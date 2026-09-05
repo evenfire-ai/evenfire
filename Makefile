@@ -1265,7 +1265,18 @@ test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC w
 test-e2e-wrc-egress-degradation: ## Prove valid UI/workload services survive transient DNS while removed/raced egress is contracted
 	@echo "Running WRC external-egress degradation gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
-	E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-egress-degradation.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-egress-degradation.sh
+
+.PHONY: test-e2e-wrc-egress-recover
+test-e2e-wrc-egress-recover: ## Restore only the recorded, owned WRC DNS fault intervention; never certify the interrupted gate
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh --recover-wrc-egress
 
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active

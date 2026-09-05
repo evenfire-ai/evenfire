@@ -121,6 +121,33 @@ describe('applyNetworkPolicy no-op gate', () => {
   })
 
   it.each([
+    { form: 'ApiException', error: apiException(404) },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])(
+    'admission-sensitive create409/read404 ($form) rejects instead of certifying absence',
+    async ({ error }) => {
+      const api = fakeNetworkingApi()
+      api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      api.readNamespacedNetworkPolicy.mockRejectedValue(error)
+
+      await expect(
+        applyNetworkPolicy(
+          api as unknown as k8s.NetworkingV1Api,
+          'np',
+          'ns',
+          desiredPolicy(),
+          '[NetPol]',
+          undefined,
+          undefined,
+          true
+        )
+      ).rejects.toBe(error)
+
+      expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
     { status: 403, form: 'ApiException', error: apiException(403) },
     { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
     { status: 500, form: 'ApiException', error: apiException(500) },

@@ -4018,9 +4018,12 @@ describe('NetworkPolicyReconciler', () => {
       expect(error).toBeInstanceOf(AggregateError)
       expect((error as AggregateError).errors).toEqual([additiveFailure])
       expect(ordering).toEqual(['certify', 'context:aaa-poisoned', 'context:bbb-healthy'])
-      expect(errorLog).toHaveBeenCalledWith(
-        '[NetPol] Additive Context reconciliation failed for "aaa-poisoned":',
-        additiveFailure
+      expect(errorLog.mock.calls.map(([line]) => JSON.parse(String(line)))).toContainEqual(
+        expect.objectContaining({
+          level: 'error',
+          contextId: 'aaa-poisoned',
+          err: { name: 'Error', message: additiveFailure.message },
+        })
       )
     })
 

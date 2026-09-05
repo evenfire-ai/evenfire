@@ -167,12 +167,18 @@ type ProvenDnsAnnotations = {
   contracted: boolean
 }
 
+type ExternalEgressDisposition =
+  | { state: 'pending' }
+  | { state: 'retained' }
+  | { state: 'absent' }
+  | { state: 'revoke'; policy: k8s.V1NetworkPolicy }
+
 /**
  * What the ExternalEgressReady message says about the live policy on a non-DNS
  * fault. One entry per verdict state so a new state cannot be added without
  * deciding what the operator is told.
  */
-const LIVE_EGRESS_FAULT_TEXT: Record<LiveEgressVerdict['state'], string> = {
+const LIVE_EGRESS_FAULT_TEXT: Record<LiveEgressVerdict['state'] | 'unavailable', string> = {
   none: 'no live policy to serve',
   foreign: 'homonymous live policy is not HCC-owned and was left untouched',
   intact: 'verified policy retained for existing pods; runtime remains blocked',
@@ -180,6 +186,7 @@ const LIVE_EGRESS_FAULT_TEXT: Record<LiveEgressVerdict['state'], string> = {
     'live policy REVOKED: it enforced a CIDR outside the /32 allowlist this controller writes',
   'drifted-shape': 'live policy REVOKED: its egress shape is not one this controller writes',
   'untrusted-state': 'live policy REVOKED: its DNS provenance was absent or invalid',
+  unavailable: 'live policy could not be verified and was left untouched; runtime remains blocked',
 }
 
 function hasExpectedPolicyOwnership(policy: k8s.V1NetworkPolicy, policyType: string): boolean {
@@ -569,6 +576,40 @@ export class NetworkPolicyReconciler {
     return `ext-egress-${serverName}-${suffix}-${binding.port}`.slice(0, 253)
   }
 
+  private externalEgressBindingError(binding: EgressBinding): string | null {
+    const egressClass = binding.egressClass ?? 'exact-host'
+    if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
+      return `egressClass "${String(binding.egressClass)}" is not supported`
+    }
+    if (egressClass === 'public-web') {
+      return binding.dns ||
+        binding.cidr ||
+        binding.port !== undefined ||
+        binding.protocol !== undefined
+        ? 'public-web external egress bindings must not declare dns, cidr, port, or protocol'
+        : null
+    }
+    if (!binding.dns && !binding.cidr) {
+      return 'exact-host external egress bindings must declare dns or cidr'
+    }
+    if (
+      binding.port === undefined ||
+      !Number.isInteger(binding.port) ||
+      binding.port < 1 ||
+      binding.port > 65535
+    ) {
+      return 'exact-host external egress bindings must declare an integer port from 1-65535'
+    }
+    if (binding.cidr) {
+      return isAllowedExternalEgressCidr(binding.cidr)
+        ? null
+        : `CIDR "${binding.cidr}" overlaps private, metadata, link-local, multicast, documentation, or reserved ranges`
+    }
+    return isPublicDnsHostname(binding.dns!)
+      ? null
+      : `hostname "${binding.dns}" is private, internal, metadata, local, or otherwise disallowed`
+  }
+
   // ─── Default Policies (L0 + L1) ─────────────────────────────────────
 
   /**
@@ -583,7 +624,7 @@ export class NetworkPolicyReconciler {
     await this.ensureAllowContextMapperApi()
     await this.deleteLegacyStaticPolicy(config.rpcProxyNamespace, 'allow-desktop-egress-rpc-proxy')
     await this.deleteLegacyStaticPolicy(config.namespace, 'allow-rpc-proxy-to-managed-mcp-servers')
-    console.log('[NetPol] Default policies ensured')
+    hccLogger.info('default network policies ensured')
   }
 
   /**
@@ -970,18 +1011,17 @@ export class NetworkPolicyReconciler {
       })
     if (!isCurrent()) return false
 
-    console.log(
-      `[NetPol] Reconciling context "${contextId}" — allowed servers: [${allowedServers.join(', ')}]`
-    )
+    hccLogger.info('reconciling context network policies', { contextId, allowedServers })
 
     // Create or update policies for each allowed server.
     for (const serverName of allowedServers) {
       if (!isCurrent()) return false
       const server = this.serverCache.get(serverName)
       if (!server) {
-        console.warn(
-          `[NetPol] McpServer "${serverName}" not found in cache — skipping policy for context "${contextId}"`
-        )
+        hccLogger.warn('McpServer absent from cache; context policy skipped', {
+          serverName,
+          contextId,
+        })
         continue
       }
 
@@ -1109,14 +1149,14 @@ export class NetworkPolicyReconciler {
       const existingName = existing.metadata?.name || ''
       const desired = desiredIngress.get(existingName)
       if (!desired) {
-        console.log(`[NetPol] Deleting orphaned policy "${existingName}"`)
+        hccLogger.info('deleting orphaned context policy', { policy: existingName })
         if (!(await revokeOrphanedPolicy(config.namespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
         !hasExpectedPolicyOwnership(existing, 'context-allow')
       ) {
-        console.log(`[NetPol] Replacing stale same-name policy "${existingName}"`)
+        hccLogger.info('replacing stale context policy', { policy: existingName })
         if (safetySnapshotProvided) {
           if (
             !(await this.replaceSafetyPolicySnapshot(
@@ -1150,14 +1190,14 @@ export class NetworkPolicyReconciler {
       const existingName = existing.metadata?.name || ''
       const desired = desiredHostEgress.get(existingName)
       if (!desired) {
-        console.log(`[NetPol] Deleting orphaned L2 egress policy "${existingName}"`)
+        hccLogger.info('deleting orphaned L2 egress policy', { policy: existingName })
         if (!(await revokeOrphanedPolicy(config.hostNamespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
         !hasExpectedPolicyOwnership(existing, 'context-allow')
       ) {
-        console.log(`[NetPol] Replacing stale same-name L2 egress policy "${existingName}"`)
+        hccLogger.info('replacing stale L2 egress policy', { policy: existingName })
         if (safetySnapshotProvided) {
           if (
             !(await this.replaceSafetyPolicySnapshot(
@@ -1191,14 +1231,14 @@ export class NetworkPolicyReconciler {
       const existingName = existing.metadata?.name || ''
       const desired = desiredRpcProxyEgress.get(existingName)
       if (!desired) {
-        console.log(`[NetPol] Deleting orphaned rpc-proxy egress policy "${existingName}"`)
+        hccLogger.info('deleting orphaned rpc-proxy egress policy', { policy: existingName })
         if (!(await revokeOrphanedPolicy(config.rpcProxyNamespace, existing))) return false
         onRevoked?.()
       } else if (
         !sameNetworkPolicySpec(existing, desired) ||
         !hasExpectedPolicyOwnership(existing, RPC_PROXY_EGRESS_POLICY_TYPE)
       ) {
-        console.log(`[NetPol] Replacing stale same-name rpc-proxy egress policy "${existingName}"`)
+        hccLogger.info('replacing stale rpc-proxy egress policy', { policy: existingName })
         if (safetySnapshotProvided) {
           if (
             !(await this.replaceSafetyPolicySnapshot(
@@ -1234,7 +1274,7 @@ export class NetworkPolicyReconciler {
     contextId: string,
     deleteAllowed?: () => Promise<boolean>
   ): Promise<void> {
-    console.log(`[NetPol] Context "${contextId}" deleted — removing all policies`)
+    hccLogger.info('removing policies for deleted context', { contextId })
 
     const policies = await this.listPoliciesForContext(contextId)
     for (const policy of policies) {
@@ -1319,7 +1359,7 @@ export class NetworkPolicyReconciler {
     servers: McpServerCRD[] = [],
     options: NetworkPolicyFullReconcileOptions = {}
   ): Promise<void> {
-    console.log(`[NetPol] Running full reconciliation for ${contexts.length} Context(s)`)
+    hccLogger.info('running full network policy reconciliation', { contexts: contexts.length })
 
     // This is intentionally scoped to callers that use the authoritative
     // revocation callback. Ordinary additive reconciles must not be presented
@@ -1362,7 +1402,7 @@ export class NetworkPolicyReconciler {
       }
       if (contextAuthorityLost && !contextAuthorityWarningLogged) {
         contextAuthorityWarningLogged = true
-        console.warn(
+        hccLogger.warn(
           '[NetPol] Skipping remaining Context policy orphan cleanup because Context inventory authority was lost'
         )
       }
@@ -1381,7 +1421,7 @@ export class NetworkPolicyReconciler {
       }
       if (serverAuthorityLost && !serverAuthorityWarningLogged) {
         serverAuthorityWarningLogged = true
-        console.warn(
+        hccLogger.warn(
           '[NetPol] Skipping remaining external egress orphan cleanup because McpServer inventory authority was lost'
         )
       }
@@ -1410,9 +1450,10 @@ export class NetworkPolicyReconciler {
           if (!name) {
             throw new Error('HCC-managed Context NetworkPolicy is missing its name and owner label')
           }
-          console.warn(
-            `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${CONTEXT_LABEL}`
-          )
+          hccLogger.warn('deleting malformed HCC-managed policy', {
+            policy: name,
+            missingLabel: CONTEXT_LABEL,
+          })
           recordOrphanDelete(lane, await deletePolicy(policy))
           continue
         }
@@ -1428,7 +1469,7 @@ export class NetworkPolicyReconciler {
             ) {
               return
             }
-            console.log(describePolicy(name, contextId))
+            hccLogger.info(describePolicy(name, contextId), { policy: name, contextId, lane })
             recordOrphanDelete(lane, await deletePolicy(policy))
           })
         }
@@ -1524,9 +1565,12 @@ export class NetworkPolicyReconciler {
     const capReason = evaluateNetPolOrphanSweepCap(orphanCandidates.length, listedManagedFleet)
     if (capReason) {
       netPolOrphanSweepCappedTotal.inc({ reason: capReason })
-      console.warn(
-        `[NetPol] ${NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE} (${capReason}): ${orphanCandidates.length} candidates of ${listedManagedFleet} listed managed policies; refusing deletes and continuing certification`
-      )
+      hccLogger.warn(NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE, {
+        reason: capReason,
+        candidates: orphanCandidates.length,
+        listedManagedFleet,
+        action: 'refusing deletes and continuing certification',
+      })
     }
 
     // Delete orphaned Context policies across every L2 lane. Each lane uses
@@ -1614,9 +1658,10 @@ export class NetworkPolicyReconciler {
               'HCC-managed external egress NetworkPolicy is missing its name and owner label'
             )
           }
-          console.warn(
-            `[NetPol] Deleting malformed HCC-managed policy "${name}" without ${MCPSERVER_LABEL}`
-          )
+          hccLogger.warn('deleting malformed HCC-managed policy', {
+            policy: name,
+            missingLabel: MCPSERVER_LABEL,
+          })
           recordOrphanDelete(
             'external-egress',
             await this.deleteSafetyPolicySnapshot(
@@ -1646,7 +1691,7 @@ export class NetworkPolicyReconciler {
             ) {
               return
             }
-            console.log(`[NetPol] Deleting orphaned external egress policy "${name}"`)
+            hccLogger.info('deleting orphaned external egress policy', { policy: name })
             recordOrphanDelete(
               'external-egress',
               await this.deleteSafetyPolicySnapshot(
@@ -1659,7 +1704,7 @@ export class NetworkPolicyReconciler {
         }
       }
     } else if (options.serverInventoryComplete === false) {
-      console.warn(
+      hccLogger.warn(
         '[NetPol] Skipping external egress orphan cleanup because server inventory is incomplete'
       )
     }
@@ -1752,7 +1797,7 @@ export class NetworkPolicyReconciler {
         })
       } catch (error) {
         contextAdditiveFailures.push(error)
-        console.error(`[NetPol] Additive Context reconciliation failed for "${contextId}":`, error)
+        hccLogger.error('additive context reconciliation failed', { contextId, err: error })
       }
     }
 
@@ -1763,7 +1808,7 @@ export class NetworkPolicyReconciler {
       )
     }
 
-    console.log('[NetPol] Full reconciliation complete')
+    hccLogger.info('full network policy reconciliation complete')
   }
 
   private async contextOrphanDeleteAllowed(
@@ -2332,26 +2377,108 @@ export class NetworkPolicyReconciler {
       return
     }
 
-    console.log(
-      `[NetPol] Reconciling ${bindings.length} external egress binding(s) for "${server.name}"`
-    )
+    hccLogger.info('reconciling external egress bindings', {
+      serverName: server.name,
+      bindings: bindings.length,
+    })
 
-    const desiredPolicyNames = new Set<string>()
     const resolvedEgressIPs: McpServerResolvedEgressIP[] = []
     const failures: string[] = []
+    const declaredBindings: Array<{ binding: EgressBinding; name: string }> = []
+    const dispositions = new Map<string, ExternalEgressDisposition>()
+    for (const binding of bindings) {
+      const error = this.externalEgressBindingError(binding)
+      const name = this.externalEgressPolicyName(server.name, binding)
+      if (error || !name) {
+        failures.push(error ?? 'exact-host external egress bindings must declare dns or cidr')
+        continue
+      }
+      declaredBindings.push({ binding, name })
+      dispositions.set(name, { state: 'pending' })
+    }
+
+    const cleanup = async (policies: k8s.V1NetworkPolicy[]): Promise<void> => {
+      const errors: unknown[] = []
+      for (const policy of policies) {
+        if (!isCurrent()) return
+        try {
+          await this.cleanupExternalEgress(
+            server.name,
+            server.namespace,
+            [policy],
+            async () => isCurrent(),
+            options.onRevoked
+          )
+        } catch (error: unknown) {
+          // Independent removals remain authorized even when one snapshot loses
+          // its fence or the API is temporarily unavailable for that object.
+          errors.push(error)
+        }
+      }
+      if (errors.length === 0 || !isCurrent()) return
+      await this.writeExternalEgressStatus(
+        server,
+        resolvedEgressIPs,
+        'False',
+        'CleanupFailed',
+        `Failed to delete stale external egress policies: ${errors.map(error => this.errorMessage(error)).join('; ')}`,
+        isCurrent
+      )
+      throw errors[0]
+    }
+
+    // Current intent, not success/failure of a GET, determines removal. Complete
+    // this barrier before DNS or additions; a failed removal never admits them.
+    await cleanup(existingPolicies.filter(policy => !dispositions.has(policy.metadata?.name ?? '')))
+    if (!isCurrent()) return
+    existingPolicies = existingPolicies.filter(policy =>
+      dispositions.has(policy.metadata?.name ?? '')
+    )
     // Issue #513: faults that are NOT a DNS condition. Kept separate from
     // `failures` because those are rejected INPUT (the operator's) while these are
     // OUR bug, and the two earn different reasons and different messages.
     const reconcileFaults: Array<{
-      dns: string
+      binding: string
       err: unknown
-      live: LiveEgressVerdict['state']
+      live: LiveEgressVerdict['state'] | 'unavailable'
       verificationError?: unknown
     }> = []
-    const freshPolicySnapshots = new Map<string, k8s.V1NetworkPolicy>()
+    const convergences: Array<{
+      name: string
+      policy: k8s.V1NetworkPolicy
+      observedPolicy: k8s.V1NetworkPolicy | null
+      writeRequired: boolean
+      resolvedStatus?: McpServerResolvedEgressIP
+      dnsFailStatic?: boolean
+    }> = []
     const resolvedAtMs = Date.now()
     const resolvedAt = new Date(resolvedAtMs).toISOString()
     let dnsFailStatic = false
+
+    const recordUnavailable = (
+      binding: EgressBinding,
+      name: string,
+      err: unknown,
+      verificationError?: unknown
+    ): void => {
+      dispositions.set(name, { state: 'pending' })
+      hccLogger.error('external egress policy observation unavailable', {
+        serverName: server.name,
+        policy: name,
+        err,
+        verificationError,
+      })
+      reconcileFaults.push({
+        binding: binding.dns ?? binding.cidr ?? 'public-web',
+        err,
+        live: 'unavailable',
+        verificationError,
+      })
+    }
+
+    const revoke = (name: string, policy: k8s.V1NetworkPolicy | null): void => {
+      dispositions.set(name, policy ? { state: 'revoke', policy } : { state: 'absent' })
+    }
 
     const recordReconcileFault = async (
       binding: EgressBinding,
@@ -2374,35 +2501,28 @@ export class NetworkPolicyReconciler {
           dns: binding.dns,
           err: verificationError,
         })
-        reconcileFaults.push({
-          dns: binding.dns,
-          err,
-          live: 'untrusted-state',
-          verificationError,
-        })
+        recordUnavailable(binding, name, err, verificationError)
         return
       }
 
       if (verdict.state === 'intact') {
-        desiredPolicyNames.add(name)
+        dispositions.set(name, { state: 'retained' })
         resolvedEgressIPs.push({
           dns: binding.dns,
           ips: verdict.cidrs.map(cidr => cidr.replace(/\/32$/, '')),
           resolvedAt: verdict.resolvedAt,
         })
       } else if ('policy' in verdict) {
-        freshPolicySnapshots.set(name, verdict.policy)
+        revoke(name, verdict.policy)
+      } else {
+        dispositions.set(name, { state: verdict.state === 'none' ? 'absent' : 'pending' })
       }
-      reconcileFaults.push({ dns: binding.dns, err, live: verdict.state })
+      reconcileFaults.push({ binding: binding.dns, err, live: verdict.state })
     }
 
-    for (const binding of bindings) {
+    for (const { binding, name } of declaredBindings) {
       if (!isCurrent()) return
       const egressClass = binding.egressClass ?? 'exact-host'
-      if (egressClass !== 'exact-host' && egressClass !== 'public-web') {
-        failures.push(`egressClass "${String(binding.egressClass)}" is not supported`)
-        continue
-      }
 
       let cidrs: string[] = []
       // Sliding-window state annotations to persist on the policy (issue #299).
@@ -2420,11 +2540,6 @@ export class NetworkPolicyReconciler {
       let resolvedStatus: McpServerResolvedEgressIP | undefined
       let bindingDnsFailStatic = false
       let ownershipRepairRequired = false
-      const name = this.externalEgressPolicyName(server.name, binding)
-      if (!name) {
-        failures.push('exact-host external egress bindings must declare dns or cidr')
-        continue
-      }
       // Look up the live policy once: used to rehydrate the window (DNS branch)
       // AND to decide whether a write is actually needed (audit F2/L1) — the
       // write is gated on the ENFORCED spec.egress, so identical static policies
@@ -2432,61 +2547,34 @@ export class NetworkPolicyReconciler {
       let existingPolicy = existingPolicies.find(p => p.metadata?.name === name) ?? null
 
       if (egressClass === 'public-web') {
-        if (
-          binding.dns ||
-          binding.cidr ||
-          binding.port !== undefined ||
-          binding.protocol !== undefined
-        ) {
-          failures.push(
-            'public-web external egress bindings must not declare dns, cidr, port, or protocol'
-          )
-          continue
-        }
-
         // public-web is a static policy. Preserve #205's ownership-fenced write
         // (applyOwnedPolicy asserts ownership + honors the isCurrent generation
         // fence) while keeping dev's F2 no-churn gate so the TTL-accelerated
         // resync does not rewrite it every tick.
         const policy = this.buildPublicWebEgressPolicy(server, name)
-        const fresh = await this.readFreshExternalEgressPolicy(server, name)
-        existingPolicy = fresh.policy
-        if (fresh.repairRequired || this.externalEgressWriteNeeded(existingPolicy, policy)) {
-          await this.applyOwnedPolicy(name, server.namespace, policy, 'external-egress', isCurrent)
+        let fresh: FreshExternalEgressPolicy
+        try {
+          fresh = await this.readFreshExternalEgressPolicy(server, name)
+        } catch (error: unknown) {
+          recordUnavailable(binding, name, error)
+          continue
         }
+        existingPolicy = fresh.policy
         if (!isCurrent()) return
-        desiredPolicyNames.add(name)
+        convergences.push({
+          name,
+          policy,
+          observedPolicy: existingPolicy,
+          writeRequired:
+            fresh.repairRequired || this.externalEgressWriteNeeded(existingPolicy, policy),
+        })
         continue
       }
 
       const protocol = binding.protocol ?? 'TCP'
-      if (
-        binding.port === undefined ||
-        !Number.isInteger(binding.port) ||
-        binding.port < 1 ||
-        binding.port > 65535
-      ) {
-        failures.push(
-          'exact-host external egress bindings must declare an integer port from 1-65535'
-        )
-        continue
-      }
-
       if (binding.cidr) {
-        if (!isAllowedExternalEgressCidr(binding.cidr)) {
-          failures.push(
-            `CIDR "${binding.cidr}" overlaps private, metadata, link-local, multicast, documentation, or reserved ranges`
-          )
-          continue
-        }
         cidrs = [binding.cidr]
       } else if (binding.dns) {
-        if (!isPublicDnsHostname(binding.dns)) {
-          failures.push(
-            `hostname "${binding.dns}" is private, internal, metadata, local, or otherwise disallowed`
-          )
-          continue
-        }
         // Sliding-window accumulation (issue #299): a single-generation snapshot
         // pins one rotating IP of a provider that serves 1 A record/response, so
         // the pod's next resolution lands on an un-pinned IP and egress drops.
@@ -2528,8 +2616,8 @@ export class NetworkPolicyReconciler {
         const liveAnnotations = existingPolicy?.metadata?.annotations
 
         if (resolverFailure) {
-          if (fresh.policy) freshPolicySnapshots.set(name, fresh.policy)
           if (resolverFailure.kind === 'permanent') {
+            revoke(name, existingPolicy)
             failures.push(
               `failed to resolve hostname "${binding.dns}": ${this.errorMessage(resolverFailure.error)}`
             )
@@ -2538,8 +2626,9 @@ export class NetworkPolicyReconciler {
           if (existingPolicy) {
             const proof = this.judgeExactHostEgressPolicy(server, name, binding, existingPolicy)
             if (proof.state !== 'intact') {
+              if ('policy' in proof) revoke(name, proof.policy)
               reconcileFaults.push({
-                dns: binding.dns,
+                binding: binding.dns,
                 err: new Error(
                   `Fail-static proof failed for "${binding.dns}": ${LIVE_EGRESS_FAULT_TEXT[proof.state]}`
                 ),
@@ -2550,7 +2639,7 @@ export class NetworkPolicyReconciler {
           }
           const accumulated = accumulateHostExactHostEgress({
             fqdn: binding.dns,
-            port: binding.port,
+            port: binding.port!,
             protocol,
             resolution: { kind: 'transient' },
             previousAnnotations: liveAnnotations,
@@ -2558,6 +2647,7 @@ export class NetworkPolicyReconciler {
             config: coreConfig,
           })
           if (accumulated.cidrs.length === 0) {
+            revoke(name, existingPolicy)
             failures.push(
               `failed to resolve hostname "${binding.dns}": ${this.errorMessage(resolverFailure.error)}`
             )
@@ -2565,6 +2655,7 @@ export class NetworkPolicyReconciler {
           }
           cidrs = accumulated.cidrs.filter(c => isAllowedExternalEgressCidr(c))
           if (cidrs.length !== accumulated.cidrs.length) {
+            revoke(name, existingPolicy)
             failures.push(
               `persisted DNS state for hostname "${binding.dns}" contains a disallowed address`
             )
@@ -2595,13 +2686,13 @@ export class NetworkPolicyReconciler {
             if (!isCurrent()) return
             const uniqueIps = [...new Set(records.map(record => record.address))].sort()
             if (uniqueIps.length === 0) {
-              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              revoke(name, existingPolicy)
               failures.push(`hostname "${binding.dns}" resolved to no IPv4 addresses`)
               continue
             }
             const invalidIps = uniqueIps.filter(ip => isIP(ip) !== 4)
             if (invalidIps.length > 0) {
-              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              revoke(name, existingPolicy)
               failures.push(
                 `hostname "${binding.dns}" resolved invalid IPv4 answer(s): ${invalidIps.join(', ')}`
               )
@@ -2610,7 +2701,7 @@ export class NetworkPolicyReconciler {
             const freshCidrs = uniqueIps.map(ip => `${ip}/32`)
             const disallowedCidrs = freshCidrs.filter(cidr => !isAllowedExternalEgressCidr(cidr))
             if (disallowedCidrs.length > 0) {
-              if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
+              revoke(name, existingPolicy)
               failures.push(
                 `hostname "${binding.dns}" resolved disallowed address(es): ${disallowedCidrs.join(', ')}`
               )
@@ -2631,7 +2722,7 @@ export class NetworkPolicyReconciler {
             )
             const accumulated = accumulateHostExactHostEgress({
               fqdn: binding.dns,
-              port: binding.port,
+              port: binding.port!,
               protocol,
               resolution: { kind: 'ok', ips: uniqueIps, ttlSeconds },
               previousAnnotations: provenPrevious.annotations,
@@ -2684,7 +2775,13 @@ export class NetworkPolicyReconciler {
       }
 
       if (!binding.dns) {
-        const fresh = await this.readFreshExternalEgressPolicy(server, name)
+        let fresh: FreshExternalEgressPolicy
+        try {
+          fresh = await this.readFreshExternalEgressPolicy(server, name)
+        } catch (error: unknown) {
+          recordUnavailable(binding, name, error)
+          continue
+        }
         existingPolicy = fresh.policy
         ownershipRepairRequired = fresh.repairRequired
       }
@@ -2696,64 +2793,32 @@ export class NetworkPolicyReconciler {
       if (stateAnnotations) {
         policy.metadata = { ...(policy.metadata ?? {}), annotations: stateAnnotations }
       }
-      if (existingPolicy) freshPolicySnapshots.set(name, existingPolicy)
 
       // Write only when the enforced rules changed / the policy is new / drifted
       // (audit F2 no-churn + L1 self-heal), OR when the DNS window is aging and
       // must be re-persisted (audit M1). A pure timestamp refresh is a no-op.
       // Route the write through applyOwnedPolicy so #205's ownership assertion
       // and isCurrent generation fence still guard the mutation.
-      if (
-        ownershipRepairRequired ||
-        this.externalEgressWriteNeeded(existingPolicy, policy) ||
-        egressRenewalDue ||
-        egressStateChanged
-      ) {
-        await this.applyOwnedPolicy(name, server.namespace, policy, 'external-egress', isCurrent)
-      } else {
-        console.log(`[NetPol] External egress "${name}" unchanged — no-op (issue #299 no-churn)`)
-      }
       if (!isCurrent()) return
-      desiredPolicyNames.add(name)
-      if (resolvedStatus) resolvedEgressIPs.push(resolvedStatus)
-      if (bindingDnsFailStatic) dnsFailStatic = true
-    }
-
-    const cleanupCandidates = existingPolicies
-      .filter(policy => {
-        const name = policy.metadata?.name
-        return Boolean(name) && !desiredPolicyNames.has(name!)
+      convergences.push({
+        name,
+        policy,
+        observedPolicy: existingPolicy,
+        resolvedStatus,
+        dnsFailStatic: bindingDnsFailStatic,
+        writeRequired:
+          ownershipRepairRequired ||
+          this.externalEgressWriteNeeded(existingPolicy, policy) ||
+          egressRenewalDue ||
+          egressStateChanged,
       })
-      .map(policy => freshPolicySnapshots.get(policy.metadata?.name ?? '') ?? policy)
-    for (const [name, snapshot] of freshPolicySnapshots) {
-      if (
-        !desiredPolicyNames.has(name) &&
-        !cleanupCandidates.some(policy => policy.metadata?.name === name)
-      ) {
-        cleanupCandidates.push(snapshot)
-      }
     }
 
-    try {
-      await this.cleanupExternalEgress(
-        server.name,
-        server.namespace,
-        cleanupCandidates,
-        async () => isCurrent(),
-        options.onRevoked
+    await cleanup(
+      [...dispositions.values()].flatMap(disposition =>
+        disposition.state === 'revoke' ? [disposition.policy] : []
       )
-    } catch (error) {
-      if (!isCurrent()) return
-      await this.writeExternalEgressStatus(
-        server,
-        resolvedEgressIPs,
-        'False',
-        'CleanupFailed',
-        `Failed to delete stale external egress policies: ${this.errorMessage(error)}`,
-        isCurrent
-      )
-      throw error
-    }
+    )
     if (!isCurrent()) return
 
     // Issue #513: a controller fault outranks rejected input. `failures` means the
@@ -2764,7 +2829,7 @@ export class NetworkPolicyReconciler {
     if (reconcileFaults.length > 0) {
       const first = reconcileFaults[0]
       const parts = [
-        `External egress reconciliation failed on binding "${first.dns}" with a non-DNS error ` +
+        `External egress reconciliation failed on binding "${first.binding}" with a non-DNS error ` +
           `(not a resolver condition, ${LIVE_EGRESS_FAULT_TEXT[first.live]}): ${this.errorMessage(
             first.err
           )}`,
@@ -2795,6 +2860,52 @@ export class NetworkPolicyReconciler {
       // an exactly-proven policy may remain for already-running pods, but False
       // never admits a new/update runtime and never completes the retry.
       throw first.err
+    }
+
+    // No additive write is attempted until every observed revocation succeeded
+    // and every policy observation completed. A pending observation contributes
+    // neither a new permit nor a resolved-at/status proof.
+    for (const convergence of convergences) {
+      if (!isCurrent()) return
+      try {
+        // A sibling DNS lookup or cleanup may have taken time since this plan
+        // was built. Revalidate even no-ops; changed snapshots require a new
+        // observation rather than stamping a newer resourceVersion on old state.
+        const fresh = await this.readFreshExternalEgressPolicy(server, convergence.name)
+        this.assertExternalEgressSnapshot(
+          convergence.name,
+          convergence.observedPolicy,
+          fresh.policy
+        )
+        if (!isCurrent()) return
+        if (convergence.writeRequired) {
+          await this.applyOwnedPolicy(
+            convergence.name,
+            server.namespace,
+            convergence.policy,
+            'external-egress',
+            isCurrent,
+            convergence.observedPolicy
+          )
+        } else {
+          hccLogger.info('external egress policy unchanged', { policy: convergence.name })
+        }
+      } catch (error: unknown) {
+        if (!isCurrent()) return
+        await this.writeExternalEgressStatus(
+          server,
+          this.sortResolvedEgressIPs(resolvedEgressIPs),
+          'False',
+          'ExternalEgressReconcileFailed',
+          `Failed to apply external egress policy "${convergence.name}": ${this.errorMessage(error)}`,
+          isCurrent
+        )
+        throw error
+      }
+      if (!isCurrent()) return
+      dispositions.set(convergence.name, { state: 'retained' })
+      if (convergence.resolvedStatus) resolvedEgressIPs.push(convergence.resolvedStatus)
+      if (convergence.dnsFailStatic) dnsFailStatic = true
     }
 
     if (failures.length > 0) {
@@ -2843,12 +2954,12 @@ export class NetworkPolicyReconciler {
       try {
         if (deleteAllowed && !(await deleteAllowed())) return
         await this.deleteSafetyPolicySnapshot(namespace, policy, undefined, () => {
-          console.log(`[NetPol] Deleted external egress policy "${name}"`)
+          hccLogger.info('deleted external egress policy', { policy: name })
           onDeleted?.()
         })
       } catch (error: unknown) {
         if (getErrorCode(error) !== 404) {
-          console.error(`[NetPol] Failed to delete external egress policy "${name}":`, error)
+          hccLogger.error('failed to delete external egress policy', { policy: name, err: error })
           throw error
         }
         // A concurrent actor may already have removed the policy. The safety
@@ -2969,15 +3080,15 @@ export class NetworkPolicyReconciler {
       currentStatus = current.status ?? {}
     } catch (error) {
       if (getErrorCode(error) === 404) {
-        console.warn(
-          `[NetPol] McpServer "${server.name}" deleted mid-reconcile — external egress status skipped`
-        )
+        hccLogger.warn('McpServer deleted mid-reconcile; external egress status skipped', {
+          serverName: server.name,
+        })
         return
       }
-      console.warn(
-        `[NetPol] Failed to read external egress status for "${server.name}" — skipping status update:`,
-        error
-      )
+      hccLogger.warn('failed to read external egress status; status update skipped', {
+        serverName: server.name,
+        err: error,
+      })
       throw error
     }
     if (!isCurrent()) return
@@ -3057,10 +3168,11 @@ export class NetworkPolicyReconciler {
         body: statusPatch,
       })
     } catch (error) {
-      console.warn(
-        `[NetPol] Failed to write ExternalEgressReady=${status} on "${server.name}":`,
-        error
-      )
+      hccLogger.warn('failed to write ExternalEgressReady', {
+        serverName: server.name,
+        status,
+        err: error,
+      })
       throw error
     }
   }
@@ -3081,7 +3193,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error(`[NetPol] Failed to list policies for context "${contextId}":`, error)
+      hccLogger.error('failed to list context policies', { contextId, err: error })
       throw error
     }
   }
@@ -3095,7 +3207,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error('[NetPol] Failed to list all context policies:', error)
+      hccLogger.error('failed to list all context policies', { err: error })
       throw error
     }
   }
@@ -3106,7 +3218,7 @@ export class NetworkPolicyReconciler {
       const response = await this.networkingApi.listNamespacedNetworkPolicy({ namespace })
       return response.items || []
     } catch (error) {
-      console.error(`[NetPol] Failed to list broad NetworkPolicy inventory in ${namespace}:`, error)
+      hccLogger.error('failed to list broad NetworkPolicy inventory', { namespace, err: error })
       throw error
     }
   }
@@ -3150,7 +3262,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error('[NetPol] Failed to list all Context egress policies:', error)
+      hccLogger.error('failed to list all context egress policies', { err: error })
       throw error
     }
   }
@@ -3164,7 +3276,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error('[NetPol] Failed to list all external egress policies:', error)
+      hccLogger.error('failed to list all external egress policies', { err: error })
       throw error
     }
   }
@@ -3219,7 +3331,8 @@ export class NetworkPolicyReconciler {
     namespace: string,
     policy: k8s.V1NetworkPolicy,
     lane: SafetyInventoryLane,
-    isCurrent?: () => boolean
+    isCurrent?: () => boolean,
+    expectedSnapshot?: k8s.V1NetworkPolicy | null
   ): Promise<void> {
     await applyNetworkPolicy(
       this.networkingApi,
@@ -3228,8 +3341,31 @@ export class NetworkPolicyReconciler {
       policy,
       '[NetPol]',
       isCurrent,
-      existing => this.assertPolicyOwnership(name, existing, policy, lane)
+      existing => {
+        this.assertPolicyOwnership(name, existing, policy, lane)
+        if (expectedSnapshot !== undefined) {
+          this.assertExternalEgressSnapshot(name, expectedSnapshot, existing)
+        }
+      },
+      // Best-effort maintenance may skip a disappeared object. External-egress
+      // admission must instead retry: POST409 followed by GET404 applied nothing.
+      lane === 'external-egress'
     )
+  }
+
+  private assertExternalEgressSnapshot(
+    name: string,
+    expected: k8s.V1NetworkPolicy | null,
+    actual: k8s.V1NetworkPolicy | null
+  ): void {
+    if (
+      expected?.metadata?.uid !== actual?.metadata?.uid ||
+      expected?.metadata?.resourceVersion !== actual?.metadata?.resourceVersion
+    ) {
+      throw new Error(
+        `NetworkPolicy "${name}" changed after the external-egress observation; reconciliation must retry`
+      )
+    }
   }
 
   private assertPolicyOwnership(
@@ -3287,12 +3423,12 @@ export class NetworkPolicyReconciler {
         namespace,
         body: { preconditions: { uid, resourceVersion } },
       })
-      console.log(`[NetPol] Deleted safety-inventory policy "${name}" in ${namespace}`)
+      hccLogger.info('deleted safety-inventory policy', { policy: name, namespace })
       onDeleted?.()
       return true
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[NetPol] Safety-inventory policy "${name}" already gone`)
+        hccLogger.info('safety-inventory policy already gone', { policy: name, namespace })
         return true
       }
       if (getErrorCode(error) === 409 && lostFenceOutcome === 'report') {
@@ -3302,15 +3438,17 @@ export class NetworkPolicyReconciler {
         // adopted. Callers that opt in act on this outcome by declining to
         // certify, which is the expected racy result rather than a failure.
         // Callers that cannot act on it keep the loud default.
-        console.warn(
-          `[NetPol] Lost the delete fence on safety-inventory policy "${name}" in ${namespace}; it changed identity after the authoritative inventory and was not revoked`
-        )
+        hccLogger.warn('lost safety-inventory delete fence; changed policy was not revoked', {
+          policy: name,
+          namespace,
+        })
         return false
       }
-      console.error(
-        `[NetPol] Failed identity-bound delete of safety-inventory policy "${name}" in ${namespace}:`,
-        error
-      )
+      hccLogger.error('failed identity-bound delete of safety-inventory policy', {
+        policy: name,
+        namespace,
+        err: error,
+      })
       throw error
     }
   }
@@ -3381,9 +3519,10 @@ export class NetworkPolicyReconciler {
       if (!name) {
         throw new Error(`Cannot converge a conflicting ${lane} policy without a desired name`)
       }
-      console.log(
-        `[NetPol] Safety policy "${name}" in ${namespace} already exists — converging it to the desired spec`
-      )
+      hccLogger.info('converging existing safety policy to desired spec', {
+        policy: name,
+        namespace,
+      })
       // Deliberately not delegating to applyOwnedPolicy here: that helper owns
       // the create-then-conflict flow, so calling it from inside our own
       // create's catch would issue a second create. Delegating from the top is
@@ -3423,7 +3562,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error(`[NetPol] Failed to list egress policies for context "${contextId}":`, error)
+      hccLogger.error('failed to list context egress policies', { contextId, err: error })
       throw error
     }
   }
@@ -3481,10 +3620,10 @@ export class NetworkPolicyReconciler {
         await this.deleteSafetyPolicySnapshot(config.rpcProxyNamespace, policy)
       }
     } catch (error) {
-      console.error(
-        `[NetPol] Failed to delete rpc-proxy egress policies for context "${contextId}":`,
-        error
-      )
+      hccLogger.error('failed to delete context rpc-proxy egress policies', {
+        contextId,
+        err: error,
+      })
       throw error
     }
   }
@@ -3500,10 +3639,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error(
-        `[NetPol] Failed to list rpc-proxy egress policies for context "${contextId}":`,
-        error
-      )
+      hccLogger.error('failed to list context rpc-proxy egress policies', { contextId, err: error })
       throw error
     }
   }
@@ -3517,7 +3653,7 @@ export class NetworkPolicyReconciler {
       })
       return response.items || []
     } catch (error) {
-      console.error('[NetPol] Failed to list all rpc-proxy egress policies:', error)
+      hccLogger.error('failed to list all rpc-proxy egress policies', { err: error })
       throw error
     }
   }
@@ -3535,6 +3671,6 @@ export class NetworkPolicyReconciler {
       throw new Error(`NetworkPolicy "${name}" has conflicting ownership for legacy cleanup`)
     }
     await this.deleteSafetyPolicySnapshot(namespace, existing)
-    console.log(`[NetPol] Deleted legacy static policy "${name}" in "${namespace}"`)
+    hccLogger.info('deleted legacy static policy', { policy: name, namespace })
   }
 }

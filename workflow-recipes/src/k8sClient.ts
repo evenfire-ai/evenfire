@@ -21,6 +21,7 @@ import {
   createGovernedTraceReporter,
 } from './governedTraceReporter'
 import { K8sSecretWatchLoop } from './k8sSecretWatchLoop'
+import { createLogger } from './observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './reconciler/crdConstants'
 import {
   type ChildRecipeCreator,
@@ -44,7 +45,9 @@ import { SecretWatcher } from './reconciler/secretWatcher'
 import {
   type ReconcileResult,
   TRANSIENT_REQUEUE_BASE_MS,
+  TRANSPORT_NETWORK_CONDITION_TYPE,
   WorkflowRecipeReconciler,
+  hasPendingTransportNetworkReadiness,
 } from './reconciler/workflowRecipeReconciler'
 import {
   type StatusCondition,
@@ -147,6 +150,14 @@ export function shouldPatchRecipeStatus(
   // Parent workflow recipes may remain active while stale execution status is
   // cleared. That still needs one status patch even though phase is unchanged.
   if (result.clearWorkflowExecution && recipe.status?.workflowExecution) return true
+
+  if (
+    result.transportNetworkConditions !== undefined &&
+    ownedConditionsChanged(recipe.status?.conditions, result.transportNetworkConditions, [
+      TRANSPORT_NETWORK_CONDITION_TYPE,
+    ])
+  )
+    return true
 
   return false
 }
@@ -307,7 +318,10 @@ function enqueueInfrastructureTelemetryBestEffort(
   try {
     traceReporter.enqueueInfrastructureTelemetry(projection)
   } catch (error) {
-    console.error('[WR-K8s] Infrastructure telemetry enqueue failed:', error)
+    createLogger('wrc', 'workflow-recipes').error(
+      '[WR-K8s] Infrastructure telemetry enqueue failed:',
+      { err: error }
+    )
   }
 }
 
@@ -405,6 +419,15 @@ export function workflowNeedsRuntimeCredentialRefresh(recipe: WorkflowRecipeCRD)
 export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD): boolean {
   const isWorkflow = (recipe.spec.steps ?? []).length > 0
   if (recipe.metadata.deletionTimestamp) return false
+  const workflowPhase = recipe.status?.workflowExecution?.phase
+  // Restore the retry after a process restart, including stepless stdio recipes
+  // whose egress is exclusively HCC-owned. Pod readiness is not admission proof.
+  if (
+    hasPendingTransportNetworkReadiness(recipe) &&
+    !['failed', 'deprecated', 'rollback-failed'].includes(recipe.status?.phase ?? '') &&
+    !['completed', 'failed', 'cancelled'].includes(workflowPhase ?? '')
+  )
+    return true
 
   // SDK-only recipes are deliberately stepless, but their eager mcp-host and
   // bootstrap proof still need the full reconciler lane. The generic workload
@@ -414,7 +437,6 @@ export function workflowNeedsInfrastructureReconcile(recipe: WorkflowRecipeCRD):
   if (!isWorkflow && recipe.spec.pluginWorkloadSdk) return true
   if (!isWorkflow) return false
 
-  const workflowPhase = recipe.status?.workflowExecution?.phase
   if (workflowPhase === 'initializing' || workflowPhase === 'recovering') return true
 
   // Plugin Workload SDK eager path: the recipe sits in phase=active with no run
@@ -638,7 +660,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   private externalEgressRefreshTimer: ReturnType<typeof setTimeout> | null = null
   private externalEgressRefreshRunning = false
   private eventQueue = new RecipeEventQueue((key, error) => {
-    console.error(`[WR-K8s] Unhandled event failure for "${key}":`, error)
+    createLogger('wrc', 'workflow-recipes').error('Unhandled recipe event failure', {
+      key,
+      err: error,
+    })
   })
   private secretReverseIndex = new SecretReverseIndex()
   private secretWatchLoops: K8sSecretWatchLoop[] = []
@@ -723,10 +748,13 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       // independent env vars; if they ever diverge, 100% of NOTIFYs would be
       // dropped and the feature would silently degrade to 30s polling. Log names
       // only — no secrets.
-      console.warn(
-        `[WR-K8s] Discarding grant-update NOTIFY for "${recipeNamespace}/${recipeName}": ` +
-          (known ? `namespace mismatch (watching "${known.metadata.namespace}")` : 'unknown recipe')
-      )
+      createLogger('wrc', recipeName).warn('Discarding grant-update NOTIFY', {
+        recipeNamespace,
+        recipeName,
+        value3: known
+          ? `namespace mismatch (watching "${known.metadata.namespace}")`
+          : 'unknown recipe',
+      })
       return
     }
     void this.eventQueue.enqueue(recipeName, () => {
@@ -787,7 +815,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   }
 
   async start(): Promise<void> {
-    console.log('[WR-K8s] Starting WorkflowRecipe watcher')
+    createLogger('wrc', 'workflow-recipes').info('[WR-K8s] Starting WorkflowRecipe watcher')
 
     // Initialize workflow subsystem by reading the signing key from control-plane.
     // Non-fatal: if the Secret doesn't exist, workflow recipes will gracefully fail
@@ -821,7 +849,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
             this.reconciler.ensureOAuthBrokerTokenSecret(recipe)
           ),
         (recipe, err) => {
-          console.error(`[WR-K8s] Broker-token refresh failed for "${recipe.metadata.name}":`, err)
+          createLogger('wrc', recipe.metadata.name).error('Broker-token refresh failed', {
+            name: recipe.metadata.name,
+            err,
+          })
         }
       )
     }
@@ -895,14 +926,16 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       const privateKeyB64 = secret.data?.['private.pem']
       const publicKeyB64 = secret.data?.['public.pem']
       if (!privateKeyB64) {
-        console.warn(
-          `[WR-K8s] Secret "${SIGNING_KEY_SECRET}" exists but missing private.pem key — workflow disabled`
+        createLogger('wrc', 'workflow-recipes').warn(
+          'Signing Secret lacks private.pem; workflow disabled',
+          { SIGNING_KEY_SECRET }
         )
         return
       }
       if (!publicKeyB64) {
-        console.warn(
-          `[WR-K8s] Secret "${SIGNING_KEY_SECRET}" exists but missing public.pem key — JWT verification disabled`
+        createLogger('wrc', 'workflow-recipes').warn(
+          'Signing Secret lacks public.pem; JWT verification disabled',
+          { SIGNING_KEY_SECRET }
         )
       }
 
@@ -911,15 +944,21 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         ? Buffer.from(publicKeyB64, 'base64').toString('utf-8')
         : undefined
       await this.reconciler.initializeWorkflow(privateKeyPem, publicKeyPem)
-      console.log('[WR-K8s] Workflow subsystem initialized from signing key')
+      createLogger('wrc', 'workflow-recipes').info(
+        '[WR-K8s] Workflow subsystem initialized from signing key'
+      )
     } catch (error: unknown) {
       const code = (error as { response?: { statusCode?: number } })?.response?.statusCode
       if (code === 404 || code === 403) {
-        console.warn(
-          `[WR-K8s] Signing key Secret not found or forbidden (${code}) — workflow disabled`
+        createLogger('wrc', 'workflow-recipes').warn(
+          'Signing Secret not found or forbidden; workflow disabled',
+          { code }
         )
       } else {
-        console.warn('[WR-K8s] Failed to read signing key — workflow disabled:', error)
+        createLogger('wrc', 'workflow-recipes').warn(
+          '[WR-K8s] Failed to read signing key — workflow disabled:',
+          { err: error }
+        )
       }
     }
   }
@@ -933,7 +972,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const watchCallback = (type: string, apiObj: WorkflowRecipeWatchObject) => {
       const recipe = workflowRecipeFromWatchObject(apiObj, this.config.sandboxNamespace)
 
-      console.log(`[WR-K8s] Watch event: ${type} for "${recipe.metadata.name}"`)
+      createLogger('wrc', recipe.metadata.name).info('Received recipe watch event', {
+        type,
+        name: recipe.metadata.name,
+      })
 
       this.eventQueue.enqueue(recipe.metadata.name, () => this.handleRecipeEvent(type, recipe))
     }
@@ -941,9 +983,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const doneCallback = (err: Error | null) => {
       if (this.stopped) return
       if (err) {
-        console.error('[WR-K8s] Watch error:', err)
+        createLogger('wrc', 'workflow-recipes').error('[WR-K8s] Watch error:', { err })
       }
-      console.log('[WR-K8s] Watch ended, restarting...')
+      createLogger('wrc', 'workflow-recipes').info('[WR-K8s] Watch ended, restarting...')
       setTimeout(() => this.startWatch(), err ? 5000 : 1000)
     }
 
@@ -959,17 +1001,23 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       let dbSyncAttempted = false
       if (recipe.metadata.deletionTimestamp) {
         // Resource is being deleted — cleanup cross-namespace resources, then remove finalizer.
-        console.log(`[WR-K8s] Finalizer cleanup for "${recipe.metadata.name}"`)
+        createLogger('wrc', recipe.metadata.name).info('Cleaning up recipe finalizer', {
+          name: recipe.metadata.name,
+        })
         try {
           await this.reconciler.reconcileDelete(recipe)
           await this.reconciler.removeFinalizer(recipe)
         } catch (error) {
           if (getErrorCode(error) === 404) {
-            console.warn(
-              `[WR-K8s] Finalizer cleanup skipped for "${recipe.metadata.name}"; recipe already gone`
+            createLogger('wrc', recipe.metadata.name).warn(
+              'Skipping finalizer cleanup because the recipe is gone',
+              { name: recipe.metadata.name }
             )
           } else {
-            console.error(`[WR-K8s] Finalizer cleanup failed for "${recipe.metadata.name}":`, error)
+            createLogger('wrc', recipe.metadata.name).error('Finalizer cleanup failed', {
+              name: recipe.metadata.name,
+              err: error,
+            })
           }
         }
         this.recipes.delete(recipe.metadata.name)
@@ -997,17 +1045,18 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           try {
             await this.dbRunProcessor.syncFromRecipeExecution(recipe)
           } catch (error) {
-            console.error(
-              `[WR-K8s] DB sync failed for status-only event "${recipe.metadata.name}":`,
-              error
+            createLogger('wrc', recipe.metadata.name).error(
+              'Database sync failed for a status-only event',
+              { name: recipe.metadata.name, err: error }
             )
           } finally {
             dbSyncAttempted = true
           }
         }
         if (needsTerminalRunTeardown) {
-          console.log(
-            `[WR-K8s] Terminal run status-only event for "${recipe.metadata.name}" — forcing reconcile for compute teardown`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Forcing reconciliation of terminal run status for compute teardown',
+            { name: recipe.metadata.name }
           )
         } else {
           return
@@ -1018,8 +1067,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       this.recipes.set(recipe.metadata.name, recipe)
       try {
         if (!(await this.reconciler.isRecipeStillActive(recipe))) {
-          console.warn(
-            `[WR-K8s] Skipping stale event for "${recipe.metadata.name}"; recipe is gone or deleting`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Skipping stale event because the recipe is gone or deleting',
+            { name: recipe.metadata.name }
           )
           this.recipes.delete(recipe.metadata.name)
           return
@@ -1029,8 +1079,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         }
         await this.reconciler.ensureFinalizer(recipe)
         if (!(await this.reconciler.isRecipeStillActive(recipe))) {
-          console.warn(
-            `[WR-K8s] Skipping reconcile for "${recipe.metadata.name}"; recipe started deleting after finalizer check`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Skipping reconciliation because deletion began after the finalizer check',
+            { name: recipe.metadata.name }
           )
           this.recipes.delete(recipe.metadata.name)
           return
@@ -1052,10 +1103,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         // capability); its clearing PATCH is still emitted via
         // `pluginWorkloadSdkProjectionChanged`, so the publish is covered.
         if (projectedSdkState !== undefined && projectedSdkState !== persistedSdkState) {
-          console.log(
-            `[WR-K8s] Plugin Workload SDK state for "${recipe.metadata.name}": ` +
-              `${persistedSdkState ?? 'none'} -> ${projectedSdkState} (patchEmitted=${willPatch})`
-          )
+          createLogger('wrc', recipe.metadata.name).info('Plugin Workload SDK state changed', {
+            name: recipe.metadata.name,
+            value2: persistedSdkState ?? 'none',
+            projectedSdkState,
+            willPatch,
+          })
         }
         if (willPatch) {
           await this.reconciler.patchStatus(recipe, result)
@@ -1078,13 +1131,17 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         }
       } catch (error) {
         if (getErrorCode(error) === 404) {
-          console.warn(
-            `[WR-K8s] Reconciliation skipped for "${recipe.metadata.name}"; recipe already gone`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Reconciliation skipped because the recipe is gone',
+            { name: recipe.metadata.name }
           )
           this.recipes.delete(recipe.metadata.name)
           return
         }
-        console.error(`[WR-K8s] Reconciliation failed for "${recipe.metadata.name}":`, error)
+        createLogger('wrc', recipe.metadata.name).error('Reconciliation failed', {
+          name: recipe.metadata.name,
+          err: error,
+        })
         enqueueInfrastructureTelemetryBestEffort(
           this.traceReporter,
           controllerErrorTelemetryProjection(recipe, error)
@@ -1109,6 +1166,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
 
   private isStatusOnlyModifiedEvent(recipe: WorkflowRecipeCRD): boolean {
     const cached = this.recipes.get(recipe.metadata.name)
+    // POST /admin/recipes/:name/retry requests the canonical failed -> candidate
+    // transition through /status, without changing spec/generation. Run that
+    // transition once; subsequent candidate/status updates remain coalesced.
+    if (cached?.status?.phase === 'failed' && recipe.status?.phase === 'candidate') return false
     const cachedGeneration = cached?.metadata.generation
     const nextGeneration = recipe.metadata.generation
     if (
@@ -1165,7 +1226,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         return
       }
       const label = fixedInterval ? 'progress' : 'transient'
-      console.log(`[WR-K8s] ${label} retry for "${name}" (attempt ${attempts + 1}, ${delay}ms)`)
+      createLogger('wrc', 'workflow-recipes').info('Retrying recipe reconciliation', {
+        label,
+        name,
+        value3: attempts + 1,
+        delay,
+      })
       void this.eventQueue.enqueue(name, () =>
         this.handleRecipeEvent('MODIFIED', cached, { forceReconcile: true })
       )
@@ -1285,7 +1351,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
         )
         enqueued++
       } catch (error) {
-        console.error(`[WR-K8s] External egress refresh failed for "${name}":`, error)
+        createLogger('wrc', 'workflow-recipes').error('External egress refresh failed', {
+          name,
+          err: error,
+        })
       }
     })
 
@@ -1296,8 +1365,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // where the set is decided and written instead — `logResolvedEgressSet` in
     // workflowRecipeReconciler.ts, one entry per FQDN, only when the set changed
     // and only once the policy has landed (#299). Secrets stay out of both.
-    console.log(
-      `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
+    createLogger('wrc', 'workflow-recipes').info(
+      'Re-enqueued recipes for external egress refresh',
+      { enqueued, length: selected.length, value3: Date.now() - started }
     )
   }
 
@@ -1319,7 +1389,10 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           this.refreshWorkloadStatusOnly(latest, { ownershipOnly: !needsStatusRefresh })
         )
       } catch (error) {
-        console.error(`[WR-K8s] Workload status refresh failed for "${recipeName}":`, error)
+        createLogger('wrc', recipeName).error('Workload status refresh failed', {
+          recipeName,
+          err: error,
+        })
       }
     })
 
@@ -1377,9 +1450,9 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           )
         }
       } catch (error) {
-        console.error(
-          `[WR-K8s] Runtime credential refresh or infrastructure retry failed for "${recipeName}":`,
-          error
+        createLogger('wrc', recipeName).error(
+          'Runtime credential refresh or infrastructure retry failed',
+          { recipeName, err: error }
         )
       }
     })
@@ -1404,7 +1477,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       this.externalEgressRefreshTimer = null
     }
     if (this.watchRequest) {
-      console.log('[WR-K8s] Stopping watch')
+      createLogger('wrc', 'workflow-recipes').info('[WR-K8s] Stopping watch')
       this.watchRequest.abort()
       this.watchRequest = null
     }
@@ -1431,9 +1504,14 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     if (this.traceReporter) {
       const result = await this.traceReporter.stopAndDrain()
       if (!result.drained) {
-        console.warn('[WR-K8s] Governed trace reporter shutdown timed out', {
-          dropped: result.dropped,
-        })
+        createLogger('wrc', 'workflow-recipes').warn(
+          '[WR-K8s] Governed trace reporter shutdown timed out',
+          {
+            value1: {
+              dropped: result.dropped,
+            },
+          }
+        )
       }
     }
   }
@@ -1464,7 +1542,9 @@ export class DevWorkflowRecipeProvider implements WorkflowRecipeProvider {
   async start(): Promise<void> {
     const raw = process.env.CLERUM_RECIPES
     if (!raw) {
-      console.log('[WR-Dev] No CLERUM_RECIPES env var — starting with empty recipe list')
+      createLogger('wrc', 'workflow-recipes').info(
+        '[WR-Dev] No CLERUM_RECIPES env var — starting with empty recipe list'
+      )
       return
     }
 
@@ -1472,16 +1552,22 @@ export class DevWorkflowRecipeProvider implements WorkflowRecipeProvider {
       const recipes = JSON.parse(raw) as WorkflowRecipeCRD[]
       for (const recipe of recipes) {
         this.recipes.set(recipe.metadata.name, recipe)
-        console.log(`[WR-Dev] Loaded recipe: ${recipe.metadata.name}`)
+        createLogger('wrc', recipe.metadata.name).info('Loaded development recipe', {
+          name: recipe.metadata.name,
+        })
       }
-      console.log(`[WR-Dev] Loaded ${this.recipes.size} recipe(s)`)
+      createLogger('wrc', 'workflow-recipes').info('Loaded development recipes', {
+        size: this.recipes.size,
+      })
     } catch (error) {
-      console.error('[WR-Dev] Failed to parse CLERUM_RECIPES:', error)
+      createLogger('wrc', 'workflow-recipes').error('[WR-Dev] Failed to parse CLERUM_RECIPES:', {
+        err: error,
+      })
     }
   }
 
   async stop(): Promise<void> {
-    console.log('[WR-Dev] Stopping dev provider')
+    createLogger('wrc', 'workflow-recipes').info('[WR-Dev] Stopping dev provider')
   }
 }
 
@@ -1495,7 +1581,7 @@ export class DevWorkflowRecipeProvider implements WorkflowRecipeProvider {
 export function createWorkflowRecipeProvider(): WorkflowRecipeProvider {
   const config = loadConfig()
   if (config.devMode) {
-    console.log('[WR-Provider] Creating dev mode provider')
+    createLogger('wrc', 'workflow-recipes').info('[WR-Provider] Creating dev mode provider')
     return new DevWorkflowRecipeProvider()
   }
 
@@ -1507,9 +1593,9 @@ export function createWorkflowRecipeProvider(): WorkflowRecipeProvider {
     try {
       pool = initDb(config.db)
     } catch (err) {
-      console.warn(
+      createLogger('wrc', 'workflow-recipes').warn(
         '[WR-Provider] initDb() failed — DB run processor disabled:',
-        err instanceof Error ? err.message : err
+        { err }
       )
       pool = null
     }
@@ -1525,6 +1611,6 @@ export function createWorkflowRecipeProvider(): WorkflowRecipeProvider {
     }
   }
 
-  console.log('[WR-Provider] Creating K8s watcher provider')
+  createLogger('wrc', 'workflow-recipes').info('[WR-Provider] Creating K8s watcher provider')
   return new WorkflowRecipeWatcher(kc, pool)
 }
