@@ -50,18 +50,53 @@ function safeParents(file, create = false, allowMissing = false) {
 
 function readJournal(file) {
   safeParents(file)
-  const info = fs.lstatSync(file)
-  invariant(info.isFile() && info.nlink === 1 && (info.mode & 0o077) === 0, 'UNSAFE_JOURNAL_FILE')
-  invariant(info.size > 0 && info.size <= 1024 * 1024, 'INVALID_JOURNAL_SIZE')
-  const state = JSON.parse(fs.readFileSync(file, 'utf8'))
-  invariant(
-    state.version === 1 &&
-      typeof state.runId === 'string' &&
-      /^[a-f0-9-]{36}$/.test(state.runId) &&
-      Array.isArray(state.resources),
-    'INVALID_JOURNAL'
-  )
-  return state
+  let descriptor
+  try {
+    // The local harness runs on POSIX. NOFOLLOW binds validation and reading
+    // to one opened file; NONBLOCK prevents a substituted FIFO from hanging
+    // before fstat can reject it as a non-regular file.
+    descriptor = fs.openSync(
+      file,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+    )
+  } catch (error) {
+    if (error.code === 'ELOOP') throw new Error('UNSAFE_JOURNAL_FILE', { cause: error })
+    throw error
+  }
+  try {
+    const checkedStat = () => {
+      const info = fs.fstatSync(descriptor)
+      invariant(
+        info.isFile() && info.nlink === 1 && (info.mode & 0o077) === 0,
+        'UNSAFE_JOURNAL_FILE'
+      )
+      invariant(info.size > 0 && info.size <= 1024 * 1024, 'INVALID_JOURNAL_SIZE')
+      return info
+    }
+    const before = checkedStat()
+    // One extra byte detects growth without an unbounded read-to-EOF. Normal
+    // journal writers replace atomically; in-place size changes are refused.
+    const buffer = Buffer.alloc(before.size + 1)
+    let length = 0
+    while (length < buffer.length) {
+      const count = fs.readSync(descriptor, buffer, length, buffer.length - length, null)
+      if (count === 0) break
+      length += count
+    }
+    const after = checkedStat()
+    invariant(length === before.size && after.size === before.size, 'JOURNAL_CHANGED_DURING_READ')
+    const state = JSON.parse(buffer.subarray(0, length).toString('utf8'))
+    invariant(
+      state.version === 1 &&
+        typeof state.runId === 'string' &&
+        /^[a-f0-9-]{36}$/.test(state.runId) &&
+        Array.isArray(state.resources),
+      'INVALID_JOURNAL'
+    )
+    return state
+  } finally {
+    fs.closeSync(descriptor)
+  }
 }
 
 function assertJournalBinding(state, expected) {

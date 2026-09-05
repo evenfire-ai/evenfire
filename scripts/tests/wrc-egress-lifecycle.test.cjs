@@ -62,6 +62,49 @@ function apiError(code) {
   return Object.assign(new Error(`API ${code}`), { code })
 }
 
+function trackJournalDescriptors(t, file) {
+  const open = fs.openSync
+  const fstat = fs.fstatSync
+  const descriptors = []
+  t.mock.method(fs, 'openSync', (filename, flags, ...args) => {
+    const descriptor = open(filename, flags, ...args)
+    if (
+      filename === file &&
+      (flags === 'r' ||
+        (typeof flags === 'number' &&
+          (flags & (fs.constants.O_WRONLY | fs.constants.O_RDWR)) === 0))
+    ) {
+      descriptors.push(descriptor)
+    }
+    return descriptor
+  })
+  return { descriptors, fstat }
+}
+
+// Exercise the same interleaving with the old pathname check and with the new
+// descriptor check. No production seam is needed: only the test mocks fs.
+function afterJournalMetadata(t, file, tracked, action) {
+  const lstat = fs.lstatSync
+  let changed = false
+  const once = () => {
+    if (!changed) {
+      changed = true
+      action()
+    }
+  }
+  t.mock.method(fs, 'lstatSync', (filename, ...args) => {
+    const info = lstat(filename, ...args)
+    if (filename === file) once()
+    return info
+  })
+  t.mock.method(fs, 'fstatSync', (descriptor, ...args) => {
+    const info = tracked.fstat(descriptor, ...args)
+    if (tracked.descriptors.includes(descriptor)) once()
+    return info
+  })
+  return () => changed
+}
+
 test('journal creates private durable state, saves atomically, and removes only its own run', t => {
   const { journal, file, state } = fixture(t)
   assert.equal(fs.statSync(file).mode & 0o777, 0o600)
@@ -106,6 +149,108 @@ test('journal refuses replacement, hard links, public permissions, invalid JSON 
   assert.throws(() => readJournal(file), SyntaxError)
   fs.writeFileSync(file, 'x'.repeat(1024 * 1024 + 1))
   assert.throws(() => readJournal(file), /INVALID_JOURNAL_SIZE/)
+})
+
+for (const replacementKind of ['regular file', 'symlink']) {
+  test(`journal reads the checked descriptor when its pathname is replaced with a ${replacementKind}`, t => {
+    const { directory, file, state } = fixture(t)
+    const retained = path.join(directory, 'retained-journal.json')
+    const replacement = path.join(directory, 'replacement-journal.json')
+    fs.writeFileSync(replacement, JSON.stringify({ ...state, runId: randomUUID() }), {
+      mode: 0o644,
+    })
+    const tracked = trackJournalDescriptors(t, file)
+    const changed = afterJournalMetadata(t, file, tracked, () => {
+      fs.renameSync(file, retained)
+      if (replacementKind === 'symlink') fs.symlinkSync(replacement, file)
+      else fs.renameSync(replacement, file)
+    })
+    assert.deepEqual(
+      readJournal(file),
+      state,
+      'never read a replacement whose permissions were not validated'
+    )
+    assert.equal(changed(), true, 'the check/use interleaving must actually execute')
+    assert.equal(tracked.descriptors.length, 1)
+    assert.throws(() => tracked.fstat(tracked.descriptors[0]), { code: 'EBADF' })
+  })
+}
+
+for (const failureAt of ['fstat', 'read', 'parse']) {
+  test(`journal closes its descriptor when ${failureAt} fails`, t => {
+    const { file } = fixture(t)
+    if (failureAt === 'parse') fs.writeFileSync(file, '{')
+    const tracked = trackJournalDescriptors(t, file)
+    const failure = new Error(`injected ${failureAt} failure`)
+    if (failureAt === 'fstat') {
+      t.mock.method(fs, 'fstatSync', descriptor => {
+        if (tracked.descriptors.includes(descriptor)) throw failure
+        return tracked.fstat(descriptor)
+      })
+    }
+    if (failureAt === 'read') {
+      const read = fs.readSync
+      t.mock.method(fs, 'readSync', (descriptor, ...args) => {
+        if (tracked.descriptors.includes(descriptor)) throw failure
+        return read(descriptor, ...args)
+      })
+    }
+    assert.throws(
+      () => readJournal(file),
+      error => (failureAt === 'parse' ? error instanceof SyntaxError : error === failure)
+    )
+    assert.equal(tracked.descriptors.length, 1)
+    assert.throws(() => tracked.fstat(tracked.descriptors[0]), { code: 'EBADF' })
+  })
+}
+
+test('journal rejects concurrent growth without reading beyond its checked size plus one byte', t => {
+  const { file } = fixture(t)
+  const checkedSize = fs.statSync(file).size
+  const tracked = trackJournalDescriptors(t, file)
+  const changed = afterJournalMetadata(t, file, tracked, () => {
+    fs.appendFileSync(file, ' '.repeat(1024 * 1024))
+  })
+  const read = fs.readSync
+  let bytesRead = 0
+  t.mock.method(fs, 'readSync', (descriptor, ...args) => {
+    const bytes = read(descriptor, ...args)
+    if (tracked.descriptors.includes(descriptor)) bytesRead += bytes
+    return bytes
+  })
+  assert.throws(() => readJournal(file), /INVALID_JOURNAL_SIZE|JOURNAL_CHANGED_DURING_READ/)
+  assert.equal(changed(), true)
+  assert(bytesRead > 0 && bytesRead <= checkedSize + 1)
+  assert.throws(() => tracked.fstat(tracked.descriptors[0]), { code: 'EBADF' })
+})
+
+test('journal accepts exactly the size limit and rejects a FIFO without waiting for a writer', t => {
+  const { file, state } = fixture(t)
+  const json = JSON.stringify(state)
+  fs.writeFileSync(file, json + ' '.repeat(1024 * 1024 - Buffer.byteLength(json)))
+  assert.deepEqual(readJournal(file), state)
+  fs.unlinkSync(file)
+  const fifo = spawnSync('mkfifo', ['-m', '600', file], { encoding: 'utf8', timeout: 3000 })
+  assert.ifError(fifo.error)
+  assert.equal(fifo.status, 0, fifo.stderr)
+  // A synchronous FIFO open cannot be interrupted by node:test's timer, so use
+  // a separate bounded process. It must reject before any writer connects.
+  const result = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+    const assert = require('node:assert/strict');
+    const { readJournal } = require(process.argv[1]);
+    assert.throws(() => readJournal(process.argv[2]), /UNSAFE_JOURNAL_FILE/);
+  `,
+      lifecycle,
+      file,
+    ],
+    { encoding: 'utf8', timeout: 3000 }
+  )
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
 })
 
 test('journal paths reject traversal, noncanonical roots, and symbolic files or ancestors', t => {
