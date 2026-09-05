@@ -90,7 +90,7 @@ fi
 internal_condition_value() {
   kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
     -o jsonpath='{range .status.conditions[?(@.type=="InternalDependenciesReady")]}{.status}{"|"}{.reason}{"|"}{.message}{end}' \
-    2>/dev/null || true
+    2>/dev/null
 }
 
 reap_condition_value() {
@@ -115,20 +115,19 @@ guard_recipe_nonterminal() {
   esac
 }
 
-wait_internal_ready() {
-  local elapsed=0 timeout=${1:-120} condition
-  while [ "$elapsed" -lt "$timeout" ]; do
-    guard_recipe_nonterminal || return 1
-    condition="$(internal_condition_value)"
-    case "$condition" in
-      True\|Reconciled\|*) ok "InternalDependenciesReady=True (${condition})"; return 0 ;;
-      False\|*) fail "InternalDependenciesReady=False (${condition})"; return 1 ;;
-    esac
-    sleep "$POLL_INTERVAL"
-    elapsed=$((elapsed + POLL_INTERVAL))
-  done
-  fail "Timed out waiting for InternalDependenciesReady=True"
-  return 1
+assert_internal_not_failed() {
+  local condition
+  condition="$(internal_condition_value)" || {
+    fail "Could not observe InternalDependenciesReady after rollout"
+    return 1
+  }
+  # A health-only refresh intentionally clears this unevaluated condition.
+  # Availability and convergence are proved separately by active, reap, policy
+  # shape and packet checks; an API error or explicit failed condition is not absence.
+  case "$condition" in
+    ''|True\|*) ok "Internal dependency condition is not failed after rollout" ;;
+    *) fail "Internal dependency condition failed or is unknown (${condition})"; return 1 ;;
+  esac
 }
 
 wait_reap_reaped() {
@@ -596,9 +595,9 @@ for deployment in "$SOURCE_DEPLOYMENT" "$KEEP_BACKEND_DEPLOYMENT" "$DROP_BACKEND
   }
   ok "Deployment ${deployment} ready"
 done
-wait_internal_ready "$TIMEOUT_POD"
 wait_reap_reaped "$TIMEOUT_POD"
 wait_recipe_active "$TIMEOUT_POD"
+assert_internal_not_failed
 
 keep_target="http://${KEEP_BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/"
 drop_target="http://${DROP_BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/"
@@ -624,6 +623,15 @@ baseline_egress_hash="$(policy_hash "$egress_ref")"
 [ -n "$baseline_egress_hash" ] || { fail "Baseline egress policy has no desired hash"; exit 1; }
 assert_http_allowed "$SOURCE_DEPLOYMENT" "$keep_target" "keep-route-ok"
 assert_http_allowed "$SOURCE_DEPLOYMENT" "$drop_target" "drop-route-ok"
+for backend in "$KEEP_BACKEND_DEPLOYMENT" "$DROP_BACKEND_DEPLOYMENT"; do
+  service_ip="$(kctl get service "$backend" -n "$SANDBOX_NS" -o jsonpath='{.spec.clusterIP}')"
+  service_ip="$(python3 "$WRC_EVIDENCE_PY" service-ip "$service_ip" "$BACKEND_PORT")"
+  if [ "$(probe_tcp_result "deploy/${SOURCE_DEPLOYMENT}" "$service_ip" "$BACKEND_PORT")" != WRC_TCP_CONNECTED ]; then
+    fail "TCP connect-only probe did not reach the declared backend ${backend}"
+    exit 1
+  fi
+done
+ok "TCP connect-only probe reached both declared backends without waiting for HTTP"
 
 header "Phase 4 - Unassociated caller remains denied"
 kctl delete pod "$DENIED_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -694,9 +702,9 @@ updated_egress_hash="$(policy_hash "$updated_egress_ref")"
 assert_policy "$updated_egress_ref" "egress" "$SOURCE_ID" "$KEEP_BACKEND_ID"
 assert_policy_excludes_peer "$updated_egress_ref" "$DROP_BACKEND_ID"
 assert_policy "$updated_keep_ingress_ref" "ingress" "$KEEP_BACKEND_ID" "$SOURCE_ID"
-wait_internal_ready "$TIMEOUT_POD"
 wait_reap_reaped "$TIMEOUT_POD"
 wait_recipe_active "$TIMEOUT_POD"
+assert_internal_not_failed
 wait_for_deployment "$SANDBOX_NS" "$DROP_BACKEND_DEPLOYMENT" "$TIMEOUT_POD"
 assert_service_has_ready_endpoint "$DROP_BACKEND_DEPLOYMENT" "$SANDBOX_NS"
 assert_http_allowed "$DROP_BACKEND_DEPLOYMENT" \

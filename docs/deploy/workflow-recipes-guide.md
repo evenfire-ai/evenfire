@@ -483,6 +483,10 @@ routes and their inferred policies, then reapplies the WorkflowRecipe without on
 `DROP_URL` dependency. Acceptance requires the DROP route/policy to disappear, the KEEP
 route to remain reachable, the recipe to remain active, and
 `NetworkPolicyReapFailed=False/Reaped` to survive natural rollout status patches.
+`InternalDependenciesReady` is diagnostic rather than durable: health-only refreshes
+may clear it. The gate permits its observed absence but rejects an explicit failed/unknown
+condition or a failed API read. Convergence requires the positive policy, packet-flow,
+active-phase and durable-reap checks above, not catching a transient acknowledgement.
 
 Before accepting the expected DROP denial, the gate re-proves the DROP Deployment,
 Service endpoint and loopback HTTP response before and after each probe. Denial requires

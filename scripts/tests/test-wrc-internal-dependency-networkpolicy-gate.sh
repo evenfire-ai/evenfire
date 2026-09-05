@@ -185,10 +185,11 @@ if (
     local remote_script=$1
     shift
     nc() {
-      [ "$*" = '-w 1 10.0.0.1 8080 -e true' ] || return 2
+      [ "$*" = '-n -z -v -w 1 10.0.0.1 8080' ] || return 2
       case "$PROBE_CASE" in
         allowed|http_stall) return 0 ;;
         timeout) echo 'nc: timed out' >&2; return 1 ;;
+        silent_failure) return 1 ;;
         refused) echo "nc: can't connect to remote host: Connection refused" >&2; return 1 ;;
         dns_failure) echo "nc: bad address 'backend'" >&2; return 1 ;;
         invalid_option) echo 'nc: invalid option -- e' >&2; return 1 ;;
@@ -204,7 +205,7 @@ if (
   done
   PROBE_CASE=timeout
   [ "$(probe_tcp_result deploy/source 10.0.0.1 8080)" = WRC_TCP_CONNECT_TIMEOUT ] || exit 1
-  for PROBE_CASE in exec_failure refused dns_failure invalid_option missing_client; do
+  for PROBE_CASE in exec_failure refused dns_failure invalid_option missing_client silent_failure; do
     if probe_tcp_result deploy/source 10.0.0.1 8080; then exit 1; fi
   done
 ); then
@@ -357,6 +358,34 @@ if (
   pass "Real denial journey requires consecutive timeouts with healthy DNS, endpoints and backend"
 else
   fail "Denial journey can certify a broken probe or unhealthy backend"
+fi
+
+# Health-only status refreshes may clear this acknowledgement, but an API
+# failure or an explicit negative/unknown condition must never count as absence.
+if (
+  eval "$(function_body assert_internal_not_failed)"
+  ok() { :; }
+  fail() { :; }
+  internal_condition_value() {
+    case "$CONDITION_CASE" in
+      absent) return 0 ;;
+      ready) printf 'True|Reconciled|ready' ;;
+      failed) printf 'False|InvalidInternalDependency|invalid' ;;
+      unknown) printf 'Unknown|Pending|pending' ;;
+      read_failure) return 1 ;;
+    esac
+  }
+  for CONDITION_CASE in absent ready failed unknown read_failure; do
+    if assert_internal_not_failed; then
+      [[ "$CONDITION_CASE" == absent || "$CONDITION_CASE" == ready ]] || exit 1
+    else
+      [[ "$CONDITION_CASE" != absent && "$CONDITION_CASE" != ready ]] || exit 1
+    fi
+  done
+); then
+  pass "Post-rollout internal condition accepts legitimate absence but rejects failed/unknown/read-error evidence"
+else
+  fail "Post-rollout internal condition confuses failed observation with legitimate absence"
 fi
 
 exit "$FAIL"

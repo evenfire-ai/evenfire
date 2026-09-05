@@ -41,13 +41,14 @@ probe_tcp_result() {
   local target=$1 host=$2 port=$3 result
   # The remote shell always reports a completed probe with exit zero. An exec
   # transport failure or a missing nc cannot impersonate a connect timeout.
-  # BusyBox nc -e runs true immediately after connecting: an HTTP stall is
-  # therefore connected evidence, never a policy denial.
+  # BusyBox nc -z exits after connect, without waiting for an HTTP response.
+  # -v is required by NC_110_COMPAT to report ETIMEDOUT; otherwise a refused
+  # connection and a timeout both produce silent exit 1. -n avoids reverse DNS.
   # Variables belong to the remote shell.
   # shellcheck disable=SC2016
   if ! result="$(kctl exec "$target" -n "$SANDBOX_NS" -- sh -c '
     command -v nc >/dev/null 2>&1 || { printf "WRC_TCP_ERROR\n"; exit 0; }
-    if output=$(LC_ALL=C nc -w "$1" "$2" "$3" -e true 2>&1); then
+    if output=$(LC_ALL=C nc -n -z -v -w "$1" "$2" "$3" 2>&1); then
       printf "WRC_TCP_CONNECTED\n"
     else
       case "$output" in
