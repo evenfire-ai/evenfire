@@ -39,6 +39,19 @@ function makeWorkflowRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): Workflo
 }
 
 describe('workflowRecipeFromWatchObject', () => {
+  it.each(['2026-09-04T10:00:00Z', undefined])(
+    'preserves API creationTimestamp %s without inventing legacy epoch evidence',
+    creationTimestamp => {
+      const recipe = workflowRecipeFromWatchObject(
+        makeWorkflowRecipe({
+          metadata: { name: 'recipe', namespace: 'sandbox-recipes', creationTimestamp },
+        }),
+        'sandbox-recipes'
+      )
+      expect(recipe.metadata.creationTimestamp).toBe(creationTimestamp)
+    }
+  )
+
   it('preserves ownerReferences from Kubernetes watch objects', () => {
     const recipe = workflowRecipeFromWatchObject(
       {

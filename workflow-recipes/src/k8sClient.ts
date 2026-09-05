@@ -81,6 +81,7 @@ export interface WorkflowRecipeWatchObject {
     uid?: string
     resourceVersion?: string
     generation?: number
+    creationTimestamp?: string
     deletionTimestamp?: string
     finalizers?: string[]
     annotations?: Record<string, string>
@@ -104,6 +105,7 @@ export function workflowRecipeFromWatchObject(
       uid: apiObj.metadata.uid,
       resourceVersion: apiObj.metadata.resourceVersion,
       generation: apiObj.metadata.generation,
+      creationTimestamp: apiObj.metadata.creationTimestamp,
       finalizers: apiObj.metadata.finalizers,
       deletionTimestamp: apiObj.metadata.deletionTimestamp,
       annotations: apiObj.metadata.annotations,

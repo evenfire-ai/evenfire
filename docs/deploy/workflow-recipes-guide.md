@@ -359,6 +359,11 @@ An owned legacy object is adopted in place. If both aliases belong to the same r
 UID, their DNS windows are combined and persisted before retiring the duplicate, even
 when the IP set is unchanged. Migration does not extend an existing expiry. The desired
 ledger, transport/UI carveout, and cleanup use the same alias set.
+An owned duplicate that is still `Terminating` may contribute valid same-epoch DNS
+history, but cannot be selected for writes. A live compatible survivor remains usable
+while the reap condition and retry track deletion of the duplicate. If all compatible
+aliases are terminating, the desired-policy lane remains retryable rather than writing
+to a deleting object.
 
 Workflow fast paths receive the declarative CR again from the watch, so env/command/args
 may still contain `{{workload:host}}` and `{{workload:port}}`. WRC resolves a detached
@@ -422,10 +427,14 @@ policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
   policy UID/resourceVersion as Kubernetes preconditions. The `ui-egress`/`wl-egress`
   no-op gate advances the epoch stamps (and therefore resourceVersion) once per recipe
   generation even when the enforced rules are unchanged.
+  Replacement preserves other controllers' finalizers from the same live read that
+  supplies resourceVersion; a concurrent finalizer change therefore conflicts safely.
   Legacy policies without a UID are adopted only by a current recipe pass; generations
   from those objects are never compared to a new recipe's generation. Their DNS history
   is reused only when creation timestamps establish continuity. Missing/equal timestamps
   are ambiguous and do not authorize inheriting an earlier owner's DNS state.
+  The watch adapter carries the API's creation timestamp into reconciliation so valid
+  continuity evidence is not lost at that boundary.
 - **Deletion confirmation:** a successful DELETE response is only acceptance. WRC reads
   every accepted target on a pass that had no earlier delete failure and reports the reap
   incomplete until that exact name returns 404. If another delete failed first, the whole
@@ -476,13 +485,16 @@ route to remain reachable, the recipe to remain active, and
 `NetworkPolicyReapFailed=False/Reaped` to survive natural rollout status patches.
 
 Before accepting the expected DROP denial, the gate re-proves the DROP Deployment,
-Service endpoint and loopback HTTP response. A failed `exec`, DNS lookup, backend or API
-read therefore cannot masquerade as NetworkPolicy enforcement.
+Service endpoint and loopback HTTP response before and after each probe. Denial requires
+consecutive TCP connection timeouts; a connected socket whose HTTP response stalls is
+not a denied route. A failed `exec`, DNS lookup, backend or API read therefore cannot
+masquerade as NetworkPolicy enforcement.
 
 Finalization installs a test-only deletion barrier on one owned NetworkPolicy. WRC must
 request that deletion while retaining `clerum.io/workload-cleanup` on the terminating
 recipe; only after the barrier is released and the policy is absent may the recipe
-disappear. Direct NetworkPolicy deletion exists only in emergency cleanup after the gate
+disappear. Before release, the gate observes a new rejected WRC cleanup cycle between
+two identity-bound parent/child snapshots. Direct NetworkPolicy deletion exists only in emergency cleanup after the gate
 has already failed, so it cannot make the success path green. The evidence reader accepts
 only real RFC3339 deletion timestamps and explicit empty `--ignore-not-found` output;
 `<no value>`, authorization errors, timeouts and 5xx responses are never treated as

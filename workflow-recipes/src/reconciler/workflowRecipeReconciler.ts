@@ -4856,7 +4856,7 @@ export class WorkflowRecipeReconciler {
     if (policy.metadata?.name) policy.metadata.name = policyName
     desired.remember(policy)
 
-    if (existing) await this.assertNetworkPolicyOwnership(policy, existing, ns, recipe)
+    if (existing) await this.assertNetworkPolicyWritable(policy, existing, ns, recipe)
 
     // issue #299: NO-OP when the accumulated egress set and rules are already
     // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
@@ -4889,7 +4889,7 @@ export class WorkflowRecipeReconciler {
         // The object may have changed after the no-op/ownership read and before
         // create returned 409. Revalidate the exact second read so generation N
         // cannot borrow N+1's resourceVersion and replace its newer policy.
-        await this.assertNetworkPolicyOwnership(policy, existing, ns, recipe)
+        await this.assertNetworkPolicyWritable(policy, existing, ns, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         // PUT replaces shared metadata too. Preserve other controllers' cleanup
         // barriers from the same read whose resourceVersion fences this write.
@@ -5669,7 +5669,7 @@ export class WorkflowRecipeReconciler {
       desired.remember(policy)
 
       if (existingWlPolicy) {
-        await this.assertNetworkPolicyOwnership(policy, existingWlPolicy, wlNs, recipe)
+        await this.assertNetworkPolicyWritable(policy, existingWlPolicy, wlNs, recipe)
       }
 
       // issue #299: NO-OP when the accumulated set and rules are already live —
@@ -5728,6 +5728,20 @@ export class WorkflowRecipeReconciler {
     return skippedWorkloadIds
   }
 
+  private async assertNetworkPolicyWritable(
+    desired: k8s.V1NetworkPolicy,
+    existing: k8s.V1NetworkPolicy,
+    namespace: string,
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
+    await this.assertNetworkPolicyOwnership(desired, existing, namespace, recipe)
+    if (existing.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${desired.metadata?.name}" is still terminating`
+      )
+    }
+  }
+
   private async assertNetworkPolicyOwnership(
     desired: k8s.V1NetworkPolicy,
     existing: k8s.V1NetworkPolicy,
@@ -5764,10 +5778,6 @@ export class WorkflowRecipeReconciler {
         `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the ${lane} for WorkflowRecipe "${desiredRecipe}"`
       )
     }
-    if (existing.metadata?.deletionTimestamp) {
-      throw new RetryableReconcileError(`NetworkPolicy "${desiredName}" is still terminating`)
-    }
-
     const desiredUid = desired.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
     const existingUid = existing.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
     const differentEpoch = desiredUid !== undefined && existingUid !== desiredUid
@@ -5928,13 +5938,21 @@ export class WorkflowRecipeReconciler {
       // primary remains available for this identity; the matching workload's
       // own pass will adopt the legacy object and keep it in the desired ledger.
     }
+    // A retiring duplicate can still hold the only copy of a valid DNS window,
+    // but is not a writable target. Its cleanup must not degrade a live survivor.
+    const liveMatches = matches.filter(({ existing }) => !existing.metadata?.deletionTimestamp)
     // Keep the legacy physical identity when possible. Rehydrate every verified
     // same-epoch alias before a duplicate is retired, so neither DNS window is lost.
-    const sameEpoch = [...matches]
+    const sameEpoch = [...liveMatches]
       .reverse()
       .find(({ existing }) => this.networkPolicyStateBelongsToRecipeEpoch(existing, recipe))
-    const selected = sameEpoch ?? matches[0]
+    const selected = sameEpoch ?? liveMatches[0]
     if (selected) return { ...selected, aliases: matches.map(match => match.existing) }
+    if (matches.length > 0) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${primary}" has no live compatible alias; deletion is still pending`
+      )
+    }
     if (primaryConflict) {
       const lane =
         expectedLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE
@@ -6129,7 +6147,7 @@ export class WorkflowRecipeReconciler {
           name: policyName,
           namespace,
         })
-        await this.assertNetworkPolicyOwnership(policy, existing, namespace, recipe)
+        await this.assertNetworkPolicyWritable(policy, existing, namespace, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         // A rule/UID update must not remove another controller's finalizer.
         policy.metadata!.finalizers = existing.metadata?.finalizers?.slice()
