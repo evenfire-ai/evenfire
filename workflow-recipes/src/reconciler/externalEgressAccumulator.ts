@@ -75,6 +75,38 @@ export interface AccumulateOutput {
   frozenFqdns: string[]
 }
 
+/** Merge verified aliases of one policy/recipe epoch before retiring a duplicate.
+ * The normal accumulator still applies declarations, expiry, filtering and caps.
+ * Migration does not renew timestamps or invent a new DNS observation.
+ */
+export function mergeExternalEgressAnnotations(
+  aliases: Array<Record<string, string> | undefined>,
+  declarations: DeclaredExternal[],
+  now: number,
+  config: EgressCoreConfig
+): Record<string, string> | undefined {
+  const states = aliases.filter((state): state is Record<string, string> => state !== undefined)
+  if (states.length < 2) return states[0]
+  const entries = new Map<string, EgressEntry>()
+  for (const state of states) {
+    for (const entry of parseState(state, now, config, declarations).entries) {
+      const key = JSON.stringify([entry.fqdn, entry.ip, entry.port, entry.protocol])
+      const previous = entries.get(key)
+      entries.set(
+        key,
+        previous
+          ? {
+              ...entry,
+              expiresAt: Math.max(previous.expiresAt, entry.expiresAt),
+              lastObservedAt: Math.max(previous.lastObservedAt, entry.lastObservedAt),
+            }
+          : entry
+      )
+    }
+  }
+  return serializeState({ entries: [...entries.values()] })
+}
+
 /**
  * Turn the declared externals + this round's resolver output into normalized
  * observations for the core. Iterating the DECLARED list (not the resolver

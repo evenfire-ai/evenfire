@@ -91,18 +91,27 @@ function baseLabels(
   }
 }
 
+/**
+ * Name prefixes for this lane's two policy families, exported so issue #582's
+ * reap classifier has ONE definition to read rather than a copy. `composePolicyName`
+ * never truncates the prefix — it only shortens the recipe and workload segments
+ * (and appends a hash) — so a prefix match is a reliable family test.
+ */
+export const INTERNAL_DEPENDENCY_EGRESS_PREFIX = 'wr-intdep-egress'
+export const INTERNAL_DEPENDENCY_INGRESS_PREFIX = 'wr-intdep-ingress'
+
 export function internalDependencyEgressPolicyName(
   recipeName: string,
   sourceWorkloadId: string
 ): string {
-  return composePolicyName('wr-intdep-egress', recipeName, sourceWorkloadId)
+  return composePolicyName(INTERNAL_DEPENDENCY_EGRESS_PREFIX, recipeName, sourceWorkloadId)
 }
 
 export function internalDependencyIngressPolicyName(
   recipeName: string,
   targetWorkloadId: string
 ): string {
-  return composePolicyName('wr-intdep-ingress', recipeName, targetWorkloadId)
+  return composePolicyName(INTERNAL_DEPENDENCY_INGRESS_PREFIX, recipeName, targetWorkloadId)
 }
 
 export function buildInternalDependencyEgressNetworkPolicy(

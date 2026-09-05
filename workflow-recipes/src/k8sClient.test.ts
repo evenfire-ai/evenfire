@@ -16,6 +16,7 @@ import {
   workflowNeedsWorkloadStatusRefresh,
   workflowRecipeFromWatchObject,
 } from './k8sClient'
+import { TRANSIENT_REQUEUE_BASE_MS } from './reconciler/workflowRecipeReconciler'
 import type { WorkflowRecipeCRD } from './types'
 
 function makeWorkflowRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): WorkflowRecipeCRD {
@@ -38,6 +39,19 @@ function makeWorkflowRecipe(overrides: Partial<WorkflowRecipeCRD> = {}): Workflo
 }
 
 describe('workflowRecipeFromWatchObject', () => {
+  it.each(['2026-09-04T10:00:00Z', undefined])(
+    'preserves API creationTimestamp %s without inventing legacy epoch evidence',
+    creationTimestamp => {
+      const recipe = workflowRecipeFromWatchObject(
+        makeWorkflowRecipe({
+          metadata: { name: 'recipe', namespace: 'sandbox-recipes', creationTimestamp },
+        }),
+        'sandbox-recipes'
+      )
+      expect(recipe.metadata.creationTimestamp).toBe(creationTimestamp)
+    }
+  )
+
   it('preserves ownerReferences from Kubernetes watch objects', () => {
     const recipe = workflowRecipeFromWatchObject(
       {
@@ -208,6 +222,33 @@ describe('shouldPatchRecipeStatus', () => {
           ],
         }
       )
+    ).toBe(true)
+  })
+
+  it('patches when only the durable NetworkPolicy reap condition changes', () => {
+    const recipe = makeWorkflowRecipe({
+      spec: { steps: [], workloads: [{ id: 'api', type: 'deployment', image: 'api:test' }] },
+      status: { phase: 'active', message: 'All workloads deployed', conditions: [] },
+    })
+
+    expect(
+      shouldPatchRecipeStatus(recipe, {
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+        networkPolicyReapProjection: {
+          condition: {
+            type: 'NetworkPolicyReapFailed',
+            status: 'True',
+            reason: 'DeleteForbidden',
+            message: 'reap denied',
+            lastTransitionTime: 'now',
+          },
+          failureClass: 'authorization',
+          requeueAfterMs: 30_000,
+          requeueFixedInterval: true,
+        },
+      })
     ).toBe(true)
   })
 
@@ -751,6 +792,532 @@ describe('shouldPatchRecipeStatus', () => {
       ).toBe(true)
     })
   })
+})
+
+describe('WorkflowRecipe finalizer retry lifecycle', () => {
+  function deletingRecipe(): WorkflowRecipeCRD {
+    return makeWorkflowRecipe({
+      metadata: {
+        name: 'deleting-recipe',
+        namespace: 'sandbox-recipes',
+        uid: 'uid-deleting',
+        deletionTimestamp: '2026-09-04T00:00:00Z',
+        finalizers: ['clerum.io/workload-cleanup'],
+      },
+    })
+  }
+
+  it('retains the cached recipe and schedules a forced retry when cleanup fails', async () => {
+    const recipe = deletingRecipe()
+    const reconcileDelete = vi.fn().mockRejectedValue({ code: 403 })
+    const removeFinalizer = vi.fn().mockResolvedValue(undefined)
+    const scheduleTransientRetry = vi.fn()
+    const clearTransientRetry = vi.fn()
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      reconciler: {
+        reconcileDelete: typeof reconcileDelete
+        removeFinalizer: typeof removeFinalizer
+      }
+      stopped: boolean
+      scheduleTransientRetry: typeof scheduleTransientRetry
+      clearTransientRetry: typeof clearTransientRetry
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    watcher.recipes = new Map()
+    watcher.reconciler = { reconcileDelete, removeFinalizer }
+    watcher.stopped = false
+    watcher.scheduleTransientRetry = scheduleTransientRetry
+    watcher.clearTransientRetry = clearTransientRetry
+
+    await watcher.handleRecipeEvent('MODIFIED', recipe)
+
+    expect(removeFinalizer).not.toHaveBeenCalled()
+    expect(watcher.recipes.get(recipe.metadata.name)).toBe(recipe)
+    expect(scheduleTransientRetry).toHaveBeenCalledWith(
+      recipe.metadata.name,
+      TRANSIENT_REQUEUE_BASE_MS,
+      false,
+      recipe.metadata.uid
+    )
+    expect(clearTransientRetry).not.toHaveBeenCalled()
+  })
+
+  it('removes the finalizer and clears retry state only after cleanup succeeds', async () => {
+    const recipe = deletingRecipe()
+    const reconcileDelete = vi.fn().mockResolvedValue(undefined)
+    const removeFinalizer = vi.fn().mockResolvedValue(undefined)
+    const scheduleTransientRetry = vi.fn()
+    const clearTransientRetry = vi.fn()
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      reconciler: {
+        reconcileDelete: typeof reconcileDelete
+        removeFinalizer: typeof removeFinalizer
+      }
+      stopped: boolean
+      scheduleTransientRetry: typeof scheduleTransientRetry
+      clearTransientRetry: typeof clearTransientRetry
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    watcher.recipes = new Map([[recipe.metadata.name, recipe]])
+    watcher.reconciler = { reconcileDelete, removeFinalizer }
+    watcher.stopped = false
+    watcher.scheduleTransientRetry = scheduleTransientRetry
+    watcher.clearTransientRetry = clearTransientRetry
+
+    await watcher.handleRecipeEvent('MODIFIED', recipe)
+
+    expect(removeFinalizer).toHaveBeenCalledWith(recipe)
+    expect(watcher.recipes.has(recipe.metadata.name)).toBe(false)
+    expect(clearTransientRetry).toHaveBeenCalledWith(recipe.metadata.name)
+    expect(scheduleTransientRetry).not.toHaveBeenCalled()
+  })
+
+  it('reconstructs finalizer cleanup after restart and removes it only after recovery', async () => {
+    vi.useFakeTimers()
+    try {
+      const recipe = deletingRecipe()
+      const reconcileDelete = vi
+        .fn()
+        .mockRejectedValueOnce({ code: 503 })
+        .mockResolvedValueOnce(undefined)
+      const removeFinalizer = vi.fn().mockResolvedValue(undefined)
+
+      type InternalWatcher = {
+        recipes: Map<string, WorkflowRecipeCRD>
+        transientRetries: Map<
+          string,
+          { timer: ReturnType<typeof setTimeout>; attempts: number; expectedUid?: string }
+        >
+        eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+        reconciler: {
+          reconcileDelete: typeof reconcileDelete
+          removeFinalizer: typeof removeFinalizer
+        }
+        stopped: boolean
+        handleRecipeEvent: (
+          type: string,
+          recipe: WorkflowRecipeCRD,
+          options?: { forceReconcile?: boolean }
+        ) => Promise<void>
+      }
+      const restarted = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+      restarted.recipes = new Map()
+      restarted.transientRetries = new Map()
+      restarted.eventQueue = { enqueue: (_key, task) => task() }
+      restarted.reconciler = { reconcileDelete, removeFinalizer }
+      restarted.stopped = false
+
+      await restarted.handleRecipeEvent('ADDED', recipe)
+
+      expect(reconcileDelete).toHaveBeenCalledTimes(1)
+      expect(removeFinalizer).not.toHaveBeenCalled()
+      expect(restarted.transientRetries.get(recipe.metadata.name)?.expectedUid).toBe(
+        recipe.metadata.uid
+      )
+
+      await vi.advanceTimersByTimeAsync(TRANSIENT_REQUEUE_BASE_MS)
+
+      expect(reconcileDelete).toHaveBeenCalledTimes(2)
+      expect(removeFinalizer).toHaveBeenCalledTimes(1)
+      expect(removeFinalizer).toHaveBeenCalledWith(recipe)
+      expect(restarted.transientRetries.has(recipe.metadata.name)).toBe(false)
+      expect(restarted.recipes.has(recipe.metadata.name)).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('NetworkPolicy reap watcher lifecycle', () => {
+  it('publishes a condition-only failure and schedules its forced retry', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'reap-pending', namespace: 'sandbox-recipes', generation: 7 },
+      spec: { steps: [], workloads: [{ id: 'api', type: 'deployment', image: 'api:test' }] },
+      status: { phase: 'active', message: 'All workloads deployed', conditions: [] },
+    })
+    const result = {
+      phase: 'active' as const,
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+      networkPolicyReapProjection: {
+        condition: {
+          type: 'NetworkPolicyReapFailed',
+          status: 'True' as const,
+          reason: 'DeleteForbidden',
+          message: 'pending cleanup',
+          lastTransitionTime: 'now',
+        },
+        failureClass: 'authorization' as const,
+        requeueAfterMs: 30_000,
+        requeueFixedInterval: true,
+      },
+    }
+    const reconcile = vi.fn().mockResolvedValue(result)
+    const patchStatus = vi.fn().mockResolvedValue(undefined)
+    const scheduleTransientRetry = vi.fn()
+    const clearTransientRetry = vi.fn()
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      reconciler: {
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        reconcile: typeof reconcile
+        patchStatus: typeof patchStatus
+      }
+      dbRunProcessor: null
+      traceReporter: null
+      stopped: boolean
+      scheduleTransientRetry: typeof scheduleTransientRetry
+      clearTransientRetry: typeof clearTransientRetry
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    watcher.recipes = new Map()
+    watcher.reconciler = {
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      reconcile,
+      patchStatus,
+    }
+    watcher.dbRunProcessor = null
+    watcher.traceReporter = null
+    watcher.stopped = false
+    watcher.scheduleTransientRetry = scheduleTransientRetry
+    watcher.clearTransientRetry = clearTransientRetry
+
+    await watcher.handleRecipeEvent('ADDED', recipe)
+
+    expect(patchStatus).toHaveBeenCalledWith(recipe, result)
+    expect(scheduleTransientRetry).toHaveBeenCalledWith(recipe.metadata.name, 30_000, true)
+    expect(clearTransientRetry).not.toHaveBeenCalled()
+  })
+
+  it('preserves retry work when a full reconcile returns no reap opinion', async () => {
+    const recipe = makeWorkflowRecipe({
+      metadata: { name: 'reap-pending', namespace: 'sandbox-recipes', generation: 7 },
+      spec: { steps: [], workloads: [{ id: 'api', type: 'deployment', image: 'api:test' }] },
+      status: {
+        phase: 'active',
+        message: 'All workloads deployed',
+        conditions: [
+          {
+            type: 'NetworkPolicyReapFailed',
+            status: 'True',
+            reason: 'DeleteForbidden',
+            message: 'pending cleanup',
+            lastTransitionTime: 'old',
+          },
+        ],
+      },
+    })
+    const result = {
+      phase: 'active' as const,
+      message: 'All workloads deployed',
+      workloadStatuses: [],
+    }
+    const reconcile = vi.fn().mockResolvedValue(result)
+    const patchStatus = vi.fn().mockResolvedValue(undefined)
+    const scheduleTransientRetry = vi.fn()
+    const clearTransientRetry = vi.fn()
+
+    type InternalWatcher = {
+      recipes: Map<string, WorkflowRecipeCRD>
+      reconciler: {
+        isRecipeStillActive: ReturnType<typeof vi.fn>
+        ensureFinalizer: ReturnType<typeof vi.fn>
+        reconcile: typeof reconcile
+        patchStatus: typeof patchStatus
+      }
+      dbRunProcessor: null
+      traceReporter: null
+      stopped: boolean
+      scheduleTransientRetry: typeof scheduleTransientRetry
+      clearTransientRetry: typeof clearTransientRetry
+      handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    watcher.recipes = new Map()
+    watcher.reconciler = {
+      isRecipeStillActive: vi.fn().mockResolvedValue(true),
+      ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+      reconcile,
+      patchStatus,
+    }
+    watcher.dbRunProcessor = null
+    watcher.traceReporter = null
+    watcher.stopped = false
+    watcher.scheduleTransientRetry = scheduleTransientRetry
+    watcher.clearTransientRetry = clearTransientRetry
+
+    await watcher.handleRecipeEvent('ADDED', recipe)
+
+    expect(patchStatus).not.toHaveBeenCalled()
+    expect(scheduleTransientRetry).toHaveBeenCalledWith(recipe.metadata.name, 30_000, true)
+    expect(clearTransientRetry).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    {
+      failureClass: 'authorization',
+      status: 'True',
+      reason: 'DeleteForbidden',
+      delay: 30_000,
+      fixed: true,
+    },
+    {
+      failureClass: 'transient',
+      status: 'Unknown',
+      reason: 'ReapRetrying',
+      delay: TRANSIENT_REQUEUE_BASE_MS,
+      fixed: false,
+    },
+    {
+      failureClass: 'permanent',
+      status: 'True',
+      reason: 'PermanentReapFailure',
+      delay: 60_000,
+      fixed: true,
+    },
+  ] as const)(
+    'publishes $failureClass reap state, retries, and clears it without changing phase',
+    async ({ failureClass, status, reason, delay, fixed }) => {
+      vi.useFakeTimers()
+      try {
+        const recipe = makeWorkflowRecipe({
+          metadata: {
+            name: `reap-${failureClass}`,
+            namespace: 'sandbox-recipes',
+            uid: `uid-${failureClass}`,
+            generation: 7,
+          },
+          status: { phase: 'active', message: 'All workloads deployed', conditions: [] },
+        })
+        const pending = {
+          phase: 'active' as const,
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          networkPolicyReapProjection: {
+            condition: {
+              type: 'NetworkPolicyReapFailed',
+              status,
+              reason,
+              message: 'pending cleanup',
+              lastTransitionTime: 'pending',
+            },
+            failureClass,
+            requeueAfterMs: delay,
+            requeueFixedInterval: fixed,
+          },
+        }
+        const clean = {
+          phase: 'active' as const,
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+          networkPolicyReapProjection: {
+            condition: {
+              type: 'NetworkPolicyReapFailed',
+              status: 'False' as const,
+              reason: 'Reaped',
+              message: 'The WRC NetworkPolicy live set is converged',
+              lastTransitionTime: 'clean',
+            },
+          },
+        }
+        const reconcile = vi.fn().mockResolvedValueOnce(pending).mockResolvedValueOnce(clean)
+        const patchStatus = vi.fn(
+          async (_recipe: WorkflowRecipeCRD, result: typeof pending | typeof clean) => {
+            recipe.status = {
+              ...recipe.status,
+              phase: result.phase,
+              message: result.message,
+              conditions: result.networkPolicyReapProjection.condition
+                ? [result.networkPolicyReapProjection.condition]
+                : recipe.status?.conditions,
+            }
+          }
+        )
+
+        type InternalWatcher = {
+          recipes: Map<string, WorkflowRecipeCRD>
+          transientRetries: Map<
+            string,
+            { timer: ReturnType<typeof setTimeout>; attempts: number; expectedUid?: string }
+          >
+          eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+          reconciler: {
+            isRecipeStillActive: ReturnType<typeof vi.fn>
+            ensureFinalizer: ReturnType<typeof vi.fn>
+            reconcile: typeof reconcile
+            patchStatus: typeof patchStatus
+          }
+          dbRunProcessor: null
+          traceReporter: null
+          stopped: boolean
+          handleRecipeEvent: (
+            type: string,
+            recipe: WorkflowRecipeCRD,
+            options?: { forceReconcile?: boolean }
+          ) => Promise<void>
+        }
+        const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+        watcher.recipes = new Map()
+        watcher.transientRetries = new Map()
+        watcher.eventQueue = { enqueue: (_key, task) => task() }
+        watcher.reconciler = {
+          isRecipeStillActive: vi.fn().mockResolvedValue(true),
+          ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+          reconcile,
+          patchStatus,
+        }
+        watcher.dbRunProcessor = null
+        watcher.traceReporter = null
+        watcher.stopped = false
+
+        await watcher.handleRecipeEvent('ADDED', recipe)
+
+        expect(patchStatus).toHaveBeenCalledWith(
+          recipe,
+          expect.objectContaining({
+            phase: 'active',
+            networkPolicyReapProjection: pending.networkPolicyReapProjection,
+          })
+        )
+        expect(watcher.transientRetries.has(recipe.metadata.name)).toBe(true)
+
+        await vi.advanceTimersByTimeAsync(delay)
+
+        expect(reconcile).toHaveBeenCalledTimes(2)
+        expect(patchStatus).toHaveBeenLastCalledWith(
+          recipe,
+          expect.objectContaining({
+            phase: 'active',
+            networkPolicyReapProjection: expect.objectContaining({
+              condition: expect.objectContaining({ status: 'False', reason: 'Reaped' }),
+            }),
+          })
+        )
+        expect(watcher.transientRetries.has(recipe.metadata.name)).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it.each([
+    { status: 'True', reason: 'DeleteForbidden', delay: 30_000 },
+    { status: 'Unknown', reason: 'ReapRetrying', delay: TRANSIENT_REQUEUE_BASE_MS },
+    { status: 'True', reason: 'PermanentReapFailure', delay: 60_000 },
+  ] as const)(
+    'reconstructs $reason retry from durable status after watcher restart',
+    async ({ status, reason, delay }) => {
+      vi.useFakeTimers()
+      try {
+        const recipe = makeWorkflowRecipe({
+          metadata: {
+            name: `reap-after-restart-${reason}`,
+            namespace: 'sandbox-recipes',
+            uid: `uid-restart-${reason}`,
+          },
+          status: {
+            phase: 'active',
+            message: 'All workloads deployed',
+            conditions: [
+              {
+                type: 'NetworkPolicyReapFailed',
+                status,
+                reason,
+                message: 'pending cleanup before restart',
+                lastTransitionTime: 'old',
+              },
+            ],
+          },
+        })
+        const noOpinion = {
+          phase: 'active' as const,
+          message: 'All workloads deployed',
+          workloadStatuses: [],
+        }
+        const clean = {
+          ...noOpinion,
+          networkPolicyReapProjection: {
+            condition: {
+              type: 'NetworkPolicyReapFailed',
+              status: 'False' as const,
+              reason: 'Reaped',
+              message: 'The WRC NetworkPolicy live set is converged',
+              lastTransitionTime: 'clean',
+            },
+          },
+        }
+        const reconcile = vi.fn().mockResolvedValueOnce(noOpinion).mockResolvedValueOnce(clean)
+        const patchStatus = vi.fn().mockResolvedValue(undefined)
+
+        type InternalWatcher = {
+          recipes: Map<string, WorkflowRecipeCRD>
+          transientRetries: Map<
+            string,
+            { timer: ReturnType<typeof setTimeout>; attempts: number; expectedUid?: string }
+          >
+          eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
+          reconciler: {
+            isRecipeStillActive: ReturnType<typeof vi.fn>
+            ensureFinalizer: ReturnType<typeof vi.fn>
+            reconcile: typeof reconcile
+            patchStatus: typeof patchStatus
+          }
+          dbRunProcessor: null
+          traceReporter: null
+          stopped: boolean
+          handleRecipeEvent: (
+            type: string,
+            recipe: WorkflowRecipeCRD,
+            options?: { forceReconcile?: boolean }
+          ) => Promise<void>
+        }
+        const restarted = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+        restarted.recipes = new Map()
+        restarted.transientRetries = new Map()
+        restarted.eventQueue = { enqueue: (_key, task) => task() }
+        restarted.reconciler = {
+          isRecipeStillActive: vi.fn().mockResolvedValue(true),
+          ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+          reconcile,
+          patchStatus,
+        }
+        restarted.dbRunProcessor = null
+        restarted.traceReporter = null
+        restarted.stopped = false
+
+        await restarted.handleRecipeEvent('ADDED', recipe)
+
+        expect(patchStatus).not.toHaveBeenCalled()
+        expect(restarted.transientRetries.has(recipe.metadata.name)).toBe(true)
+
+        await vi.advanceTimersByTimeAsync(delay)
+
+        expect(reconcile).toHaveBeenCalledTimes(2)
+        expect(patchStatus).toHaveBeenCalledWith(
+          recipe,
+          expect.objectContaining({
+            phase: 'active',
+            networkPolicyReapProjection: expect.objectContaining({
+              condition: expect.objectContaining({ status: 'False', reason: 'Reaped' }),
+            }),
+          })
+        )
+        expect(restarted.transientRetries.has(recipe.metadata.name)).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
 })
 
 describe('infrastructure telemetry projections', () => {
@@ -1560,6 +2127,56 @@ describe('workload status refresh loop helpers', () => {
 
     expect(handleRecipeEvent).not.toHaveBeenCalled()
   })
+
+  it('recovers an all-ready recipe without clearing its pending reap condition', async () => {
+    const recipe = makeWorkloadRecipe({
+      metadata: { name: 'reap-pending', namespace: 'sandbox-recipes', generation: 7 },
+      status: {
+        phase: 'degraded',
+        message: 'NetworkPolicy reap retrying',
+        conditions: [
+          {
+            type: 'NetworkPolicyReapFailed',
+            status: 'Unknown',
+            reason: 'ReapRetrying',
+            message: 'pending cleanup',
+            lastTransitionTime: 'old',
+          },
+        ],
+      },
+    })
+    const observed = {
+      phase: 'active' as const,
+      message: 'All workloads deployed',
+      workloadStatuses: [{ id: 'api', phase: 'running', ready: true }],
+    }
+    const observeCurrentWorkloadStatus = vi.fn().mockResolvedValue(observed)
+    const patchStatus = vi.fn().mockResolvedValue(undefined)
+    const handleRecipeEvent = vi.fn().mockResolvedValue(undefined)
+
+    type InternalWatcher = {
+      reconciler: {
+        observeCurrentWorkloadStatus: typeof observeCurrentWorkloadStatus
+        patchStatus: typeof patchStatus
+      }
+      handleRecipeEvent: typeof handleRecipeEvent
+      refreshWorkloadStatusOnly: (recipe: WorkflowRecipeCRD) => Promise<void>
+    }
+    const watcher = Object.create(WorkflowRecipeWatcher.prototype) as InternalWatcher
+    watcher.reconciler = { observeCurrentWorkloadStatus, patchStatus }
+    watcher.handleRecipeEvent = handleRecipeEvent
+
+    await watcher.refreshWorkloadStatusOnly(recipe)
+
+    expect(patchStatus).toHaveBeenCalledWith(
+      recipe,
+      expect.objectContaining({
+        phase: 'active',
+        message: 'All workloads deployed',
+      })
+    )
+    expect(handleRecipeEvent).not.toHaveBeenCalled()
+  })
 })
 
 describe('workflowNeedsTerminalRunTeardown', () => {
@@ -1991,9 +2608,17 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
     recipes: Map<string, WorkflowRecipeCRD>
     eventQueue: { enqueue: (key: string, task: () => Promise<void>) => Promise<void> }
     handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
-    transientRetries: Map<string, { timer: ReturnType<typeof setTimeout>; attempts: number }>
+    transientRetries: Map<
+      string,
+      { timer: ReturnType<typeof setTimeout>; attempts: number; expectedUid?: string }
+    >
     stopped: boolean
-    scheduleTransientRetry: (name: string, baseMs: number, fixedInterval?: boolean) => void
+    scheduleTransientRetry: (
+      name: string,
+      baseMs: number,
+      fixedInterval?: boolean,
+      expectedUid?: string
+    ) => void
     clearTransientRetry: (name: string) => void
   }
 
@@ -2068,6 +2693,28 @@ describe('transient-result requeue (scheduleTransientRetry)', () => {
       vi.advanceTimersByTime(60_000)
       expect(handleRecipeEvent).not.toHaveBeenCalled()
       expect(internal.transientRetries.has('flaky')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not deliver a finalizer retry to a recreated recipe with the same name', () => {
+    vi.useFakeTimers()
+    try {
+      const deleting = makeWorkflowRecipe({
+        metadata: { name: 'same-name', namespace: 'sandbox-recipes', uid: 'uid-old' },
+      })
+      const recreated = makeWorkflowRecipe({
+        metadata: { name: 'same-name', namespace: 'sandbox-recipes', uid: 'uid-new' },
+      })
+      const { internal, handleRecipeEvent } = makeInternal(deleting)
+
+      internal.scheduleTransientRetry('same-name', 5_000, false, 'uid-old')
+      internal.recipes.set('same-name', recreated)
+      vi.advanceTimersByTime(5_000)
+
+      expect(handleRecipeEvent).not.toHaveBeenCalled()
+      expect(internal.transientRetries.has('same-name')).toBe(false)
     } finally {
       vi.useRealTimers()
     }

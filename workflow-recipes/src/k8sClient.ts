@@ -81,6 +81,7 @@ export interface WorkflowRecipeWatchObject {
     uid?: string
     resourceVersion?: string
     generation?: number
+    creationTimestamp?: string
     deletionTimestamp?: string
     finalizers?: string[]
     annotations?: Record<string, string>
@@ -104,6 +105,7 @@ export function workflowRecipeFromWatchObject(
       uid: apiObj.metadata.uid,
       resourceVersion: apiObj.metadata.resourceVersion,
       generation: apiObj.metadata.generation,
+      creationTimestamp: apiObj.metadata.creationTimestamp,
       finalizers: apiObj.metadata.finalizers,
       deletionTimestamp: apiObj.metadata.deletionTimestamp,
       annotations: apiObj.metadata.annotations,
@@ -140,6 +142,17 @@ export function shouldPatchRecipeStatus(
     ownedConditionsChanged(recipe.status?.conditions, result.internalDependencyConditions, [
       'InternalDependenciesReady',
     ])
+  ) {
+    return true
+  }
+
+  if (
+    result.networkPolicyReapProjection?.condition &&
+    ownedConditionsChanged(
+      recipe.status?.conditions,
+      [result.networkPolicyReapProjection.condition],
+      ['NetworkPolicyReapFailed']
+    )
   ) {
     return true
   }
@@ -652,7 +665,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
   // result or DELETE.
   private transientRetries = new Map<
     string,
-    { timer: ReturnType<typeof setTimeout>; attempts: number }
+    { timer: ReturnType<typeof setTimeout>; attempts: number; expectedUid?: string }
   >()
   private static readonly TRANSIENT_RETRY_MAX_MS = 60_000
 
@@ -960,19 +973,31 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       if (recipe.metadata.deletionTimestamp) {
         // Resource is being deleted — cleanup cross-namespace resources, then remove finalizer.
         console.log(`[WR-K8s] Finalizer cleanup for "${recipe.metadata.name}"`)
+        this.recipes.set(recipe.metadata.name, recipe)
         try {
           await this.reconciler.reconcileDelete(recipe)
           await this.reconciler.removeFinalizer(recipe)
+          this.clearTransientRetry(recipe.metadata.name)
+          this.recipes.delete(recipe.metadata.name)
         } catch (error) {
           if (getErrorCode(error) === 404) {
             console.warn(
               `[WR-K8s] Finalizer cleanup skipped for "${recipe.metadata.name}"; recipe already gone`
             )
+            this.clearTransientRetry(recipe.metadata.name)
+            this.recipes.delete(recipe.metadata.name)
           } else {
             console.error(`[WR-K8s] Finalizer cleanup failed for "${recipe.metadata.name}":`, error)
+            if (!this.stopped) {
+              this.scheduleTransientRetry(
+                recipe.metadata.name,
+                TRANSIENT_REQUEUE_BASE_MS,
+                false,
+                recipe.metadata.uid
+              )
+            }
           }
         }
-        this.recipes.delete(recipe.metadata.name)
         return
       }
 
@@ -1065,14 +1090,42 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
           )
         }
         // Transient (skipStatusPatch) results write no status ⇒ emit no MODIFIED
-        // event, so schedule a deterministic backoff retry ourselves. Any other
-        // result clears the per-recipe backoff.
-        if (result.requeueAfterMs && !this.stopped) {
-          this.scheduleTransientRetry(
-            recipe.metadata.name,
-            result.requeueAfterMs,
-            result.requeueFixedInterval ?? false
-          )
+        // event, so schedule a deterministic backoff retry ourselves. A pass
+        // with no reap opinion preserves a retry implied by the durable condition;
+        // only an explicit clean projection can clear that work.
+        const standardDelay = result.requeueAfterMs
+        const persistedReapCondition =
+          result.networkPolicyReapProjection === undefined
+            ? recipe.status?.conditions?.find(
+                condition =>
+                  condition.type === 'NetworkPolicyReapFailed' && condition.status !== 'False'
+              )
+            : undefined
+        const persistedReapDelay = persistedReapCondition
+          ? persistedReapCondition.reason === 'ReapRetrying'
+            ? TRANSIENT_REQUEUE_BASE_MS
+            : persistedReapCondition.reason === 'PermanentReapFailure'
+              ? 60_000
+              : 30_000
+          : undefined
+        const reapDelay = result.networkPolicyReapProjection?.requeueAfterMs ?? persistedReapDelay
+        const reapFixed =
+          result.networkPolicyReapProjection?.requeueFixedInterval ??
+          (persistedReapCondition ? persistedReapCondition.reason !== 'ReapRetrying' : false)
+        const retryDelay =
+          standardDelay === undefined
+            ? reapDelay
+            : reapDelay === undefined
+              ? standardDelay
+              : Math.min(standardDelay, reapDelay)
+        const retryFixed =
+          standardDelay === undefined
+            ? reapFixed
+            : reapDelay === undefined
+              ? (result.requeueFixedInterval ?? false)
+              : (result.requeueFixedInterval ?? false) && reapFixed
+        if (retryDelay && !this.stopped) {
+          this.scheduleTransientRetry(recipe.metadata.name, retryDelay, retryFixed)
         } else {
           this.clearTransientRetry(recipe.metadata.name)
         }
@@ -1148,7 +1201,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
    *
    * Exposed for tests via the watcher's event path.
    */
-  private scheduleTransientRetry(name: string, baseMs: number, fixedInterval = false): void {
+  private scheduleTransientRetry(
+    name: string,
+    baseMs: number,
+    fixedInterval = false,
+    expectedUid?: string
+  ): void {
     const existing = this.transientRetries.get(name)
     // Fixed-interval (progress) requeues reset the backoff counter; transient
     // (error) requeues grow it.
@@ -1160,7 +1218,7 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const timer = setTimeout(() => {
       if (this.stopped) return
       const cached = this.recipes.get(name)
-      if (!cached) {
+      if (!cached || (expectedUid !== undefined && cached.metadata.uid !== expectedUid)) {
         this.transientRetries.delete(name)
         return
       }
@@ -1178,7 +1236,11 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     // reconcile advances past the waiting state once the awaited Pod succeeds,
     // and the 240s readiness deadline / dbRunProcessor max-duration paths
     // terminate any run permanently stuck in deploying, so this is bounded.
-    this.transientRetries.set(name, { timer, attempts: fixedInterval ? 0 : attempts + 1 })
+    this.transientRetries.set(name, {
+      timer,
+      attempts: fixedInterval ? 0 : attempts + 1,
+      expectedUid,
+    })
   }
 
   private clearTransientRetry(name: string): void {

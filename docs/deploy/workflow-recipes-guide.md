@@ -322,6 +322,137 @@ the write entirely when the existing object's stamped hash matches**. This keeps
 - **First deploy after this change** does one stamping write per pre-existing managed
   object (they have no hash yet), then steady-state is quiet.
 
+## Stale NetworkPolicy reap
+
+WRC removes NetworkPolicies its recipes no longer want. Until issue #582 it did so
+blindly: on the branch where no policy was desired it issued a `DELETE` and swallowed
+the 404. A workload that never had a policy takes that branch too, so the delete fired
+on every pass forever — **15 115 `DELETE`/hour on clerum-dev, 100 % `NOT_FOUND`**.
+
+It now reaps from the live set instead. Once every lane has recorded what it wants, one
+`LIST` per namespace selects by ownership —
+`clerum.io/managed-by=workflow-recipes,clerum.io/recipe=<name>` — and deletes only what
+is live, belongs to a recipe family, and is not wanted.
+
+**The `LIST` adds no request**: the internal-dependency prune already issued one per
+namespace, over the same three namespaces. What changed is the _result set_, not the
+count — dropping the `policy-type` term from the selector makes the query return all six
+families instead of one, and the family check then re-narrows what may be deleted.
+
+The hardened path adds two metadata `GET`s of the WorkflowRecipe: one before any
+NetworkPolicy-family mutation and one after the complete live inventory, immediately
+before deletes. Those freshness fences are the cost of proving the UID/generation still
+matches the plan during a rolling update; they replace thousands of write-shaped 404s
+with bounded reads and prevent an obsolete pass from deleting newer state.
+
+**Six families are reaped**: `ui-ingress-*`, `ui-egress-*`, `wl-egress-*`,
+`wl-ingress-*`, `wr-intdep-egress/ingress-*`, and `wf-*-oauth-broker-egress`. Family is
+decided by **name prefix**, because five of the six carry no distinguishing label
+(issue #524). The selector is scoped by ownership rather than by `policy-type` for the
+same reason — requiring that label would make the reap blind to five families.
+
+Long per-workload names have two compatible physical forms: the valid recipe-truncated
+name emitted by older releases and the collision-safe hash form used for new identities.
+WRC probes both, including older API-valid names above the 63-character budget used by
+new names. UI-egress and OAuth-broker policies also retain their former direct names.
+An owned legacy object is adopted in place. If both aliases belong to the same recipe
+UID, their DNS windows are combined and persisted before retiring the duplicate, even
+when the IP set is unchanged. Migration does not extend an existing expiry. The desired
+ledger, transport/UI carveout, and cleanup use the same alias set.
+An owned duplicate that is still `Terminating` may contribute valid same-epoch DNS
+history, but cannot be selected for writes. A live compatible survivor remains usable
+while the reap condition and retry track deletion of the duplicate. If all compatible
+aliases are terminating, the desired-policy lane remains retryable rather than writing
+to a deleting object.
+
+Workflow fast paths receive the declarative CR again from the watch, so env/command/args
+may still contain `{{workload:host}}` and `{{workload:port}}`. WRC resolves a detached
+effective-spec copy before planning policies. A template-preparation failure leaves that
+family non-authoritative and cannot turn an empty ledger into permission to delete live
+internal-dependency policies.
+
+**Never touched**, because the classifier does not recognise them: the webhook gateway's
+policies (they carry no `clerum.io/recipe` label), the workflow run lane's, the
+`coordinator-to-gfs` policy, and anything created by hand.
+
+**One deliberate exclusion**, tracked separately:
+
+- **`wl-*` of a workload that gained `transport` or became the UI workload** — those
+  policies are stale and nothing writes them, but the producer is a spec edit rather
+  than the reconcile loop, so reaping them here would widen this change into a family it
+  does not own. Carved out explicitly (issue #583).
+  (An earlier draft also excluded `reconcileUiEgressPolicy`'s own unconditional delete.
+  That is gone: it was redundant — `ui-egress` is a reaped family and `sandbox-ui` is
+  always scanned, so the prune already removed the same object on the same pass.)
+
+**Operational consequences:**
+
+- **Logs:** `Deleted stale <family> NetworkPolicy "<name>" in <ns> (not in desired set)`
+  appears only on an actual deletion. There is deliberately no per-pass line — at three
+  namespaces × 19 recipes × ~206 passes/hour that would be ~12 k lines/hour.
+- **An incomplete reap does not change recipe phase.** At this point every desired policy
+  family was already built and applied in a reap-only failure; only inventory/deletion of the stale live set is
+  incomplete. Reusing `phase` as a cleanup signal would block correctly configured
+  consumers without fencing running workloads or closing the residual allow. The
+  `NetworkPolicyReapFailed` condition plus deterministic retry owns this orthogonal
+  lifecycle instead.
+
+  RBAC `401`/`403` leaves stale policies **enforced** and is reported three ways: an error
+  log naming what could not be removed, the condition on the recipe (written in both
+  directions, so it clears on the next clean pass), and the
+  `clerum_wrc_networkpolicy_reap_denied_total` counter, labelled by `family` and by
+  `operation`. The counter is monotonic event history, not current state: alert on
+  `increase(clerum_wrc_networkpolicy_reap_denied_total[5m]) > 0`, never on its absolute
+  value. The condition is the current-state signal and the controller rechecks denied
+  work every 30 seconds until a clean pass publishes `False/Reaped`.
+
+  The `operation` label matters for triage: `delete` means one named policy survived;
+  `list` means the controller could not examine that namespace **at all**, so nothing of
+  any family was reaped there. A denied `LIST` skips that namespace and continues with
+  the others rather than failing the pass.
+
+  Transient reap-only failures (`409`, `429`, 5xx, timeout or transport) publish
+  `Unknown/ReapRetrying` and use bounded exponential backoff. Permanent request failures
+  (for example `400`/`405`/`422`) publish `True/PermanentReapFailure` and use a slow fixed
+  recheck. Neither replaces the recipe phase/message/workload status. A failure while
+  building or applying a **desired** policy remains a separate `laneError` and retains its
+  existing fail/retry/preserve semantics because desired enforcement may not exist.
+
+- **Destructive freshness:** immediately before pruning, WRC rechecks the recipe UID and
+  generation after the complete LIST. Every desired policy is stamped with both
+  `clerum.io/recipe-uid` and `clerum.io/recipe-generation`; generations are compared only
+  inside the same UID because a recreated recipe restarts at generation 1. A policy from
+  a demonstrably older recipe epoch can therefore be reclaimed or reaped instead of
+  causing an infinite stale-generation retry. Every DELETE still carries the listed
+  policy UID/resourceVersion as Kubernetes preconditions. The `ui-egress`/`wl-egress`
+  no-op gate advances the epoch stamps (and therefore resourceVersion) once per recipe
+  generation even when the enforced rules are unchanged.
+  Replacement preserves other controllers' finalizers from the same live read that
+  supplies resourceVersion; a concurrent finalizer change therefore conflicts safely.
+  Legacy policies without a UID are adopted only by a current recipe pass; generations
+  from those objects are never compared to a new recipe's generation. Their DNS history
+  is reused only when creation timestamps establish continuity. Missing/equal timestamps
+  are ambiguous and do not authorize inheriting an earlier owner's DNS state.
+  The watch adapter carries the API's creation timestamp into reconciliation so valid
+  continuity evidence is not lost at that boundary.
+- **Deletion confirmation:** a successful DELETE response is only acceptance. WRC reads
+  every accepted target on a pass that had no earlier delete failure and reports the reap
+  incomplete until that exact name returns 404. If another delete failed first, the whole
+  result is already incomplete and the next retry inventories every remaining object.
+  This prevents `False/Reaped` or finalizer removal while admission or a child finalizer
+  still keeps a NetworkPolicy in `Terminating`.
+- **Finalization:** cleanup checks the live recipe UID, skips policies stamped for another
+  UID, and removes the recipe finalizer using UID/resourceVersion tests against the latest
+  finalizer list. UI/OAuth aliases already covered by cleanup are ownership-read and
+  absence-confirmed too. This does not expand deletion to the `wl-*` finalizer follow-up.
+- **RBAC invariant.** The prune queries exactly `sandbox-recipes`, `mcp-server` and
+  `sandbox-ui`, because `resolveWorkloadNamespace` can return no others. The
+  `workflow-recipes` ServiceAccount holds `list` and `delete` on `networkpolicies` in all
+  three (`deploy/base/*/rbac.yaml`). Adding a fourth namespace requires a Role there, or
+  its policies are never reaped.
+- **Reaping still happens on real changes.** Dropping `egressBindings` from a workload
+  still deletes its policy on the next pass — the reap became conditional, not optional.
+
 ## Automated Tests
 
 ### Unit tests (vitest + @testing-library/react)
@@ -336,6 +467,42 @@ npm test -- recipeValidator RecipesTab RecipeEditor RecipeDefaultsPanel RecipeSt
 
 Recipe unit tests live in `control-ui/lib/__tests__/recipeValidator.test.ts` and
 `control-ui/components/__tests__/Recipe*.test.tsx`.
+
+### WRC live-set and finalizer E2E
+
+Run this only against an explicitly verified, branch-owned Kubernetes context:
+
+```bash
+MINIKUBE_PROFILE=<verified-profile> \
+E2E_KUBECONTEXT=<verified-context> \
+make test-e2e-wrc-internal-dependency-networkpolicy
+```
+
+The synthetic fixture has one source and two healthy backend routes. It first proves both
+routes and their inferred policies, then reapplies the WorkflowRecipe without only the
+`DROP_URL` dependency. Acceptance requires the DROP route/policy to disappear, the KEEP
+route to remain reachable, the recipe to remain active, and
+`NetworkPolicyReapFailed=False/Reaped` to survive natural rollout status patches.
+`InternalDependenciesReady` is diagnostic rather than durable: health-only refreshes
+may clear it. The gate permits its observed absence but rejects an explicit failed/unknown
+condition or a failed API read. Convergence requires the positive policy, packet-flow,
+active-phase and durable-reap checks above, not catching a transient acknowledgement.
+
+Before accepting the expected DROP denial, the gate re-proves the DROP Deployment,
+Service endpoint and loopback HTTP response before and after each probe. Denial requires
+consecutive TCP connection timeouts; a connected socket whose HTTP response stalls is
+not a denied route. A failed `exec`, DNS lookup, backend or API read therefore cannot
+masquerade as NetworkPolicy enforcement.
+
+Finalization installs a test-only deletion barrier on one owned NetworkPolicy. WRC must
+request that deletion while retaining `clerum.io/workload-cleanup` on the terminating
+recipe; only after the barrier is released and the policy is absent may the recipe
+disappear. Before release, the gate observes a new rejected WRC cleanup cycle between
+two identity-bound parent/child snapshots. Direct NetworkPolicy deletion exists only in emergency cleanup after the gate
+has already failed, so it cannot make the success path green. The evidence reader accepts
+only real RFC3339 deletion timestamps and explicit empty `--ignore-not-found` output;
+`<no value>`, authorization errors, timeouts and 5xx responses are never treated as
+deletion or absence.
 
 ### Playwright E2E (currently BLOCKED — does not run)
 
