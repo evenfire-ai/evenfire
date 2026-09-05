@@ -301,28 +301,118 @@ kubectl delete workflowrecipe my-nginx -n sandbox-recipes
 
 ## Reconcile idempotency & drift behavior
 
-WRC reconciles every recipe on a periodic resync. Each managed object (Deployment,
-StatefulSet, headless Service, CronJob, Job, DaemonSet, and the McpServer CRD) is
-applied through a **spec-hash idempotency gate**: WRC stamps a `clerum.io/spec-hash`
-annotation (a hash of the _desired_ manifest) and, on the already-exists path, **skips
-the write entirely when the existing object's stamped hash matches**. This keeps
-`metadata.generation` from climbing on no-op reconciles (which previously produced a
-`degraded↔active` status flap and a downstream HCC NetworkPolicy no-op write storm).
+WRC reconciles every recipe on a periodic resync. Deployments, StatefulSets, headless
+Services, CronJobs, Jobs, DaemonSets and the McpServer CRD use the existing
+**spec-hash idempotency gate**. The recipe-derived NetworkPolicies (`ui-ingress-*`,
+`wl-ingress-*`, `wl-egress-*`, `wr-intdep-*`, `wf-*-oauth-broker-egress` and the three
+webhook-gateway policies) use a stronger **live convergence check** instead: WRC reads
+the current object, validates ownership/lifecycle, normalizes Kubernetes defaults and
+skips the write only when the live enforcement plus WRC-authored metadata equal the
+desired policy. A legacy `clerum.io/spec-hash` annotation is ignored for this decision;
+it cannot hide later drift.
+
+**What this path does _not_ cover.** Do not read the list above as "every policy writer":
+
+- `ui-egress-*` and the `coordinator-to-gfs` policy keep their existing dedicated
+  comparisons (#299 and #579 respectively); they do not use the recipe NetworkPolicy
+  helper.
+- `wl-egress-*` still uses the #299 content/renewal prefilter before the live convergence
+  helper. External/mixed egress carries temporal resolution state; a cluster-local-only
+  policy does not. In both cases, once the prefilter requires a write, the downstream
+  helper rechecks the live spec and cannot cancel a real repair because of a stale seal.
+- The **webhook gateway's own** ConfigMap, Deployment and Service remain ungated and are
+  rewritten on every pass — only its three NetworkPolicies use live convergence.
 
 **Operational consequences:**
 
-- **Logs:** expect "unchanged (spec-hash match); skipping update" instead of a per-loop
-  "Updated …". Per-loop write/`Updated` log volume drops sharply by design — re-baseline
-  any alert keyed on it.
-- **Drift is no longer auto-reverted.** If an operator hand-edits a WRC-managed object
-  (e.g. `kubectl edit`/`scale` on a recipe Deployment), WRC will **not** revert it until
-  the recipe spec changes (which flips the hash). The change is still **visible**: the
-  recipe `status` reports the workload `degraded` when replica health drops. To force a
-  re-apply, change the recipe spec (or delete the object and let WRC recreate it).
-- **First deploy after this change** does one stamping write per pre-existing managed
-  object (they have no hash yet), then steady-state is quiet.
+- **Logs:** the live-convergence helper and the `wl-egress-*` prefilter use the structured
+  WRC logger. In steady state expect `network policy unchanged; skipping update` or
+  `network policy egress set unchanged; skipping live apply` with `policy`, `namespace`
+  and `family` fields. Re-baseline alerts keyed on the old `Updated …` console line.
+  `recipe reconciliation completed` records recipe UID, generation, outcome and retry
+  delay only after the reconciliation result is ready; entering a reconcile is not its
+  completion signal.
+- **NetworkPolicy drift is auto-reverted.** A live change to `podSelector`,
+  `policyTypes`, `ingress`, `egress`, WRC-authored metadata or the gateway controller
+  owner forces one optimistic-concurrency replace using the `resourceVersion` from the
+  same validated read on the next parent recipe reconcile. NetworkPolicy-only changes do
+  not emit a WorkflowRecipe event. The following reconcile is read-only.
+- **Retryable races schedule their own recovery.** A terminating object, create conflict
+  whose winner disappears, missing live `resourceVersion`, replace 404/409 or transient
+  API failure re-enqueues the parent with bounded backoff. A status-only update is not
+  treated as the retry trigger.
+- **Metadata ownership applies to writes too.** Replacing a policy preserves external
+  labels, annotations and finalizers from the validated snapshot. Desired WRC keys win;
+  retired egress state and the legacy spec-hash are removed. Additional foreign lifecycle
+  owners are rejected, not silently dropped or adopted. The workload-egress pre-read uses
+  the same transient-error classification as the downstream apply path.
+- **Other spec-hash-managed objects retain their existing drift contract.** For example,
+  a manually scaled recipe Deployment is not reverted until the desired manifest changes;
+  its replica-health drift remains visible in recipe status.
+- `deploy/scripts/verify-networkpolicies.sh` still covers only overlay-rendered policies.
+  Recipe-derived policy integrity is owned by the runtime reconciliation described here.
+- **First deploy after this change** does not require a NetworkPolicy stamping wave.
+  Equivalent policies are one GET and zero writes; real spec/metadata/owner drift is
+  repaired once.
 
 ## Automated Tests
+
+### WRC NetworkPolicy live-convergence E2E
+
+NetworkPolicy changes must run the aggregate gate against an isolated development
+cluster with an explicit context. Its Make target acquires the existing profile mutation
+lease; individual suites require that same inherited lease:
+
+```bash
+E2E_KUBECONTEXT=<branch-owned-context> \
+  make test-e2e-wrc-networkpolicy-live-convergence
+```
+
+The aggregate fails unless all four executable suites run. Together they cover every
+NetworkPolicy family routed through the live-convergence helper:
+
+- `ui-ingress`, `workload-ingress` and `workload-egress`: correctly configured UI→API
+  and API→sibling traffic, isolated ingress and undeclared-sibling egress controls,
+  forced live-spec drift, a real
+  parent recipe reconcile, repair, a terminating-policy race that self-heals through the
+  scheduled retry without a second parent event, and a post-repair no-op witness plus
+  pre-trigger UID/resourceVersion baseline and full observation window;
+- `internal-dependency`: inferred source→backend traffic, an unlabelled denied pod,
+  two-sided policy repair and no-churn;
+- `oauth-broker-egress`: opted-in workload→Control API reachability, an unlabelled
+  denied workload, drift repair and no-churn;
+- `webhook-gateway`: all three policies, a signed public webhook business signal,
+  spec drift, stale/missing owner repair, route recovery and no-churn.
+
+Negative controls first prove reachability from the same probe with a narrow temporary
+permission, remove only that permission, observe a remotely executed connection timeout,
+and prove reachability again. Complementary permissions isolate ingress from egress.
+An exec, authorization, missing-tool or malformed-response error fails the test instead
+of counting as a policy denial. Silent failures and read timeouts after a connection
+opens are also errors; only a connection-timeout diagnostic counts as denial.
+Condition-based polling accommodates CNI propagation.
+
+Every no-churn observation begins before the parent trigger. It requires the exact
+UID/generation completion receipt, every policy/family no-op witness, unchanged policy
+UID/resourceVersion, stable controller replica/container identities, and no observed
+policy write during the entire window. A no-op followed by a write fails even when the
+resourceVersion does not change. Exact API-call counts are asserted separately in unit
+tests; the runtime logs are not a substitute for exhaustive Kubernetes audit accounting.
+
+Fixtures use unique run IDs, collision-safe creation, UID-preconditioned deletion and
+owned dynamic port-forwards. Generated children are enrolled only while the same owned
+parent UID is verified before and after discovery; parent absence permits cleanup of
+previously recorded child UIDs only. A failed parent deletion stops child cleanup.
+Cleanup never enrolls an existing sample by name, and a
+cleanup failure fails the suite. `E2E_KEEP_RESOURCES=1` explicitly retains run
+resources for inspection, while still stopping owned port-forwards.
+
+The public CI runner cannot provide this Calico-backed cluster. It runs
+`make test-wrc-networkpolicy-contracts`: the actual aggregate against instrumented child
+processes, every child failure/missing-child case, helper fault injection, and fixture
+ownership/cleanup tests. Skipping the child invocation or swallowing a child error fails
+this contract. The real dataplane result remains a separate local T2/pre-merge evidence
+lane. Missing prerequisites, incomplete observations and zero execution are failures.
 
 ### Unit tests (vitest + @testing-library/react)
 
