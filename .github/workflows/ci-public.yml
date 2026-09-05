@@ -413,6 +413,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
       - name: Run bash -n on all .sh files
         run: |
           fail=0
@@ -460,6 +464,12 @@ jobs:
 
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
+
+      - name: Test WRC egress oracle, DNS and lifecycle (unit/integration, cluster-free)
+        run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
+
+      - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
+        run: bash scripts/tests/test-minikube-mutation-boundary.sh
 
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh

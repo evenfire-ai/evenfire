@@ -210,6 +210,21 @@ hcc_log_contains() {
   grep -Fq "$marker" <<<"$logs"
 }
 
+hcc_initial_empty_context_observed() {
+  local logs
+  [ -n "$NEW_HCC_POD" ] || return 1
+  logs="$(kctl logs "pod/${NEW_HCC_POD}" -n "$HCC_NS" \
+    -c host-context-controller 2>/dev/null)" || return 1
+  # This pod still mixes legacy text with structured events. Only a complete
+  # JSON event for our exact Context with an explicitly empty allowlist counts.
+  jq -Rse --arg context_id "$CONTEXT_ID" '
+    any(split("\n")[] | fromjson? | select(type == "object");
+      .svc == "host-context-controller" and
+      .msg == "reconciling context network policies" and
+      .contextId == $context_id and .allowedServers == [])
+  ' <<<"$logs" >/dev/null
+}
+
 dns_log_contains() {
   local marker=$1 logs
   logs="$(kctl logs "deployment/${DNS_BLOCKER_NAME}" -n "$HCC_NS" 2>/dev/null)" ||
@@ -1714,9 +1729,8 @@ ok "/ready is 200 while the divergent stale policy and affected runtime remain a
 ok "safety_pass_* metrics corroborate an authoritative pass revoked the stale policy"
 ok "baseline NetworkPolicies remain present throughout fail-closed safety convergence"
 
-initial_empty_context_log="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []"
 wait_until 120 "initial NetworkPolicy pass to reconcile the fixture's empty Context snapshot" \
-  hcc_log_contains "$initial_empty_context_log" ||
+  hcc_initial_empty_context_observed ||
   die "initial NetworkPolicy pass never reconciled the fixture's empty Context"
 wait_until 120 "a real divergent external-egress retry to be scheduled" \
   external_egress_retry_progress_is_observed ||

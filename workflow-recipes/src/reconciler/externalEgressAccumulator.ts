@@ -32,6 +32,7 @@ import {
   RESOLVED_AT_ANNOTATION,
   emptyState,
   parseState,
+  parseStateStrict,
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
@@ -73,6 +74,24 @@ export interface AccumulateOutput {
   overCap: boolean
   /** FQDNs frozen this round because their observation was transient. */
   frozenFqdns: string[]
+}
+
+export interface ContractInput {
+  externals: DeclaredExternal[]
+  previousAnnotations: Record<string, string> | undefined
+  now: number
+  config: EgressCoreConfig
+  /** Optional lane-specific safety filter applied to persisted IPs. */
+  isAllowedIp?: (ip: string) => boolean
+}
+
+export interface ContractOutput {
+  entries: EgressEntry[]
+  resolved: ResolvedExternalEgressInput[]
+  annotations: Record<string, string>
+  changed: boolean
+  evicted: EgressEntry[]
+  overCap: boolean
 }
 
 /**
@@ -131,6 +150,22 @@ function buildObservations(
   return observations
 }
 
+function priorAcceptedResolvedAt(
+  previousAnnotations: Record<string, string> | undefined,
+  config: EgressCoreConfig,
+  externals: DeclaredExternal[]
+): string | undefined {
+  if (!previousAnnotations) return undefined
+  const annotated = previousAnnotations[RESOLVED_AT_ANNOTATION]
+  if (annotated && Number.isFinite(Date.parse(annotated))) return annotated
+  const strict = parseStateStrict(previousAnnotations, config, externals)
+  if (strict.kind !== 'valid' || strict.state.entries.length === 0) return undefined
+  const latestObservedAt = Math.max(...strict.state.entries.map(entry => entry.lastObservedAt))
+  return Number.isFinite(new Date(latestObservedAt).getTime())
+    ? new Date(latestObservedAt).toISOString()
+    : undefined
+}
+
 /**
  * Fold this reconcile's DNS snapshot into the accumulated egress set persisted
  * on the policy's annotations, applying the sliding window, fail-static expiry,
@@ -147,26 +182,73 @@ export function accumulateExternalEgress(input: AccumulateInput): AccumulateOutp
 
   const observations = buildObservations(externals, resolveResult)
   const out = reconcileEgressState(previous, observations, now, config)
+  const permanentFqdns = new Set(
+    resolveResult.failures.filter(failure => !failure.retryable).map(failure => failure.fqdn)
+  )
+  // A conclusive negative answer blocks this reconcile and revokes that
+  // identity immediately. The shared core's normal TTL expiry remains useful
+  // for other consumers, but WRC must not keep a known-negative allow live.
+  const entries = out.entries.filter(entry => !permanentFqdns.has(entry.fqdn))
 
-  const resolved: ResolvedExternalEgressInput[] = out.entries.map(entry => ({
+  const resolved: ResolvedExternalEgressInput[] = entries.map(entry => ({
     cidr: `${entry.ip}/32`,
     port: entry.port,
     source: { kind: 'fqdn', fqdn: entry.fqdn },
   }))
 
-  const annotations: Record<string, string> = {
-    ...serializeState(out.state),
-    [RESOLVED_AT_ANNOTATION]: new Date(now).toISOString(),
-  }
+  const annotations: Record<string, string> = serializeState({ entries })
+  const resolvedAt =
+    resolveResult.resolved.length > 0
+      ? new Date(now).toISOString()
+      : priorAcceptedResolvedAt(previousAnnotations, config, externals)
+  if (resolvedAt) annotations[RESOLVED_AT_ANNOTATION] = resolvedAt
 
   return {
-    entries: out.entries,
+    entries,
     resolved,
     annotations,
-    changed: out.changed,
+    changed: out.changed || entries.length !== out.entries.length,
     renewalDue: out.renewalDue,
     evicted: out.evicted,
     overCap: out.overCap,
     frozenFqdns: out.frozenFqdns,
+  }
+}
+
+/**
+ * Contract an existing aggregate policy to the declarations that still exist,
+ * without performing or pretending to perform a DNS observation. Current
+ * identities are frozen for this pure subtractive phase; undeclared identities
+ * are removed and the normal cap still applies. The last successful resolved-at
+ * timestamp is preserved because contraction is not a resolution event.
+ */
+export function contractExternalEgress(input: ContractInput): ContractOutput {
+  const { externals, previousAnnotations, now, config, isAllowedIp } = input
+  const previous = previousAnnotations
+    ? parseState(previousAnnotations, now, config, externals)
+    : emptyState()
+  const observations: Observation[] = externals.map(external => ({
+    fqdn: external.fqdn,
+    port: external.port,
+    kind: 'transient',
+  }))
+  const out = reconcileEgressState(previous, observations, now, config)
+  const entries = isAllowedIp ? out.entries.filter(entry => isAllowedIp(entry.ip)) : out.entries
+  const resolved: ResolvedExternalEgressInput[] = entries.map(entry => ({
+    cidr: `${entry.ip}/32`,
+    port: entry.port,
+    source: { kind: 'fqdn', fqdn: entry.fqdn },
+  }))
+  const annotations = serializeState({ entries })
+  const lastResolvedAt = priorAcceptedResolvedAt(previousAnnotations, config, externals)
+  if (lastResolvedAt) annotations[RESOLVED_AT_ANNOTATION] = lastResolvedAt
+
+  return {
+    entries,
+    resolved,
+    annotations,
+    changed: out.changed || entries.length !== out.entries.length,
+    evicted: out.evicted,
+    overCap: out.overCap,
   }
 }

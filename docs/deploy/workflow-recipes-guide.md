@@ -311,9 +311,11 @@ the write entirely when the existing object's stamped hash matches**. This keeps
 
 **Operational consequences:**
 
-- **Logs:** expect "unchanged (spec-hash match); skipping update" instead of a per-loop
-  "Updated …". Per-loop write/`Updated` log volume drops sharply by design — re-baseline
-  any alert keyed on it.
+- **Logs:** inspect the structured `msg` field for
+  `Resource spec hash unchanged; skipping update` (resource identity in `label`) or
+  `StatefulSet spec hash unchanged; skipping update` (identity in `name` and
+  `namespace`). Per-loop write log volume drops sharply by design — re-baseline
+  any alert keyed on the former unstructured `Updated …` text.
 - **Drift is no longer auto-reverted.** If an operator hand-edits a WRC-managed object
   (e.g. `kubectl edit`/`scale` on a recipe Deployment), WRC will **not** revert it until
   the recipe spec changes (which flips the hash). The change is still **visible**: the
