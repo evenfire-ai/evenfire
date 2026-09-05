@@ -320,7 +320,7 @@ fi
 # ensure that failed DNS, endpoints or backend health cannot turn it green.
 if (
   eval "$(function_body wait_http_denied)"
-  POLL_INTERVAL=1 SANDBOX_NS=test-ns BACKEND_PORT=8080
+  POLL_INTERVAL=1 SANDBOX_NS=test-ns BACKEND_PORT=8080 CONNECT_TIMEOUT=1
   ok() { :; }
   fail() { :; }
   sleep() { :; }

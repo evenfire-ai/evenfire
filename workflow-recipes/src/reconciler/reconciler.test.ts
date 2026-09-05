@@ -5404,6 +5404,68 @@ describe('WorkflowRecipeReconciler', () => {
       )
     })
 
+    it.each([
+      ['workload', 'preserved'],
+      ['workload', 'added'],
+      ['workload', 'removed'],
+      ['ui', 'preserved'],
+      ['ui', 'added'],
+      ['ui', 'removed'],
+    ])(
+      'preserves the final live finalizer state during %s UID stamping (%s)',
+      async (lane, change) => {
+        const recipe = lane === 'ui' ? recipeWithUi() : recipeWithClusterLocalEgress()
+        recipe.metadata.generation = 7
+        const policyName = lane === 'ui' ? 'ui-egress-test-recipe' : 'wl-egress-test-recipe-worker'
+        await reconciler.reconcile(recipe)
+        const created = mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls
+          .map(call => call[0].body as k8s.V1NetworkPolicy)
+          .find(policy => policy.metadata?.name === policyName)!
+        expect(created).toBeDefined()
+
+        // Feed back the actual desired rules; only the new recipe UID stamp is
+        // missing. A concurrent controller may add/remove its finalizer between
+        // alias selection and the definitive resourceVersion read before PUT.
+        const initial = structuredClone(created)
+        delete initial.metadata!.annotations!['clerum.io/recipe-uid']
+        initial.metadata!.uid = 'uid-live-policy'
+        initial.metadata!.resourceVersion = 'rv-initial'
+        initial.metadata!.finalizers = change === 'added' ? undefined : ['example.com/cleanup']
+        const definitive = structuredClone(initial)
+        definitive.metadata!.resourceVersion = 'rv-definitive'
+        definitive.metadata!.finalizers = change === 'removed' ? undefined : ['example.com/cleanup']
+        let reads = 0
+        mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(
+          ({ name }: { name: string }) => {
+            if (name !== policyName) return Promise.reject({ code: 404 })
+            reads += 1
+            return Promise.resolve(reads === 1 ? initial : definitive)
+          }
+        )
+        mockNetworkingApi.createNamespacedNetworkPolicy.mockImplementation(
+          ({ body }: { body: k8s.V1NetworkPolicy }) =>
+            body.metadata?.name === policyName ? Promise.reject({ code: 409 }) : Promise.resolve({})
+        )
+        mockNetworkingApi.replaceNamespacedNetworkPolicy.mockClear()
+
+        await reconciler.reconcile(recipe)
+
+        expect(reads).toBe(2)
+        const replacements = mockNetworkingApi.replaceNamespacedNetworkPolicy.mock.calls
+          .filter(call => call[0].name === policyName)
+          .map(call => call[0].body as k8s.V1NetworkPolicy)
+        expect(replacements).toHaveLength(1)
+        const replacement = replacements[0]
+        expect(replacement.spec).toEqual(created.spec)
+        expect(replacement.metadata?.annotations).toEqual(created.metadata?.annotations)
+        expect(replacement.metadata?.resourceVersion).toBe('rv-definitive')
+        expect(replacement.metadata?.finalizers).toEqual(definitive.metadata?.finalizers)
+        if (definitive.metadata?.finalizers) {
+          expect(replacement.metadata?.finalizers).not.toBe(definitive.metadata.finalizers)
+        }
+      }
+    )
+
     it('revalidates ui-egress generation on the second read before replace', async () => {
       const recipe = recipeWithUi()
       recipe.metadata.generation = 6

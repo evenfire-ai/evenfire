@@ -4891,6 +4891,9 @@ export class WorkflowRecipeReconciler {
         // cannot borrow N+1's resourceVersion and replace its newer policy.
         await this.assertNetworkPolicyOwnership(policy, existing, ns, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
+        // PUT replaces shared metadata too. Preserve other controllers' cleanup
+        // barriers from the same read whose resourceVersion fences this write.
+        policy.metadata!.finalizers = existing.metadata?.finalizers?.slice()
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
           namespace: ns,
@@ -6128,6 +6131,8 @@ export class WorkflowRecipeReconciler {
         })
         await this.assertNetworkPolicyOwnership(policy, existing, namespace, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
+        // A rule/UID update must not remove another controller's finalizer.
+        policy.metadata!.finalizers = existing.metadata?.finalizers?.slice()
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
           namespace,
