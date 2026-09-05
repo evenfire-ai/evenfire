@@ -29,6 +29,8 @@ import { mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
+  configMapMatchesDesired,
+  deploymentMatchesDesired,
   getErrorCode,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
@@ -946,39 +948,28 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
     if (!isCurrent()) return
+    const name = `${server.name}-nginx-conf`
+    const namespace = server.namespace
     try {
       await this.coreApi.createNamespacedConfigMap({
-        namespace: server.namespace,
+        namespace,
         body: cm,
       })
-      console.log(`[Reconciler] Created nginx ConfigMap "${server.name}-nginx-conf"`)
+      console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
     } catch (error: unknown) {
-      if (getErrorCode(error) === 409) {
-        const existing = await this.coreApi.readNamespacedConfigMap({
-          name: `${server.name}-nginx-conf`,
-          namespace: server.namespace,
-        })
-        if (!isCurrent()) return
-        const next = preserveObjectAnnotations(
-          {
-            ...cm,
-            metadata: {
-              ...cm.metadata,
-              resourceVersion: existing.metadata?.resourceVersion,
-            },
-          },
-          existing
-        )
-        if (!isCurrent()) return
-        await this.coreApi.replaceNamespacedConfigMap({
-          name: `${server.name}-nginx-conf`,
-          namespace: server.namespace,
-          body: next,
-        })
-        console.log(`[Reconciler] Updated nginx ConfigMap "${server.name}-nginx-conf"`)
-      } else {
+      if (getErrorCode(error) !== 409) {
         throw error
       }
+      await replaceWithConflictRetry({
+        description: `nginx ConfigMap "${name}"`,
+        logPrefix: '[Reconciler]',
+        body: cm,
+        mergeExisting: preserveObjectAnnotations,
+        isUpToDate: configMapMatchesDesired,
+        mutationAllowed: isCurrent,
+        read: () => this.coreApi.readNamespacedConfigMap({ name, namespace }),
+        replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+      })
     }
   }
 
@@ -1279,8 +1270,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'copy-mcp-app',
                       image: server.spec.image,
-                      imagePullPolicy:
-                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       command: [
                         'sh',
                         '-c',
@@ -1341,8 +1331,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'mcp-server',
                       image: server.spec.image,
-                      imagePullPolicy:
-                        server.spec.imagePullPolicy || config.mcpServerImagePullPolicy,
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       command: server.spec.command || undefined,
                       args: server.spec.args || undefined,
                       ports,
@@ -1379,6 +1368,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
                     {
                       name: 'stdio-bridge',
                       image: config.stdioBridgeImage, // G10: configurable bridge image
+                      imagePullPolicy: config.mcpServerImagePullPolicy,
                       env: [
                         {
                           name: 'STDIO_COMMAND',
@@ -1510,6 +1500,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         logPrefix: '[Reconciler]',
         body: deployment,
         mergeExisting: preserveDeploymentAnnotations,
+        isUpToDate: deploymentMatchesDesired,
         read: () =>
           this.appsApi.readNamespacedDeployment({
             name: server.name,
@@ -1845,7 +1836,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean = () => true
   ): Promise<void> {
     try {
-      await this.writeStatusCondition(
+      const networkWrote = await this.writeStatusCondition(
         server,
         {
           type: 'NetworkReady',
@@ -1855,7 +1846,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      await this.writeStatusCondition(
+      const deploymentWrote = await this.writeStatusCondition(
         server,
         {
           type: 'DeploymentReady',
@@ -1873,9 +1864,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      console.log(
-        `[Reconciler] Updated status conditions on "${server.name}" (DeploymentReady=${deploymentReady})`
-      )
+      if (networkWrote || deploymentWrote) {
+        console.log(
+          `[Reconciler] Updated status conditions on "${server.name}" (DeploymentReady=${deploymentReady})`
+        )
+      }
     } catch (error) {
       // Status subresource may not exist yet — log but don't fail reconciliation
       console.warn(`[Reconciler] Failed to update status conditions on "${server.name}":`, error)
@@ -1904,8 +1897,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     server: McpServerCRD,
     condition: Omit<McpServerCondition, 'lastTransitionTime'>,
     isCurrent: () => boolean = () => true
-  ): Promise<void> {
-    if (!isCurrent()) return
+  ): Promise<boolean> {
+    if (!isCurrent()) return false
     const now = new Date().toISOString()
 
     // Update the missing-secret gauge for SecretResolved conditions.
@@ -1930,7 +1923,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // if anything changed since our read; we then re-read and retry, so no
     // writer's condition is lost.
     for (let attempt = 1; attempt <= STATUS_CONDITION_WRITE_MAX_ATTEMPTS; attempt += 1) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       // Re-read on every optimistic-conflict retry. Merging against the
       // latest resourceVersion preserves conditions written by peer
       // controllers between our read and patch.
@@ -1956,15 +1949,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
           )
-          return
+          return false
         }
         console.warn(
           `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
           error
         )
-        return
+        return false
       }
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
 
       const prior = existingConditions.find(c => c.type === condition.type)
       const observedGeneration = condition.observedGeneration ?? server.generation
@@ -1981,7 +1974,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       // reconcile — a tight self-loop that also amplifies NetworkPolicy
       // optimistic-lock contention downstream.
       if (unchanged) {
-        return
+        return false
       }
 
       const lastTransitionTime =
@@ -2035,7 +2028,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // The generated client prefers JSON Patch for this endpoint. Send an
         // actual patch document so status writes keep working across client
         // upgrades instead of relying on merge-patch object bodies.
-        if (!isCurrent()) return
+        if (!isCurrent()) return false
         await this.customApi.patchNamespacedCustomObjectStatus({
           group: 'clerum.io',
           version: 'v1alpha1',
@@ -2044,14 +2037,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           name: server.name,
           body: statusPatch,
         })
-        return
+        return true
       } catch (error) {
         const errorCode = getErrorCode(error)
         if (errorCode === 404) {
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
           )
-          return
+          return false
         }
         // 409 (Conflict) or 422 (a `test` op failed) mean a concurrent writer
         // won the race. Re-read and retry rather than lose our condition. Any
@@ -2067,9 +2060,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS}):`,
           error
         )
-        return
+        return false
       }
     }
+    return false
   }
 
   // ─── Public API ─────────────────────────────────────────────────────

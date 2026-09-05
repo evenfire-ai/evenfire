@@ -284,6 +284,7 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
       const copyContainer = capturedInitContainer(appsApi, 'copy-mcp-app')
       const bridgeContainer = capturedContainer(appsApi, 'stdio-bridge')
       for (const container of [copyContainer, bridgeContainer]) {
+        expect(container.imagePullPolicy).toBe('IfNotPresent')
         expect(container.securityContext?.allowPrivilegeEscalation).toBe(false)
         expect(container.securityContext?.capabilities?.drop).toEqual(['ALL'])
         expect(container.securityContext?.capabilities?.add).toBeUndefined()

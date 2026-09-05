@@ -93,6 +93,9 @@ function hostNameFromResourceName(name = ''): string {
   if (name.startsWith('mcp-host-') && name.endsWith('-egress-gfs')) {
     return name.replace(/^mcp-host-/, '').replace(/-egress-gfs$/, '')
   }
+  if (name.startsWith('mcp-host-') && name.endsWith('-egress-codex-proxy')) {
+    return name.replace(/^mcp-host-/, '').replace(/-egress-codex-proxy$/, '')
+  }
   if (name.startsWith('rpc-proxy-') && name.endsWith('-egress-mcp-host')) {
     return name.replace(/^rpc-proxy-/, '').replace(/-egress-mcp-host$/, '')
   }

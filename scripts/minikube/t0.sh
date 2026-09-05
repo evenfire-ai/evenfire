@@ -58,12 +58,34 @@ else
   printf 'T0_SHELLCHECK=NOT_APPLICABLE\n'
 fi
 
+has_npm_script() {
+  local package_dir="$1"
+  local script_name="$2"
+  node -e 'const p=require(process.argv[1]); process.exit(p.scripts && p.scripts[process.argv[2]] ? 0 : 1)' \
+    "$package_dir/package.json" "$script_name"
+}
+
 if [ "${#package_dirs[@]}" -gt 0 ]; then
   for package in "${package_dirs[@]}"; do
-    printf '[minikube-t0] affected package: %s test\n' "$package"
-    (cd "$PROJECT_DIR/$package" && npm test)
-    printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
-    (cd "$PROJECT_DIR/$package" && npm run build)
+    # Live Vitest/Playwright E2E is the T2 opt-in lane. T0 is unit/build only.
+    case "$package" in
+      tests/e2e|tests/e2e/*)
+        printf '[minikube-t0] affected package: %s skipped (live E2E is T2)\n' "$package"
+        continue
+        ;;
+    esac
+    if has_npm_script "$PROJECT_DIR/$package" test; then
+      printf '[minikube-t0] affected package: %s test\n' "$package"
+      (cd "$PROJECT_DIR/$package" && npm test)
+    else
+      printf '[minikube-t0] affected package: %s test skipped (no test script)\n' "$package"
+    fi
+    if has_npm_script "$PROJECT_DIR/$package" build; then
+      printf '[minikube-t0] affected package: %s build/typecheck\n' "$package"
+      (cd "$PROJECT_DIR/$package" && npm run build)
+    else
+      printf '[minikube-t0] affected package: %s build/typecheck skipped (no build script)\n' "$package"
+    fi
   done
 fi
 

@@ -8,7 +8,7 @@ import {
   revokeMcpAuthorityState,
 } from '../authorityLifecycle'
 import { McpClient } from '../client'
-import { McpManager } from '../manager'
+import { McpManager, SHARED_PRINCIPAL, serializeClientKey } from '../manager'
 
 const securedServer: McpServerInfo = {
   name: 'secured-server',
@@ -35,7 +35,7 @@ function retainedClient(
     manager as unknown as {
       clients: Map<string, McpClient>
     }
-  ).clients.get(serverName)
+  ).clients.get(serializeClientKey(serverName, SHARED_PRINCIPAL))
 }
 
 function pendingClient(
@@ -46,7 +46,7 @@ function pendingClient(
     manager as unknown as {
       pendingAdmissions: Map<string, { client: McpClient }>
     }
-  ).pendingAdmissions.get(serverName)?.client
+  ).pendingAdmissions.get(serializeClientKey(serverName, SHARED_PRINCIPAL))?.client
 }
 
 function createLifecycleHarness(
@@ -161,6 +161,11 @@ describe('MCP authority lifecycle', () => {
     'withdraws the live fleet synchronously and restarts polling after persistent $status',
     async ({ status, expectedFetches, expectedRefreshes }) => {
       vi.spyOn(McpClient.prototype, 'connect').mockImplementation(async function (this: McpClient) {
+        // Mimic the real connect's JIT token resolution so the post-revoke wipe
+        // assertion below exercises currentAuthToken.
+        ;(this as unknown as { currentAuthToken?: string }).currentAuthToken = await (
+          this as unknown as { tokenProvider?: { resolve(): Promise<string | undefined> } }
+        ).tokenProvider?.resolve()
         ;(this as unknown as { connected: boolean }).connected = true
       })
       const manager = new McpManager()
@@ -206,7 +211,9 @@ describe('MCP authority lifecycle', () => {
         pollerRunning: true,
       })
       expect(harness.state().serverState.size).toBe(0)
-      expect((installedClient as unknown as { authToken?: string }).authToken).toBeUndefined()
+      expect(
+        (installedClient as unknown as { currentAuthToken?: string }).currentAuthToken
+      ).toBeUndefined()
       expect(manager.getConnectedServers()).toEqual([])
       expect(manager.getKnownServers()).toEqual([])
       expect(harness.effects).toEqual([
@@ -312,6 +319,11 @@ describe('MCP authority lifecycle', () => {
     const connectStarted = deferred()
     const releaseConnect = deferred()
     vi.spyOn(McpClient.prototype, 'connect').mockImplementation(async function (this: McpClient) {
+      // Mimic the real connect's JIT token resolution before the transport pause
+      // so the fencing assertions (bearer held, then wiped) observe it.
+      ;(this as unknown as { currentAuthToken?: string }).currentAuthToken = await (
+        this as unknown as { tokenProvider?: { resolve(): Promise<string | undefined> } }
+      ).tokenProvider?.resolve()
       connectStarted.resolve()
       await releaseConnect.promise
       if ((this as unknown as { retired: boolean }).retired) {
@@ -341,12 +353,14 @@ describe('MCP authority lifecycle', () => {
     await connectStarted.promise
     const candidate = pendingClient(manager)
     expect(candidate).toBeDefined()
-    expect((candidate as unknown as { authToken?: string }).authToken).toBe('late-sensitive-bearer')
+    expect((candidate as unknown as { currentAuthToken?: string }).currentAuthToken).toBe(
+      'late-sensitive-bearer'
+    )
 
     harness.revoke('caller_403', true)
 
     expect(harness.state().currentManager).toBeNull()
-    expect((candidate as unknown as { authToken?: string }).authToken).toBeUndefined()
+    expect((candidate as unknown as { currentAuthToken?: string }).currentAuthToken).toBeUndefined()
     expect(manager.getConnectedServers()).toEqual([])
     expect(manager.getKnownServers()).toEqual([])
     releaseConnect.resolve()

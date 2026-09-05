@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import type { LlmAllowedModel } from '@lib/api'
 import { getLlmModels, getUnpricedModels } from '@lib/api'
+import { loadCodexSubscriptionCapability } from '@lib/codexSubscriptionFeature'
 import { LlmModelsSurface } from '../LlmModelsSurface'
 import { ToastProvider } from '../Toast'
 
@@ -22,12 +23,23 @@ vi.mock('@components/LlmDiscoveryPanel', () => ({
   ),
 }))
 vi.mock('@components/LlmModelTable', () => ({
-  LlmModelTable: () => <div>Model catalog</div>,
+  LlmModelTable: ({ navigation }: { navigation?: ReactNode }) => (
+    <div>
+      {navigation}
+      Model catalog
+    </div>
+  ),
 }))
 vi.mock('@lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/api')>()
   return { ...actual, getLlmModels: vi.fn(), getUnpricedModels: vi.fn() }
 })
+
+vi.mock('@lib/codexSubscriptionFeature', () => ({
+  loadCodexSubscriptionCapability: vi.fn(),
+  isCodexSubscriptionUiEnabled: (capability: { enabled?: boolean } | null) =>
+    capability?.enabled === true,
+}))
 
 const model: LlmAllowedModel = {
   id: 'model-1',
@@ -51,6 +63,7 @@ describe('LlmModelsSurface', () => {
     vi.mocked(getUnpricedModels).mockReturnValue(
       new Promise<Awaited<ReturnType<typeof getUnpricedModels>>>(() => undefined)
     )
+    vi.mocked(loadCodexSubscriptionCapability).mockResolvedValue({ enabled: false })
   })
 
   afterEach(() => {
@@ -67,5 +80,28 @@ describe('LlmModelsSurface', () => {
 
     expect(await screen.findByText('Discovery models: 1')).toBeInTheDocument()
     expect(getUnpricedModels).not.toHaveBeenCalled()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
+  })
+
+  it('hides the Codex subscription deep link when Control API capability is absent', async () => {
+    render(
+      <ToastProvider>
+        <LlmModelsSurface activeTab="catalog" />
+      </ToastProvider>
+    )
+
+    expect(await screen.findByText('Model catalog')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
+  })
+
+  it('never shows a Codex subscription tab on LLM Models', async () => {
+    render(
+      <ToastProvider>
+        <LlmModelsSurface activeTab="catalog" />
+      </ToastProvider>
+    )
+
+    expect(await screen.findByText('Model catalog')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Codex subscription' })).not.toBeInTheDocument()
   })
 })

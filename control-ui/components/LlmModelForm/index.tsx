@@ -158,10 +158,14 @@ export function LlmModelForm({
       <FormSection title="Settings">
         <CheckboxField
           label="Enabled"
-          description="Only enabled models can be selected for agents and served at runtime. Disable to retire a model without deleting it."
+          description={
+            provider === 'codex-subscription'
+              ? 'ChatGPT subscription models are enabled by the assigned grant catalog after sync, not from this table.'
+              : 'Only enabled models can be selected for agents and served at runtime. Disable to retire a model without deleting it.'
+          }
           checked={enabled}
           onChange={event => setEnabled(event.target.checked)}
-          disabled={saving}
+          disabled={saving || provider === 'codex-subscription'}
         />
       </FormSection>
 

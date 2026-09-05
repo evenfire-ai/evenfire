@@ -20,7 +20,15 @@ interface Props {
    * sticky `suspended` (V2) into the tracker. The tracker's own `pendingApproval`
    * (live/replayed suspended) still wins when present.
    */
-  pendingApproval?: { requestId: string; displayName: string }
+  pendingApproval?: {
+    requestId: string
+    displayName: string
+    // U5: carried through the FSM projection so the optimistic-paint fallback can
+    // also drive the "Connect <server>" prompt before the tracker's live
+    // suspended replays.
+    reason?: string
+    mcpServerName?: string
+  }
 }
 
 /**
@@ -100,6 +108,25 @@ export function InFlightAssistantPlaceholder({
               : undefined
           }
           onCancel={onCancelTask ? () => onCancelTask(taskId) : undefined}
+          onConnect={
+            // U5: connect_required suspension → open the provider OAuth flow,
+            // host-bound to this conversation's agent (hostRef ≡ agentRef).
+            si?.reason === 'connect_required' && si.mcpServerName
+              ? () => {
+                  // R4-L1: a failed mint (403 membership, rpc-proxy down) must not
+                  // escape as an unhandled rejection. The ProgressStepper's 5s timer
+                  // re-enables the Connect button so the user can retry; log the
+                  // failure so it is observable. (Follow-up: a user-facing error
+                  // indicator on the button.)
+                  window.clerum.rpc.connectMcpServer(si.mcpServerName!, agentRef).catch(err => {
+                    console.error('[connect] connectMcpServer failed', {
+                      mcpServerName: si.mcpServerName,
+                      error: err instanceof Error ? err.message : String(err),
+                    })
+                  })
+                }
+              : undefined
+          }
         />
       </div>
     </section>

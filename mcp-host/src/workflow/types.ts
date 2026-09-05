@@ -103,6 +103,13 @@ export interface ConfigureRequest {
 
 export interface ConfigureResponse {
   configured: boolean
+  /**
+   * oauth-broker identity is bound in-process. This is not execute permission;
+   * spend still requires a redeemable grant (WRC + authorize).
+   */
+  identityBound?: boolean
+  /** Present only when WRC observes a live redeemable grant. mcp-host omits it. */
+  grantRedeemable?: boolean
   capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: string
   model?: string
@@ -111,7 +118,18 @@ export interface ConfigureResponse {
    * is intentionally present only on the SDK bootstrap response; workflow
    * `/configure` remains on its legacy response shape.
    */
-  contractVersion?: 2
+  contractVersion?: 2 | 3
+  /**
+   * Sanitized Codex execution binding echoed on configure v3. Absent for
+   * non-Codex v2 recipes.
+   */
+  codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
   ready?: boolean
   /** Pod/protocol identity is ready even while operator policy is pending. */
   policyReady?: boolean
@@ -133,6 +151,15 @@ export interface PluginWorkloadSdkBootstrapRequest {
   capabilityFamily?: 'promptBridge' | 'clientNotifications'
   provider?: LlmProvider
   model?: string
+  /** Required for Codex; ignored by non-Codex v2 hosts that fail closed. */
+  contractVersion?: 2 | 3
+  codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
 }
 
 // ─── Internal Tools (clerum__*) ──────────────────────────────────────

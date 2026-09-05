@@ -7,7 +7,7 @@ bodyless rollback path of `POST /admin/mcp-secrets` followed by
 ## Deployment contract
 
 1. Run the Control API schema migration job before changing the pod image.
-2. Verify migration `0101_mcp_secret_rollback_permits` and the runtime-access
+2. Verify migration `0109_mcp_secret_rollback_permits` and the runtime-access
    profile before starting Control API.
 3. Deploy Control API with its repository-owned `Recreate` strategy and one
    replica. Old and new API writers must not overlap.

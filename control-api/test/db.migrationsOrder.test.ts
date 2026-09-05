@@ -59,10 +59,10 @@ describe('CONTROL_API_MIGRATIONS ordering invariant', () => {
     expect(currentCollisions).toEqual([])
   })
 
-  it('requires 0101_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
+  it('requires 0109_mcp_secret_rollback_permits to persist expiring rollback permits', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0101_mcp_secret_rollback_permits'
+      candidate => candidate.version === '0109_mcp_secret_rollback_permits'
     )
 
     expect(migration).toBeDefined()

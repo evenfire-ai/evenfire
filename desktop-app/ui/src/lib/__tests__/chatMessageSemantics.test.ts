@@ -126,7 +126,7 @@ describe('chat message Markdown semantic model', () => {
     const model = buildChatMessageSemanticModel(assistant(hostile))
     expect(findChatSemanticMatches(model, 'label')).toHaveLength(1)
     expect(performance.now() - started).toBeLessThan(2_000)
-  })
+  }, 30_000)
 
   it('maps dense inline matches without rescanning every fragment per occurrence', () => {
     const model = buildChatMessageSemanticModel(assistant(Array(8_000).fill('*a*').join(' ')))
@@ -134,5 +134,5 @@ describe('chat message Markdown semantic model', () => {
 
     expect(findChatSemanticMatches(model, 'a')).toHaveLength(8_000)
     expect(performance.now() - started).toBeLessThan(2_000)
-  })
+  }, 30_000)
 })

@@ -28,7 +28,11 @@ export class K8sSecretReaderImpl implements K8sSecretReader {
       // The CM exists — even if `data` was omitted (kube-apiserver drops an
       // empty `data: {}`), report it present with an empty map so the caller
       // treats an empty allowlist as deny-all rather than absent (degraded).
-      return { exists: true, data: cm.data ?? {} }
+      return {
+        exists: true,
+        data: cm.data ?? {},
+        annotations: cm.metadata?.annotations ?? {},
+      }
     } catch (error: unknown) {
       const code = getErrorCode(error)
       if (code === 404) return { exists: false }

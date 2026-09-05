@@ -1,8 +1,17 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import '@testing-library/jest-dom/vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { Sidebar } from '@components/Sidebar'
+import { resetReleaseIdentityCache } from '@lib/releaseIdentity'
+
+const api = vi.hoisted(() => ({
+  getDesktopRelease: vi.fn(),
+}))
+
+vi.mock('@lib/api', () => ({
+  getDesktopRelease: api.getDesktopRelease,
+}))
 
 const profileAccessState = vi.hoisted(() => ({
   approvalTargets: [] as Array<{ id: string }>,
@@ -49,6 +58,9 @@ beforeEach(() => {
   profileAccessState.manageableTeamsLoading = false
   profileAccessState.refreshApprovalTargets.mockClear()
   profileAccessState.refreshManageableTeams.mockClear()
+  resetReleaseIdentityCache()
+  api.getDesktopRelease.mockReset()
+  api.getDesktopRelease.mockResolvedValue({ releaseId: 'v0.6.0' })
 })
 
 afterEach(cleanup)
@@ -73,5 +85,24 @@ describe('Profile Sidebar access-controlled entries', () => {
 
     expect(screen.queryByRole('link', { name: /Approval Channels/i })).not.toBeInTheDocument()
     expect(view.container.querySelector('.cu-sidebar__item--loading')).toBeInTheDocument()
+  })
+})
+
+describe('Profile Sidebar release identity', () => {
+  it('titles the brand with the platform release, not the portal package version', async () => {
+    const view = render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
+    const brand = view.container.querySelector('.cu-sidebar__brand')
+
+    await waitFor(() => expect(brand).toHaveAttribute('title', 'Release v0.6.0'))
+  })
+
+  it('leaves the brand untitled rather than naming a release it could not read', async () => {
+    api.getDesktopRelease.mockRejectedValue(new Error('503 Service Unavailable'))
+
+    const view = render(<Sidebar currentRoute="settings" onLogout={vi.fn()} />)
+    const brand = view.container.querySelector('.cu-sidebar__brand')
+
+    await waitFor(() => expect(api.getDesktopRelease).toHaveBeenCalled())
+    expect(brand).not.toHaveAttribute('title')
   })
 })

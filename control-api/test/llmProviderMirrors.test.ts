@@ -29,7 +29,9 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
   it('check-prereqs.sh PROVIDER_KEYS maps every provider to its primary env', () => {
     const script = read('scripts/check-prereqs.sh')
     for (const id of PROVIDER_IDS) {
-      const primaryEnv = PROVIDER_CREDENTIAL_SLOTS[id][0].envName
+      const slots = PROVIDER_CREDENTIAL_SLOTS[id]
+      if (slots.length === 0) continue
+      const primaryEnv = slots[0].envName
       expect(script, `missing provider key ${id}:${primaryEnv}`).toContain(`${id}:${primaryEnv}`)
     }
   })
@@ -44,7 +46,9 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
       // multiple case blocks.
       const lines = read(rel).split('\n')
       for (const id of PROVIDER_IDS) {
-        const primarySlot = PROVIDER_CREDENTIAL_SLOTS[id][0].dataKey
+        const slots = PROVIDER_CREDENTIAL_SLOTS[id]
+        if (slots.length === 0) continue
+        const primarySlot = slots[0].dataKey
         const idArms = lines.filter(line => line.trimStart().startsWith(`${id})`))
         expect(idArms.length, `${rel}: missing case arm ${id})`).toBeGreaterThan(0)
         expect(

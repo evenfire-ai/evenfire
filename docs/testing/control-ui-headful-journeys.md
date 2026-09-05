@@ -6,8 +6,11 @@ Chromium window (recorded WebM + PNG) against a local control-ui dev server
 pointed at a `example-dev` control-api port-forward. They are separate from the CI
 Playwright suite and never run in CI by default.
 
-For the recorder contract, safety flags, and credential configuration, see
-[optional-playwright-qa-recorder.md](./optional-playwright-qa-recorder.md).
+Recorder runs are local and opt-in. Configure the exact QA identity in
+`.env.qa-recorder`; target only an approved loopback or disposable development
+environment; and set `QA_RECORDER_CONFIRM_MUTATIONS=1` only for journeys whose
+side effects you intend to run. Recordings stay under the git-ignored
+`.local-notes/qa-recorder/` directory and may contain sensitive UI data.
 
 ## Coverage
 
@@ -23,7 +26,7 @@ PNG per test under `.local-notes/qa-recorder/runs/control-ui/` (git-ignored).
 | Login & shell | `qa-recorder-login.spec.ts` | 2 — sign-in page, authenticated shell | — | ✅ |
 | Navigation | `qa-recorder-navigation.spec.ts` | 1 — sidebar across main sections | — | ✅ |
 | Agents (hosts) | `qa-recorder-agents.spec.ts` | 1 — list + detail | — | ✅ |
-| Contexts | `qa-recorder-contexts.spec.ts` | 2 — list, detail + tabs | — | ✅ |
+| Agent-centric vocabulary sweep | `qa-recorder-context-vocab-sweep.spec.ts` | 1 — current operator surfaces | — | ✳️ |
 | Connectors | `qa-recorder-connectors.spec.ts` | 1 — inventory | — | ✅ |
 | External channels | `qa-recorder-external-channels.spec.ts` | 1 — Telegram/Email/Slack | — | ✅ |
 | LLM models & secrets | `qa-recorder-llm-models.spec.ts` | 1 — models catalog + secrets | — | ✅ |
@@ -35,6 +38,11 @@ PNG per test under `.local-notes/qa-recorder/runs/control-ui/` (git-ignored).
 | Marketplace browse | `qa-recorder-marketplace-browse.spec.ts` | 1 — search, filter, plugins tab, entry detail (skips if empty) | — | ✳️ |
 | Create agent | `qa-recorder-agent-create.spec.ts` | 1 — full create wizard | `QA_RECORDER_CONFIRM_MUTATIONS` (required) | ✅ |
 
+The two recorder filenames that still contain `context` cover migration-only
+compatibility behavior: legacy-link redirects and the assertion that current
+operator surfaces use Agent-centric vocabulary. They do not restore Context
+management journeys.
+
 ### Workflow & combo journeys (create / edit / delete / grant)
 
 Full mutating user journeys. Each is self-contained — it creates its own
@@ -45,8 +53,10 @@ credential). Run with `npm run qa:recorder:<journey>`.
 
 | Journey | Spec | Tests | Confirm flag | Status |
 | --- | --- | --- | --- | --- |
-| Context create + detail tour | `qa-recorder-context-create.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
-| Context + stdio discovery connector + attach | `qa-recorder-context-connector.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| Legacy scope links → owning Agent | `qa-recorder-context-redirects.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| Agent connector inventory + detail | `qa-recorder-agent-connectors.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| Connector create + Agent access | `qa-recorder-connector-create-access.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| Installed Connectors Agent access | `qa-recorder-connectors-agent-access.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
 | Connector edit egress | `qa-recorder-connector-edit.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
 | LLM model add → disable → remove | `qa-recorder-llm-model-lifecycle.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
 | Recipe secret (shared, dummy) | `qa-recorder-secret-recipe.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
@@ -70,11 +80,11 @@ credential). Run with `npm run qa:recorder:<journey>`.
 
 | Journey | Spec | Tests | Confirm flag | Status |
 | --- | --- | --- | --- | --- |
-| New-team onboarding (team → member → context grant) | `qa-recorder-onboarding-combo.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| New-team onboarding (team → member → Agent grant) | `qa-recorder-onboarding-combo.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
 | Cost governance (model → price → model-scoped budget) | `qa-recorder-cost-governance.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
-| Context + connector + global budget | `qa-recorder-context-connector-budget.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
+| Agent-scoped token budget | `qa-recorder-token-budget-scope.spec.ts` | 1 | `CONFIRM_MUTATIONS` | ✳️ |
 
-**Totals: 37 specs, 55 tests.** Read-only journeys need no confirmation flag; every
+**Totals: 50 specs, 67 tests.** Read-only journeys need no confirmation flag; every
 journey still calls the loopback reachability guard on both URLs. Every mutating
 journey requires `QA_RECORDER_CONFIRM_MUTATIONS=1`, creates only temporary
 `qa-recorder-*` resources, and cleans them up via the Control API in a `finally`
@@ -93,7 +103,7 @@ cd control-ui
 npm run qa:recorder:install   # one-time: recorder Chromium into .local-notes/qa-recorder/browsers
 # control-ui dev server on :3000 + control-api forward on :8090 must be up
 npm run qa:recorder:login     # one journey
-npm run qa:recorder:all       # all 37 specs / 55 tests
+npm run qa:recorder:all       # all 50 specs / 67 tests
 ```
 
 ## Proof artifacts (local only, git-ignored)
@@ -109,7 +119,7 @@ find .local-notes/qa-recorder/runs/control-ui -name '*.png'    # full-page scree
   original 13 specs / 17 tests passed, exit 0, with WebM + PNG proof for every
   test. Point-in-time snapshot; re-run to refresh.
 - **Workflow, combo & smoke journeys (✳️):** implemented and compile-verified via
-  `npx playwright test --config=playwright.qa-recorder.config.ts --list` (55/55
+  `npx playwright test --config=playwright.qa-recorder.config.ts --list` (67/67
   tests discovered, zero compile errors). Not yet exercised against a live
   environment — run `npm run qa:recorder:all` (with `QA_RECORDER_CONFIRM_MUTATIONS=1`)
   to produce WebM + PNG proof and flip these to ✅.

@@ -52,6 +52,28 @@ SHA is historical metadata; it does not override stable worktree+branch
 ownership. Persisted `ports.env` is allocated once. Missing, corrupt, or
 ambiguous metadata fails closed; never regenerate or copy another lane's ports.
 
+First-hand entry point (gitignored helper at repo root — do not search for
+it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+This is the host-side hold for Control UI / Desktop. Profile-owned random
+ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
+gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
+PFs from a sandboxed agent shell (hooks/PATH; runners clean children). Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
+globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
+STOPS them on EXIT — do not use it as the lasting hold.
+
 ## State transitions
 
 ### Bootstrap
@@ -144,6 +166,14 @@ claim first and then the stale lock. `rmdir` is preferred for the claim because
 it must be empty. Never remove either path with a live owner/reclaimer, and
 never remove the whole lock root.
 
+After bootstrap or reconcile, `make minikube-t2` calls `pre-gate-sync` with
+`--skip-port-forwards`. Never pass that flag globally into `make minikube-t2`.
+T1 opens its own `control-postgres` port-forward and
+does not inherit Control UI stack forwards. Do not kill this lane's
+`branch-profile-pf`. `t2_process_check` accepts only
+real `kubectl` port-forward PIDs recorded in the profile cache or legacy
+`/tmp/pf-<profile>-*.pid`.
+
 ## Preconditions and secrets
 
 The runner checks required namespaces, Services, Secret names, ConfigMap names,
@@ -160,7 +190,9 @@ the full binding; dead legacy records may be pruned. Registered pidfiles are
 also checked when `ps` no longer lists a child, and a successful user-facing
 health probe is followed by exact process/start-time/argv revalidation.
 `make minikube-t2` invokes `pre-gate-sync` with `--skip-port-forwards` so the
-orchestrator does not plant forwards that fail its own T2 check. Secret values
+orchestrator does not plant forwards that fail its own T2 check. The Control
+UI / Desktop hold stays on the host via the first-hand helper above; do not
+replace it with `make minikube-pf-all-bg`. Secret values
 are never printed.
 
 Docker endpoint discovery runs before isolation and accepts only an explicit

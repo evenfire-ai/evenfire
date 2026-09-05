@@ -102,7 +102,11 @@ describe('Host ensureHostRole no-op gate', () => {
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
       const live = structuredClone(desiredFromCreate(rbacApi))
-      secretGetRule(live).resourceNames![0] = host.spec.secretRef
+      const currentSecretRef = host.spec.secretRef
+      if (!currentSecretRef) {
+        throw new Error('test host is missing secretRef')
+      }
+      secretGetRule(live).resourceNames![0] = currentSecretRef
       existing = asApiserverRole(live)
       return Promise.resolve(existing)
     })

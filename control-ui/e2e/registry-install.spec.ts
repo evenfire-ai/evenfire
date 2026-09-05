@@ -553,9 +553,6 @@ async function submitRegistryInstallForm(
   await installForm.locator('#ri-name').clear()
   await installForm.locator('#ri-name').fill(serverName)
   await installForm.getByRole('button', { name: 'Continue' }).click()
-  await installForm.locator('#ri-context').click()
-  await installForm.getByRole('option', { name: 'context1', exact: true }).click()
-  await installForm.getByRole('button', { name: 'Continue' }).click()
   const credentialInputs = installForm.locator('fieldset input')
   for (const credentialInput of await credentialInputs.all()) {
     await credentialInput.fill('e2e-test-value')
@@ -1407,10 +1404,8 @@ test.describe('H. Control-UI Smoke Tests', () => {
       await nameInput.clear()
       await nameInput.fill(serverName)
 
-      // Advance through Context to Credentials and fill fields if present.
-      await installForm.getByRole('button', { name: 'Continue' }).click()
-      await installForm.locator('#ri-context').click()
-      await installForm.getByRole('option', { name: 'context1', exact: true }).click()
+      // Advance to Credentials and fill fields if present. The access scope is
+      // provisioned silently by the app; no context selection exists anymore.
       await installForm.getByRole('button', { name: 'Continue' }).click()
       const credFieldset = installForm.locator('fieldset')
       if ((await credFieldset.count()) > 0) {
@@ -1776,14 +1771,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await page
         .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
         .fill('clerum/mock-mcp-server:test')
-      await expect(page.getByRole('button', { name: 'context1' })).toBeVisible({
-        timeout: 15_000,
-      })
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Runtime settings' })).toBeVisible()
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible()
 
+      // Egress lives in the Advanced options disclosure on the Connector step.
+      await page.getByText('Advanced options').click()
       const egressSection = page.locator('section', { hasText: 'External Egress' })
       const exactHostMode = egressSection.getByRole('combobox')
       await expect(exactHostMode).toHaveCount(1)
@@ -1794,13 +1784,18 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await egressSection.locator('input[placeholder="443"]').fill('443')
       await expect(egressSection.getByRole('status')).toContainText('1 domain(s) x 1 port(s)')
 
+      // The Access step is optional (no agents required) — continue through it.
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await expect(page.getByRole('heading', { name: 'Agent access' })).toBeVisible()
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
+
       const createResponse = page.waitForResponse(
         response =>
           response.url().includes('/admin/mcp-servers') && response.request().method() === 'POST',
         { timeout: 30_000 }
       )
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
+      await page.getByRole('radio', { name: 'No credentials required' }).check()
       await page.getByRole('button', { name: 'Create connector' }).click()
       expect((await createResponse).status()).toBe(201)
       await expect(page).toHaveURL(/\/mcp-servers$/)
@@ -1835,14 +1830,9 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await page
         .getByPlaceholder('us-central1-docker.pkg.dev/my-project/repo/mcp-server:latest')
         .fill('clerum/mock-mcp-server:test')
-      await expect(page.getByRole('button', { name: 'context1' })).toBeVisible({
-        timeout: 15_000,
-      })
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Runtime settings' })).toBeVisible()
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Network egress' })).toBeVisible()
 
+      // Egress lives in the Advanced options disclosure on the Connector step.
+      await page.getByText('Advanced options').click()
       const egressSection = page.locator('section', { hasText: 'External Egress' })
       const publicWebMode = egressSection.getByRole('combobox')
       await expect(publicWebMode).toHaveCount(1)
@@ -1850,13 +1840,18 @@ test.describe('J. Operator Egress Editor Journeys', () => {
       await expect(egressSection.getByRole('alert')).toContainText('Public web egress allows')
       await expect(egressSection.getByRole('status')).toContainText('1 public-web binding')
 
+      // The Access step is optional (no agents required) — continue through it.
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await expect(page.getByRole('heading', { name: 'Agent access' })).toBeVisible()
+      await page.getByRole('button', { name: 'Continue' }).click()
+      await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
+
       const createResponse = page.waitForResponse(
         response =>
           response.url().includes('/admin/mcp-servers') && response.request().method() === 'POST',
         { timeout: 30_000 }
       )
-      await page.getByRole('button', { name: 'Continue' }).click()
-      await expect(page.getByRole('heading', { name: 'Secrets and environment' })).toBeVisible()
+      await page.getByRole('radio', { name: 'No credentials required' }).check()
       await page.getByRole('button', { name: 'Create connector' }).click()
       expect((await createResponse).status()).toBe(201)
       await expect(page).toHaveURL(/\/mcp-servers$/)
@@ -2185,9 +2180,6 @@ test.describe('J. Operator Egress Editor Journeys', () => {
     await installForm.locator('summary', { hasText: 'Configuration' }).click()
     await expect(installForm.locator('#ri-name')).toBeVisible({ timeout: 10_000 })
     await installForm.locator('#ri-name').fill(deferredMcpServerName)
-    await installForm.getByRole('button', { name: 'Continue' }).click()
-    await installForm.locator('#ri-context').click()
-    await installForm.getByRole('option', { name: 'context1', exact: true }).click()
     await installForm.getByRole('button', { name: 'Continue' }).click()
     await expect(
       installForm.getByText(/Leave all credential fields empty to install now/)

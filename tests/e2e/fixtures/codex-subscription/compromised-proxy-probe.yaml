@@ -1,0 +1,44 @@
+# Applied only by the Task 23/25 network-boundary rehearsal. Distinct labels
+# keep this Job off the codex-llm-proxy Service. It must not ship credentials
+# or a ServiceAccount token.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: codex-compromised-proxy-probe
+  namespace: control-plane
+  labels:
+    app: codex-compromised-proxy-probe
+    clerum.io/test-only: 'true'
+spec:
+  ttlSecondsAfterFinished: 120
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: codex-compromised-proxy-probe
+        clerum.io/test-only: 'true'
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: probe
+          image: busybox:1.36
+          command: ['/bin/sh', '-c']
+          args:
+            - |
+              set +e
+              echo "probe start"
+              wget -qO- --timeout=3 http://control-api.control-plane.svc.cluster.local:8090/health
+              echo "direct_control_api:$?"
+              wget -qO- --timeout=3 http://control-postgres.control-plane.svc.cluster.local:5432
+              echo "postgres:$?"
+              wget -qO- --timeout=3 http://169.254.169.254/
+              echo "metadata:$?"
+              echo "probe done"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop: ['ALL']

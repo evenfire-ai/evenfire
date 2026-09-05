@@ -64,6 +64,7 @@ export function buildPromptBridgeUsageEvent(input: {
   }
   metadata?: Record<string, unknown>
 }): LlmUsageEvent | null {
+  if (input.provider === 'codex-subscription') return null
   // Explicit runtime mode is authoritative for recipe-bound hosts. The
   // namespace fallback remains only for older non-recipe callers that do not
   // yet inject the mode into their pod.
@@ -359,12 +360,15 @@ export function maybeCreatePluginWorkloadSdkServer(
         : undefined,
       finalizePromptBridge:
         config.pluginWorkloadSdkRuntimeMode === 'sdk-only'
-          ? input =>
-              controlApiClient.finalizePromptBridge({
-                recipeNamespace: binding.recipeNamespace,
-                recipeName: binding.recipeName,
-                ...input,
-              })
+          ? (input, options) =>
+              controlApiClient.finalizePromptBridge(
+                {
+                  recipeNamespace: binding.recipeNamespace,
+                  recipeName: binding.recipeName,
+                  ...input,
+                },
+                options
+              )
           : undefined,
       onUsage: usage => {
         if (!usageReporter) return

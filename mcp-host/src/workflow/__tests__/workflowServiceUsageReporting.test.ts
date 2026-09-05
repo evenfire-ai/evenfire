@@ -3,6 +3,7 @@ import { LlmErrorCode } from '../../core/errors'
 import type { SingleTurnProvider } from '../../llm'
 import type { LlmUsageEvent, UsageReporter } from '../../usage/usageReporter'
 import type { McpClientConnection, McpClientFactory } from '../stepRouter'
+import type { ConfigureRequest } from '../types'
 import type { McpHostRuntimeAuth } from '../userApprovalRequester'
 import { WorkflowService } from '../workflowService'
 
@@ -272,6 +273,30 @@ describe('WorkflowService — UsageReporter integration', () => {
     const res = await svc.executeStep({ stepId: 's1', instruction: 'go' })
     expect(res.status).toBe('failed')
     expect(res.error).toContain('workflowExecutionId')
+    expect(enqueued).toHaveLength(0)
+  })
+
+  it('does not enqueue Codex workflow usage because proxy finalize owns the ledger', async () => {
+    const llm = mockLlmProvider([{ content: 'final answer', tool_calls: null }])
+    llm.getProviderType = () => 'codex-subscription'
+    const { reporter, enqueued } = makeReporter()
+    const svc = new WorkflowService('my-recipe-12345', {
+      llmFactory: () => llm,
+      mcpClientFactory: mockMcpFactory(),
+      usageReporter: reporter,
+      runtimeAuth: mockRuntimeAuth('my-recipe'),
+    })
+    const configured = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    } as ConfigureRequest)
+    expect(configured.configured).toBe(true)
+    const res = await svc.executeStep({
+      stepId: 's1',
+      instruction: 'hello',
+      contextVars: { workflowExecutionId, workflowTeamId, workflowUserId },
+    })
+    expect(res.status).toBe('completed')
     expect(enqueued).toHaveLength(0)
   })
 

@@ -38,11 +38,17 @@ export function BootSplash({ loading }: BootSplashProps) {
     <div className={`boot-overlay${leaving ? ' boot-overlay--leaving' : ''}`}>
       <section className="boot-screen glass-card" role="status" aria-live="polite">
         <div className="boot-brand">
-          <img className="boot-brand-mark" src="./logo.svg" alt="" aria-hidden="true" />
-          <span className="boot-brand-copy">
-            <span className="boot-brand-title">Evenfire</span>
-            <span className="boot-brand-subtitle">Desktop App</span>
-          </span>
+          <img
+            className="brand-lockup brand-lockup--light"
+            src="./logotype-light.svg"
+            alt=""
+            aria-hidden="true"
+          />
+          <img
+            className="brand-lockup brand-lockup--dark"
+            src="./logotype-dark.svg"
+            alt="Evenfire"
+          />
         </div>
         <div className="boot-progress" aria-hidden="true" />
         <p className="boot-status muted">Loading session…</p>

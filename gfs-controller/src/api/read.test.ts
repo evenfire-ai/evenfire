@@ -35,6 +35,7 @@ function resource(partial: Partial<GfsResource> & { resourceId: string; name: st
     blobKey: null,
     contentSha256: null,
     deletedAt: null,
+    updatedAt: "2026-01-01T00:00:00.000Z",
     ...partial,
   };
 }
@@ -342,5 +343,32 @@ describe("toView", () => {
     expect(view.rid).toBe(rid(9));
     expect(view.gfsUri).toBe(`gfs://main/${rid(9)}`);
     expect(view.path).toBe("/org/n");
+  });
+
+  it("exposes updatedAt as an ISO 8601 UTC string", () => {
+    const view = toView(
+      resource({ resourceId: rid(9), name: "n", updatedAt: "2026-06-01T12:00:00.000Z" })
+    );
+    expect(view.updatedAt).toBe("2026-06-01T12:00:00.000Z");
+    expect(view.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
+  });
+});
+
+describe("listChildren timestamp projection", () => {
+  it("includes updatedAt on every listed item without putting it in the cursor", async () => {
+    const stamp = "2026-06-01T12:00:00.000Z";
+    const store = new FakeStore()
+      .add(resource({ resourceId: rid(1), name: "root", kind: "directory" }))
+      .add(
+        resource({
+          resourceId: rid(2),
+          name: "a",
+          parentResourceId: rid(1),
+          updatedAt: stamp,
+        })
+      );
+    const page = await listChildren(store, "main", rid(1), { limit: 10 });
+    expect(page.items[0]?.updatedAt).toBe(stamp);
+    expect(page.nextCursor).toBeNull();
   });
 });

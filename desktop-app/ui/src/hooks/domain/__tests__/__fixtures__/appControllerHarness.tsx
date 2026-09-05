@@ -119,6 +119,13 @@ export interface AppControllerClerumHandle {
   switchTeam: Fn
   refreshCatalog: Fn
   listPending: Fn
+  /** The `rpc.onMcpOauthCompleted` mock (U5 deep-link push registration). */
+  onMcpOauthCompleted: Fn
+  /**
+   * Fire an OAuth-completed deep link to whatever listener the coordinator
+   * registered via `rpc.onMcpOauthCompleted`. No-op if none is registered yet.
+   */
+  emitMcpOauthCompleted: (args: { mcpServerName: string; provider?: string }) => void
   /** Settles a dependency-health probe held by `delayHealth`. */
   resolveHealth: () => void
   /** Settles whatever `delayAuthenticatedLoad` is holding open. */
@@ -179,11 +186,29 @@ export function extendMockClerumForAppController(
   )
   const listPending = vi.fn(async () => (held() ? approvalsDeferred.promise : []))
 
+  // U5: the OAuth deep-link push. Capture the coordinator's listener so a test
+  // can fire a completion through the real registration path.
+  let mcpOauthListener: ((args: { mcpServerName: string; provider: string }) => void) | null = null
+  const onMcpOauthCompleted = vi.fn(
+    (callback: (args: { mcpServerName: string; provider: string }) => void) => {
+      mcpOauthListener = callback
+      return () => {
+        if (mcpOauthListener === callback) mcpOauthListener = null
+      }
+    }
+  )
+
   Object.assign(bridge.rpc as object, {
     listServers: vi.fn(async () => ({ servers: [] })),
     prewarmHost: vi.fn(async () => ({ status: 'ok' })),
     approveToolCall: vi.fn(async () => undefined),
     denyToolCall: vi.fn(async () => undefined),
+    // The coordinator now owns the connectors panel's initial load (post-auth
+    // bootstrap) — give the app-level `useConnectorsController` a producer.
+    listConnectors: vi.fn(async () => ({ userId: HARNESS_ME.id, agents: [] })),
+    connectMcpServer: vi.fn(async () => undefined),
+    disconnectMcpServer: vi.fn(async () => ({ confirmed: true })),
+    onMcpOauthCompleted,
   })
 
   Object.assign(bridge, {
@@ -278,6 +303,10 @@ export function extendMockClerumForAppController(
     switchTeam,
     refreshCatalog,
     listPending,
+    onMcpOauthCompleted,
+    emitMcpOauthCompleted(args) {
+      mcpOauthListener?.({ mcpServerName: args.mcpServerName, provider: args.provider ?? 'mcp' })
+    },
     resolveHealth() {
       healthDeferred.resolve(createHealth())
     },

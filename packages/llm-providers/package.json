@@ -12,5 +12,9 @@
       "default": "./index.cjs"
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "test": "node --check index.cjs",
+    "build": "node --check index.cjs"
+  }
 }

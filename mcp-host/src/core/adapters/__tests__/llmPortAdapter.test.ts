@@ -266,6 +266,48 @@ describe('LlmPortAdapter usage reporting', () => {
     expect(typeof event.ts).toBe('string')
   })
 
+  it('does not enqueue Codex usage because proxy finalize owns the ledger', async () => {
+    const enqueue = vi.fn()
+    const onUsageRecorded = vi.fn()
+    const reporter = { enqueue, drain: vi.fn(), stop: vi.fn(), bufferSize: vi.fn() }
+    const provider: SingleTurnProvider = {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn().mockResolvedValue({
+        content: null,
+        tool_calls: [],
+        usage: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+        finish_reason: FinishReason.Stop,
+      }),
+      getProviderType: () => 'codex-subscription' as const,
+      classifyError: vi.fn(),
+    }
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.1',
+      'codex-subscription',
+      reporter as never,
+      {
+        host_ref: 'research-host',
+        context_ref: null,
+        llm_secret_name: null,
+      },
+      undefined,
+      undefined,
+      onUsageRecorded
+    )
+    await adapter.completeWithTools({
+      messages: [],
+      tools: [],
+      usageContext: {
+        source_kind: 'channel',
+        team_id: null,
+        user_id: null,
+      },
+    })
+    expect(onUsageRecorded).toHaveBeenCalled()
+    expect(enqueue).not.toHaveBeenCalled()
+  })
+
   it('does not enqueue when usageContext is omitted', async () => {
     const enqueue = vi.fn()
     const reporter = { enqueue, drain: vi.fn(), stop: vi.fn(), bufferSize: vi.fn() }
@@ -612,5 +654,27 @@ describe('Cross-provider ToolCall normalization', () => {
     expect(claudeResult.tool_calls![0]).toMatchObject(expectedToolCall)
     expect(typeof openaiResult.tool_calls![0].arguments).toBe('object')
     expect(typeof claudeResult.tool_calls![0].arguments).toBe('object')
+  })
+
+  it('preserves Codex insufficient_scope on the LlmError boundary', async () => {
+    const mockProvider: SingleTurnProvider = {
+      completeSingleTurn: vi.fn().mockRejectedValue(new Error('missing scope')),
+      completeSingleTurnWithTools: vi.fn(),
+      getProviderType: () => 'codex-subscription' as const,
+      classifyError: vi.fn(() => ({
+        code: LlmErrorCode.AuthenticationFailed,
+        retryable: false,
+        message: 'missing scope',
+        providerCode: 'insufficient_scope',
+      })),
+    }
+    const adapter = new LlmPortAdapter(mockProvider, 'gpt-5.3-codex', 'codex-subscription')
+    await expect(
+      adapter.complete({ messages: [{ role: 'user', content: 'Hi' }] })
+    ).rejects.toMatchObject({
+      code: LlmErrorCode.AuthenticationFailed,
+      providerCode: 'insufficient_scope',
+      retryable: false,
+    })
   })
 })

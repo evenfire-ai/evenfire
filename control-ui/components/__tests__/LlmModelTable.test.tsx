@@ -73,6 +73,80 @@ describe('LlmModelTable catalog-lifecycle columns', () => {
     expect(screen.queryByText('Discovered')).not.toBeInTheDocument()
     expect(screen.queryByText('Stale', { selector: '.cu-px-badge--warn' })).toBeNull()
   })
+
+  it('groups OpenAI API-key and subscription rows under one family', () => {
+    renderTable([
+      {
+        ...baseModel,
+        id: 'oa-key',
+        provider: 'openai',
+        model: 'gpt-5.1',
+        vendor: 'OpenAI',
+        display_name: 'GPT-5.1',
+      },
+      {
+        ...baseModel,
+        id: 'oa-sub',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        vendor: 'OpenAI',
+        display_name: 'GPT-5.1',
+      },
+      {
+        ...baseModel,
+        id: 'oa-sub-only',
+        provider: 'codex-subscription',
+        model: 'gpt-5.3-codex',
+        vendor: 'OpenAI',
+        display_name: 'GPT-5.3 Codex',
+      },
+    ])
+    expect(
+      screen.queryByRole('button', { name: /OpenAI Codex Subscription/i })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+    expect(screen.getByText('gpt-5.1')).toBeInTheDocument()
+    expect(screen.getByText('API key · Subscription')).toBeInTheDocument()
+    expect(screen.getByText('gpt-5.3-codex').closest('tr')).toHaveTextContent('Subscription')
+  })
+
+  it('edits the subscription row of a collapsed OpenAI family through the existing actions menu', () => {
+    const onEdit = vi.fn()
+    render(
+      <LlmModelTable
+        items={[
+          {
+            ...baseModel,
+            id: 'oa-key',
+            provider: 'openai',
+            model: 'gpt-5.1',
+            vendor: 'OpenAI',
+            display_name: 'GPT-5.1',
+          },
+          {
+            ...baseModel,
+            id: 'oa-sub',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            vendor: 'OpenAI',
+            display_name: 'GPT-5.1',
+          },
+        ]}
+        unpricedKeys={new Set()}
+        onCreate={vi.fn()}
+        onEdit={onEdit}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        onRefresh={vi.fn()}
+        deletingId={null}
+        refreshing={false}
+        loading={false}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI models' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for model openai/gpt-5.1' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit subscription' }))
+    expect(onEdit).toHaveBeenCalledWith('oa-sub')
+  })
 })
 
 describe('LlmModelTable filters', () => {

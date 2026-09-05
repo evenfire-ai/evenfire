@@ -32,7 +32,7 @@ import { useToast } from './Toast'
 import { IconAlertTriangle, IconRefresh, IconX } from './icons'
 import { CheckboxField } from './ui'
 
-type TeamSortKey = 'members' | 'agents' | 'contexts'
+type TeamSortKey = 'members' | 'agents'
 
 export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: ProfileAdminHomeProps) {
   const router = useRouter()
@@ -64,7 +64,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
   const [deleteDialogError, setDeleteDialogError] = useState('')
 
   const [teamAgentCounts, setTeamAgentCounts] = useState<Record<string, number>>({})
-  const [teamContextCounts, setTeamContextCounts] = useState<Record<string, number>>({})
   const [pendingInvitations, setPendingInvitations] = useState<AdminPendingInvitationListItem[]>([])
   const [resendingInvitationId, setResendingInvitationId] = useState<string | null>(null)
   const [resendingPasswordSetupUserId, setResendingPasswordSetupUserId] = useState<string | null>(
@@ -124,7 +123,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
         Array.isArray(overview.pendingInvitations) ? overview.pendingInvitations : []
       )
       setTeamAgentCounts(overview.teamAgentCounts || {})
-      setTeamContextCounts(overview.teamContextCounts || {})
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load data')
     } finally {
@@ -186,17 +184,15 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
       let countDiff = 0
       if (teamSortKey === 'members') {
         countDiff = a.memberCount - b.memberCount
-      } else if (teamSortKey === 'agents') {
-        countDiff = (teamAgentCounts[a.id] ?? 0) - (teamAgentCounts[b.id] ?? 0)
       } else {
-        countDiff = (teamContextCounts[a.id] ?? 0) - (teamContextCounts[b.id] ?? 0)
+        countDiff = (teamAgentCounts[a.id] ?? 0) - (teamAgentCounts[b.id] ?? 0)
       }
       countDiff *= direction
       if (countDiff !== 0) return countDiff
       return a.name.localeCompare(b.name)
     })
     return sorted
-  }, [filteredTeams, teamAgentCounts, teamContextCounts, teamSortDir, teamSortKey])
+  }, [filteredTeams, teamAgentCounts, teamSortDir, teamSortKey])
 
   const sortedUsers = useMemo(() => {
     const sorted = [...visibleUsers]
@@ -591,9 +587,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         <th style={{ width: '5rem', textAlign: 'right' }}>
                           {renderTeamSortButton('agents', 'Agents')}
                         </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
-                        </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
                     </thead>
@@ -617,9 +610,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                         </th>
                         <th style={{ width: '5rem', textAlign: 'right' }}>
                           {renderTeamSortButton('agents', 'Agents')}
-                        </th>
-                        <th style={{ width: '5rem', textAlign: 'right' }}>
-                          {renderTeamSortButton('contexts', 'Contexts')}
                         </th>
                         <th style={{ width: '4.5rem', textAlign: 'right' }} aria-label="Actions" />
                       </tr>
@@ -664,15 +654,6 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
                             }}
                           >
                             {teamAgentCounts[team.id] ?? 0}
-                          </td>
-                          <td
-                            style={{
-                              fontVariantNumeric: 'tabular-nums',
-                              color: 'var(--cu-text-muted)',
-                              textAlign: 'right',
-                            }}
-                          >
-                            {teamContextCounts[team.id] ?? 0}
                           </td>
                           <td style={{ textAlign: 'right' }}>
                             <button
@@ -1085,7 +1066,7 @@ export function ProfileAdminHome({ activeTab, highlightedAdminId = '' }: Profile
             </div>
             <p className="cu-muted" style={{ fontSize: '0.875rem', margin: '0 0 1rem' }}>
               Permanently delete <strong>{teamToDelete.name}</strong> and all memberships, pending
-              invitations, and team context/agent mappings. This cannot be undone.
+              invitations, and team access/agent mappings. This cannot be undone.
             </p>
             {deleteDialogError ? (
               <div className="cu-banner cu-banner--error" style={{ marginBottom: '0.75rem' }}>

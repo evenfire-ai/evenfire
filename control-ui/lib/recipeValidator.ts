@@ -735,7 +735,7 @@ export function validateRecipe(input: string, defaults?: OperatorDefaults): Vali
       severity: 'info',
       path: 'spec.contextRef',
       message:
-        'Omitted — WRC will auto-create a private Context "wf-<recipeName>" for this recipe. Set explicitly only to share connectors with other recipes in the same namespace.',
+        'Omitted — WRC will auto-create a private connector scope for this recipe. Set explicitly only to share connectors with other recipes in the same namespace.',
     })
   }
 

@@ -472,6 +472,7 @@ export async function listEnabledGroupedByProvider(
     `SELECT provider, model, vendor, display_name, context_window_tokens
        FROM llm_allowed_models
       WHERE enabled
+        AND NOT (provider = 'codex-subscription' AND stale)
       ORDER BY provider ASC, model ASC`
   )
   // Null-prototype map so a stray/legacy `provider` value equal to an

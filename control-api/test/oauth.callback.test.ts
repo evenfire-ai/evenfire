@@ -147,17 +147,19 @@ describe('handleOAuthCallback (O4.1)', () => {
     expect(db.query).toHaveBeenCalledTimes(1)
     const [sql, params] = db.query.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('INSERT INTO oauth_grants')
-    expect(params[0]).toBe('sandbox-recipes')
-    expect(params[1]).toBe('crm')
-    expect(params[2]).toBe(USER_ID)
-    expect(params[3]).toBe('salesforce')
+    // owner_kind leads the param list (recipe domain for the recipe callback).
+    expect(params[0]).toBe('recipe')
+    expect(params[1]).toBe('sandbox-recipes')
+    expect(params[2]).toBe('crm')
+    expect(params[3]).toBe(USER_ID)
     expect(params[4]).toBe('salesforce')
-    // params[5] is the encrypted access token; should be a non-empty string.
-    expect(typeof params[5]).toBe('string')
-    expect((params[5] as string).startsWith('v1.')).toBe(true)
-    // params[6] is the encrypted refresh token; should also be encrypted.
+    expect(params[5]).toBe('salesforce')
+    // params[6] is the encrypted access token; should be a non-empty string.
     expect(typeof params[6]).toBe('string')
     expect((params[6] as string).startsWith('v1.')).toBe(true)
+    // params[7] is the encrypted refresh token; should also be encrypted.
+    expect(typeof params[7]).toBe('string')
+    expect((params[7] as string).startsWith('v1.')).toBe(true)
   })
 
   it('stores a service grant with no user_id when state.grantKind is service', async () => {
@@ -185,12 +187,13 @@ describe('handleOAuthCallback (O4.1)', () => {
     expect(sql).toContain(
       "ON CONFLICT (recipe_namespace, recipe_name, oauth_client_id) WHERE grant_kind = 'service'"
     )
-    // Service INSERT carries 7 params (no user_id): ns, name, oauthClientId,
-    // provider, accessToken, refreshToken, expiresAt.
-    expect(params).toHaveLength(7)
-    expect(params[0]).toBe('sandbox-recipes')
-    expect(params[1]).toBe('crm')
-    expect(params[2]).toBe('salesforce') // oauthClientId — NOT a userId
+    // Service INSERT carries 8 params (no user_id): owner_kind, ns, name,
+    // oauthClientId, provider, accessToken, refreshToken, expiresAt.
+    expect(params).toHaveLength(8)
+    expect(params[0]).toBe('recipe')
+    expect(params[1]).toBe('sandbox-recipes')
+    expect(params[2]).toBe('crm')
+    expect(params[3]).toBe('salesforce') // oauthClientId — NOT a userId
   })
 
   it('rejects a tampered state (signature mismatch)', async () => {

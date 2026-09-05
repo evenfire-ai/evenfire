@@ -22,12 +22,16 @@ function launchOptions() {
   return { headless: true }
 }
 
-async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
+async function headerGeometry(
+  width: number,
+  drawerOpen = false,
+  searchOpen = false
+): Promise<HeaderGeometry> {
   if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
   await page.setContent(`
     <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
-      <div class="top-bar"><div class="header-left"><div class="global-search"></div></div></div>
+      <div class="top-bar"><div class="header-left"><div class="global-search${searchOpen ? ' is-open' : ''}"></div></div></div>
       <section class="page">
         <header class="apps-page-header">Apps</header>
         <header class="sandbox-ui-mounted-header"><button>Back</button></header>
@@ -62,8 +66,14 @@ describe('responsive utility gutter', () => {
   it('uses the compact closed-header reservation at tablet widths and retains drawer-open space', async () => {
     const closed = await headerGeometry(1100)
     const open = await headerGeometry(1100, true)
+    const searchExpanded = await headerGeometry(1100, false, true)
 
-    expect(closed.searchWidth).toBe(352)
+    // Idle, the global-search collapses to the 40px magnifier; it grows to its
+    // tablet expanded width (clamp(160px, 32vw, …) = 352px at 1100) only on
+    // focus/open. The utility gutter still reserves for the *expanded* search
+    // (352 + space-2 + 36 = 398) so expansion never collides with page content.
+    expect(closed.searchWidth).toBe(40)
+    expect(searchExpanded.searchWidth).toBe(352)
     expect(closed.mountedPaddingRight).toBe(398)
     expect(closed.mountedPaddingRight).toBeLessThan(open.pagePaddingRight)
     expect(open.mountedPaddingRight).toBe(0)

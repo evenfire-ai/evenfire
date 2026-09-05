@@ -35,6 +35,8 @@ describe('control-ui control-api proxy route', () => {
     expect(init.method).toBe('POST')
     expect(init.headers.get('authorization')).toBe('Bearer test-token')
     expect(init.headers.get('x-trace')).toBe('abc123')
+    expect(init.headers.get('x-forwarded-host')).toBe('localhost:3000')
+    expect(init.headers.get('x-forwarded-proto')).toBe('http')
     expect(init.headers.has('host')).toBe(false)
     expect(init.headers.has('content-length')).toBe(false)
     expect(init.signal).toBeDefined()

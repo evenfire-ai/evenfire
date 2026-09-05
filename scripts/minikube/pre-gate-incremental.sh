@@ -206,6 +206,7 @@ incremental_classify_path() {
       ;;
     profile-ui/*) incremental_add_target profile-ui profiles profile-ui ;;
     webhook-proxy/*) incremental_add_target webhook-proxy webhook-ingress webhook-proxy ;;
+    codex-llm-proxy/*) incremental_add_target codex-llm-proxy control-plane codex-llm-proxy ;;
     tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)
       incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e
       ;;

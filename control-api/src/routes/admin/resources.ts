@@ -13,7 +13,6 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
-import { getModelAllowlistState, isModelAllowed } from '../../services/llmAllowedModels.js'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -36,7 +35,7 @@ import {
 } from './communicationChannelSpecHelpers.js'
 import { enumerateHostModelReferences } from './hostModelReferences.js'
 import { validateHostSecretRef } from './hostSecrets.js'
-import { type HostSpecValidationDeps, validateHostSpec } from './hostSpecValidation.js'
+import { createHostValidationDeps, validateHostSpec } from './hostSpecValidation.js'
 import {
   type HostSpecIncoherenceToleratedEvent,
   emitHostSpecIncoherenceTolerated,
@@ -509,11 +508,8 @@ function hostModelLockNames(spec: unknown): string[] {
 // `isModelAllowed` (the fail-closed gate) AND `getModelAllowlistState` (the
 // stale-warning lookup) are bound — leaving the latter defaulted would let
 // `maybeWarnStale` escape to the global pool under the lock (adenda A3).
-function hostValidationDeps(db: DbClient): HostSpecValidationDeps {
-  return {
-    isModelAllowed: (provider, model) => isModelAllowed(provider, model, db),
-    getModelAllowlistState: (provider, model) => getModelAllowlistState(provider, model, db),
-  }
+function hostValidationDeps(db: DbClient) {
+  return createHostValidationDeps(db)
 }
 
 export function createAdminResourcesRouter(gateway: K8sGateway): Router {

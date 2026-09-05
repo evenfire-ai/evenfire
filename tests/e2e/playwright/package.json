@@ -1,6 +1,6 @@
 {
   "name": "clerum-playwright-tests",
-  "version": "0.1.21",
+  "version": "0.1.40",
   "private": true,
   "description": "Playwright E2E tests for Control UI and Desktop App",
   "scripts": {
@@ -8,10 +8,12 @@
     "test:control-ui": "playwright test --project=control-ui",
     "test:desktop": "playwright test --project=desktop",
     "test:headed": "playwright test --headed --project=control-ui",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "install-browsers": "playwright install chromium"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "typescript": "5.9.3"
   }
 }

@@ -1,5 +1,5 @@
-import { createHmac } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import { createHmac } from 'node:crypto'
 import { signOAuthState, verifyOAuthState, verifyOAuthStateSignature } from '../src/oauth/state.js'
 
 const SECRET = 'unit-test-state-hmac-secret-32-bytes-pad'
@@ -131,6 +131,167 @@ describe('signOAuthState / verifyOAuthState (O3.1)', () => {
   })
 })
 
+describe('OAuth state — recipe subject wire format is FROZEN (U5 byte-identity)', () => {
+  // The exact field set + order the pre-U5 recipe state serialized with. The
+  // authorize-URL helper signs with this exact input shape (background defaulted
+  // to false). If U5 leaks a `subjectKind`/`mcpServerName` field, or reorders,
+  // this decode-and-rebuild guard fails.
+  const RECIPE_INPUT = {
+    recipeNamespace: 'sandbox-recipes',
+    recipeName: 'crm',
+    userId: 'user-uuid-1',
+    oauthClientId: 'salesforce',
+    grantKind: 'user' as const,
+    background: false,
+  }
+  const FROZEN_KEYS = [
+    'recipeNamespace',
+    'recipeName',
+    'userId',
+    'oauthClientId',
+    'grantKind',
+    'background',
+    'expiresAt',
+    'nonce',
+  ]
+
+  it('carries NO subject discriminator and NO mcp fields for a recipe subject', () => {
+    const state = signOAuthState(SECRET, RECIPE_INPUT)
+    const payload = state.split('.')[1]
+    const obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    expect(Object.keys(obj)).toEqual(FROZEN_KEYS)
+    expect('subjectKind' in obj).toBe(false)
+    expect('mcpServerName' in obj).toBe(false)
+  })
+
+  it('serializes byte-for-byte as JSON.stringify of the frozen field order', () => {
+    const state = signOAuthState(SECRET, RECIPE_INPUT)
+    const payload = state.split('.')[1]
+    const obj = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    // Re-serialize in the exact frozen order using ONLY the wire values; a byte
+    // match proves the serialization order + field set is unchanged from pre-U5.
+    const rebuilt = Buffer.from(
+      JSON.stringify({
+        recipeNamespace: obj.recipeNamespace,
+        recipeName: obj.recipeName,
+        userId: obj.userId,
+        oauthClientId: obj.oauthClientId,
+        grantKind: obj.grantKind,
+        background: obj.background,
+        expiresAt: obj.expiresAt,
+        nonce: obj.nonce,
+      })
+    ).toString('base64url')
+    expect(rebuilt).toBe(payload)
+    // And the signature covers exactly that payload.
+    const sig = createHmac('sha256', SECRET).update(`v1.${payload}`).digest('base64url')
+    expect(state.split('.')[2]).toBe(sig)
+  })
+
+  it('an explicit subjectKind:"recipe" produces the same frozen wire (no discriminator)', () => {
+    const withTag = signOAuthState(SECRET, { ...RECIPE_INPUT, subjectKind: 'recipe' as const })
+    const obj = JSON.parse(Buffer.from(withTag.split('.')[1], 'base64url').toString('utf8'))
+    expect('subjectKind' in obj).toBe(false)
+    expect(Object.keys(obj)).toEqual(FROZEN_KEYS)
+  })
+})
+
+describe('OAuth state — mcp subject round-trip + fail-closed (U5)', () => {
+  const MCP_INPUT = {
+    subjectKind: 'mcp' as const,
+    mcpServerName: 'gdrive',
+    userId: 'user-uuid-9',
+    oauthClientId: 'google-drive',
+    grantKind: 'user' as const,
+    background: false,
+  }
+
+  it('round-trips subjectKind + mcpServerName + userId + oauthClientId', () => {
+    const state = signOAuthState(SECRET, MCP_INPUT)
+    const r = verifyOAuthStateSignature(SECRET, state)
+    expect(r.kind).toBe('ok')
+    if (r.kind === 'ok') {
+      expect(r.claims.subjectKind).toBe('mcp')
+      // Narrow to the mcp variant to read mcpServerName.
+      if (r.claims.subjectKind === 'mcp') {
+        expect(r.claims.mcpServerName).toBe('gdrive')
+      }
+      expect(r.claims.userId).toBe('user-uuid-9')
+      expect(r.claims.oauthClientId).toBe('google-drive')
+      // A recipe field must NOT be present on an mcp subject.
+      expect((r.claims as Record<string, unknown>).recipeNamespace).toBeUndefined()
+    }
+  })
+
+  it('rejects a forged signature on an mcp state', () => {
+    const state = signOAuthState(SECRET, MCP_INPUT)
+    const bad = verifyOAuthStateSignature('different-secret-32-bytes-padding-here', state)
+    expect(bad.kind).toBe('invalid_signature')
+  })
+
+  it('rejects a tampered mcpServerName (signature no longer matches)', () => {
+    const state = signOAuthState(SECRET, MCP_INPUT)
+    const [version, payload, signature] = state.split('.')
+    const tampered = Buffer.from(
+      JSON.stringify({
+        ...JSON.parse(Buffer.from(payload, 'base64url').toString()),
+        mcpServerName: 'attacker-server',
+      })
+    ).toString('base64url')
+    const r = verifyOAuthStateSignature(SECRET, [version, tampered, signature].join('.'))
+    expect(r.kind).toBe('invalid_signature')
+  })
+
+  it('fails closed on a validly-signed mcp state that is missing mcpServerName', () => {
+    // Sign a hand-built payload (mcp discriminator, no mcpServerName) with the
+    // REAL secret so only the shape — not the signature — can be the failure.
+    const bad = {
+      subjectKind: 'mcp',
+      userId: 'u',
+      oauthClientId: 'c',
+      grantKind: 'user',
+      background: false,
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      nonce: 'n',
+    }
+    const payload = Buffer.from(JSON.stringify(bad)).toString('base64url')
+    const sig = createHmac('sha256', SECRET).update(`v1.${payload}`).digest('base64url')
+    const r = verifyOAuthStateSignature(SECRET, `v1.${payload}.${sig}`)
+    // Signature is valid, but the malformed mcp shape is rejected at decode.
+    expect(r.kind).toBe('invalid_format')
+  })
+
+  it('fails closed on an unknown subjectKind (never defaults to recipe)', () => {
+    const bad = {
+      subjectKind: 'evil',
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'crm',
+      userId: 'u',
+      oauthClientId: 'c',
+      grantKind: 'user',
+      background: false,
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      nonce: 'n',
+    }
+    const payload = Buffer.from(JSON.stringify(bad)).toString('base64url')
+    const sig = createHmac('sha256', SECRET).update(`v1.${payload}`).digest('base64url')
+    const r = verifyOAuthStateSignature(SECRET, `v1.${payload}.${sig}`)
+    expect(r.kind).toBe('invalid_format')
+  })
+
+  it('the recipe external-binding verifier fails closed on an mcp state', () => {
+    const state = signOAuthState(SECRET, MCP_INPUT)
+    const r = verifyOAuthState(SECRET, state, {
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'gdrive',
+      userId: 'user-uuid-9',
+      oauthClientId: 'google-drive',
+    })
+    expect(r.kind).toBe('binding_mismatch')
+    if (r.kind === 'binding_mismatch') expect(r.reason).toBe('subjectKind')
+  })
+})
+
 describe('verifyOAuthStateSignature (signature-only, for the path-less callback)', () => {
   it('verifies signature + expiry and returns claims with NO external binding check', () => {
     const state = signOAuthState(SECRET, BINDING)
@@ -181,6 +342,8 @@ describe('verifyOAuthStateSignature (signature-only, for the path-less callback)
       })
     ).toString('base64url')
     const sig = createHmac('sha256', SECRET).update(`${version}.${expired}`).digest('base64url')
-    expect(verifyOAuthStateSignature(SECRET, [version, expired, sig].join('.')).kind).toBe('expired')
+    expect(verifyOAuthStateSignature(SECRET, [version, expired, sig].join('.')).kind).toBe(
+      'expired'
+    )
   })
 })

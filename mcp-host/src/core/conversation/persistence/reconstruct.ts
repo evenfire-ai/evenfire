@@ -119,6 +119,19 @@ function parseModelSelections(raw: string | null): Record<string, string> | unde
   }
 }
 
+/**
+ * U5 — narrow a persisted `reason` column to the `PendingApproval.reason` union.
+ * Only the known reactive-consent value survives; NULL / legacy / unknown values
+ * read as the default HITL gate (undefined). Shared by `reconstructPendingApproval`
+ * (full rehydration) and the lightweight summary/message-page REST projections so
+ * the "degrade unknown → generic approval" rule lives in ONE place (no divergence).
+ */
+export function normalizeConnectReason(
+  raw: string | null | undefined
+): 'connect_required' | undefined {
+  return raw === 'connect_required' ? 'connect_required' : undefined
+}
+
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
   const snapshot = JSON.parse(row.context_snapshot) as ChatMessage[]
   return {
@@ -131,6 +144,10 @@ export function reconstructPendingApproval(row: PendingApprovalRow): PendingAppr
     completed_results: deserializeCompletedResults(row.completed_results),
     intent_summary: row.intent_summary ?? undefined,
     traceContext: parseTraceContext(row.trace_context),
+    // U5 — rehydrate the connect_required discriminator so a cold restart does
+    // NOT degrade a reactive-consent suspension into a generic approval.
+    reason: normalizeConnectReason(row.reason),
+    mcpServerName: row.mcp_server_name ?? undefined,
   }
 }
 

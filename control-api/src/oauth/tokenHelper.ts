@@ -7,11 +7,11 @@ import {
   type SecretReader,
 } from './callback.js'
 import {
-  type OAuthProvider,
   type ParsedTokenResponse,
   getOAuthProviderAdapter,
+  isKnownOAuthProvider,
 } from './providers.js'
-import { type OAuthGrantKey, getOAuthGrant, upsertOAuthGrant } from './store.js'
+import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './store.js'
 
 /**
  * Fetch the current access token for a grant (user or service), refreshing on
@@ -24,7 +24,12 @@ import { type OAuthGrantKey, getOAuthGrant, upsertOAuthGrant } from './store.js'
  */
 
 export type GetAccessTokenInput = OAuthGrantKey & {
-  /** User grants only: require a background-consented grant (per-user broker, SEC-5). */
+  /**
+   * Require a background-consented grant (per-user broker, SEC-5). Parametrized,
+   * NOT pinned to `true`: the recipe background broker passes `true`; the
+   * interactive mcp-host live-session path (U1) passes `false` (there IS a live
+   * session). Honored for `user` and `shared` grants; ignored for `service`.
+   */
   requireBackground?: boolean
 }
 
@@ -80,7 +85,7 @@ export async function getAccessToken(
 
   const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
-  if (!isKnownProvider(decl.provider)) {
+  if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }
 
@@ -148,31 +153,28 @@ export async function getAccessToken(
   }
 
   // Some providers omit refresh_token on refresh — keep the previous one.
-  // Spread `...input` so the grant key (grantKind + identifiers) is carried
-  // through verbatim — the refresh re-upserts the same row, user or service.
-  await upsertOAuthGrant(deps.db, deps.encryptionKey, {
+  // Persist via `refreshOAuthGrantTokens` (UPDATE by key), NOT an upsert. The
+  // grant row was read above, but a concurrent disconnect (DELETE) can land
+  // between that read and this write; an `INSERT … ON CONFLICT` would RESURRECT
+  // the deleted grant with fresh tokens (R1-B1), whereas an UPDATE touches 0
+  // rows once the row is gone. Spread `...input` so the grant key
+  // (grantKind + owner/identifiers) targets the SAME row verbatim; for `shared`
+  // the UPDATE never rewrites `bootstrapped_by_user_id` or the shared identity.
+  const refreshed = await refreshOAuthGrantTokens(deps.db, deps.encryptionKey, {
     ...input,
     provider: decl.provider,
     accessToken: parsed.accessToken,
     refreshToken: parsed.refreshToken ?? grant.refreshToken,
     accessTokenExpiresInSec: parsed.expiresIn,
   })
+  // 0 rows ⇒ the grant was deleted during the refresh window. Surface it as
+  // "needs reauth" (no_grant) rather than return a token for a revoked grant —
+  // and crucially do NOT recreate the row.
+  if (!refreshed.updated) return { kind: 'no_grant' }
 
   const expiresAt =
     typeof parsed.expiresIn === 'number'
       ? new Date(Date.now() + parsed.expiresIn * 1000)
       : undefined
   return { kind: 'ok', accessToken: parsed.accessToken, expiresAt }
-}
-
-const KNOWN_PROVIDERS: ReadonlySet<OAuthProvider> = new Set([
-  'salesforce',
-  'slack',
-  'notion',
-  'microsoft-graph',
-  'google',
-])
-
-function isKnownProvider(value: string): value is OAuthProvider {
-  return KNOWN_PROVIDERS.has(value as OAuthProvider)
 }

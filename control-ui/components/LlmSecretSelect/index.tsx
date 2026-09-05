@@ -16,7 +16,6 @@ function ProviderSummary({
 
   return (
     <span className="cu-agent-select__providers">
-      <span className="cu-agent-select__providers-label">Providers: </span>
       {providers.map((provider, index) => (
         <Fragment key={provider.id}>
           {index > 0 ? ', ' : null}
@@ -82,28 +81,32 @@ export function LlmSecretSelect({
           {options.length === 0 ? (
             <span className="cu-agent-select__empty">No options available.</span>
           ) : (
-            options.map(option => (
-              <button
-                key={option.value}
-                type="button"
-                className="cu-agent-select__option"
-                data-active={value === option.value ? 'true' : 'false'}
-                role="option"
-                aria-selected={value === option.value}
-                onClick={() => {
-                  onChange(option.value)
-                  setOpen(false)
-                }}
-              >
-                <span className="cu-agent-select__option-copy">
-                  <span className="cu-agent-select__option-name">{option.label}</span>
-                  {option.providers && option.providers.length > 0 ? (
-                    <ProviderSummary providers={option.providers} />
-                  ) : option.meta ? (
-                    <span className="cu-agent-select__option-meta">{option.meta}</span>
-                  ) : null}
-                </span>
-              </button>
+            options.map((option, index) => (
+              <Fragment key={option.value}>
+                {option.group && option.group !== options[index - 1]?.group ? (
+                  <span className="cu-agent-select__group">{option.group}</span>
+                ) : null}
+                <button
+                  type="button"
+                  className="cu-agent-select__option"
+                  data-active={value === option.value ? 'true' : 'false'}
+                  role="option"
+                  aria-selected={value === option.value}
+                  onClick={() => {
+                    onChange(option.value)
+                    setOpen(false)
+                  }}
+                >
+                  <span className="cu-agent-select__option-copy">
+                    <span className="cu-agent-select__option-name">{option.label}</span>
+                    {option.providers && option.providers.length > 0 ? (
+                      <ProviderSummary providers={option.providers} />
+                    ) : option.meta ? (
+                      <span className="cu-agent-select__option-meta">{option.meta}</span>
+                    ) : null}
+                  </span>
+                </button>
+              </Fragment>
             ))
           )}
         </div>

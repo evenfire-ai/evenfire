@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import {
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_IDS,
+  PROVIDER_MODEL_CATALOG_MODE,
   PROVIDER_NON_SECRET_ENV,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
+  providerDescriptor,
+  requireStaticCredentialSlot,
 } from '@clerum/llm-providers'
 
 // Unit tests for the shared @clerum/llm-providers package (spec §3-R4). Hosted
@@ -13,7 +17,7 @@ import {
 // (same convention as @clerum/image-policy → control-api/test/imagePolicy.test.ts).
 
 describe('PROVIDER_IDS', () => {
-  it('is the canonical 22-provider set in auto-detect priority order', () => {
+  it('is the canonical 22 static providers plus the Codex broker', () => {
     expect([...PROVIDER_IDS]).toEqual([
       'openai',
       'claude',
@@ -37,14 +41,19 @@ describe('PROVIDER_IDS', () => {
       'novita',
       'minimax',
       'azure',
+      'codex-subscription',
     ])
   })
 
-  it('has a display label and a credential-slot entry for every id', () => {
+  it('has a display label for every id and credential slots only for static providers', () => {
     for (const id of PROVIDER_IDS) {
       expect(PROVIDER_DISPLAY_LABELS[id]).toBeTruthy()
-      expect(PROVIDER_CREDENTIAL_SLOTS[id].length).toBeGreaterThan(0)
       expect(PROVIDER_NON_SECRET_ENV[id]).toBeInstanceOf(Array)
+      if (id === 'codex-subscription') {
+        expect(PROVIDER_CREDENTIAL_SLOTS[id]).toEqual([])
+      } else {
+        expect(PROVIDER_CREDENTIAL_SLOTS[id].length).toBeGreaterThan(0)
+      }
     }
   })
 })
@@ -159,5 +168,25 @@ describe('non-secret per-Host env', () => {
     ] as const) {
       expect(PROVIDER_NON_SECRET_ENV[id]).toEqual([])
     }
+  })
+})
+
+describe('codex-subscription descriptor', () => {
+  it('is an oauth-broker with a dynamic catalog and no static slots', () => {
+    expect(providerDescriptor('codex-subscription')).toMatchObject({
+      id: 'codex-subscription',
+      authMode: 'oauth-broker',
+      modelCatalogMode: 'dynamic',
+      credentialSlots: [],
+      nonSecretEnv: [],
+    })
+    expect(PROVIDER_AUTH_MODE['codex-subscription']).toBe('oauth-broker')
+    expect(PROVIDER_MODEL_CATALOG_MODE['codex-subscription']).toBe('dynamic')
+  })
+
+  it('rejects the static credential helper for a broker', () => {
+    expect(() => requireStaticCredentialSlot(providerDescriptor('codex-subscription'))).toThrow(
+      /static credential helper/
+    )
   })
 })

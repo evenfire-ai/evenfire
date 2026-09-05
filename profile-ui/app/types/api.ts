@@ -42,6 +42,16 @@ export type DesktopEnvironmentResponse = {
   rpcProxyBaseUrl: string
 }
 
+export type DesktopReleaseResponse = {
+  releaseId: string
+  externalRestApiVersion: string
+  rpcProxyVersion: string
+  desktopVersion: string
+  minimumDesktopVersion: string
+  releaseTag: string
+  releaseUrl: string
+}
+
 export type PasswordLoginResponse = {
   me: {
     id: string

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
 import { runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../../queue/messageQueue'
@@ -131,6 +132,79 @@ describe('AgentStateMachine -- concurrent execution', () => {
     expect(pending[0].requestId).toBe('req-concurrent-1')
     expect(pending[0].toolName).toBe('shell_exec')
     expect(pending[0].userId).toBe('user-1')
+  })
+
+  // U5 — the polling projection of a connect_required suspension must carry the
+  // same discriminator the SSE `suspended` event does, so the desktop renders
+  // "Connect <server>" instead of a generic approval. Fixture built by the REAL
+  // producer (buildConnectRequiredApproval), never hand-shaped (T1).
+  it('getPendingApprovals surfaces reason/mcpServerName for a connect_required suspension', async () => {
+    const approval = buildConnectRequiredApproval(
+      { id: 'tc_connect', name: 'monday__list_boards', arguments: { limit: 5 } },
+      { mcpServerName: 'monday' }
+    )
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval,
+    })
+
+    const { agent } = setupAgent()
+    await agent.executeTask(createTestTask('list boards'))
+
+    const pending = agent.getPendingApprovals()
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).toMatchObject({
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+    })
+    expect(pending[0]).not.toHaveProperty('provider')
+  })
+
+  it('getPendingApprovals leaves a generic approval free of connect fields (back-compat)', async () => {
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval: {
+        request_id: 'req-generic-1',
+        tool_name: 'shell_exec',
+        parameters: { command: 'ls' },
+        description: 'List files',
+        tool_call_id: 'tc_1',
+        context_snapshot: [],
+      },
+    })
+
+    const { agent } = setupAgent()
+    await agent.executeTask(createTestTask('run a command'))
+
+    const pending = agent.getPendingApprovals()
+    expect(pending).toHaveLength(1)
+    expect(pending[0]).not.toHaveProperty('reason')
+    expect(pending[0]).not.toHaveProperty('mcpServerName')
+    expect(pending[0]).not.toHaveProperty('provider')
+  })
+
+  it('emits tool:approval_needed carrying the connect_required discriminator', async () => {
+    const approval = buildConnectRequiredApproval(
+      { id: 'tc_connect', name: 'monday__list_boards', arguments: { limit: 5 } },
+      { mcpServerName: 'monday' }
+    )
+    ;(runToolUseLoop as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      type: 'need_approval',
+      approval,
+    })
+
+    const { agent } = setupAgent()
+    const events: Array<{ data: Record<string, unknown> }> = []
+    agent.on('tool:approval_needed', (e: { data: Record<string, unknown> }) => events.push(e))
+
+    await agent.executeTask(createTestTask('list boards'))
+
+    expect(events).toHaveLength(1)
+    expect(events[0].data).toMatchObject({
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+    })
+    expect(events[0].data).not.toHaveProperty('provider')
   })
 
   it('should resolve approval by requestId and resume execution', async () => {

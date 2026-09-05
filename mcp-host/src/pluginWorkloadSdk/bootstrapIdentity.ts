@@ -7,6 +7,7 @@ import type {
   PluginWorkloadSdkBootstrapProof,
   PluginWorkloadSdkClientNotificationsBootstrapProof,
 } from './promptBridge/controlApiClient'
+import { readVerifiedSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   /**
@@ -86,23 +87,81 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   if (!isRunnableLlmModelId(model)) {
     return { configured: false, message: 'model is required and has an invalid format' }
   }
-  const proof = deps.verify ? await deps.verify(req.provider, model) : null
+  // Always integrity-check a supplied binding before the provider protocol
+  // branch. Request-controlled provider/version must not skip this check.
+  const verifiedBinding = readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
+  if (req.provider === 'codex-subscription') {
+    if (!verifiedBinding) {
+      replaceSdkOnlyCodexBinding(null)
+      return {
+        configured: true,
+        ready: true,
+        capabilityFamily: 'promptBridge',
+        provider: req.provider,
+        model,
+        contractVersion: 3,
+        policyReady: false,
+        policyState: 'binding_missing',
+        policyReason: 'codex_execution_binding_missing',
+        message: 'SDK-only Codex bootstrap requires a live v3 execution binding',
+      }
+    }
+    replaceSdkOnlyCodexBinding(verifiedBinding)
+  } else {
+    replaceSdkOnlyCodexBinding(null)
+  }
+  // The binding must be installed BEFORE this call — `deps.verify` reads the
+  // live global to build its capabilities request. That ordering means a throw
+  // here (a transport failure, a control-api 5xx) would otherwise leave the
+  // global populated with a binding this bootstrap never confirmed, and the
+  // next prompt would execute against it. Clear it and rethrow: an unverified
+  // binding must not survive the attempt that failed to verify it. The error
+  // itself is not swallowed — the caller still sees the failure.
+  let proof: Awaited<ReturnType<NonNullable<typeof deps.verify>>> | null = null
+  try {
+    proof = deps.verify ? await deps.verify(req.provider, model) : null
+  } catch (err) {
+    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    throw err
+  }
   if (deps.verify && !proof) {
+    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
     return {
       configured: false,
       ready: false,
-      contractVersion: 2,
+      contractVersion: req.provider === 'codex-subscription' ? 3 : 2,
       message: 'Plugin Workload SDK identity bootstrap contract is not ready',
     }
   }
+  if (
+    req.provider === 'codex-subscription' &&
+    proof &&
+    (proof.codexBindingReady === false || proof.policyReason === 'codex_execution_binding_missing')
+  ) {
+    replaceSdkOnlyCodexBinding(null)
+    return {
+      configured: true,
+      ready: true,
+      capabilityFamily: 'promptBridge',
+      provider: req.provider,
+      model,
+      contractVersion: 3,
+      policyReady: false,
+      policyState: proof.policyState,
+      policyReason: 'codex_execution_binding_missing',
+      message: 'Control API rejected the SDK-only Codex execution binding',
+      ...(verifiedBinding ? { codexBinding: verifiedBinding } : {}),
+    }
+  }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
+  const contractVersion = req.provider === 'codex-subscription' ? 3 : 2
   return {
     configured: true,
     ready: true,
     capabilityFamily: 'promptBridge',
     provider: req.provider,
     model,
-    contractVersion: 2,
+    contractVersion,
     ...(proof ? { policyReady: proof.policyReady, policyState: proof.policyState } : {}),
     ...(proof?.policyReason ? { policyReason: proof.policyReason } : {}),
     ...(proof?.policyRevision !== undefined ? { policyRevision: proof.policyRevision } : {}),
@@ -118,6 +177,9 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
       : {}),
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
+      : {}),
+    ...(req.provider === 'codex-subscription' && verifiedBinding
+      ? { codexBinding: verifiedBinding }
       : {}),
   }
 }

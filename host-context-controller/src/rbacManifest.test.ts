@@ -67,4 +67,19 @@ describe('host-context-controller RBAC manifest', () => {
     expect(role).toContain("resources: ['poddisruptionbudgets']")
     expect(role).toContain("verbs: ['get', 'create', 'update', 'delete']")
   })
+
+  it('can read the shared LLM allowlist ConfigMap in the mcp-host namespace', () => {
+    const manifest = readFileSync(
+      path.join(__dirname, '../../deploy/base/mcp-host/rbac.yaml'),
+      'utf8'
+    )
+    const role = manifest
+      .split('name: host-context-controller-host-runtime\n  namespace: mcp-host')[1]
+      ?.split('---')[0]
+
+    expect(role).toBeTruthy()
+    expect(role).toContain("resources: ['configmaps']")
+    expect(role).toMatch(/verbs: \['get', 'watch', 'list'\]/)
+    expect(role).not.toContain('llm:codex:execute')
+  })
 })

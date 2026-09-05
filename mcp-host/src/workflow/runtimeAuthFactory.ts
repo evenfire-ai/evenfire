@@ -132,7 +132,7 @@ export function createMcpHostRuntimeAuthFromValues(params: {
   return auth
 }
 
-function workflowControlTokenFromConfig(): string | undefined {
+export function workflowControlTokenFromConfig(): string | undefined {
   const inlineToken = config.mcpHostWorkflowControlToken?.trim()
   if (inlineToken) return inlineToken
 

@@ -7,6 +7,8 @@ WORKDIR /app
 # @clerum/workflow-runtime-core depends on it (file:../llm-providers) and
 # workflow-recipes consumes it directly.
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY packages/workflow-runtime-core/tsconfig.json ./packages/workflow-runtime-core/
@@ -21,7 +23,7 @@ COPY workflow-recipes/package.json workflow-recipes/package-lock.json ./workflow
 WORKDIR /app/workflow-recipes
 RUN npm ci
 
-COPY workflow-recipes/tsconfig.json ./
+COPY workflow-recipes/tsconfig.json workflow-recipes/tsconfig.build.json ./
 COPY workflow-recipes/src ./src
 RUN npm run build:docker
 
@@ -30,9 +32,16 @@ FROM node:24-alpine
 WORKDIR /app
 
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
+COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
 COPY --from=builder /app/packages/workflow-runtime-core/dist ./packages/workflow-runtime-core/dist
+# injection/model.js requires @clerum/llm-providers from this package path.
+# Node walks up from packages/workflow-runtime-core/, not from workflow-recipes/.
+WORKDIR /app/packages/workflow-runtime-core
+RUN npm ci --omit=dev
+WORKDIR /app
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/image-policy ./packages/image-policy
 

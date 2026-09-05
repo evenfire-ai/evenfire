@@ -85,7 +85,8 @@ class McpToolAdapter implements Tool {
      * at connect). Carried explicitly because `traceDescriptor()` feeds the
      * tool-lane guardrail identity that `server=` rules match on — see below.
      */
-    private readonly serverName: string
+    private readonly serverName: string,
+    private readonly userId?: string
   ) {}
 
   name() {
@@ -120,7 +121,16 @@ class McpToolAdapter implements Tool {
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
-      const result = await this.mcpManager.callTool(this.fullName, params)
+      // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
+      // `this.userId` — the authenticated task sender baked in at construction
+      // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
+      // rpc-proxy edge `auth.sub` in handleMessageRoute). `params` is model /
+      // tool-arg data and is forwarded as the call payload only; it can NEVER
+      // become the identity, so a `userId` field inside `params` cannot spoof
+      // another user's broker token.
+      const result = await this.mcpManager.callTool(this.fullName, params, {
+        userId: this.userId,
+      })
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
       let content: string
@@ -137,6 +147,17 @@ class McpToolAdapter implements Tool {
         duration_ms: Date.now() - startTime,
         is_error: result.isError,
         attachments: attachments.length > 0 ? attachments : undefined,
+        // U5 — map the typed reactive-consent marker to `metadata.connect_required`
+        // on the SUCCESS path (the manager never lets the McpAuthError throw reach
+        // the catch below — that route would be dead code). The tool-use loop and
+        // resume path read this to raise a durable `connect_required` suspension.
+        metadata: result.connectRequired
+          ? {
+              connect_required: {
+                mcpServerName: result.connectRequired.mcpServerName,
+              },
+            }
+          : undefined,
       }
     } catch (err) {
       return {
@@ -157,7 +178,16 @@ class McpToolAdapter implements Tool {
 export class McpToolRegistryAdapter implements ToolRegistry {
   private tools = new Map<string, Tool>()
 
-  constructor(private readonly mcpManager: McpManager) {
+  /**
+   * @param userId caller identity (authenticated session `sender`) threaded to
+   *   `manager.callTool` so oauth grantScope='user' tools dispatch to the
+   *   caller's per-user partition. A fresh adapter is built per turn, so it
+   *   always carries exactly one userId.
+   */
+  constructor(
+    private readonly mcpManager: McpManager,
+    private readonly userId?: string
+  ) {
     this.refresh()
   }
 
@@ -200,7 +230,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           mcpTool.description || '',
           mcpTool.inputSchema || {},
           this.mcpManager,
-          serverNameOf(mcpTool)
+          serverNameOf(mcpTool),
+          this.userId
         )
       )
     }

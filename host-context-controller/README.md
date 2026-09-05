@@ -380,7 +380,7 @@ a permissive policy — see the NetworkPolicy and GFS tables:
 | `CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_MEMORY` | `256Mi`                          | Desktop memory request.                                                                                                                                                                  |
 | `CONTEXT_MAPPER_DESKTOP_RESOURCES_REQUEST_CPU`    | `250m`                           | Desktop CPU request.                                                                                                                                                                     |
 | `CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY`   | `4Gi`                            | Desktop memory limit.                                                                                                                                                                    |
-| `CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU`      | `1000m`                          | Desktop CPU limit.                                                                                                                                                                       |
+| `CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU`      | `1`                              | Desktop CPU limit. Author the apiserver-canonical form (`1`, not `1000m`) so the Deployment no-op gate can match.                                                                        |
 | `CONTEXT_MAPPER_DESKTOP_API_TOKEN`                | `` (empty)                       | Bearer token required by `GET /api/v1/desktop/:hostRef`. **When empty the check is skipped and the endpoint is unauthenticated** — a dev-mode convenience. Set it in any shared cluster. |
 
 ### channel-reader provisioning

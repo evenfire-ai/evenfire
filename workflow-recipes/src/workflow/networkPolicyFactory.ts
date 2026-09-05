@@ -67,6 +67,11 @@ export interface NetworkPolicyConfig {
    */
   includeCoordinator?: boolean
   includeMcpHost?: boolean
+  /**
+   * Open mcp-host egress to the isolated Codex LLM proxy. Set only from the
+   * same eligibility projection that mints `llm:codex:execute`.
+   */
+  includeCodexProxyEgress?: boolean
   includeCoordinatorGfs?: boolean
   includeArtifactReader?: boolean
   includeSnippetRunner?: boolean
@@ -972,6 +977,48 @@ export function buildWorkflowNetworkPolicies(
         ],
       },
     },
+    ...(config.includeCodexProxyEgress
+      ? [
+          {
+            apiVersion: 'networking.k8s.io/v1',
+            kind: 'NetworkPolicy',
+            metadata: {
+              name: `${config.recipeName}-mcp-host-to-codex-proxy`,
+              namespace: config.sandboxNamespace,
+              labels: {
+                ...commonLabels,
+                'clerum.io/policy-type': 'codex-proxy-egress',
+              },
+            },
+            spec: {
+              podSelector: {
+                matchLabels: {
+                  'clerum.io/recipe': config.recipeName,
+                  'clerum.io/component': 'workflow-mcp-host',
+                },
+              },
+              policyTypes: ['Egress'],
+              egress: [
+                {
+                  to: [
+                    {
+                      namespaceSelector: {
+                        matchLabels: {
+                          'kubernetes.io/metadata.name': config.controlPlaneNamespace,
+                        },
+                      },
+                      podSelector: {
+                        matchLabels: { app: 'codex-llm-proxy' },
+                      },
+                    },
+                  ],
+                  ports: [{ port: 8080, protocol: 'TCP' as const }],
+                },
+              ],
+            },
+          } as k8s.V1NetworkPolicy,
+        ]
+      : []),
     // 8. Plugin Workload SDK: same-recipe workloads <-> mcp-host on the SDK
     // port plus mcp-host -> WRC for per-attempt credential ticket redemption.
     // Empty unless the capability and feature flag are both enabled.

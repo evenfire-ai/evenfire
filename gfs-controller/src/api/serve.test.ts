@@ -99,6 +99,7 @@ const FILE: GfsResource = {
   blobKey: null,
   contentSha256: null,
   deletedAt: null,
+  updatedAt: "2026-01-01T00:00:00.000Z",
 };
 const DIR: GfsResource = {
   ...FILE,
@@ -465,9 +466,10 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     const res = new FakeRes();
     await run(deps(), req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(200);
-    const data = (res.json as { ok: boolean; data: { gfsUri: string; name: string } }).data;
+    const data = (res.json as { ok: boolean; data: { gfsUri: string; name: string; updatedAt: string } }).data;
     expect(data.name).toBe("report.pdf");
     expect(data.gfsUri).toBe(`gfs://main/${RID}`);
+    expect(data.updatedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 
   it("200 children returns the paged items", async () => {
@@ -540,6 +542,7 @@ describe("GfsReadServer.tryHandle — served reads", () => {
           path: FILE.pathCache,
           version: FILE.version,
           bytes: FILE.bytes,
+          updatedAt: FILE.updatedAt,
           permissions: ["read", "write"],
           sources: ["grant"],
           coversDescendants: true,
@@ -549,10 +552,11 @@ describe("GfsReadServer.tryHandle — served reads", () => {
     });
     await run(deps({ listAccessible }), req("/v1/accessible?limit=20", { auth: "Bearer t" }), res);
     expect(res.statusCode).toBe(200);
-    const data = (res.json as { data: { items: Array<{ gfsUri: string; permissions: string[] }> } })
+    const data = (res.json as { data: { items: Array<{ gfsUri: string; permissions: string[]; updatedAt?: string }> } })
       .data;
     expect(data.items[0]?.gfsUri).toBe(`gfs://main/${RID}`);
     expect(data.items[0]?.permissions).toContain("write");
+    expect(data.items[0]?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
   });
 
   it("403 accessible requires a read scope even if the store would return rows", async () => {

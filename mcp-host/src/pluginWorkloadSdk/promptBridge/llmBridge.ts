@@ -1,11 +1,13 @@
 import { LlmErrorCode } from '../../core/errors'
 import { type ChatMessage, FinishReason } from '../../core/types'
 import { type SingleTurnProvider, createLLMProvider } from '../../llm'
+import type { CodexAttemptContext } from '../../llm/codexSubscription'
 import { type ClassifiedLike, type FailoverClass, classifyFailoverClass } from '../../llm/failover'
-import { isLlmProvider } from '../../llm/registryCore'
+import { descriptorFor, isLlmProvider } from '../../llm/registryCore'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
+import { readSdkOnlyCodexBinding, verifySdkOnlyCodexBindingHash } from '../sdkOnlyCodexBinding'
 import type { BrokeredCredential } from './credentialBrokerClient'
 
 class ClassifiedProviderError extends Error {
@@ -79,6 +81,9 @@ export interface LlmBridgeRequest {
   temperature?: number
   timeoutMs: number
   triggerOn?: FailoverClass[]
+  recipeNamespace?: string
+  recipeName?: string
+  hostRef?: string
 }
 
 export interface LlmBridgeResult {
@@ -134,6 +139,35 @@ const DEFAULT_PROMPT_BRIDGE_FAILOVER_CLASSES: readonly FailoverClass[] = [
 
 function remainingTimeoutMs(deadlineAt: number): number {
   return deadlineAt - Date.now()
+}
+
+function captureSdkOnlyCodexAttemptContext(
+  request: LlmBridgeRequest,
+  target: PromptBridgeTarget,
+  ticket: { providerAttemptId?: string; providerAttemptIndex?: number }
+): CodexAttemptContext | null {
+  const binding = readSdkOnlyCodexBinding()
+  if (
+    !binding ||
+    !verifySdkOnlyCodexBindingHash(binding) ||
+    binding.model !== target.model ||
+    !ticket.providerAttemptId ||
+    ticket.providerAttemptIndex === undefined
+  ) {
+    return null
+  }
+  return {
+    invocationId: request.invocationId,
+    attemptGeneration: request.attemptGeneration,
+    providerAttemptIndex: ticket.providerAttemptIndex,
+    pluginWorkloadSdkProviderAttemptId: ticket.providerAttemptId,
+    targetRef: target.targetRef,
+    policyRevision: binding.catalogRevision,
+    policyHash: binding.bindingHash,
+    ...(request.hostRef ? { hostRef: request.hostRef } : {}),
+    ...(request.recipeNamespace ? { recipeNamespace: request.recipeNamespace } : {}),
+    ...(request.recipeName ? { recipeName: request.recipeName } : {}),
+  }
 }
 
 function providerOutcomeUnknownError(
@@ -250,7 +284,13 @@ export class LlmBridge {
   }
 
   private breakerKey(target: PromptBridgeTarget): string {
-    return [target.targetRef, target.provider, target.model, target.credentialSlot].join('\u0000')
+    return [
+      target.targetRef,
+      target.provider,
+      target.model,
+      target.credentialSlot,
+      target.connectionRef ?? '',
+    ].join('\u0000')
   }
 
   private breakerFor(target: PromptBridgeTarget): CircuitBreaker {
@@ -293,6 +333,27 @@ export class LlmBridge {
       }
 
       const breaker = this.breakerFor(authorized.target)
+      const oauthBroker =
+        isLlmProvider(authorized.target.provider) &&
+        descriptorFor(authorized.target.provider).authMode === 'oauth-broker'
+      if (oauthBroker) {
+        const skippedOrReserved = await this.completeOauthBrokerTarget({
+          authorized,
+          index,
+          request,
+          breaker,
+          triggerOn,
+          deadlineAt,
+        })
+        if (skippedOrReserved.kind === 'error') {
+          lastProviderError = skippedOrReserved.error
+          if (skippedOrReserved.terminal) {
+            throw skippedOrReserved.error.toPluginWorkloadError()
+          }
+          continue
+        }
+        return skippedOrReserved.result
+      }
       if (!breaker.allow()) {
         // A circuit-open target still consumes an ordered, auditable physical
         // attempt. Reserve and close it as `skipped` before advancing; without
@@ -514,11 +575,205 @@ export class LlmBridge {
     )
   }
 
+  private async completeOauthBrokerTarget(input: {
+    authorized: { target: PromptBridgeTarget }
+    index: number
+    request: LlmBridgeRequest
+    breaker: CircuitBreaker
+    triggerOn: Set<FailoverClass>
+    deadlineAt: number
+  }): Promise<
+    | { kind: 'result'; result: LlmBridgeResult }
+    | { kind: 'error'; error: ClassifiedProviderError; terminal: boolean }
+  > {
+    const { authorized, index, request, breaker, triggerOn, deadlineAt } = input
+    const ticket = await withinDeadline(
+      () =>
+        request.credentialTicketIssuer.issue({
+          invocationId: request.invocationId,
+          attemptGeneration: request.attemptGeneration,
+          target: authorized.target,
+          policyRevision: request.policyRevision,
+          policyHash: request.policyHash,
+        }),
+      remainingTimeoutMs(deadlineAt),
+      'timeout'
+    )
+    const providerAttemptContext =
+      ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined
+        ? {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            target: authorized.target,
+            attemptCount: index + 1,
+            fallbackUsed: index > 0,
+          }
+        : undefined
+
+    if (!breaker.allow()) {
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          status: 'skipped',
+        })
+      }
+      const error = new ClassifiedProviderError(
+        { code: LlmErrorCode.ApiCallFailed, retryable: true },
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'LLM provider is temporarily unavailable',
+          true,
+          'provider_unavailable',
+          false,
+          providerAttemptContext
+        )
+      )
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return { kind: 'error', error, terminal: !eligible || index === request.targets.length - 1 }
+    }
+
+    const captured = captureSdkOnlyCodexAttemptContext(request, authorized.target, ticket)
+    if (!captured) {
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        await reportProviderAttemptBestEffort(request.providerAttemptReporter, {
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          status: 'failed',
+        })
+      }
+      const error = new ClassifiedProviderError(
+        { code: LlmErrorCode.ApiCallFailed, retryable: true },
+        new PluginWorkloadError(
+          'provider_unavailable',
+          'Codex execution binding is missing after reserving the SDK attempt',
+          true,
+          'provider_unavailable',
+          false,
+          providerAttemptContext
+        )
+      )
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return { kind: 'error', error, terminal: !eligible || index === request.targets.length - 1 }
+    }
+
+    try {
+      const completion = await this.attempt(
+        { target: authorized.target, keys: {}, llmSecretName: '' },
+        { ...request, timeoutMs: remainingTimeoutMs(deadlineAt) },
+        breaker,
+        captured
+      )
+      // Receipt ownership is decided by the caller's mode, exactly as on the
+      // api-key lane. Only atomic finalization defers the terminal ACK; a
+      // workflow-mode Codex attempt must still be acknowledged here, and a
+      // lost acknowledgement must surface as `failed` rather than be hidden
+      // behind the finalizer's name.
+      let providerAttemptAcknowledgement: 'confirmed' | 'owned_by_finalizer' | 'failed' =
+        'confirmed'
+      if (request.acknowledgementMode === 'atomic_terminal_finalization') {
+        providerAttemptAcknowledgement = 'owned_by_finalizer'
+      } else if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        const acknowledged = await reportProviderAttemptBestEffort(
+          request.providerAttemptReporter,
+          {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: 'complete',
+          }
+        )
+        providerAttemptAcknowledgement = acknowledged ? 'confirmed' : 'failed'
+      }
+      return {
+        kind: 'result',
+        result: {
+          ...completion,
+          servedTarget: authorized.target,
+          fallbackUsed: index > 0,
+          attemptCount: index + 1,
+          llmSecretName: '',
+          providerAttemptId: ticket.providerAttemptId,
+          providerAttemptIndex: ticket.providerAttemptIndex,
+          providerAttemptAcknowledgement,
+        },
+      }
+    } catch (error) {
+      // One physical status for one attempt. The grant/scope/budget failures
+      // used to be acknowledged as `failed` from a branch of their own, which
+      // could contradict `providerMayHaveExecuted` and leave a possibly billed
+      // Codex call revivable. `providerMayHaveExecuted` is now the single
+      // source of that decision for every oauth failure.
+      const providerMayHaveExecuted =
+        (error instanceof PluginWorkloadError && error.providerMayHaveExecuted) ||
+        (error instanceof ClassifiedProviderError && error.providerMayHaveExecuted)
+      if (ticket.providerAttemptId && ticket.providerAttemptIndex !== undefined) {
+        const acknowledged = await reportProviderAttemptBestEffort(
+          request.providerAttemptReporter,
+          {
+            providerAttemptId: ticket.providerAttemptId,
+            providerAttemptIndex: ticket.providerAttemptIndex,
+            status: providerMayHaveExecuted ? 'provider_unavailable' : 'failed',
+          }
+        )
+        // Mirror the non-oauth fence: a lost receipt after dispatch is not a
+        // safe failover signal. Codex may already have billed.
+        if (!acknowledged) {
+          return {
+            kind: 'error',
+            error: new ClassifiedProviderError(
+              { code: LlmErrorCode.ApiCallFailed, retryable: false },
+              providerOutcomeUnknownError(providerAttemptContext)
+            ),
+            terminal: true,
+          }
+        }
+      }
+      if (!(error instanceof ClassifiedProviderError)) {
+        throw providerAttemptContext
+          ? withProviderAttemptContext(error, providerAttemptContext)
+          : error
+      }
+      // Grant, scope, binding and budget denials never advance to another
+      // target: they are operator/configuration signals about this invocation,
+      // not transient provider weather.
+      const forcedTerminal =
+        error.classified.providerCode === 'budget_denied' ||
+        error.classified.providerCode === 'no_grant' ||
+        error.classified.providerCode === 'host_binding_mismatch' ||
+        error.classified.providerCode === 'insufficient_scope' ||
+        error.classified.code === LlmErrorCode.AuthenticationFailed
+      const failureClass = classifyFailoverClass(error.classified.code, error.classified.retryable)
+      const eligible = failureClass !== null && triggerOn.has(failureClass)
+      return {
+        kind: 'error',
+        // The ticket already reserved this physical attempt, so the receipt
+        // must travel with the error. Without it the atomic finalizer closes
+        // the logical invocation while the spend row for the attempt is never
+        // written — the same contract the api-key lane applies.
+        error: providerAttemptContext
+          ? new ClassifiedProviderError(
+              error.classified,
+              withProviderAttemptContext(error, providerAttemptContext)
+            )
+          : error,
+        terminal: forcedTerminal || !eligible || index === request.targets.length - 1,
+      }
+    }
+  }
+
   private async attempt(
     credential: BrokeredCredential,
     request: LlmBridgeRequest,
-    breaker: CircuitBreaker
-  ): Promise<Pick<LlmBridgeResult, 'model' | 'content' | 'usage' | 'finishReason'>> {
+    breaker: CircuitBreaker,
+    capturedCodexAttemptContext?: CodexAttemptContext
+  ): Promise<
+    Pick<
+      LlmBridgeResult,
+      'model' | 'content' | 'usage' | 'finishReason' | 'providerAttemptId' | 'providerAttemptIndex'
+    >
+  > {
     if (request.timeoutMs <= 0) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -537,10 +792,14 @@ export class LlmBridge {
         'configuration'
       )
     }
-    const provider: SingleTurnProvider | null = factory(credential.keys, {
-      provider: providerId,
-      name: credential.target.model,
-    })
+    const provider: SingleTurnProvider | null = factory(
+      credential.keys,
+      {
+        provider: providerId,
+        name: credential.target.model,
+      },
+      capturedCodexAttemptContext ? { capturedCodexAttemptContext } : undefined
+    )
     if (!provider) {
       throw new PluginWorkloadError(
         'provider_unavailable',
@@ -571,8 +830,9 @@ export class LlmBridge {
       }
       const inputTokens = response.usage?.input_tokens ?? 0
       const outputTokens = response.usage?.output_tokens ?? 0
+      const brokerBacked = descriptorFor(providerId).authMode === 'oauth-broker'
       if (
-        response.usage_reported === false ||
+        (!brokerBacked && response.usage_reported === false) ||
         inputTokens < 0 ||
         outputTokens < 0 ||
         !Number.isInteger(inputTokens) ||
@@ -591,6 +851,14 @@ export class LlmBridge {
         content: response.content,
         usage: { inputTokens, outputTokens },
         finishReason: mapFinishReason(response.finish_reason),
+        ...(typeof response.providerAttemptId === 'string' && response.providerAttemptId
+          ? { providerAttemptId: response.providerAttemptId }
+          : {}),
+        ...(typeof response.providerAttemptIndex === 'number' &&
+        Number.isInteger(response.providerAttemptIndex) &&
+        response.providerAttemptIndex >= 1
+          ? { providerAttemptIndex: response.providerAttemptIndex }
+          : {}),
       }
     } catch (error) {
       if (error instanceof PluginWorkloadError) throw error
@@ -611,17 +879,27 @@ export class LlmBridge {
       const reason =
         classifyFailoverClass(classified.code, classified.retryable) ?? 'provider_unavailable'
       throw new ClassifiedProviderError(
-        { code: classified.code, retryable: classified.retryable },
+        {
+          code: classified.code,
+          retryable: classified.retryable,
+          ...(classified.providerCode ? { providerCode: classified.providerCode } : {}),
+          ...(classified.providerDispatched !== undefined
+            ? { providerDispatched: classified.providerDispatched }
+            : {}),
+        },
         new PluginWorkloadError(
           'provider_unavailable',
           `LLM provider error: ${classified.code}`,
           classified.retryable,
           reason,
-          // This branch runs only after the provider call was entered. Even a
-          // provider-declared auth/rate-limit response is not proof that no
-          // billable work occurred, so it must remain fenced as an ambiguous
-          // physical outcome rather than reviving the idempotency key.
-          true
+          // This branch runs only after the provider call was entered, so an
+          // unknown dispatch state must read as executed: a provider-declared
+          // auth/rate-limit response is not proof that no billable work
+          // occurred. Only a classifier that PROVED no call left the process
+          // may revive the idempotency key — mislabelling a dispatched attempt
+          // as not-executed would permit a second charge, while the opposite
+          // mistake only costs revivability.
+          classified.providerDispatched ?? true
         )
       )
     } finally {

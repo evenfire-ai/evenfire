@@ -40,7 +40,14 @@ export interface PromptBridgeTarget {
   targetRef: string
   provider: string
   model: string
+  /** Empty for oauth-broker (Codex) targets: no static Secret data key exists. */
   credentialSlot: string
+  /**
+   * Codex subscription grant (connection key) chosen by the operator for an
+   * oauth-broker target. Attestation authority stays with control-api via the
+   * recipe-level annotation; this field is carried for identity/audit only.
+   */
+  connectionRef?: string
 }
 
 export interface PromptBridgeResult {

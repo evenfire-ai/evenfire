@@ -31,6 +31,14 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import {
+  CATALOG_REVISION_ANNOTATION,
+  CODEX_CONNECTIONS_ANNOTATION,
+  CONNECTION_REVISION_ANNOTATION,
+  type CodexPolicyBinding,
+  toPolicyBinding,
+} from '@clerum/codex-catalog-projection'
+import { assignedConnectionRef } from '../llm/hostLlmBinding'
+import {
   ALL_PROVIDERS,
   ALL_PROVIDER_SLOT_ENV_NAMES,
   type LlmProvider,
@@ -53,8 +61,11 @@ export type { LlmProvider }
  * Exported for status/debug callers that key on the primary env name.
  */
 export const PROVIDER_ENV_NAME = Object.fromEntries(
-  ALL_PROVIDERS.map(p => [p, primarySlot(descriptorFor(p)).envName])
-) as Record<LlmProvider, string>
+  ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials').map(p => [
+    p,
+    primarySlot(descriptorFor(p)).envName,
+  ])
+) as Record<Exclude<LlmProvider, 'codex-subscription'>, string>
 
 /**
  * Every provider credential env var name across ALL providers and ALL their
@@ -104,6 +115,15 @@ export interface AllowedModelEntry {
   vendor?: string
 }
 
+/**
+ * Catalog/credential pair projected onto `clerum-llm-allowed-models` by
+ * control-api. Host chat hashes this with the selected model to authorize a
+ * Codex attempt. Annotation names are a cross-service contract with
+ * control-api, HCC, and WRC.
+ */
+export type { CodexPolicyBinding }
+export { CATALOG_REVISION_ANNOTATION, CONNECTION_REVISION_ANNOTATION, CODEX_CONNECTIONS_ANNOTATION }
+
 export type ConfigStoreChangeHandler = (change: ConfigStoreChange) => void
 
 export interface ConfigStoreOptions {
@@ -115,6 +135,8 @@ export interface ConfigStoreOptions {
   llmSecretRef: string | null
   /** Configured LLM provider — selects which key inside the LLM Secret is exposed. */
   provider: LlmProvider | null
+  /** Assigned Codex grant. Empty/missing is unassigned and must not spend. */
+  connectionRef?: string | null
   /**
    * Name of the operator-managed LLM allowlist ConfigMap to watch (R3). When
    * null/undefined the fourth tier is disabled entirely (no watch, no bootstrap)
@@ -225,6 +247,8 @@ export class ConfigStore {
   private allowlistDelivered = false
   /** Dedupe flag for the "CM absent" WARN + metric (fires once per transition). */
   private allowlistMissingWarned = false
+  /** Catalog/credential pair from allowlist CM annotations, or null. */
+  private codexBinding: CodexPolicyBinding | null = null
 
   constructor(opts: ConfigStoreOptions) {
     this.opts = opts
@@ -456,6 +480,16 @@ export class ConfigStore {
     return this.allowlistDelivered
   }
 
+  /**
+   * Live Codex catalog/credential revisions from the allowlist ConfigMap
+   * annotations. Null when the CM is absent, the annotations are missing, or
+   * either value is not an integer. Callers must still require catalogRevision
+   * >= 1 before authorizing.
+   */
+  codexPolicyBinding(): CodexPolicyBinding | null {
+    return this.codexBinding
+  }
+
   // ─── Bootstrap (initial list) ────────────────────────────────────────
 
   private async bootstrapLlmSecret(): Promise<void> {
@@ -503,7 +537,7 @@ export class ConfigStore {
         namespace: this.opts.namespace,
       })
       const wasAvailable = this.allowlistDelivered
-      const contentChanged = this.applyAllowlistData(cm.data ?? {})
+      const contentChanged = this.applyAllowlistConfigMap(cm)
       this.allowlistDelivered = true
       this.allowlistMissingWarned = false
       return contentChanged || !wasAvailable
@@ -517,6 +551,22 @@ export class ConfigStore {
   }
 
   /**
+   * Parse models plus Codex catalog/credential annotations from the allowlist
+   * ConfigMap. Returns whether either surface changed so annotation-only
+   * catalog bumps still refresh Host chat's authorize binding.
+   */
+  private applyAllowlistConfigMap(cm: {
+    data?: Record<string, string>
+    metadata?: { annotations?: Record<string, string> }
+  }): boolean {
+    const nextBinding = toPolicyBinding(cm, assignedConnectionRef(this.opts.connectionRef))
+    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
+    const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
+    this.codexBinding = nextBinding
+    return modelsChanged || bindingChanged
+  }
+
+  /**
    * Parse the allowlist ConfigMap data — one key per provider, value a JSON
    * array of {@link AllowedModelEntry}. Per-key fail-loud: a key with invalid
    * JSON (or a non-array / malformed entry) is logged at ERROR naming the key
@@ -526,7 +576,10 @@ export class ConfigStore {
    * allowlist — callers use this to notify subscribers only on a real content
    * change (so routine watch reconnects don't re-fire the R3.7 signal).
    */
-  private applyAllowlistData(data: Record<string, string>): boolean {
+  private applyAllowlistData(
+    data: Record<string, string>,
+    binding: CodexPolicyBinding | null = null
+  ): boolean {
     const next = new Map<string, AllowedModelEntry[]>()
     for (const [provider, raw] of Object.entries(data)) {
       let parsed: unknown
@@ -546,7 +599,7 @@ export class ConfigStore {
         console.error(`[ConfigStore] allowlist key '${provider}' is not a JSON array — skipping`)
         continue
       }
-      const entries: AllowedModelEntry[] = []
+      let entries: AllowedModelEntry[] = []
       for (const item of parsed) {
         if (!item || typeof item !== 'object') {
           console.error(
@@ -570,7 +623,19 @@ export class ConfigStore {
           entry.contextWindowTokens = rec.contextWindowTokens as number
         }
         if (typeof rec.vendor === 'string') entry.vendor = rec.vendor
+        if (rec.stale === true) continue
         entries.push(entry)
+      }
+      if (provider === 'codex-subscription') {
+        if (!binding) {
+          entries = []
+        } else if (Array.isArray(binding.models)) {
+          const allowed = new Set(binding.models)
+          entries = entries.filter(entry => allowed.has(entry.model))
+        }
+        // Legacy ConfigMap with no connections map returns a binding without
+        // models[]. Keep the flat catalog. A map entry that omits models[]
+        // is parsed as [] and fail-closes here.
       }
       next.set(provider, entries)
     }
@@ -589,6 +654,7 @@ export class ConfigStore {
     const wasAvailable = this.allowlistDelivered
     this.allowlistDelivered = false
     this.allowedModelsMap = new Map()
+    this.codexBinding = null
     if (!this.allowlistMissingWarned) {
       this.allowlistMissingWarned = true
       llmAllowlistMissingTotal.inc()
@@ -698,9 +764,7 @@ export class ConfigStore {
       }
       if (type !== 'ADDED' && type !== 'MODIFIED') return
       const wasAvailable = this.allowlistDelivered
-      const contentChanged = this.applyAllowlistData(
-        (obj.data as Record<string, string> | undefined) ?? {}
-      )
+      const contentChanged = this.applyAllowlistConfigMap(obj)
       this.allowlistDelivered = true
       this.allowlistMissingWarned = false
       // Only notify subscribers on a real transition — a re-delivered,
@@ -854,8 +918,19 @@ export class ConfigStore {
 }
 
 interface KubeObject {
-  metadata?: { name?: string }
+  metadata?: { name?: string; annotations?: Record<string, string> }
   data?: Record<string, string>
+}
+
+function codexBindingsEqual(a: CodexPolicyBinding | null, b: CodexPolicyBinding | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    a.catalogRevision === b.catalogRevision &&
+    a.credentialRevision === b.credentialRevision &&
+    a.connectionKey === b.connectionKey &&
+    JSON.stringify(a.models ?? null) === JSON.stringify(b.models ?? null)
+  )
 }
 
 /**

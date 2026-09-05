@@ -34,7 +34,7 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     // Shell proof: the TablePanelHeader subtitle is unique and renders regardless of
     // whether the inventory is loading, populated, or empty.
     await expect(
-      page.getByText('Browse connector deployments and context bindings.', { exact: true })
+      page.getByText('Browse connector deployments and agent access.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
 
     // Panel title is "Connectors" while loading/empty, or "Connectors (N)" once populated.

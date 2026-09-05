@@ -52,8 +52,6 @@ vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     navItem: 'apps',
     handleNavSelect: vi.fn(),
-    handleOpenContextDetails: vi.fn(),
-    handleOpenTeamDetails: vi.fn(),
   }),
 }))
 
@@ -243,9 +241,7 @@ describe('AppHeader notification tray presentation', () => {
 
     const search = screen.getByRole('textbox', { name: 'Search' })
     expect(search.getAttribute('placeholder')).toBe('Search workspace...')
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('title')).toBe('Search agents, connectors, plugins or apps...')
   })
 
   it('uses the full search label above the constrained-width breakpoint', () => {
@@ -254,12 +250,8 @@ describe('AppHeader notification tray presentation', () => {
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('placeholder')).toBe('Search agents, connectors, plugins or apps...')
+    expect(search.getAttribute('title')).toBe('Search agents, connectors, plugins or apps...')
   })
 
   it('opens and focuses the existing global search for a command request', () => {

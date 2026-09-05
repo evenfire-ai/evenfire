@@ -48,7 +48,9 @@ const POINT_PATH: Record<LifecyclePoint, string> = {
 }
 
 function sanitizeForLog(value: unknown): string {
-  return String(value).replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u001F\u007F]/g, '')
+  return String(value)
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/[\u0000-\u001F\u007F]/g, '')
 }
 
 /** Build `{endpoint}{path}/v1/{point}`, normalizing slashes (spec §8.1). */

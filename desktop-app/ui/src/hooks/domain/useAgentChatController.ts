@@ -2336,11 +2336,23 @@ export function useAgentChatController({
         ? {
             requestId: state.pendingApproval.requestId,
             displayName: state.pendingApproval.displayName || 'Unknown Tool',
+            // U5: carry the connect_required discriminator (+ server) so the
+            // live message ProgressStepper renders "Connect <server>" instead of a
+            // generic Approve/Deny prompt. Absent on ordinary approval suspensions.
+            reason: state.pendingApproval.reason,
+            mcpServerName: state.pendingApproval.mcpServerName,
           }
         : activeFsmApproval
           ? {
               requestId: activeFsmApproval.requestId,
               displayName: activeFsmApproval.displayName || 'Unknown Tool',
+              // U5 — the optimistic-paint fallback (rejoin, SERVER_SNAPSHOT before the
+              // sticky `suspended` SSE replays) must ALSO carry the connect_required
+              // discriminator so the live-message stepper renders "Connect <server>",
+              // not a generic Approve/Deny, during that window. Mirrors the tracker
+              // branch above and InFlightAssistantPlaceholder's fallback.
+              reason: activeFsmApproval.reason,
+              mcpServerName: activeFsmApproval.mcpServerName,
             }
           : undefined
       updateMessageProgress(selectedAgent, state.userMessageId, () => ({

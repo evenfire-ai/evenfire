@@ -110,9 +110,10 @@ describe('routes/recipe-oauth — POST /recipe-oauth/user-token (SEC-5)', () => 
 
     // [SEC-5] verify the grant lookup was scoped to the correct recipe and userId
     const grantQuery = mockPoolQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants') && sql.includes('background = true')
+      ([sql]) =>
+        typeof sql === 'string' && sql.includes('oauth_grants') && sql.includes('background = true')
     )
-    expect(grantQuery?.[1]).toEqual([SANDBOX_NS, 'leadforge', 'user-1', 'google-gmail'])
+    expect(grantQuery?.[1]).toEqual(['recipe', SANDBOX_NS, 'leadforge', 'user-1', 'google-gmail'])
   })
 
   it('404 no_grant for a non-consented (background=false) user', async () => {
@@ -175,8 +176,12 @@ describe('routes/recipe-oauth — POST /recipe-oauth/user-token (SEC-5)', () => 
     const res = await request(app)
       .post('/api/v1/recipe-oauth/user-token')
       .set('Authorization', `Bearer ${brokerToken('leadforge')}`)
-      .send({ oauthClientId: 'google-gmail', userId: 'user-1',
-              recipeName: 'victim', recipeNamespace: SANDBOX_NS })
+      .send({
+        oauthClientId: 'google-gmail',
+        userId: 'user-1',
+        recipeName: 'victim',
+        recipeNamespace: SANDBOX_NS,
+      })
 
     // Grant lookup was scoped to "leadforge" — no grant seeded → no_grant
     expect(res.status).toBe(404)
@@ -184,7 +189,7 @@ describe('routes/recipe-oauth — POST /recipe-oauth/user-token (SEC-5)', () => 
     const grantQuery = mockPoolQuery.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants')
     )
-    expect(grantQuery?.[1]).toEqual([SANDBOX_NS, 'leadforge', 'user-1', 'google-gmail'])
+    expect(grantQuery?.[1]).toEqual(['recipe', SANDBOX_NS, 'leadforge', 'user-1', 'google-gmail'])
   })
 
   it('returns 429 when the per-recipe rate limit is exceeded', async () => {

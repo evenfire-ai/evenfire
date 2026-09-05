@@ -31,5 +31,6 @@ describe('resolveDevModelProvider', () => {
     expect(() => resolveDevModelProvider('zaii')).toThrow(
       new RegExp(`Valid providers: ${ALL_PROVIDERS.join(', ')}`)
     )
+    expect(ALL_PROVIDERS).toContain('codex-subscription')
   })
 })

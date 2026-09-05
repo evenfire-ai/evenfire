@@ -45,6 +45,7 @@ function pgRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     blob_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-4111-8111-111111111111",
     content_sha256: "b".repeat(64),
     deleted_at: null,
+    updated_at: new Date("2026-01-01T00:00:00.000Z"),
     ...over,
   };
 }
@@ -68,10 +69,23 @@ describe("PgResourceStore.getResource", () => {
       blobKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-4111-8111-111111111111",
       contentSha256: "b".repeat(64),
       deletedAt: null,
+      updatedAt: "2026-01-01T00:00:00.000Z",
     });
     expect(typeof res?.bytes).toBe("number");
+    expect(res?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(db.calls[0].text).toContain("updated_at");
     // Parameterized: never string-interpolates the id.
     expect(db.calls[0].values).toEqual(["main", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]);
+  });
+
+  it("coerces TIMESTAMPTZ updated_at Date values to ISO 8601 UTC", async () => {
+    const db = fakeDb([[pgRow({ updated_at: new Date("2026-06-01T12:00:00.000Z") })]]);
+    const res = await new PgResourceStore(db).getResource(
+      "main",
+      "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    );
+    expect(res?.updatedAt).toBe("2026-06-01T12:00:00.000Z");
+    expect(res?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
   });
 
   it("maps legacy rows with no generation pointer without inventing one", async () => {

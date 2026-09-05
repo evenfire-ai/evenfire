@@ -716,7 +716,7 @@ export const config: Config = {
     },
     limits: {
       memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1000m')!,
+      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!,
     },
   },
 

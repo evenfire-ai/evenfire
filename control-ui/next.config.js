@@ -133,6 +133,34 @@ const nextConfig = {
         destination: '/agents/:name/connectors',
         permanent: true,
       },
+      // Connector edit "Context" tab renamed to "Access".
+      {
+        source: '/connectors/:name/edit/context',
+        destination: '/connectors/:name/edit/access',
+        permanent: true,
+      },
+      // Users & Teams access tabs consolidated onto "Agents" (D10): the old
+      // "Contexts" and "Access" tab URLs all land on the Agents tab.
+      {
+        source: '/users-and-teams/users/:id/contexts',
+        destination: '/users-and-teams/users/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/contexts',
+        destination: '/users-and-teams/teams/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/users/:id/access',
+        destination: '/users-and-teams/users/:id/agents',
+        permanent: true,
+      },
+      {
+        source: '/users-and-teams/teams/:id/access',
+        destination: '/users-and-teams/teams/:id/agents',
+        permanent: true,
+      },
       { source: '/marketplace', destination: '/marketplace/connectors', permanent: true },
       { source: '/cost-and-usage', destination: '/cost-and-usage/usage', permanent: true },
       {
@@ -142,11 +170,6 @@ const nextConfig = {
       },
       { source: '/outputs', destination: '/agent-outputs/recipe-artifacts', permanent: true },
       { source: '/outputs/:path*', destination: '/agent-outputs/:path*', permanent: true },
-      {
-        source: '/contexts/:name/shared-files',
-        destination: '/contexts/:name/agent-files',
-        permanent: true,
-      },
       { source: '/secrets', destination: '/secrets/llm', permanent: true },
       { source: '/settings', destination: '/settings/ui', permanent: true },
       { source: '/traces/hosts', destination: '/traces', permanent: true },

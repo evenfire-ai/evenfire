@@ -179,7 +179,12 @@ function promptBridgeMetadata(value: unknown): LlmUsageEvent['prompt_bridge_meta
   }
 }
 
-export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
+export type UsageEventValidationOrigin = 'reporter' | 'finalize'
+
+export function validateUsageEvent(
+  raw: unknown,
+  options?: { origin?: UsageEventValidationOrigin }
+): LlmUsageEvent | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
 
@@ -194,14 +199,20 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
   const host_ref = typeof r.host_ref === 'string' ? r.host_ref.trim() : ''
   if (!host_ref) return null
 
+  const origin = options?.origin === 'finalize' ? 'finalize' : 'reporter'
   const provider = typeof r.provider === 'string' ? r.provider.trim() : ''
   if (!provider) return null
+  // Codex spend belongs to proxy finalize. Reporter shapes (workflow, desktop,
+  // plugin_workload_sdk) must not open a second ledger row.
+  if (provider === 'codex-subscription' && origin !== 'finalize') return null
+  if (origin === 'finalize' && provider !== 'codex-subscription') return null
 
   const model = typeof r.model === 'string' ? r.model.trim() : ''
   if (!model) return null
 
   const source_kind_raw = typeof r.source_kind === 'string' ? r.source_kind.trim() : ''
   if (!SOURCE_KINDS.has(source_kind_raw)) return null
+  if (origin === 'finalize' && source_kind_raw !== 'channel') return null
 
   const team_id = trimOrNull(r.team_id)
   if (team_id && !isUsageTeamId(team_id)) return null
@@ -234,6 +245,7 @@ export function validateUsageEvent(raw: unknown): LlmUsageEvent | null {
 
   const recipe_name = trimOrNull(r.recipe_name)
   const llm_secret_name = trimOrNull(r.llm_secret_name)
+  if (origin === 'finalize' && llm_secret_name !== null) return null
   const task_id = trimOrNull(r.task_id)
   const run_id = trimOrNull(r.run_id)
   if (run_id && !UUID_REGEX.test(run_id)) return null
@@ -499,12 +511,13 @@ export async function ingestUsageEvents(
 export async function ingestUsageEventsInTransaction(
   rawEvents: unknown[],
   db: DbClient,
-  binding?: UsageBindingContext
+  binding?: UsageBindingContext,
+  options?: { origin?: UsageEventValidationOrigin }
 ): Promise<UsageIngestTransactionResult> {
   const total = rawEvents.length
   let validated: LlmUsageEvent[] = []
   for (const raw of rawEvents) {
-    const ev = validateUsageEvent(raw)
+    const ev = validateUsageEvent(raw, options)
     if (ev) validated.push(ev)
   }
   let rejected = total - validated.length

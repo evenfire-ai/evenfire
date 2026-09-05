@@ -3,6 +3,8 @@ import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import {
+  type McpServerOAuthReader,
+  type McpServerOAuthSubject,
   RecipeNotFoundError,
   type RecipeReader,
   type RecipeWithOAuthClients,
@@ -12,6 +14,11 @@ import {
 } from '../../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../../oauth/integrationNotConfigured.js'
+import {
+  type McpServerOAuthSpecInput,
+  resolveServerOAuthSubject,
+} from '../../oauth/mcpServerOAuthSpec.js'
+import { getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 
 /**
@@ -63,6 +70,30 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
     },
   }
 
+  // U5: resolve an OAuth McpServer subject when the signed state carries
+  // `subjectKind:'mcp'`. Reads the CR from the mcp-servers namespace (the
+  // authoritative source of oauthClientId / grantScope / contextRef — never the
+  // state) and surfaces the namespace so grant persistence + Secret reads stay
+  // pinned to it.
+  const mcpServerReader: McpServerOAuthReader = {
+    async read(mcpServerName): Promise<McpServerOAuthSubject | null> {
+      let server: McpServerOAuthSpecInput
+      try {
+        server = (await gateway.getResource(
+          'mcpservers',
+          mcpServerName,
+          config.mcpServersNamespace
+        )) as McpServerOAuthSpecInput
+      } catch (err) {
+        if (err instanceof K8sNotFoundError) return null
+        throw err
+      }
+      const resolved = resolveServerOAuthSubject(server)
+      if (!resolved) return null
+      return { namespace: config.mcpServersNamespace, ...resolved }
+    },
+  }
+
   // Stable callback path: only the oauthClientId rides the URL (one registered
   // redirect URI per provider client). The recipe (namespace, name) is recovered
   // from the signed state inside handleOAuthCallback, so the URI no longer churns
@@ -87,6 +118,10 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           db: { query: (text, values) => pool.query(text, values) },
           recipeReader,
           secretReader,
+          mcpServerReader,
+          // Shared-identity mcp bootstrap requires the consenting user to be a
+          // member of the server's Context (defence in depth).
+          userContextsReader: getUserContexts,
           fetchFn: (input, init) => fetch(input, init),
           stateSecret: config.oauthStateHmacSecret,
           encryptionKey,
@@ -102,6 +137,8 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
               renderSuccessHtml(result.provider, oauthClientId, {
                 backgroundRequested: result.backgroundRequested,
                 backgroundEnabled: result.backgroundEnabled,
+                source: result.source,
+                mcpServerName: result.mcpServerName,
               })
             )
         case 'invalid_state':
@@ -110,6 +147,12 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         case 'recipe_not_found':
           return res.status(404).json({ error: 'recipe_not_found' })
+        case 'server_not_found':
+          return res.status(404).json({ error: 'server_not_found' })
+        case 'server_missing_context':
+          return res.status(400).json({ error: 'server_missing_context' })
+        case 'context_membership_denied':
+          return res.status(403).json({ error: 'context_membership_denied' })
         case 'secret_missing':
           return res.status(503).json(integrationNotConfigured(oauthClientId, result.secret))
         case 'unsupported_provider':
@@ -154,16 +197,32 @@ export function buildPublicCallbackUrl(
 export function renderSuccessHtml(
   provider: string,
   oauthClientId: string,
-  opts?: { backgroundRequested?: boolean; backgroundEnabled?: boolean }
+  opts?: {
+    backgroundRequested?: boolean
+    backgroundEnabled?: boolean
+    source?: 'mcp'
+    mcpServerName?: string
+  }
 ): string {
   // The user's browser hits this page on the platform's origin, not inside
   // the embed. Spec §9.9 — bounce to `clerum://oauth-completed?…` so the
-  // desktop app's open-url handler dispatches the envelope into the active
-  // sandbox-ui embed (recipe JS subscribes via `clerum.onOauthCompleted`).
+  // desktop app's open-url handler dispatches the envelope. The RECIPE deep-link
+  // is FROZEN: `clientId` + `provider` only, no `source`. For an mcp subject
+  // (U5) we append `&source=mcp` on the SAME `oauth-completed` host so the
+  // desktop dispatcher routes it to the task resume instead of the embed. The
+  // clientId is built unconditionally either way (it never depends on `source`).
   const safeProvider = String(provider).replace(/[^a-z0-9-]/gi, '')
   const deepLink = new URL('clerum://oauth-completed')
   deepLink.searchParams.set('clientId', oauthClientId)
   deepLink.searchParams.set('provider', safeProvider)
+  if (opts?.source === 'mcp') {
+    deepLink.searchParams.set('source', 'mcp')
+    // Correlation key for the desktop resume (authoritative — from the signed
+    // state). Robust against concurrent suspensions of different mcp-servers.
+    if (opts.mcpServerName) {
+      deepLink.searchParams.set('mcpServerName', opts.mcpServerName)
+    }
+  }
   const deepLinkHref = htmlAttrEscape(deepLink.toString())
   // JSON.stringify gives valid JS string literal; `<` → `<` blocks
   // any chance of `</script>` injection if the URL ever carried weird input.

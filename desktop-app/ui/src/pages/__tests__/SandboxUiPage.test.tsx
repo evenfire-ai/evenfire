@@ -185,6 +185,60 @@ describe('SandboxUiPage', () => {
     expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
   })
 
+  it('exposes a chat-drawer toggle in the mounted header that reflects and drives drawer state', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onToggleChatDrawer = vi.fn()
+
+    const view = render(
+      <SandboxUiPage chatDrawerOpen={false} onToggleChatDrawer={onToggleChatDrawer} />
+    )
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    const toggle = await screen.findByRole('button', { name: 'Toggle chat drawer' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(toggle)
+    expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
+
+    view.rerender(<SandboxUiPage chatDrawerOpen={true} onToggleChatDrawer={onToggleChatDrawer} />)
+    expect(
+      screen.getByRole('button', { name: 'Toggle chat drawer' }).getAttribute('aria-pressed')
+    ).toBe('true')
+  })
+
+  it('omits the chat-drawer toggle when no toggle handler is provided', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+
+    render(<SandboxUiPage />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    expect(screen.queryByRole('button', { name: 'Toggle chat drawer' })).toBeNull()
+  })
+
   it('routes controlled refresh and back requests through mounted-app owners', async () => {
     sandboxUi.listApps.mockResolvedValue({
       apps: [
@@ -725,6 +779,40 @@ describe('SandboxUiPage', () => {
     })
   })
 
+  it('publishes the measured embed slot top through onEmbedSlotTopChange', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onEmbedSlotTopChange = vi.fn()
+
+    render(<SandboxUiPage onEmbedSlotTopChange={onEmbedSlotTopChange} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+
+    // The slot rect (getBoundingClientRect mock -> top: 12) flows through the real
+    // useEmbedBounds push, so the callback fires with Math.round(rect.top) = 12.
+    await waitFor(() => {
+      expect(onEmbedSlotTopChange).toHaveBeenCalledWith(12)
+    })
+    const calls = onEmbedSlotTopChange.mock.calls.length
+
+    // A push that measures the same top must NOT re-emit (dedupe against churn).
+    fireEvent.scroll(window)
+    await new Promise(resolve => window.setTimeout(resolve, 0))
+    expect(onEmbedSlotTopChange.mock.calls.length).toBe(calls)
+  })
+
   it('reloads the embed in place when the Refresh button is clicked (no navigate-away needed)', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
@@ -849,6 +937,105 @@ describe('SandboxUiPage', () => {
     await waitFor(() => {
       expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(false)
     })
+  })
+
+  it('hides the native view while a deep-link dialog overlay is open and restores it on close', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.capturePreview.mockResolvedValueOnce('data:image/png;base64,deeplink')
+
+    const { rerender } = render(<SandboxUiPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    // The "Open app link?" / "App link could not be opened" dialogs live in the
+    // renderer DOM; without hiding the WebContentsView they render behind the
+    // embedded app and the user can never reach the confirm/dismiss buttons.
+    rerender(<SandboxUiPage deepLinkShellOverlayOpen />)
+
+    // toHaveBeenLastCalledWith(false) would be satisfied by a stray false->true
+    // ->false flicker inside this phase; assert the exact call list (scoped by
+    // the mockClear above) so any transient setVisible(true) fails the test.
+    await waitFor(() => expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy())
+    // The placeholder shown while the native view is hidden is the captured
+    // preview data URL; assert it so the fixture literal is load-bearing.
+    expect(screen.getByTestId('sandbox-ui-embed-preview').getAttribute('src')).toBe(
+      'data:image/png;base64,deeplink'
+    )
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
+
+    sandboxUi.setVisible.mockClear()
+    rerender(<SandboxUiPage />)
+
+    await waitFor(() => expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull())
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[true]])
+  })
+
+  // This test pins the refcount-like behaviour of the overlay OR: two overlays
+  // open, closing one keeps the embed hidden, closing the last restores it. It
+  // does NOT discriminate the "collapse the whole OR" mutant on its own —
+  // `deepLinkShellOverlayOpen` stays true through every phase here, so that
+  // mutant is caught by the single-overlay tests above, not by this one. Keep
+  // those tests: this one does not subsume them.
+  it('keeps the native view hidden until the last of several overlays closes', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    sandboxUi.capturePreview.mockResolvedValueOnce('data:image/png;base64,multi')
+
+    const { rerender } = render(<SandboxUiPage />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+    await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
+    sandboxUi.setVisible.mockClear()
+
+    // Two overlays open at once (a deep-link dialog and a header overlay); the
+    // native view must hide exactly once.
+    rerender(<SandboxUiPage deepLinkShellOverlayOpen headerShellOverlayOpen />)
+
+    await waitFor(() => expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy())
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[false]])
+
+    // Close only ONE overlay: the OR of the remaining overlays is still true, so
+    // the embed stays hidden and setVisible is not called again.
+    sandboxUi.setVisible.mockClear()
+    rerender(<SandboxUiPage deepLinkShellOverlayOpen />)
+
+    await waitFor(() => expect(sandboxUi.capturePreview).toHaveBeenCalledTimes(1))
+    expect(sandboxUi.setVisible).not.toHaveBeenCalled()
+    expect(screen.getByTestId('sandbox-ui-embed-preview')).toBeTruthy()
+
+    // Close the last overlay: only now is the native view restored.
+    sandboxUi.setVisible.mockClear()
+    rerender(<SandboxUiPage />)
+
+    await waitFor(() => expect(screen.queryByTestId('sandbox-ui-embed-preview')).toBeNull())
+    expect(sandboxUi.setVisible.mock.calls).toEqual([[true]])
   })
 
   it('hides an active native view even before local launch state is available', async () => {

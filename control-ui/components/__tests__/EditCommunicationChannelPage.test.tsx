@@ -919,3 +919,40 @@ describe('EditCommunicationChannelPage conversation delete validation', () => {
     expect(api.apiSend).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * The helper tests round-trip spec.email through the draft builder. They do
+ * not cover the page → request boundary where #386 actually happened: Save
+ * is a full-spec PUT, the edit page has no email controls, and control-api
+ * preserves only credentialsSecretRef. If persistDraft ever built that PUT
+ * without the loaded email groups, the inbox would drop out of the poll set
+ * after an unrelated edit.
+ */
+describe('EditCommunicationChannelPage spec.email preservation on Save', () => {
+  const EMAIL_GROUPS = [{ channelId: 'INBOX', emails: ['someone@example.com'] }]
+
+  it('keeps populated spec.email in the PUT when only a modelled field is edited', async () => {
+    mockChannel('inbox-channel', {
+      email: EMAIL_GROUPS,
+      telegram: [{ channelId: '424242', chatType: 'private' }],
+      telegramSettings: { botHandle: '@bot', replyOnlyWhenMentioned: true },
+    })
+    await renderLoadedPage()
+
+    fireEvent.change(screen.getByLabelText(/Telegram bot handle/), {
+      target: { value: '@new_bot' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(api.apiSend).toHaveBeenCalled())
+    const [method, path, body] = vi.mocked(api.apiSend).mock.calls[0] as [
+      string,
+      string,
+      { spec: { email?: unknown; telegramSettings?: { botHandle?: string } } },
+    ]
+    expect(method).toBe('PUT')
+    expect(path).toBe('/api/v1/admin/communication-channels/inbox-channel')
+    expect(body.spec.email).toEqual(EMAIL_GROUPS)
+    expect(body.spec.telegramSettings?.botHandle).toBe('@new_bot')
+  })
+})

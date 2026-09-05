@@ -5,7 +5,6 @@ import {
   IconBroadcast,
   IconCable,
   IconFolder,
-  IconGroupWork,
   IconInfrastructureTrace,
   IconKey,
   IconLlmPrices,
@@ -32,7 +31,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     href: CONTROL_ROUTES.connectors.root,
     icon: <IconCable />,
   },
-  contexts: { label: 'Contexts', href: CONTROL_ROUTES.contexts.root, icon: <IconGroupWork /> },
   guardrails: {
     label: 'Installed Guardrails',
     href: CONTROL_ROUTES.guardrails.root,
@@ -138,7 +136,6 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
 export const SIDEBAR_TAB_ORDER: SidebarTab[] = [
   'profile-admin',
   'hosts',
-  'contexts',
   'registry-catalog',
   'mcp-servers',
   'workflow-recipes',

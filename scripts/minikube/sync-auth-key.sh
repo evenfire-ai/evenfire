@@ -534,64 +534,83 @@ sync_mcp_consumers() {
     fi
   fi
 
+  # HCC can mutate mcp-host/chatllm while Host CRs are applied immediately
+  # before this sync (token roll + host.clerum.io/chatllm). Attest only a
+  # stable contract: if the snapshot changes, re-enumerate and prove the new
+  # bindings instead of stamping the stale one.
+  local attempt max_attempts="${MCP_CONSUMER_CONTRACT_ATTEMPTS:-8}"
+  local retry_sleep="${MCP_CONSUMER_CONTRACT_RETRY_SLEEP:-3}"
   local consumer_snapshot snapshot_header snapshot_hash snapshot_tag snapshot_extra binding_records
-  if ! consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
-    die "cannot enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before auth key rollout"
-  fi
-  snapshot_header="${consumer_snapshot%%$'\n'*}"
-  IFS=$'\x1f' read -r snapshot_tag snapshot_hash snapshot_extra <<<"${snapshot_header}"
-  [[ "${snapshot_tag}" == "@snapshot" && "${snapshot_hash}" =~ ^[0-9a-f]{64}$ && \
-     -z "${snapshot_extra}" ]] ||
-    die "consumer discovery returned an invalid contract snapshot"
-  if [[ "${consumer_snapshot}" == *$'\n'* ]]; then
-    binding_records="${consumer_snapshot#*$'\n'}"
-  else
-    binding_records=""
-  fi
-  if [[ -z "${binding_records}" ]]; then
-    log "No effective Deployment bindings consume ${CONFIGMAP}.${TARGET_KEY}; auth key is synced for future consumers"
-  else
-    local namespace deployment desired_replicas selector container env_name
-    local current_namespace="" current_deployment="" current_replicas="" current_selector=""
-    local current_bindings=""
-    while IFS=$'\x1f' read -r namespace deployment desired_replicas selector container env_name; do
-      [[ -n "${namespace}" && -n "${deployment}" && -n "${desired_replicas}" && \
-         -n "${container}" && -n "${env_name}" ]] ||
-        die "consumer discovery returned an incomplete binding record"
-      if [[ -n "${current_deployment}" && \
-            ( "${namespace}" != "${current_namespace}" || "${deployment}" != "${current_deployment}" ) ]]; then
+  local final_consumer_snapshot final_hash
+  [[ "${max_attempts}" =~ ^[1-9][0-9]*$ ]] ||
+    die "MCP_CONSUMER_CONTRACT_ATTEMPTS must be a positive integer"
+  [[ "${retry_sleep}" =~ ^[0-9]+$ ]] ||
+    die "MCP_CONSUMER_CONTRACT_RETRY_SLEEP must be a non-negative integer"
+
+  for ((attempt=1; attempt<=max_attempts; attempt++)); do
+    if ! consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
+      die "cannot enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before auth key rollout"
+    fi
+    snapshot_header="${consumer_snapshot%%$'\n'*}"
+    IFS=$'\x1f' read -r snapshot_tag snapshot_hash snapshot_extra <<<"${snapshot_header}"
+    [[ "${snapshot_tag}" == "@snapshot" && "${snapshot_hash}" =~ ^[0-9a-f]{64}$ && \
+       -z "${snapshot_extra}" ]] ||
+      die "consumer discovery returned an invalid contract snapshot"
+    if [[ "${consumer_snapshot}" == *$'\n'* ]]; then
+      binding_records="${consumer_snapshot#*$'\n'}"
+    else
+      binding_records=""
+    fi
+    if [[ -z "${binding_records}" ]]; then
+      log "No effective Deployment bindings consume ${CONFIGMAP}.${TARGET_KEY}; auth key is synced for future consumers"
+    else
+      local namespace deployment desired_replicas selector container env_name
+      local current_namespace="" current_deployment="" current_replicas="" current_selector=""
+      local current_bindings=""
+      while IFS=$'\x1f' read -r namespace deployment desired_replicas selector container env_name; do
+        [[ -n "${namespace}" && -n "${deployment}" && -n "${desired_replicas}" && \
+           -n "${container}" && -n "${env_name}" ]] ||
+          die "consumer discovery returned an incomplete binding record"
+        if [[ -n "${current_deployment}" && \
+              ( "${namespace}" != "${current_namespace}" || "${deployment}" != "${current_deployment}" ) ]]; then
+          reconcile_mcp_consumer_deployment "${current_namespace}" "${current_deployment}" \
+            "${current_replicas}" "${current_selector}" "${current_bindings}"
+          current_bindings=""
+        fi
+        if [[ -z "${current_bindings}" ]]; then
+          current_namespace="${namespace}"
+          current_deployment="${deployment}"
+          current_replicas="${desired_replicas}"
+          current_selector="${selector}"
+        elif [[ "${namespace}" != "${current_namespace}" || \
+                "${deployment}" != "${current_deployment}" || \
+                "${desired_replicas}" != "${current_replicas}" || \
+                "${selector}" != "${current_selector}" ]]; then
+          die "consumer discovery returned inconsistent Deployment metadata for ${namespace}/${deployment}"
+        fi
+        if [[ -n "${current_bindings}" ]]; then
+          current_bindings+=$'\n'
+        fi
+        current_bindings+="${container}"$'\x1f'"${env_name}"
+      done <<<"${binding_records}"
+      if [[ -n "${current_deployment}" ]]; then
         reconcile_mcp_consumer_deployment "${current_namespace}" "${current_deployment}" \
           "${current_replicas}" "${current_selector}" "${current_bindings}"
-        current_bindings=""
       fi
-      if [[ -z "${current_bindings}" ]]; then
-        current_namespace="${namespace}"
-        current_deployment="${deployment}"
-        current_replicas="${desired_replicas}"
-        current_selector="${selector}"
-      elif [[ "${namespace}" != "${current_namespace}" || \
-              "${deployment}" != "${current_deployment}" || \
-              "${desired_replicas}" != "${current_replicas}" || \
-              "${selector}" != "${current_selector}" ]]; then
-        die "consumer discovery returned inconsistent Deployment metadata for ${namespace}/${deployment}"
-      fi
-      if [[ -n "${current_bindings}" ]]; then
-        current_bindings+=$'\n'
-      fi
-      current_bindings+="${container}"$'\x1f'"${env_name}"
-    done <<<"${binding_records}"
-    if [[ -n "${current_deployment}" ]]; then
-      reconcile_mcp_consumer_deployment "${current_namespace}" "${current_deployment}" \
-        "${current_replicas}" "${current_selector}" "${current_bindings}"
     fi
-  fi
 
-  local final_consumer_snapshot final_hash
-  if ! final_consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
-    die "cannot re-enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before attestation"
-  fi
-  [[ "${final_consumer_snapshot}" == "${consumer_snapshot}" ]] ||
-    die "${CONFIGMAP}.${TARGET_KEY} consumer contracts changed during convergence"
+    if ! final_consumer_snapshot="$(discover_mcp_consumer_snapshot)"; then
+      die "cannot re-enumerate effective ${CONFIGMAP}.${TARGET_KEY} consumers before attestation"
+    fi
+    if [[ "${final_consumer_snapshot}" == "${consumer_snapshot}" ]]; then
+      break
+    fi
+    if [[ "${attempt}" -eq "${max_attempts}" ]]; then
+      die "${CONFIGMAP}.${TARGET_KEY} consumer contracts changed during convergence"
+    fi
+    log "${CONFIGMAP}.${TARGET_KEY} consumer contracts changed during convergence; retrying (${attempt}/${max_attempts})"
+    sleep "${retry_sleep}"
+  done
   if ! final_hash="$(configmap_key_hash "${CONFIG_NAMESPACE}" "${CONFIGMAP}" "${TARGET_KEY}" 2>&1)"; then
     die "cannot re-read auth target ${CONFIG_NAMESPACE}/${CONFIGMAP} before attestation: ${final_hash}"
   fi

@@ -13,10 +13,47 @@ export interface McpServerTransport {
 }
 
 /**
+ * Reference to a key within a Kubernetes Secret.
+ */
+export interface McpServerSecretRef {
+  name: string
+  key: string
+}
+
+/**
+ * OAuth broker configuration for an mcp-server (auth.type === 'oauth').
+ *
+ * Present iff `spec.auth.type === 'oauth'`. control-api owns the OAuth flow and
+ * resolves tokens per connection just-in-time; HCC does NOT mount the token as
+ * env (invariant O4 stays intact — this type only lets the controller type the
+ * discriminator; the runtime token carril is mcp-host's, not HCC's).
+ */
+export interface McpServerOAuth {
+  id: string
+  // Full control-api adapter set — must mirror the mcpserver.yaml `oauth.provider`
+  // enum, control-api `providers.ts` `OAuthProvider`, and workflow-recipes
+  // `OAuthProvider`. U2 (spec 06) added monday/clickup/vercel.
+  provider:
+    | 'salesforce'
+    | 'slack'
+    | 'notion'
+    | 'microsoft-graph'
+    | 'google'
+    | 'monday'
+    | 'clickup'
+    | 'vercel'
+  clientIdRef: McpServerSecretRef
+  clientSecretRef: McpServerSecretRef
+  scopes?: string[]
+  backgroundAccess?: boolean
+  grantScope?: 'user' | 'context'
+}
+
+/**
  * McpServer authentication configuration.
  */
 export interface McpServerAuth {
-  type: 'none' | 'bearer' | 'basic' | 'apiKey'
+  type: 'none' | 'bearer' | 'basic' | 'apiKey' | 'oauth'
   secretRef?: string
   secretKey?: string
 }
@@ -121,6 +158,9 @@ export interface McpServerSpec {
   args?: string[]
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config; present iff auth.type === 'oauth'. Typing only — HCC
+  // does NOT mount the resolved token as env (O4 stays intact).
+  oauth?: McpServerOAuth
   serverConfig?: McpServerConfig
   envMapping?: McpServerEnvMapping
   env?: McpServerEnvVar[]
@@ -361,6 +401,22 @@ export interface ContextCRD {
 export interface HostModelSpec {
   provider?: LlmProviderId
   name?: string
+  connectionRef?: string
+}
+
+export interface HostAllowedModel {
+  provider?: string
+  model?: string
+}
+
+export interface HostLlmPolicyFallback {
+  provider?: string
+  model?: string
+  credentialSlot?: string
+}
+
+export interface HostLlmPolicySpec {
+  fallbacks?: HostLlmPolicyFallback[]
 }
 
 export interface HostDesktopSpec {
@@ -384,9 +440,32 @@ export type HostWorkflowControlScope =
   | 'workflow:approval:resolve'
   | 'workflow:approval:decide'
 
+export type DerivedPlatformScope = 'llm:codex:execute'
+// The full effective runtime control scope set minted into an mcp-host control
+// JWT: the user-declarable workflow-control scopes PLUS every HCC-derived scope
+// — `oauth:user-token` (see {@link HostRuntimeControlScope}) and the codex
+// `llm:codex:execute` derive. Both derives can co-occur on one Host, so this
+// must be their union, not either alone.
+export type EffectiveMcpHostControlScope = HostRuntimeControlScope | DerivedPlatformScope
+
 export interface HostWorkflowControlSpec {
   scopes?: HostWorkflowControlScope[]
 }
+
+/**
+ * Runtime control scopes minted into an mcp-host's control JWT. This is the
+ * DERIVED superset of the user-declarable {@link HostWorkflowControlScope}:
+ * HCC appends `oauth:user-token` for a Host runtime that fronts an enabled
+ * `auth.type: oauth` mcp-server, so the mcp-host can call control-api's OAuth
+ * user-token broker on that connection's behalf.
+ *
+ * `oauth:user-token` is HCC-derived and MUST NEVER be user-declarable: it is
+ * deliberately absent from {@link HostWorkflowControlScope} and from the Host
+ * CRD `spec.workflowControl.scopes` enum. HCC computes it per reconcile from
+ * the referenced Context's McpServer allow-list; nothing writes it back to the
+ * Host CR.
+ */
+export type HostRuntimeControlScope = HostWorkflowControlScope | 'oauth:user-token'
 
 /**
  * A single installed-hook reference inside Host.spec.guardrails.hooks[phase].
@@ -430,9 +509,11 @@ export interface HostGuardrailsSpec {
 export interface HostSpec {
   host: string
   contextRef: string
-  secretRef: string
+  secretRef?: string
   channels?: string[]
   model?: HostModelSpec
+  allowedModels?: HostAllowedModel[]
+  llmPolicy?: HostLlmPolicySpec
   approval?: Record<string, unknown>
   desktop?: HostDesktopSpec
   lifecycle?: HostLifecycleSpec
@@ -572,6 +653,11 @@ export interface McpServerInfo {
   contextRef: string
   transport: McpServerTransport
   auth?: McpServerAuth
+  // OAuth broker config; present iff auth.type === 'oauth'. Discovery metadata
+  // only — mcp-host dispatches the per-connection partition from `authKind`
+  // (derived separately), not from this field, which currently has no consumer.
+  // HCC does NOT mount the resolved token as env (O4 stays intact).
+  oauth?: McpServerOAuth
   enabled: boolean
   status: McpServerStatus
 }

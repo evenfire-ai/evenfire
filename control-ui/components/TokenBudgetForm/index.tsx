@@ -14,7 +14,7 @@ import {
   getRecipeSecrets,
 } from '@lib/api'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
-import { LLM_PROVIDER_OPTIONS, getAllModelOptions } from '@lib/llm'
+import { LLM_PROVIDER_OPTIONS, budgetUnitAllowedForProviders, getAllModelOptions } from '@lib/llm'
 import { ScopeSelector } from './ScopeSelector'
 import { DEFAULT_CURRENCY, DEFAULT_TIMEZONE } from './constants'
 import type { ScopeDimensionConfig, ScopeOption, TokenBudgetFormProps } from './types'
@@ -169,8 +169,15 @@ export function TokenBudgetForm({
   const minStartInvalid = minStartValue === null || minStartValue < 0
   const maxTaskInvalid = maxTaskAmount.trim() !== '' && (maxTaskValue === null || maxTaskValue <= 0)
   const currencyInvalid = unit === 'cost' && currency.trim().length === 0
+  const codexCostInvalid =
+    unit === 'cost' && !budgetUnitAllowedForProviders('cost', scope.provider ?? [])
   const hasErrors =
-    nameInvalid || limitInvalid || minStartInvalid || maxTaskInvalid || currencyInvalid
+    nameInvalid ||
+    limitInvalid ||
+    minStartInvalid ||
+    maxTaskInvalid ||
+    currencyInvalid ||
+    codexCostInvalid
 
   // Live unpriced surfacing (§6.2): derived from the CURRENT form scope and the
   // loaded price list, not the saved snapshot — so it appears on create and
@@ -237,11 +244,21 @@ export function TokenBudgetForm({
               autoFocus
             />
           </Field>
-          <Field htmlFor="budget-unit" label="Unit" required>
+          <Field
+            htmlFor="budget-unit"
+            label="Unit"
+            required
+            error={
+              showErrors && codexCostInvalid
+                ? 'Codex subscription budgets must use unit tokens, not cost.'
+                : undefined
+            }
+          >
             <SelectInput
               id="budget-unit"
               value={unit}
               onChange={event => setUnit(event.target.value as 'cost' | 'tokens')}
+              invalid={showErrors && codexCostInvalid}
               disabled={saving}
             >
               <option value="cost">Cost (currency)</option>

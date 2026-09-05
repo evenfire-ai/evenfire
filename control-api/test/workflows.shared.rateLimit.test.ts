@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
 import {
+  adminCodexReadRateLimits,
+  adminCodexWriteRateLimits,
   adminOutputsReadRateLimits,
   adminWorkflowRateLimitCredential,
   adminWorkflowTriggerRateLimit,
+  codexOAuthCallbackRateLimits,
+  llmProviderAttemptAuthorizeRateLimits,
   mcpHostWorkflowTriggerRateLimit,
   mcpHostWorkflowTriggerRateLimitCredential,
   shouldSkipWorkflowGrantEdgeRateLimit,
@@ -85,11 +89,34 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(adminWorkflowRateLimitCredential(req)).toBe('admin-cookie-token')
   })
 
+  it('llmProviderAttemptAuthorizeRateLimits meters callers before JWT is attached', async () => {
+    mockCheckAndIncrement.mockReset()
+    const app = express()
+    app.post('/authorize', ...llmProviderAttemptAuthorizeRateLimits(), (_req, res) => {
+      res.status(200).json({ ok: true })
+    })
+
+    for (let i = 0; i < 60; i++) {
+      pgAllows()
+      await request(app).post('/authorize').expect(200)
+    }
+    pgAllows()
+    const res = await request(app).post('/authorize').expect(429)
+    expect(res.body).toMatchObject({
+      error: 'Too Many Requests',
+      retryAfterSeconds: expect.any(Number),
+    })
+  })
+
   it('rate-limit factories pair an edge backstop with the PG limiter', () => {
     expect(workflowGrantReadRateLimits()).toHaveLength(2)
     expect(workflowGrantWriteRateLimits()).toHaveLength(2)
     expect(workflowAdminReadRateLimits()).toHaveLength(2)
     expect(adminOutputsReadRateLimits()).toHaveLength(2)
+    expect(adminCodexReadRateLimits()).toHaveLength(2)
+    expect(adminCodexWriteRateLimits()).toHaveLength(2)
+    expect(codexOAuthCallbackRateLimits()).toHaveLength(2)
+    expect(llmProviderAttemptAuthorizeRateLimits()).toHaveLength(2)
   })
 
   it('shouldSkipWorkflowGrantEdgeRateLimit skips anonymous callers', () => {

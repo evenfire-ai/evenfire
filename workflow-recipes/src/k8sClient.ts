@@ -54,6 +54,7 @@ import {
 } from './types'
 import { createDbRunChildRecipe } from './workflow/dbRunChildRecipeCreator'
 import type { JwtTokenFactory } from './workflow/jwtTokenFactory'
+import { CODEX_CONNECTION_REF_ANNOTATION } from './workflow/llmAllowedModelsSnapshot'
 
 const PLURAL = 'workflowrecipes'
 const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
@@ -1110,11 +1111,18 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const cached = this.recipes.get(recipe.metadata.name)
     const cachedGeneration = cached?.metadata.generation
     const nextGeneration = recipe.metadata.generation
-    return (
-      cachedGeneration !== undefined &&
-      nextGeneration !== undefined &&
-      cachedGeneration === nextGeneration
-    )
+    if (
+      cachedGeneration === undefined ||
+      nextGeneration === undefined ||
+      cachedGeneration !== nextGeneration
+    ) {
+      return false
+    }
+    // Grant identity is a metadata annotation and does not bump generation.
+    // Treat it as a real reconcile, not a status-only skip.
+    const cachedRef = cached?.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    const nextRef = recipe.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    return cachedRef === nextRef
   }
 
   /**
@@ -1282,6 +1290,12 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     })
 
     // Counts and duration only — never the resolved FQDNs/IPs or any Secret.
+    // This line summarises a FLEET-WIDE sweep: naming every host of every recipe
+    // here would dump the whole fleet's egress onto one line, every pass, with no
+    // way to attribute an address back to a policy. The per-host record lives
+    // where the set is decided and written instead — `logResolvedEgressSet` in
+    // workflowRecipeReconciler.ts, one entry per FQDN, only when the set changed
+    // and only once the policy has landed (#299). Secrets stay out of both.
     console.log(
       `[WR-K8s] External egress refresh: re-enqueued ${enqueued}/${selected.length} recipe(s) in ${Date.now() - started}ms`
     )

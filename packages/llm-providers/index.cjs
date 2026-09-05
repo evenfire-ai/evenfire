@@ -51,6 +51,8 @@ const PROVIDER_IDS = Object.freeze([
   'minimax',
   // Light-driver (OpenAI-compatible shape, non-vanilla auth/host).
   'azure',
+  // OAuth-broker subscription provider. Not part of env-key autodetection.
+  'codex-subscription',
 ])
 
 // Model identifiers are transport selectors, not arbitrary user text. Keep
@@ -69,7 +71,8 @@ function apiKeySlot(dataKey, envName) {
 
 /**
  * Credentials each provider loads from the LLM Secret, in priority order (the
- * first is the "primary" slot). Every provider has at least one slot.
+ * first is the "primary" slot). Static-credential providers have at least one
+ * slot; oauth-broker providers have none.
  * @type {Record<string, ReadonlyArray<{dataKey: string, envName: string, required: boolean, multiline?: boolean}>>}
  */
 const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
@@ -116,6 +119,8 @@ const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
   minimax: apiKeySlot('minimax-api-key', 'MINIMAX_API_KEY'),
   // Azure: one API key, sent via the `api-key` header (driver concern, not here).
   azure: apiKeySlot('azure-openai-api-key', 'AZURE_OPENAI_API_KEY'),
+  // Subscription broker: zero Secret slots. Env autodetection must never pick it.
+  'codex-subscription': Object.freeze([]),
 })
 
 /**
@@ -145,6 +150,7 @@ const PROVIDER_DISPLAY_LABELS = Object.freeze({
   novita: 'Novita AI',
   minimax: 'MiniMax',
   azure: 'Azure OpenAI',
+  'codex-subscription': 'OpenAI Codex Subscription',
 })
 
 /**
@@ -186,6 +192,7 @@ const PROVIDER_NON_SECRET_ENV = Object.freeze({
     Object.freeze({ envName: 'AZURE_OPENAI_ENDPOINT', required: true }),
     Object.freeze({ envName: 'AZURE_OPENAI_API_VERSION', required: false }),
   ]),
+  'codex-subscription': Object.freeze([]),
 })
 
 // SECURITY: use an own-property check, NOT `in`. `in` walks the prototype chain
@@ -214,6 +221,45 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
   return canonical.includes(credentialSlot)
 }
 
+/** @type {Record<string, 'static-credentials' | 'oauth-broker'>} */
+const PROVIDER_AUTH_MODE = Object.freeze(
+  Object.fromEntries(
+    PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'oauth-broker' : 'static-credentials'])
+  )
+)
+
+/** @type {Record<string, 'static' | 'dynamic'>} */
+const PROVIDER_MODEL_CATALOG_MODE = Object.freeze(
+  Object.fromEntries(PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'dynamic' : 'static']))
+)
+
+function providerDescriptor(id) {
+  if (!isLlmProviderId(id)) {
+    throw new Error(`[llm-providers] unknown provider '${String(id)}'`)
+  }
+  return Object.freeze({
+    id,
+    displayLabel: PROVIDER_DISPLAY_LABELS[id],
+    authMode: PROVIDER_AUTH_MODE[id],
+    modelCatalogMode: PROVIDER_MODEL_CATALOG_MODE[id],
+    credentialSlots: PROVIDER_CREDENTIAL_SLOTS[id],
+    nonSecretEnv: PROVIDER_NON_SECRET_ENV[id],
+  })
+}
+
+function requireStaticCredentialSlot(descriptor) {
+  if (!descriptor || descriptor.authMode !== 'static-credentials') {
+    throw new Error(
+      `[llm-providers] static credential helper rejects authMode '${descriptor && descriptor.authMode}'`
+    )
+  }
+  const slot = descriptor.credentialSlots && descriptor.credentialSlots[0]
+  if (!slot) {
+    throw new Error('[llm-providers] static credential helper requires a primary slot')
+  }
+  return slot
+}
+
 module.exports = {
   PROVIDER_IDS,
   RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
@@ -221,7 +267,11 @@ module.exports = {
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_NON_SECRET_ENV,
+  PROVIDER_AUTH_MODE,
+  PROVIDER_MODEL_CATALOG_MODE,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,
+  providerDescriptor,
+  requireStaticCredentialSlot,
 }

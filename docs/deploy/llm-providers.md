@@ -5,7 +5,7 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — **22 providers**, from `openai`, `claude`
+The canonical provider set — **23 providers**, from `openai`, `claude`
 (Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
 OpenAI-compatible additions and `azure` — and their credential slots live in the
 shared `@clerum/llm-providers` package, which the Control UI, control-api,

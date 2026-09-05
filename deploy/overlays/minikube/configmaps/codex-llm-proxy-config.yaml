@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codex-llm-proxy-config
+  namespace: control-plane
+  labels:
+    app: codex-llm-proxy
+data:
+  CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'

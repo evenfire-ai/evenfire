@@ -200,6 +200,27 @@ describe('sessionFsmReducer — R3 approval notifications (GAP-N3 dedupe)', () =
     })
     expect(effects).toEqual([])
   })
+
+  it('U5: a connect_required suspension flips the badge WITHOUT the generic approval notification', () => {
+    const { state, effects } = sessionFsmReducer(
+      stateWith({ phase: 'processing', activeTaskId: 't1' }),
+      {
+        type: 'STREAM_SUSPENDED',
+        taskId: 't1',
+        approval: {
+          requestId: 'req-1',
+          displayName: 'monday tool',
+          reason: 'connect_required',
+          mcpServerName: 'monday',
+        },
+      }
+    )
+    // Badge still moves to awaiting_approval (the connect completion resumes it via
+    // the same approval RPC) — but NO emit_approval_notification: a connect prompt
+    // is not a tool approval, and its decide-action would resume without a grant.
+    expect(state).toMatchObject({ phase: 'awaiting_approval' })
+    expect(effects).toEqual([])
+  })
 })
 
 describe('sessionFsmReducer — R3 decision optimism / revert / suppression', () => {

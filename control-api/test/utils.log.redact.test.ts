@@ -22,12 +22,26 @@ describe('token-leak redaction', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('refreshToken')
   })
 
+  it('redacts ChatGPT account identifiers', () => {
+    expect(TOKEN_LEAK_REDACT_PATHS).toContain('chatgptAccountId')
+    expect(TOKEN_LEAK_REDACT_PATHS).toContain('accountId')
+    expect(REQUIRED_REDACT_PATHS).toContain('chatgptAccountId')
+    expect(REQUIRED_REDACT_PATHS).toContain('accountId')
+  })
+
   it('redacts the registry voucher field (defense-in-depth)', () => {
     expect(TOKEN_LEAK_REDACT_PATHS).toContain('voucher')
   })
 
   it('redacts registry connect claim tokens and client secrets', () => {
     for (const p of ['claim_token', 'claimToken', 'client_secret', 'clientSecret']) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
+      expect(REQUIRED_REDACT_PATHS).toContain(p)
+    }
+  })
+
+  it('redacts the PKCE code_verifier (U2) in both snake and camel case', () => {
+    for (const p of ['code_verifier', 'codeVerifier']) {
       expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
       expect(REQUIRED_REDACT_PATHS).toContain(p)
     }

@@ -134,6 +134,139 @@ describe('McpToolRegistryAdapter', () => {
     })
   })
 
+  it('maps the connect_required marker to metadata.connect_required on the success path (U5)', async () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'monday-server__list_boards',
+          description: 'List boards',
+          inputSchema: { type: 'object' },
+          serverName: 'monday-server',
+        },
+      ],
+      // manager.callTool returns the TYPED marker (never a flattened opaque error)
+      // when a live 401 hit an oauth server.
+      callTool: vi.fn(async () => ({
+        toolName: 'monday-server__list_boards',
+        result: { error: 'MCP server monday-server auth failed (401)' },
+        isError: true,
+        connectRequired: { mcpServerName: 'monday-server' },
+      })),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('monday-server__list_boards')
+    expect(tool).not.toBeNull()
+
+    const output = await tool!.execute({})
+    // The consumer observes the typed metadata marker, not an opaque error.
+    expect(output.metadata).toEqual({
+      connect_required: { mcpServerName: 'monday-server' },
+    })
+    expect(output.is_error).toBe(true)
+  })
+
+  it('does not attach connect_required metadata for a plain (non-oauth) error result', async () => {
+    const mockManager = {
+      getAllTools: () => [
+        {
+          name: 'airtable-server__list',
+          description: 'List',
+          inputSchema: { type: 'object' },
+          serverName: 'airtable-server',
+        },
+      ],
+      callTool: vi.fn(async () => ({
+        toolName: 'airtable-server__list',
+        result: { error: 'boom' },
+        isError: true,
+        // no connectRequired marker
+      })),
+    } as any
+
+    const registry = new McpToolRegistryAdapter(mockManager)
+    const tool = registry.get('airtable-server__list')
+    const output = await tool!.execute({})
+    expect(output.metadata).toBeUndefined()
+  })
+
+  // ─── Principal binding (PR #319 C2/H1) ──────────────────────────────────────
+  //
+  // The userId the adapter forwards to `manager.callTool` (which becomes the
+  // oauth grantScope='user' broker grant subject) MUST be the authenticated task
+  // sender baked into the adapter at construction (taskExecutor threads
+  // `task.sourceMessage.sender`), NEVER a value the model can choose. These lock
+  // that the principal is the constructor identity and cannot be spoofed by a
+  // tool argument named `userId`, and that two per-user adapters never cross.
+  describe('principal binding — broker userId is the authenticated sender, not a tool arg', () => {
+    function capturingManager(): {
+      manager: unknown
+      calls: Array<{ tool: string; params: Record<string, unknown>; options: unknown }>
+    } {
+      const calls: Array<{ tool: string; params: Record<string, unknown>; options: unknown }> = []
+      const manager = {
+        getAllTools: () => [
+          {
+            name: 'gh__do',
+            description: 'demo',
+            inputSchema: { type: 'object' },
+            serverName: 'gh',
+          },
+        ],
+        callTool: vi.fn(async (tool: string, params: Record<string, unknown>, options: unknown) => {
+          calls.push({ tool, params, options })
+          return {
+            toolName: tool,
+            result: { content: [{ type: 'text', text: 'ok' }] },
+            isError: false,
+          }
+        }),
+      }
+      return { manager, calls }
+    }
+
+    it('forwards the constructor userId as options.userId, ignoring a spoofed `userId` arg', async () => {
+      const { manager, calls } = capturingManager()
+      // Adapter built for the authenticated sender "alice".
+      const registry = new McpToolRegistryAdapter(manager as never, 'alice')
+      const tool = registry.get('gh__do')!
+
+      // The model supplies its own `userId` arg trying to impersonate "bob".
+      await tool.execute({ userId: 'bob', foo: 1 })
+
+      expect(calls).toHaveLength(1)
+      // The broker subject is the authenticated identity, never the arg.
+      expect(calls[0].options).toEqual({ userId: 'alice' })
+      // The arg is still forwarded verbatim as tool params (it is data, not identity).
+      expect(calls[0].params).toEqual({ userId: 'bob', foo: 1 })
+    })
+
+    it('two per-user adapters never forward each other’s userId', async () => {
+      const { manager, calls } = capturingManager()
+      const aliceTool = new McpToolRegistryAdapter(manager as never, 'alice').get('gh__do')!
+      const bobTool = new McpToolRegistryAdapter(manager as never, 'bob').get('gh__do')!
+
+      await aliceTool.execute({})
+      await bobTool.execute({})
+
+      expect(calls.map(c => (c.options as { userId?: string }).userId)).toEqual(['alice', 'bob'])
+      // Alice's identity is emitted exactly once, only from her own adapter.
+      expect(calls.filter(c => (c.options as { userId?: string }).userId === 'alice')).toHaveLength(
+        1
+      )
+    })
+
+    it('an absent authenticated sender forwards userId=undefined (manager fails closed)', async () => {
+      const { manager, calls } = capturingManager()
+      // No sender on the task → no userId (never a body/arg fallback).
+      const tool = new McpToolRegistryAdapter(manager as never).get('gh__do')!
+
+      await tool.execute({ userId: 'anyone' })
+
+      expect(calls[0].options).toEqual({ userId: undefined })
+    })
+  })
+
   // `sourceRef` is the tool-lane guardrail's `server` identity, so a `server=` deny
   // rule matches on it. Slicing it off the display name at the first `__` truncates
   // any server whose own name contains one — the rule then fails to match, and a

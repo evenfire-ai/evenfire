@@ -127,6 +127,7 @@ describeRealPostgres("renamePublication on real PostgreSQL", () => {
     });
 
     expect(renamed.name).toBe("archive");
+    expect(renamed.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/);
 
     const rows = await pool.query(
       `SELECT resource_id::text AS id, name, path_cache, version
@@ -140,6 +141,55 @@ describeRealPostgres("renamePublication on real PostgreSQL", () => {
       path_cache: "/archive/docs/notes.txt",
       version: 0,
     });
+  });
+
+  it("advances updatedAt on rename and leaves an untouched parent at the seeded timestamp", async () => {
+    const seed = "2000-01-01T00:00:00.000Z";
+    const seeded = await pool.query(`
+      WITH drive_root AS (
+        INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache, updated_at)
+        VALUES ('stamp', NULL, '', 'directory', '/', $1::timestamptz)
+        RETURNING resource_id
+      ),
+      parent AS (
+        INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache, updated_at)
+        SELECT 'stamp', resource_id, 'docs', 'directory', '/docs', $1::timestamptz FROM drive_root
+        RETURNING resource_id
+      ),
+      target AS (
+        INSERT INTO gfs_resources (drive, parent_resource_id, name, kind, path_cache, version, updated_at)
+        SELECT 'stamp', resource_id, 'old', 'directory', '/docs/old', 1, $1::timestamptz FROM parent
+        RETURNING resource_id
+      )
+      SELECT parent.resource_id::text AS parent_id, target.resource_id::text AS target_id
+        FROM parent, target;
+    `, [seed]);
+    const { parent_id: parentId, target_id: targetId } = seeded.rows[0] as {
+      parent_id: string;
+      target_id: string;
+    };
+
+    const renamed = await publishRename(tx, {
+      requestId: "req-rename-updated-at",
+      subject: "host:1st:mcp-host/agent-a",
+      audit: noopAudit,
+      drive: "stamp",
+      resourceId: targetId,
+      newName: "new",
+      ifMatch: 1,
+      maxObjects: 1000,
+      deadlineAtMs: Date.now() + 30_000,
+    });
+    expect(new Date(renamed.updatedAt).getTime()).toBeGreaterThan(new Date(seed).getTime());
+
+    const rows = await pool.query(
+      `SELECT resource_id::text AS id, updated_at
+         FROM gfs_resources WHERE drive = 'stamp' AND resource_id = ANY($1::uuid[])`,
+      [[parentId, targetId]]
+    );
+    const byId = new Map(rows.rows.map(row => [row.id as string, (row.updated_at as Date).toISOString()]));
+    expect(byId.get(parentId)).toBe(new Date(seed).toISOString());
+    expect(new Date(byId.get(targetId) ?? 0).getTime()).toBeGreaterThan(new Date(seed).getTime());
   });
 
   // The admission bounds run through the REAL transactor here: PgTransactor

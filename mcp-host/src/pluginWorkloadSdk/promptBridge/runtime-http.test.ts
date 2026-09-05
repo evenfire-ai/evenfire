@@ -149,7 +149,6 @@ function makeHarness(scenario: Scenario): RuntimeHarness {
       attemptGeneration: 1,
       policyRevision: 9,
       policyHash: POLICY_HASH,
-      maxOutputTokens: 256,
     }
   })
   const controlApiClient = {

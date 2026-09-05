@@ -193,24 +193,30 @@ export class OpenAIProvider implements SingleTurnProvider {
         })
         return { role: 'user' as const, content }
       }
-      if (m.role === 'assistant' && m.tool_calls) {
-        return {
-          role: 'assistant' as const,
-          content: m.content || null,
-          tool_calls: m.tool_calls.map(tc => ({
-            id: tc.id,
-            type: 'function' as const,
-            function: {
-              name: tc.name,
-              arguments: JSON.stringify(tc.arguments),
-            },
-          })),
+      if (m.role === 'assistant') {
+        if (m.tool_calls) {
+          return {
+            role: 'assistant' as const,
+            content: m.content || null,
+            tool_calls: m.tool_calls.map(tc => ({
+              id: tc.id,
+              type: 'function' as const,
+              function: {
+                name: tc.name,
+                arguments: JSON.stringify(tc.arguments),
+              },
+            })),
+          }
         }
+        return { role: 'assistant' as const, content: m.content }
       }
-      return {
-        role: m.role as 'system' | 'user' | 'assistant',
-        content: m.content,
+      if (m.role === 'user') {
+        return { role: 'user' as const, content: m.content }
       }
+      // Operator/soul instruction channel. This API is WRC-JWT gated; the
+      // host must forward system text to the model. Do not fold user/tool
+      // content into this branch — that union was js/system-prompt-injection.
+      return { role: 'system' as const, content: m.content }
     })
   }
 

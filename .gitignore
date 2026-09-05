@@ -79,9 +79,11 @@ desktop-app/*.tsbuildinfo
 .playwright-mcp/
 control-ui/.playwright-browsers/
 desktop-app/.playwright-browsers/
+tests/e2e/playwright/.playwright-browsers/
 **/e2e-artifacts/
 desktop-app/test/e2e-playwright/test-results/
 **/test-results/
+tests/e2e/playwright/test-results-codex-subscription/
 desktop-app/test-results/
 **/playwright-report/
 *.tsbuildinfo

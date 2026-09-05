@@ -267,15 +267,30 @@ export function createInternalUsageEventsRouter(): Router {
           got: events.length,
         })
       }
-      const violation = checkClaimBinding(events, req.mcpHostJwt!)
+      // Old mcp-host reporters still enqueue Codex. Proxy finalize owns that
+      // ledger row; drop reporter Codex here so request_id cannot fork.
+      const reporterEvents: unknown[] = []
+      let droppedCodex = 0
+      for (const event of events) {
+        if (
+          event &&
+          typeof event === 'object' &&
+          (event as { provider?: unknown }).provider === 'codex-subscription'
+        ) {
+          droppedCodex += 1
+          continue
+        }
+        reporterEvents.push(event)
+      }
+      const violation = checkClaimBinding(reporterEvents, req.mcpHostJwt!)
       if (violation) {
         return res.status(403).json({ error: 'claim_binding_mismatch', ...violation })
       }
       const transactionResult = await withTraceIngestTransaction(async db => {
-        const workflowBinding = await checkWorkflowRunBinding(events, req.mcpHostJwt!, db)
+        const workflowBinding = await checkWorkflowRunBinding(reporterEvents, req.mcpHostJwt!, db)
         if (workflowBinding.violation) return { violation: workflowBinding.violation }
 
-        const ingest = await ingestUsageEventsInTransaction(events, db, {
+        const ingest = await ingestUsageEventsInTransaction(reporterEvents, db, {
           recipeNamespace: req.mcpHostJwt!.recipeNamespace,
           recipeName: req.mcpHostJwt!.recipeName,
         })
@@ -285,7 +300,12 @@ export function createInternalUsageEventsRouter(): Router {
           recipeName: req.mcpHostJwt!.recipeName,
           hostRef: req.mcpHostJwt!.hostRefs[0],
         })
-        return { result: ingest.result }
+        return {
+          result: {
+            ...ingest.result,
+            rejected: ingest.result.rejected + droppedCodex,
+          },
+        }
       })
       if ('violation' in transactionResult) {
         return res.status(403).json({

@@ -85,10 +85,12 @@ describe('DELETE /api/v1/internal/sandbox-ui/oauth/grant (spec §9.9 disconnect)
     expect(mockPoolQuery).toHaveBeenCalledTimes(1)
     const [sql, params] = mockPoolQuery.mock.calls[0] as [string, unknown[]]
     expect(sql).toContain('DELETE FROM oauth_grants')
-    expect(params[0]).toBe(config.sandboxNamespace)
-    expect(params[1]).toBe('crm')
-    expect(params[2]).toBe('user-uuid-1')
-    expect(params[3]).toBe('salesforce-prod')
+    // owner_kind leads the param list (recipe domain).
+    expect(params[0]).toBe('recipe')
+    expect(params[1]).toBe(config.sandboxNamespace)
+    expect(params[2]).toBe('crm')
+    expect(params[3]).toBe('user-uuid-1')
+    expect(params[4]).toBe('salesforce-prod')
   })
 
   it('is idempotent — 204 even when no grant exists', async () => {

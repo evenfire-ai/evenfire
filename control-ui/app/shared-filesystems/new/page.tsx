@@ -153,7 +153,7 @@ export default function CreateSharedFileSystemPage() {
             <CreatePageHeader
               icon={<IconSharedFiles />}
               title="Create SharedFileSystem"
-              subtitle="Provision workspace storage that Contexts can mount read-only into agent pods."
+              subtitle="Provision workspace storage that agents can mount read-only into their pods."
               backLabel="Back to Agent Files"
               onBack={() => router.push(CONTROL_ROUTES.agentFiles.root)}
               backDisabled={saving}

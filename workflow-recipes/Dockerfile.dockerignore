@@ -1,5 +1,9 @@
 **
 !packages/
+!packages/llm-provider-attempt-contract/
+!packages/llm-provider-attempt-contract/**
+!packages/codex-catalog-projection/
+!packages/codex-catalog-projection/**
 !packages/network-policy-core/
 !packages/network-policy-core/**
 !packages/workflow-runtime-core/
@@ -16,5 +20,6 @@
 !workflow-recipes/package.json
 !workflow-recipes/package-lock.json
 !workflow-recipes/tsconfig.json
+!workflow-recipes/tsconfig.build.json
 !workflow-recipes/src/
 !workflow-recipes/src/**

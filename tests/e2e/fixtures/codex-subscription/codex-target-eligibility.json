@@ -1,0 +1,126 @@
+{
+  "cases": [
+    {
+      "id": "flag-on-connected-ready",
+      "expected": "eligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "catalogContentHash": "aa",
+        "catalogRevision": 1,
+        "connectionRevision": 1,
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "static-only",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "openai", "name": "gpt-5.4-mini" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "catalogRevision": 1,
+        "connectionRevision": 1,
+        "enabledModels": ["openai:gpt-5.4-mini"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "flag-off",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": {
+        "flagEnabled": false,
+        "connectionStatus": "connected",
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "disconnected",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "disconnected",
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "reauth",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "reauth-required",
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "model-stale",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": ["codex-subscription:gpt-5.3-codex"]
+      }
+    },
+    {
+      "id": "model-missing",
+      "expected": "ineligible",
+      "spec": { "model": { "provider": "codex-subscription", "name": "unknown" } },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "enabledModels": ["codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "snapshot-forbidden",
+      "expected": "uncertain",
+      "spec": { "model": { "provider": "codex-subscription", "name": "gpt-5.3-codex" } },
+      "snapshot": { "flagEnabled": true, "snapshotError": "forbidden" }
+    },
+    {
+      "id": "eligible-fallback",
+      "expected": "eligible",
+      "spec": {
+        "model": { "provider": "openai", "name": "gpt-5.4-mini" },
+        "llmPolicy": {
+          "fallbacks": [{ "provider": "codex-subscription", "model": "gpt-5.3-codex" }]
+        }
+      },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "catalogRevision": 1,
+        "connectionRevision": 1,
+        "enabledModels": ["openai:gpt-5.4-mini", "codex-subscription:gpt-5.3-codex"],
+        "staleModels": []
+      }
+    },
+    {
+      "id": "stale-fallback-keeps-static",
+      "expected": "ineligible",
+      "spec": {
+        "model": { "provider": "openai", "name": "gpt-5.4-mini" },
+        "llmPolicy": {
+          "fallbacks": [{ "provider": "codex-subscription", "model": "gpt-5.3-codex" }]
+        }
+      },
+      "snapshot": {
+        "flagEnabled": true,
+        "connectionStatus": "connected",
+        "enabledModels": ["openai:gpt-5.4-mini", "codex-subscription:gpt-5.3-codex"],
+        "staleModels": ["codex-subscription:gpt-5.3-codex"]
+      }
+    }
+  ]
+}

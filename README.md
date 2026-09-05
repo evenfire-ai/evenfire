@@ -37,7 +37,7 @@
 
 ## Quick start
 
-> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation. 
+> **This quick start runs the whole platform on a local [minikube](https://minikube.sigs.k8s.io/) cluster** — the fastest way to try Evenfire on your workstation.
 
 Stand up every service on minikube with one command, including a seeded agent
 named `chatllm`. On a fresh minimal install, setup consumes the first-run
@@ -73,15 +73,25 @@ Evenfire is meant to be run on a remote cluster — see [Deploying to a remote c
 
 ## What is Evenfire
 
-Evenfire is a complete platform for running LLM agents that take **real
-actions**, on **your** infrastructure. Agents converse across the native desktop app, Telegram,
-and Slack; call tools over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP); compose
-multi-step workflows; and draw on teams, shared files, and cost budgets, while
-risky actions pause for human review. Every piece of the fleet (agents,
-connectors, channels, workflows, policies) is a Kubernetes custom resource, so
-your platform is version-controlled, reviewable configuration. You bring your
-own model keys, so prompts and data flow only to the model provider you choose,
-not through any Evenfire service.
+Evenfire is a complete platform for running LLM agents that take
+**real actions** on **your** infrastructure.
+
+Agents in Evenfire can:
+
+- **Converse** across the native desktop app, Telegram, Microsoft Teams and Slack
+- **Call tools** over the [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
+- **Share** teams, files, and cost budgets
+- **Compose** multi-step workflows
+- **Configure guardrails** through approval thresholds, budget caps, network
+  deny-rules, and tool-level scopes so risky actions automatically pause
+  for human review
+- **Install plugins** that ship their own UX and expose themselves as MCP server tools, so agents can interact
+  with them through chat
+
+Every piece of the fleet — agents, connectors, channels, workflows, policies,
+plugins — is a Kubernetes custom resource, so your platform is version-controlled,
+reviewable configuration. You bring your own model keys, so prompts and data
+flow only to the provider you choose
 
 ---
 

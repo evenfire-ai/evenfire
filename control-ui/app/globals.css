@@ -322,6 +322,12 @@ body.cu-body {
   max-width: min(28rem, 100%);
 }
 
+/* Detail-page forms that need more room for their selects and embedded cards
+   (agent Models & creds). */
+.cu-form-stack--wide {
+  max-width: min(35rem, 100%);
+}
+
 .cu-connector-credentials-form {
   display: grid;
   gap: var(--cu-space-3);
@@ -1810,6 +1816,10 @@ textarea.cu-input {
   margin: 0;
 }
 
+.cu-tabs--nested {
+  margin-top: var(--cu-space-4);
+}
+
 .cu-tabs--tight {
   margin: 0 0 1rem;
 }
@@ -2199,15 +2209,15 @@ textarea.cu-input {
   grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
 }
 
-.cu-connector-context-access__list li {
+.cu-connector-agent-access__list li {
   align-items: center;
 }
 
-.cu-connector-context-access__name {
+.cu-connector-agent-access__name {
   flex: 1 1 auto;
 }
 
-.cu-connector-context-access__name > .cu-link {
+.cu-connector-agent-access__name > .cu-link {
   display: block;
   max-width: 100%;
   overflow: hidden;
@@ -2215,13 +2225,13 @@ textarea.cu-input {
   white-space: nowrap;
 }
 
-.cu-connector-context-access__remove {
+.cu-connector-agent-access__remove {
   width: var(--cu-space-5);
   height: var(--cu-space-5);
   flex: 0 0 auto;
 }
 
-.cu-connector-context-access__add {
+.cu-connector-agent-access__add {
   width: 100%;
   margin-top: auto;
 }
@@ -2804,7 +2814,7 @@ textarea.cu-input {
   padding-left: var(--cu-space-5);
 }
 
-.cu-registry-context-access {
+.cu-entity-access {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: var(--cu-space-2);
@@ -2814,13 +2824,13 @@ textarea.cu-input {
   background: rgba(var(--cu-panel-rgb), 0.35);
 }
 
-.cu-registry-context-access__intro {
+.cu-entity-access__intro {
   display: grid;
   gap: calc(var(--cu-space-1) / 2);
   margin-top: var(--cu-space-1);
 }
 
-.cu-registry-context-access__intro > span {
+.cu-entity-access__intro > span {
   color: var(--cu-text-muted);
   font-size: 0.7rem;
   font-weight: 600;
@@ -2828,14 +2838,14 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-.cu-registry-context-access__intro > p {
+.cu-entity-access__intro > p {
   margin: 0;
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
   line-height: 1.45;
 }
 
-.cu-registry-context-access__group {
+.cu-entity-access__group {
   position: relative;
   display: grid;
   align-content: start;
@@ -2850,7 +2860,7 @@ textarea.cu-input {
   overflow: hidden;
 }
 
-.cu-registry-context-access__group::before {
+.cu-entity-access__group::before {
   position: absolute;
   top: 0;
   right: 0;
@@ -2860,32 +2870,32 @@ textarea.cu-input {
   content: '';
 }
 
-.cu-registry-context-access__group[data-kind='teams'] {
+.cu-entity-access__group[data-kind='teams'] {
   background:
     linear-gradient(145deg, rgba(var(--cu-success-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
-.cu-registry-context-access__group[data-kind='teams']::before {
+.cu-entity-access__group[data-kind='teams']::before {
   background: var(--cu-success);
 }
 
-.cu-registry-context-access__group[data-kind='agents'] {
+.cu-entity-access__group[data-kind='agents'] {
   background:
     linear-gradient(145deg, rgba(var(--cu-warning-rgb), 0.1), transparent 52%), var(--cu-surface);
 }
 
-.cu-registry-context-access__group[data-kind='agents']::before {
+.cu-entity-access__group[data-kind='agents']::before {
   background: var(--cu-warning);
 }
 
-.cu-registry-context-access__heading {
+.cu-entity-access__heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--cu-space-2);
 }
 
-.cu-registry-context-access__heading h4 {
+.cu-entity-access__heading h4 {
   margin: 0;
   color: var(--cu-text);
   font-size: 0.75rem;
@@ -2894,7 +2904,7 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-.cu-registry-context-access__heading span {
+.cu-entity-access__heading span {
   display: inline-grid;
   place-items: center;
   min-width: calc(var(--cu-space-3) * 2);
@@ -2908,17 +2918,17 @@ textarea.cu-input {
   font-variant-numeric: tabular-nums;
 }
 
-.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__heading span {
+.cu-entity-access__group[data-kind='teams'] .cu-entity-access__heading span {
   border-color: rgba(var(--cu-success-rgb), 0.35);
   background: rgba(var(--cu-success-rgb), 0.12);
 }
 
-.cu-registry-context-access__group[data-kind='agents'] .cu-registry-context-access__heading span {
+.cu-entity-access__group[data-kind='agents'] .cu-entity-access__heading span {
   border-color: rgba(var(--cu-warning-rgb), 0.35);
   background: rgba(var(--cu-warning-rgb), 0.12);
 }
 
-.cu-registry-context-access__list {
+.cu-entity-access__list {
   display: grid;
   gap: var(--cu-space-1);
   max-height: 10rem;
@@ -2930,14 +2940,14 @@ textarea.cu-input {
   list-style: none;
 }
 
-.cu-registry-context-access__list li {
+.cu-entity-access__list li {
   display: flex;
   align-items: center;
   gap: var(--cu-space-2);
   min-width: 0;
 }
 
-.cu-registry-context-access__list li::before {
+.cu-entity-access__list li::before {
   width: var(--cu-space-1);
   height: var(--cu-space-1);
   flex: 0 0 auto;
@@ -2946,23 +2956,21 @@ textarea.cu-input {
   content: '';
 }
 
-.cu-registry-context-access__group[data-kind='teams'] .cu-registry-context-access__list li::before {
+.cu-entity-access__group[data-kind='teams'] .cu-entity-access__list li::before {
   background: rgba(var(--cu-success-rgb), 0.8);
 }
 
-.cu-registry-context-access__group[data-kind='agents']
-  .cu-registry-context-access__list
-  li::before {
+.cu-entity-access__group[data-kind='agents'] .cu-entity-access__list li::before {
   background: rgba(var(--cu-warning-rgb), 0.8);
 }
 
-.cu-registry-context-access__list li > span {
+.cu-entity-access__list li > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cu-registry-context-access__group .cu-muted {
+.cu-entity-access__group .cu-muted {
   margin: 0;
   font-size: 0.8125rem;
 }
@@ -5701,15 +5709,6 @@ textarea.cu-input {
   margin-inline: var(--cu-space-3);
 }
 
-.cu-connector-edit-context-name {
-  margin: 0 0 var(--cu-space-3);
-  color: var(--cu-text-muted);
-}
-
-.cu-connector-edit-context-name strong {
-  color: var(--cu-text);
-}
-
 .cu-connector-edit-form {
   flex: 1;
   min-height: 0;
@@ -6238,7 +6237,7 @@ textarea.cu-input {
   font-weight: 600;
 }
 
-.cu-agent-context-mcp-summary {
+.cu-agent-connectors-summary {
   display: grid;
   gap: var(--cu-space-2);
   padding: var(--cu-space-3);
@@ -6247,7 +6246,7 @@ textarea.cu-input {
   background: var(--cu-bg-elevated);
 }
 
-.cu-agent-context-mcp-summary__head {
+.cu-agent-connectors-summary__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -6259,7 +6258,7 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-.cu-agent-context-mcp-summary__head > span:last-child {
+.cu-agent-connectors-summary__head > span:last-child {
   display: inline-grid;
   place-items: center;
   min-width: 1.5rem;
@@ -6271,7 +6270,7 @@ textarea.cu-input {
   font-variant-numeric: tabular-nums;
 }
 
-.cu-agent-context-mcp-summary__list {
+.cu-agent-connectors-summary__list {
   display: flex;
   flex-wrap: wrap;
   gap: var(--cu-space-1);
@@ -6280,7 +6279,7 @@ textarea.cu-input {
   list-style: none;
 }
 
-.cu-agent-context-mcp-summary__list li {
+.cu-agent-connectors-summary__list li {
   max-width: 100%;
   padding: 0.2rem var(--cu-space-2);
   overflow: hidden;
@@ -6294,7 +6293,7 @@ textarea.cu-input {
   white-space: nowrap;
 }
 
-.cu-agent-context-mcp-summary > .cu-muted {
+.cu-agent-connectors-summary > .cu-muted {
   margin: 0;
   font-size: 0.8125rem;
 }
@@ -6633,8 +6632,14 @@ textarea.cu-input {
   line-height: 1.25;
 }
 
-.cu-agent-select__providers-label {
-  margin-right: 0.1rem;
+.cu-agent-select__group {
+  display: block;
+  padding: var(--cu-space-2) 0.65rem var(--cu-space-05);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-bold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .cu-agent-select__provider {
@@ -7458,21 +7463,16 @@ textarea.cu-input {
   gap: var(--cu-space-4);
 }
 
-.cu-host-context-select {
-  width: min(36rem, 100%);
-}
-
-/* Hover card on the Context column — shows the same MCP-server list as the
-   agent-wizard's `cu-agent-context-mcp-summary` block. The wrapper is the
-   positioning context so the absolutely-positioned card sits just below the
-   link instead of clipping against the table cell. */
-.cu-host-context-hover {
+/* Hover card on the Connectors column — shows the agent's MCP-server list.
+   The wrapper is the positioning context so the absolutely-positioned card
+   sits just below the link instead of clipping against the table cell. */
+.cu-host-connectors-hover {
   position: relative;
   display: inline-flex;
   max-width: 100%;
 }
 
-.cu-host-context-count {
+.cu-host-connectors-count {
   display: inline-grid;
   place-items: center;
   min-width: 1.75rem;
@@ -7486,7 +7486,7 @@ textarea.cu-input {
   line-height: 1.2;
 }
 
-.cu-host-context-hover > .cu-agent-context-mcp-summary {
+.cu-host-connectors-hover > .cu-agent-connectors-summary {
   position: absolute;
   top: calc(100% + var(--cu-space-1));
   left: 0;
@@ -8451,10 +8451,25 @@ textarea.cu-input {
   color: var(--cu-text-muted);
 }
 
+.cu-llm-config__block-tag--warning {
+  border-color: rgba(var(--cu-warning-rgb), 0.4);
+  color: var(--cu-warning);
+}
+
+.cu-llm-config__block-tag--danger {
+  border-color: rgba(var(--cu-danger-rgb), 0.4);
+  color: var(--cu-danger);
+}
+
 .cu-llm-config__model-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
   gap: 0.75rem;
+}
+
+.cu-llm-config__credential-kind,
+.cu-llm-config__after-provider {
+  grid-column: 1 / -1;
 }
 
 .cu-llm-provider-icon {
@@ -8494,19 +8509,10 @@ textarea.cu-input {
 }
 
 /* OpenAI ships a white-on-transparent mark, so on light surfaces it needs to be
-   knocked back to black. Scoped to provider-level controls — the model dropdown
-   reuses the same icon on a different treatment and must not inherit this. */
+   knocked back to black — provider pickers, credential dropdowns, model
+   dropdowns, chips, and filters all sit on light surfaces in this theme. */
 :root[data-theme='light']
-  :is(
-    .cu-llm-config__provider-select,
-    .cu-llm-cred-add,
-    .cu-llm-model-group__toggle,
-    .cu-filter-select__copy,
-    .cu-filter-select__icon,
-    .cu-chip,
-    .cu-px-provider
-  )
-  .cu-llm-provider-icon[data-provider='openai']
+  .cu-llm-provider-icon:is([data-provider='openai'], [data-provider='codex-subscription'])
   img {
   filter: brightness(0);
 }
@@ -8559,6 +8565,51 @@ textarea.cu-input {
 
 .cu-llm-config__allowed-intro {
   margin: 0;
+}
+
+/* ChatGPT device sign-in card shown while the subscription modal waits for the
+   operator to approve the device code in the auto-opened ChatGPT tab. */
+.cu-device-setup {
+  display: grid;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3) var(--cu-space-4);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-device-setup__step {
+  margin: 0;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-device-setup__link {
+  color: var(--cu-accent);
+}
+
+.cu-device-setup__code {
+  font-size: var(--cu-font-size-xl);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.14em;
+  text-align: center;
+}
+
+.cu-device-setup__note {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+}
+
+/* Wrapper that keeps a tooltip available on a disabled button (disabled
+   elements suppress their own title in some browsers). */
+.cu-hover-hint {
+  display: inline-flex;
+  cursor: not-allowed;
+}
+
+.cu-hover-hint > .cu-btn:not(:disabled) {
+  cursor: pointer;
 }
 
 /* Read-only model configuration summary. It mirrors the editor's provider
@@ -9023,11 +9074,6 @@ textarea.cu-input {
   display: flex;
   gap: 0.15rem;
   justify-content: flex-end;
-}
-
-.cu-deleted-access-heading {
-  margin-top: var(--cu-space-4);
-  font-size: 0.875rem;
 }
 
 .cu-grant-row {
@@ -11242,6 +11288,48 @@ textarea.cu-input {
 
 .cu-llm-models-error {
   flex: 0 0 auto;
+}
+
+.cu-agent-create-panel__header > .cu-tabs {
+  margin: 0;
+  padding: 0 var(--cu-space-4) var(--cu-space-3);
+}
+
+.cu-codex-subscription-panel {
+  display: grid;
+  gap: var(--cu-space-4);
+}
+
+.cu-codex-subscription-panel__status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code {
+  display: grid;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code a {
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+.cu-codex-device-code__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cu-space-2);
+}
+
+.cu-codex-device-code__value {
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-lg);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.04em;
 }
 
 .cu-agent-select.cu-llm-provider-filter {

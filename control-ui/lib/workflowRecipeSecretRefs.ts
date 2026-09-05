@@ -1,3 +1,5 @@
+import { providerRequiresLlmSecret } from './llm'
+
 export type WorkflowRecipeSecretRefUsage = {
   secretName: string
   namespace: string
@@ -92,6 +94,15 @@ export function collectWorkflowRecipeSecretRefs(
       const secretRef = (client[refField] ?? {}) as Record<string, unknown>
       addRef(refs, secretRef.name, secretRef.key, namespaces.recipeNamespace)
     }
+  }
+
+  // Agent LLM secrets are collected only for static-credentials providers.
+  // Broker-backed agents (Codex) authenticate via tickets and must never
+  // invent or surface an OAuth/LLM Secret from spec.agent.
+  const agent = (spec.agent ?? {}) as Record<string, unknown>
+  if (typeof agent.provider === 'string' && providerRequiresLlmSecret(agent.provider)) {
+    const secretRef = (agent.secretRef ?? {}) as Record<string, unknown>
+    addRef(refs, secretRef.name, secretRef.key, namespaces.recipeNamespace)
   }
 
   return refs

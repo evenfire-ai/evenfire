@@ -4,7 +4,13 @@ import React, { useEffect, useRef, useState } from 'react'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { useToast } from '@components/Toast'
 import { Button, Field, FormSection, TextInput } from '@components/ui'
-import { getMcpServer, getMcpServers, getRegistryCredentialSchema, updateMcpSecret } from '@lib/api'
+import {
+  createMcpSecret,
+  getMcpServer,
+  getMcpServers,
+  getRegistryCredentialSchema,
+  updateMcpSecret,
+} from '@lib/api'
 import type { McpServerCondition } from '@lib/api'
 import type { RotationPhase, UpdateConnectorCredentialsProps } from './types'
 
@@ -51,6 +57,45 @@ export const ROLLOUT_INCOMPLETE_REASON = 'RolloutIncomplete'
 // excluded. 5s comfortably covers ordinary NTP drift.
 export const CLOCK_SKEW_TOLERANCE_MS = 5_000
 
+// The aggregate validation alert's id. Rejected inputs point at it through
+// `aria-describedby`, so a screen reader announces WHY a field is invalid from
+// the field itself instead of only when the operator happens to reach the
+// banner at the bottom of the form.
+const VALIDATION_ERROR_ID = 'mcp-cred-validation-error'
+
+// Kubernetes permits Secret keys that overlap Object.prototype, including
+// __proto__, constructor, and toString. Credential drafts and request payloads
+// therefore cannot be ordinary objects: reading an untouched key must mean
+// "absent", never an inherited method or prototype value.
+type CredentialMap = Record<string, string>
+
+function emptyCredentialMap(): CredentialMap {
+  return Object.create(null) as CredentialMap
+}
+
+function ownCredentialValue(credentials: CredentialMap, secretKey: string): string | undefined {
+  return Object.hasOwn(credentials, secretKey) ? credentials[secretKey] : undefined
+}
+
+function withCredentialValue(
+  credentials: CredentialMap,
+  secretKey: string,
+  value: string
+): CredentialMap {
+  const next = emptyCredentialMap()
+  for (const key of Object.keys(credentials)) {
+    next[key] = credentials[key]
+  }
+  next[secretKey] = value
+  return next
+}
+
+/** Stable per-key input id, shared by the label's `htmlFor` and the
+ *  post-submit focus lookup. */
+function inputId(secretKey: string): string {
+  return `mcp-cred-${secretKey}`
+}
+
 function buildConfirmMessage(secretName: string, affected: string[] | null): string {
   if (affected === null) {
     return `This rotates the credential value(s) you entered in Secret "${secretName}" and restarts any connector that references it.`
@@ -82,13 +127,20 @@ function findFreshDeploymentReady(
 export function UpdateConnectorCredentials({
   serverName,
   envSecret,
+  surface = 'rotate',
+  recipeOwned = false,
   registryCredentialSource,
 }: UpdateConnectorCredentialsProps) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
-  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [draft, setDraft] = useState<CredentialMap>(emptyCredentialMap)
   const [validationError, setValidationError] = useState('')
+  // The secretKeys the last submit rejected. Drives per-input `aria-invalid` /
+  // `aria-describedby`, so the aggregate alert is not the ONLY way to learn
+  // which fields are wrong — assistive technology gets the association on the
+  // control itself.
+  const [invalidKeys, setInvalidKeys] = useState<string[]>([])
   // Best-effort preview of "who restarts", shown in the pre-save confirm
   // dialog (requisito 5). The authoritative list only exists after the PUT
   // (Fase 1 regla 9) — this mirrors the server's own
@@ -100,7 +152,24 @@ export function UpdateConnectorCredentials({
   const [phaseMessage, setPhaseMessage] = useState('')
   const [rotationCutoff, setRotationCutoff] = useState<string | null>(null)
   const [rotationAffected, setRotationAffected] = useState<string[]>([])
-  const [credentialLabels, setCredentialLabels] = useState<Record<string, string>>({})
+  // Labels use the same Kubernetes-valid key namespace as drafts. Keep this
+  // map prototype-safe as well, because Marketplace schemas may contain keys
+  // such as `constructor` or `__proto__`.
+  const [credentialLabels, setCredentialLabels] = useState<CredentialMap>(emptyCredentialMap)
+  // Latches the form onto rotate semantics after a successful create, so a
+  // stale `surface` prop cannot leave "set" copy on a Secret that now exists.
+  const [secretCreated, setSecretCreated] = useState(false)
+  // Latches the form onto set semantics when a rotate PUT 404s (Task 5).
+  const [recreateRequired, setRecreateRequired] = useState(false)
+  // Which operation is actually in flight / just completed. Captured at submit
+  // time and used for the in-flight and success banners.
+  //
+  // This CANNOT be derived from `mode`: setSecretCreated(true) flips `mode` to
+  // 'rotate' the instant a create succeeds, so a banner reading `mode` would
+  // announce "Credentials rotated" immediately after a create. The latch and
+  // the banner answer different questions — "what should the form do next?"
+  // versus "what did we just do?" — so they need separate state.
+  const [submittedMode, setSubmittedMode] = useState<'set' | 'rotate'>('rotate')
   // The HCC's most recent RolloutIncomplete diagnostic, kept across polls (a
   // ref, not state: it only matters at the timeout boundary, so it must not
   // re-render or re-fire the poll effect). Seeing RolloutIncomplete never
@@ -139,7 +208,7 @@ export function UpdateConnectorCredentials({
 
   useEffect(() => {
     if (!registryCredentialSource) {
-      setCredentialLabels({})
+      setCredentialLabels(emptyCredentialMap())
       return
     }
 
@@ -150,12 +219,12 @@ export function UpdateConnectorCredentials({
     )
       .then(schema => {
         if (cancelled) return
-        setCredentialLabels(
-          Object.fromEntries(schema.keys.map(key => [key.name, key.label || key.name]))
-        )
+        const labels = emptyCredentialMap()
+        for (const key of schema.keys) labels[key.name] = key.label || key.name
+        setCredentialLabels(labels)
       })
       .catch(() => {
-        if (!cancelled) setCredentialLabels({})
+        if (!cancelled) setCredentialLabels(emptyCredentialMap())
       })
 
     return () => {
@@ -237,10 +306,14 @@ export function UpdateConnectorCredentials({
             // No verdict either way inside the budget — an inconclusive
             // timeout, distinct from a diagnosed failure.
             setPhase('timeout')
+            // Diagnostic only. The "what to try next" sentence is mode-specific
+            // (nothing was rotated in set mode) and is appended by the timeout
+            // banner, which reads `submittedMode` at render time — keeping this
+            // effect free of a dependency that would restart the poll.
             setPhaseMessage(
               `The rollout did not finish within ${Math.round(POLL_TIMEOUT_MS / 1000)}s. Run ` +
                 `"kubectl get mcpserver ${serverName} -o yaml" to see the current DeploymentReady ` +
-                'condition, or try the rotation again.'
+                'condition.'
             )
           }
         }
@@ -255,6 +328,26 @@ export function UpdateConnectorCredentials({
     }
   }, [phase, rotationCutoff, serverName])
 
+  // "The Secret is missing and this screen would have to create it." Two
+  // sources feed it, and `secretCreated` gates BOTH — not just the `surface`
+  // prop. That latch flips the moment a create succeeds, and the Secret it
+  // created exists from then on, whether the form got here from a stale
+  // `surface` prop or from a rotate PUT that 404'd (`recreateRequired`).
+  // Leaving `recreateRequired` outside the guard made it a one-way latch:
+  // nothing resets it (resetToIdle does not), so after a successful recreate
+  // the form kept "set" copy, forced every key, and offered a confirm dialog
+  // promising to create a Secret that now exists.
+  const secretMissing = !secretCreated && (recreateRequired || surface === 'set')
+  // Ownership is the can-create invariant, and it is NOT derived from the
+  // observed condition — see the `recipeOwned` prop doc. A recipe-owned
+  // connector reaches `secretMissing` only through the late PUT 404 (or a
+  // caller handing it surface='set'), and neither may open the create form:
+  // the Secret name belongs to the recipe, the POST route does not guard
+  // ownership the way the PUT does, and HCC never rolls out a managed:false
+  // connector, so the create would cross an ownership boundary AND never
+  // converge. `mode` can therefore never be 'set' while `recipeOwned` is true.
+  const mode: 'set' | 'rotate' = secretMissing && !recipeOwned ? 'set' : 'rotate'
+
   if (!envSecret) {
     return (
       <FormSection title="Update credentials">
@@ -266,32 +359,95 @@ export function UpdateConnectorCredentials({
     )
   }
 
+  // A WorkflowRecipe-owned connector whose Secret is missing: the Secret name
+  // belongs to the recipe (the PUT route guards recipe-owned Secrets, the POST
+  // route does not), and HCC never creates a Deployment for managed:false, so a
+  // create here would both cross an ownership boundary and never converge.
+  //
+  // Two ways in, and both must land here rather than on the create form:
+  //  - `surface === 'recipe-owned'`, resolved up front from an observed
+  //    SecretResolved=False/SecretNotFound condition; and
+  //  - `recipeOwned && secretMissing`, the LATE discovery — status was absent,
+  //    Unknown or stale, so the surface resolved to 'rotate' and only the
+  //    rotation PUT's 404 revealed the Secret is gone.
+  if (surface === 'recipe-owned' || (recipeOwned && secretMissing)) {
+    return (
+      <FormSection title="Update credentials">
+        <p className="cu-muted">
+          This connector&apos;s credentials are managed by its WorkflowRecipe. Add the Secret
+          through the recipe&apos;s secrets, not here.
+        </p>
+      </FormSection>
+    )
+  }
+
   function updateField(secretKey: string, value: string) {
-    setDraft(prev => ({ ...prev, [secretKey]: value }))
+    setDraft(prev => withCredentialValue(prev, secretKey, value))
     if (validationError) setValidationError('')
+    // The alert the inputs point at is about to disappear, so the association
+    // has to go with it — a dangling aria-describedby is worse than none.
+    if (invalidKeys.length > 0) setInvalidKeys([])
+  }
+
+  /** Rejects a submit: shows the aggregate alert, marks the offending inputs,
+   *  and moves focus to the first one so the repair is reachable without
+   *  hunting for it. `keys` may be empty (rotate mode's "at least one" rule
+   *  blames no single field); focus then lands on the first input. */
+  function rejectSubmit(message: string, keys: string[]) {
+    setValidationError(message)
+    setInvalidKeys(keys)
+    const focusKey = keys[0] ?? envSecret!.keys[0]?.secretKey
+    if (!focusKey) return
+    // The inputs already exist and their ids are deterministic, so a lookup is
+    // enough — TextInput is a plain function component under React 18 and does
+    // not forward a ref.
+    const target = document.getElementById(inputId(focusKey))
+    if (target instanceof HTMLElement) target.focus()
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (phase === 'saving' || phase === 'rotating') return
 
-    const data: Record<string, string> = {}
+    const data = emptyCredentialMap()
     for (const key of envSecret!.keys) {
-      const value = draft[key.secretKey]
-      if (value && value.trim() !== '') data[key.secretKey] = value
+      const value = ownCredentialValue(draft, key.secretKey)
+      if (typeof value === 'string' && value.trim() !== '') data[key.secretKey] = value
     }
-    if (Object.keys(data).length === 0) {
-      setValidationError('Enter at least one credential value to rotate.')
+    if (mode === 'set') {
+      // Every declared key is required. HCC validates each key and answers
+      // SecretMissingKey if any is absent, so a partial create would just swap
+      // one broken state for another while this screen reported success.
+      const missing = envSecret!.keys
+        .map(k => k.secretKey)
+        .filter(secretKey => !(data[secretKey] && data[secretKey].trim()))
+      if (missing.length > 0) {
+        rejectSubmit(`Enter every credential value. Missing: ${missing.join(', ')}.`, missing)
+        return
+      }
+    } else if (Object.keys(data).length === 0) {
+      // No single field is at fault here — the rule is "at least one" — so
+      // nothing is marked invalid; focus just returns to the top of the form.
+      rejectSubmit('Enter at least one credential value to rotate.', [])
       return
     }
     setValidationError('')
+    setInvalidKeys([])
 
-    const confirmed = await confirm({
-      title: 'Rotate credentials',
-      message: buildConfirmMessage(envSecret!.name, previewAffected),
-      confirmLabel: 'Rotate & restart',
-      tone: 'danger',
-    })
+    const confirmed = await confirm(
+      mode === 'set'
+        ? {
+            title: 'Set credentials',
+            message: `This creates Secret "${envSecret!.name}" and starts ${serverName}.`,
+            confirmLabel: 'Set & start',
+          }
+        : {
+            title: 'Rotate credentials',
+            message: buildConfirmMessage(envSecret!.name, previewAffected),
+            confirmLabel: 'Rotate & restart',
+            tone: 'danger',
+          }
+    )
     if (!confirmed) return
 
     // Captured BEFORE the PUT fires — the correlation anchor the poll below
@@ -308,16 +464,80 @@ export function UpdateConnectorCredentials({
     const cutoff = new Date(Date.now() - CLOCK_SKEW_TOLERANCE_MS).toISOString()
     setPhase('saving')
     setPhaseMessage('')
+    // Capture what this submit IS, before any state flips underneath it.
+    setSubmittedMode(mode)
     try {
-      const result = await updateMcpSecret(envSecret!.name, data)
-      setDraft({})
-      setRotationAffected(result.affectedConnectors)
+      if (mode === 'set') {
+        try {
+          await createMcpSecret(envSecret!.name, data)
+        } catch (postError) {
+          // The Secret may have appeared between page load and submit. Retry as
+          // a merge-patch WITHOUT inspecting the status: control-api answers a
+          // bare 500 for AlreadyExists, never 409 (spec Non-goals), so a
+          // status-gated branch here would be permanently dead code.
+          try {
+            await updateMcpSecret(envSecret!.name, data)
+          } catch (putError) {
+            // BOTH legs failed, so exactly one of the two errors reaches the
+            // operator. The rule:
+            //
+            //  - PUT 404 -> keep the CREATE error. The retry only exists on the
+            //    hypothesis that the Secret already exists; "it does not exist"
+            //    refutes the hypothesis and says nothing about why the create
+            //    failed, so it is pure noise.
+            //  - anything else -> surface the PUT error. It describes the
+            //    CURRENT state of the Secret more precisely than the create
+            //    error does — ownership (409 recipe-owned, which is the only
+            //    message pointing at /admin/recipe-secrets), authorization
+            //    (403), validation (400), or a server fault (5xx) — whereas
+            //    control-api's create error for the common AlreadyExists race
+            //    is an opaque bare 500.
+            throw (putError as { status?: number })?.status === 404 ? postError : putError
+          }
+        }
+        setSecretCreated(true)
+        // POST returns no affectedConnectors, so fall back to the best-effort
+        // preview for the "who else restarts" note.
+        setRotationAffected(previewAffected ?? [])
+      } else {
+        try {
+          const result = await updateMcpSecret(envSecret!.name, data)
+          setRotationAffected(result.affectedConnectors)
+        } catch (putError) {
+          // The Secret is gone (or the condition was stale). Do NOT silently
+          // POST: rotate mode may hold only one of several declared keys, and a
+          // partial create is exactly the failure this screen exists to remove
+          // (HCC would answer SecretMissingKey). Demand every key instead.
+          if ((putError as { status?: number })?.status === 404) {
+            setRecreateRequired(true)
+            // A 404 is proof the Secret does NOT exist right now, so the
+            // "a create already landed" latch has to be cleared with it — it is
+            // what gates set mode. Without this, a Secret deleted a SECOND time
+            // in the same session (after a successful recreate) would leave the
+            // form on the rotate button while the error below demands every key,
+            // and every retry would just 404 again.
+            setSecretCreated(false)
+            setPhase('idle')
+            setValidationError('This Secret no longer exists. Enter every key to recreate it.')
+            return
+          }
+          throw putError
+        }
+      }
+      setDraft(emptyCredentialMap())
       setRotationCutoff(cutoff)
       setPhase('rotating')
     } catch (e) {
       setPhase('failed')
-      setPhaseMessage(e instanceof Error ? e.message : 'Failed to rotate credentials')
-      showToast('Failed to rotate credentials.', { tone: 'error' })
+      setPhaseMessage(e instanceof Error ? e.message : 'Failed to save credentials')
+      // `mode` — not the `submittedMode` state — is what this submit IS: the
+      // setSubmittedMode(mode) above does not update this closure's copy, so
+      // reading the state here would report the PREVIOUS submit's mode. Keeps
+      // the toast in step with the failure banner ("Rotation failed:" /
+      // "Could not set credentials:").
+      showToast(mode === 'set' ? 'Failed to set credentials.' : 'Failed to rotate credentials.', {
+        tone: 'error',
+      })
     }
   }
 
@@ -347,104 +567,149 @@ export function UpdateConnectorCredentials({
 
   return (
     <FormSection
-      title="Update credentials"
+      title={mode === 'set' ? 'Set credentials' : 'Update credentials'}
       description={
-        <>
-          Rotate values stored in Secret <code>{envSecret.name}</code>. Values are write-only — this
-          screen never shows a stored credential, only key names.
-        </>
+        mode === 'set' ? (
+          <>
+            This connector needs credentials before it can start. Values are write-only — this
+            screen never shows a stored credential, only key names.
+          </>
+        ) : (
+          <>
+            Rotate values stored in Secret <code>{envSecret.name}</code>. Values are write-only —
+            this screen never shows a stored credential, only key names.
+          </>
+        )
       }
     >
       {confirmDialog}
 
-      <form className="cu-connector-credentials-form" onSubmit={handleSubmit}>
-        <div className="cu-form-stack">
-          <div className="cu-table-wrap">
-            <table className="cu-table">
-              <thead>
-                <tr>
-                  <th>Secret key</th>
-                  <th>Env var</th>
-                </tr>
-              </thead>
-              <tbody>
-                {envSecret.keys.map(k => (
-                  <tr key={k.secretKey}>
-                    <td>
-                      <code>{k.secretKey}</code>
-                    </td>
-                    <td>
-                      <code>{k.envVar}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+      <div className="cu-table-wrap">
+        <table className="cu-table">
+          <thead>
+            <tr>
+              <th>Secret key</th>
+              <th>Env var</th>
+            </tr>
+          </thead>
+          <tbody>
+            {envSecret.keys.map(k => (
+              <tr key={k.secretKey}>
+                <td>
+                  <code>{k.secretKey}</code>
+                </td>
+                <td>
+                  <code>{k.envVar}</code>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-          {envSecret.keys.map(k => (
+      {/* `noValidate`: the browser's own required-field bubble would fire
+          before handleSubmit and replace the aggregate message that actually
+          NAMES the missing keys. The `required` attributes below are kept for
+          their programmatic semantics (assistive technology reads the required
+          state regardless of novalidate); the enforcement stays ours. */}
+      <form
+        className="cu-connector-credentials-form cu-form-stack"
+        onSubmit={handleSubmit}
+        noValidate
+      >
+        {envSecret.keys.map(k => {
+          const isInvalid = invalidKeys.includes(k.secretKey)
+          return (
             <Field
               key={k.secretKey}
-              htmlFor={`mcp-cred-${k.secretKey}`}
-              label={credentialLabels[k.secretKey] || k.secretKey}
+              htmlFor={inputId(k.secretKey)}
+              label={ownCredentialValue(credentialLabels, k.secretKey) ?? k.secretKey}
+              required={mode === 'set'}
             >
               <TextInput
-                id={`mcp-cred-${k.secretKey}`}
+                id={inputId(k.secretKey)}
                 type="password"
                 autoComplete="new-password"
-                placeholder="Leave blank to keep current value"
-                value={draft[k.secretKey] || ''}
+                placeholder={mode === 'set' ? 'Required' : 'Leave blank to keep current value'}
+                value={ownCredentialValue(draft, k.secretKey) ?? ''}
                 onChange={e => updateField(k.secretKey, e.target.value)}
                 disabled={busy}
+                // Set mode creates the Secret in one shot: HCC answers
+                // SecretMissingKey for any key left out, so every declared key
+                // really is mandatory. In rotate mode a blank field means
+                // "keep the current value", and marking it required would be a
+                // lie the screen reader would repeat on every field.
+                required={mode === 'set'}
+                aria-required={mode === 'set' || undefined}
+                invalid={isInvalid}
+                aria-invalid={isInvalid || undefined}
+                aria-describedby={isInvalid ? VALIDATION_ERROR_ID : undefined}
               />
             </Field>
-          ))}
+          )
+        })}
 
-          {validationError ? (
-            <div className="cu-banner cu-banner--error" role="alert">
-              {validationError}
-            </div>
-          ) : null}
+        {validationError ? (
+          <div className="cu-banner cu-banner--error" role="alert" id={VALIDATION_ERROR_ID}>
+            {validationError}
+          </div>
+        ) : null}
 
-          {phase === 'rotating' ? (
-            <div className="cu-banner cu-banner--info" role="status">
-              Rotating credentials — waiting for {serverName} to restart with the new value.
-              {phaseMessage ? ` ${phaseMessage}` : ''}
-            </div>
-          ) : null}
+        {phase === 'rotating' ? (
+          <div className="cu-banner cu-banner--info" role="status">
+            {submittedMode === 'set'
+              ? `Setting credentials — waiting for ${serverName} to start.`
+              : `Rotating credentials — waiting for ${serverName} to restart with the new value.`}
+            {phaseMessage ? ` ${phaseMessage}` : ''}
+          </div>
+        ) : null}
 
-          {phase === 'success' ? (
-            <div className="cu-banner cu-banner--ok" role="status">
-              Credentials rotated. {serverName} restarted and is serving the new credential.
-              {otherAffectedNote}
-            </div>
-          ) : null}
+        {phase === 'success' ? (
+          <div className="cu-banner cu-banner--ok" role="status">
+            {submittedMode === 'set'
+              ? `Credentials set. ${serverName} started and is serving the new credential.`
+              : `Credentials rotated. ${serverName} restarted and is serving the new credential.`}
+            {otherAffectedNote}
+          </div>
+        ) : null}
 
-          {phase === 'failed' ? (
-            <div className="cu-banner cu-banner--error" role="alert">
-              Rotation failed: {phaseMessage}
-            </div>
-          ) : null}
+        {phase === 'failed' ? (
+          <div className="cu-banner cu-banner--error" role="alert">
+            {submittedMode === 'set'
+              ? `Could not set credentials: ${phaseMessage}`
+              : `Rotation failed: ${phaseMessage}`}
+          </div>
+        ) : null}
 
-          {phase === 'timeout' ? (
-            <div className="cu-banner cu-banner--warning" role="alert">
-              {phaseMessage}
-            </div>
-          ) : null}
-        </div>
+        {phase === 'timeout' ? (
+          <div className="cu-banner cu-banner--warning" role="alert">
+            {phaseMessage}{' '}
+            {submittedMode === 'set'
+              ? 'You can also try setting the credentials again.'
+              : 'You can also try the rotation again.'}
+          </div>
+        ) : null}
 
         <div className="cu-create-actions">
           {phase === 'success' || phase === 'failed' || phase === 'timeout' ? (
             <Button type="button" onClick={resetToIdle}>
-              {phase === 'success' ? 'Done' : 'Rotate again'}
+              {phase === 'success'
+                ? 'Done'
+                : submittedMode === 'set'
+                  ? 'Try again'
+                  : 'Rotate again'}
             </Button>
           ) : (
             <Button type="submit" variant="primary" disabled={busy}>
               {phase === 'saving'
                 ? 'Saving…'
                 : phase === 'rotating'
-                  ? 'Rotating…'
-                  : 'Rotate credentials'}
+                  ? submittedMode === 'set'
+                    ? 'Starting…'
+                    : 'Rotating…'
+                  : mode === 'set'
+                    ? 'Set credentials'
+                    : 'Rotate credentials'}
             </Button>
           )}
         </div>

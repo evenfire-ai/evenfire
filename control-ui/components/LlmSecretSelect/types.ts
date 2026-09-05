@@ -6,6 +6,7 @@ export type LlmSecretSelectProvider = {
 }
 
 export type LlmSecretSelectOption = {
+  group?: string
   value: string
   label: string
   meta?: ReactNode

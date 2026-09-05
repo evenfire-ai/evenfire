@@ -14,48 +14,83 @@
  *   import "./logger";
  */
 
-const COMPONENT_RE = /^\[([^\]]+)\]\s*/;
+const COMPONENT_RE = /^\[([^\]]+)\]\s*/
+const SENSITIVE_KEY_RE =
+  /password|secret|token|authorization|cookie|api[_-]?key|dsn|private|refresh|credential|account[_-]?id/i
+const UNSAFE_OBJECT_KEY = /^(?:__proto__|constructor|prototype)$/
+const SAFE_OBJECT_KEY = /^[A-Za-z0-9._-]{1,64}$/
 
-const originalLog = console.log.bind(console);
-const originalError = console.error.bind(console);
-const originalWarn = console.warn.bind(console);
+const originalLog = console.log.bind(console)
+const originalError = console.error.bind(console)
+const originalWarn = console.warn.bind(console)
+
+function isSafeObjectKey(key: string): boolean {
+  return SAFE_OBJECT_KEY.test(key) && !UNSAFE_OBJECT_KEY.test(key)
+}
+
+function cloneRedacted(value: unknown, key?: string): unknown {
+  if (value === process.env) return '[Redacted]'
+  if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
+  if (value === undefined) return undefined
+  if (typeof value !== 'object' || value === null) return value
+  if (Array.isArray(value)) return value.map(item => cloneRedacted(item))
+  const out: Record<string, unknown> = Object.create(null)
+  for (const nextKey of Object.keys(value as object)) {
+    if (!isSafeObjectKey(nextKey)) continue
+    if (SENSITIVE_KEY_RE.test(nextKey)) {
+      out[nextKey] = '[Redacted]'
+      continue
+    }
+    out[nextKey] = cloneRedacted((value as Record<string, unknown>)[nextKey], nextKey)
+  }
+  return out
+}
+
+export function redactUnknown(value: unknown, key?: string): unknown {
+  try {
+    return cloneRedacted(value, key)
+  } catch {
+    return '[Unserializable]'
+  }
+}
 
 function formatArgs(args: unknown[]): string {
-  return args
-    .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
-    .join(" ");
+  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(redactUnknown(a)))).join(' ')
 }
 
 function emit(level: string, args: unknown[]): void {
-  const raw = formatArgs(args);
+  const raw = formatArgs(args)
 
   // Skip empty lines and separator lines (====, ----)
-  const trimmed = raw.trim();
-  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return;
+  const trimmed = raw.trim()
+  if (!trimmed || /^[=\-]{3,}$/.test(trimmed)) return
 
-  let component = "";
-  let msg = raw;
+  let component = ''
+  let msg = raw
 
-  const match = raw.match(COMPONENT_RE);
+  const match = raw.match(COMPONENT_RE)
   if (match) {
-    component = match[1];
-    msg = raw.slice(match[0].length);
+    const parsed = match[1] ?? ''
+    if (SAFE_OBJECT_KEY.test(parsed)) {
+      component = parsed
+      msg = raw.slice(match[0].length)
+    }
   }
 
   const entry: Record<string, string> = {
     timestamp: new Date().toISOString(),
     level,
-    msg: msg.trim(),
-  };
-
-  if (component) {
-    entry.component = component;
+    msg: msg.replace(/[\r\n\u2028\u2029]/g, ' ').trim(),
   }
 
-  const writer = level === "error" ? originalError : originalLog;
-  writer(JSON.stringify(entry));
+  if (component) {
+    entry.component = component
+  }
+
+  const writer = level === 'error' ? originalError : level === 'warn' ? originalWarn : originalLog
+  writer(JSON.stringify(entry))
 }
 
-console.log = (...args: unknown[]) => emit("info", args);
-console.error = (...args: unknown[]) => emit("error", args);
-console.warn = (...args: unknown[]) => emit("warn", args);
+console.log = (...args: unknown[]) => emit('info', args)
+console.error = (...args: unknown[]) => emit('error', args)
+console.warn = (...args: unknown[]) => emit('warn', args)

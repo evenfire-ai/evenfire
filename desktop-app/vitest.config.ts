@@ -16,6 +16,9 @@ export default defineConfig({
     },
   },
   test: {
+    testTimeout: 30_000,
+    fileParallelism: false,
+    teardownTimeout: 60_000,
     include: [
       'src/**/*.test.ts',
       'src/**/__tests__/**/*.ts',

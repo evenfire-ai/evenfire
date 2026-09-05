@@ -33,6 +33,17 @@ function deferred<T = void>(): {
   return { promise, resolve, reject }
 }
 
+async function readLabeledCounter(name: string, labels: Record<string, string>): Promise<number> {
+  const metric = registry.getSingleMetric(name)
+  if (!metric) throw new Error(`${name} is not registered`)
+  const snapshot = await metric.get()
+  return (
+    snapshot.values.find(entry =>
+      Object.entries(labels).every(([key, value]) => entry.labels[key] === value)
+    )?.value ?? 0
+  )
+}
+
 vi.mock('./config', () => ({
   config: {
     hostNamespace: 'mcp-host',
@@ -1095,7 +1106,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
     expect(reconcileCore).not.toHaveBeenCalled()
   })
 
-  it('rejects a queued fleet worker after Context authority retires and recovers', async () => {
+  it('withdraws a queued fleet worker after Context authority retires and recovers', async () => {
     const reconciler = makeBasicReconciler()
     const hostA = makeHost({ name: 'context-authority-a' })
     const hostB = makeHost({ name: 'context-authority-b' })
@@ -1131,17 +1142,26 @@ describe('HostReconciler Host inventory mutation authority', () => {
     // transition and admit Host B with stale derived mounts. A pure watch
     // reconnect with identical content would NOT advance the revision and is
     // correctly admitted — that is the point of the content-identity fence.
+    // After #490 the fence still retires Host B; the fleet aggregator withdraws
+    // HostInventoryAuthorityUnavailableError instead of failing the pass.
     mutationAuthority.current = {
       known: true,
       hostRevision: 7,
       contextRevision: 13,
     }
+    const before = await readLabeledCounter('clerum_hcc_host_fleet_benign_supersessions_total', {
+      error: 'HostInventoryAuthorityUnavailableError',
+    })
     releaseBlocker.resolve(undefined)
     await occupied
-
-    await expect(fleet).rejects.toBeInstanceOf(HostFleetReconcileError)
+    await expect(fleet).resolves.toBeUndefined()
     expect(reconcileCore).toHaveBeenCalledTimes(1)
     expect(reconcileCore).not.toHaveBeenCalledWith(hostB, expect.any(Function))
+    expect(
+      await readLabeledCounter('clerum_hcc_host_fleet_benign_supersessions_total', {
+        error: 'HostInventoryAuthorityUnavailableError',
+      })
+    ).toBe(before + 1)
   })
 
   it('retires a Host reconcile when its Context is superseded within the same watch', async () => {

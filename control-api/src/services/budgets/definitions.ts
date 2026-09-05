@@ -43,6 +43,21 @@ export class BudgetValidationError extends Error {
   }
 }
 
+const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
+
+export function scopeIncludesCodexSubscription(scope?: BudgetScope | null): boolean {
+  return Array.isArray(scope?.provider) && scope.provider.includes(CODEX_SUBSCRIPTION_PROVIDER)
+}
+
+export function assertCodexBudgetUnit(
+  unit: BudgetUnit | undefined,
+  scope?: BudgetScope | null
+): void {
+  if (unit === 'cost' && scopeIncludesCodexSubscription(scope)) {
+    throw new BudgetValidationError('Codex subscription budgets must use unit tokens, not cost.')
+  }
+}
+
 /** A scoped (provider, model) target that has no active price. provider is null
  *  when the scope pins a model without pinning a provider (any provider). */
 export type UnpricedScopeTarget = { provider: string | null; model: string }
@@ -318,6 +333,7 @@ export async function createBudget(
   db: DbClient = pool
 ): Promise<TokenBudget> {
   const currency = input.currency ?? null
+  assertCodexBudgetUnit(input.unit, input.scope)
   if (input.unit === 'cost') {
     const unpriced = await findUnpricedScopedModels(input.scope, db)
     if (unpriced.length > 0) throw new BudgetUnpricedModelsError(unpriced)
@@ -383,6 +399,7 @@ export async function updateBudget(
       }
     }
     if (effectiveUnit === 'cost' && effectiveScope) {
+      assertCodexBudgetUnit(effectiveUnit, effectiveScope)
       const unpriced = await findUnpricedScopedModels(effectiveScope, db)
       if (unpriced.length > 0) throw new BudgetUnpricedModelsError(unpriced)
     }

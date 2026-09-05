@@ -193,6 +193,22 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
     expect(readPending(chatId)).toBeUndefined()
   })
 
+  it('does not invent a Codex catalog default when sending without a pending model', async () => {
+    const { invokeHostMessage } = installClerumHarness()
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+
+    await createChat()
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+
+    const payload = invokeHostMessage.mock.calls[0]?.[1] as Record<string, unknown>
+    expect('model' in payload).toBe(false)
+  })
+
   it('(e) omits model entirely when there is no pending selection', async () => {
     const { invokeHostMessage } = installClerumHarness()
     render(

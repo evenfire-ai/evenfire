@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { McpManager } from '../../mcp/manager'
+import { McpManager, SHARED_PRINCIPAL, serializeClientKey } from '../../mcp/manager'
 import { ServerStatusTracker, classifyConnectError } from '../../mcp/serverStatus'
 
 type ProbeClient = {
@@ -13,8 +13,15 @@ function connectedManager(clients: Record<string, ProbeClient>): {
   const tracker = new ServerStatusTracker(() => new Date('2026-07-23T10:00:00.000Z'))
   const manager = new McpManager(undefined, tracker)
   const internalClients = (manager as unknown as { clients: Map<string, ProbeClient> }).clients
+  const byServer = (manager as unknown as { byServer: Map<string, Set<string>> }).byServer
   for (const [name, client] of Object.entries(clients)) {
-    internalClients.set(name, client)
+    // Register the SHARED representative exactly as a real connection does: the
+    // client is keyed by its serialized ClientKey and indexed under byServer, so
+    // refreshAllServerStatus finds it via representativeClient(name) (one probe
+    // per server, never once per per-user partition).
+    const key = serializeClientKey(name, SHARED_PRINCIPAL)
+    internalClients.set(key, client)
+    byServer.set(name, new Set([key]))
     tracker.markConnecting(name)
     tracker.markConnected(name, 1)
   }

@@ -357,6 +357,36 @@ describe('createBudget cost-model pricing guard', () => {
     const pricingCall = query.mock.calls.find(c => /llm_model_prices/.test(String(c[0])))
     expect(pricingCall).toBeUndefined()
   })
+
+  it('rejects unit=cost when the scope includes Codex subscription', async () => {
+    const query = vi.fn()
+    const input = createBudgetSchema.parse({
+      name: 'codex cost',
+      unit: 'cost',
+      currency: 'USD',
+      limit_amount: 25,
+      period: 'monthly',
+      scope: { provider: ['codex-subscription'] },
+    })
+    await expect(createBudget(input, fakeDb(query))).rejects.toMatchObject({
+      name: 'BudgetValidationError',
+      message: /unit tokens, not cost/,
+    })
+    expect(query).not.toHaveBeenCalled()
+  })
+
+  it('allows a tokens budget scoped to Codex subscription', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [BASE_BUDGET], rowCount: 1 })
+    const input = createBudgetSchema.parse({
+      name: 'codex tokens',
+      unit: 'tokens',
+      limit_amount: 10000,
+      period: 'monthly',
+      scope: { provider: ['codex-subscription'] },
+    })
+    await createBudget(input, fakeDb(query))
+    expect(query).toHaveBeenCalled()
+  })
 })
 
 describe('updateBudget cost-model pricing guard (merged effective row)', () => {

@@ -101,24 +101,92 @@ describe('SecretInformer', () => {
     expect(onEvent).not.toHaveBeenCalled()
   })
 
-  it('reconnects with exponential backoff after a disconnect', async () => {
+  it('reconnects at the base delay after a healthy watch closes', async () => {
     vi.useFakeTimers()
 
     await informer.start()
     expect(watchFn).toHaveBeenCalledTimes(1)
 
-    // Simulate a server-side disconnect.
+    // Simulate a server-side disconnect of an established stream.
     calls[0].done(new Error('stream ended'))
 
-    // First reconnect scheduled at 1s.
     await vi.advanceTimersByTimeAsync(999)
     expect(watchFn).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(2)
     expect(watchFn).toHaveBeenCalledTimes(2)
 
-    // Second disconnect → backoff now 2s.
+    // A second healthy close must not climb — that was the quiet-namespace cap.
     calls[1].done(new Error('stream ended again'))
+    await vi.advanceTimersByTimeAsync(999)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(watchFn).toHaveBeenCalledTimes(3)
+  })
+
+  it('still climbs backoff when watch establishment fails', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    watchFn.mockRejectedValue(new Error('forbidden'))
+
+    await expect(informer.start()).resolves.toBe(false)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+
     await vi.advanceTimersByTimeAsync(1999)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(3)
+    warnSpy.mockRestore()
+  })
+
+  it('climbs backoff when Watch.watch calls done(err) then resolves (client 1.4.0)', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    watchFn.mockImplementation(
+      async (path: string, _qs: Record<string, unknown>, cb: WatchCallback, done: DoneCallback) => {
+        const abort = vi.fn()
+        const ctrl = { abort } as unknown as AbortController
+        calls.push({ path, cb, done, abort })
+        done(new Error('Forbidden'))
+        return ctrl
+      }
+    )
+
+    await expect(informer.start()).resolves.toBe(false)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    expect(calls[0].abort).toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(999)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1999)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(watchFn).toHaveBeenCalledTimes(3)
+    warnSpy.mockRestore()
+  })
+
+  it('resets backoff on successful establish so a quiet namespace reconnects at 1s', async () => {
+    vi.useFakeTimers()
+
+    await informer.start()
+    expect(watchFn).toHaveBeenCalledTimes(1)
+
+    // No Secret events — the pre-#461 reset was unreachable here.
+    calls[0].done(null)
+    await vi.advanceTimersByTimeAsync(999)
+    expect(watchFn).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(watchFn).toHaveBeenCalledTimes(2)
+
+    calls[1].done(null)
+    await vi.advanceTimersByTimeAsync(999)
     expect(watchFn).toHaveBeenCalledTimes(2)
     await vi.advanceTimersByTimeAsync(2)
     expect(watchFn).toHaveBeenCalledTimes(3)

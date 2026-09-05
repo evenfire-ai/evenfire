@@ -159,17 +159,17 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       const tray = page.getByRole('dialog', { name: 'Notifications and approvals' })
       const search = page.getByRole('textbox', { name: 'Search' })
       await expect(search).toHaveAttribute('placeholder', 'Search workspace...')
-      await expect(search).toHaveAttribute(
-        'title',
-        'Search teams, contexts, members, agents or connectors...'
-      )
+      await expect(search).toHaveAttribute('title', 'Search agents, connectors, plugins or apps...')
       const [trayBox, searchBox] = await Promise.all([bounds(tray), bounds(search)])
       expect(searchBox.width).toBeLessThanOrEqual(trayBox.width)
 
       await page.getByTestId('notification-bell').click()
       await resizeDesktop(app!, 901)
       const at901 = await bounds(search)
-      expect(at901.width).toBeGreaterThanOrEqual(160)
+      // Idle above the 900px full-width breakpoint the search collapses to the
+      // 40px magnifier square (it expands only on focus / open results), so the
+      // bell click above must leave it collapsed rather than at its old min width.
+      expect(Math.round(at901.width)).toBe(40)
 
       await resizeDesktop(app!, 900)
       const [mobileSearch, mobileHeader] = await Promise.all([

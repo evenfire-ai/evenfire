@@ -6,7 +6,14 @@ const RID = '8f3c2e1a4b5d4c6a9e7f1a2b3c4d5e6f'
 const UUID = '8f3c2e1a-4b5d-4c6a-9e7f-1a2b3c4d5e6f'
 
 function res(partial: Partial<ResolvedResource> & { resourceId: string }): ResolvedResource {
-  return { drive: 'main', name: 'n', kind: 'directory', pathCache: null, ...partial }
+  return {
+    drive: 'main',
+    name: 'n',
+    kind: 'directory',
+    pathCache: null,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...partial,
+  }
 }
 
 class FakeStore implements ResolveStore {
@@ -26,6 +33,8 @@ describe('toResolveView', () => {
     expect(view.rid).toBe(RID)
     expect(view.gfsUri).toBe(`gfs://main/${RID}`)
     expect(view.path).toBe('/org')
+    expect(view.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(view.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
   })
 })
 
@@ -51,7 +60,11 @@ describe('resolveUriToHttp', () => {
     store.byRid.set(RID, res({ resourceId: UUID, drive: 'main', name: 'org', pathCache: '/org' }))
     const out = await resolveUriToHttp(store, `gfs://main/${RID}`)
     expect(out.status).toBe(200)
-    expect(out.body).toMatchObject({ gfsUri: `gfs://main/${RID}`, path: '/org' })
+    expect(out.body).toMatchObject({
+      gfsUri: `gfs://main/${RID}`,
+      path: '/org',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    })
   })
 })
 

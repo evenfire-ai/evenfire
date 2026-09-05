@@ -13,9 +13,14 @@ import { useToast } from '@components/Toast'
 import { IconRefresh, IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { accessScopeLabeler } from '@lib/accessScopeLabels'
 import {
+  type ContextResource,
+  type HostResource,
   type SharedFileSystemResource,
   deleteSharedFileSystem,
+  getContexts,
+  getHosts,
   getSharedFileSystems,
   isSilentApiError,
 } from '@lib/api'
@@ -25,7 +30,7 @@ const SHARED_FILE_SYSTEM_COLUMNS: TableHeaderColumn[] = [
   { key: 'phase', label: 'Phase' },
   { key: 'capacity', label: 'Capacity' },
   { key: 'storage-class', label: 'Storage Class' },
-  { key: 'mounted-by-contexts', label: 'Mounted by Contexts' },
+  { key: 'mounted-by', label: 'Mounted by' },
   { key: 'actions', label: 'Actions', width: '8rem', align: 'right' },
 ]
 
@@ -47,6 +52,9 @@ export default function SharedFileSystemsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [items, setItems] = useState<SharedFileSystemResource[]>([])
+  const [scopeLabeler, setScopeLabeler] = useState<
+    (scopeId: string) => { label: string; resolved: boolean }
+  >(() => (scopeId: string) => ({ label: scopeId, resolved: false }))
   const [searchQuery, setSearchQuery] = useState('')
   const [deletingNames, setDeletingNames] = useState<Set<string>>(() => new Set())
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
@@ -61,6 +69,19 @@ export default function SharedFileSystemsPage() {
         const r = await getSharedFileSystems()
         const nextItems = (r.items || []) as SharedFileSystemResource[]
         setItems(nextItems)
+        // Optional enrichment: mount refs resolve to owning agent names. A
+        // failure must not hide the table — refs simply stay unresolved.
+        try {
+          const [contextsResult, hostsResult] = await Promise.all([getContexts(), getHosts()])
+          setScopeLabeler(() =>
+            accessScopeLabeler(
+              (contextsResult.items || []) as ContextResource[],
+              (hostsResult.items || []) as HostResource[]
+            )
+          )
+        } catch {
+          setScopeLabeler(() => (scopeId: string) => ({ label: scopeId, resolved: false }))
+        }
         return nextItems
       } catch (e) {
         if (isSilentApiError(e)) return null
@@ -162,7 +183,7 @@ export default function SharedFileSystemsPage() {
               {isInitialLoad ? 'Agent Files' : `Agent Files (${filteredItems.length})`}
             </>
           }
-          subtitle="Workspace volumes that Contexts can mount read-only into agent pods."
+          subtitle="Workspace volumes that agents can mount read-only into their pods."
           actions={
             <>
               <SectionSearchInput
@@ -226,6 +247,16 @@ export default function SharedFileSystemsPage() {
                     const isDeleting = deletingNames.has(name)
                     const status = item.status || {}
                     const mountedBy = status.mountedByContexts || []
+                    // Scopes with no owning agent (per-install or recipe
+                    // private scopes) are invisible by policy.
+                    const mountedByLabels = Array.from(
+                      new Set(
+                        mountedBy
+                          .map(entry => scopeLabeler(entry.name))
+                          .filter(result => result.resolved)
+                          .map(result => result.label)
+                      )
+                    )
                     const phase = status.phase || 'Unknown'
                     const phaseClass =
                       phase === 'Ready'
@@ -261,11 +292,7 @@ export default function SharedFileSystemsPage() {
                         </td>
                         <td>{status.capacity || item.spec?.size || '—'}</td>
                         <td>{status.storageClassName || item.spec?.storageClassName || '—'}</td>
-                        <td>
-                          {mountedBy.length === 0
-                            ? '—'
-                            : mountedBy.map(c => `${c.namespace}/${c.name}`).join(', ')}
-                        </td>
+                        <td>{mountedByLabels.length === 0 ? '—' : mountedByLabels.join(', ')}</td>
                         <td style={{ textAlign: 'right' }} onClick={e => e.stopPropagation()}>
                           <button
                             type="button"

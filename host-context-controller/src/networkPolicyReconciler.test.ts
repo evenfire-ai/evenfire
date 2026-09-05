@@ -79,6 +79,8 @@ vi.mock('./metrics', () => ({
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
   netPolOrphansDeletedTotal: { inc: vi.fn() },
   netPolOrphanSweepCappedTotal: { inc: vi.fn() },
+  writesTotal: { inc: vi.fn() },
+  writeSkipsTotal: { inc: vi.fn() },
 }))
 
 function makeMockNetworkingApi() {
@@ -175,6 +177,15 @@ function makeReconciler(
   ;(reconciler as unknown as { customApi: unknown }).customApi = mockCustomApi
   return reconciler
 }
+
+describe('NetworkPolicyReconciler Codex boundary', () => {
+  it('does not derive Codex scope or proxy egress - that belongs to HostReconciler', () => {
+    const source = readFileSync(join(__dirname, 'networkPolicyReconciler.ts'), 'utf8')
+    expect(source).not.toContain('llm:codex:execute')
+    expect(source).not.toContain('codex-llm-proxy')
+    expect(source).not.toContain('codex-proxy-egress')
+  })
+})
 
 describe('NetworkPolicyReconciler', () => {
   let mockApi: ReturnType<typeof makeMockNetworkingApi>

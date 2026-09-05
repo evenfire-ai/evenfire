@@ -67,6 +67,15 @@ jobs:
           languages: javascript-typescript
           build-mode: none
           queries: security-and-quality
+          # mcp-host LLM adapters must forward operator soul/system text to
+          # the model. CodeQL traces that from the WRC-JWT configure/execute
+          # body and labels it js/system-prompt-injection. That HTTP source
+          # is not an open prompt sink; do not concatenate untrusted input
+          # into tool descriptions. Keep js/missing-rate-limiting enabled.
+          config: |
+            query-filters:
+              - exclude:
+                  id: js/system-prompt-injection
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4

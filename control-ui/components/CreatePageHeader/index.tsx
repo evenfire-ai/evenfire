@@ -31,14 +31,16 @@ export function CreatePageHeader({
       </div>
       <div className="cu-create-top__controls">
         {actions ? <div className="cu-create-top__actions">{actions}</div> : null}
-        <button
-          type="button"
-          className="cu-btn cu-btn--ghost cu-btn--sm cu-create-back-btn"
-          onClick={onBack}
-          disabled={backDisabled}
-        >
-          {backLabel}
-        </button>
+        {backLabel && onBack ? (
+          <button
+            type="button"
+            className="cu-btn cu-btn--ghost cu-btn--sm cu-create-back-btn"
+            onClick={onBack}
+            disabled={backDisabled}
+          >
+            {backLabel}
+          </button>
+        ) : null}
       </div>
     </div>
   )
