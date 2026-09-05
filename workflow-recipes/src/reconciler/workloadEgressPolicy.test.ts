@@ -5,12 +5,17 @@ import {
   buildWorkloadIngressNetworkPolicy,
   classifyRecipeNetworkPolicyName,
   oauthBrokerEgressPolicyName,
+  oauthBrokerEgressPolicyNames,
   parseClusterLocalFqdn,
   resolveClusterLocalBinding,
   uiEgressPolicyName,
+  uiEgressPolicyNames,
   uiIngressPolicyName,
+  uiIngressPolicyNames,
   workloadEgressPolicyName,
+  workloadEgressPolicyNames,
   workloadIngressPolicyName,
+  workloadIngressPolicyNames,
 } from './resourceBuilder'
 
 function makeRecipe(workloads: DeploymentDef[]): WorkflowRecipeCRD {
@@ -241,6 +246,26 @@ describe('policy name composition', () => {
     // Trailing hyphens are stripped so we never produce `prefix--workload`.
     expect(e).not.toMatch(/--/)
     expect(i).not.toMatch(/--/)
+  })
+
+  it('exposes valid legacy aliases so upgrades preserve live policy identity', () => {
+    const recipeName = 'recipe-with-an-extremely-long-name-that-might-overflow'
+    expect(workloadEgressPolicyNames(recipeName, 'worker')).toEqual([
+      workloadEgressPolicyName(recipeName, 'worker'),
+      'wl-egress-recipe-with-an-extremely-long-name-that-might-worker',
+    ])
+    expect(workloadIngressPolicyNames(recipeName, 'worker')).toHaveLength(2)
+    expect(uiIngressPolicyNames(recipeName, 'worker')).toHaveLength(2)
+    expect(workloadEgressPolicyNames('sales', 'api')).toEqual(['wl-egress-sales-api'])
+  })
+
+  it('retains API-valid legacy aliases above the new 63-character naming budget', () => {
+    const recipe = 'r'.repeat(63)
+    const workload = 'w'.repeat(63)
+    expect(uiEgressPolicyNames(recipe)).toContain(`ui-egress-${recipe}`)
+    expect(oauthBrokerEgressPolicyNames(recipe)).toContain(`wf-${recipe}-oauth-broker-egress`)
+    expect(workloadEgressPolicyNames('r', workload)).toContain(`wl-egress-r-${workload}`)
+    expect(uiIngressPolicyNames('r', workload)).toContain(`ui-ingress-r-${workload}`)
   })
 
   it('keeps every valid maximum-length workload id within the DNS-1123 limit', () => {

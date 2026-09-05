@@ -1399,13 +1399,6 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
       return
     }
     const result = await this.reconciler.observeCurrentWorkloadStatus(recipe)
-    const reapPending = recipe.status?.conditions?.some(
-      condition => condition.type === 'NetworkPolicyReapFailed' && condition.status !== 'False'
-    )
-    if (reapPending && result.phase === 'active') {
-      result.phase = recipe.status?.phase ?? 'degraded'
-      result.message = recipe.status?.message ?? result.message
-    }
     if (shouldPatchRecipeStatus(recipe, result)) {
       await this.reconciler.patchStatus(recipe, result)
       enqueueInfrastructureTelemetryBestEffort(

@@ -508,6 +508,13 @@ export function oauthBrokerEgressPolicyName(recipeName: string): string {
   return `${OAUTH_BROKER_EGRESS_PREFIX}${recipeStem}-${hash}${OAUTH_BROKER_EGRESS_SUFFIX}`
 }
 
+export function oauthBrokerEgressPolicyNames(recipeName: string): string[] {
+  return compatiblePolicyNames(
+    oauthBrokerEgressPolicyName(recipeName),
+    `wf-${recipeName}-oauth-broker-egress`
+  )
+}
+
 /**
  * Egress NetworkPolicy letting a recipe's background-OAuth workloads reach the
  * control-api broker route. sandbox-recipes is deny-all by default, so without
@@ -1486,6 +1493,10 @@ export function uiEgressPolicyName(recipeName: string): string {
   return composePerRecipePolicyName(UI_EGRESS_PREFIX, recipeName)
 }
 
+export function uiEgressPolicyNames(recipeName: string): string[] {
+  return compatiblePolicyNames(uiEgressPolicyName(recipeName), `ui-egress-${recipeName}`)
+}
+
 /**
  * Build the symmetric ingress NetworkPolicy for one workload targeted by
  * `spec.ui.egress.internal[]`. `buildUiEgressNetworkPolicy` only opens the
@@ -1682,13 +1693,33 @@ function composePerRecipePolicyName(prefix: string, recipeName: string): string 
   return `${prefix}-${dns1123Stem(recipeName, recipeBudget, 'recipe')}-${hash}`
 }
 
+/**
+ * Physical name emitted before the collision-safe hash format was introduced.
+ * Existing policies with this shape are valid identities and must be adopted
+ * in place during upgrade so their DNS accumulator state is not discarded.
+ */
+function legacyComposePolicyName(prefix: string, recipeName: string, workloadId: string): string {
+  const reserved = prefix.length + 2 + workloadId.length
+  const maxRecipe = Math.max(1, 63 - reserved)
+  const stem =
+    recipeName.length > maxRecipe ? recipeName.slice(0, maxRecipe).replace(/-+$/g, '') : recipeName
+  return `${prefix}-${stem || 'recipe'}-${workloadId}`
+}
+
+function compatiblePolicyNames(primary: string, legacy: string): string[] {
+  // NetworkPolicy metadata.name uses DNS subdomain validation (253 characters),
+  // even though new WRC names intentionally fit the stricter 63-character budget.
+  const validLegacy = legacy.length <= 253 && /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(legacy)
+  return legacy !== primary && validLegacy ? [primary, legacy] : [primary]
+}
+
 function composePolicyName(prefix: string, recipeName: string, workloadId: string): string {
   const direct = `${prefix}-${recipeName}-${workloadId}`
   if (direct.length <= 63) return direct
 
-  // Only legacy-overflow identities change shape. Those direct names could not
-  // have existed in Kubernetes, so adding a hash fixes validity and collision
-  // safety without renaming any live, already-valid policy.
+  // New overflow identities use a hash for collision safety. Existing releases
+  // emitted a different, recipe-truncated name that can still be valid; callers
+  // must resolve the aliases below before choosing the physical identity.
   const hash = policyNameHash([prefix, recipeName, workloadId])
   const segmentBudget = 63 - prefix.length - 3 - hash.length
   let recipeBudget = Math.max(1, Math.floor(segmentBudget / 2))
@@ -1716,8 +1747,29 @@ export function workloadEgressPolicyName(recipeName: string, workloadId: string)
   return composePolicyName(WORKLOAD_EGRESS_PREFIX, recipeName, workloadId)
 }
 
+export function workloadEgressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    workloadEgressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(WORKLOAD_EGRESS_PREFIX, recipeName, workloadId)
+  )
+}
+
 export function workloadIngressPolicyName(recipeName: string, workloadId: string): string {
   return composePolicyName(WORKLOAD_INGRESS_PREFIX, recipeName, workloadId)
+}
+
+export function workloadIngressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    workloadIngressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(WORKLOAD_INGRESS_PREFIX, recipeName, workloadId)
+  )
+}
+
+export function uiIngressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    uiIngressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(UI_INGRESS_PREFIX, recipeName, workloadId)
+  )
 }
 
 // ─── issue #582: classifying a LIVE policy back to its family ────────────────

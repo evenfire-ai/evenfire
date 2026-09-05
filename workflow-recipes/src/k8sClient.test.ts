@@ -2115,7 +2115,7 @@ describe('workload status refresh loop helpers', () => {
     expect(handleRecipeEvent).not.toHaveBeenCalled()
   })
 
-  it('does not let an all-ready status refresh fake recovery from a pending reap', async () => {
+  it('recovers an all-ready recipe without clearing its pending reap condition', async () => {
     const recipe = makeWorkloadRecipe({
       metadata: { name: 'reap-pending', namespace: 'sandbox-recipes', generation: 7 },
       status: {
@@ -2158,8 +2158,8 @@ describe('workload status refresh loop helpers', () => {
     expect(patchStatus).toHaveBeenCalledWith(
       recipe,
       expect.objectContaining({
-        phase: 'degraded',
-        message: 'NetworkPolicy reap retrying',
+        phase: 'active',
+        message: 'All workloads deployed',
       })
     )
     expect(handleRecipeEvent).not.toHaveBeenCalled()

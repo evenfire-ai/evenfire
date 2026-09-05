@@ -59,7 +59,11 @@ import {
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
-import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
+import {
+  type AccumulateOutput,
+  accumulateExternalEgress,
+  mergeExternalEgressAnnotations,
+} from './externalEgressAccumulator'
 import {
   type FqdnLookup,
   defaultFqdnLookup,
@@ -555,12 +559,16 @@ export interface NetworkPolicyReapProjection {
 }
 
 const RECIPE_GENERATION_ANNOTATION = 'clerum.io/recipe-generation'
+const RECIPE_UID_ANNOTATION = 'clerum.io/recipe-uid'
 
 class DesiredNetworkPolicyLedger {
   private readonly byNamespace = new Map<string, Map<string, string>>()
   private readonly completed = new Set<rb.RecipeNetworkPolicyFamily>()
 
-  constructor(private readonly recipeGeneration?: number) {}
+  constructor(
+    private readonly recipeGeneration?: number,
+    private readonly recipeUid?: string
+  ) {}
 
   /**
    * Record a policy as desired. Throws on a manifest with no name or namespace:
@@ -578,10 +586,13 @@ class DesiredNetworkPolicyLedger {
         }, namespace=${namespace ?? '<none>'})`
       )
     }
-    if (this.recipeGeneration !== undefined) {
+    if (this.recipeGeneration !== undefined || this.recipeUid !== undefined) {
       policy.metadata!.annotations = {
         ...(policy.metadata?.annotations ?? {}),
-        [RECIPE_GENERATION_ANNOTATION]: String(this.recipeGeneration),
+        ...(this.recipeGeneration === undefined
+          ? {}
+          : { [RECIPE_GENERATION_ANNOTATION]: String(this.recipeGeneration) }),
+        ...(this.recipeUid === undefined ? {} : { [RECIPE_UID_ANNOTATION]: this.recipeUid }),
       }
     }
     const family = rb.classifyRecipeNetworkPolicyName(name)
@@ -1462,6 +1473,25 @@ export class WorkflowRecipeReconciler {
     }
   }
 
+  private async recipeCleanupStillCurrent(recipe: WorkflowRecipeCRD): Promise<boolean> {
+    try {
+      const current = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+      if (!recipe.metadata.uid || !current.metadata?.uid) {
+        throw new Error('Cannot clean up WorkflowRecipe without current owner identity')
+      }
+      return recipe.metadata.uid === current.metadata.uid
+    } catch (error) {
+      if (getErrorCode(error) === 404) return false
+      throw error
+    }
+  }
+
   // ─── Namespace Resolution ────────────────────────────────────────
 
   /**
@@ -1546,18 +1576,36 @@ export class WorkflowRecipeReconciler {
   }
 
   async removeFinalizer(recipe: WorkflowRecipeCRD): Promise<void> {
-    const finalizers = recipe.metadata.finalizers ?? []
-    const idx = finalizers.indexOf(FINALIZER)
-    if (idx < 0) return
-
     try {
+      const current = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: recipe.metadata.name,
+      })) as WorkflowRecipeCRD
+      if (!recipe.metadata.uid || !current.metadata?.uid || !current.metadata.resourceVersion) {
+        throw new Error('Cannot remove WorkflowRecipe finalizer without current object identity')
+      }
+      if (current.metadata.uid !== recipe.metadata.uid) return
+      const idx = current.metadata.finalizers?.indexOf(FINALIZER) ?? -1
+      if (idx < 0) return
       await this.customApi.patchNamespacedCustomObject({
         group: CRD_GROUP,
         version: CRD_VERSION,
         namespace: recipe.metadata.namespace,
         plural: WORKFLOWRECIPE_PLURAL,
         name: recipe.metadata.name,
-        body: [{ op: 'remove' as const, path: `/metadata/finalizers/${idx}` }],
+        body: [
+          { op: 'test', path: '/metadata/uid', value: recipe.metadata.uid },
+          {
+            op: 'test',
+            path: '/metadata/resourceVersion',
+            value: current.metadata.resourceVersion,
+          },
+          { op: 'test', path: `/metadata/finalizers/${idx}`, value: FINALIZER },
+          { op: 'remove', path: `/metadata/finalizers/${idx}` },
+        ],
       })
     } catch (error) {
       if (getErrorCode(error) === 404) {
@@ -2014,13 +2062,12 @@ export class WorkflowRecipeReconciler {
       }
 
       try {
-        resolveWorkloadTemplates({
+        this.resolveRecipeWorkloadTemplates(
           recipe,
-          workloads: workflowWorkloads,
-          inputs: workflowResolvedInputs,
-          computed: workflowComputedValues,
-          resolveNamespace: workload => this.resolveWorkloadNamespace(workload),
-        })
+          workflowResolvedInputs,
+          workflowComputedValues,
+          workflowWorkloads
+        )
       } catch (error) {
         if (error instanceof WorkloadTemplateResolutionError) {
           return {
@@ -2432,14 +2479,7 @@ export class WorkflowRecipeReconciler {
 
       // Step 4: Resolve templates in env vars, command, and args.
       try {
-        resolveWorkloadTemplates({
-          recipe,
-          workloads: recipe.spec.workloads,
-          inputs: resolvedInputs,
-          computed: computedValues,
-          resolveNamespace: workload =>
-            this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef),
-        })
+        this.resolveRecipeWorkloadTemplates(recipe, resolvedInputs, computedValues)
       } catch (error) {
         if (error instanceof WorkloadTemplateResolutionError) {
           return {
@@ -3709,6 +3749,7 @@ export class WorkflowRecipeReconciler {
 
   async reconcileDelete(recipe: WorkflowRecipeCRD): Promise<void> {
     const name = recipe.metadata.name
+    if (!(await this.recipeCleanupStillCurrent(recipe))) return
 
     console.log(`[WR-Reconciler] Deleting resources for "${name}"`)
     this.secretReverseIndex?.delete(name)
@@ -3974,14 +4015,9 @@ export class WorkflowRecipeReconciler {
         }),
       `Secret "${rb.oauthBrokerTokenSecretName(recipe.metadata.name)}" in ${this.config.sandboxNamespace}`
     )
-    await this.safeDelete(
-      () =>
-        this.networkingApi.deleteNamespacedNetworkPolicy({
-          name: rb.oauthBrokerEgressPolicyName(recipe.metadata.name),
-          namespace: this.config.sandboxNamespace,
-        }),
-      `NetworkPolicy "${rb.oauthBrokerEgressPolicyName(recipe.metadata.name)}" in ${this.config.sandboxNamespace}`
-    )
+    for (const name of rb.oauthBrokerEgressPolicyNames(recipe.metadata.name)) {
+      await this.deleteOwnedPolicyAlias(recipe, name, this.config.sandboxNamespace)
+    }
 
     await this.cleanupInternalDependencyPolicies(recipe)
 
@@ -4000,15 +4036,9 @@ export class WorkflowRecipeReconciler {
     // The ui-egress NetworkPolicy lives in sandbox-ui (cross-namespace from the
     // CRD), so K8s GC does not reap it via the Recipe's ownerReference. Always
     // attempt deletion — safeDelete swallows 404 when no policy was created.
-    const uiPolicyName = rb.uiEgressPolicyName(recipe.metadata.name)
-    await this.safeDelete(
-      () =>
-        this.networkingApi.deleteNamespacedNetworkPolicy({
-          name: uiPolicyName,
-          namespace: this.config.sandboxUiNamespace,
-        }),
-      `NetworkPolicy "${uiPolicyName}" in ${this.config.sandboxUiNamespace}`
-    )
+    for (const name of rb.uiEgressPolicyNames(recipe.metadata.name)) {
+      await this.deleteOwnedPolicyAlias(recipe, name, this.config.sandboxUiNamespace)
+    }
 
     // The symmetric ui-ingress NetworkPolicies carry no ownerReference (same
     // rationale as ui-egress — the policy namespace need not match the CRD's),
@@ -4017,15 +4047,9 @@ export class WorkflowRecipeReconciler {
       (recipe.spec.ui?.egress?.internal ?? []).map(rule => rule.workloadRef)
     )
     for (const workloadId of uiIngressTargets) {
-      const npName = rb.uiIngressPolicyName(recipe.metadata.name, workloadId)
-      await this.safeDelete(
-        () =>
-          this.networkingApi.deleteNamespacedNetworkPolicy({
-            name: npName,
-            namespace: this.config.sandboxNamespace,
-          }),
-        `NetworkPolicy "${npName}" in ${this.config.sandboxNamespace}`
-      )
+      for (const name of rb.uiIngressPolicyNames(recipe.metadata.name, workloadId)) {
+        await this.deleteOwnedPolicyAlias(recipe, name, this.config.sandboxNamespace, workloadId)
+      }
     }
   }
 
@@ -4406,6 +4430,57 @@ export class WorkflowRecipeReconciler {
     await this.safeDelete(del, label)
   }
 
+  private async deleteOwnedPolicyAlias(
+    recipe: WorkflowRecipeCRD,
+    name: string,
+    namespace: string,
+    workloadId?: string
+  ): Promise<void> {
+    const log = createLogger('wrc', recipe.metadata.name)
+    let existing: k8s.V1NetworkPolicy
+    try {
+      existing = await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error) {
+      if (getErrorCode(error) === 404) return
+      throw error
+    }
+    const labels = existing.metadata?.labels ?? {}
+    if (
+      labels['clerum.io/managed-by'] !== 'workflow-recipes' ||
+      labels['clerum.io/recipe'] !== recipe.metadata.name ||
+      !this.networkPolicyHasCompatibleRecipeScope(existing, recipe) ||
+      (workloadId !== undefined && labels['clerum.io/workload'] !== workloadId)
+    ) {
+      log.warn('Skipping NetworkPolicy alias cleanup for a different logical owner', {
+        operation: 'delete',
+        namespace,
+        policy: name,
+        family: rb.classifyRecipeNetworkPolicyName(name),
+      })
+      return
+    }
+    const stampedUid = existing.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+    if (stampedUid !== undefined && stampedUid !== recipe.metadata.uid) return
+    if (!(await this.recipeCleanupStillCurrent(recipe))) return
+    const uid = existing.metadata?.uid
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!uid || !resourceVersion) {
+      throw new Error(`Cannot clean up NetworkPolicy alias "${name}" without live object identity`)
+    }
+    try {
+      await this.networkingApi.deleteNamespacedNetworkPolicy({
+        name,
+        namespace,
+        body: { preconditions: { uid, resourceVersion } },
+      })
+      await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+    } catch (error) {
+      if (getErrorCode(error) === 404) return
+      throw error
+    }
+    throw new Error(`NetworkPolicy alias "${name}" cleanup is still pending`)
+  }
+
   private async reconcileRecipeNetworkPolicyPass(
     recipe: WorkflowRecipeCRD
   ): Promise<RecipeNetworkPolicyPass> {
@@ -4421,7 +4496,7 @@ export class WorkflowRecipeReconciler {
         ),
       }
     }
-    const desired = new DesiredNetworkPolicyLedger(recipe.metadata.generation)
+    const desired = new DesiredNetworkPolicyLedger(recipe.metadata.generation, recipe.metadata.uid)
     let skippedWorkloadIds: ReadonlySet<string> = new Set()
     let internalDependencyConditions: StatusCondition[] = []
     let laneError: unknown
@@ -4457,6 +4532,9 @@ export class WorkflowRecipeReconciler {
           recipe,
           desired
         )
+        const failure = internalDependencyConditions.find(condition => condition.status === 'False')
+        if (failure)
+          throw new Error(failure.message ?? 'Internal dependency policy planning failed')
       })
     } catch (error) {
       return {
@@ -4490,7 +4568,23 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD,
     baseResult: ReconcileResult
   ): Promise<ReconcileResult> {
-    const pass = await this.reconcileRecipeNetworkPolicyPass(recipe)
+    let effectiveRecipe: WorkflowRecipeCRD
+    try {
+      effectiveRecipe = this.prepareNetworkPolicyRecipe(recipe)
+    } catch (error) {
+      if (error instanceof WorkloadTemplateResolutionError) {
+        return {
+          phase: 'failed',
+          message: error.message,
+          workloadStatuses: baseResult.workloadStatuses,
+          internalDependencyConditions: [
+            this.internalDependencyCondition('False', 'InvalidInternalDependency', error.message),
+          ],
+        }
+      }
+      throw error
+    }
+    const pass = await this.reconcileRecipeNetworkPolicyPass(effectiveRecipe)
     const { internalDependencyConditions, projection } = pass
     if (projection?.staleGeneration) {
       return {
@@ -4570,6 +4664,45 @@ export class WorkflowRecipeReconciler {
     }
   }
 
+  /**
+   * Watch events always carry the declarative CR spec, including workload
+   * templates. Fast paths must plan NetworkPolicies from the same effective
+   * workload values used by deployment; mutating a detached copy keeps the
+   * watch cache authoritative and prevents unresolved templates from becoming
+   * an empty, destructive desired set.
+   */
+  private prepareNetworkPolicyRecipe(recipe: WorkflowRecipeCRD): WorkflowRecipeCRD {
+    const effective = JSON.parse(JSON.stringify(recipe)) as WorkflowRecipeCRD
+    const computed = effective.spec.computed
+      ? evaluateComputedValues(effective.spec.computed, effective.spec.inputs ?? {})
+      : undefined
+    const inputs = resolveInputs(
+      effective.spec.inputs ?? {},
+      effective.spec.inputContract,
+      effective.spec.profiles,
+      effective.spec.activeProfile,
+      computed
+    )
+    this.resolveRecipeWorkloadTemplates(effective, inputs, computed)
+    return effective
+  }
+
+  private resolveRecipeWorkloadTemplates(
+    recipe: WorkflowRecipeCRD,
+    inputs: Record<string, unknown>,
+    computed?: Record<string, unknown>,
+    workloads: WorkloadDef[] = recipe.spec.workloads ?? []
+  ): void {
+    resolveWorkloadTemplates({
+      recipe,
+      workloads,
+      inputs,
+      computed,
+      resolveNamespace: workload =>
+        this.resolveWorkloadNamespace(workload, recipe.spec.ui?.workloadRef),
+    })
+  }
+
   private workflowFastPathReapConditionNeedsPatch(
     recipe: WorkflowRecipeCRD,
     projected: StatusCondition | undefined
@@ -4600,8 +4733,17 @@ export class WorkflowRecipeReconciler {
     recipe: WorkflowRecipeCRD,
     desired: DesiredNetworkPolicyLedger
   ): Promise<void> {
-    const policyName = rb.uiEgressPolicyName(recipe.metadata.name)
     const ns = this.config.sandboxUiNamespace
+    const selected = await this.readCompatibleNetworkPolicy(
+      recipe,
+      ns,
+      rb.uiEgressPolicyNames(recipe.metadata.name),
+      {
+        'clerum.io/managed-by': 'workflow-recipes',
+        'clerum.io/recipe': recipe.metadata.name,
+      }
+    )
+    const policyName = selected.name
 
     const externals = recipe.spec.ui?.egress?.external ?? []
     const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
@@ -4632,14 +4774,24 @@ export class WorkflowRecipeReconciler {
     // hit the no-op gate below instead of being rewritten on every reconcile —
     // which the 60s external-egress refresh loop amplifies for mixed recipes. For
     // external egress it also seeds the accumulator's rehydration (H5).
-    existing = await this.readNetworkPolicyOrNull(policyName, ns)
+    existing = selected.existing
     if (externals.length > 0) {
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
         externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
         resolveResult: { resolved, failures },
-        previousAnnotations: existing?.metadata?.annotations,
+        previousAnnotations: mergeExternalEgressAnnotations(
+          selected.aliases
+            .filter(alias => this.networkPolicyStateBelongsToRecipeEpoch(alias, recipe))
+            .map(alias => alias.metadata?.annotations),
+          externals,
+          Date.now(),
+          {
+            overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+            maxEntries: this.config.externalEgressMaxEntries,
+          }
+        ),
         now: Date.now(),
         config: {
           overlapMs: this.config.externalEgressOverlapSeconds * 1000,
@@ -4701,9 +4853,10 @@ export class WorkflowRecipeReconciler {
     // #582: record BEFORE the no-op gate. The gate returns without writing while
     // the policy is live and desired; recording only at the apply below would
     // make the prune delete it on every pass.
+    if (policy.metadata?.name) policy.metadata.name = policyName
     desired.remember(policy)
 
-    if (existing) this.assertNetworkPolicyOwnership(policy, existing, ns)
+    if (existing) await this.assertNetworkPolicyOwnership(policy, existing, ns, recipe)
 
     // issue #299: NO-OP when the accumulated egress set and rules are already
     // live — a TTL-only refresh must not churn the apiserver/dataplane. But DO
@@ -4711,6 +4864,7 @@ export class WorkflowRecipeReconciler {
     // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
     if (
       !this.egressWriteNeeded(existing, policy) &&
+      selected.aliases.length < 2 &&
       !egressRenewalDue &&
       !egressStateChanged &&
       this.networkPolicyGenerationStampMatches(existing, policy)
@@ -4735,7 +4889,7 @@ export class WorkflowRecipeReconciler {
         // The object may have changed after the no-op/ownership read and before
         // create returned 409. Revalidate the exact second read so generation N
         // cannot borrow N+1's resourceVersion and replace its newer policy.
-        this.assertNetworkPolicyOwnership(policy, existing, ns)
+        await this.assertNetworkPolicyOwnership(policy, existing, ns, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
@@ -4795,8 +4949,18 @@ export class WorkflowRecipeReconciler {
         this.config.sandboxUiNamespace
       )
       if (!policy) continue
+      const compatibleNames = rb.uiIngressPolicyNames(recipe.metadata.name, w.id)
+      if (compatibleNames.length > 1) {
+        const selected = await this.readCompatibleNetworkPolicy(
+          recipe,
+          ns,
+          compatibleNames,
+          policy.metadata?.labels ?? {}
+        )
+        if (policy.metadata?.name) policy.metadata.name = selected.name
+      }
       desired.remember(policy)
-      await this.applyNetworkPolicy(policy, ns)
+      await this.applyNetworkPolicy(policy, ns, recipe)
     }
   }
 
@@ -5006,9 +5170,10 @@ export class WorkflowRecipeReconciler {
 
     try {
       for (const { policy, namespace } of policies) {
-        await this.applyNetworkPolicy(policy, namespace)
+        await this.applyNetworkPolicy(policy, namespace, recipe)
       }
     } catch (error) {
+      if (error instanceof StaleNetworkPolicyPlanError) throw error
       const reason =
         error instanceof NetworkPolicyOwnershipConflictError
           ? 'OwnershipConflict'
@@ -5103,8 +5268,12 @@ export class WorkflowRecipeReconciler {
 
     const excludedNames = new Set<string>()
     for (const workloadId of excludedWorkloadIds) {
-      excludedNames.add(rb.workloadEgressPolicyName(recipe.metadata.name, workloadId))
-      excludedNames.add(rb.workloadIngressPolicyName(recipe.metadata.name, workloadId))
+      for (const name of rb.workloadEgressPolicyNames(recipe.metadata.name, workloadId)) {
+        excludedNames.add(name)
+      }
+      for (const name of rb.workloadIngressPolicyNames(recipe.metadata.name, workloadId)) {
+        excludedNames.add(name)
+      }
     }
 
     let deleted = 0
@@ -5116,6 +5285,7 @@ export class WorkflowRecipeReconciler {
       uid: string
       resourceVersion: string
       recipeGeneration?: string
+      recipeUid?: string
     }> = []
     const acceptedDeleteCandidates: typeof deleteCandidates = []
     const log = createLogger('wrc', recipe.metadata.name)
@@ -5165,6 +5335,11 @@ export class WorkflowRecipeReconciler {
         if (!families.has(family)) continue
         if (desired.has(namespace, name)) continue
         if (excludedNames.has(name)) continue
+        if (!this.networkPolicyHasCompatibleRecipeScope(policy, recipe)) continue
+        if (options.context === 'finalizer') {
+          const ownerUid = policy.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+          if (ownerUid !== undefined && ownerUid !== recipe.metadata.uid) continue
+        }
         const uid = policy.metadata?.uid
         const resourceVersion = policy.metadata?.resourceVersion
         if (!uid || !resourceVersion) {
@@ -5192,6 +5367,7 @@ export class WorkflowRecipeReconciler {
           uid,
           resourceVersion,
           recipeGeneration: policy.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION],
+          recipeUid: policy.metadata?.annotations?.[RECIPE_UID_ANNOTATION],
         })
       }
     }
@@ -5201,6 +5377,9 @@ export class WorkflowRecipeReconciler {
     // generation can change after the pre-LIST fence and an obsolete pass can
     // delete from the newer desired set. A newer generation stamped on any live
     // candidate is an equivalent stale-plan witness.
+    if (options.context === 'finalizer' && !(await this.recipeCleanupStillCurrent(recipe))) {
+      return { kind: 'clean', deleted: 0 }
+    }
     if (options.context === 'active' && recipe.metadata.generation !== undefined) {
       if (!(await this.recipeGenerationStillCurrent(recipe))) {
         return { kind: 'stale_generation' }
@@ -5209,7 +5388,11 @@ export class WorkflowRecipeReconciler {
       if (
         deleteCandidates.some(candidate => {
           const liveGeneration = Number(candidate.recipeGeneration ?? Number.NaN)
-          return Number.isFinite(liveGeneration) && liveGeneration > plannedGeneration
+          return (
+            candidate.recipeUid === recipe.metadata.uid &&
+            Number.isFinite(liveGeneration) &&
+            liveGeneration > plannedGeneration
+          )
         })
       ) {
         return { kind: 'stale_generation' }
@@ -5412,17 +5595,33 @@ export class WorkflowRecipeReconciler {
       let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
-      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
+      const compatibleNames = rb.workloadEgressPolicyNames(recipe.metadata.name, w.id)
+      const selected = await this.readCompatibleNetworkPolicy(recipe, wlNs, compatibleNames, {
+        'clerum.io/managed-by': 'workflow-recipes',
+        'clerum.io/recipe': recipe.metadata.name,
+        'clerum.io/workload': w.id,
+      })
+      const wlPolicyName = selected.name
       // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
       // local) workload egress policy hits the no-op gate instead of churning
       // every reconcile; for external egress it also seeds rehydration (H5).
-      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
+      existingWlPolicy = selected.existing
       if (externalDeclared.length > 0) {
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
           externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
           resolveResult: { resolved: resolvedExternal, failures },
-          previousAnnotations: existingWlPolicy?.metadata?.annotations,
+          previousAnnotations: mergeExternalEgressAnnotations(
+            selected.aliases
+              .filter(alias => this.networkPolicyStateBelongsToRecipeEpoch(alias, recipe))
+              .map(alias => alias.metadata?.annotations),
+            externalDeclared,
+            Date.now(),
+            {
+              overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+              maxEntries: this.config.externalEgressMaxEntries,
+            }
+          ),
           now: Date.now(),
           config: {
             overlapMs: this.config.externalEgressOverlapSeconds * 1000,
@@ -5459,18 +5658,24 @@ export class WorkflowRecipeReconciler {
         wlStateAnnotations
       )
       if (!policy) continue
+      if (policy.metadata?.name) policy.metadata.name = wlPolicyName
 
       // #582: record BEFORE the no-op gate. The gate `continue`s without writing
       // while the policy is live and desired; recording only at the apply below
       // would make the prune delete it on every pass.
       desired.remember(policy)
 
-      if (existingWlPolicy) this.assertNetworkPolicyOwnership(policy, existingWlPolicy, wlNs)
+      if (existingWlPolicy) {
+        await this.assertNetworkPolicyOwnership(policy, existingWlPolicy, wlNs, recipe)
+      }
 
       // issue #299: NO-OP when the accumulated set and rules are already live —
       // but still write when the persisted window is aging (renewalDue, M1).
       if (
         !this.egressWriteNeeded(existingWlPolicy, policy) &&
+        // Commit merged DNS windows even if the set of IPs is unchanged before
+        // the duplicate holding their only durable copy can be pruned.
+        selected.aliases.length < 2 &&
         !wlEgressRenewalDue &&
         !wlEgressStateChanged &&
         this.networkPolicyGenerationStampMatches(existingWlPolicy, policy)
@@ -5480,7 +5685,7 @@ export class WorkflowRecipeReconciler {
         )
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, recipe)
       // #299: the policy has landed — record the set it actually enforces.
       this.logResolvedEgressSet(
         recipe.metadata.name,
@@ -5503,27 +5708,49 @@ export class WorkflowRecipeReconciler {
       if (sources.length === 0) continue
       const policy = rb.buildWorkloadIngressNetworkPolicy(w, recipe, wlNs, sources)
       if (!policy) continue
+      const compatibleNames = rb.workloadIngressPolicyNames(recipe.metadata.name, w.id)
+      if (compatibleNames.length > 1) {
+        const selected = await this.readCompatibleNetworkPolicy(
+          recipe,
+          wlNs,
+          compatibleNames,
+          policy.metadata?.labels ?? {}
+        )
+        if (policy.metadata?.name) policy.metadata.name = selected.name
+      }
       desired.remember(policy)
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, recipe)
     }
 
     return skippedWorkloadIds
   }
 
-  private assertNetworkPolicyOwnership(
+  private async assertNetworkPolicyOwnership(
     desired: k8s.V1NetworkPolicy,
     existing: k8s.V1NetworkPolicy,
-    namespace: string
-  ): void {
+    namespace: string,
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
     const desiredLabels = desired.metadata?.labels ?? {}
     const existingLabels = existing.metadata?.labels ?? {}
     const desiredName = desired.metadata?.name ?? '<unknown>'
     const desiredRecipe = desiredLabels['clerum.io/recipe']
+    const identityLabelKeys = [
+      'clerum.io/workload',
+      NETWORK_POLICY_TYPE_LABEL,
+      'clerum.io/policy-direction',
+      'clerum.io/source-workload',
+      'clerum.io/target-workload',
+    ]
     const ownsSameLane =
       existingLabels['clerum.io/managed-by'] === 'workflow-recipes' &&
       existingLabels['clerum.io/recipe'] === desiredRecipe &&
+      this.networkPolicyHasCompatibleRecipeScope(existing, recipe) &&
       (desiredLabels[NETWORK_POLICY_TYPE_LABEL] !== INTERNAL_DEPENDENCY_POLICY_TYPE ||
-        existingLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE)
+        existingLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE) &&
+      identityLabelKeys.every(
+        key => desiredLabels[key] === undefined || existingLabels[key] === desiredLabels[key]
+      )
 
     if (!ownsSameLane) {
       const lane =
@@ -5533,6 +5760,26 @@ export class WorkflowRecipeReconciler {
       throw new NetworkPolicyOwnershipConflictError(
         `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: existing policy is not the ${lane} for WorkflowRecipe "${desiredRecipe}"`
       )
+    }
+    if (existing.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(`NetworkPolicy "${desiredName}" is still terminating`)
+    }
+
+    const desiredUid = desired.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+    const existingUid = existing.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+    const differentEpoch = desiredUid !== undefined && existingUid !== desiredUid
+    if (differentEpoch) {
+      // A name can survive deletion of its WorkflowRecipe because most policy
+      // families are cross-namespace and deliberately outside the current
+      // finalizer scope. Only the currently live recipe epoch may reclaim it;
+      // an in-flight pass from the old UID fails this check and cannot overwrite
+      // the replacement recipe's policy.
+      if (!(await this.recipeGenerationStillCurrent(recipe))) {
+        throw new StaleNetworkPolicyPlanError(
+          `Refusing to replace NetworkPolicy "${desiredName}" in ${namespace}: WorkflowRecipe epoch changed`
+        )
+      }
+      return
     }
 
     const desiredGeneration = Number(
@@ -5558,12 +5805,143 @@ export class WorkflowRecipeReconciler {
   ): boolean {
     if (!existing) return false
     const desiredGeneration = desired.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION]
+    const desiredUid = desired.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
     // Synthetic callers may omit a generation. In production, a changed recipe
     // generation must advance the policy annotation and resourceVersion even when
     // the enforced egress rules are byte-identical, so an older delete CAS cannot
     // still succeed after the newer pass completes.
-    if (desiredGeneration === undefined) return true
-    return existing.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION] === desiredGeneration
+    if (desiredGeneration === undefined && desiredUid === undefined) return true
+    return (
+      existing.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION] === desiredGeneration &&
+      existing.metadata?.annotations?.[RECIPE_UID_ANNOTATION] === desiredUid
+    )
+  }
+
+  private networkPolicyStateBelongsToRecipeEpoch(
+    existing: k8s.V1NetworkPolicy | null,
+    recipe: WorkflowRecipeCRD
+  ): boolean {
+    if (!existing) return false
+    const stampedUid = existing.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+    if (stampedUid !== undefined) return stampedUid === recipe.metadata.uid
+
+    const stampedGeneration = Number(
+      existing.metadata?.annotations?.[RECIPE_GENERATION_ANNOTATION] ?? Number.NaN
+    )
+    if (
+      recipe.metadata.generation !== undefined &&
+      Number.isFinite(stampedGeneration) &&
+      stampedGeneration > recipe.metadata.generation
+    ) {
+      return false
+    }
+
+    const policyCreated = Date.parse(String(existing.metadata?.creationTimestamp ?? ''))
+    const recipeCreated = Date.parse(recipe.metadata.creationTimestamp ?? '')
+    // Without a UID stamp, only an object created after this recipe establishes
+    // continuity. Equal timestamps are ambiguous at the API's clock resolution;
+    // adopt its identity through a fresh recipe read, but never its old DNS state.
+    return (
+      Number.isFinite(policyCreated) &&
+      Number.isFinite(recipeCreated) &&
+      policyCreated > recipeCreated
+    )
+  }
+
+  private networkPolicyHasCompatibleRecipeScope(
+    policy: k8s.V1NetworkPolicy,
+    recipe: WorkflowRecipeCRD
+  ): boolean {
+    const ownerNamespace = policy.metadata?.labels?.['clerum.io/recipe-namespace']
+    if (ownerNamespace !== undefined && ownerNamespace !== recipe.metadata.namespace) return false
+    const stampedUid = policy.metadata?.annotations?.[RECIPE_UID_ANNOTATION]
+    return (policy.metadata?.ownerReferences ?? []).every(
+      owner =>
+        owner.kind === 'WorkflowRecipe' &&
+        owner.name === recipe.metadata.name &&
+        (stampedUid === undefined || owner.uid === stampedUid)
+    )
+  }
+
+  private networkPolicyMatchesLogicalIdentity(
+    existing: k8s.V1NetworkPolicy,
+    expectedLabels: Record<string, string>
+  ): boolean {
+    const existingLabels = existing.metadata?.labels ?? {}
+    const identityKeys = [
+      'clerum.io/managed-by',
+      'clerum.io/recipe',
+      'clerum.io/workload',
+      NETWORK_POLICY_TYPE_LABEL,
+      'clerum.io/policy-direction',
+      'clerum.io/source-workload',
+      'clerum.io/target-workload',
+    ]
+    return identityKeys.every(
+      key => expectedLabels[key] === undefined || existingLabels[key] === expectedLabels[key]
+    )
+  }
+
+  private async readCompatibleNetworkPolicy(
+    recipe: WorkflowRecipeCRD,
+    namespace: string,
+    names: readonly string[],
+    expectedLabels: Record<string, string>
+  ): Promise<{
+    name: string
+    existing: k8s.V1NetworkPolicy | null
+    aliases: k8s.V1NetworkPolicy[]
+  }> {
+    const uniqueNames = [...new Set(names)]
+    const primary = uniqueNames[0]
+    const matches: Array<{ name: string; existing: k8s.V1NetworkPolicy }> = []
+    let primaryConflict = false
+    for (const [index, name] of uniqueNames.entries()) {
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) continue
+      if (this.networkPolicyMatchesLogicalIdentity(existing, expectedLabels)) {
+        await this.assertNetworkPolicyOwnership(
+          {
+            metadata: {
+              name,
+              labels: expectedLabels,
+              annotations: {
+                ...(recipe.metadata.uid ? { [RECIPE_UID_ANNOTATION]: recipe.metadata.uid } : {}),
+                ...(recipe.metadata.generation === undefined
+                  ? {}
+                  : { [RECIPE_GENERATION_ANNOTATION]: String(recipe.metadata.generation) }),
+              },
+            },
+          },
+          existing,
+          namespace,
+          recipe
+        )
+        matches.push({ name, existing })
+      } else if (index === 0) {
+        primaryConflict = true
+      }
+      // A legacy truncated name can collide inside one recipe. The hashed
+      // primary remains available for this identity; the matching workload's
+      // own pass will adopt the legacy object and keep it in the desired ledger.
+    }
+    // Keep the legacy physical identity when possible. Rehydrate every verified
+    // same-epoch alias before a duplicate is retired, so neither DNS window is lost.
+    const sameEpoch = [...matches]
+      .reverse()
+      .find(({ existing }) => this.networkPolicyStateBelongsToRecipeEpoch(existing, recipe))
+    const selected = sameEpoch ?? matches[0]
+    if (selected) return { ...selected, aliases: matches.map(match => match.existing) }
+    if (primaryConflict) {
+      const lane =
+        expectedLabels[NETWORK_POLICY_TYPE_LABEL] === INTERNAL_DEPENDENCY_POLICY_TYPE
+          ? 'WRC internal-dependency policy'
+          : 'WRC recipe policy'
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to use NetworkPolicy "${primary}" in ${namespace}: existing policy is not the ${lane} for WorkflowRecipe "${recipe.metadata.name}"`
+      )
+    }
+    return { name: primary, existing: null, aliases: [] }
   }
 
   /**
@@ -5731,7 +6109,11 @@ export class WorkflowRecipeReconciler {
     }
   }
 
-  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
+  private async applyNetworkPolicy(
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    recipe: WorkflowRecipeCRD
+  ): Promise<void> {
     const policyName = policy.metadata!.name!
     await this.createOrReplace(
       () =>
@@ -5744,7 +6126,7 @@ export class WorkflowRecipeReconciler {
           name: policyName,
           namespace,
         })
-        this.assertNetworkPolicyOwnership(policy, existing, namespace)
+        await this.assertNetworkPolicyOwnership(policy, existing, namespace, recipe)
         policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
         return this.networkingApi.replaceNamespacedNetworkPolicy({
           name: policyName,
@@ -7048,8 +7430,18 @@ export class WorkflowRecipeReconciler {
     // used to issue an unconditional DELETE every pass: 1 053 NOT_FOUND/hour
     // (issue #582). The prune removes the leftover when there is one.
     if (!policy) return
+    const compatibleNames = rb.oauthBrokerEgressPolicyNames(recipe.metadata.name)
+    if (compatibleNames.length > 1) {
+      const selected = await this.readCompatibleNetworkPolicy(
+        recipe,
+        ns,
+        compatibleNames,
+        policy.metadata?.labels ?? {}
+      )
+      if (policy.metadata?.name) policy.metadata.name = selected.name
+    }
     desired.remember(policy)
-    await this.applyNetworkPolicy(policy, ns)
+    await this.applyNetworkPolicy(policy, ns, recipe)
   }
 
   private async ensureConfigMap(

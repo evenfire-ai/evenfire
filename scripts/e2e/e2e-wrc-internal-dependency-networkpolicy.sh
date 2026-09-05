@@ -8,6 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/e2e/e2e-lib.sh
 source "${SCRIPT_DIR}/e2e-lib.sh"
+# shellcheck source=scripts/e2e/_lib/wrc-networkpolicy-evidence.sh
+source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-evidence.sh"
 
 raw_run_id="${E2E_RUN_ID:-$(date +%H%M%S)-$$}"
 RUN_ID="$(printf "%s" "$raw_run_id" | tr '[:upper:]' '[:lower:]' \
@@ -29,20 +31,13 @@ KEEP_BACKEND_DEPLOYMENT="$KEEP_BACKEND_ID"
 DROP_BACKEND_DEPLOYMENT="$DROP_BACKEND_ID"
 HELD_POLICY_NS=""
 HELD_POLICY_NAME=""
+HELD_POLICY_UID=""
 CREATED=0
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 && ok "Command '$1' available" && return
   fail "Command '$1' not found"
   exit 1
-}
-
-release_held_policy_finalizer() {
-  [ -n "$HELD_POLICY_NS" ] && [ -n "$HELD_POLICY_NAME" ] || return 0
-  if kctl get networkpolicy "$HELD_POLICY_NAME" -n "$HELD_POLICY_NS" >/dev/null 2>&1; then
-    kctl patch networkpolicy "$HELD_POLICY_NAME" -n "$HELD_POLICY_NS" --type=merge \
-      -p '{"metadata":{"finalizers":[]}}' >/dev/null 2>&1 || return 1
-  fi
 }
 
 # Recovery only. The success journey never calls this function: direct child
@@ -223,7 +218,7 @@ wait_for_deployment_generation_after() {
 policy_refs() {
   kctl get networkpolicy -A -l "$1" \
     -o go-template='{{range .items}}{{.metadata.namespace}}/{{.metadata.name}}{{"\n"}}{{end}}' \
-    2>/dev/null | sed '/^$/d' || true
+    2>/dev/null | sed '/^$/d'
 }
 
 one_policy_ref() {
@@ -255,17 +250,12 @@ wait_for_policy_count() {
 }
 
 wait_for_policy_absent() {
-  local ref=$1 timeout=${2:-90} elapsed=0 ns name
-  ns="${ref%%/*}"
-  name="${ref#*/}"
-  while [ "$elapsed" -lt "$timeout" ]; do
-    if ! kctl get networkpolicy "$name" -n "$ns" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep "$POLL_INTERVAL"
-    elapsed=$((elapsed + POLL_INTERVAL))
-  done
-  return 1
+  local ref=$1 timeout=${2:-90}
+  wait_for_resource_absent networkpolicy "${ref%%/*}" "${ref#*/}" "$timeout"
+}
+
+wait_for_workflowrecipe_absent_strict() {
+  wait_for_resource_absent workflowrecipe "$1" "$2" "${3:-90}"
 }
 
 netpol_go() {
@@ -338,27 +328,59 @@ assert_policy_excludes_peer() {
 assert_http_allowed() {
   local deployment=$1 url=$2 expected=$3 output
   output="$(kctl exec "deploy/${deployment}" -n "$SANDBOX_NS" -- \
-    wget -qO- --timeout="$CONNECT_TIMEOUT" --tries=1 "$url" 2>/dev/null || true)"
-  printf "%s" "$output" | grep -Fq "$expected" || {
+    wget -qO- -T "$CONNECT_TIMEOUT" "$url")" || {
+    fail "HTTP probe failed for ${deployment}"
+    return 1
+  }
+  [ "$output" = "$expected" ] || {
     fail "${deployment} could not reach ${url} (output: ${output})"
     return 1
   }
   ok "${deployment} reached ${url} (${expected})"
 }
 
+assert_service_has_ready_endpoint() {
+  local service=$1 namespace=$2 addresses
+  if ! addresses="$(kctl get endpoints "$service" -n "$namespace" \
+    -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null)"; then
+    fail "Could not read Endpoints for ${namespace}/${service}"
+    return 1
+  fi
+  [ -n "$addresses" ] || {
+    fail "Service ${namespace}/${service} has no ready endpoint"
+    return 1
+  }
+  ok "Service ${namespace}/${service} has a ready endpoint"
+}
+
 wait_http_denied() {
-  local deployment=$1 url=$2 timeout=${3:-90} elapsed=0 consecutive=0
+  local deployment=$1 url=$2 timeout=$3 backend=$4 expected=$5
+  local elapsed=0 consecutive=0 result service_ip host target
+  case "$deployment" in pod/*) target=$deployment ;; *) target="deploy/${deployment}" ;; esac
+  host="${url#http://}"
+  host="${host%%:*}"
+  service_ip="$(kctl get service "$backend" -n "$SANDBOX_NS" -o jsonpath='{.spec.clusterIP}')" || return 1
+  service_ip="$(python3 "$WRC_EVIDENCE_PY" service-ip "$service_ip" "$BACKEND_PORT")" || return 1
   while [ "$elapsed" -lt "$timeout" ]; do
     guard_recipe_nonterminal || return 1
-    if kctl exec "deploy/${deployment}" -n "$SANDBOX_NS" -- \
-      wget -qO- --timeout="$CONNECT_TIMEOUT" --tries=1 "$url" >/dev/null 2>&1; then
-      consecutive=0
-    else
-      consecutive=$((consecutive + 1))
-      if [ "$consecutive" -ge 3 ]; then
-        ok "${deployment} is denied from ${url} in three consecutive probes"
-        return 0
-      fi
+    # DNS and backend failure are failed evidence, never network enforcement.
+    kctl exec "$target" -n "$SANDBOX_NS" -- timeout "$CONNECT_TIMEOUT" nslookup "$host" >/dev/null || return 1
+    assert_service_has_ready_endpoint "$backend" "$SANDBOX_NS" || return 1
+    assert_http_allowed "$backend" "http://127.0.0.1:${BACKEND_PORT}/" "$expected" || return 1
+    result="$(probe_tcp_result "$target" "$service_ip" "$BACKEND_PORT")" || {
+      fail "Could not classify TCP connect probe for ${deployment}; exec/client failure is not denial"
+      return 1
+    }
+    assert_service_has_ready_endpoint "$backend" "$SANDBOX_NS" || return 1
+    assert_http_allowed "$backend" "http://127.0.0.1:${BACKEND_PORT}/" "$expected" || return 1
+    case "$result" in
+      WRC_TCP_CONNECTED) consecutive=0 ;;
+      WRC_TCP_CONNECT_TIMEOUT) consecutive=$((consecutive + 1)) ;;
+      *) return 1 ;;
+    esac
+    if [ "$consecutive" -ge 3 ]; then
+      ok "${deployment} had three consecutive TCP connect timeouts with DNS and backend healthy"
+      return 0
     fi
     sleep "$POLL_INTERVAL"
     elapsed=$((elapsed + POLL_INTERVAL))
@@ -417,14 +439,20 @@ YAML
 }
 
 wait_source_env_without_drop() {
-  local expected_keep=$1 timeout=${2:-120} elapsed=0 keep_value drop_value
+  local expected_keep=$1 timeout=${2:-120} elapsed=0 observed
   while [ "$elapsed" -lt "$timeout" ]; do
     guard_recipe_nonterminal || return 1
-    keep_value="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
-      printenv KEEP_URL 2>/dev/null || true)"
-    drop_value="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
-      printenv DROP_URL 2>/dev/null || true)"
-    if [ "$keep_value" = "$expected_keep" ] && [ -z "$drop_value" ]; then
+    # Read both fields in one completed exec. A failed second exec must not
+    # masquerade as an absent DROP_URL after an otherwise healthy KEEP read.
+    # shellcheck disable=SC2016
+    observed="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- sh -c '
+      if [ "${KEEP_URL-}" = "$1" ] && [ "${DROP_URL+x}" != x ]; then
+        printf "WRC_ENV_CONVERGED\n"
+      else
+        printf "WRC_ENV_PENDING\n"
+      fi
+    ' sh "$expected_keep")" || return 1
+    if [ "$observed" = WRC_ENV_CONVERGED ]; then
       ok "source rollout retained KEEP_URL and removed DROP_URL"
       return 0
     fi
@@ -437,66 +465,66 @@ wait_source_env_without_drop() {
 
 delete_recipe_and_verify_finalizer_order() {
   local hold_ref=$1 timeout=${2:-$TIMEOUT_DELETE}
-  local elapsed=0 policy_deleting recipe_deleting recipe_finalizers existing_finalizers
-  HELD_POLICY_NS="${hold_ref%%/*}"
-  HELD_POLICY_NAME="${hold_ref#*/}"
+  local elapsed=0 policy recipe recipe_uid policy_uid patch status
+  local hold_ns="${hold_ref%%/*}" hold_name="${hold_ref#*/}"
+  local observation_start baseline_failures current_failures
 
-  recipe_finalizers="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    -o go-template='{{range .metadata.finalizers}}{{.}}{{"\n"}}{{end}}')"
-  printf '%s\n' "$recipe_finalizers" | grep -Fxq 'clerum.io/workload-cleanup' || {
-    fail "WorkflowRecipe is missing clerum.io/workload-cleanup before deletion"
-    return 1
-  }
-
-  existing_finalizers="$(netpol_go "$HELD_POLICY_NS" "$HELD_POLICY_NAME" \
-    'go-template={{range .metadata.finalizers}}{{.}}{{"\n"}}{{end}}')"
-  [ -z "$existing_finalizers" ] || {
-    fail "${hold_ref} already has finalizers; refusing to replace them"
-    return 1
-  }
-  kctl patch networkpolicy "$HELD_POLICY_NAME" -n "$HELD_POLICY_NS" --type=merge \
-    -p "{\"metadata\":{\"finalizers\":[\"${FINALIZER_HOLD}\"]}}" >/dev/null
+  recipe="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o json)" || return 1
+  recipe_uid="$(python3 "$WRC_EVIDENCE_PY" uid "$recipe")" || return 1
+  policy="$(kctl get networkpolicy "$hold_name" -n "$hold_ns" -o json)" || return 1
+  policy_uid="$(python3 "$WRC_EVIDENCE_PY" uid "$policy")" || return 1
+  patch="$(python3 "$WRC_EVIDENCE_PY" barrier-patch install "$policy_uid" "$policy" "$FINALIZER_HOLD")" || return 1
+  kctl patch networkpolicy "$hold_name" -n "$hold_ns" --type=json -p "$patch" >/dev/null || return 1
+  # Only a confirmed install grants the failure trap ownership of this hold.
+  HELD_POLICY_NS="$hold_ns"
+  HELD_POLICY_NAME="$hold_name"
+  HELD_POLICY_UID="$policy_uid"
   ok "Installed deterministic deletion barrier on ${hold_ref}"
 
-  kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" --wait=false >/dev/null
+  observation_start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  baseline_failures="$(finalizer_failure_count "$observation_start")" || return 1
+  kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" --wait=false >/dev/null || return 1
   while [ "$elapsed" -lt "$timeout" ]; do
-    if ! kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" >/dev/null 2>&1; then
-      fail "WorkflowRecipe disappeared while held NetworkPolicy still existed"
-      return 1
-    fi
-    policy_deleting="$(netpol_go "$HELD_POLICY_NS" "$HELD_POLICY_NAME" \
-      'go-template={{.metadata.deletionTimestamp}}')"
-    recipe_deleting="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-      -o go-template='{{.metadata.deletionTimestamp}}' 2>/dev/null || true)"
-    recipe_finalizers="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-      -o go-template='{{range .metadata.finalizers}}{{.}}{{"\n"}}{{end}}' 2>/dev/null || true)"
-    if [ -n "$policy_deleting" ] && [ -n "$recipe_deleting" ] && \
-      printf '%s\n' "$recipe_finalizers" | grep -Fxq 'clerum.io/workload-cleanup'; then
-      ok "NetworkPolicy is deleting while WorkflowRecipe remains Terminating with its finalizer"
-      break
+    # Each snapshot binds UID, deletion timestamp and finalizers together.
+    policy="$(kctl get networkpolicy "$HELD_POLICY_NAME" -n "$HELD_POLICY_NS" -o json)" || return 1
+    recipe="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o json)" || return 1
+    if python3 "$WRC_EVIDENCE_PY" barrier-ready "$HELD_POLICY_UID" "$recipe_uid" "$policy" "$recipe" "$FINALIZER_HOLD"; then
+      current_failures="$(finalizer_failure_count "$observation_start")" || return 1
+      if [ "$current_failures" -gt "$baseline_failures" ]; then
+        # A second pair after the failed cleanup cycle prevents a transient
+        # pre-cleanup snapshot from certifying a parent that has since vanished.
+        policy="$(kctl get networkpolicy "$HELD_POLICY_NAME" -n "$HELD_POLICY_NS" -o json)" || return 1
+        recipe="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o json)" || return 1
+        python3 "$WRC_EVIDENCE_PY" barrier-ready "$HELD_POLICY_UID" "$recipe_uid" "$policy" "$recipe" "$FINALIZER_HOLD" || return 1
+        ok "Cleanup cycle rejected while held NetworkPolicy UID=${HELD_POLICY_UID} and WorkflowRecipe UID=${recipe_uid} remain deleting with clerum.io/workload-cleanup"
+        break
+      fi
+    else
+      status=$?
+      [ "$status" -eq 1 ] || return 1
     fi
     sleep "$POLL_INTERVAL"
     elapsed=$((elapsed + POLL_INTERVAL))
   done
   [ "$elapsed" -lt "$timeout" ] || {
-    fail "Timed out proving held NetworkPolicy deletion before WorkflowRecipe removal"
+    fail "Timed out proving a rejected cleanup cycle while both original objects retain their finalizers"
     return 1
   }
 
-  release_held_policy_finalizer
+  release_held_policy_finalizer || return 1
   ok "Released deterministic deletion barrier on ${hold_ref}"
   wait_for_policy_absent "$hold_ref" "$timeout" || {
     fail "Held NetworkPolicy still exists after releasing its finalizer"
     return 1
   }
-  ok "Held NetworkPolicy disappeared before the WorkflowRecipe"
-  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" "$timeout" || {
+  ok "Held NetworkPolicy absence confirmed after releasing its finalizer"
+  wait_for_workflowrecipe_absent_strict "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" "$timeout" || {
     fail "WorkflowRecipe still exists after NetworkPolicy cleanup completed"
     return 1
   }
   HELD_POLICY_NS=""
   HELD_POLICY_NAME=""
-  ok "WorkflowRecipe disappeared after NetworkPolicy cleanup"
+  ok "WorkflowRecipe absence confirmed after the blocked cleanup cycle and held-policy release"
 }
 
 header "WRC internal dependency NetworkPolicy E2E"
@@ -505,6 +533,7 @@ log "Context=$(current_e2e_context || true)"
 
 header "Phase 0 - Safety"
 need_cmd "$KUBECTL_BIN"
+need_cmd python3
 require_safe_kube_context
 if kctl cluster-info >/dev/null 2>&1; then
   ok "Kubernetes cluster reachable"
@@ -625,11 +654,7 @@ spec:
           drop: ["ALL"]
 YAML
 wait_for_pod "$SANDBOX_NS" "run=${DENIED_POD}" 60 || { fail "Unassociated pod not ready"; exit 1; }
-if kctl exec "$DENIED_POD" -n "$SANDBOX_NS" -- wget -qO- \
-  --timeout="$CONNECT_TIMEOUT" --tries=1 "$keep_target" >/dev/null 2>&1; then
-  fail "Unassociated pod reached KEEP backend"
-  exit 1
-fi
+wait_http_denied "pod/${DENIED_POD}" "$keep_target" 60 "$KEEP_BACKEND_DEPLOYMENT" "keep-route-ok"
 ok "Unassociated pod cannot reach KEEP backend"
 
 header "Phase 5 - Legitimately remove only the DROP dependency"
@@ -672,16 +697,26 @@ assert_policy "$updated_keep_ingress_ref" "ingress" "$KEEP_BACKEND_ID" "$SOURCE_
 wait_internal_ready "$TIMEOUT_POD"
 wait_reap_reaped "$TIMEOUT_POD"
 wait_recipe_active "$TIMEOUT_POD"
-wait_http_denied "$SOURCE_DEPLOYMENT" "$drop_target" "$TIMEOUT_POD"
+wait_for_deployment "$SANDBOX_NS" "$DROP_BACKEND_DEPLOYMENT" "$TIMEOUT_POD"
+assert_service_has_ready_endpoint "$DROP_BACKEND_DEPLOYMENT" "$SANDBOX_NS"
+assert_http_allowed "$DROP_BACKEND_DEPLOYMENT" \
+  "http://127.0.0.1:${BACKEND_PORT}/" "drop-route-ok"
+wait_http_denied "$SOURCE_DEPLOYMENT" "$drop_target" "$TIMEOUT_POD" "$DROP_BACKEND_DEPLOYMENT" "drop-route-ok"
 assert_http_allowed "$SOURCE_DEPLOYMENT" "$keep_target" "keep-route-ok"
 assert_reap_reaped
 guard_recipe_nonterminal
 
-header "Phase 7 - Finalizer proves NetworkPolicy before WorkflowRecipe"
+header "Phase 7 - Finalizer blocks on the held NetworkPolicy, then completes"
 kctl delete pod "$DENIED_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null
 delete_recipe_and_verify_finalizer_order "$updated_keep_ingress_ref" "$TIMEOUT_DELETE"
-policy_refs "$OWNER_SELECTOR" | grep -q . \
-  && { fail "wr-intdep policies still exist after finalizer completion"; exit 1; }
+final_policy_refs="$(policy_refs "$OWNER_SELECTOR")" || {
+  fail "Could not inventory wr-intdep policies after finalizer completion"
+  exit 1
+}
+[ -z "$final_policy_refs" ] || {
+  fail "wr-intdep policies still exist after finalizer completion"
+  exit 1
+}
 ok "All wr-intdep policies are absent after finalizer completion"
 CREATED=0
 

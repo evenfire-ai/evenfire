@@ -7,11 +7,51 @@ import {
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
-import { accumulateExternalEgress } from './externalEgressAccumulator'
+import {
+  accumulateExternalEgress,
+  mergeExternalEgressAnnotations,
+} from './externalEgressAccumulator'
 import type { ResolveResult } from './fqdnResolver'
 
 const CONFIG = { overlapMs: 300_000, maxEntries: 128 }
 const NOW = 1_000_000_000
+
+describe('compatible policy alias state', () => {
+  it('retains both authorized windows without extending expiry or retaining removed targets', () => {
+    const entry = (ip: string, expiresAt: number, fqdn = 'api.example.com') => ({
+      ip,
+      expiresAt,
+      fqdn,
+      port: 443,
+      protocol: 'TCP',
+      lastObservedAt: NOW - 1000,
+    })
+    const first = serializeState({ entries: [entry('8.8.8.8', NOW + 60000)] })
+    const second = serializeState({
+      entries: [
+        entry('1.1.1.1', NOW + 120000),
+        entry('8.8.8.8', NOW + 30000),
+        entry('9.9.9.9', NOW + 120000, 'removed.example.com'),
+      ],
+    })
+    const annotations = mergeExternalEgressAnnotations(
+      [first, second],
+      [{ fqdn: 'api.example.com', port: 443 }],
+      NOW,
+      CONFIG
+    )
+    const out = accumulateExternalEgress({
+      externals: [{ fqdn: 'api.example.com', port: 443 }],
+      resolveResult: { resolved: [], failures: [] },
+      previousAnnotations: annotations,
+      now: NOW,
+      config: CONFIG,
+    })
+    expect(out.entries.map(e => e.ip).sort()).toEqual(['1.1.1.1', '8.8.8.8'])
+    expect(out.entries.find(e => e.ip === '8.8.8.8')?.expiresAt).toBe(NOW + 60000)
+    expect(out.entries.find(e => e.ip === '1.1.1.1')?.expiresAt).toBe(NOW + 120000)
+  })
+})
 
 function okResolve(
   entries: Array<{ fqdn: string; port: number; ip: string; ttlSeconds: number }>
