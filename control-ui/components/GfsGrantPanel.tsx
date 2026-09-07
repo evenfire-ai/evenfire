@@ -497,7 +497,7 @@ export function GfsGrantPanel({
                         onSelect: () => void revokeAccess(item),
                       },
                     ]}
-                    ariaLabel={`Actions for ${label}`}
+                    ariaLabel={`Actions for ${item.kind === 'grant' ? 'direct grant to' : 'direct share to'} ${label}`}
                   />
                 </RecordListRow>
               )

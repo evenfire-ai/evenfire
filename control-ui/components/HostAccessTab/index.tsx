@@ -408,7 +408,7 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                       </td>
                       <td className="cu-table__cell-actions">
                         <RowActionsMenu
-                          ariaLabel={`Actions for ${user.displayName || user.name || user.email}`}
+                          ariaLabel={`Actions for member ${user.displayName || user.name || user.email}`}
                           actions={[
                             {
                               key: 'view',
@@ -449,7 +449,7 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
                     </td>
                     <td className="cu-table__cell-actions">
                       <RowActionsMenu
-                        ariaLabel={`Actions for ${team.name}`}
+                        ariaLabel={`Actions for team ${team.name}`}
                         actions={[
                           {
                             key: 'view',

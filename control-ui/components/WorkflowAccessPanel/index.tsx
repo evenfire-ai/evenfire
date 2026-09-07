@@ -703,7 +703,7 @@ function AccessUserSection({
                     onSelect: () => void onRevoke(user.id),
                   },
                 ]}
-                ariaLabel={`Actions for ${userLabel(user)}`}
+                ariaLabel={`Actions for ${definition.revokeLabel.replace(/^Remove /, '')}: ${userLabel(user)}`}
               />
             </RecordListRow>
           ))}
@@ -801,7 +801,7 @@ function AccessTeamSection({
                     onSelect: () => void onRevoke(team.id),
                   },
                 ]}
-                ariaLabel={`Actions for ${teamLabel(team)}`}
+                ariaLabel={`Actions for ${definition.revokeLabel.replace(/^Remove /, '')}: ${teamLabel(team)}`}
               />
             </RecordListRow>
           ))}

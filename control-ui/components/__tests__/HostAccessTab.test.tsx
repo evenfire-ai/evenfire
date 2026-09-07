@@ -165,7 +165,7 @@ describe('HostAccessTab — extracted access behavior', () => {
 
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
 
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for Alice' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for member Alice' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
 
     // ConfirmDialog opens; click the danger "Revoke" button.
@@ -223,7 +223,7 @@ describe('HostAccessTab — extracted access behavior', () => {
     await waitFor(() => expect(screen.getByText('Alice')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('tab', { name: 'Teams' }))
     await waitFor(() => expect(screen.getByText('Platform')).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: 'Actions for Platform' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for team Platform' }))
     fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
 
     const confirmDialog = await screen.findByRole('alertdialog')

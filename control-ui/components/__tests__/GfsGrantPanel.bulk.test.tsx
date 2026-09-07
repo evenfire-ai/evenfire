@@ -184,7 +184,9 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(within(existing).getByText('Read')).toBeTruthy()
     expect(within(existing).getByText('Write')).toBeTruthy()
-    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
+    )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -197,6 +199,43 @@ describe('GfsGrantPanel bulk access', () => {
     )
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('distinguishes direct grant and share menus for the same principal', async () => {
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    mockGetGfsShares.mockResolvedValue({
+      items: [
+        {
+          id: '44444444-4444-4444-4444-444444444444',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          includeDescendants: false,
+        },
+      ],
+    })
+
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    expect(
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
+    ).toBeInTheDocument()
+    expect(
+      within(existing).getByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
+    ).toBeInTheDocument()
   })
 
   it('sorts access records by visible principal identity', async () => {
@@ -288,7 +327,9 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
+    )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -322,7 +363,9 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
+    fireEvent.click(
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
+    )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))

@@ -153,7 +153,9 @@ describe('WorkflowAccessPanel', () => {
     const section = screen.getByTestId('workflow-access-trigger-users')
     await waitFor(() => expect(within(section).getByText(/alice@example\.com/)).toBeInTheDocument())
 
-    fireEvent.click(within(section).getByRole('button', { name: 'Actions for Alice' }))
+    fireEvent.click(
+      within(section).getByRole('button', { name: 'Actions for member trigger access: Alice' })
+    )
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove member trigger access' }))
     expect(setWorkflowGrants).not.toHaveBeenCalled()
     expect(
