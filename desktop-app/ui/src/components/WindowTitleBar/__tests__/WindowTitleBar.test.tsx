@@ -116,6 +116,35 @@ describe('WindowTitleBar', () => {
     expect(screen.getByRole('button', { name: 'Close window' })).toBeTruthy()
   })
 
+  it('toggles maximize when the draggable titlebar area is double clicked', () => {
+    setNavigatorPlatform('MacIntel')
+    const { api } = installWindowControls()
+    const { container } = render(<WindowTitleBar />)
+
+    fireEvent.doubleClick(container.querySelector('.window-titlebar') as HTMLElement)
+
+    expect(api.toggleMaximize).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps double clicks on titlebar controls scoped to that control', () => {
+    setNavigatorPlatform('MacIntel')
+    const { api } = installWindowControls()
+    render(
+      <WindowTitleBar
+        actions={
+          <button type="button" aria-label="Search">
+            Search
+          </button>
+        }
+      />
+    )
+
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Close window' }))
+    fireEvent.doubleClick(screen.getByRole('button', { name: 'Search' }))
+
+    expect(api.toggleMaximize).not.toHaveBeenCalled()
+  })
+
   it('portals provider-backed actions above the titlebar background', async () => {
     setNavigatorPlatform('MacIntel')
     installWindowControls()

@@ -159,7 +159,7 @@
   --window-control-mac-expand: rgb(40, 201, 64);
   --window-control-mac-border: rgba(var(--overlay-rgb), 0.28);
   --titlebar-control-ink: #ffffff;
-  --titlebar-control-border: rgba(255, 255, 255, 0.58);
+  --titlebar-control-border: rgba(255, 255, 255, 0.3);
   --titlebar-control-surface: rgb(var(--panel-rgb));
 
   /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
@@ -286,6 +286,6 @@
   --mcp-health-shell-surface: rgba(var(--panel-rgb), 0.96);
   --mcp-health-rows-surface: rgba(var(--panel-rgb), 0.86);
   --titlebar-control-ink: #000000;
-  --titlebar-control-border: rgba(var(--overlay-rgb), 0.68);
+  --titlebar-control-border: rgba(var(--overlay-rgb), 0.3);
   --titlebar-control-surface: rgb(var(--panel-rgb));
 }

@@ -23,6 +23,7 @@ import type {
 } from './types'
 
 const SEARCH_PLACEHOLDER = 'Search'
+const SEARCH_RESULTS_PROMPT = 'Search teams, contexts, members, agents or connectors...'
 
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
@@ -135,6 +136,7 @@ export const HeaderActions = React.memo(function HeaderActions({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationsOpen, setNotificationsOpen] = useState(false)
+  const [notificationTraySettled, setNotificationTraySettled] = useState(false)
   const searchRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
   const notificationsRef = useRef<HTMLDivElement | null>(null)
@@ -145,15 +147,6 @@ export const HeaderActions = React.memo(function HeaderActions({
   const notificationTrayVisible =
     notificationsOpen && (!notificationTrayUsesDrawer || notificationTrayReady)
   const titlebarPlacement = placement === 'titlebar'
-  const titlebarForeground = 'var(--titlebar-action-ink)'
-  const titlebarControlStyle = titlebarPlacement
-    ? {
-        background: 'var(--titlebar-action-surface)',
-        borderColor: 'var(--titlebar-action-border)',
-        color: titlebarForeground,
-        WebkitTextFillColor: titlebarForeground,
-      }
-    : undefined
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000)
@@ -166,11 +159,7 @@ export const HeaderActions = React.memo(function HeaderActions({
   useEffect(() => {
     if (searchFocusRequestId <= 0) return
     setNotificationsOpen(false)
-    // Open based on query presence rather than delegating to the input's
-    // onFocus: when the field is already focused (e.g. Escape then re-triggering
-    // the shortcut) focus() is a no-op and onFocus would not re-fire. Read the
-    // live input value so this stays keyed only on the request id.
-    setSearchOpen((searchInputRef.current?.value ?? '').trim().length > 0)
+    setSearchOpen(true)
     searchInputRef.current?.focus()
   }, [searchFocusRequestId])
 
@@ -199,8 +188,18 @@ export const HeaderActions = React.memo(function HeaderActions({
   }, [onNotificationTrayOpenChange, onShellOverlayOpenChange])
 
   useEffect(() => {
-    if (!notificationsOpen) return
-    void onRefreshPendingApprovals()
+    if (!notificationsOpen) {
+      setNotificationTraySettled(false)
+      return
+    }
+    let cancelled = false
+    setNotificationTraySettled(false)
+    void onRefreshPendingApprovals().finally(() => {
+      if (!cancelled) setNotificationTraySettled(true)
+    })
+    return () => {
+      cancelled = true
+    }
   }, [notificationsOpen, onRefreshPendingApprovals])
 
   useEffect(() => {
@@ -573,6 +572,11 @@ export const HeaderActions = React.memo(function HeaderActions({
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
+  const showNotificationTrayEmpty =
+    notificationTraySettled &&
+    !pendingApprovalsLoading &&
+    !pendingApprovalsCount &&
+    !notifications.length
   const notificationButtonLabel =
     totalAttentionCount === 0
       ? 'Inbox'
@@ -633,11 +637,7 @@ export const HeaderActions = React.memo(function HeaderActions({
           ref={searchRef}
         >
           {titlebarPlacement ? (
-            <span
-              aria-hidden="true"
-              className="global-search__titlebar-icon"
-              style={{ color: titlebarForeground, opacity: 1 }}
-            >
+            <span aria-hidden="true" className="global-search__titlebar-icon">
               ⌕
             </span>
           ) : null}
@@ -648,13 +648,12 @@ export const HeaderActions = React.memo(function HeaderActions({
             className={`search-input${titlebarPlacement ? ' search-input--titlebar' : ''}`}
             aria-label="Search"
             title={SEARCH_PLACEHOLDER}
-            style={titlebarControlStyle}
             value={searchQuery}
             onChange={event => {
               setSearchQuery(event.target.value)
-              setSearchOpen(event.target.value.trim().length > 0)
+              setSearchOpen(true)
             }}
-            onFocus={() => setSearchOpen(searchQuery.trim().length > 0)}
+            onFocus={() => setSearchOpen(true)}
             onKeyDown={event => {
               if (event.key === 'Escape') {
                 setSearchOpen(false)
@@ -662,23 +661,23 @@ export const HeaderActions = React.memo(function HeaderActions({
             }}
           />
           {titlebarPlacement && !searchQuery ? (
-            <span
-              aria-hidden="true"
-              className="search-input__titlebar-placeholder"
-              style={{ color: titlebarForeground, opacity: 1 }}
-            >
+            <span aria-hidden="true" className="search-input__titlebar-placeholder">
               {SEARCH_PLACEHOLDER}
             </span>
           ) : null}
-          {searchOpen && hasSearch && (
+          {searchOpen && (
             <div className="global-search-results">
               <div className="search-results-card">
-                <div className="search-results-header-row">
-                  <strong>Search Results</strong>
-                  <span className="search-results-meta">
-                    {totalMatches} match{totalMatches === 1 ? '' : 'es'}
-                  </span>
-                </div>
+                {hasSearch ? (
+                  <div className="search-results-header-row">
+                    <strong>Search Results</strong>
+                    <span className="search-results-meta">
+                      {totalMatches} match{totalMatches === 1 ? '' : 'es'}
+                    </span>
+                  </div>
+                ) : (
+                  <p className="search-results-prompt">{SEARCH_RESULTS_PROMPT}</p>
+                )}
 
                 {teamDirectoryLoading && !teamDirectoryHydrated && (
                   <p className="search-results-loading">
@@ -873,7 +872,7 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {!totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
+                {hasSearch && !totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
                   <p className="search-results-empty">
                     No matches for "{searchQuery.trim()}". Try a member email, team name, context,
                     agent, connector, plugin, or app.
@@ -897,7 +896,6 @@ export const HeaderActions = React.memo(function HeaderActions({
             aria-expanded={notificationsOpen}
             label="Notifications and approvals"
             title={notificationButtonLabel}
-            style={titlebarControlStyle}
             onClick={() => {
               setNotificationsOpen(open => !open)
               setSearchOpen(false)
@@ -909,7 +907,6 @@ export const HeaderActions = React.memo(function HeaderActions({
               viewBox="0 0 24 24"
               stroke="currentColor"
               strokeWidth={titlebarPlacement ? '2.3' : '2'}
-              style={titlebarPlacement ? { color: titlebarForeground } : undefined}
             >
               <path
                 strokeLinecap="round"
@@ -1198,7 +1195,7 @@ export const HeaderActions = React.memo(function HeaderActions({
                   </section>
                 )}
 
-                {!pendingApprovalsLoading && !pendingApprovalsCount && !notifications.length && (
+                {showNotificationTrayEmpty && (
                   <p className="notification-menu-empty">
                     No notifications or pending approvals right now.
                   </p>

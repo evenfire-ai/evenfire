@@ -116,6 +116,27 @@ describe('AppHeader notification tray presentation', () => {
     await waitFor(() => expect(notificationMocks.refresh).toHaveBeenCalledOnce())
   })
 
+  it('does not show the empty notification state before the open refresh settles', async () => {
+    let resolveRefresh: (() => void) | undefined
+    notificationMocks.refresh.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        resolveRefresh = resolve
+      })
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    expect(screen.queryByText('No notifications or pending approvals right now.')).toBeNull()
+
+    resolveRefresh?.()
+
+    await waitFor(() => {
+      expect(screen.getByText('No notifications or pending approvals right now.')).toBeTruthy()
+    })
+  })
+
   it('opens a clickable notification card with the keyboard', () => {
     const notification = {
       id: 'notification-1',

@@ -38,6 +38,26 @@ function getWindowControlsApi() {
   return window.evenfire?.window
 }
 
+function targetOwnsPointerGesture(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  return Boolean(
+    target.closest(
+      [
+        '.window-titlebar__controls',
+        '.global-search',
+        '.notification-bell-wrapper',
+        'button',
+        'a',
+        'input',
+        'select',
+        'textarea',
+        '[role="button"]',
+        '[role="link"]',
+      ].join(', ')
+    )
+  )
+}
+
 export function TitlebarActionsPortal({ children, container }: TitlebarActionsPortalProps) {
   return container ? createPortal(children, container) : null
 }
@@ -85,10 +105,16 @@ export function WindowTitleBar({ actions, actionsRef }: WindowTitleBarProps) {
     void controlsApi?.toggleMaximize()
   }, [])
 
+  const handleTitlebarDoubleClick = React.useCallback((event: React.MouseEvent<HTMLElement>) => {
+    if (targetOwnsPointerGesture(event.target)) return
+    void getWindowControlsApi()?.toggleMaximize()
+  }, [])
+
   return (
     <header
       className={`window-titlebar window-titlebar--platform-${platform}`}
       data-platform={platform}
+      onDoubleClick={handleTitlebarDoubleClick}
     >
       <div className="window-titlebar__controls" aria-label="Window controls">
         {controlOrder.map(action => (

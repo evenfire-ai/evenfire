@@ -130,7 +130,7 @@ h3 {
   align-items: center;
   gap: var(--space-2);
   pointer-events: auto;
-  -webkit-app-region: no-drag;
+  -webkit-app-region: drag;
 }
 
 .window-titlebar__actions .header-left {
@@ -151,6 +151,7 @@ h3 {
   min-width: 0;
   max-width: min(var(--global-search-expanded), 100%);
   margin-right: 0;
+  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__actions .global-search:focus-within,
@@ -166,9 +167,8 @@ h3 {
   border-color: var(--titlebar-action-border);
   background: var(--titlebar-action-surface);
   color: var(--titlebar-action-ink);
-  box-shadow:
-    0 0 0 1px rgba(17, 24, 39, 0.08),
-    0 6px 14px rgba(var(--overlay-rgb), 0.1);
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08);
+  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__actions .global-search::before {
@@ -503,6 +503,7 @@ h3 {
 }
 
 .search-results-loading,
+.search-results-prompt,
 .search-results-empty {
   margin: 0;
   font-size: var(--font-size-sm);
@@ -716,6 +717,7 @@ h3 {
 .notification-bell-wrapper {
   position: relative;
   z-index: var(--layer-dropdown);
+  -webkit-app-region: no-drag;
 }
 
 .notification-bell.has-attention svg {
@@ -13341,6 +13343,7 @@ pre {
   border-color: var(--titlebar-action-border) !important;
   background: var(--titlebar-action-surface) !important;
   color: var(--titlebar-action-ink) !important;
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
   -webkit-text-fill-color: var(--titlebar-action-ink) !important;
 }
 
@@ -13400,6 +13403,7 @@ pre {
 .window-titlebar__actions .notification-bell {
   border-color: var(--titlebar-action-border) !important;
   background: var(--titlebar-action-surface) !important;
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
 }
 
 .window-titlebar__actions .notification-bell--titlebar {
