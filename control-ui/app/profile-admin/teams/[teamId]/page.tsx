@@ -17,7 +17,10 @@ import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
-import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
+import {
+  applyAgentAccessCompatibilityUpdate,
+  effectiveAgentNamesForAccess,
+} from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import { InviteMemberDialog } from '../../../../components/InviteMemberDialog'
 import { IconUsers } from '../../../../components/Sidebar/icons'
@@ -200,6 +203,16 @@ export default function TeamDetailsPage() {
         new Set((hosts || []).map(host => String(host.metadata?.name || '').trim()).filter(Boolean))
       ).sort((a, b) => a.localeCompare(b)),
     [hosts]
+  )
+  const effectiveAgentNames = useMemo(
+    () =>
+      effectiveAgentNamesForAccess({
+        assignedAgentNames,
+        assignedContextIds,
+        contexts: contextResources,
+        hosts,
+      }),
+    [assignedAgentNames, assignedContextIds, contextResources, hosts]
   )
 
   function contextIdFromResource(item: {
@@ -526,7 +539,7 @@ export default function TeamDetailsPage() {
     if (!shouldRevoke) return
 
     await saveAgents(
-      assignedAgentNames.filter(name => name !== agentName),
+      effectiveAgentNames.filter(name => name !== agentName),
       'Team agent access updated.'
     )
   }
@@ -563,13 +576,13 @@ export default function TeamDetailsPage() {
   const availableAgentOptions = useMemo(
     () =>
       hostNameOptions
-        .filter(agentName => !assignedAgentNames.includes(agentName))
+        .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
           label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions, hosts]
+    [effectiveAgentNames, hostNameOptions, hosts]
   )
 
   useEffect(() => {
@@ -966,13 +979,13 @@ export default function TeamDetailsPage() {
                       </div>
                     ))}
                   </div>
-                ) : assignedAgentNames.length === 0 ? (
+                ) : effectiveAgentNames.length === 0 ? (
                   <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
                     No agent access yet.
                   </div>
                 ) : (
                   <RecordList>
-                    {assignedAgentNames.map(agentName => (
+                    {effectiveAgentNames.map(agentName => (
                       <RecordListRow key={agentName} className="cu-access-row">
                         <button
                           type="button"
@@ -1294,7 +1307,7 @@ export default function TeamDetailsPage() {
                 className="cu-btn cu-btn--primary"
                 onClick={() => {
                   void saveAgents(
-                    [...assignedAgentNames, ...selectedAgentNamesToAdd],
+                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
                     selectedAgentNamesToAdd.length === 1
                       ? 'Team agent access updated.'
                       : 'Team agents access updated.'

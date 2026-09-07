@@ -13,7 +13,10 @@ import { useToast } from '@components/Toast'
 import { CheckboxField } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
-import { applyAgentAccessCompatibilityUpdate } from '@lib/agentAccessCompatibility'
+import {
+  applyAgentAccessCompatibilityUpdate,
+  effectiveAgentNamesForAccess,
+} from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
@@ -141,6 +144,16 @@ export default function UserDetailsPage() {
       ).sort((a, b) => a.localeCompare(b)),
     [hosts]
   )
+  const effectiveAgentNames = useMemo(
+    () =>
+      effectiveAgentNamesForAccess({
+        assignedAgentNames,
+        assignedContextIds,
+        contexts: contextResources,
+        hosts,
+      }),
+    [assignedAgentNames, assignedContextIds, contextResources, hosts]
+  )
   const availableTeamOptions = useMemo(
     () =>
       allTeams
@@ -155,13 +168,13 @@ export default function UserDetailsPage() {
   const availableAgentOptions = useMemo(
     () =>
       hostNameOptions
-        .filter(agentName => !assignedAgentNames.includes(agentName))
+        .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
           label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions, hosts]
+    [effectiveAgentNames, hostNameOptions, hosts]
   )
   const userCommunicationConversations = useMemo(
     () =>
@@ -442,7 +455,7 @@ export default function UserDetailsPage() {
     if (!shouldRevoke) return
 
     await saveAgents(
-      assignedAgentNames.filter(name => name !== agentName),
+      effectiveAgentNames.filter(name => name !== agentName),
       'Agent access updated.'
     )
   }
@@ -1099,7 +1112,7 @@ export default function UserDetailsPage() {
                 </tbody>
               </DataTable>
             </TableViewport>
-          ) : assignedAgentNames.length === 0 ? (
+          ) : effectiveAgentNames.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               No agent access yet.
             </div>
@@ -1113,7 +1126,7 @@ export default function UserDetailsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {assignedAgentNames.map(agentName => (
+                  {effectiveAgentNames.map(agentName => (
                     <tr key={agentName}>
                       <td>
                         <button
@@ -1375,7 +1388,7 @@ export default function UserDetailsPage() {
                 className="cu-btn cu-btn--primary"
                 onClick={() => {
                   void saveAgents(
-                    [...assignedAgentNames, ...selectedAgentNamesToAdd],
+                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
                     selectedAgentNamesToAdd.length === 1
                       ? 'Agent access updated.'
                       : 'Agents access updated.'
