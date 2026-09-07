@@ -98,13 +98,95 @@ assert_dockerignore_allows() {
   fi
 }
 
+assert_dockerignore_excludes_generated_dependencies() {
+  local file="$1"
+  local package="$2"
+  local ignore="$file"
+  local allow_line exclude_line
+  if [[ "$ignore" != /* ]]; then
+    ignore="$REPO_ROOT/$file"
+  fi
+  allow_line="$(
+    awk -v pattern="!packages/$package/" \
+      '$0 == pattern { line=NR } END { if (line) print line }' "$ignore"
+  )"
+  exclude_line="$(
+    awk -v pattern="packages/$package/node_modules/" \
+      '$0 == pattern { line=NR } END { if (line) print line }' "$ignore"
+  )"
+  if [[ -z "$allow_line" || -z "$exclude_line" || "$exclude_line" -le "$allow_line" ]]; then
+    fail "$file must exclude packages/$package/node_modules from its Docker context"
+  fi
+}
+
+assert_dockerignore_narrow_package() {
+  local file="$1"
+  local package="$2"
+  local ignore="$file"
+  local expected actual
+  if [[ "$ignore" != /* ]]; then
+    ignore="$REPO_ROOT/$file"
+  fi
+  expected="$(printf '%s\n' \
+    "!packages/$package/" \
+    "!packages/$package/package.json" \
+    "!packages/$package/src/" \
+    "!packages/$package/src/index.tsx" \
+    "!packages/$package/styles.css")"
+  actual="$(awk -v prefix="!packages/$package/" 'index($0, prefix) == 1 { print }' "$ignore")"
+  if [[ "$actual" != "$expected" ]]; then
+    fail "$file must allow exactly the tracked packages/$package build files"
+  fi
+}
+
+assert_dockerignore_mutations_rejected() {
+  local fixture_dir negated_node_modules extra_secret
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-dockerignore-contract.XXXXXX")"
+  negated_node_modules="$fixture_dir/negated-node-modules"
+  extra_secret="$fixture_dir/extra-secret"
+
+  printf '%s\n' \
+    '!packages/frontend-components/' \
+    '!packages/frontend-components/package.json' \
+    '!packages/frontend-components/src/' \
+    '!packages/frontend-components/src/index.tsx' \
+    '!packages/frontend-components/styles.css' \
+    '!packages/frontend-components/node_modules/' > "$negated_node_modules"
+  local before="$failures"
+  assert_dockerignore_excludes_generated_dependencies \
+    "$negated_node_modules" frontend-components 2>/dev/null
+  if [[ "$failures" -eq "$before" ]]; then
+    fail 'Docker context contract must reject a negated node_modules rule'
+  else
+    failures="$before"
+  fi
+
+  printf '%s\n' \
+    '!packages/frontend-components/' \
+    '!packages/frontend-components/package.json' \
+    '!packages/frontend-components/src/' \
+    '!packages/frontend-components/src/index.tsx' \
+    '!packages/frontend-components/styles.css' \
+    '!packages/frontend-components/.env' \
+    'packages/frontend-components/node_modules/' > "$extra_secret"
+  before="$failures"
+  assert_dockerignore_narrow_package "$extra_secret" frontend-components 2>/dev/null
+  if [[ "$failures" -eq "$before" ]]; then
+    fail 'Docker context contract must reject an extra package-scoped allow rule'
+  else
+    failures="$before"
+  fi
+
+  rm -rf -- "$fixture_dir"
+}
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
   display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field llm-providers workflow-recipe-capability-policy
-assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links
+  display-field frontend-components llm-providers workflow-recipe-capability-policy
+assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
 assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
@@ -123,14 +205,20 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator workflow-reci
 assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 
 assert_materialized control-ui/Dockerfile display-field
+assert_materialized control-ui/Dockerfile frontend-components
 assert_materialized control-ui/Dockerfile llm-providers
 assert_materialized control-ui/Dockerfile workflow-recipe-capability-policy
 assert_materialized profile-ui/Dockerfile desktop-app-links
+assert_materialized profile-ui/Dockerfile frontend-components
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
+assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-components
+assert_dockerignore_excludes_generated_dependencies \
+  control-ui/Dockerfile.dockerignore frontend-components
+assert_dockerignore_mutations_rejected
 
 if (( failures > 0 )); then
   echo "$failures Docker local-package contract failure(s)" >&2

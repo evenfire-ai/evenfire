@@ -2,7 +2,11 @@ import type React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import OutputsPage from '../../app/outputs/page'
-import { getAdminOutputsOverview, getWorkflowRunArtifactDownloadUrl } from '../../lib/api'
+import {
+  getAdminOutputsOverview,
+  getHostArtifactDownloadUrl,
+  getWorkflowRunArtifactDownloadUrl,
+} from '../../lib/api'
 
 const navigationState = vi.hoisted(() => ({
   params: {} as { tab?: string },
@@ -63,6 +67,7 @@ vi.mock('../../lib/api', () => ({
 }))
 
 const mockGetAdminOutputsOverview = vi.mocked(getAdminOutputsOverview)
+const mockGetHostArtifactDownloadUrl = vi.mocked(getHostArtifactDownloadUrl)
 const mockGetWorkflowRunArtifactDownloadUrl = vi.mocked(getWorkflowRunArtifactDownloadUrl)
 
 afterEach(() => {
@@ -75,28 +80,30 @@ afterEach(() => {
 })
 
 describe('OutputsPage', () => {
-  it('shows workflow artifact skeleton rows while the workflow tab is loading', () => {
+  it('keeps workflow artifact headers mounted while the workflow tab is loading', () => {
     mockGetAdminOutputsOverview.mockReturnValue(new Promise<never>(() => {}))
 
-    const { container } = render(<OutputsPage />)
+    render(<OutputsPage />)
 
     expect(screen.getByText('Agent Outputs')).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'File' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Recipe' })).toBeInTheDocument()
     expect(screen.queryByText(/No workflow artifacts found/)).not.toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(24)
+    expect(screen.getByRole('status', { name: 'Loading recipe artifacts…' })).toBeInTheDocument()
   })
 
-  it('shows desktop artifact skeleton rows while the desktop tab is loading', () => {
+  it('keeps desktop artifact headers mounted while the desktop tab is loading', () => {
     navigationState.params = { tab: 'desktop-app-artifacts' }
     mockGetAdminOutputsOverview.mockReturnValue(new Promise<never>(() => {}))
 
-    const { container } = render(<OutputsPage />)
+    render(<OutputsPage />)
 
     expect(screen.getByRole('columnheader', { name: 'File' })).toBeInTheDocument()
     expect(screen.getByRole('columnheader', { name: 'Host' })).toBeInTheDocument()
     expect(screen.queryByText(/No desktop app artifacts found/)).not.toBeInTheDocument()
-    expect(container.querySelectorAll('.cu-skeleton')).toHaveLength(24)
+    expect(
+      screen.getByRole('status', { name: 'Loading desktop app artifacts…' })
+    ).toBeInTheDocument()
   })
 
   it('loads workflow artifacts from exact runs and downloads through the run-scoped URL', async () => {
@@ -130,7 +137,8 @@ describe('OutputsPage', () => {
     render(<OutputsPage />)
 
     expect(await screen.findByText('report.md')).toBeInTheDocument()
-    fireEvent.click(screen.getByText('Download'))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for workflow artifact report.md' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }))
 
     await waitFor(() =>
       expect(mockGetWorkflowRunArtifactDownloadUrl).toHaveBeenCalledWith(
@@ -141,6 +149,50 @@ describe('OutputsPage', () => {
       )
     )
     expect(fetchMock).toHaveBeenCalledWith('http://localhost/run-artifact', {
+      credentials: 'include',
+    })
+    expect(click).toHaveBeenCalled()
+  })
+
+  it('downloads desktop artifacts through the far-right action menu', async () => {
+    navigationState.params = { tab: 'desktop-app-artifacts' }
+    mockGetAdminOutputsOverview.mockResolvedValue({
+      chatArtifacts: [
+        {
+          hostRef: 'host-1',
+          fileName: 'transcript.txt',
+          format: 'txt',
+          sizeBytes: 18,
+          createdAt: '2026-05-12T00:00:02.000Z',
+        },
+      ],
+      workflowOutputs: [],
+    })
+    mockGetHostArtifactDownloadUrl.mockReturnValue('http://localhost/host-artifact')
+    const fetchMock = vi.fn().mockResolvedValue(new Response('artifact', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    Object.defineProperty(URL, 'createObjectURL', {
+      configurable: true,
+      value: vi.fn(() => 'blob:artifact'),
+    })
+    Object.defineProperty(URL, 'revokeObjectURL', {
+      configurable: true,
+      value: vi.fn(),
+    })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+
+    render(<OutputsPage />)
+
+    expect(await screen.findByText('transcript.txt')).toBeInTheDocument()
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for desktop artifact transcript.txt' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Download' }))
+
+    await waitFor(() =>
+      expect(mockGetHostArtifactDownloadUrl).toHaveBeenCalledWith('host-1', 'transcript.txt')
+    )
+    expect(fetchMock).toHaveBeenCalledWith('http://localhost/host-artifact', {
       credentials: 'include',
     })
     expect(click).toHaveBeenCalled()

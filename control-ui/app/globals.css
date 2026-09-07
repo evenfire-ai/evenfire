@@ -62,7 +62,7 @@
   --cu-create-action-min-width: 8.5rem;
   --cu-create-flow-min-height: calc(100vh - 7rem);
   --cu-toast-top-offset: calc(var(--cu-space-5) * 3.5);
-  --cu-expandable-body-bg: #000000;
+  --cu-preview-body-bg: #000000;
 
   /* ---- Typography ---------------------------------------------------- */
   /* Derived from control-ui's own de-facto usage, so adopting the scale is
@@ -79,6 +79,10 @@
   --cu-font-size-2xl: 1.125rem; /* 18px  page subhead                   */
   --cu-font-size-3xl: 1.375rem; /* 22px  page hero                      */
   --cu-font-size-4xl: 1.75rem; /* 28px  auth hero only                 */
+  --eft-table-header-font-size: var(--cu-font-size-2xs);
+  --eft-table-header-font-weight: var(--cu-font-weight-semibold);
+  --eft-table-header-letter-spacing: 0.05em;
+  --eft-table-cell-font-size: var(--cu-font-size-md);
 
   --cu-font-weight-regular: 400;
   --cu-font-weight-medium: 500;
@@ -163,7 +167,7 @@
   --cu-auth-bg-edge: rgba(var(--cu-edge-rgb), 0.28);
   --cu-selection-bg: rgba(var(--cu-accent-rgb), 0.3);
   --cu-selection-text: var(--cu-brand-dark-blue);
-  --cu-expandable-body-bg: var(--cu-bg);
+  --cu-preview-body-bg: var(--cu-bg);
 }
 
 *,
@@ -1816,10 +1820,6 @@ textarea.cu-input {
   margin: 0;
 }
 
-.cu-tabs--nested {
-  margin-top: var(--cu-space-4);
-}
-
 .cu-tabs--tight {
   margin: 0 0 1rem;
 }
@@ -1839,6 +1839,10 @@ textarea.cu-input {
 
 .cu-table-wrap--border-top {
   border-top: 1px solid var(--cu-border-subtle);
+}
+
+.cu-table-wrap--section-gap {
+  margin-top: var(--cu-space-4);
 }
 
 .cu-table {
@@ -2015,7 +2019,13 @@ textarea.cu-input {
   margin-bottom: var(--cu-space-5);
 }
 
-.cu-expandable-table {
+.cu-context-table {
+  min-width: 52rem;
+  table-layout: fixed;
+}
+
+.cu-external-channels-table {
+  min-width: 48rem;
   table-layout: fixed;
 }
 
@@ -2025,40 +2035,40 @@ textarea.cu-input {
 }
 
 .cu-connectors-table {
-  min-width: 48rem;
-  --cu-expandable-inset-left: calc(3rem + 0.85rem);
-  --cu-expandable-inset-right: max(7rem, calc(55% - 21rem));
+  min-width: 62rem;
+  table-layout: fixed;
 }
 
 .cu-connectors-table th:nth-child(1),
 .cu-connectors-table td:nth-child(1) {
-  width: 3rem;
+  width: 16rem;
 }
 
 .cu-connectors-table th:nth-child(2),
 .cu-connectors-table td:nth-child(2) {
-  width: 45%;
-  max-width: 45%;
+  width: auto;
+  max-width: none;
 }
 
 .cu-connectors-table th:nth-child(3),
 .cu-connectors-table td:nth-child(3) {
-  width: 8rem;
+  width: 6rem;
 }
 
 .cu-connectors-table th:nth-child(4),
 .cu-connectors-table td:nth-child(4) {
-  width: 10rem;
+  width: 6rem;
 }
 
 .cu-connectors-table th:nth-child(5),
 .cu-connectors-table td:nth-child(5) {
-  width: max(7rem, calc(55% - 21rem));
-  text-align: right;
+  width: 7rem;
 }
 
-.cu-connectors-table td:nth-child(5) .cu-table-actions {
-  justify-content: flex-end;
+.cu-connectors-table th:nth-child(6),
+.cu-connectors-table td:nth-child(6) {
+  width: 3.5rem;
+  text-align: right;
 }
 
 .cu-guardrails-table-wrap {
@@ -2110,42 +2120,17 @@ textarea.cu-input {
   width: 3rem;
 }
 
-.cu-expandable-row__name,
+.cu-table__cell-name,
 .cu-installed-plugin__name {
   color: var(--cu-text);
   font-weight: 600;
 }
 
-.cu-expandable-row__chevron {
-  color: var(--cu-text-muted);
-  text-align: center;
-}
-
-.cu-expandable-row__chevron svg {
-  display: block;
-  margin: auto;
-  transition: transform var(--cu-control-transition);
-  transform: rotate(0deg);
-}
-
-.cu-expandable-row__chevron svg.is-expanded {
-  transform: rotate(90deg);
-}
-
-.cu-expandable-detail-row > td {
-  padding: 0;
-  background: var(--cu-expandable-body-bg);
-}
-
-.cu-table tbody .cu-expandable-detail-row:hover > td {
-  background: var(--cu-expandable-body-bg);
-}
-
+.cu-detail-summary,
 .cu-expandable-detail {
   display: flex;
   gap: var(--cu-space-5);
-  padding: var(--cu-space-4) var(--cu-expandable-inset-right, var(--cu-space-5)) var(--cu-space-4)
-    var(--cu-expandable-inset-left, var(--cu-space-5));
+  padding: var(--cu-space-4) var(--cu-space-5);
 }
 
 .cu-connector-detail .cu-expandable-detail__fields {
@@ -2236,6 +2221,7 @@ textarea.cu-input {
   margin-top: auto;
 }
 
+.cu-detail-summary__fields,
 .cu-expandable-detail__fields {
   display: flex;
   flex: 1 1 50%;
@@ -2245,7 +2231,7 @@ textarea.cu-input {
   min-width: 0;
 }
 
-.cu-expandable-field {
+.cu-detail-field {
   display: flex;
   flex: 1 1 10rem;
   min-width: 0;
@@ -2254,21 +2240,19 @@ textarea.cu-input {
   gap: var(--cu-space-1);
 }
 
-.cu-expandable-field--wide {
+.cu-detail-field--wide {
   flex-basis: 100%;
 }
 
-.cu-marketplace-detail .cu-expandable-field,
-.cu-marketplace-row-detail .cu-expandable-field {
+.cu-marketplace-detail .cu-detail-field {
   flex: 0 0 auto;
 }
 
-.cu-marketplace-detail .cu-expandable-detail__fields,
-.cu-marketplace-row-detail .cu-expandable-detail__fields {
+.cu-marketplace-detail .cu-detail-summary__fields {
   gap: var(--cu-space-4);
 }
 
-.cu-expandable-field__label {
+.cu-detail-field__label {
   color: var(--cu-text-muted);
   font-size: 0.7rem;
   font-weight: 600;
@@ -2276,30 +2260,14 @@ textarea.cu-input {
   text-transform: uppercase;
 }
 
-/* Previous-versions list inside an expanded owned-entry row: keep the label and
-   each version/Install line spaced so adjacent Install buttons don't touch. */
-.cu-marketplace-versions {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: var(--cu-space-3);
-  min-width: 0;
-  max-width: 28rem;
-}
-
-.cu-marketplace-versions .cu-table-actions {
-  align-items: center;
-  gap: var(--cu-space-4);
-}
-
-.cu-expandable-field__code,
+.cu-detail-field__code,
 .cu-code-text {
   color: var(--cu-text-soft);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   overflow-wrap: anywhere;
 }
 
-.cu-expandable-detail__description {
+.cu-detail-summary__description {
   flex: 1 1 50%;
   max-width: 50%;
   margin: 0;
@@ -2308,7 +2276,7 @@ textarea.cu-input {
   white-space: pre-wrap;
 }
 
-.cu-expandable-tags {
+.cu-detail-tags {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2445,11 +2413,11 @@ textarea.cu-input {
 }
 
 @media (max-width: 768px) {
-  .cu-expandable-detail {
+  .cu-detail-summary {
     flex-direction: column;
   }
 
-  .cu-expandable-detail__description {
+  .cu-detail-summary__description {
     order: -1;
     width: 100%;
     max-width: none;
@@ -2457,15 +2425,12 @@ textarea.cu-input {
 }
 
 @container (max-width: 48rem) {
-  .cu-connector-detail .cu-expandable-detail__fields,
-  .cu-marketplace-row-detail .cu-expandable-detail__fields {
+  .cu-marketplace-detail .cu-detail-summary__fields {
     flex-direction: column;
     flex-wrap: nowrap;
   }
 
-  .cu-connector-detail .cu-expandable-detail__description,
-  .cu-connector-detail .cu-expandable-field,
-  .cu-marketplace-row-detail .cu-expandable-field {
+  .cu-marketplace-detail .cu-detail-field {
     flex: 0 0 auto;
     width: 100%;
   }
@@ -2473,7 +2438,7 @@ textarea.cu-input {
 
 .cu-table-panel__head {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.65rem;
@@ -2505,11 +2470,34 @@ textarea.cu-input {
   color: var(--cu-text-soft);
 }
 
+.cu-table-panel__head > .eft-data-view-header__main {
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+}
+
+.cu-table-panel__head .eft-data-view-header__identity {
+  flex: 0 1 auto;
+}
+
+.cu-table-panel__head .eft-data-view-header__actions {
+  flex: 1 1 42rem;
+  min-width: 0;
+}
+
 .cu-table-panel__actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.4rem;
   align-self: flex-start;
+  width: 100%;
+}
+
+.cu-table-panel__actions > select.cu-input {
+  flex: 0 1 auto;
+  width: auto;
 }
 
 .cu-table-panel__actions--mcp .cu-section-search {
@@ -2528,6 +2516,7 @@ textarea.cu-input {
 .cu-section-search {
   width: min(13rem, 100%);
   min-width: 9rem;
+  max-width: 250px !important;
 }
 
 .cu-registry-layout {
@@ -2640,70 +2629,41 @@ textarea.cu-input {
   padding-inline: 0.75rem;
 }
 
-.cu-registry-toolbar .cu-btn--primary {
-  margin-left: auto;
-}
-
 .cu-registry-name {
   font-weight: 600;
   color: var(--cu-text);
 }
 
 .cu-marketplace-table {
-  min-width: 52rem;
-  --cu-expandable-inset-left: calc(3rem + 0.85rem);
-  --cu-expandable-inset-right: 4.75rem;
+  min-width: 54rem;
+  table-layout: fixed;
 }
 
 .cu-marketplace-table th:nth-child(1),
 .cu-marketplace-table td:nth-child(1) {
-  width: 3rem;
+  width: 18rem;
+}
+
+.cu-marketplace-table th:nth-child(2),
+.cu-marketplace-table td:nth-child(2) {
+  width: auto;
+  max-width: none;
 }
 
 .cu-marketplace-table th:nth-child(3),
 .cu-marketplace-table td:nth-child(3) {
-  width: 7rem;
+  width: 9rem;
 }
 
 .cu-marketplace-table th:nth-child(4),
 .cu-marketplace-table td:nth-child(4) {
-  width: 7rem;
+  width: 3.5rem;
+  text-align: right;
 }
 
-.cu-marketplace-table th:nth-child(5),
-.cu-marketplace-table td:nth-child(5) {
-  width: 4.75rem;
-}
-
-.cu-marketplace-actions {
-  flex-wrap: nowrap;
-  justify-content: flex-start;
-}
-
-.cu-marketplace-action-cell {
-  padding-inline: var(--cu-space-1);
-  white-space: nowrap;
-}
-
-.cu-marketplace-table td.cu-marketplace-action-cell:nth-last-child(2) {
-  padding-right: 0.15rem;
-}
-
-.cu-marketplace-table td.cu-marketplace-action-cell:last-child {
-  padding-left: 0.15rem;
-}
-
-.cu-marketplace-table td:nth-child(4) {
-  text-align: center;
-}
-
-.cu-marketplace-table td:nth-child(4) .cu-btn {
-  max-width: 100%;
-  padding-inline: var(--cu-space-1);
-}
-
-.cu-marketplace-table td:nth-child(5) {
-  text-align: left;
+.cu-plugin-sdk-grants-table {
+  min-width: 72rem;
+  table-layout: fixed;
 }
 
 .cu-marketplace-detail__overview {
@@ -2720,12 +2680,12 @@ textarea.cu-input {
   width: 100%;
 }
 
-.cu-marketplace-detail__overview > .cu-expandable-detail__fields {
+.cu-marketplace-detail__overview > .cu-detail-summary__fields {
   flex: 0 0 auto;
   width: 100%;
 }
 
-.cu-marketplace-detail__description-block > .cu-expandable-detail__description {
+.cu-marketplace-detail__description-block > .cu-detail-summary__description {
   order: 0;
   width: 100%;
   max-width: none;
@@ -2748,6 +2708,14 @@ textarea.cu-input {
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+
+td.cu-registry-description {
+  display: table-cell;
+  margin-top: 0;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
 }
 
 .cu-registry-tags {
@@ -9170,9 +9138,22 @@ textarea.cu-input {
   gap: var(--cu-space-2);
 }
 
+.cu-diagnostic-record-list {
+  background: var(--cu-bg-elevated);
+}
+
+.cu-diagnostic-record-list__row {
+  min-width: 0;
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-diagnostic-record-list__row--workload {
+  font-size: var(--cu-font-size-md);
+}
+
 .cu-recipe-inline-error {
   color: var(--cu-danger);
-  font-size: 0.75rem;
+  font-size: var(--cu-font-size-xs);
 }
 
 .cu-recipe-manifest-editor {
@@ -9195,7 +9176,7 @@ textarea.cu-input {
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
     monospace;
-  font-size: 0.85rem;
+  font-size: var(--cu-font-size-md);
   resize: vertical;
 }
 
@@ -9503,7 +9484,10 @@ textarea.cu-input {
 }
 
 .cu-table__cell-actions {
+  max-width: 3.5rem;
+  min-width: 3rem;
   text-align: right;
+  width: 3.5rem;
 }
 
 .cu-host-lifecycle {
@@ -9635,20 +9619,6 @@ textarea.cu-input {
 .cu-table__sort-link.is-active {
   color: var(--cu-text);
   font-weight: var(--cu-font-weight-bold);
-}
-
-.cu-row-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.15rem;
-}
-
-.cu-row-actions--wrap {
-  flex-wrap: wrap;
-}
-
-.cu-row-actions--nowrap {
-  flex-wrap: nowrap;
 }
 
 .cu-nowrap {
@@ -11185,6 +11155,22 @@ textarea.cu-input {
     min-width: 0;
   }
 
+  .cu-table-panel__actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .cu-table-panel__actions > .cu-section-search {
+    flex: 0 1 13rem;
+    width: min(13rem, 100%);
+  }
+
+  .cu-table-panel__head .eft-data-view-header__actions {
+    flex: none;
+    width: 100%;
+  }
+
   .cu-registry-toolbar .cu-section-search {
     width: 100%;
     min-width: 0;
@@ -11284,6 +11270,17 @@ textarea.cu-input {
 
 .cu-llm-review-table .cu-llm-model-row > td:first-child {
   padding-left: 0.85rem;
+}
+
+.cu-llm-model-row > .cu-llm-provider-cell {
+  padding-left: var(--cu-space-2);
+}
+
+.cu-inline-icon-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--cu-space-2);
+  line-height: 1.2;
 }
 
 .cu-llm-models-error {
@@ -12659,7 +12656,7 @@ button.cu-gfs-tree__button:focus-visible,
   max-height: 100%;
   display: block;
   border-radius: var(--cu-radius-sm);
-  background: var(--cu-expandable-body-bg);
+  background: var(--cu-preview-body-bg);
 }
 
 .cu-gfs-markdown-preview-dialog__body {
@@ -13366,34 +13363,6 @@ button.cu-gfs-tree__button:focus-visible,
   width: var(--cu-space-2);
   height: var(--cu-space-2);
   flex: 0 0 var(--cu-space-2);
-}
-
-.cu-gfs-existing-access__item > .cu-btn {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.cu-gfs-existing-access__revoke.cu-btn {
-  min-width: 1.5rem;
-  min-height: 1.5rem;
-  padding: 0;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--cu-danger);
-  font-size: 0.9rem;
-  font-weight: 700;
-  line-height: 1;
-}
-
-.cu-gfs-existing-access__revoke.cu-btn:hover:not(:disabled) {
-  border-color: transparent;
-  background: transparent;
-  color: var(--cu-danger-hover);
-}
-
-.cu-gfs-existing-access__revoke.cu-btn:focus-visible {
-  border-color: transparent;
 }
 
 .cu-gfs-existing-access__error {

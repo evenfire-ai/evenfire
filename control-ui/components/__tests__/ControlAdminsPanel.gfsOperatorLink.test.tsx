@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import {
+  deleteControlAdmin,
   getControlAdmins,
   reactivateControlAdminGfsOperatorLink,
   revokeControlAdminGfsOperatorLink,
@@ -39,6 +40,7 @@ vi.mock('@lib/api', async () => {
   const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
   return {
     ...actual,
+    deleteControlAdmin: vi.fn(),
     getControlAdmins: vi.fn(),
     reactivateControlAdminGfsOperatorLink: vi.fn(),
     revokeControlAdminGfsOperatorLink: vi.fn(),
@@ -104,17 +106,12 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
 
     await screen.findByText(`Desktop user: ${LINK.desktopUserId}`)
     expect(screen.getByText(`Control Admin: ${LINK.controlAdminId}`)).toBeInTheDocument()
-    expect(
-      screen.getByRole('button', {
-        name: 'Revoke Desktop GFS operator access for initial-admin (admin@example.com)',
-      })
-    ).toBeInTheDocument()
-
     fireEvent.click(
       screen.getByRole('button', {
-        name: 'Revoke Desktop GFS operator access for initial-admin (admin@example.com)',
+        name: 'Actions for initial-admin (admin@example.com)',
       })
     )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke GFS' }))
 
     await waitFor(() =>
       expect(revokeControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1', {
@@ -132,10 +129,11 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     confirmMock.mockResolvedValueOnce(false)
     render(<ControlAdminsPanel />)
 
-    const revokeButton = await screen.findByRole('button', {
-      name: 'Revoke Desktop GFS operator access for initial-admin (admin@example.com)',
+    const actionsButton = await screen.findByRole('button', {
+      name: 'Actions for initial-admin (admin@example.com)',
     })
-    fireEvent.click(revokeButton)
+    fireEvent.click(actionsButton)
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke GFS' }))
 
     await waitFor(() => expect(confirmMock).toHaveBeenCalled())
     expect(revokeControlAdminGfsOperatorLink).not.toHaveBeenCalled()
@@ -163,24 +161,47 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(await screen.findByTestId('gfs-operator-link-admin-2')).toHaveTextContent('Not linked')
   })
 
-  it('views the matching member from an admin with the destination-role SVG', async () => {
+  it('hides the pending invitations table when there are no pending admin invitations', async () => {
     render(<ControlAdminsPanel />)
 
-    const viewMemberButton = await screen.findByRole('button', {
-      name: 'View member for admin initial-admin (admin@example.com)',
-    })
-    expect(viewMemberButton).toHaveAttribute('title', 'View member')
-    expect(viewMemberButton.querySelector('svg')).toHaveAttribute(
-      'data-relationship-role',
-      'member'
-    )
-    expect(viewMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+    await screen.findByText('initial-admin')
+    expect(screen.queryByRole('columnheader', { name: 'Pending invitation' })).toBeNull()
+    expect(screen.queryByText('No pending invitations.')).toBeNull()
+  })
 
-    fireEvent.click(viewMemberButton)
+  it('views the matching member from the admin row menu', async () => {
+    render(<ControlAdminsPanel />)
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for initial-admin (admin@example.com)',
+      })
+    )
+    const viewMemberItem = screen.getByRole('menuitem', {
+      name: 'View member',
+    })
+    fireEvent.click(viewMemberItem)
 
     expect(mockPush).toHaveBeenCalledWith(
       '/users-and-teams/users/11111111-1111-4111-8111-111111111111'
     )
+  })
+
+  it('keeps the current admin delete action disabled and inert inside the row menu', async () => {
+    render(<ControlAdminsPanel />)
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for initial-admin (admin@example.com)',
+      })
+    )
+    const deleteItem = screen.getByRole('menuitem', { name: /Delete admin/ })
+
+    expect(deleteItem).toHaveAttribute('aria-disabled', 'true')
+    expect(deleteItem).toHaveTextContent('Current admin cannot be deleted.')
+    fireEvent.click(deleteItem)
+
+    expect(deleteControlAdmin).not.toHaveBeenCalled()
   })
 
   it('creates a member from an admin without a matching member', async () => {
@@ -200,17 +221,15 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
     render(<ControlAdminsPanel />)
 
-    const createMemberButton = await screen.findByRole('button', {
-      name: 'Create member for admin create-member (create-member@example.com)',
-    })
-    expect(createMemberButton).toHaveAttribute('title', 'Create member')
-    expect(createMemberButton.querySelector('svg')).toHaveAttribute(
-      'data-relationship-role',
-      'member'
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for create-member (create-member@example.com)',
+      })
     )
-    expect(createMemberButton.querySelector('svg')).toHaveAttribute('data-create-badge', 'true')
-
-    fireEvent.click(createMemberButton)
+    const createMemberItem = screen.getByRole('menuitem', {
+      name: 'Create member',
+    })
+    fireEvent.click(createMemberItem)
 
     expect(mockPush).toHaveBeenCalledWith(
       '/users-and-teams/users/new?adminId=admin-2&email=create-member%40example.com&name=create-member'
@@ -234,14 +253,17 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
     render(<ControlAdminsPanel />)
 
-    const createMemberButton = await screen.findByRole('button', {
-      name: 'Email required to create member for admin email-missing',
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for email-missing',
+      })
+    )
+    const createMemberItem = screen.getByRole('menuitem', {
+      name: 'Email required to create member',
     })
-    expect(createMemberButton).toBeDisabled()
-    expect(createMemberButton).toHaveAttribute('title', 'Email required to create member')
-    expect(createMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+    expect(createMemberItem).toBeDisabled()
 
-    fireEvent.click(createMemberButton)
+    fireEvent.click(createMemberItem)
     expect(mockPush).not.toHaveBeenCalled()
   })
 
@@ -263,14 +285,17 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
     render(<ControlAdminsPanel />)
 
-    const createMemberButton = await screen.findByRole('button', {
-      name: 'Complete password setup to create member for admin password-pending (password-pending@example.com)',
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for password-pending (password-pending@example.com)',
+      })
+    )
+    const createMemberItem = screen.getByRole('menuitem', {
+      name: 'Complete password setup to create member',
     })
-    expect(createMemberButton).toBeDisabled()
-    expect(createMemberButton).toHaveAttribute('title', 'Complete password setup to create member')
-    expect(createMemberButton.querySelector('svg')).not.toHaveAttribute('data-create-badge')
+    expect(createMemberItem).toBeDisabled()
 
-    fireEvent.click(createMemberButton)
+    fireEvent.click(createMemberItem)
     expect(mockPush).not.toHaveBeenCalled()
   })
 
@@ -321,10 +346,15 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     })
 
     render(<ControlAdminsPanel />)
-    const reactivateButton = await screen.findByRole('button', {
-      name: 'Reactivate Desktop GFS operator access for initial-admin (admin@example.com)',
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for initial-admin (admin@example.com)',
+      })
+    )
+    const reactivateItem = screen.getByRole('menuitem', {
+      name: 'Reactivate GFS',
     })
-    fireEvent.click(reactivateButton)
+    fireEvent.click(reactivateItem)
 
     await waitFor(() =>
       expect(reactivateControlAdminGfsOperatorLink).toHaveBeenCalledWith('admin-1', {
