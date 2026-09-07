@@ -18,7 +18,11 @@ import {
   requestedActionContextV2,
 } from '../../services/access/actionContextV2.js'
 import { delegationV2IssuanceResponse } from '../../services/access/actionMessageId.js'
-import { getActionOperationDefinition } from '../../services/access/actionOperationRegistry.js'
+import {
+  EXTERNAL_RPC_ADMISSION_CLASS,
+  externalRpcAdmissionClassForOperation,
+  getActionOperationDefinition,
+} from '../../services/access/actionOperationRegistry.js'
 import { canonicalEnvironmentId } from '../../services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../../services/access/resourceIdentity.js'
 import { resolveEffectiveUserAccessPolicy } from '../../services/access/userAccessRuntimePolicy.js'
@@ -55,7 +59,12 @@ function parseIssuanceRequest(req: ExternalAuthedRequest) {
   if (!exactKeys(req.body.resource, ['type', 'logicalId'])) throw new Error('invalid_request')
   const operationId = requireActionOperationId(req.body.operationId)
   const operation = getActionOperationDefinition(operationId)
-  if (operation.delegation === 'none' || operation.pathMode !== 'selected_path') {
+  const admissionClass = externalRpcAdmissionClassForOperation(operationId)
+  if (
+    operation.delegation === 'none' ||
+    operation.pathMode !== 'selected_path' ||
+    admissionClass !== EXTERNAL_RPC_ADMISSION_CLASS
+  ) {
     throw new Error('invalid_request')
   }
   const resource = canonicalResourceIdentity({
@@ -69,6 +78,7 @@ function parseIssuanceRequest(req: ExternalAuthedRequest) {
   })
   return Object.freeze({
     operationId,
+    admissionClass,
     resource,
     requested,
     ...(hasTarget ? { operationTarget: req.body.target } : {}),
@@ -139,7 +149,7 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
 
   router.post(
     '/external/rpc/delegations',
-    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'pre_auth')),
+    rateLimitMiddleware(externalUserRateLimitOptions(EXTERNAL_RPC_ADMISSION_CLASS, 'pre_auth')),
     attachAccessExecutionBudget,
     requireExternalSessionRateLimitContext({
       purpose: 'protected',
@@ -147,7 +157,9 @@ export function createExternalRpcDelegationsRouter(gateway: K8sGateway): Router 
       client: req => ({ version: req.header('x-evenfire-client-version') || undefined }),
     }),
     requireAuthenticatedExternalUserRateLimitContext,
-    rateLimitMiddleware(externalUserRateLimitOptions('rpc_token', 'authenticated')),
+    rateLimitMiddleware(
+      externalUserRateLimitOptions(EXTERNAL_RPC_ADMISSION_CLASS, 'authenticated')
+    ),
     async (req: ExternalAuthedRequest, res, next) => {
       try {
         const policy = await resolveEffectiveUserAccessPolicy({
