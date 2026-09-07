@@ -109,12 +109,12 @@ describe('RecipeStatusContent — workload recipe', () => {
     mockGetStatus.mockResolvedValue({
       phase: 'active',
       workloads: [
-        { id: 'my-mcp-server', ready: true, replicas: 2 },
-        { id: 'redis', ready: false },
+        { id: 'z-worker', ready: true, replicas: 2 },
+        { id: 'a-worker', ready: false },
       ],
     })
     render(<RecipeStatusContent {...DEFAULT_PROPS} />)
-    await waitFor(() => expect(screen.getByText('my-mcp-server')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('z-worker')).toBeInTheDocument())
     expect(screen.getByText('Ready')).toBeInTheDocument()
     expect(screen.getByText('Not Ready')).toBeInTheDocument()
     expect(screen.getByText('×2')).toBeInTheDocument()
@@ -123,7 +123,7 @@ describe('RecipeStatusContent — workload recipe', () => {
       within(list)
         .getAllByRole('listitem')
         .map(row => row.textContent)
-    ).toEqual(['my-mcp-serverReady×2', 'redisNot Ready'])
+    ).toEqual(['z-workerReady×2', 'a-workerNot Ready'])
   })
 
   it('shows message section with copy button', async () => {
