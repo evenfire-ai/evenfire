@@ -15,6 +15,7 @@ export function RowActionsMenu({ ariaLabel, actions, horizontalTrigger }: RowAct
         onSelect: action.onClick,
         danger: action.danger,
         disabled: action.disabled,
+        disabledReason: action.disabledReason,
       }))}
       ariaLabel={ariaLabel}
       menuClassName="cu-kebab__menu--portal"

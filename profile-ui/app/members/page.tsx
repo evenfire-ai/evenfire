@@ -337,6 +337,9 @@ export default function MembersPage() {
                                   label: 'Delete member',
                                   danger: true,
                                   disabled: busy || !deleteAllowed,
+                                  disabledReason: !deleteAllowed
+                                    ? memberDeleteTooltip(member, currentUserId)
+                                    : undefined,
                                   onSelect: () => void deleteMemberAccount(member),
                                 },
                               ]}

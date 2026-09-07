@@ -231,4 +231,33 @@ describe('shared frontend components', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
     expect(onDelete).not.toHaveBeenCalled()
   })
+
+  it('keeps disabled action reasons reachable without running unavailable actions', () => {
+    const onDelete = vi.fn()
+    render(
+      <RowActionMenu
+        ariaLabel="Actions for Alpha"
+        actions={[
+          {
+            key: 'delete',
+            label: 'Delete',
+            danger: true,
+            disabled: true,
+            disabledReason: 'Only owners can delete this record.',
+            onSelect: onDelete,
+          },
+        ]}
+      />
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Actions for Alpha' })
+    expect(trigger).not.toBeDisabled()
+    fireEvent.click(trigger)
+    const deleteAction = screen.getByRole('menuitem', { name: /Delete/ })
+    expect(deleteAction).toHaveFocus()
+    expect(deleteAction).toHaveAttribute('aria-disabled', 'true')
+    expect(deleteAction).toHaveTextContent('Only owners can delete this record.')
+    fireEvent.click(deleteAction)
+    expect(onDelete).not.toHaveBeenCalled()
+  })
 })

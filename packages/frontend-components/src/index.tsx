@@ -370,9 +370,10 @@ export type RowAction = {
   onSelect: () => void
   danger?: boolean
   disabled?: boolean
+  disabledReason?: ReactNode
 }
 
-function enabledItems(menu: HTMLDivElement | null) {
+function focusableItems(menu: HTMLDivElement | null) {
   return menu
     ? Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'))
     : []
@@ -396,7 +397,8 @@ export function RowActionMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const initialFocusRef = useRef<'first' | 'last'>('first')
   const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
-  const triggerDisabled = actions.every(action => action.disabled)
+  const hasDisabledReason = actions.some(action => action.disabled && action.disabledReason)
+  const triggerDisabled = actions.every(action => action.disabled) && !hasDisabledReason
 
   const close = useCallback((restoreFocus = false) => {
     setOpen(false)
@@ -442,7 +444,7 @@ export function RowActionMenu({
       setPosition({ left, top: above ? anchor.top - bounds.height - inset : anchor.bottom + inset })
     }
     place()
-    const items = enabledItems(menuRef.current)
+    const items = focusableItems(menuRef.current)
     ;(initialFocusRef.current === 'last' ? items.at(-1) : items[0])?.focus()
     window.addEventListener('resize', place)
     window.addEventListener('scroll', place, true)
@@ -486,7 +488,7 @@ export function RowActionMenu({
               className={classNames('eft-row-actions__menu', menuClassName)}
               onClick={event => event.stopPropagation()}
               onKeyDown={event => {
-                const items = enabledItems(menuRef.current)
+                const items = focusableItems(menuRef.current)
                 const current = items.indexOf(document.activeElement as HTMLButtonElement)
                 if (event.key === 'Escape') {
                   event.preventDefault()
@@ -511,24 +513,34 @@ export function RowActionMenu({
               role="menu"
               style={position ? position : { left: 0, top: 0, visibility: 'hidden' }}
             >
-              {actions.map(action => (
-                <button
-                  className={classNames(
-                    'eft-row-actions__item',
-                    action.danger && 'eft-row-actions__item--danger'
-                  )}
-                  disabled={action.disabled}
-                  key={action.key}
-                  onClick={() => {
-                    close(true)
-                    action.onSelect()
-                  }}
-                  role="menuitem"
-                  type="button"
-                >
-                  {action.label}
-                </button>
-              ))}
+              {actions.map(action => {
+                const disabledReason = action.disabled ? action.disabledReason : undefined
+                const disabledWithReason = Boolean(disabledReason)
+                return (
+                  <button
+                    aria-disabled={action.disabled ? true : undefined}
+                    className={classNames(
+                      'eft-row-actions__item',
+                      action.danger && 'eft-row-actions__item--danger'
+                    )}
+                    disabled={action.disabled && !disabledWithReason}
+                    key={action.key}
+                    onClick={() => {
+                      if (action.disabled) return
+                      close(true)
+                      action.onSelect()
+                    }}
+                    role="menuitem"
+                    title={typeof disabledReason === 'string' ? disabledReason : undefined}
+                    type="button"
+                  >
+                    <span>{action.label}</span>
+                    {disabledReason ? (
+                      <span className="eft-row-actions__item-reason">{disabledReason}</span>
+                    ) : null}
+                  </button>
+                )
+              })}
             </div>,
             document.body
           )

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import {
+  deleteControlAdmin,
   getControlAdmins,
   reactivateControlAdminGfsOperatorLink,
   revokeControlAdminGfsOperatorLink,
@@ -39,6 +40,7 @@ vi.mock('@lib/api', async () => {
   const actual = await vi.importActual<typeof import('@lib/api')>('@lib/api')
   return {
     ...actual,
+    deleteControlAdmin: vi.fn(),
     getControlAdmins: vi.fn(),
     reactivateControlAdminGfsOperatorLink: vi.fn(),
     revokeControlAdminGfsOperatorLink: vi.fn(),
@@ -183,6 +185,23 @@ describe('ControlAdminsPanel GFS operator link lifecycle', () => {
     expect(mockPush).toHaveBeenCalledWith(
       '/users-and-teams/users/11111111-1111-4111-8111-111111111111'
     )
+  })
+
+  it('keeps the current admin delete action disabled and inert inside the row menu', async () => {
+    render(<ControlAdminsPanel />)
+
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'Actions for initial-admin (admin@example.com)',
+      })
+    )
+    const deleteItem = screen.getByRole('menuitem', { name: /Delete admin/ })
+
+    expect(deleteItem).toHaveAttribute('aria-disabled', 'true')
+    expect(deleteItem).toHaveTextContent('Current admin cannot be deleted.')
+    fireEvent.click(deleteItem)
+
+    expect(deleteControlAdmin).not.toHaveBeenCalled()
   })
 
   it('creates a member from an admin without a matching member', async () => {

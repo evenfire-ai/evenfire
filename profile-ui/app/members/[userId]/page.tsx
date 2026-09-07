@@ -274,6 +274,9 @@ export default function MemberDetailsPage() {
                                     key: 'edit',
                                     label: 'Edit permissions',
                                     disabled: busy || !team.canEdit,
+                                    disabledReason: !team.canEdit
+                                      ? 'Only team leaders can edit member permissions.'
+                                      : undefined,
                                     onSelect: () => {
                                       if (!team.canEdit) return
                                       setEditTeam(team)
@@ -286,6 +289,9 @@ export default function MemberDetailsPage() {
                                     label: 'Remove from team',
                                     danger: true,
                                     disabled: busy || !team.canDelete,
+                                    disabledReason: !team.canDelete
+                                      ? 'Only team leaders can remove this member from the team.'
+                                      : undefined,
                                     onSelect: () => void removeMemberFromTeam(team),
                                   },
                                 ]}

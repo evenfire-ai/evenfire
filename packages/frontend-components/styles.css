@@ -314,7 +314,20 @@
   padding: 0.5rem 0.625rem;
   text-align: left;
 }
-.eft-row-actions__item:hover:not(:disabled),
+.eft-row-actions__item[aria-disabled='true'] {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+.eft-row-actions__item-reason {
+  color: var(--eft-muted);
+  display: block;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  margin-top: 0.2rem;
+  max-width: 16rem;
+  white-space: normal;
+}
+.eft-row-actions__item:hover:not(:disabled):not([aria-disabled='true']),
 .eft-row-actions__item:focus-visible {
   background: var(--eft-surface-muted);
   outline: none;

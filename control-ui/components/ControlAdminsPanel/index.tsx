@@ -571,16 +571,17 @@ export function ControlAdminsPanel({
                             : []),
                           {
                             key: 'delete',
-                            label: currentAdmin
-                              ? 'Current admin cannot be deleted'
-                              : admin.passwordPending
-                                ? deletingAdminId === admin.id
-                                  ? 'Canceling setup…'
-                                  : 'Cancel admin setup'
-                                : deletingAdminId === admin.id
-                                  ? 'Deleting…'
-                                  : 'Delete admin',
+                            label: admin.passwordPending
+                              ? deletingAdminId === admin.id
+                                ? 'Canceling setup…'
+                                : 'Cancel admin setup'
+                              : deletingAdminId === admin.id
+                                ? 'Deleting…'
+                                : 'Delete admin',
                             disabled: currentAdmin || deletingAdminId === admin.id,
+                            disabledReason: currentAdmin
+                              ? 'Current admin cannot be deleted.'
+                              : undefined,
                             onClick: () => void handleDeleteAdmin(admin),
                             danger: true,
                           },
