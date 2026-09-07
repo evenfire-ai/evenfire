@@ -40,6 +40,8 @@ describe('GuardrailHooksTable', () => {
     // borrow the expandable-row vocabulary, which promises in-place detail.
     expect(view.container.querySelector('.cu-expandable-row__chevron')).toBeNull()
     expect(view.container.querySelector('.cu-expandable-table')).toBeNull()
-    expect(view.container.querySelector('.cu-installed-plugin__navigation')).not.toBeNull()
+    expect(
+      view.container.querySelector('[aria-label="View guardrail hook-token-compactor"]')
+    ).not.toBeNull()
   })
 })

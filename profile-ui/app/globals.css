@@ -60,6 +60,10 @@
   --cu-create-flow-min-height: calc(100vh - 7rem);
   --cu-toast-top-offset: calc(var(--cu-space-5) * 3.5);
   --cu-font: 'Inter', system-ui, -apple-system, sans-serif;
+  --eft-table-header-font-size: 0.75rem;
+  --eft-table-header-font-weight: 600;
+  --eft-table-header-letter-spacing: 0.04em;
+  --eft-table-cell-font-size: 0.9rem;
 }
 
 *,
@@ -1176,44 +1180,6 @@ code {
 .members-section {
   display: grid;
   gap: 1rem;
-}
-
-.members-table-wrap {
-  width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--cu-border-subtle);
-  border-radius: var(--cu-radius-sm);
-}
-
-.members-table {
-  width: 100%;
-  min-width: 42rem;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-
-.members-table th,
-.members-table td {
-  padding: 0.75rem;
-  border-bottom: 1px solid var(--cu-border-subtle);
-  text-align: left;
-  vertical-align: middle;
-}
-
-.members-table th {
-  color: var(--cu-text-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.members-table tbody tr:last-child td {
-  border-bottom: 0;
-}
-
-.members-table tr[data-selected='true'] td {
-  background: var(--cu-bg-elevated);
 }
 
 .cu-btn__content {
