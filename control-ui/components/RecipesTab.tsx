@@ -2,23 +2,22 @@
 
 import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
 import { PluginsEmptyState } from './PluginsEmptyState'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconWorkflow } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconRefresh } from './icons'
+import { IconRefresh } from './icons'
 
 const RECIPE_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
   { key: 'phase', label: 'Phase' },
   { key: 'created', label: 'Created' },
-  { key: 'navigation', ariaLabel: 'Navigation', align: 'right' },
 ]
 
 type Props = {
@@ -57,6 +56,22 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
         .includes(normalizedSearch)
     })
   }, [items, normalizedSearch])
+  const recipeSort = useTableSort<WorkflowRecipeResource, 'name' | 'phase' | 'created'>({
+    rows: filteredItems,
+    defaultKey: 'name',
+    identity: item =>
+      `${item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE}/${item.metadata?.name ?? ''}`,
+    accessors: {
+      name: item => item.metadata?.name,
+      phase: item => normalizeRecipePhase(item.status?.phase),
+      created: item => item.metadata?.creationTimestamp,
+    },
+  })
+  const columns = RECIPE_COLUMNS.map(column => ({
+    ...column,
+    activeDirection: recipeSort.key === column.key ? recipeSort.direction : null,
+    onSort: () => recipeSort.sortBy(column.key as 'name' | 'phase' | 'created'),
+  }))
   const isInitialLoad = loading && items.length === 0
 
   function detailHref(name: string, namespace: string): string {
@@ -73,68 +88,66 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
           </>
         }
         subtitle="Select a plugin to view status, run history, and actions."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search plugins"
-              ariaLabel="Search plugins"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={onRefresh}
-              disabled={loading || isInitialLoad}
-              aria-label={loading ? 'Refreshing…' : 'Reload plugins'}
-            >
-              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--sm cu-nowrap"
-              onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
-              disabled={isInitialLoad}
-            >
-              Plugins SDK
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onInstall}
-              disabled={isInitialLoad}
-            >
-              Install Plugin
-            </button>
-          </>
+        secondaryActions={
+          <button
+            type="button"
+            className="cu-btn cu-btn--sm cu-nowrap"
+            onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
+            disabled={isInitialLoad}
+          >
+            Plugins SDK
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={onRefresh}
+            disabled={loading || isInitialLoad}
+            aria-label={loading ? 'Refreshing…' : 'Reload plugins'}
+          >
+            <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search plugins"
+            ariaLabel="Search plugins"
+            disabled={isInitialLoad}
+          />
+        }
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onInstall}
+            disabled={isInitialLoad}
+          >
+            Install Plugin
+          </button>
         }
       />
       {error ? <div className="cu-banner cu-banner--error cu-table-error">{error}</div> : null}
 
-      {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
-            <thead>
-              <TableHeaderRow columns={RECIPE_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={RECIPE_COLUMNS.length} rows={4} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredItems.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
-        </div>
-      ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band cu-installed-plugins-table">
-            <thead>
-              <TableHeaderRow columns={RECIPE_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredItems.map(item => {
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-installed-plugins-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading plugins…" />
+            ) : error && recipeSort.sortedRows.length === 0 ? (
+              <TableStateRow colSpan={columns.length} kind="error" message={error} />
+            ) : filteredItems.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={normalizedSearch ? 'No plugins match this search.' : <PluginsEmptyState />}
+              />
+            ) : (
+              recipeSort.sortedRows.map(item => {
                 const name = item.metadata?.name ?? '(unnamed)'
                 const namespace = item.metadata?.namespace ?? DEFAULT_WORKFLOW_RECIPE_NAMESPACE
                 const key = `${namespace}/${name}`
@@ -169,16 +182,13 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
                       </span>
                     </td>
                     <td className="cu-installed-plugin__created">{created}</td>
-                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
-                      <IconChevronRight width={18} height={18} />
-                    </td>
                   </tr>
                 )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }

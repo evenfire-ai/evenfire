@@ -1,6 +1,7 @@
 'use client'
 
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import {
   type UserGrant,
   type WorkflowRecipeResource,
@@ -11,6 +12,7 @@ import {
   getRecipeOauthStatus,
 } from '../../lib/api'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
 import { IconRefresh } from '../icons'
@@ -34,7 +36,6 @@ type UserGrantsState = 'idle' | 'loading' | 'ready' | 'error'
 type UserGrantsRowState = {
   loadState: UserGrantsState
   users: UserGrant[]
-  expanded: boolean
   busyUserId: string | null
 }
 
@@ -78,6 +79,44 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
 
   // Per-client user-grants state, keyed by client.id
   const [userGrantsMap, setUserGrantsMap] = useState<Record<string, UserGrantsRowState>>({})
+  const [activeGrantsClientId, setActiveGrantsClientId] = useState<string | null>(null)
+  const grantsDialogRef = useRef<HTMLElement>(null)
+  const grantsCloseButtonRef = useRef<HTMLButtonElement>(null)
+  const grantsOpenerRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!activeGrantsClientId) return
+    grantsCloseButtonRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setActiveGrantsClientId(null)
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = Array.from(
+        grantsDialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      )
+      const first = focusable[0]
+      const last = focusable.at(-1)
+      if (!first || !last) return
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    const opener = grantsOpenerRef.current
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [activeGrantsClientId])
 
   const loadStatuses = useCallback(async () => {
     if (!recipeName || clients.length === 0) {
@@ -153,7 +192,6 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
       userGrantsMap[clientId] ?? {
         loadState: 'idle',
         users: [],
-        expanded: false,
         busyUserId: null,
       }
     )
@@ -162,7 +200,6 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
   const defaultUserGrantsRowState: UserGrantsRowState = {
     loadState: 'idle',
     users: [],
-    expanded: false,
     busyUserId: null,
   }
 
@@ -175,21 +212,13 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
 
   async function loadUserGrants(client: OAuthClient) {
     if (!recipeName) return
-    setUserGrantsState(client.id, { loadState: 'loading', expanded: true })
+    setActiveGrantsClientId(client.id)
+    setUserGrantsState(client.id, { loadState: 'loading' })
     try {
       const { users } = await adminListUserGrants(recipeName, client.id)
       setUserGrantsState(client.id, { loadState: 'ready', users })
     } catch {
       setUserGrantsState(client.id, { loadState: 'error' })
-    }
-  }
-
-  async function toggleUserGrants(client: OAuthClient) {
-    const current = getUserGrantsState(client.id)
-    if (current.expanded) {
-      setUserGrantsState(client.id, { expanded: false })
-    } else {
-      await loadUserGrants(client)
     }
   }
 
@@ -223,7 +252,7 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
             user is involved.
           </>
         }
-        actions={
+        refreshAction={
           <button
             type="button"
             className="cu-btn cu-btn--icon cu-btn--toolbar"
@@ -247,8 +276,8 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
           .
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <tr>
                 <th>Client</th>
@@ -260,180 +289,182 @@ export function RecipeIntegrationsPanel({ recipe }: { recipe: WorkflowRecipeReso
             <tbody>
               {rows.map(({ client, state }) => {
                 const busy = busyClientId === client.id
-                const ugState = getUserGrantsState(client.id)
                 return (
-                  <Fragment key={client.id}>
-                    <tr>
-                      <td style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>{client.id}</td>
-                      <td>{client.provider}</td>
-                      <td>
-                        <span
-                          className="cu-chip"
-                          style={
+                  <tr key={client.id}>
+                    <td style={{ fontFamily: 'monospace', fontSize: '0.85rem' }}>{client.id}</td>
+                    <td>{client.provider}</td>
+                    <td>
+                      <span
+                        className="cu-chip"
+                        style={
+                          state === 'connected'
+                            ? {
+                                color: 'var(--cu-ok-text, var(--cu-text))',
+                                borderColor: 'var(--cu-ok-border, var(--cu-border-subtle))',
+                              }
+                            : {
+                                color: 'var(--cu-text-soft)',
+                                borderColor: 'var(--cu-border-subtle)',
+                              }
+                        }
+                      >
+                        {state === 'connected'
+                          ? 'Connected'
+                          : state === 'disconnected'
+                            ? 'Not connected'
+                            : 'Unknown'}
+                      </span>
+                    </td>
+                    <td className="cu-table__cell-actions">
+                      <span
+                        onFocusCapture={event => {
+                          grantsOpenerRef.current = event.target as HTMLElement
+                        }}
+                      >
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${client.id}`}
+                          actions={[
+                            {
+                              key: 'user-grants',
+                              label: 'Manage user grants',
+                              disabled: !recipeName,
+                              onClick: () => void loadUserGrants(client),
+                            },
                             state === 'connected'
                               ? {
-                                  color: 'var(--cu-ok-text, var(--cu-text))',
-                                  borderColor: 'var(--cu-ok-border, var(--cu-border-subtle))',
+                                  key: 'disconnect',
+                                  label: busy ? 'Working…' : 'Disconnect',
+                                  danger: true,
+                                  disabled: busy,
+                                  onClick: () => void handleDisconnect(client),
                                 }
                               : {
-                                  color: 'var(--cu-text-soft)',
-                                  borderColor: 'var(--cu-border-subtle)',
-                                }
-                          }
-                        >
-                          {state === 'connected'
-                            ? 'Connected'
-                            : state === 'disconnected'
-                              ? 'Not connected'
-                              : 'Unknown'}
-                        </span>
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <span style={{ display: 'inline-flex', gap: '0.5rem' }}>
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--ghost cu-btn--sm"
-                            onClick={() => void toggleUserGrants(client)}
-                            disabled={!recipeName}
-                            aria-expanded={ugState.expanded}
-                          >
-                            {ugState.expanded ? 'Hide users' : 'Show users'}
-                          </button>
-                          {state === 'connected' ? (
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--ghost cu-btn--sm"
-                              onClick={() => void handleDisconnect(client)}
-                              disabled={busy}
-                            >
-                              {busy ? 'Working…' : 'Disconnect'}
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--primary cu-btn--sm"
-                              onClick={() => void handleConnect(client)}
-                              disabled={busy || !recipeName}
-                            >
-                              {busy ? 'Working…' : `Connect ${client.provider}`}
-                            </button>
-                          )}
-                        </span>
-                      </td>
-                    </tr>
-                    {ugState.expanded && (
-                      <tr key={`${client.id}--user-grants`}>
-                        <td colSpan={4} style={{ padding: '0 1rem 0.75rem 2rem' }}>
-                          <div
-                            style={{
-                              borderLeft: '2px solid var(--cu-border-subtle)',
-                              paddingLeft: '0.75rem',
-                            }}
-                          >
-                            <div
-                              style={{
-                                fontSize: '0.78rem',
-                                fontWeight: 600,
-                                color: 'var(--cu-text-soft)',
-                                textTransform: 'uppercase',
-                                letterSpacing: '0.04em',
-                                marginBottom: '0.4rem',
-                              }}
-                            >
-                              Per-user connections
-                            </div>
-                            {ugState.loadState === 'loading' && (
-                              <div className="cu-empty" style={{ paddingTop: 0 }}>
-                                Loading…
-                              </div>
-                            )}
-                            {ugState.loadState === 'error' && (
-                              <div
-                                className="cu-banner cu-banner--error"
-                                style={{ margin: '0.25rem 0' }}
-                              >
-                                Could not load user grants.
-                              </div>
-                            )}
-                            {ugState.loadState === 'ready' && ugState.users.length === 0 && (
-                              <div className="cu-empty" style={{ paddingTop: 0 }}>
-                                No user grants for this client.
-                              </div>
-                            )}
-                            {ugState.loadState === 'ready' && ugState.users.length > 0 && (
-                              <table
-                                className="cu-table"
-                                style={{ fontSize: '0.82rem', marginTop: 0 }}
-                              >
-                                <thead>
-                                  <tr>
-                                    <th>User ID</th>
-                                    <th>Type</th>
-                                    <th>Granted</th>
-                                    <th
-                                      style={{ width: '8rem', textAlign: 'right' }}
-                                      aria-label="Actions"
-                                    />
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {ugState.users.map(u => {
-                                    const userBusy = ugState.busyUserId === u.userId
-                                    return (
-                                      <tr key={u.userId}>
-                                        <td style={{ fontFamily: 'monospace' }}>{u.userId}</td>
-                                        <td>
-                                          <span className="cu-chip">
-                                            {u.background ? 'background' : 'interactive'}
-                                          </span>
-                                        </td>
-                                        <td style={{ color: 'var(--cu-text-soft)' }}>
-                                          {new Date(u.updatedAt).toLocaleDateString()}
-                                        </td>
-                                        <td style={{ textAlign: 'right' }}>
-                                          <button
-                                            type="button"
-                                            className="cu-btn cu-btn--ghost cu-btn--sm"
-                                            disabled={userBusy}
-                                            onClick={() =>
-                                              void handleRevokeUserGrant(client, u.userId)
-                                            }
-                                          >
-                                            {userBusy ? 'Working…' : 'Revoke'}
-                                          </button>
-                                        </td>
-                                      </tr>
-                                    )
-                                  })}
-                                </tbody>
-                              </table>
-                            )}
-                            <div style={{ marginTop: '0.4rem' }}>
-                              <button
-                                type="button"
-                                className="cu-btn cu-btn--ghost cu-btn--sm"
-                                onClick={() => void loadUserGrants(client)}
-                                disabled={ugState.loadState === 'loading'}
-                                aria-label="Refresh user grants"
-                              >
-                                <IconRefresh
-                                  className={ugState.loadState === 'loading' ? 'cu-spin' : undefined}
-                                  width={14}
-                                  height={14}
-                                />
-                              </button>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
+                                  key: 'connect',
+                                  label: busy ? 'Working…' : `Connect ${client.provider}`,
+                                  disabled: busy || !recipeName,
+                                  onClick: () => void handleConnect(client),
+                                },
+                          ]}
+                        />
+                      </span>
+                    </td>
+                  </tr>
                 )
               })}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       )}
+      {activeGrantsClientId
+        ? (() => {
+            const client = clients.find(candidate => candidate.id === activeGrantsClientId)
+            if (!client) return null
+            const grants = getUserGrantsState(client.id)
+            return (
+              <div
+                className="cu-modal-backdrop"
+                role="presentation"
+                onClick={event => {
+                  if (event.target === event.currentTarget && !grants.busyUserId) {
+                    setActiveGrantsClientId(null)
+                  }
+                }}
+              >
+                <section
+                  aria-labelledby="recipe-user-grants-title"
+                  aria-modal="true"
+                  className="cu-modal-panel cu-modal-panel--selection"
+                  ref={grantsDialogRef}
+                  role="dialog"
+                >
+                  <div className="cu-modal-panel__head">
+                    <div>
+                      <h3 className="cu-modal-panel__title" id="recipe-user-grants-title">
+                        Per-user connections
+                      </h3>
+                      <p className="cu-muted">
+                        {client.provider} grants for client <code>{client.id}</code>
+                      </p>
+                    </div>
+                    <button
+                      aria-label="Close user grants"
+                      className="cu-btn cu-btn--ghost cu-btn--sm"
+                      disabled={Boolean(grants.busyUserId)}
+                      onClick={() => setActiveGrantsClientId(null)}
+                      ref={grantsCloseButtonRef}
+                      type="button"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  {grants.loadState === 'loading' ? <div className="cu-empty">Loading…</div> : null}
+                  {grants.loadState === 'error' ? (
+                    <div className="cu-banner cu-banner--error">Could not load user grants.</div>
+                  ) : null}
+                  {grants.loadState === 'ready' && grants.users.length === 0 ? (
+                    <div className="cu-empty">No user grants for this client.</div>
+                  ) : null}
+                  {grants.loadState === 'ready' && grants.users.length > 0 ? (
+                    <TableViewport className="cu-table-wrap">
+                      <DataTable className="eft-table cu-table" variant="embedded">
+                        <thead>
+                          <tr>
+                            <th>User ID</th>
+                            <th>Type</th>
+                            <th>Granted</th>
+                            <th aria-label="Actions" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {grants.users.map(user => {
+                            const userBusy = grants.busyUserId === user.userId
+                            return (
+                              <tr key={user.userId}>
+                                <td className="cu-code-text">{user.userId}</td>
+                                <td>{user.background ? 'Background' : 'Interactive'}</td>
+                                <td>{new Date(user.updatedAt).toLocaleDateString()}</td>
+                                <td className="cu-table__cell-actions">
+                                  <RowActionsMenu
+                                    ariaLabel={`Actions for user ${user.userId}`}
+                                    actions={[
+                                      {
+                                        key: 'revoke',
+                                        label: userBusy ? 'Working…' : 'Revoke',
+                                        danger: true,
+                                        disabled: userBusy,
+                                        onClick: () =>
+                                          void handleRevokeUserGrant(client, user.userId),
+                                      },
+                                    ]}
+                                  />
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </DataTable>
+                    </TableViewport>
+                  ) : null}
+                  <div className="cu-create-actions">
+                    <button
+                      className="cu-btn cu-btn--secondary cu-btn--sm"
+                      disabled={grants.loadState === 'loading'}
+                      onClick={() => void loadUserGrants(client)}
+                      type="button"
+                    >
+                      <IconRefresh
+                        className={grants.loadState === 'loading' ? 'cu-spin' : undefined}
+                        height={14}
+                        width={14}
+                      />
+                      Refresh
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )
+          })()
+        : null}
       {confirmDialog}
     </div>
   )
