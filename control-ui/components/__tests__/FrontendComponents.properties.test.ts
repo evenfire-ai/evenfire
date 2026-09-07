@@ -29,9 +29,10 @@ function rowOrder(
   right: { id: string; value: SortValue },
   direction: SortDirection
 ): number {
-  if (left.value == null) return right.value == null ? 0 : 1
-  if (right.value == null) return -1
-  const primary = compareSortValues(left.value, right.value) * (direction === 'asc' ? 1 : -1)
+  const primary =
+    left.value == null || right.value == null
+      ? compareSortValues(left.value, right.value)
+      : compareSortValues(left.value, right.value) * (direction === 'asc' ? 1 : -1)
   return primary || compareSortValues(left.id, right.id)
 }
 
@@ -59,6 +60,41 @@ describe('stableSortRows properties', () => {
           expect(rowOrder(first[index - 1], first[index], direction)).toBeLessThanOrEqual(0)
         }
       }),
+      { numRuns: 250 }
+    )
+  })
+
+  it('uses identity ordering for nullish primary ties regardless of input order', () => {
+    fc.assert(
+      fc.property(
+        fc.uniqueArray(
+          fc.record({
+            id: fc.uuid(),
+            value: fc.constantFrom<null | undefined>(null, undefined),
+          }),
+          { maxLength: 60, selector: row => row.id }
+        ),
+        fc.constantFrom<SortDirection>('asc', 'desc'),
+        (input, direction) => {
+          const sortedIds = stableSortRows(
+            input,
+            row => row.value,
+            direction,
+            row => row.id
+          ).map(row => row.id)
+          const reversedSortedIds = stableSortRows(
+            [...input].reverse(),
+            row => row.value,
+            direction,
+            row => row.id
+          ).map(row => row.id)
+
+          expect(sortedIds).toEqual(
+            [...input].map(row => row.id).sort((left, right) => compareSortValues(left, right))
+          )
+          expect(reversedSortedIds).toEqual(sortedIds)
+        }
+      ),
       { numRuns: 250 }
     )
   })

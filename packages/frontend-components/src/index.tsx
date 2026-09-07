@@ -554,9 +554,10 @@ export function stableSortRows<TRow>(
     .sort((left, right) => {
       const leftValue = value(left.row)
       const rightValue = value(right.row)
-      if (leftValue == null) return rightValue == null ? 0 : 1
-      if (rightValue == null) return -1
-      const primary = compareSortValues(leftValue, rightValue) * multiplier
+      const primary =
+        leftValue == null || rightValue == null
+          ? compareSortValues(leftValue, rightValue)
+          : compareSortValues(leftValue, rightValue) * multiplier
       if (primary !== 0) return primary
       const secondary = compareSortValues(identity(left.row), identity(right.row))
       return secondary || left.index - right.index
