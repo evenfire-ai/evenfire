@@ -1,0 +1,99 @@
+name: Prettier source preflight
+
+on:
+  workflow_call:
+    inputs:
+      base_sha:
+        description: 'Lower bound for incoming-diff modes'
+        required: false
+        type: string
+        default: ''
+      head_sha:
+        description: 'Exact source commit to check'
+        required: true
+        type: string
+      mode:
+        description: 'merge-base or direct'
+        required: true
+        type: string
+
+jobs:
+  validate-inputs:
+    name: Validate preflight inputs
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require explicit bounded inputs
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -euo pipefail
+          zero=0000000000000000000000000000000000000000
+          case "$MODE" in
+            direct|merge-base)
+              if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$BASE_SHA" = "$zero" ]; then
+                echo "::error::A non-zero full base SHA is required for a bounded incoming diff."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Unsupported source preflight mode: $MODE"
+              exit 1
+              ;;
+          esac
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [ "$HEAD_SHA" = "$zero" ]; then
+            echo "::error::A non-zero full head SHA is required."
+            exit 1
+          fi
+
+  prettier:
+    name: Prettier (incoming files)
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.head_sha }}
+
+      - name: Fetch explicit range commits when absent
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: bash scripts/ci/fetch-bounded-commits.sh "$BASE_SHA" "$HEAD_SHA"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install locked formatter dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check incoming files
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          MODE: ${{ inputs.mode }}
+        run: npm run format:diff -- --base "$BASE_SHA" --head "$HEAD_SHA" --mode "$MODE"
+
+  conclude:
+    name: Source preflight result
+    if: always()
+    needs: [validate-inputs, prettier]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require the incoming-diff gate to pass
+        env:
+          VALIDATE_RESULT: ${{ needs.validate-inputs.result }}
+          PRETTIER_RESULT: ${{ needs.prettier.result }}
+        run: |
+          set -euo pipefail
+          [ "$VALIDATE_RESULT" = success ] && [ "$PRETTIER_RESULT" = success ]
