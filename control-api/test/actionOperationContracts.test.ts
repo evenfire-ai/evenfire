@@ -27,6 +27,8 @@ import {
   ACTION_OPERATION_REGISTRY,
   type ActionOperationDefinition,
   ActionOperationTargetError,
+  EXTERNAL_RPC_ADMISSION_CLASS,
+  externalRpcAdmissionClassForOperation,
   getActionOperationDefinition,
   validateActionOperationTarget,
 } from '../src/services/access/actionOperationRegistry.js'
@@ -176,6 +178,17 @@ describe('canonical action-operation registry', () => {
       'providerModelPolicy',
       'audit',
     ])
+  })
+
+  it('uses an explicit existing admission class for every externally delegatable operation', () => {
+    for (const definition of ACTION_OPERATION_REGISTRY) {
+      const admissionClass = externalRpcAdmissionClassForOperation(definition.operationId)
+      if (definition.delegation === 'none' || definition.pathMode !== 'selected_path') {
+        expect(admissionClass).toBeNull()
+        continue
+      }
+      expect(admissionClass).toBe(EXTERNAL_RPC_ADMISSION_CLASS)
+    }
   })
 
   it('accepts each exact registered target and rejects missing or additional authority fields', () => {

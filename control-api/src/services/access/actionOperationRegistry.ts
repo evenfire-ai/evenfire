@@ -53,6 +53,60 @@ export type ActionOperationFamily =
 
 export type BehaviorDimensionName = Exclude<keyof AccessPathBehavior, 'capabilities'>
 
+/**
+ * The v2 external-delegation route has one already-approved D37 limiter class.
+ * This map is intentionally explicit: adding a delegatable operation requires a
+ * conscious admission decision rather than inheriting an allow from its registry
+ * shape or a broad legacy RPC scope.
+ */
+export type ExternalRpcAdmissionClass = 'rpc_token'
+
+export const EXTERNAL_RPC_ADMISSION_CLASS = 'rpc_token' as const
+
+const EXTERNAL_RPC_ADMISSION_CLASS_BY_OPERATION: Readonly<
+  Partial<Record<ActionOperationId, ExternalRpcAdmissionClass>>
+> = Object.freeze({
+  'host.status.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'host.health.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'host.wake': EXTERNAL_RPC_ADMISSION_CLASS,
+  'host.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'mcp.invoke': EXTERNAL_RPC_ADMISSION_CLASS,
+  'mcp.tools.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'context.use': EXTERNAL_RPC_ADMISSION_CLASS,
+  'context.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'chat.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'chat.message.invoke': EXTERNAL_RPC_ADMISSION_CLASS,
+  'task.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'task.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'model.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'model.select': EXTERNAL_RPC_ADMISSION_CLASS,
+  'session.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'session.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'host.activity.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'host.activity.read_all': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.trigger': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.run.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.artifact.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.artifact.delete': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.approval.decide': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.approval.consume': EXTERNAL_RPC_ADMISSION_CLASS,
+  'gfs.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'gfs.write': EXTERNAL_RPC_ADMISSION_CLASS,
+  'gfs.delete': EXTERNAL_RPC_ADMISSION_CLASS,
+  'gfs.manage_acl': EXTERNAL_RPC_ADMISSION_CLASS,
+  'gfs.share': EXTERNAL_RPC_ADMISSION_CLASS,
+  'shared_filesystem.read': EXTERNAL_RPC_ADMISSION_CLASS,
+  'shared_filesystem.write': EXTERNAL_RPC_ADMISSION_CLASS,
+  'sandbox.open': EXTERNAL_RPC_ADMISSION_CLASS,
+  'sandbox.reconnect': EXTERNAL_RPC_ADMISSION_CLASS,
+  'sandbox.oauth.vend': EXTERNAL_RPC_ADMISSION_CLASS,
+  'sandbox.oauth.disconnect': EXTERNAL_RPC_ADMISSION_CLASS,
+  'remote_desktop.status': EXTERNAL_RPC_ADMISSION_CLASS,
+  'remote_desktop.open': EXTERNAL_RPC_ADMISSION_CLASS,
+  'remote_desktop.reconnect': EXTERNAL_RPC_ADMISSION_CLASS,
+})
+
 export type ActionOperationDefinition = Readonly<{
   operationId: ActionOperationId
   family: ActionOperationFamily
@@ -446,6 +500,12 @@ export function getActionOperationDefinition(
   const definition = registry.get(operationId)
   if (!definition) throw new Error('action_operation_unknown')
   return definition
+}
+
+export function externalRpcAdmissionClassForOperation(
+  operationId: ActionOperationId
+): ExternalRpcAdmissionClass | null {
+  return EXTERNAL_RPC_ADMISSION_CLASS_BY_OPERATION[operationId] ?? null
 }
 
 export function validateActionOperationTarget(input: {
