@@ -383,11 +383,13 @@ export function RowActionMenu({
   ariaLabel,
   className,
   menuClassName,
+  triggerVariant = 'vertical',
 }: {
   actions: RowAction[]
   ariaLabel: string
   className?: string
   menuClassName?: string
+  triggerVariant?: 'horizontal' | 'vertical'
 }) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
@@ -457,7 +459,10 @@ export function RowActionMenu({
         aria-expanded={open}
         aria-haspopup="menu"
         aria-label={ariaLabel}
-        className="eft-row-actions__trigger"
+        className={classNames(
+          'eft-row-actions__trigger',
+          triggerVariant === 'horizontal' && 'eft-row-actions__trigger--horizontal'
+        )}
         disabled={triggerDisabled}
         onClick={event => {
           event.stopPropagation()
@@ -473,7 +478,7 @@ export function RowActionMenu({
         ref={triggerRef}
         type="button"
       >
-        <span aria-hidden="true">⋮</span>
+        <span aria-hidden="true">{triggerVariant === 'horizontal' ? '⋯' : '⋮'}</span>
       </button>
       {open
         ? createPortal(

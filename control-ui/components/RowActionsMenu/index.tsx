@@ -6,7 +6,7 @@ import type { RowActionsMenuProps } from './types'
 export type { RowActionMenuItem } from './types'
 
 /** Control UI compatibility adapter for the shared cross-application action menu. */
-export function RowActionsMenu({ ariaLabel, actions }: RowActionsMenuProps) {
+export function RowActionsMenu({ ariaLabel, actions, horizontalTrigger }: RowActionsMenuProps) {
   return (
     <RowActionMenu
       actions={actions.map(action => ({
@@ -18,6 +18,7 @@ export function RowActionsMenu({ ariaLabel, actions }: RowActionsMenuProps) {
       }))}
       ariaLabel={ariaLabel}
       menuClassName="cu-kebab__menu--portal"
+      triggerVariant={horizontalTrigger ? 'horizontal' : 'vertical'}
     />
   )
 }

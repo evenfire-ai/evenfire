@@ -279,6 +279,9 @@
   line-height: 1;
   width: 1.75rem;
 }
+.eft-row-actions__trigger--horizontal {
+  font-size: 1rem;
+}
 .eft-row-actions__trigger:hover:not(:disabled),
 .eft-row-actions__trigger[aria-expanded='true'] {
   background: var(--eft-surface-muted);
