@@ -85,14 +85,13 @@ test.describe('demo: Control UI credential-rotation journey', () => {
         await humanPause(page)
       })
 
-      await test.step('expand the connector row and open its Edit screen', async () => {
-        const expandBtn = page.getByRole('button', { name: `Expand connector ${connectorName}` })
-        await expect(expandBtn).toBeVisible({ timeout: 30_000 })
-        await humanClick(page, expandBtn)
-        await humanClick(
-          page,
-          page.getByRole('button', { name: `Edit connector ${connectorName}` })
-        )
+      await test.step('open the connector detail screen from its row menu', async () => {
+        const actions = page.getByRole('button', {
+          name: `Actions for connector ${connectorName}`,
+        })
+        await expect(actions).toBeVisible({ timeout: 30_000 })
+        await humanClick(page, actions)
+        await humanClick(page, page.getByRole('menuitem', { name: 'View details' }))
         await expect(
           page.getByRole('heading', { name: `Edit Connector: ${connectorName}`, exact: true })
         ).toBeVisible({ timeout: 20_000 })

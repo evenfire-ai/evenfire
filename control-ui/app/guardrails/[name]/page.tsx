@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '../../../app/constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
 import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
@@ -230,14 +231,14 @@ export default function GuardrailDetailPage() {
                   <StatusBadge status={hook.status} />
                 </Row>
                 <Row label={target.kind}>
-                  <strong className="cu-expandable-field__code">{target.value}</strong>
+                  <strong className="cu-detail-field__code">{target.value}</strong>
                 </Row>
                 <Row label="Path">{spec.path || '/'}</Row>
                 <Row label="Lifecycle points">{(spec.lifecyclePoints || []).join(', ') || '—'}</Row>
                 <Row label="Fail mode">{spec.failMode || '—'}</Row>
                 <Row label="Capabilities">
                   {spec.capabilities && spec.capabilities.length > 0 ? (
-                    <span className="cu-expandable-tags">
+                    <span className="cu-detail-tags">
                       {spec.capabilities.map(c => (
                         <span key={c} className="cu-registry-tag">
                           {c}
@@ -249,7 +250,7 @@ export default function GuardrailDetailPage() {
                   )}
                 </Row>
                 <Row label="Observed digest">
-                  <strong className="cu-expandable-field__code">
+                  <strong className="cu-detail-field__code">
                     {hook.status?.observedDigest || '—'}
                   </strong>
                 </Row>
@@ -266,8 +267,8 @@ export default function GuardrailDetailPage() {
               {agents.length === 0 ? (
                 <div className="cu-empty">No agents reference this guardrail.</div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table cu-table--header-band">
+                <TableViewport className="cu-table-wrap">
+                  <DataTable className="eft-table cu-table cu-table--header-band">
                     <thead>
                       <tr>
                         <th>Agent</th>
@@ -294,7 +295,7 @@ export default function GuardrailDetailPage() {
                         >
                           <td>{a.name}</td>
                           <td>
-                            <span className="cu-expandable-tags">
+                            <span className="cu-detail-tags">
                               {a.phases.map(p => (
                                 <span key={p} className="cu-registry-tag">
                                   {PHASE_LABEL[p] || p}
@@ -305,8 +306,8 @@ export default function GuardrailDetailPage() {
                         </tr>
                       ))}
                     </tbody>
-                  </table>
-                </div>
+                  </DataTable>
+                </TableViewport>
               )}
             </FormSection>
           </>

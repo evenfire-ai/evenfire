@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { IconTrash } from '@components/icons'
+import { DataTable, RowActionMenu, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { formatCommunicationChannelConfirmedAt } from '@lib/communicationChannels'
 import type {
@@ -67,8 +67,8 @@ export function CommunicationChannelConversationsTable({
     return <div className="cu-empty cu-empty--compact">{emptyLabel}</div>
   }
   return (
-    <div className="cu-table-wrap">
-      <table className="cu-table cu-channel-conversations-table">
+    <TableViewport className="cu-table-wrap">
+      <DataTable className="eft-table cu-table cu-channel-conversations-table">
         <thead>
           <tr>
             <th>Provider</th>
@@ -110,22 +110,24 @@ export function CommunicationChannelConversationsTable({
                 <td>{formatCommunicationChannelConfirmedAt(conversation.confirmedAt)}</td>
                 {onDelete ? (
                   <td className="cu-table__actions">
-                    <button
-                      type="button"
-                      className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                      onClick={() => onDelete(conversation)}
-                      aria-label={`Delete ${displayName(conversation)}`}
-                      title={`Delete ${displayName(conversation)}`}
-                    >
-                      <IconTrash width={16} height={16} />
-                    </button>
+                    <RowActionMenu
+                      ariaLabel={`Actions for ${displayName(conversation)}`}
+                      actions={[
+                        {
+                          key: 'delete',
+                          label: 'Delete',
+                          danger: true,
+                          onSelect: () => onDelete(conversation),
+                        },
+                      ]}
+                    />
                   </td>
                 ) : null}
               </tr>
             )
           })}
         </tbody>
-      </table>
-    </div>
+      </DataTable>
+    </TableViewport>
   )
 }
