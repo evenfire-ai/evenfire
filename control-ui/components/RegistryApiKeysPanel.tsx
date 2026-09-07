@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
@@ -67,6 +67,7 @@ export default function RegistryApiKeysPanel({
   const [view, setView] = useState<View>({ kind: 'loading' })
   const [creating, setCreating] = useState(false)
   const [revealed, setRevealed] = useState<CreatedRegistryApiKey | null>(null)
+  const consumedCreateSignalRef = useRef(0)
   const normalizedSearch = search.trim().toLowerCase()
   const visibleKeys = useMemo(
     () =>
@@ -173,7 +174,14 @@ export default function RegistryApiKeysPanel({
   }, [load, refreshSignal])
 
   useEffect(() => {
-    if (createSignal > 0 && view.kind === 'ready') setCreating(true)
+    if (
+      createSignal > 0 &&
+      createSignal !== consumedCreateSignalRef.current &&
+      view.kind === 'ready'
+    ) {
+      consumedCreateSignalRef.current = createSignal
+      setCreating(true)
+    }
   }, [createSignal, view.kind])
 
   useEffect(() => {

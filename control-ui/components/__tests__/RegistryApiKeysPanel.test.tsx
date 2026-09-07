@@ -216,6 +216,33 @@ describe('RegistryApiKeysPanel', () => {
     expect(await screen.findByText(/100-key limit/i)).toBeInTheDocument()
   })
 
+  it('consumes an external create signal once across error to ready transitions', async () => {
+    vi.mocked(api.listRegistryApiKeys)
+      .mockResolvedValueOnce({ org: 'acme', keys: [] })
+      .mockRejectedValueOnce(Object.assign(new Error('Network failure'), { status: 500 }))
+      .mockResolvedValueOnce({ org: 'acme', keys: [] })
+
+    const view = render(<RegistryApiKeysPanel createSignal={1} refreshSignal={0} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: /create api key/i })).toBeNull()
+
+    view.rerender(
+      <ToastProvider>
+        <RegistryApiKeysPanel createSignal={1} refreshSignal={1} />
+      </ToastProvider>
+    )
+    expect(await screen.findByText(/could not load api keys/i)).toBeInTheDocument()
+
+    view.rerender(
+      <ToastProvider>
+        <RegistryApiKeysPanel createSignal={1} refreshSignal={2} />
+      </ToastProvider>
+    )
+    expect(await screen.findByText(/no api keys yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /create api key/i })).toBeNull()
+  })
+
   it('default sort: two keys with different created_at render newest-first', async () => {
     const olderKey = {
       ...key,
