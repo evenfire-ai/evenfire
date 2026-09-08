@@ -19,6 +19,13 @@ const derivedViewProducer = resolve(
   'fixtures',
   'emitDerivedViewDelegationV2Fixture.ts'
 )
+const sandboxOAuthProducer = resolve(
+  repositoryRoot,
+  'control-api',
+  'test',
+  'fixtures',
+  'emitSandboxOAuthDelegationV2Fixture.ts'
+)
 
 describe('Control API delegation producer to rpc-proxy verifier interoperability', () => {
   it('consumes a token emitted at test time by the real Control producer', () => {
@@ -55,6 +62,32 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
         ver: 2,
         operationIds: [operationId],
         scopes: [`action:${operationId}`],
+      })
+    }
+  )
+
+  it.each(['sandbox.oauth.vend', 'sandbox.oauth.disconnect'])(
+    'consumes a real exact recipe-client delegation for %s',
+    operationId => {
+      const output = execFileSync(tsx, [sandboxOAuthProducer, operationId], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: process.env,
+      })
+      const fixture = JSON.parse(output) as { token: string; operationId: string }
+
+      expect(verifyUserDelegationV2(fixture.token)).toMatchObject({
+        typ: 'user_delegation',
+        ver: 2,
+        operationIds: [operationId],
+        scopes: [`action:${operationId}`],
+        targets: {
+          [operationId]: {
+            recipeNamespace: 'sandbox-recipes',
+            recipeName: 'r1',
+            oauthClientId: 'google-calendar',
+          },
+        },
       })
     }
   )

@@ -1,4 +1,11 @@
 import { Router } from 'express'
+import {
+  type ActionOperationId,
+  canonicalActionTargetJson,
+  hashActionTarget,
+  validateActionOperationTarget,
+  validateCanonicalResourceIdentity,
+} from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
@@ -22,6 +29,7 @@ import {
   resolveServerOAuth,
   resolveServerOAuthSubject,
 } from '../../oauth/mcpServerOAuthSpec.js'
+import { resolveExactRecipeOAuthClient } from '../../oauth/recipeOAuthClient.js'
 import { deleteOAuthGrant } from '../../oauth/store.js'
 import { getAccessToken } from '../../oauth/tokenHelper.js'
 import { getUserContexts } from '../../services/directory/index.js'
@@ -34,6 +42,48 @@ import { buildPublicCallbackUrl } from '../external/oauthCallback.js'
 const K8S_NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/
 function isValidK8sName(name: string): boolean {
   return name.length > 0 && name.length <= 253 && K8S_NAME_RE.test(name)
+}
+
+function hasExpectedV2OAuthContext(
+  encoded: string | undefined,
+  expected: {
+    operationId: ActionOperationId
+    userId: string
+    target: Readonly<Record<string, string>>
+  }
+): boolean {
+  // No trusted-edge header is the existing legacy compatibility path. A v2
+  // caller is required to send this header by rpc-proxy after its live
+  // checkpoint; malformed or mismatched headers never fall back to legacy.
+  if (!encoded) return true
+  try {
+    const decoded = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as Record<
+      string,
+      unknown
+    >
+    if (
+      decoded.version !== 2 ||
+      decoded.userId !== expected.userId ||
+      decoded.operationId !== expected.operationId ||
+      typeof decoded.targetHash !== 'string' ||
+      typeof decoded.expiresAt !== 'string' ||
+      Date.parse(decoded.expiresAt) <= Date.now()
+    ) {
+      return false
+    }
+    const resource = validateCanonicalResourceIdentity(decoded.resource)
+    const target = validateActionOperationTarget({
+      operationId: expected.operationId,
+      resource,
+      operationTarget: decoded.target,
+    })
+    return (
+      canonicalActionTargetJson(target) === canonicalActionTargetJson(expected.target) &&
+      hashActionTarget(target) === decoded.targetHash
+    )
+  } catch {
+    return false
+  }
 }
 
 /** McpServer shape used to read `spec.auth.type` for the OAuth gate. */
@@ -458,6 +508,15 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         if (recipeNs !== config.sandboxNamespace) {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
         }
+        if (
+          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
+            operationId: 'sandbox.oauth.vend',
+            userId,
+            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
+          })
+        ) {
+          return res.status(400).json({ error: 'invalid_binding' })
+        }
 
         const result = await buildAuthorizeUrl(
           {
@@ -514,6 +573,15 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         }
         if (recipeNs !== config.sandboxNamespace) {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
+        }
+        if (
+          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
+            operationId: 'sandbox.oauth.vend',
+            userId,
+            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
+          })
+        ) {
+          return res.status(400).json({ error: 'invalid_binding' })
         }
 
         const result = await getAccessToken(
@@ -578,6 +646,30 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
         }
         if (recipeNs !== config.sandboxNamespace) {
           return res.status(400).json({ error: 'invalid_recipe_namespace' })
+        }
+
+        if (
+          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
+            operationId: 'sandbox.oauth.disconnect',
+            userId,
+            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
+          })
+        ) {
+          return res.status(400).json({ error: 'invalid_binding' })
+        }
+
+        let recipe: RecipeWithOAuthClients | null
+        try {
+          recipe = await recipeReader.read(recipeName, recipeNs)
+        } catch (err) {
+          if (err instanceof RecipeNotFoundError) {
+            return res.status(404).json({ error: 'recipe_not_found' })
+          }
+          throw err
+        }
+        if (!recipe) return res.status(404).json({ error: 'recipe_not_found' })
+        if (!resolveExactRecipeOAuthClient(recipe, oauthClientId)) {
+          return res.status(400).json({ error: 'unknown_oauth_client' })
         }
 
         // Idempotent: a no-op delete returns 204. We intentionally do not

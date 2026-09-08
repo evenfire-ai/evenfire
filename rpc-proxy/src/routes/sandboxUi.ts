@@ -9,6 +9,7 @@ import {
   requireScope,
 } from '../middleware/auth.js'
 import { emitSessionMint, emitViewRequest } from '../observability/sandboxUiAudit.js'
+import { trustedEdgeActionContextHeader } from '../routeActionBindingV2.js'
 import { startActiveViewLease } from '../services/activeViewLease.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
@@ -108,6 +109,32 @@ function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): v
     return
   }
   requireRpcAuth(req, res, () => requireScope('sandbox:ui:view')(req, res, next))
+}
+
+function controlApiOAuthHeaders(req: AuthedRequest): Record<string, string> {
+  const actionContext = trustedEdgeActionContextHeader(req)
+  return {
+    authorization: `Bearer ${config.controlApiServiceToken}`,
+    'x-service-token': config.controlApiServiceName,
+    'content-type': 'application/json',
+    ...(actionContext ? { 'x-clerum-edge-action-context': actionContext } : {}),
+  }
+}
+
+function sandboxOAuthUser(req: AuthedRequest, res: Response): string | null {
+  if (isV2ViewRequest(req)) return req.auth!.sub
+  const cookies = parseCookies(req.headers.cookie ?? '')
+  const cookieValue = cookies[config.sandboxUiCookieName]
+  if (!cookieValue) {
+    res.status(401).json({ error: 'sandbox_ui_session_required' })
+    return null
+  }
+  const claims = verifySandboxUiSession(cookieValue, req.params.recipeNs, req.params.recipeName)
+  if (!claims) {
+    res.status(401).json({ error: 'sandbox_ui_session_invalid' })
+    return null
+  }
+  return claims.sub
 }
 
 // Response security headers. CSP is the hard floor; no per-recipe relax.
@@ -380,13 +407,20 @@ export function createSandboxUiSessionRouter(): Router {
       }
       const background = req.body?.background === true
 
-      const acl = await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
+      // For v2, Control API already performed the live selected-path check.
+      // This lookup is only current recipe readiness; the legacy path keeps
+      // its historical user/team ACL check.
+      const acl = isV2ViewRequest(req)
+        ? await lookupSandboxUiRegistry(recipeNs, recipeName)
+        : await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
       switch (acl.kind) {
         case 'not_found':
           res.status(404).json({ error: 'recipe_not_found' })
           return
         case 'forbidden':
-          res.status(403).json({ error: 'recipe_acl_denied' })
+          res
+            .status(isV2ViewRequest(req) ? 503 : 403)
+            .json({ error: isV2ViewRequest(req) ? 'authority_unavailable' : 'recipe_acl_denied' })
           return
         case 'not_ready':
           res.status(409).json({ error: 'recipe_not_ready', reason: acl.reason })
@@ -418,11 +452,7 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
@@ -493,20 +523,11 @@ export function createSandboxUiSessionRouter(): Router {
   // the user's session is bad).
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
-    async (req: Request, res: Response) => {
+    v2ViewAuthority,
+    async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const userId = sandboxOAuthUser(req, res)
+      if (!userId) return
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''
@@ -520,16 +541,12 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
             oauthClientId,
-            userId: claims.sub,
+            userId,
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
@@ -591,20 +608,11 @@ export function createSandboxUiSessionRouter(): Router {
   // a best-effort buildRevokeRequest adapter call before delete.
   router.delete(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
-    async (req: Request, res: Response) => {
+    v2ViewAuthority,
+    async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const userId = sandboxOAuthUser(req, res)
+      if (!userId) return
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''
@@ -618,16 +626,12 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'DELETE',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
             oauthClientId,
-            userId: claims.sub,
+            userId,
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
