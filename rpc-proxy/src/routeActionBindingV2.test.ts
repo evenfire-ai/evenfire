@@ -220,4 +220,87 @@ describe('route action v2 binding', () => {
       )
     ).toThrow(RouteActionBindingError)
   })
+
+  it('binds Sandbox OAuth routes to the exact recipe client selector', () => {
+    const target = {
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'r1',
+      oauthClientId: 'google-calendar',
+    }
+    for (const path of [
+      '/sandbox-ui/:recipeNs/:recipeName/oauth/authorize-url',
+      '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
+    ]) {
+      const claims = delegation({
+        operationId: 'sandbox.oauth.vend',
+        resourceType: 'sandbox_app',
+        resourceId: 'sandbox-recipes/r1',
+        target,
+      })
+      expect(
+        bindRouteActionV2(
+          request({
+            path,
+            method: 'POST',
+            params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+            body: { oauthClientId: 'google-calendar', provider: 'attacker' },
+          }),
+          claims
+        )
+      ).toMatchObject({ operationId: 'sandbox.oauth.vend', target })
+    }
+
+    const disconnect = delegation({
+      operationId: 'sandbox.oauth.disconnect',
+      resourceType: 'sandbox_app',
+      resourceId: 'sandbox-recipes/r1',
+      target,
+    })
+    expect(
+      bindRouteActionV2(
+        request({
+          path: '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
+          method: 'DELETE',
+          params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+          body: { oauthClientId: 'google-calendar', grantId: 'attacker' },
+        }),
+        disconnect
+      )
+    ).toMatchObject({ operationId: 'sandbox.oauth.disconnect', target })
+  })
+
+  it('rejects OAuth client and operation substitution', () => {
+    const claims = delegation({
+      operationId: 'sandbox.oauth.vend',
+      resourceType: 'sandbox_app',
+      resourceId: 'sandbox-recipes/r1',
+      target: {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        oauthClientId: 'google-calendar',
+      },
+    })
+    expect(() =>
+      bindRouteActionV2(
+        request({
+          path: '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
+          method: 'POST',
+          params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+          body: { oauthClientId: 'google-drive' },
+        }),
+        claims
+      )
+    ).toThrow(RouteActionBindingError)
+    expect(() =>
+      bindRouteActionV2(
+        request({
+          path: '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
+          method: 'DELETE',
+          params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+          body: { oauthClientId: 'google-calendar' },
+        }),
+        claims
+      )
+    ).toThrow(RouteActionBindingError)
+  })
 })
