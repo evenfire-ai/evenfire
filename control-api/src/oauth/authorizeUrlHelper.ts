@@ -15,6 +15,7 @@ import {
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
 } from './providers.js'
+import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 import { type SignStateInput, signOAuthState } from './state.js'
 
 /**
@@ -135,7 +136,7 @@ export async function buildAuthorizeUrl(
   }
   if (!recipe) return { kind: 'recipe_not_found' }
 
-  const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
+  const decl = resolveExactRecipeOAuthClient(recipe, input.oauthClientId)
   if (!decl) return { kind: 'unknown_oauth_client' }
 
   return mintAuthorizeUrl(decl, input.recipeNamespace, input, deps, {
