@@ -274,6 +274,7 @@ jobs:
             services.llmProviderAttemptFinalization.realPostgres.integration \
             userAccessRuntimeContract.realPostgres.integration \
             userSessionDatabaseClock.realPostgres.integration \
+            workflowAuthorityBindings.realPostgres.integration \
             pluginWorkloadSdkCodexDualLedger.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
