@@ -24,6 +24,22 @@ const bound = {
   target,
   targetHash: hashActionTarget(target),
 }
+const sandboxResource = canonicalResourceIdentity({
+  environmentId: 'test',
+  type: 'sandbox_app',
+  logicalId: 'sandbox-recipes/r1',
+  displayName: 'r1',
+})
+const sandboxTarget = validateActionOperationTarget({
+  operationId: 'sandbox.open',
+  resource: sandboxResource,
+  operationTarget: { recipeNamespace: 'sandbox-recipes', recipeName: 'r1' },
+})
+const sandboxBound = {
+  operationId: 'sandbox.open' as const,
+  target: sandboxTarget,
+  targetHash: hashActionTarget(sandboxTarget),
+}
 
 function claims(
   pathKind: 'direct' | 'team',
@@ -174,5 +190,56 @@ describe('action authority checkpoint and cache isolation', () => {
       status: 400,
       code: 'invalid_binding',
     })
+  })
+
+  it('accepts the canonical null destination for an exact sandbox delegation', async () => {
+    const delegation = {
+      ...claims('direct', null),
+      operationIds: ['sandbox.open'] as const,
+      scopes: ['action:sandbox.open'] as const,
+      resource: sandboxResource,
+      targets: { 'sandbox.open': sandboxTarget },
+      targetHashes: { 'sandbox.open': sandboxBound.targetHash },
+    }
+    const now = new Date()
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            version: 2,
+            status: 'allowed',
+            authorizationRevision: delegation.authorizationRevision,
+            behaviorBindingHash: delegation.behaviorBindingHash,
+            behavior,
+            checkedAt: now.toISOString(),
+            validUntil: new Date(now.getTime() + 30_000).toISOString(),
+            attribution: {
+              userId: delegation.sub,
+              sid: delegation.sid,
+              sessionVersion: delegation.sv,
+              accessPathId: delegation.accessPathId,
+              pathKind: delegation.pathKind,
+              effectiveTeamId: delegation.effectiveTeamId,
+            },
+            destination: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    )
+    await expect(authorizeActionV2(delegation, sandboxBound, { fetchImpl })).resolves.toMatchObject(
+      {
+        bound: sandboxBound,
+      }
+    )
+  })
+
+  it('rejects an expired delegation before a checkpoint can extend it', async () => {
+    const delegation = { ...claims('direct', null), exp: Math.floor(Date.now() / 1000) - 1 }
+    const fetchImpl = vi.fn()
+    await expect(authorizeActionV2(delegation, bound, { fetchImpl })).rejects.toMatchObject({
+      status: 403,
+      code: 'forbidden',
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 })

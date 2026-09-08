@@ -143,11 +143,14 @@ function assertCheckpointMatchesDelegation(
             ref: `${target.serverNamespace}/${target.serverName}`,
           }
         : null
+  if (!expectedDestination && response.destination !== null) {
+    throw new ActionAuthorityCheckpointError(400, 'invalid_binding')
+  }
   if (
-    !expectedDestination ||
-    !response.destination ||
-    response.destination.kind !== expectedDestination.kind ||
-    response.destination.ref !== expectedDestination.ref
+    expectedDestination &&
+    (!response.destination ||
+      response.destination.kind !== expectedDestination.kind ||
+      response.destination.ref !== expectedDestination.ref)
   ) {
     throw new ActionAuthorityCheckpointError(400, 'invalid_binding')
   }
@@ -158,6 +161,12 @@ export async function authorizeActionV2(
   bound: BoundActionV2,
   options: { fetchImpl?: typeof fetch } = {}
 ): Promise<AuthorizedActionV2> {
+  // A connection-local active-view lease can reuse verified claims only while
+  // their original delegation remains live. It must not stretch a 300-second
+  // delegation merely because its last Control API checkpoint was allowed.
+  if (claims.exp * 1000 <= Date.now()) {
+    throw new ActionAuthorityCheckpointError(403, 'forbidden')
+  }
   let response: Response
   try {
     response = await (options.fetchImpl ?? fetch)(
