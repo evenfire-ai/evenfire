@@ -13,6 +13,10 @@ import {
   type WorkflowRunRow,
   computeWorkflowRunPayloadHash,
 } from '../workflowRunService.js'
+import {
+  type WorkflowAuthorityBinding,
+  persistWorkflowAuthorityBinding,
+} from './workflowAuthorityBindingService.js'
 
 export type WorkflowTriggerApprovalRunIntent = {
   actorType: WorkflowRunActorType
@@ -57,6 +61,8 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   idempotencyKey: string
   correlation?: { taskId?: string; stepId?: string }
   runIntent: WorkflowTriggerApprovalRunIntent
+  authority?: WorkflowAuthorityBinding | null
+  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
 }): Promise<WorkflowTriggerApprovalRequestResult> {
   const ttlSeconds = config.userApprovalRequestDefaultTtlSec
   const payloadHash = computePayloadHash({
@@ -68,6 +74,10 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   })
 
   const result = await withTransaction(async db => {
+    const authority = params.reauthorize ? await params.reauthorize() : params.authority
+    if (params.authority && authority?.bindingHash !== params.authority.bindingHash) {
+      throw new Error('workflow_trigger_authority_changed')
+    }
     const inserted = await db.query(
       `INSERT INTO workflow_approval_requests
          (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id, payload, idempotency_key, correlation, payload_hash)
@@ -119,6 +129,7 @@ export async function createWorkflowTriggerApprovalRequest(params: {
                 wr.last_reconciled_at,
                 wr.created_at,
                 wr.updated_at
+                , binding.binding_hash AS "authorityBindingHash"
            FROM workflow_approval_requests war
       LEFT JOIN workflow_approval_trigger_run_intents watri
              ON watri.approval_request_id = war.id
@@ -126,6 +137,8 @@ export async function createWorkflowTriggerApprovalRequest(params: {
              ON wr.recipe_namespace = war.recipe_namespace
             AND wr.recipe_name = war.recipe_name
             AND wr.idempotency_key = war.idempotency_key
+      LEFT JOIN workflow_authority_bindings binding
+             ON binding.id = war.trigger_authority_binding_id
           WHERE war.recipe_namespace = $1
             AND war.recipe_name = $2
             AND war.idempotency_key = $3`,
@@ -143,9 +156,14 @@ export async function createWorkflowTriggerApprovalRequest(params: {
         payloadHash: string
         runIntentApprovalRequestId?: string | null
         run_id?: string | null
+        authorityBindingHash?: string | null
       } & Partial<WorkflowRunRow>
 
-      if (row.payloadHash && row.payloadHash !== payloadHash) {
+      if (
+        (row.payloadHash && row.payloadHash !== payloadHash) ||
+        Boolean(row.authorityBindingHash) !== Boolean(authority) ||
+        (authority && row.authorityBindingHash !== authority.bindingHash)
+      ) {
         return {
           kind: 'mismatch' as const,
           approvalRequestId: row.id,
@@ -177,6 +195,22 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     }
 
     const row = inserted.rows[0] as { id: string; expires_at: string; status: ApprovalStatus }
+    const authorityBindingId = authority
+      ? await persistWorkflowAuthorityBinding(db, {
+          authority,
+          kind: 'trigger',
+          entityType: 'workflow_approval',
+          entityId: row.id,
+        })
+      : null
+    if (authorityBindingId) {
+      await db.query(
+        `UPDATE workflow_approval_requests
+            SET trigger_authority_binding_id = $2
+          WHERE id = $1`,
+        [row.id, authorityBindingId]
+      )
+    }
     await new ApprovalPromptHistoryService(db).capture({
       approvalRequestId: row.id,
       approvalKind: 'workflow',
@@ -196,6 +230,7 @@ export async function createWorkflowTriggerApprovalRequest(params: {
       inputs: params.runIntent.inputs ?? {},
       intermediateParameters: params.runIntent.intermediateParameters ?? null,
       outputOverrides: params.runIntent.outputOverrides ?? null,
+      authorityBindingHash: authority?.bindingHash ?? null,
     })
 
     await db.query(

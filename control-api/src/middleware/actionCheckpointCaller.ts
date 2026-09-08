@@ -1,17 +1,23 @@
 import type { NextFunction, Request, Response } from 'express'
+import type { ActionOperationId } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
+import { verifyInternalControlJwt } from '../utils/auth/internalControlToken.js'
+import { extractBearerToken } from '../utils/extractBearerToken.js'
+import { requireInternalControlJwt } from './internalControlJwt.js'
 import { requireInternalToken } from './internalServiceAuth.js'
 import { requireMcpHostJwt } from './mcpHostJwtAuth.js'
 
-export type ActionCheckpointCallerService = 'rpc-proxy' | 'mcp-host'
+export type ActionCheckpointCallerService = 'rpc-proxy' | 'mcp-host' | 'workflow-recipes'
 
 export type ActionCheckpointCallerIdentity = Readonly<{
   service: ActionCheckpointCallerService
-  trustPlane: 'internal_service_token' | 'mcp_host_runtime_jwt'
+  trustPlane: 'internal_service_token' | 'internal_control_jwt' | 'mcp_host_runtime_jwt'
   permittedResource?: Readonly<{
     type: 'host' | 'workflow_recipe'
     logicalId: string
   }>
+  permittedResourceTypes?: readonly ('host' | 'workflow_recipe')[]
+  permittedOperations?: readonly ActionOperationId[]
 }>
 
 declare global {
@@ -68,11 +74,33 @@ function mcpHostAuthenticator(): CallerAuthenticator {
   })
 }
 
+function workflowRecipesAuthenticator(): CallerAuthenticator {
+  return Object.freeze({
+    service: 'workflow-recipes',
+    matches: req => {
+      if (String(req.header('x-service-token') || '').trim()) return false
+      const claims = verifyInternalControlJwt(extractBearerToken(req))
+      return claims?.iss === 'wrc' && claims.sub === 'wrc-provisioner'
+    },
+    authenticate: requireInternalControlJwt,
+    identity: req =>
+      req.internalControl?.iss === 'wrc' && req.internalControl.sub === 'wrc-provisioner'
+        ? Object.freeze({
+            service: 'workflow-recipes',
+            trustPlane: 'internal_control_jwt' as const,
+            permittedResourceTypes: Object.freeze(['workflow_recipe'] as const),
+            permittedOperations: Object.freeze(['workflow.trigger'] as const),
+          })
+        : null,
+  })
+}
+
 // Each future arm must compose that service's existing verifier. This boundary
 // normalizes only the authenticated service identity; it never introduces a
 // checkpoint-wide credential or treats service claims as user authority.
 const callerAuthenticators: readonly CallerAuthenticator[] = Object.freeze([
   rpcProxyAuthenticator(),
+  workflowRecipesAuthenticator(),
   mcpHostAuthenticator(),
 ])
 

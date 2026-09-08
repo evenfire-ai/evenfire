@@ -7,9 +7,11 @@ const mockedConfig = vi.hoisted(() => ({
   hostsNamespace: 'mcp-host',
 }))
 const mcpJwtMock = vi.hoisted(() => ({ verifyMcpHostAccessJwt: vi.fn() }))
+const internalControlMock = vi.hoisted(() => ({ verifyInternalControlJwt: vi.fn() }))
 
 vi.mock('../src/config.js', () => ({ config: mockedConfig }))
 vi.mock('../src/utils/auth/mcpHostJwtToken.js', () => mcpJwtMock)
+vi.mock('../src/utils/auth/internalControlToken.js', () => internalControlMock)
 
 const { requireActionCheckpointCaller } =
   await import('../src/middleware/actionCheckpointCaller.js')
@@ -29,6 +31,7 @@ describe('requireActionCheckpointCaller', () => {
       'rpc-proxy': 'rpc-proxy-token1',
       'external-rest-api': 'external-token-1',
     }
+    internalControlMock.verifyInternalControlJwt.mockReset().mockReturnValue(null)
   })
 
   it.each([
@@ -101,6 +104,47 @@ describe('requireActionCheckpointCaller', () => {
       service: 'rpc-proxy',
       trustPlane: 'internal_service_token',
     })
+  })
+
+  it('accepts only the existing WRC internal-control identity for workflow checkpoints', async () => {
+    internalControlMock.verifyInternalControlJwt.mockReturnValue({
+      iss: 'wrc',
+      sub: 'wrc-provisioner',
+      aud: 'control-api',
+      iat: 1,
+      exp: 2,
+      jti: 'internal-jti',
+    })
+
+    const response = await request(app())
+      .post('/checkpoint')
+      .set('authorization', 'Bearer v2-token')
+
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({
+      service: 'workflow-recipes',
+      trustPlane: 'internal_control_jwt',
+      permittedResourceTypes: ['workflow_recipe'],
+      permittedOperations: ['workflow.trigger'],
+    })
+  })
+
+  it.each([
+    ['HCC identity', { iss: 'hcc', sub: 'hcc-reconciler' }],
+    ['wrong WRC subject', { iss: 'wrc', sub: 'other' }],
+  ])('rejects %s on the WRC checkpoint plane', async (_label, identity) => {
+    internalControlMock.verifyInternalControlJwt.mockReturnValue({
+      ...identity,
+      aud: 'control-api',
+      iat: 1,
+      exp: 2,
+      jti: 'internal-jti',
+    })
+
+    await request(app())
+      .post('/checkpoint')
+      .set('authorization', 'Bearer v2-token')
+      .expect(401, { error: 'Unauthorized' })
   })
 
   it.each([

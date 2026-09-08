@@ -3,6 +3,10 @@ import { asyncHandler } from '../../../http/asyncHandler.js'
 import type { K8sGateway } from '../../../k8s.js'
 import { rootLogger } from '../../../observability/logger.js'
 import type { TriggerBody } from '../../../services/workflows/types.js'
+import {
+  WorkflowAuthorityError,
+  requireWorkflowActionAuthority,
+} from '../../../services/workflows/workflowAuthorityBindingService.js'
 import { getCallerDisplayId } from '../../../services/workflows/workflowCallerService.js'
 import { asRecord } from '../../../services/workflows/workflowRecipeAccessService.js'
 import { mapDbRun } from '../../../services/workflows/workflowRunReadService.js'
@@ -31,6 +35,16 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
       const idempotencyKey = String(req.headers['idempotency-key'] || '').trim()
 
       try {
+        const authorityInput = {
+          req,
+          caller,
+          operationId: 'workflow.trigger',
+          resourceType: 'workflow_recipe',
+          resourceLogicalId: `${ns}/${name}`,
+          target: Object.freeze({ recipeNamespace: ns, recipeName: name }),
+          gateway,
+        } as const
+        const authority = await requireWorkflowActionAuthority(authorityInput)
         const result = await triggerWorkflow({
           gateway,
           caller,
@@ -39,6 +53,8 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
           body,
           idempotencyKey,
           correlationId: req.correlationId,
+          authority,
+          reauthorize: () => requireWorkflowActionAuthority(authorityInput),
         })
 
         if (result.kind === 'approval') {
@@ -79,6 +95,10 @@ export function createExternalWorkflowTriggerRoutes(gateway: K8sGateway): Router
 
         res.status(created ? 201 : 200).json(mapDbRun(row))
       } catch (err) {
+        if (err instanceof WorkflowAuthorityError) {
+          res.status(err.status).json({ error: err.code })
+          return
+        }
         if (err instanceof WorkflowTriggerHttpError) {
           res.status(err.status).json(err.body)
           return

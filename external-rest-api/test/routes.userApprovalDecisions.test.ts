@@ -114,6 +114,26 @@ describe('routes/userApprovalDecisions', () => {
     )
   })
 
+  it('forwards exact action authority separately for a v2 approval decision', async () => {
+    authTokenMock.verifyToken.mockReturnValueOnce({ ...claims, sessionContract: 'v2' })
+    userApprovalDecisionsServiceMock.decideUserApprovalDecision.mockResolvedValueOnce({ ok: true })
+
+    await request(makeApp())
+      .post('/workflow-approvals/approval-1/decide')
+      .set('authorization', 'Bearer good-token')
+      .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+      .send({ decision: 'approve' })
+      .expect(200)
+
+    expect(userApprovalDecisionsServiceMock.decideUserApprovalDecision).toHaveBeenCalledWith(
+      'good-token',
+      'approval-1',
+      'approve',
+      undefined,
+      'opaque-v2-delegation'
+    )
+  })
+
   it('rejects invalid decision values', async () => {
     authTokenMock.verifyToken.mockReturnValueOnce(claims)
     const app = makeApp()

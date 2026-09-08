@@ -796,7 +796,7 @@ workflow_recipes_access_contract_values() {
     /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
     NF != 2 { exit 2 }
     $1 !~ /^[a-z][a-z0-9_]*$/ { exit 3 }
-    $2 !~ /^(legacy_dml|read_update|upsert|delete)$/ { exit 4 }
+    $2 !~ /^(legacy_dml|read|read_update|upsert|delete)$/ { exit 4 }
     seen[$1]++ { exit 5 }
     {
       count++
@@ -1049,7 +1049,7 @@ verify_workflow_recipes_runtime_boundary() {
          LEFT JOIN expected_access expected USING (relation_name)
          CROSS JOIN LATERAL (
            VALUES
-             ('SELECT', COALESCE(expected.access_profile IN ('legacy_dml', 'read_update', 'upsert'), false)),
+             ('SELECT', COALESCE(expected.access_profile IN ('legacy_dml', 'read', 'read_update', 'upsert'), false)),
              ('INSERT', COALESCE(expected.access_profile IN ('legacy_dml', 'upsert'), false)),
              ('UPDATE', COALESCE(expected.access_profile IN ('legacy_dml', 'read_update', 'upsert'), false)),
              ('DELETE', COALESCE(expected.access_profile IN ('legacy_dml', 'delete'), false)),

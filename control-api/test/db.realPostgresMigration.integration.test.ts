@@ -1118,6 +1118,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     const expectedWrcRelations: Record<string, string[]> = {
       team_workflow_triggers: ['DELETE'],
       user_workflow_triggers: ['DELETE'],
+      workflow_authority_bindings: ['SELECT'],
       workflow_approval_requests: ['SELECT', 'UPDATE'],
       workflow_recipe_allowed_teams: ['DELETE'],
       workflow_run_steps: ['INSERT', 'SELECT', 'UPDATE'],
