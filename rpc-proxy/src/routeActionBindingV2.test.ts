@@ -12,7 +12,7 @@ import type { UserDelegationV2Claims } from './userDelegationV2.js'
 
 function delegation(input: {
   operationId: ActionOperationId
-  resourceType: 'host' | 'mcp_server' | 'runtime_session'
+  resourceType: 'host' | 'mcp_server' | 'runtime_session' | 'sandbox_app'
   resourceId: string
   target: Record<string, string>
 }): UserDelegationV2Claims {
@@ -163,5 +163,61 @@ describe('route action v2 binding', () => {
         )
       ).toThrow(RouteActionBindingError)
     }
+  })
+
+  it('binds each derived-view route to its exact operation and target', () => {
+    const sandboxOpen = delegation({
+      operationId: 'sandbox.open',
+      resourceType: 'sandbox_app',
+      resourceId: 'sandbox-recipes/r1',
+      target: { recipeNamespace: 'sandbox-recipes', recipeName: 'r1' },
+    })
+    expect(
+      bindRouteActionV2(
+        request({
+          path: '/sandbox-ui/:recipeNs/:recipeName/session',
+          method: 'POST',
+          params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+        }),
+        sandboxOpen
+      ).operationId
+    ).toBe('sandbox.open')
+    expect(() =>
+      bindRouteActionV2(
+        request({
+          path: '/sandbox-ui/:recipeNs/:recipeName/reconnect',
+          method: 'POST',
+          params: { recipeNs: 'sandbox-recipes', recipeName: 'r1' },
+        }),
+        sandboxOpen
+      )
+    ).toThrow(RouteActionBindingError)
+
+    const desktopReconnect = delegation({
+      operationId: 'remote_desktop.reconnect',
+      resourceType: 'host',
+      resourceId: 'mcp-host/chatllm',
+      target: { hostRef: 'mcp-host/chatllm' },
+    })
+    expect(
+      bindRouteActionV2(
+        request({
+          path: '/desktop/:hostRef/reconnect',
+          method: 'POST',
+          params: { hostRef: 'chatllm' },
+        }),
+        desktopReconnect
+      ).target
+    ).toEqual({ hostRef: 'mcp-host/chatllm' })
+    expect(() =>
+      bindRouteActionV2(
+        request({
+          path: '/desktop/:hostRef/session',
+          method: 'POST',
+          params: { hostRef: 'chatllm' },
+        }),
+        desktopReconnect
+      )
+    ).toThrow(RouteActionBindingError)
   })
 })

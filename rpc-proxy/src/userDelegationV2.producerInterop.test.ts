@@ -12,6 +12,13 @@ const producer = resolve(
   'fixtures',
   'emitUserDelegationV2Fixture.ts'
 )
+const derivedViewProducer = resolve(
+  repositoryRoot,
+  'control-api',
+  'test',
+  'fixtures',
+  'emitDerivedViewDelegationV2Fixture.ts'
+)
 
 describe('Control API delegation producer to rpc-proxy verifier interoperability', () => {
   it('consumes a token emitted at test time by the real Control producer', () => {
@@ -32,4 +39,23 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
       behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
     })
   })
+
+  it.each(['sandbox.open', 'sandbox.reconnect', 'remote_desktop.open', 'remote_desktop.reconnect'])(
+    'consumes a real exact derived-view delegation for %s',
+    operationId => {
+      const output = execFileSync(tsx, [derivedViewProducer, operationId], {
+        cwd: repositoryRoot,
+        encoding: 'utf8',
+        env: process.env,
+      })
+      const fixture = JSON.parse(output) as { token: string; operationId: string }
+
+      expect(verifyUserDelegationV2(fixture.token)).toMatchObject({
+        typ: 'user_delegation',
+        ver: 2,
+        operationIds: [operationId],
+        scopes: [`action:${operationId}`],
+      })
+    }
+  )
 })

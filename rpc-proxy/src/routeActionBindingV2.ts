@@ -80,6 +80,23 @@ function candidateForRequest(req: AuthedRequest): {
   const path = routePath(req)
   const method = req.method.toUpperCase()
 
+  if (req.params.recipeNs !== undefined || req.params.recipeName !== undefined) {
+    const target = {
+      recipeNamespace: requiredString(req.params.recipeNs),
+      recipeName: requiredString(req.params.recipeName),
+    }
+    if (method === 'POST' && path === '/sandbox-ui/:recipeNs/:recipeName/session') {
+      return { operationId: 'sandbox.open', target }
+    }
+    if (
+      (method === 'POST' && path === '/sandbox-ui/:recipeNs/:recipeName/reconnect') ||
+      path === '/sandbox-ui/:recipeNs/:recipeName/view/*'
+    ) {
+      return { operationId: 'sandbox.reconnect', target }
+    }
+    throw new RouteActionBindingError('unsupported_route')
+  }
+
   if (method === 'POST' && path === '/rpc/:serverName') {
     const body = record(req.body)
     if (body.jsonrpc !== '2.0') throw new RouteActionBindingError('invalid_binding')
@@ -95,6 +112,18 @@ function candidateForRequest(req: AuthedRequest): {
 
   if (req.params.hostRef !== undefined) {
     const host = canonicalHostRef(req.params.hostRef)
+    if (method === 'POST' && path === '/desktop/:hostRef/session') {
+      return { operationId: 'remote_desktop.open', target: { hostRef: host.authorityHostRef } }
+    }
+    if (
+      (method === 'POST' && path === '/desktop/:hostRef/reconnect') ||
+      path === '/desktop/:hostRef/view/*'
+    ) {
+      return {
+        operationId: 'remote_desktop.reconnect',
+        target: { hostRef: host.authorityHostRef },
+      }
+    }
     const hostRead = targetForHostRead(req)
     if (hostRead) return hostRead
 
