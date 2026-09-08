@@ -41,6 +41,26 @@ function isMenuAction(action: GfsResourceMenuAction | null): action is GfsResour
   return action !== null
 }
 
+function horizontalBounds(anchor: HTMLElement, edgeInset: number) {
+  const viewportLeft = edgeInset
+  const viewportRight = window.innerWidth - edgeInset
+  const drive = anchor.closest<HTMLElement>('.da-gfs-drive')
+  const driveRect = drive?.getBoundingClientRect()
+
+  // Breadcrumb menus live beside a persistent sidebar. Keep their portal
+  // inside the Files surface instead of allowing right-edge alignment to push
+  // the panel underneath that sidebar. Isolated consumers and zero-layout test
+  // environments fall back to the viewport.
+  if (!driveRect || driveRect.width <= 0) {
+    return { left: viewportLeft, right: viewportRight }
+  }
+
+  return {
+    left: Math.max(viewportLeft, driveRect.left),
+    right: Math.min(viewportRight, driveRect.right),
+  }
+}
+
 export function GfsResourceMenu({
   resourceName,
   onManage,
@@ -115,12 +135,10 @@ export function GfsResourceMenu({
     const panelRect = panel.getBoundingClientRect()
     const edgeInset = 8
     const gap = 6
-    const viewportWidth = window.innerWidth
     const viewportHeight = window.innerHeight
-    const left = Math.min(
-      Math.max(edgeInset, triggerRect.right - panelRect.width),
-      Math.max(edgeInset, viewportWidth - panelRect.width - edgeInset)
-    )
+    const bounds = horizontalBounds(trigger, edgeInset)
+    const maxLeft = Math.max(bounds.left, bounds.right - panelRect.width)
+    const left = Math.min(Math.max(bounds.left, triggerRect.right - panelRect.width), maxLeft)
     const opensAbove =
       triggerRect.bottom + gap + panelRect.height > viewportHeight - edgeInset &&
       triggerRect.top - gap - panelRect.height >= edgeInset
@@ -144,9 +162,17 @@ export function GfsResourceMenu({
     positionPanel()
     window.addEventListener('resize', positionPanel)
     window.addEventListener('scroll', positionPanel, true)
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionPanel)
+    const trigger = triggerRef.current
+    const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
+    if (trigger) resizeObserver?.observe(trigger)
+    if (drive) resizeObserver?.observe(drive)
+    if (panelRef.current) resizeObserver?.observe(panelRef.current)
     return () => {
       window.removeEventListener('resize', positionPanel)
       window.removeEventListener('scroll', positionPanel, true)
+      resizeObserver?.disconnect()
     }
   }, [open, positionPanel])
 
@@ -159,14 +185,14 @@ export function GfsResourceMenu({
     const submenuRect = submenu.getBoundingClientRect()
     const edgeInset = 8
     const gap = 6
-    const viewportWidth = window.innerWidth
     const viewportHeight = window.innerHeight
-    const opensLeft = triggerRect.right + gap + submenuRect.width > viewportWidth - edgeInset
+    const bounds = horizontalBounds(triggerRef.current ?? trigger, edgeInset)
+    const opensLeft = triggerRect.right + gap + submenuRect.width > bounds.right
     const preferredLeft = opensLeft
       ? triggerRect.left - submenuRect.width - gap
       : triggerRect.right + gap
-    const maxLeft = Math.max(edgeInset, viewportWidth - submenuRect.width - edgeInset)
-    const left = Math.min(Math.max(edgeInset, preferredLeft), maxLeft)
+    const maxLeft = Math.max(bounds.left, bounds.right - submenuRect.width)
+    const left = Math.min(Math.max(bounds.left, preferredLeft), maxLeft)
     const maxTop = Math.max(edgeInset, viewportHeight - submenuRect.height - edgeInset)
     const top = Math.min(Math.max(edgeInset, triggerRect.top), maxTop)
 
@@ -182,11 +208,21 @@ export function GfsResourceMenu({
     positionSubmenu()
     window.addEventListener('resize', positionSubmenu)
     window.addEventListener('scroll', positionSubmenu, true)
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(positionSubmenu)
+    const trigger = triggerRef.current
+    const drive = trigger?.closest<HTMLElement>('.da-gfs-drive')
+    if (trigger) resizeObserver?.observe(trigger)
+    if (drive) resizeObserver?.observe(drive)
+    if (panelRef.current) resizeObserver?.observe(panelRef.current)
+    if (shareTriggerRef.current) resizeObserver?.observe(shareTriggerRef.current)
+    if (submenuRef.current) resizeObserver?.observe(submenuRef.current)
     return () => {
       window.removeEventListener('resize', positionSubmenu)
       window.removeEventListener('scroll', positionSubmenu, true)
+      resizeObserver?.disconnect()
     }
-  }, [positionSubmenu, shareOpen])
+  }, [panelPosition, positionSubmenu, shareOpen])
 
   useEffect(() => {
     if (!open) return

@@ -1,11 +1,27 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { GfsResourceMenu } from './index'
+
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    bottom: top + height,
+    height,
+    left,
+    right: left + width,
+    top,
+    width,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  }
+}
 
 describe('GfsResourceMenu', () => {
   afterEach(() => {
     cleanup()
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('uses a vertical kebab and presents an icon-led menu panel', () => {
@@ -64,4 +80,59 @@ describe('GfsResourceMenu', () => {
     expect(onManage).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()
   })
+
+  it.each(['Shared with me', 'Marketing'])(
+    'keeps the %s breadcrumb menu inside the Files surface as the sidebar resizes',
+    resourceName => {
+      let sidebarExpanded = true
+      const resizeCallbacks: ResizeObserverCallback[] = []
+
+      vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(918)
+      vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(700)
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        if (this.classList.contains('da-gfs-drive')) {
+          const left = sidebarExpanded ? 304 : 74
+          return rect(left, 0, 918 - left, 700)
+        }
+        if (this.classList.contains('da-gfs-resource-menu__panel')) {
+          return rect(0, 0, 360, 260)
+        }
+        if (this.getAttribute('aria-label') === `Options for ${resourceName}`) {
+          const left = sidebarExpanded ? 526 : 296
+          return rect(left, 100, 32, 32)
+        }
+        return rect(0, 0, 0, 0)
+      })
+
+      class ResizeObserverMock {
+        constructor(callback: ResizeObserverCallback) {
+          resizeCallbacks.push(callback)
+        }
+
+        disconnect() {}
+        observe() {}
+        unobserve() {}
+      }
+      vi.stubGlobal('ResizeObserver', ResizeObserverMock)
+
+      render(
+        <section className="da-gfs-drive">
+          <GfsResourceMenu resourceName={resourceName} onOpenGfsLink={vi.fn()} />
+        </section>
+      )
+
+      fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
+      const menu = screen.getByRole('menu', { name: `Actions for ${resourceName}` })
+
+      // Right alignment would start at 198px and disappear beneath the 304px
+      // sidebar. The Files boundary clamps the whole panel to visible content.
+      expect(menu.style.left).toBe('304px')
+
+      sidebarExpanded = false
+      act(() => {
+        resizeCallbacks.forEach(callback => callback([], {} as ResizeObserver))
+      })
+      expect(menu.style.left).toBe('74px')
+    }
+  )
 })

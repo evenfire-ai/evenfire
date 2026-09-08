@@ -14765,7 +14765,9 @@ pre {
 
 .da-gfs-resource-menu__panel {
   position: fixed;
-  z-index: calc(var(--layer-dropdown) + 60);
+  /* The persistent sidebar owns dropdown + 1000. Resource menus are portaled
+     to body and must remain above it while the navigation expands/collapses. */
+  z-index: calc(var(--layer-dropdown) + 1100);
   width: min(360px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
   display: grid;
@@ -14781,7 +14783,7 @@ pre {
 
 .da-gfs-resource-menu__submenu {
   position: fixed;
-  z-index: calc(var(--layer-dropdown) + 61);
+  z-index: calc(var(--layer-dropdown) + 1101);
   width: min(240px, calc(100vw - (var(--space-4) * 2)));
   max-height: calc(100vh - (var(--space-4) * 2));
   display: grid;
