@@ -132,6 +132,34 @@ test('shared exact target validation binds operation, resource, and target ident
   )
 })
 
+test('workflow artifact list authority is run-scoped metadata access only', () => {
+  const resource = contracts.canonicalResourceIdentity({
+    environmentId: 'cluster.local/evenfire',
+    type: 'workflow_run',
+    logicalId: '11111111-1111-4111-8111-111111111111',
+  })
+  assert.deepEqual(
+    {
+      ...contracts.validateActionOperationTarget({
+        operationId: 'workflow.artifact.list',
+        resource,
+        operationTarget: { runId: '11111111-1111-4111-8111-111111111111' },
+      }),
+    },
+    { runId: '11111111-1111-4111-8111-111111111111' }
+  )
+  assert.throws(() =>
+    contracts.validateActionOperationTarget({
+      operationId: 'workflow.artifact.list',
+      resource,
+      operationTarget: {
+        runId: '11111111-1111-4111-8111-111111111111',
+        artifactName: 'output.txt',
+      },
+    })
+  )
+})
+
 test('MCP caller methods classify to a closed operation surface', () => {
   const server = { serverNamespace: 'mcp-system', serverName: 'search' }
   assert.deepEqual(
