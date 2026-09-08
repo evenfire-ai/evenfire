@@ -87,6 +87,7 @@ const ACTION_OPERATION_IDS = Object.freeze([
   'workflow.read',
   'workflow.trigger',
   'workflow.run.manage',
+  'workflow.artifact.list',
   'workflow.artifact.read',
   'workflow.artifact.delete',
   'workflow.approval.decide',
@@ -670,6 +671,11 @@ targets(
     { action: ['cancel', 'resume', 'retry'] },
     { mode: 'field', field: 'runId' }
   )
+)
+targets(
+  ['workflow.artifact.list'],
+  ['workflow_run'],
+  targetSchema(['runId'], [], {}, { mode: 'field', field: 'runId' })
 )
 targets(
   ['workflow.artifact.read', 'workflow.artifact.delete'],
