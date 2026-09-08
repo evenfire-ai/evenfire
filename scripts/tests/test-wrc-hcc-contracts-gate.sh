@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Static source-contract assertions intentionally use literal shell syntax.
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016,SC2034,SC2329
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -22,6 +22,137 @@ if bash -n "$RUNTIME_GATE"; then
   pass "WRC-HCC Context no-op/resync gate has valid bash syntax"
 else
   fail "WRC-HCC Context no-op/resync gate has invalid bash syntax"
+fi
+
+# Exercise the runtime gate's real structured-log readers without sourcing its
+# mutating top-level E2E flow. Keep extraction bounded by each shell function so
+# these tests fail when the production reader is renamed or its boundary moves.
+READER_FIXTURE="$(mktemp "${TMPDIR:-/tmp}/wrc-hcc-log-readers.XXXXXX")" || exit 1
+trap 'rm -f "$READER_FIXTURE"' EXIT
+reader_extraction_ok=1
+for reader in wrc_reconcile_count wrc_context_decision_counts_since hcc_full_reconcile_completed; do
+  reader_source="$(sed -n "/^${reader}() {$/,/^}$/p" "$RUNTIME_GATE")"
+  if [ -n "$reader_source" ]; then
+    printf '%s\n' "$reader_source" >>"$READER_FIXTURE"
+  else
+    fail "WRC-HCC runtime gate exposes ${reader} for hermetic contract testing"
+    reader_extraction_ok=0
+  fi
+done
+
+run_runtime_reader() (
+  local operation=$1 fixture_logs=$2 kctl_failure=${3:-0}
+  # shellcheck disable=SC1090
+  source "$READER_FIXTURE"
+
+  RECIPE_NAME='reader-target'
+  WORKFLOW_NS='workflow-recipes'
+  CONTEXT_NAME='reader-context'
+  WRC_DEPLOY='workflow-recipes'
+  WRC_CONTAINER='workflow-recipes'
+  HCC_NS='control-plane'
+
+  running_hcc_pod() {
+    printf 'hcc-reader-pod\n'
+  }
+
+  kctl() {
+    if [ "$kctl_failure" = 1 ]; then
+      return 47
+    fi
+    printf '%s\n' "$fixture_logs"
+  }
+
+  case "$operation" in
+    wrc-count) wrc_reconcile_count ;;
+    wrc-decisions) wrc_context_decision_counts_since '2026-09-08T00:00:00Z' ;;
+    hcc-complete) hcc_full_reconcile_completed ;;
+    *) return 64 ;;
+  esac
+)
+
+expect_reader_output() {
+  local label=$1 operation=$2 logs=$3 expected=$4 actual
+  if actual="$(run_runtime_reader "$operation" "$logs")" && [ "$actual" = "$expected" ]; then
+    pass "$label"
+  else
+    fail "$label"
+  fi
+}
+
+expect_reader_success() {
+  local label=$1 operation=$2 logs=$3
+  if run_runtime_reader "$operation" "$logs" >/dev/null; then
+    pass "$label"
+  else
+    fail "$label"
+  fi
+}
+
+expect_reader_failure() {
+  local label=$1 operation=$2 logs=${3:-} kctl_failure=${4:-0}
+  if run_runtime_reader "$operation" "$logs" "$kctl_failure" >/dev/null; then
+    fail "$label"
+  else
+    pass "$label"
+  fi
+}
+
+if [ "$reader_extraction_ok" = 1 ]; then
+  structured_wrc_logs=$'{"component":"wrc","recipeName":"reader-target","ns":"workflow-recipes","msg":"Reconciling recipe"}\n{"component":"wrc","recipeName":"reader-target","contextName":"reader-context","msg":"Context unchanged; skipping update"}\n{"component":"wrc","recipeName":"reader-target","contextName":"reader-context","msg":"Context unchanged; skipping update"}\n{"component":"wrc","recipeName":"reader-target","contextName":"reader-context","msg":"Created per-recipe Context"}\n{"component":"wrc","recipeName":"reader-target","contextName":"reader-context","msg":"Updated per-recipe Context"}\nnot-json'
+  expect_reader_output \
+    "WRC reconcile reader counts only the matching structured start" \
+    wrc-count "$structured_wrc_logs" 1
+  expect_reader_output \
+    "WRC decision reader retains structured skip and write counts" \
+    wrc-decisions "$structured_wrc_logs" '1 2 2'
+
+  old_text_logs=$'[WR-Reconciler] Reconciling "reader-target"\n[NetPol] Full reconciliation complete'
+  expect_reader_output \
+    "WRC reconcile reader rejects the removed text log format" \
+    wrc-count "$old_text_logs" 0
+  expect_reader_output \
+    "WRC decision reader rejects the removed text log format" \
+    wrc-decisions "$old_text_logs" '0 0 0'
+  expect_reader_failure \
+    "HCC completion reader rejects the removed text log format" \
+    hcc-complete "$old_text_logs"
+
+  wrong_wrc_logs=$'{"component":"wrc","recipeName":"other-recipe","ns":"workflow-recipes","msg":"Reconciling recipe"}\n{"component":"wrc","recipeName":"reader-target","ns":"other-namespace","msg":"Reconciling recipe"}\n{"component":"other","recipeName":"reader-target","ns":"workflow-recipes","msg":"Reconciling recipe"}\n{"component":"wrc","recipeName":"other-recipe","contextName":"reader-context","msg":"Context unchanged; skipping update"}\n{"component":"wrc","recipeName":"reader-target","contextName":"other-context","msg":"Updated per-recipe Context"}'
+  expect_reader_output \
+    "WRC reconcile reader ignores wrong recipe, namespace, and component" \
+    wrc-count "$wrong_wrc_logs" 0
+  expect_reader_output \
+    "WRC decision reader ignores unrelated recipe and Context decisions" \
+    wrc-decisions "$wrong_wrc_logs" '0 0 0'
+
+  correct_hcc_logs=$'{"svc":"other-service","msg":"full network policy reconciliation complete"}\n{"svc":"host-context-controller","msg":"full network policy reconciliation complete"}'
+  expect_reader_success \
+    "HCC completion reader accepts the exact structured service event" \
+    hcc-complete "$correct_hcc_logs"
+  expect_reader_failure \
+    "HCC completion reader ignores the right message from the wrong service" \
+    hcc-complete '{"svc":"other-service","msg":"full network policy reconciliation complete"}'
+  expect_reader_failure \
+    "HCC completion reader fails when the completion event is absent" \
+    hcc-complete '{"svc":"host-context-controller","msg":"full network policy reconciliation started"}'
+
+  expect_reader_failure \
+    "WRC reconcile reader fails closed on a Kubernetes log read error" \
+    wrc-count '' 1
+  expect_reader_failure \
+    "WRC decision reader fails closed on a Kubernetes log read error" \
+    wrc-decisions '' 1
+  expect_reader_failure \
+    "HCC completion reader fails closed on a Kubernetes log read error" \
+    hcc-complete '' 1
+fi
+
+if [ "$(grep -Fc 'hcc_full_reconcile_completed ||' "$RUNTIME_GATE")" = 2 ] &&
+   ! grep -Fq 'hcc_log_contains' "$RUNTIME_GATE"; then
+  pass "WRC-HCC runtime waits use only the structured HCC completion reader"
+else
+  fail "WRC-HCC runtime still depends on the removed HCC text-log reader"
 fi
 
 # The Phase 2 fixture has steps, so the admission policy requires an explicit

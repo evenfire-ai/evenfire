@@ -168,16 +168,15 @@ describe('defaultFqdnLookup classification', () => {
     resolve6Mock.mockReset()
   })
 
-  it('returns ok with A records even when AAAA has none', async () => {
+  it('returns ok with A records and does not query unenforceable AAAA records', async () => {
     resolve4Mock.mockResolvedValue([{ address: '160.79.104.10', ttl: 300 }])
-    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('api.anthropic.com')
     expect(result).toEqual({ kind: 'ok', ipv4: ['160.79.104.10'], ipv6: [], ttlSeconds: 300 })
+    expect(resolve6Mock).not.toHaveBeenCalled()
   })
 
   it('classifies SERVFAIL as a retryable error and surfaces the code', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ESERVFAIL'))
-    resolve6Mock.mockRejectedValue(dnsError('ESERVFAIL'))
     const result = await defaultFqdnLookup('huggingface.co')
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') throw new Error('expected error')
@@ -188,7 +187,6 @@ describe('defaultFqdnLookup classification', () => {
 
   it('classifies a timeout as retryable', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ETIMEOUT'))
-    resolve6Mock.mockRejectedValue(dnsError('ETIMEOUT'))
     const result = await defaultFqdnLookup('api.anthropic.com')
     expect(result).toMatchObject({ kind: 'error', retryable: true })
   })
@@ -197,7 +195,6 @@ describe('defaultFqdnLookup classification', () => {
     'classifies operational DNS failure %s as retryable instead of no-records',
     async code => {
       resolve4Mock.mockRejectedValue(dnsError(code))
-      resolve6Mock.mockRejectedValue(dnsError(code))
       const result = await defaultFqdnLookup('resolver-broken.example.com')
       expect(result).toMatchObject({ kind: 'error', retryable: true })
       if (result.kind !== 'error') throw new Error('expected error')
@@ -207,24 +204,109 @@ describe('defaultFqdnLookup classification', () => {
 
   it('treats a genuine no-records answer (ENODATA) as permanent', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ENODATA'))
-    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('no-records.example.com')
-    expect(result).toEqual({ kind: 'error', error: 'no A or AAAA records' })
+    expect(result).toEqual({ kind: 'error', error: 'no A records for IPv4 egress enforcement' })
   })
 
   it('treats NXDOMAIN (ENOTFOUND) as permanent', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ENOTFOUND'))
-    resolve6Mock.mockRejectedValue(dnsError('ENOTFOUND'))
     const result = await defaultFqdnLookup('does-not-exist.example.com')
-    expect(result).toEqual({ kind: 'error', error: 'no A or AAAA records' })
+    expect(result).toEqual({ kind: 'error', error: 'no A records for IPv4 egress enforcement' })
     expect((result as { retryable?: boolean }).retryable).toBeFalsy()
   })
 
-  it('is retryable when any family hits a transient code even if the other is empty', async () => {
+  it('is retryable when the enforceable A query hits a transient code', async () => {
     resolve4Mock.mockRejectedValue(dnsError('ECONNREFUSED'))
-    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('partial.example.com')
     expect(result).toMatchObject({ kind: 'error', retryable: true })
+    expect(resolve6Mock).not.toHaveBeenCalled()
+  })
+
+  // ─── issue #513: only a positive DNS verdict may become a lookup result ──────
+  // `FqdnLookupResult` is a DNS verdict type. Before the fix its final branch was
+  // an unconditional `return { error: 'no A or AAAA records' }`, so anything the
+  // transient set did not recognize — a c-ares complaint about the query WE
+  // built, or a rejection with no code at all — was reported as an empty answer
+  // the resolver never gave, and travelled on as a permanent misconfiguration.
+
+  it.each(['EBADFAMILY', 'EBADQUERY'])(
+    'T4a throws on %s: a complaint about our own query is not a DNS answer',
+    async code => {
+      resolve4Mock.mockRejectedValue(dnsError(code))
+
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toThrow(code)
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toThrow('"h.example.com"')
+      await expect(defaultFqdnLookup('h.example.com')).rejects.toMatchObject({
+        cause: expect.objectContaining({ code }),
+      })
+
+      // #567 review, R1-M4. The message must NOT contain the substring
+      // `egress resolution failed`: workflowRecipeReconciler keys on it to
+      // exclude a message from the infra-retry reclassification, and this throw
+      // is a raw fault that has not been classified by egressResolutionError()
+      // at all, so it must stay eligible for the normal routing. The invariant
+      // lived only in a comment above the throw until now.
+      //
+      // Captured rather than asserted with `.rejects.not.toThrow(...)`: that
+      // form passes just as well when the promise never rejects, which would
+      // mean this whole branch stopped throwing and the test still went green.
+      // The positive assertions on the captured message are the liveness
+      // witness that the throw really happened.
+      const thrown = await defaultFqdnLookup('h.example.com').then(
+        result => {
+          throw new Error(`expected a throw, got ${JSON.stringify(result)}`)
+        },
+        (e: unknown) => e as Error
+      )
+      expect(thrown.message).toContain(code)
+      expect(thrown.message).not.toContain('egress resolution failed')
+    }
+  )
+
+  it('T4b throws when a rejection carries no code at all', async () => {
+    resolve4Mock.mockRejectedValue(new Error('boom'))
+
+    await expect(defaultFqdnLookup('nocode.example.com')).rejects.toThrow(/no code/)
+    await expect(defaultFqdnLookup('nocode.example.com')).rejects.toThrow(/boom/)
+  })
+
+  it.each([undefined, null, false, 0, ''])(
+    'T4b-total throws for a falsy rejection payload %s',
+    async value => {
+      resolve4Mock.mockRejectedValue(value)
+      await expect(defaultFqdnLookup('falsy.example.com')).rejects.toThrow(/non-DNS error/)
+    }
+  )
+
+  it('T4c reports EBADNAME as a malformed name, not as an empty answer', async () => {
+    // Permanent like NXDOMAIN, but the resolver never queried the name. Saying
+    // "no A or AAAA records" sends the operator hunting for missing records
+    // instead of at the typo in their own manifest.
+    resolve4Mock.mockRejectedValue(dnsError('EBADNAME'))
+
+    const result = await defaultFqdnLookup('foo..example.com')
+    expect(result).toMatchObject({ kind: 'error' })
+    expect((result as { error: string }).error).toContain('EBADNAME')
+    expect((result as { error: string }).error).toContain('foo..example.com')
+    expect((result as { error: string }).error).not.toContain('no A records')
+    expect((result as { retryable?: boolean }).retryable).toBeFalsy()
+  })
+
+  it('T4d still reports a genuinely empty answer as no-records', async () => {
+    // An empty successful A answer is a genuine negative observation, not an
+    // unclassified fault.
+    resolve4Mock.mockResolvedValue([])
+
+    const result = await defaultFqdnLookup('empty.example.com')
+    expect(result).toEqual({ kind: 'error', error: 'no A records for IPv4 egress enforcement' })
+  })
+
+  it('T4e does not let an AAAA success hide an unclassified A fault', async () => {
+    resolve4Mock.mockRejectedValue(dnsError('EBADFAMILY'))
+    resolve6Mock.mockResolvedValue(['2001:4860:4860::8888'])
+
+    await expect(defaultFqdnLookup('mixed.example.com')).rejects.toThrow('EBADFAMILY')
+    expect(resolve6Mock).not.toHaveBeenCalled()
   })
 })
 
@@ -237,7 +319,6 @@ describe('defaultFqdnLookup TTL propagation (issue #299)', () => {
 
   it('requests per-record TTLs via resolve4({ ttl: true })', async () => {
     resolve4Mock.mockResolvedValue([{ address: '140.82.112.3', ttl: 18 }])
-    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     await defaultFqdnLookup('api.github.com')
     expect(resolve4Mock).toHaveBeenCalledWith('api.github.com', { ttl: true })
   })
@@ -247,7 +328,6 @@ describe('defaultFqdnLookup TTL propagation (issue #299)', () => {
       { address: '140.82.112.3', ttl: 18 },
       { address: '140.82.112.4', ttl: 12 },
     ])
-    resolve6Mock.mockRejectedValue(dnsError('ENODATA'))
     const result = await defaultFqdnLookup('api.github.com')
     expect(result).toEqual({
       kind: 'ok',

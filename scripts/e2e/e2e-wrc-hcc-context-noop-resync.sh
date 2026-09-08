@@ -199,12 +199,14 @@ probe_hcc_ready() {
     ' >/dev/null 2>&1
 }
 
-hcc_log_contains() {
-  local marker=$1 pod logs
+hcc_full_reconcile_completed() {
+  local pod logs
   pod="$(running_hcc_pod)" || return 1
   logs="$(kctl logs "pod/${pod}" -n "$HCC_NS" -c host-context-controller \
     --since=10m 2>/dev/null)" || return 1
-  grep -Fq "$marker" <<<"$logs"
+  jq -Rse 'split("\n") | map(fromjson?) |
+    any(.svc == "host-context-controller" and
+      .msg == "full network policy reconciliation complete")' <<<"$logs" >/dev/null
 }
 
 mcpserver_named_current_ready() {
@@ -330,7 +332,11 @@ wrc_reconcile_count() {
   local logs
   logs="$(kctl logs deployment/"$WRC_DEPLOY" -n "$HCC_NS" -c "$WRC_CONTAINER" \
     --since=15m 2>/dev/null)" || return 1
-  grep -Fc "[WR-Reconciler] Reconciling \"${RECIPE_NAME}\"" <<<"$logs" || true
+  jq -Rse --arg recipe "$RECIPE_NAME" --arg namespace "$WORKFLOW_NS" '
+    split("\n") | map(fromjson?) |
+    map(select(.component == "wrc" and .recipeName == $recipe and
+      .ns == $namespace and .msg == "Reconciling recipe")) | length
+  ' <<<"$logs"
 }
 
 wrc_reconciled_after() {
@@ -343,7 +349,11 @@ wrc_context_decision_counts_since() {
   local since_time=$1 logs starts skips writes
   logs="$(kctl logs deployment/"$WRC_DEPLOY" -n "$HCC_NS" -c "$WRC_CONTAINER" \
     --since-time="$since_time" 2>/dev/null)" || return 1
-  starts="$(grep -Fc "[WR-Reconciler] Reconciling \"${RECIPE_NAME}\"" <<<"$logs" || true)"
+  starts="$(jq -Rse --arg recipe "$RECIPE_NAME" --arg namespace "$WORKFLOW_NS" '
+    split("\n") | map(fromjson?) |
+    map(select(.component == "wrc" and .recipeName == $recipe and
+      .ns == $namespace and .msg == "Reconciling recipe")) | length
+  ' <<<"$logs")" || return 1
   skips="$(jq -Rr --arg recipe "$RECIPE_NAME" --arg context "$CONTEXT_NAME" '
     fromjson? |
     select(.recipeName == $recipe and .contextName == $context and
@@ -1350,7 +1360,7 @@ kctl rollout status deployment/"$HCC_DEPLOY" -n "$HCC_NS" --timeout=240s >/dev/n
 wait_until 60 "HCC /ready before metadata-only proof" probe_hcc_ready ||
   die "HCC was not Ready after isolating the metadata-only proof"
 wait_until 180 "isolated HCC startup NetworkPolicy pass" \
-  hcc_log_contains "[NetPol] Full reconciliation complete" ||
+  hcc_full_reconcile_completed ||
   die "HCC startup NetworkPolicy pass did not drain before metadata-only proof"
 read -r HCC_UID HCC_RESTARTS <<<"$(
   kctl get pod "$(running_hcc_pod)" -n "$HCC_NS" \
@@ -1478,7 +1488,7 @@ wait_until 60 "second MCP business signal after the HCC timer rollout" \
   die "second MCP business signal failed before policy fault injection"
 host_runtime_ready || die "the real Host degraded during the HCC timer rollout"
 wait_until 180 "the armed HCC startup NetworkPolicy pass to complete" \
-  hcc_log_contains "[NetPol] Full reconciliation complete" ||
+  hcc_full_reconcile_completed ||
   die "HCC startup NetworkPolicy pass did not complete before policy fault injection"
 
 ORIGINAL_POLICY_UID="$(kctl get networkpolicy "$CONTEXT_POLICY" -n "$MCP_NS" \
