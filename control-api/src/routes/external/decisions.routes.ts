@@ -1,5 +1,7 @@
 import { NextFunction, Request, Response, Router } from 'express'
 import { config } from '../../config.js'
+import type { K8sGateway } from '../../k8s.js'
+import { attachAccessExecutionBudget } from '../../middleware/accessExecutionBudget.js'
 import { requireApprovalDecisionAccess } from '../../middleware/approvalDecisionAccess.js'
 import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import { requireValidExternalSessionToken } from '../../middleware/externalSessionAuth.js'
@@ -12,6 +14,10 @@ import {
   listPendingApprovalsForUser,
   recordDecision,
 } from '../../services/userApprovalRequestService.js'
+import {
+  WorkflowAuthorityError,
+  requireWorkflowActionAuthority,
+} from '../../services/workflows/workflowAuthorityBindingService.js'
 import { mapDbRun } from '../../services/workflows/workflowRunReadService.js'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -42,7 +48,7 @@ function userAgent(req: Request): string | null {
   return ua ? ua.slice(0, 512) : null
 }
 
-export function createExternalUserApprovalDecisionsRouter(): Router {
+export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): Router {
   const router = Router()
   const externalApprovalEdgeRateLimits = createExternalClientRateLimiters(
     'workflow-approvals',
@@ -104,6 +110,7 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
       },
     }),
     requireApprovalDecisionAccess(),
+    attachAccessExecutionBudget,
     (req, res, next) => {
       void (async () => {
         try {
@@ -120,20 +127,42 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
             return res.status(400).json({ error: 'note exceeds maximum length of 1000 characters' })
           }
 
-          const result = await recordDecision(
-            approval.id,
-            decision,
-            {
-              userId: claims!.userId,
-              ...(approval.target_team_id ? { teamId: approval.target_team_id } : {}),
+          const authorityInput = {
+            req: extReq,
+            caller: {
+              kind: 'user-session',
+              claims: extReq.externalAuth!,
+              session: extReq.externalSessionAuthority!,
             },
-            note,
-            {
-              clientIp: clientIp(req),
-              userAgent: userAgent(req),
-              correlationId: req.correlationId ?? null,
-            }
-          )
+            operationId: 'workflow.approval.decide',
+            resourceType: 'workflow_approval',
+            resourceLogicalId: approval.id,
+            target: Object.freeze({ approvalId: approval.id, decision }),
+            gateway,
+          } as const
+          const authority = await requireWorkflowActionAuthority(authorityInput)
+
+          const decisionActor = {
+            userId: claims!.userId,
+            ...(approval.target_team_id ? { teamId: approval.target_team_id } : {}),
+          }
+          const decisionAudit = {
+            clientIp: clientIp(req),
+            userAgent: userAgent(req),
+            correlationId: req.correlationId ?? null,
+          }
+          const result = authority
+            ? await recordDecision(
+                approval.id,
+                decision,
+                decisionActor,
+                note,
+                decisionAudit,
+                undefined,
+                authority,
+                () => requireWorkflowActionAuthority(authorityInput)
+              )
+            : await recordDecision(approval.id, decision, decisionActor, note, decisionAudit)
 
           if (!result.ok) {
             const status = result.error === 'not_found' ? 404 : 409
@@ -145,6 +174,9 @@ export function createExternalUserApprovalDecisionsRouter(): Router {
             ...(result.workflowRun ? { run: mapDbRun(result.workflowRun.row) } : {}),
           })
         } catch (err) {
+          if (err instanceof WorkflowAuthorityError) {
+            return res.status(err.status).json({ error: err.code })
+          }
           if (err instanceof ApprovalConsumeError) {
             const status =
               err.code === 'approval_expired' || err.code === 'approval_status_not_consumable'

@@ -3043,6 +3043,123 @@ async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promi
   `)
 }
 
+async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS workflow_authority_bindings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      binding_kind TEXT NOT NULL CHECK (binding_kind IN (
+        'trigger', 'workflow_read', 'approval_decision', 'approval_consume',
+        'run_management', 'artifact_list', 'artifact_read', 'artifact_delete'
+      )),
+      entity_type TEXT NOT NULL CHECK (entity_type IN (
+        'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'
+      )),
+      entity_id TEXT NOT NULL CHECK (
+        NULLIF(BTRIM(entity_id), '') IS NOT NULL AND char_length(entity_id) <= 1024
+      ),
+      binding_version SMALLINT NOT NULL CHECK (binding_version = 2),
+      binding_hash TEXT NOT NULL CHECK (binding_hash ~ '^[0-9a-f]{64}$'),
+      parent_binding_id UUID NULL REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT,
+      transition_id TEXT NULL CHECK (
+        transition_id IS NULL OR transition_id = 'workflow.approval.decide->workflow.approval.consume'
+      ),
+      user_id UUID NOT NULL,
+      session_id UUID NOT NULL,
+      session_version INTEGER NOT NULL CHECK (session_version >= 1),
+      delegation_jti UUID NOT NULL,
+      operation_id TEXT NOT NULL,
+      resource JSONB NOT NULL CHECK (jsonb_typeof(resource) = 'object'),
+      target JSONB NULL CHECK (target IS NULL OR jsonb_typeof(target) = 'object'),
+      target_hash TEXT NOT NULL,
+      access_path_id TEXT NOT NULL,
+      authorization_revision TEXT NOT NULL,
+      path_kind TEXT NOT NULL CHECK (path_kind IN ('direct', 'team')),
+      effective_team_id UUID NULL,
+      behavior_binding_hash TEXT NOT NULL,
+      source_issued_at TIMESTAMPTZ NOT NULL,
+      source_expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (source_expires_at > source_issued_at),
+      CHECK (
+        (path_kind = 'direct' AND effective_team_id IS NULL)
+        OR (path_kind = 'team' AND effective_team_id IS NOT NULL)
+      ),
+      CHECK (
+        (parent_binding_id IS NULL AND transition_id IS NULL)
+        OR (
+          parent_binding_id IS NOT NULL
+          AND transition_id = 'workflow.approval.decide->workflow.approval.consume'
+          AND binding_kind = 'approval_consume'
+          AND entity_type = 'workflow_approval'
+          AND operation_id = 'workflow.approval.consume'
+        )
+      ),
+      UNIQUE (binding_kind, entity_type, entity_id, binding_hash)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS workflow_authority_bindings_delegation_kind_unique
+      ON workflow_authority_bindings (delegation_jti, binding_kind);
+    CREATE INDEX IF NOT EXISTS workflow_authority_bindings_entity
+      ON workflow_authority_bindings (entity_type, entity_id, created_at DESC);
+
+    CREATE OR REPLACE FUNCTION enforce_workflow_authority_binding_parent()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+      parent_kind TEXT;
+      parent_entity_type TEXT;
+      parent_entity_id TEXT;
+      parent_operation TEXT;
+    BEGIN
+      IF NEW.parent_binding_id IS NULL THEN
+        RETURN NEW;
+      END IF;
+      SELECT binding_kind, entity_type, entity_id, operation_id
+        INTO parent_kind, parent_entity_type, parent_entity_id, parent_operation
+        FROM workflow_authority_bindings
+       WHERE id = NEW.parent_binding_id;
+      IF parent_kind IS DISTINCT FROM 'approval_decision'
+         OR parent_entity_type IS DISTINCT FROM 'workflow_approval'
+         OR parent_entity_id IS DISTINCT FROM NEW.entity_id
+         OR parent_operation IS DISTINCT FROM 'workflow.approval.decide' THEN
+        RAISE EXCEPTION 'invalid workflow authority transition parent'
+          USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS workflow_authority_binding_parent_guard
+      ON workflow_authority_bindings;
+    CREATE TRIGGER workflow_authority_binding_parent_guard
+      BEFORE INSERT OR UPDATE OF parent_binding_id, transition_id, binding_kind,
+        entity_type, entity_id, operation_id
+      ON workflow_authority_bindings
+      FOR EACH ROW EXECUTE FUNCTION enforce_workflow_authority_binding_parent();
+
+    ALTER TABLE workflow_runs
+      ADD COLUMN IF NOT EXISTS initiating_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS trigger_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS decision_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS consume_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    CREATE INDEX IF NOT EXISTS workflow_runs_initiating_authority_binding
+      ON workflow_runs (initiating_authority_binding_id)
+      WHERE initiating_authority_binding_id IS NOT NULL;
+
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_recipes_runtime') THEN
+        GRANT SELECT ON TABLE workflow_authority_bindings TO workflow_recipes_runtime;
+        GRANT SELECT (initiating_authority_binding_id) ON TABLE workflow_runs
+          TO workflow_recipes_runtime;
+      END IF;
+    END $$;
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6064,6 +6181,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0106_legacy_password_security_epoch_backfill',
     ],
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '010f_workflow_authority_bindings',
+    apply: applyWorkflowAuthorityBindingsSchema,
   },
 ]
 

@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
 import request from 'supertest'
+import { hashActionTarget } from '@clerum/action-context-contracts'
 import { createExternalWorkflowsRouter } from '../src/routes/external/workflows/index.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
+import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import { MockGateway } from './mockGateway.js'
 
 const RECIPE_NS = 'sandbox-recipes'
@@ -16,6 +19,8 @@ const mockAuthenticateExternalUserSession = vi.fn()
 const mockRateLimitCheck = vi.fn()
 const mockVerifyInternalControlJwt = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
+const mockVerifyUserDelegationV2 = vi.fn()
+const mockCheckpointActionAuthority = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -56,6 +61,14 @@ vi.mock('../src/utils/auth/internalControlToken.js', () => ({
 
 vi.mock('../src/services/adminAuthService.js', () => ({
   isAdminTokenRevoked: (...args: unknown[]) => mockIsAdminTokenRevoked(...args),
+}))
+
+vi.mock('../src/utils/auth/userDelegationV2Token.js', () => ({
+  verifyUserDelegationV2: (...args: unknown[]) => mockVerifyUserDelegationV2(...args),
+}))
+
+vi.mock('../src/services/access/actionAuthorityCheckpoint.js', () => ({
+  checkpointActionAuthority: (...args: unknown[]) => mockCheckpointActionAuthority(...args),
 }))
 
 vi.mock('../src/utils/auth/delegationToken.js', () => ({
@@ -138,6 +151,8 @@ describe('routes/external/workflows', () => {
     mockRateLimitCheck.mockReset()
     mockVerifyInternalControlJwt.mockReset()
     mockIsAdminTokenRevoked.mockReset()
+    mockVerifyUserDelegationV2.mockReset()
+    mockCheckpointActionAuthority.mockReset()
     gateway = new MockGateway(RECIPE_NS)
 
     mockIssueWorkflowControlToken.mockReturnValue({
@@ -181,6 +196,19 @@ describe('routes/external/workflows', () => {
           },
         })
       }
+      if (token === 'user-session-token-v2') {
+        return Promise.resolve({
+          status: 'authenticated',
+          contract: 'v2',
+          claims: { ...USER_SESSION_CLAIMS, userId: '11111111-1111-4111-8111-111111111111' },
+          authorityContext: {
+            contract: 'v2',
+            userId: '11111111-1111-4111-8111-111111111111',
+            sid: '22222222-2222-4222-8222-222222222222',
+            sessionVersion: 2,
+          },
+        })
+      }
       return Promise.resolve({ status: 'invalid', reason: 'invalid_representation' })
     })
     mockVerifyAdminToken.mockImplementation(token =>
@@ -207,6 +235,32 @@ describe('routes/external/workflows', () => {
       async (work: (db: { query: typeof mockPoolQuery }) => unknown) =>
         work({ query: mockPoolQuery })
     )
+    mockCheckpointActionAuthority.mockResolvedValue({
+      version: 2,
+      status: 'allowed',
+      authorizationRevision: `ar1_${'b'.repeat(43)}`,
+      behaviorBindingHash: 'bh2_workflow',
+      behavior: {
+        budget: { state: 'known', value: null },
+        credentialPolicy: { state: 'known', value: null },
+        approvalPolicy: { state: 'known', value: null },
+        filesystemScope: { state: 'known', value: null },
+        runtime: { state: 'known', value: null },
+        providerModelPolicy: { state: 'known', value: null },
+        audit: { state: 'known', value: 'user:11111111-1111-4111-8111-111111111111' },
+      },
+      checkedAt: new Date().toISOString(),
+      validUntil: new Date(Date.now() + 30_000).toISOString(),
+      attribution: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 2,
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      },
+      destination: null,
+    })
   })
 
   describe('Caller-kind gate (allowedCallerKinds: ["user-session"])', () => {
@@ -431,6 +485,63 @@ describe('routes/external/workflows', () => {
       expect(res.body.source).toBe('live')
       expect(res.body.actor).toEqual({ type: 'user-session', userId: 'user-123' })
       expect(res.body.executionRef).toBeNull()
+    })
+
+    it('persists exact v2 trigger authority before creating protected work', async () => {
+      await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
+      const target = Object.freeze({ recipeNamespace: RECIPE_NS, recipeName: 'test-recipe' })
+      const resource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: 'workflow_recipe',
+        logicalId: `${RECIPE_NS}/test-recipe`,
+      })
+      mockVerifyUserDelegationV2.mockReturnValue({
+        sub: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sv: 2,
+        jti: '33333333-3333-4333-8333-333333333333',
+        iat: 1_700_000_000,
+        exp: 1_700_000_300,
+        operationIds: ['workflow.trigger'],
+        resource,
+        targets: { 'workflow.trigger': target },
+        targetHashes: { 'workflow.trigger': hashActionTarget(target) },
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        authorizationRevision: `ar1_${'b'.repeat(43)}`,
+        behaviorBindingHash: 'bh2_workflow',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      })
+      const dbRow = {
+        run_id: 'external-v2-run',
+        recipe_namespace: RECIPE_NS,
+        recipe_name: 'test-recipe',
+        phase: 'Pending',
+        actor_type: 'user',
+        actor_id: '11111111-1111-4111-8111-111111111111',
+        initiating_authority_binding_id: 'binding-1',
+      }
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ id: 'binding-1' }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [dbRow], rowCount: 1 })
+
+      const response = await request(makeApp(gateway))
+        .post(`/external/workflows/${RECIPE_NS}/test-recipe/trigger`)
+        .set('x-user-session-token', 'user-session-token-v2')
+        .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+        .set('Idempotency-Key', 'external-v2-key')
+        .send({ inputs: {} })
+
+      expect(response.status, JSON.stringify(response.body)).toBe(201)
+      expect(response.body.id).toBe('external-v2-run')
+      expect(mockVerifyUserDelegationV2).toHaveBeenCalledTimes(2)
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledTimes(2)
+      expect(
+        mockPoolQuery.mock.calls.some(([sql]) =>
+          String(sql).includes('INSERT INTO workflow_authority_bindings')
+        )
+      ).toBe(true)
     })
 
     it('creates a pre-run approval instead of a run when onDemand approval is required', async () => {
@@ -911,6 +1022,47 @@ describe('routes/external/workflows', () => {
   })
 
   describe('GET /external/workflows/:ns/:name/runs', () => {
+    it('does not persist v2 read provenance when run retrieval fails', async () => {
+      const target = Object.freeze({ recipeNamespace: RECIPE_NS, recipeName: 'test-recipe' })
+      const resource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: 'workflow_recipe',
+        logicalId: `${RECIPE_NS}/test-recipe`,
+      })
+      mockVerifyUserDelegationV2.mockReturnValue({
+        sub: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sv: 2,
+        jti: '33333333-3333-4333-8333-333333333333',
+        iat: 1_700_000_000,
+        exp: 1_700_000_300,
+        operationIds: ['workflow.read'],
+        resource,
+        targets: { 'workflow.read': target },
+        targetHashes: { 'workflow.read': hashActionTarget(target) },
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        authorizationRevision: `ar1_${'b'.repeat(43)}`,
+        behaviorBindingHash: 'bh2_workflow',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      })
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockRejectedValueOnce(new Error('run read failed'))
+
+      const response = await request(makeApp(gateway))
+        .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs?limit=10`)
+        .set('x-user-session-token', 'user-session-token-v2')
+        .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+
+      expect(response.status).toBe(500)
+      expect(
+        mockPoolQuery.mock.calls.some(([sql]) =>
+          String(sql).includes('INSERT INTO workflow_authority_bindings')
+        )
+      ).toBe(false)
+    })
+
     it('returns empty list when user has grant but no runs exist', async () => {
       await gateway.createResource('workflowrecipes', VALID_RECIPE as never, RECIPE_NS)
       mockPoolQuery
@@ -1128,6 +1280,59 @@ describe('routes/external/workflows', () => {
         .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs?limit=10`)
         .set('x-user-session-token', 'user-session-token')
         .expect(403)
+    })
+  })
+
+  describe('GET /external/workflows/:ns/:name/runs/:runId/artifacts', () => {
+    it('requires the exact run-scoped workflow.artifact.list operation for v2 metadata', async () => {
+      const runId = '22222222-2222-4222-8222-222222222222'
+      const target = Object.freeze({ runId })
+      const resource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: 'workflow_run',
+        logicalId: runId,
+      })
+      mockVerifyUserDelegationV2.mockReturnValue({
+        sub: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sv: 2,
+        jti: '33333333-3333-4333-8333-333333333333',
+        iat: 1_700_000_000,
+        exp: 1_700_000_300,
+        operationIds: ['workflow.artifact.list'],
+        resource,
+        targets: { 'workflow.artifact.list': target },
+        targetHashes: { 'workflow.artifact.list': hashActionTarget(target) },
+        accessPathId: `ap1_${'a'.repeat(43)}`,
+        authorizationRevision: `ar1_${'b'.repeat(43)}`,
+        behaviorBindingHash: 'bh2_workflow',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      })
+      mockPoolQuery
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+
+      const response = await request(makeApp(gateway))
+        .get(`/external/workflows/${RECIPE_NS}/test-recipe/runs/${runId}/artifacts`)
+        .set('x-user-session-token', 'user-session-token-v2')
+        .set('x-evenfire-action-delegation', 'opaque-v2-delegation')
+
+      expect(response.status).toBe(404)
+      expect(mockCheckpointActionAuthority).toHaveBeenCalledWith(
+        expect.objectContaining({
+          request: expect.objectContaining({
+            operationId: 'workflow.artifact.list',
+            target,
+          }),
+        })
+      )
+      expect(
+        mockPoolQuery.mock.calls.some(([sql]) =>
+          String(sql).includes('INSERT INTO workflow_authority_bindings')
+        )
+      ).toBe(false)
     })
   })
 

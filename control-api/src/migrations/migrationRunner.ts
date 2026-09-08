@@ -11,6 +11,8 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '010e_legacy_password_security_epoch_backfill',
 ] as const)
 
+export const PR2_MIGRATION_VERSIONS = Object.freeze(['010f_workflow_authority_bindings'] as const)
+
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
   '0107_llm_provider_attempts_sdk_link',
   '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
@@ -19,6 +21,7 @@ const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
 const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   ...NON_PR1_POST_0106_MIGRATION_VERSIONS,
   ...PR1_MIGRATION_VERSIONS,
+  ...PR2_MIGRATION_VERSIONS,
 ] as const)
 
 export type MigrationDescriptor = {
@@ -63,7 +66,7 @@ export async function applyPendingPr1Migrations({
   recordMigration,
 }: ApplyPendingPr1MigrationsInput): Promise<void> {
   const byVersion = new Map(migrations.map(migration => [migration.version, migration]))
-  const expected = new Set<string>(PR1_MIGRATION_VERSIONS)
+  const expected = new Set<string>([...PR1_MIGRATION_VERSIONS, ...PR2_MIGRATION_VERSIONS])
   const unclassified = migrations.filter(
     migration =>
       migration.version > '0106_oauth_grants_owner_generalization' &&

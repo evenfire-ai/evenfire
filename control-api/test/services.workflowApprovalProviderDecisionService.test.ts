@@ -29,6 +29,8 @@ vi.mock('../src/services/userApprovalRequestService.js', () => ({
     }
   },
   ApprovalTriggerRunIdempotencyConflictError: class ApprovalTriggerRunIdempotencyConflictError extends Error {},
+  WorkflowApprovalAuthorityRequiredError: class WorkflowApprovalAuthorityRequiredError extends Error {},
+  WorkflowApprovalAuthorityRequiredError: class WorkflowApprovalAuthorityRequiredError extends Error {},
   parseWorkflowTriggerIntent: vi.fn((payload: unknown) => {
     const record =
       payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
@@ -463,6 +465,45 @@ describe('workflowApprovalProviderDecisionService', () => {
       { correlationId: 'telegram:tg-chat-1:42', userAgent: 'telegram:channel-reader' },
       expect.any(Object)
     )
+  })
+
+  it('fails closed when a v2-origin approval reaches a provider without action authority', async () => {
+    dbMock.query
+      .mockResolvedValueOnce({ rows: [{ id: 'event-1' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [pendingUserApprovalRow()], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    vi.mocked(mediumIdentityService.findVerifiedOperationalMediumAccount).mockResolvedValueOnce({
+      id: 'account-1',
+      userId: 'user-1',
+      medium: 'telegram',
+      providerUserId: '123456',
+      providerWorkspaceId: null,
+      providerChannelId: 'tg-chat-1',
+    })
+    vi.mocked(userApprovalRequestService.recordDecision).mockRejectedValueOnce(
+      new userApprovalRequestService.WorkflowApprovalAuthorityRequiredError()
+    )
+
+    const result = await recordProviderApprovalDecision({
+      approvalRequestId: APPROVAL_ID,
+      mediumIdentity: {
+        medium: 'telegram',
+        providerUserId: '123456',
+        providerChannelId: 'tg-chat-1',
+        providerChannelType: 'group',
+        providerTarget: TELEGRAM_PROVIDER_TARGET,
+      },
+      providerEventId: 'telegram:tg-chat-1:v2-denied',
+      decision: 'approve',
+      caller: caller(),
+      gateway: {} as never,
+    })
+
+    expect(result).toEqual({
+      ok: false,
+      status: 403,
+      error: 'workflow_approval_authority_required',
+    })
   })
 
   it('accepts a private Telegram DM decision without an mcp-host CommunicationChannel target', async () => {

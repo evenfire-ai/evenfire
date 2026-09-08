@@ -25,7 +25,7 @@ describe('0101 oauth_grants owner generalization migration', () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const versions = CONTROL_API_MIGRATIONS.map(m => m.version)
     expect(versions).toContain('0106_oauth_grants_owner_generalization')
-    expect(versions.at(-1)).toBe('010e_legacy_password_security_epoch_backfill')
+    expect(versions.at(-1)).toBe('010f_workflow_authority_bindings')
     expect(versions.indexOf('0100_seed_minimax_allowed_model')).toBeLessThan(
       versions.indexOf('0106_oauth_grants_owner_generalization')
     )

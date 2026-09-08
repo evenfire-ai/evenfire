@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecutionPolicy.js'
 import {
   PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
@@ -239,6 +240,10 @@ describe('D34 PR1 migration runner', () => {
         version,
         apply: vi.fn(async () => undefined),
       })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
     ]
 
     await applyPendingPr1Migrations({
@@ -250,9 +255,13 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(9)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(9)
+    expect(applied).toEqual([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ])
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(10)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(10)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
@@ -271,6 +280,10 @@ describe('D34 PR1 migration runner', () => {
           applyOrder.push(version)
           if (version === PR1_MIGRATION_VERSIONS[3]) throw new Error('boom')
         }),
+      })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
       })),
     ]
     await expect(
@@ -295,6 +308,7 @@ describe('D34 PR1 migration runner', () => {
         migrations: [
           ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '010d_unclassified', apply: vi.fn() },
         ],
         appliedVersions: new Set(),
@@ -342,6 +356,12 @@ describe('D34 PR1 migration runner', () => {
             applyOrder.push(version)
           }),
         })),
+        ...PR2_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
+        })),
       ],
       appliedVersions: new Set(),
       recordMigration: async (_db, version) => {
@@ -349,7 +369,11 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applyOrder).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
+    expect(applyOrder).toEqual([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ])
     expect(recorded).toEqual(applyOrder)
   })
 })

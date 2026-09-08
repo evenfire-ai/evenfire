@@ -202,6 +202,131 @@ describe('createDbRunProcessor', () => {
     expect(claim?.params).toEqual(['wrc-1', 'child-run-1', 'sandbox-recipes', run.run_id])
   })
 
+  it('checkpoints a persisted v2 trigger binding before creating the child', async () => {
+    const run = baseRun({
+      authority_binding: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: 'ath2_test',
+        accessPathId: 'ap1_test',
+        authorizationRevision: 'ar1_test',
+        behaviorBindingHash: 'bh2_test',
+      },
+    })
+    const client = makeClient(async sql => {
+      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+        return { rows: [run], rowCount: 1 }
+      }
+      if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const order: string[] = []
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority: vi.fn(async () => {
+        order.push('checkpoint')
+      }),
+      createChildRecipe: vi.fn(async () => {
+        order.push('child')
+        return { name: 'child', namespace: 'sandbox-recipes' }
+      }),
+      logger: silentLogger(),
+    })
+
+    await proc.processPending(run.run_id)
+
+    expect(order).toEqual(['checkpoint', 'child'])
+  })
+
+  it('rolls back without creating a child when the live checkpoint fails', async () => {
+    const run = baseRun({
+      authority_binding: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: 'ath2_test',
+        accessPathId: 'ap1_test',
+        authorizationRevision: 'ar1_test',
+        behaviorBindingHash: 'bh2_test',
+      },
+    })
+    const client = makeClient(async sql =>
+      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+        ? { rows: [run], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    )
+    const createChildRecipe = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority: vi.fn(async () => {
+        throw new Error('workflow_authority_denied')
+      }),
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_denied')
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+  })
+
+  it('retries an unavailable checkpoint without duplicating the protected effect', async () => {
+    const run = baseRun({
+      authority_binding: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: 'ath2_test',
+        accessPathId: 'ap1_test',
+        authorizationRevision: 'ar1_test',
+        behaviorBindingHash: 'bh2_test',
+      },
+    })
+    const client = makeClient(async sql => {
+      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+        return { rows: [run], rowCount: 1 }
+      }
+      if (/SET phase = 'Running'/.test(sql)) return { rows: [], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    const createChildRecipe = vi.fn(async () => ({ name: 'child', namespace: 'sandbox-recipes' }))
+    const checkpointAuthority = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('workflow_authority_unavailable'))
+      .mockResolvedValueOnce(undefined)
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_unavailable')
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+
+    expect(checkpointAuthority).toHaveBeenCalledTimes(2)
+    expect(createChildRecipe).toHaveBeenCalledTimes(1)
+  })
+
   it('does not fail processPending when the post-commit run-start callback throws', async () => {
     const run = baseRun({ run_id: 'run-callback-start' })
     const client = makeClient(async sql => {
@@ -747,7 +872,7 @@ describe('createDbRunProcessor', () => {
             return { rows: [], rowCount: 0 }
           }
           if (/pg_advisory_xact_lock/.test(sql)) return { rows: [], rowCount: 0 }
-          if (/FOR UPDATE\s*$/i.test(sql.trim())) {
+          if (/FOR UPDATE(?: OF run)?\s*$/i.test(sql.trim())) {
             // SELECT_RUN_FOR_UPDATE — gate by param so only the orphan matches.
             expect(params).toEqual(['run-orphan-1'])
             return { rows: [orphanRow], rowCount: 1 }
