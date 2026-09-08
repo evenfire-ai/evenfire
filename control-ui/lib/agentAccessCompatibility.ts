@@ -71,6 +71,25 @@ export function agentNamesForContextAccess(
     .sort((left, right) => left.localeCompare(right))
 }
 
+export function effectiveAgentNamesForAccess({
+  assignedAgentNames,
+  assignedContextIds,
+  hosts,
+  contexts,
+}: {
+  assignedAgentNames: readonly string[]
+  assignedContextIds: readonly string[]
+  hosts: readonly HostResource[]
+  contexts: readonly ContextResource[]
+}): string[] {
+  return Array.from(
+    new Set([
+      ...assignedAgentNames.map(value => value.trim()).filter(Boolean),
+      ...agentNamesForContextAccess(assignedContextIds, hosts, contexts),
+    ])
+  ).sort((left, right) => left.localeCompare(right))
+}
+
 /**
  * Plans the compatibility payload for an Agent-centric access update.
  *
