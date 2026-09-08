@@ -11,6 +11,7 @@ import { FormField } from '@components/FormField'
 import { useProfileAccess } from '@components/ProfileAccessContext'
 import { ProfileBodySkeleton } from '@components/ProfileBodySkeleton'
 import { ProfileShell } from '@components/ProfileShell'
+import { ReleaseLabel } from '@components/ReleaseLabel'
 import { TextInput } from '@components/TextInput'
 import { useToast } from '@components/Toast'
 import { IconCopy, IconRefresh } from '@components/icons'
@@ -36,10 +37,10 @@ import {
   removeDraftRow,
   updateDraftRow,
 } from '@lib/profileSettings'
+import { refreshReleaseIdentity } from '@lib/releaseIdentity'
 import type { DesktopEnvironmentResponse } from '@/app/types/api'
 import type { WorkflowApprovalMediumAccount } from '@/app/types/approvalChannels'
 import type { Me } from '@/app/types/profile'
-import packageJson from '../../package.json'
 import { SettingsChannelSection } from './SettingsChannelSection'
 import { TelegramVerificationPanel } from './TelegramVerificationPanel'
 import { EMAIL_CHANNEL_SECTION, PROFILE_SOCIAL_CHANNEL_TABS } from './constants'
@@ -143,6 +144,11 @@ export function SettingsContent({
   async function loadAll(forceAccess = false) {
     setState('loading')
     setError('')
+    // An explicit Refresh re-reads the release too, so a label left on
+    // "Release unavailable" by a transient failure heals here instead of
+    // waiting for a remount. Deliberately not on the mount path: that would
+    // defeat the per-session cache the label shares with the sidebar.
+    if (forceAccess) void refreshReleaseIdentity()
     try {
       const [current, , nextAccounts] = await Promise.all([
         getMe(),
@@ -341,7 +347,7 @@ export function SettingsContent({
           <div>
             <p className="eyebrow">Profile settings</p>
             <h1 className="page-title">Settings</h1>
-            <div className="small-plus muted">Version {packageJson.version}</div>
+            <ReleaseLabel className="small-plus muted" />
             <div className="small-plus muted">
               {me ? `Signed in as ${me.email}` : 'Loading user session'}
             </div>

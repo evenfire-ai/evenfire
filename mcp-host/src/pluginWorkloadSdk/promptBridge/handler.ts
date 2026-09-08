@@ -38,6 +38,79 @@ const PURPOSE_SET = new Set<string>(PLUGIN_WORKLOAD_SDK_PURPOSES)
 const MAX_METADATA_BYTES = 16 * 1024
 
 /**
+ * Four attempts, three waits (3.5 s total). `ledger_pending` at this point is a
+ * commit race of milliseconds between the proxy's own finalize — which runs in
+ * its `finally`, before the `done` frame — and this read. The 900 s the sweeper
+ * waits is the sweeper's patience, not a client budget: a proxy that already
+ * exhausted its attempts will not land no matter how long the host waits here.
+ *
+ * No jitter: finalizations serialize per recipe on the advisory lock rather
+ * than competing in a thundering herd, and a deterministic table is the part a
+ * test can actually assert.
+ */
+export const FINALIZE_LEDGER_RETRY_DELAYS_MS = [500, 1_000, 2_000] as const
+
+/**
+ * Whole-finalize deadline, retries included. Worst case after the provider has
+ * already answered is two of these (complete path, then error path) instead of
+ * the 65-250 s an unfiltered retry of every retryable error could reach.
+ */
+const FINALIZE_DEADLINE_MS = 30_000
+
+/**
+ * `ledger_pending` is the only 409 the finalize route marks retryable AND
+ * names with a `reason`. Every other retryable finalize failure (5xx, open
+ * breaker, exhausted transport retries, unexpected response shape) arrives
+ * WITHOUT a reason and has already burnt four fetches with backoff inside
+ * `postOnce`; repeating those four more times outside is amplification with no
+ * new information. The triple is asserted as a contract in the client tests.
+ */
+export function isLedgerPendingError(err: unknown): boolean {
+  return (
+    err instanceof PluginWorkloadError &&
+    err.code === 'provider_unavailable' &&
+    err.retryable === true &&
+    err.reason === 'provider_unavailable'
+  )
+}
+
+/** Resolves on the timer or on abort, whichever comes first. */
+function sleepUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    let timer: NodeJS.Timeout
+    const finish = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    timer = setTimeout(finish, ms)
+    signal.addEventListener('abort', finish, { once: true })
+  })
+}
+
+export async function finalizeWithLedgerRetry(
+  finalize: NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>,
+  input: Parameters<NonNullable<PromptBridgeHandlerDeps['finalizePromptBridge']>>[0],
+  signal: AbortSignal
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await finalize(input, { signal })
+      return
+    } catch (error) {
+      if (attempt >= FINALIZE_LEDGER_RETRY_DELAYS_MS.length || !isLedgerPendingError(error)) {
+        throw error
+      }
+      // The deadline surfaces the real pending error rather than a synthetic
+      // one, so the caller's fence sees why the ledger never settled.
+      if (signal.aborted) throw error
+      await sleepUnlessAborted(FINALIZE_LEDGER_RETRY_DELAYS_MS[attempt], signal)
+      if (signal.aborted) throw error
+    }
+  }
+}
+
+/**
  * A provider response is already potentially billable when this acknowledgement
  * is sent. Preserve that response if the audit transport is unavailable; the
  * generation fence and maintenance sweep prevent the unfinished ledger row
@@ -80,23 +153,26 @@ export interface PromptBridgeHandlerDeps {
   /** Public provider/model identity from the live spec.agent binding. */
   getBootstrapTarget?: () => { provider: string; model: string } | null
   /** SDK-only atomic accounting boundary; workflow mode keeps the legacy reporter. */
-  finalizePromptBridge?: (input: {
-    invocationId: string
-    attemptGeneration: number
-    providerAttemptId: string
-    providerAttemptIndex: number
-    status: 'complete' | 'failed' | 'provider_unavailable'
-    reason: string
-    target: PromptBridgeTarget
-    usage?: {
-      llmSecretName: string
-      callerRef: string
-      fallbackUsed: boolean
-      attemptCount: number
-      inputTokens: number
-      outputTokens: number
-    }
-  }) => Promise<unknown>
+  finalizePromptBridge?: (
+    input: {
+      invocationId: string
+      attemptGeneration: number
+      providerAttemptId: string
+      providerAttemptIndex: number
+      status: 'complete' | 'failed' | 'provider_unavailable'
+      reason: string
+      target: PromptBridgeTarget
+      usage?: {
+        llmSecretName: string
+        callerRef: string
+        fallbackUsed: boolean
+        attemptCount: number
+        inputTokens: number
+        outputTokens: number
+      }
+    },
+    options?: { signal?: AbortSignal }
+  ) => Promise<unknown>
   onUsage?: (usage: {
     invocationId: string
     attemptGeneration: number
@@ -169,8 +245,13 @@ export function validatePromptBridgeRequest(raw: unknown): PromptBridgeRequest {
   if (body.modelPolicyRef !== undefined && typeof body.modelPolicyRef !== 'string') {
     throw new PluginWorkloadError('invalid_request', 'modelPolicyRef must be a string')
   }
-  if (body.maxTokens !== undefined && typeof body.maxTokens !== 'number') {
-    throw new PluginWorkloadError('invalid_request', 'maxTokens must be a number')
+  if (
+    body.maxTokens !== undefined &&
+    (typeof body.maxTokens !== 'number' || !Number.isInteger(body.maxTokens) || body.maxTokens < 1)
+  ) {
+    // `typeof number` alone let 0, -1 and 1.5 through to the provider
+    // and made the grant clamp's Math.min ill-defined.
+    throw new PluginWorkloadError('invalid_request', 'maxTokens must be a positive integer')
   }
   if (body.temperature !== undefined && typeof body.temperature !== 'number') {
     throw new PluginWorkloadError('invalid_request', 'temperature must be a number')
@@ -353,9 +434,18 @@ export class PromptBridgeHandler {
         acknowledgementMode: this.deps.finalizePromptBridge
           ? 'atomic_terminal_finalization'
           : 'per_attempt',
+        // The per-grant ceiling is enforced here, before the request
+        // reaches any provider. On API-key providers it lands as `max_tokens`
+        // on the wire; on codex-subscription it bounds the hashed request
+        // identity while the proxy omits it from the ChatGPT wire, which also
+        // keeps a capped grant eligible for failover instead of failing the
+        // contract's 16384 range check outright.
         maxTokens: clampMaxTokens(request.maxTokens, authorized.maxOutputTokens),
         temperature: request.temperature ?? authorized.modelPolicy?.temperature,
         timeoutMs: this.deps.promptTimeoutMs,
+        recipeNamespace: this.deps.recipeNamespace,
+        recipeName: this.deps.recipeName,
+        hostRef: `${this.deps.recipeNamespace}/${this.deps.recipeName}`,
       })
 
       const providerAttemptAcknowledgement =
@@ -385,26 +475,30 @@ export class PromptBridgeHandler {
         providerAttemptIndex >= 1
       ) {
         try {
-          await this.deps.finalizePromptBridge({
-            invocationId: authorized.invocationId,
-            attemptGeneration: authorized.attemptGeneration,
-            providerAttemptId,
-            providerAttemptIndex,
-            status: 'complete',
-            reason:
-              providerAttemptAcknowledgement === 'failed'
-                ? 'provider_completion_acknowledgement_failed'
-                : 'provider_completed',
-            target: completion.servedTarget,
-            usage: {
-              llmSecretName: completion.llmSecretName,
-              callerRef,
-              fallbackUsed: completion.fallbackUsed,
-              attemptCount: completion.attemptCount,
-              inputTokens: completion.usage.inputTokens,
-              outputTokens: completion.usage.outputTokens,
+          await finalizeWithLedgerRetry(
+            this.deps.finalizePromptBridge,
+            {
+              invocationId: authorized.invocationId,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId,
+              providerAttemptIndex,
+              status: 'complete',
+              reason:
+                providerAttemptAcknowledgement === 'failed'
+                  ? 'provider_completion_acknowledgement_failed'
+                  : 'provider_completed',
+              target: completion.servedTarget,
+              usage: {
+                llmSecretName: completion.llmSecretName,
+                callerRef,
+                fallbackUsed: completion.fallbackUsed,
+                attemptCount: completion.attemptCount,
+                inputTokens: completion.usage.inputTokens,
+                outputTokens: completion.usage.outputTokens,
+              },
             },
-          })
+            AbortSignal.timeout(FINALIZE_DEADLINE_MS)
+          )
         } catch {
           // Returning provider content before durable finalization would hide
           // a possible spend. Surface an explicit unknown outcome instead.
@@ -502,16 +596,24 @@ export class PromptBridgeHandler {
             err instanceof PluginWorkloadError && err.providerMayHaveExecuted
               ? 'provider_unavailable'
               : 'failed'
-          await this.deps.finalizePromptBridge({
-            invocationId: authorized.invocationId,
-            attemptGeneration: authorized.attemptGeneration,
-            providerAttemptId: unknownProviderAttempt.providerAttemptId,
-            providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
-            status: finalizationStatus,
-            reason:
-              err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
-            target: unknownProviderAttempt.target,
-          })
+          // The error path settles the same ledger row as the complete
+          // path, so it needs the same `ledger_pending` patience and the same
+          // bounded deadline. Losing this attempt to a millisecond commit race
+          // would silently drop the spend for an attempt that already ran.
+          await finalizeWithLedgerRetry(
+            this.deps.finalizePromptBridge,
+            {
+              invocationId: authorized.invocationId,
+              attemptGeneration: authorized.attemptGeneration,
+              providerAttemptId: unknownProviderAttempt.providerAttemptId,
+              providerAttemptIndex: unknownProviderAttempt.providerAttemptIndex,
+              status: finalizationStatus,
+              reason:
+                err instanceof PluginWorkloadError && err.reason ? err.reason : 'outcome_unknown',
+              target: unknownProviderAttempt.target,
+            },
+            AbortSignal.timeout(FINALIZE_DEADLINE_MS)
+          )
           providerAttemptFinalized = true
         } catch {
           console.warn('[PluginWorkloadSdk] provider spend finalization failed')
@@ -559,6 +661,21 @@ function unexpectedAuthorizationResponse(): PluginWorkloadError {
   )
 }
 
+/**
+ * Bound a workload's requested output against the grant's ceiling.
+ *
+ * Scope, stated honestly: on API-key providers this is the real cap —
+ * `max_tokens` reaches the provider. On codex-subscription the ChatGPT wire
+ * rejects `max_output_tokens` and the proxy omits it, so there the clamp bounds
+ * the hashed request identity rather than the response, and the enforced bound
+ * is the contract's structural `LIMITS.maxOutputTokens`. It still matters
+ * there: an unclamped request above that limit fails the contract range check
+ * as a non-retryable error, which is terminal with no failover.
+ *
+ * A grant with no ceiling passes the request through; a workload that names no
+ * maxTokens inherits the ceiling. Both inputs are validated upstream, so the
+ * `Math.min` is over two positive integers.
+ */
 function clampMaxTokens(
   requested: number | undefined,
   grantCap: number | null

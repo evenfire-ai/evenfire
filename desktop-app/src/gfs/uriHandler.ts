@@ -71,6 +71,8 @@ export interface ResolvedGfsResource {
   path?: string | null
   version: number
   bytes?: number
+  /** ISO 8601 UTC from gfs_resources.updated_at. Optional during mixed-version deploys. */
+  updatedAt?: string
 }
 
 type GfsEnvelope<T> =
@@ -107,6 +109,8 @@ export interface GfsResourceView {
   path: string | null
   version: number
   bytes: number
+  /** ISO 8601 UTC. Optional while older backends omit the additive field. */
+  updatedAt?: string
 }
 
 export interface GfsChildrenPage {

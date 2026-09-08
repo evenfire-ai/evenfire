@@ -574,6 +574,14 @@ export async function addPluginWorkloadSdkCredentialTicketRuntimeAccess(
  * executed (for example, a timeout or a lost completion acknowledgement).
  * Rows are immutable and keyed by the physical attempt id so retries of the
  * finalization request are safe.
+ *
+ * Rows are the immutable FLOOR: the least spend provable at write time. For
+ * oauth-broker attempts the effective outcome is derived at read time from the
+ * linked `llm_provider_attempts` usage (`loadSpendOutcome`); an `unknown` row
+ * is never rewritten to `exact`. Any raw SQL that reads this table without
+ * that join therefore reads a lower bound, not the effective spend — the
+ * billing truth for Codex already lives in `usage_events`, written by the
+ * proxy finalize.
  */
 export async function addPluginWorkloadSdkSpendOutcomeLedger(db: DbClient): Promise<void> {
   await db.query(`

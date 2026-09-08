@@ -208,7 +208,7 @@ export class PgBlobStagingStore {
   ): Promise<Record<string, unknown> | null> {
     const result = await this.db.query(
       `SELECT resource_id, drive, parent_resource_id, name, kind, path_cache,
-              version, bytes, blob_key, content_sha256, deleted_at
+              version, bytes, blob_key, content_sha256, deleted_at, updated_at
          FROM gfs_resources
         WHERE drive = $1 AND resource_id = $2 AND blob_key = $3`,
       [drive, resourceId, blobKey]
@@ -225,7 +225,7 @@ export class PgBlobStagingStore {
     }
     const result = await manifestQuery(this.db,
       `SELECT resource_id, drive, parent_resource_id, name, kind, path_cache,
-              version, bytes, blob_key, content_sha256, deleted_at
+              version, bytes, blob_key, content_sha256, deleted_at, updated_at
          FROM gfs_resources
         WHERE drive = $1 AND resource_id = ANY($2::uuid[])`,
       [drive, ids],

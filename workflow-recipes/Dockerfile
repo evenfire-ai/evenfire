@@ -7,6 +7,7 @@ WORKDIR /app
 # @clerum/workflow-runtime-core depends on it (file:../llm-providers) and
 # workflow-recipes consumes it directly.
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/
@@ -31,6 +32,7 @@ FROM node:24-alpine
 WORKDIR /app
 
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/network-policy-core ./packages/network-policy-core
 COPY packages/workflow-runtime-core/package.json packages/workflow-runtime-core/package-lock.json ./packages/workflow-runtime-core/

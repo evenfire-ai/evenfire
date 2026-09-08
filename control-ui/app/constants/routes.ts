@@ -38,13 +38,6 @@ export const CONTROL_ROUTES = {
     edit: (name: string) => `/connectors/${segment(name)}/edit`,
     editTab: (name: string, tab: string) => `/connectors/${segment(name)}/edit/${segment(tab)}`,
   },
-  contexts: {
-    root: '/contexts',
-    new: '/contexts/new',
-    detail: (name: string) => `/contexts/${segment(name)}`,
-    tab: (name: string, tab: string) => `/contexts/${segment(name)}/${segment(tab)}`,
-    connectors: (name: string) => `/contexts/${segment(name)}/connectors`,
-  },
   costAndUsage: {
     base: '/cost-and-usage',
     root: '/cost-and-usage/usage',

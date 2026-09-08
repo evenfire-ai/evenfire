@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   buildCoordinatorTokenSecret,
   buildMcpHostRuntimeTokenSecret,
+  nextMcpHostRuntimeTokenGeneration,
+  readMcpHostRuntimeTokenGeneration,
 } from '../../../src/workflow/secretFactory'
 
 describe('Secret Factory — mcpHost Runtime Tokens', () => {
@@ -72,6 +74,17 @@ describe('Secret Factory — mcpHost Runtime Tokens', () => {
 
   it('has NO ownerReference (cross-namespace GC safety)', () => {
     expect(secret.metadata!.ownerReferences).toBeUndefined()
+  })
+
+  it('bumps the runtime token generation from a missing or invalid residue', () => {
+    expect(nextMcpHostRuntimeTokenGeneration(undefined)).toBe('1')
+    expect(nextMcpHostRuntimeTokenGeneration('1')).toBe('2')
+    expect(readMcpHostRuntimeTokenGeneration(undefined)).toBeUndefined()
+    expect(
+      readMcpHostRuntimeTokenGeneration({
+        metadata: { annotations: { 'clerum.io/mcp-host-runtime-token-generation': '4' } },
+      })
+    ).toBe('4')
   })
 
   // ── Existing Secret unaffected ───────────────────────────────────────

@@ -624,8 +624,8 @@ function RegistryInstallPageContent() {
   const headerSubtitle = isPrivate
     ? `Install ${entry?.name}, a private ${kindLabel} from your organization${
         orgScope ? ` ${orgScope}` : ''
-      }, into your cluster and bind it to a context.`
-    : 'Install a Marketplace entry into your cluster and bind it to a context.'
+      }, into your cluster.`
+    : 'Install a Marketplace entry into your cluster.'
 
   return (
     <AuthGate>

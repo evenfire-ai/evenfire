@@ -1,5 +1,3 @@
-import type { PluginWorkloadSdkCapabilityStatus } from '../../../src/types'
-
 export function workflowStatusTone(status: string | null | undefined): 'allowed' | 'denied' | '' {
   const normalized = String(status ?? '')
     .trim()
@@ -10,42 +8,15 @@ export function workflowStatusTone(status: string | null | undefined): 'allowed'
 }
 
 /**
- * Summarize a recipe's Plugin Workload SDK capability projection
- * (status.pluginWorkloadSdk) into a Pill label + tone. Returns null when the
- * recipe does not declare the capability, so callers render nothing.
+ * Map a workflow/run status to a `Pill` tone so Plugins renders the same
+ * primitive status chip as Agents/Connectors (spec 12 §6 uniformity). Derived
+ * from `workflowStatusTone` so the allowed/denied buckets stay in one place.
  */
-export function describePluginWorkloadSdkCapability(
-  capability: PluginWorkloadSdkCapabilityStatus | null | undefined
-): { label: string; tone: 'success' | 'neutral'; title: string } | null {
-  if (!capability) return null
-  const families = [
-    capability.promptBridge ? 'promptBridge' : null,
-    capability.clientNotifications ? 'clientNotifications' : null,
-  ].filter((f): f is string => f !== null)
-  if (capability.state === 'validated') {
-    return {
-      label: `SDK: ${families.join(', ') || 'none'}`,
-      tone: 'success',
-      title: `Plugin Workload SDK capability validated (${families.join(', ') || 'none'})`,
-    }
-  }
-  if (capability.state === 'awaiting_policy') {
-    return {
-      label: 'SDK: awaiting policy',
-      tone: 'neutral',
-      title: capability.message || 'Plugin Workload SDK is awaiting operator policy',
-    }
-  }
-  if (capability.state === 'degraded') {
-    return {
-      label: 'SDK: degraded',
-      tone: 'neutral',
-      title: capability.message || 'Plugin Workload SDK capability is degraded',
-    }
-  }
-  return {
-    label: 'SDK: disabled',
-    tone: 'neutral',
-    title: capability.message || 'Plugin Workload SDK capability is disabled',
-  }
+export function workflowStatusPillTone(
+  status: string | null | undefined
+): 'success' | 'danger' | 'neutral' {
+  const tone = workflowStatusTone(status)
+  if (tone === 'allowed') return 'success'
+  if (tone === 'denied') return 'danger'
+  return 'neutral'
 }

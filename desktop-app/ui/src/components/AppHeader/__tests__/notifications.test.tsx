@@ -52,8 +52,6 @@ vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     navItem: 'apps',
     handleNavSelect: vi.fn(),
-    handleOpenContextDetails: vi.fn(),
-    handleOpenTeamDetails: vi.fn(),
   }),
 }))
 

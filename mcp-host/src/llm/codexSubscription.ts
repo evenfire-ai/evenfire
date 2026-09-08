@@ -22,6 +22,8 @@ export type CodexAttemptContext = {
   invocationId?: string
   attemptGeneration?: number
   providerAttemptIndex?: number
+  pluginWorkloadSdkProviderAttemptId?: string
+  targetRef?: string
   policyRevision: number
   policyHash: string
   hostRef?: string
@@ -113,6 +115,16 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
   classifyError(err: unknown): ClassifiedError {
     const code =
       err instanceof CodexAuthorizeError || err instanceof CodexProxyError ? err.code : undefined
+    // Every CodexAuthorizeError throw site precedes `proxy.stream`, so an
+    // authorize failure proves nothing was dispatched. A CodexProxyError knows
+    // whether its own request had left the process. Anything else stays
+    // undefined — an unrecognized error is not evidence of a missing call.
+    const providerDispatched =
+      err instanceof CodexAuthorizeError
+        ? false
+        : err instanceof CodexProxyError
+          ? err.dispatched
+          : undefined
     if (
       code === 'insufficient_scope' ||
       code === 'no_grant' ||
@@ -124,6 +136,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     if (code === 'budget_denied') {
@@ -132,6 +145,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     if (code === 'model_not_allowed') {
@@ -140,6 +154,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     if (code === 'rate_limited') {
@@ -148,6 +163,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: true,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
@@ -156,6 +172,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: true,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     if (code) {
@@ -164,6 +181,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         retryable: false,
         message: err instanceof Error ? err.message : String(err),
         providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
     return classifyUnknown(err)
@@ -234,7 +252,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   ) {
     if (options?.signal?.aborted) {
-      throw new CodexProxyError('canceled', 'aborted before authorize')
+      throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
     const request = this.buildRequest(messages, tools, options)
     const requestHash = hashCodexCompletionRequestV1(request)
@@ -247,19 +265,29 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
     }
     const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
-    const authorized = await this.deps.authorizer.authorize({
-      request,
-      requestHash,
-      invocationId: context.invocationId ?? request.requestId,
-      attemptGeneration: context.attemptGeneration ?? 1,
-      providerAttemptIndex,
-      policyRevision: context.policyRevision,
-      policyHash: context.policyHash,
-      hostRef: context.hostRef,
-      recipeNamespace: context.recipeNamespace,
-      recipeName: context.recipeName,
-      userId: context.userId,
-    })
+    const authorized = await this.deps.authorizer.authorize(
+      {
+        request,
+        requestHash,
+        invocationId: context.invocationId ?? request.requestId,
+        attemptGeneration: context.attemptGeneration ?? 1,
+        providerAttemptIndex,
+        policyRevision: context.policyRevision,
+        policyHash: context.policyHash,
+        hostRef: context.hostRef,
+        recipeNamespace: context.recipeNamespace,
+        recipeName: context.recipeName,
+        userId: context.userId,
+        ...(context.pluginWorkloadSdkProviderAttemptId
+          ? { pluginWorkloadSdkProviderAttemptId: context.pluginWorkloadSdkProviderAttemptId }
+          : {}),
+        ...(context.targetRef ? { targetRef: context.targetRef } : {}),
+      },
+      // Authorize shares the caller's deadline. Without this the attempt could
+      // keep a cancelled request alive on the control-api hop while the bridge
+      // has already given up on it.
+      { ...(options?.signal ? { signal: options.signal } : {}) }
+    )
     if (!('accessToken' in authorized)) {
       // Bound: authorize returns ticket material only.
     }

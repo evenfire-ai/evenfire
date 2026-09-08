@@ -54,6 +54,7 @@ import {
 } from './types'
 import { createDbRunChildRecipe } from './workflow/dbRunChildRecipeCreator'
 import type { JwtTokenFactory } from './workflow/jwtTokenFactory'
+import { CODEX_CONNECTION_REF_ANNOTATION } from './workflow/llmAllowedModelsSnapshot'
 
 const PLURAL = 'workflowrecipes'
 const MIN_RUNTIME_CREDENTIAL_REFRESH_INTERVAL_MS = 5_000
@@ -1110,11 +1111,18 @@ export class WorkflowRecipeWatcher implements WorkflowRecipeProvider {
     const cached = this.recipes.get(recipe.metadata.name)
     const cachedGeneration = cached?.metadata.generation
     const nextGeneration = recipe.metadata.generation
-    return (
-      cachedGeneration !== undefined &&
-      nextGeneration !== undefined &&
-      cachedGeneration === nextGeneration
-    )
+    if (
+      cachedGeneration === undefined ||
+      nextGeneration === undefined ||
+      cachedGeneration !== nextGeneration
+    ) {
+      return false
+    }
+    // Grant identity is a metadata annotation and does not bump generation.
+    // Treat it as a real reconcile, not a status-only skip.
+    const cachedRef = cached?.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    const nextRef = recipe.metadata.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+    return cachedRef === nextRef
   }
 
   /**

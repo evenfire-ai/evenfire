@@ -2,8 +2,8 @@
 //
 // Shared primitives for the optional Control UI QA recorder journeys.
 //
-// Contract: see docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder"). The Control UI recorder drives a headful Chromium managed by
+// Contract: see docs/testing/control-ui-headful-journeys.md. The Control UI
+// recorder drives a headful Chromium managed by
 // playwright.qa-recorder.config.ts (the `page` fixture), so these helpers only
 // cover shared plumbing: admin credentials, UI login, the Control API proxy,
 // the loopback target guard, opt-in confirmations, and named screenshot/video

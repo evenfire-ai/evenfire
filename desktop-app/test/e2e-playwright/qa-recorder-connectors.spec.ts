@@ -54,10 +54,22 @@ test('optional QA recorder: Desktop connectors journey', async ({}, testInfo) =>
       connectorsTable.or(healthTable).or(emptyHeading).or(healthEmpty).or(errorAlert)
     ).toBeVisible({ timeout: 20_000 })
 
-    // (2) If the connectors table is present, assert its container rendered.
-    // Rows may be empty — we only assert the table shell, not row count.
+    // (2) If the connectors table is present, assert its container rendered and
+    // that it is the agent-centric (connector, agent) list: an "Agent" column,
+    // and NO legacy "Context" / multi-chip "Agents" columns. Rows may be empty —
+    // clicking a row deep-links to THAT agent's Connectors tab, but we don't
+    // exercise navigation here (rows may be absent). We only assert the shell.
     if (await connectorsTable.isVisible().catch(() => false)) {
       await expect(connectorsTable).toBeVisible()
+      await expect(
+        connectorsTable.getByRole('columnheader', { name: 'Agent', exact: true })
+      ).toBeVisible()
+      await expect(
+        connectorsTable.getByRole('columnheader', { name: 'Context', exact: true })
+      ).toHaveCount(0)
+      await expect(
+        connectorsTable.getByRole('columnheader', { name: 'Agents', exact: true })
+      ).toHaveCount(0)
     }
 
     // (3) Toggle health detail if a toggle is exposed on this surface, then

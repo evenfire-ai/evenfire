@@ -66,24 +66,26 @@ leaning on either behaviour.
 
 ## Tables and row actions
 
+- Use `@clerum/frontend-components` directly or the thin Control UI adapters
+  `TablePanelHeader`, `TableHeaderRow`, `SectionSearchInput`, and
+  `RowActionsMenu`. Those adapters preserve Control UI labels/routes/classes;
+  they do not own a second semantic table implementation.
 - Column headers use `--cu-font-size-2xs`, semibold, uppercase, `0.05em`
-  letter-spacing. A sortable header is a button with the same type treatment as
-  a static one; sorting is signalled by the arrow and a hover color, never by a
-  different font size or casing.
+  letter-spacing. Shared sortable headers own the button, indicator, and
+  `aria-sort` semantics.
 - Right-align numeric columns and set `font-variant-numeric: tabular-nums` so
   digits line up.
 - Keep the table element and its header row mounted through loading, empty, and
   error states. Only the body changes. An empty result renders a full-width row,
   not an unmounted table.
-- Render row actions with `RowActions`. It fixes the order by `kind` (utility,
-  then edit, then destructive, then inspect) regardless of array order, supplies
-  the right-edge chevron for `inspect`, and collapses everything except
-  destructive and inspect into a kebab past `overflowAfter`. Set `hidden` to drop
-  an affordance a row cannot support rather than rendering a disabled one.
-- The chevron is the only affordance for opening a detail view. Do not add a
-  name link, a left-edge chevron, or a row click as a second route.
-- `app/cost-and-usage/llm-prices` is the reference implementation for a route
-  table, including state-dependent row affordances.
+- Ordinary resource rows use `TableRow` (or equivalent shared keyboard
+  behavior) for detail navigation. Stop propagation inside the actions cell so
+  opening a menu never navigates the row.
+- Render all per-record operations with `RowActionsMenu`; do not restore inline
+  edit/delete icon clusters or the removed `RowActions` overflow heuristic.
+- Do not restore `cu-expandable-table`, expandable record rows, or inline detail
+  `<tr>` sections. Move record details to the canonical route; use a modal only
+  for a bounded action that must complete without leaving the list.
 
 ## Routing
 
@@ -99,11 +101,19 @@ leaning on either behaviour.
 
 ## Page patterns
 
-- Use `TablePanelHeader` and `TableHeaderRow` for route tables and sections.
+- Use `TablePanelHeader` and `TableHeaderRow` for route tables and sections;
+  both delegate their semantic behavior to the shared frontend components
+  package.
 - Keep the section icon, title, subtitle, search, refresh, and CTAs visible
   while initial loading, empty, and error states render in the content area.
   Disable header CTAs during initial loading, and let only the content pane
   scroll when rows overflow.
+- In `TablePanelHeader`, pass secondary CTAs through `secondaryActions`, the
+  search input through `search`, the refresh control through `refreshAction`,
+  and the main CTA through `primaryAction`. The adapter renders that semantic
+  and focus order, keeps those controls on one toolbar line whenever their
+  combined minimum widths fit, and preserves their order when a genuinely
+  crowded toolbar must wrap.
 - Use `CreatePageHeader` plus `cu-create-panel`, `cu-create-content`, and
   `cu-form-grid` for full-screen create/install pages. Put Cancel in a ghost
   button and Submit in a primary button inside `cu-create-actions`. Use `<h2>`

@@ -147,6 +147,57 @@ describe('HostDetailsPage connectors', () => {
     expect(await screen.findByText('mcp-new')).toBeInTheDocument()
   })
 
+  // Re-homed from app/contexts/__tests__/ContextDetail.spec-preserve.test.tsx
+  // (deleted with the Contexts section): every context PUT from the surviving
+  // agent-side writer must preserve un-modeled spec fields (e.g. spec.gfs
+  // written by other controllers) and carry the loaded resourceVersion.
+  it('preserves unknown spec fields on connector updates through the agent writer', async () => {
+    const contextWithGfs = {
+      ...baseContext,
+      spec: {
+        ...baseContext.spec,
+        gfs: [{ name: 'team-docs', readOnly: true }],
+      },
+    } as unknown as typeof baseContext
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: {
+        metadata: { name: activeHostName, resourceVersion: 'rv-host-1' },
+        spec: {
+          contextRef: contextName,
+          host: 'Foo',
+          model: { name: 'gpt-5.4-mini', provider: 'openai' },
+        },
+      },
+      contexts: [contextWithGfs],
+      secrets: [],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+
+    renderPage()
+
+    const actionsButton = await screen.findByRole('button', {
+      name: 'Actions for connector mcp-existing',
+    })
+    fireEvent.click(actionsButton)
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove connector' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Remove connector' }))
+
+    await waitFor(() => expect(api.updateContext).toHaveBeenCalledTimes(1))
+    expect(api.updateContext).toHaveBeenCalledWith(
+      contextName,
+      expect.objectContaining({
+        metadata: { resourceVersion: 'rv-context-1' },
+        spec: expect.objectContaining({
+          gfs: [{ name: 'team-docs', readOnly: true }],
+          mcpServers: [],
+        }),
+      })
+    )
+  })
+
   it('confirms connector removal and updates the private context membership', async () => {
     renderPage()
 

@@ -52,7 +52,11 @@ describe('MarketplaceOrgImages', () => {
   it('shows an "unavailable" notice when the registry endpoint is not deployed (404)', async () => {
     vi.mocked(api.listOrgImages).mockRejectedValue(Object.assign(new Error('x'), { status: 404 }))
     render(<MarketplaceOrgImages orgScope="@acme" />)
-    expect(await screen.findByText(/Image listing isn.t available/i)).toBeInTheDocument()
+    expect(
+      await screen.findByText(
+        'Image listing isn’t available on this registry yet. Your pushed images still work, and the list will appear here once the registry exposes it.'
+      )
+    ).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
   })
 

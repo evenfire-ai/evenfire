@@ -546,6 +546,125 @@ describe('buildPluginWorkloadSdkStatus', () => {
     })
   })
 
+  it('blocks Validated when the Codex execution binding is missing', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { promptBridge: {} },
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' } }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 3,
+        podUid: 'pod-uid-1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        policyReady: false,
+        policyState: 'binding_missing',
+        policyReason: 'codex_execution_binding_missing',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual([
+      {
+        type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+        status: 'False',
+        reason: 'PolicyNotConfigured',
+        message:
+          'Plugin Workload SDK promptBridge policy is not ready (codex_execution_binding_missing)',
+        lastTransitionTime: NOW,
+      },
+      {
+        type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+        status: 'True',
+        reason: 'codex_execution_binding_missing',
+        message:
+          'Plugin Workload SDK promptBridge policy is not ready (codex_execution_binding_missing)',
+        lastTransitionTime: NOW,
+      },
+    ])
+    expect(projection.capability).toMatchObject({
+      state: 'awaiting_policy',
+      bootstrapContractVersion: 3,
+      bootstrapProvider: 'codex-subscription',
+      validatedAt: null,
+    })
+  })
+
+  it('names a stale Codex bootstrap contract when the binding proof is absent', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { promptBridge: {} },
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' } }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
+          status: 'False',
+          reason: 'PolicyNotConfigured',
+          message:
+            'Plugin Workload SDK promptBridge policy is not ready (codex_bootstrap_contract_stale)',
+        }),
+        expect.objectContaining({
+          type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+          status: 'True',
+          reason: 'codex_bootstrap_contract_stale',
+        }),
+      ])
+    )
+  })
+
+  it('does not hide a stale Codex contract behind a default policyState', () => {
+    const projection = buildPluginWorkloadSdkStatus({
+      spec: baseSpec(
+        { promptBridge: {} },
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' } }
+      ),
+      existingConditions: undefined,
+      phase: 'active',
+      featureFlagEnabled: true,
+      bootstrapProof: {
+        ready: true,
+        contractVersion: 2,
+        podUid: 'pod-uid-1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-luna',
+        policyReady: true,
+        policyState: 'active',
+        verifiedAt: NOW,
+      },
+      now: NOW,
+    })
+    expect(projection.conditions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
+          status: 'True',
+          reason: 'codex_bootstrap_contract_stale',
+          message:
+            'Plugin Workload SDK promptBridge policy is not ready (codex_bootstrap_contract_stale)',
+        }),
+      ])
+    )
+  })
+
   it('does not validate a clientNotifications-only recipe before its grant is proven', () => {
     const projection = buildPluginWorkloadSdkStatus({
       spec: baseSpec(

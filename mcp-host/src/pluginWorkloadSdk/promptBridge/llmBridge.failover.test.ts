@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
+import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider, createLLMProvider } from '../../llm'
@@ -8,6 +9,7 @@ import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { recordCircuitBreakerState } from '../metrics'
+import { replaceSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
 import { LlmBridge, type PromptBridgeCredentialResolver } from './llmBridge'
 
 const OK = {
@@ -31,7 +33,12 @@ const fallback: PromptBridgeTarget = {
 class FakeProvider implements Partial<SingleTurnProvider> {
   constructor(
     private readonly behavior: () => Promise<typeof OK>,
-    private readonly classification: { code: LlmErrorCode; retryable: boolean } = {
+    private readonly classification: {
+      code: LlmErrorCode
+      retryable: boolean
+      providerCode?: string
+      providerDispatched?: boolean
+    } = {
       code: LlmErrorCode.RateLimited,
       retryable: true,
     }
@@ -96,6 +103,9 @@ const request = {
 }
 
 describe('LlmBridge authorized multi-provider fallback', () => {
+  afterEach(() => {
+    replaceSdkOnlyCodexBinding(null)
+  })
   it('redeems credentials per attempt and serves the next authorized provider', async () => {
     const first = new FakeProvider(() => Promise.reject(new Error('provider response')))
     const second = new FakeProvider(() => Promise.resolve(OK))
@@ -584,6 +594,18 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       // not trigger any secret redemption or leak into the result payload.
       connectionRef: 'team-plus',
     }
+    replaceSdkOnlyCodexBinding({
+      connectionKey: 'team-plus',
+      catalogRevision: 1,
+      credentialRevision: 1,
+      model: 'gpt-5.1',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.1',
+        catalogRevision: 1,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    })
     const provider = new FakeProvider(async () => ({
       ...OK,
       usage_reported: false,
@@ -592,7 +614,13 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       providerAttemptIndex: 1,
     }))
     const { bridge, credentialCalls, resolver } = makeBridge({ 'gpt-5.1': provider })
-    const issuer = { issue: vi.fn() }
+    const issuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: '',
+        providerAttemptId: 'sdk-attempt-1',
+        providerAttemptIndex: 1,
+      })),
+    }
     const result = await bridge.complete({
       ...request,
       targets: [{ target: codex }],
@@ -601,12 +629,113 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(result.servedTarget).toEqual(codex)
     expect(result.llmSecretName).toBe('')
     expect(result.content).toBe('ok')
-    expect(issuer.issue).not.toHaveBeenCalled()
+    expect(issuer.issue).toHaveBeenCalledTimes(1)
     expect(resolver.resolve).not.toHaveBeenCalled()
     expect(credentialCalls).toEqual([])
     expect(JSON.stringify(result)).not.toMatch(/ticket|authorization|refreshToken|accessToken/i)
-    expect(result.providerAttemptId).toBe('attempt-codex')
+    expect(result.providerAttemptId).toBe('sdk-attempt-1')
     expect(result.providerAttemptIndex).toBe(1)
+  })
+
+  it('fails over after reserving a Codex target whose execution binding is missing', async () => {
+    const codex: PromptBridgeTarget = {
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      connectionRef: 'team-plus',
+    }
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls, credentialCalls } = makeBridge({
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+    const issuer = {
+      issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+        credentialTicket:
+          target.provider === 'codex-subscription' ? '' : `fresh-${target.targetRef}`,
+        providerAttemptId: `sdk-${target.targetRef}`,
+        providerAttemptIndex: target.provider === 'codex-subscription' ? 1 : 2,
+      })),
+    }
+
+    const result = await bridge.complete({
+      ...request,
+      targets: [{ target: codex }, { target: fallback }],
+      credentialTicketIssuer: issuer,
+      providerAttemptReporter,
+    })
+
+    expect(issuer.issue).toHaveBeenCalledTimes(2)
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'sdk-codex-primary',
+      providerAttemptIndex: 1,
+      status: 'failed',
+    })
+    expect(credentialCalls).toEqual([fallback.targetRef])
+    expect(providerCalls).toEqual([`${fallback.provider}/${fallback.model}`])
+    expect(result).toMatchObject({
+      servedTarget: fallback,
+      fallbackUsed: true,
+      attemptCount: 2,
+    })
+  })
+
+  it('does not fail over a Codex target when the post-dispatch acknowledgement is lost', async () => {
+    const codex: PromptBridgeTarget = {
+      targetRef: 'codex-primary',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      credentialSlot: '',
+      connectionRef: 'team-plus',
+    }
+    replaceSdkOnlyCodexBinding({
+      connectionKey: 'team-plus',
+      catalogRevision: 1,
+      credentialRevision: 1,
+      model: 'gpt-5.1',
+      bindingHash: computeCodexPolicyHash({
+        model: 'gpt-5.1',
+        catalogRevision: 1,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    })
+    const first = new FakeProvider(() => Promise.reject(new Error('codex unavailable')))
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      'gpt-5.1': first,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = {
+      report: vi.fn().mockRejectedValue(new Error('control-api unreachable')),
+    }
+    const issuer = {
+      issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+        credentialTicket:
+          target.provider === 'codex-subscription' ? '' : `fresh-${target.targetRef}`,
+        providerAttemptId: `sdk-${target.targetRef}`,
+        providerAttemptIndex: target.provider === 'codex-subscription' ? 1 : 2,
+      })),
+    }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codex }, { target: fallback }],
+        credentialTicketIssuer: issuer,
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      retryable: false,
+      reason: 'outcome_unknown',
+      providerMayHaveExecuted: true,
+    })
+    expect(first.completeSingleTurn).toHaveBeenCalledOnce()
+    expect(second.completeSingleTurn).not.toHaveBeenCalled()
+    expect(providerCalls).toEqual(['codex-subscription/gpt-5.1'])
+    expect(issuer.issue).toHaveBeenCalledTimes(1)
   })
 
   it('does not execute a Codex target while its circuit is open', async () => {
@@ -631,14 +760,345 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       undefined,
       () => openBreaker
     )
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+    const issuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: '',
+        providerAttemptId: 'sdk-attempt-open',
+        providerAttemptIndex: 1,
+      })),
+    }
 
     await expect(
       bridge.complete({
         ...request,
         targets: [{ target: codex }],
+        credentialTicketIssuer: issuer,
+        providerAttemptReporter,
       })
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    expect(issuer.issue).toHaveBeenCalledTimes(1)
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'sdk-attempt-open',
+      providerAttemptIndex: 1,
+      status: 'skipped',
+    })
     expect(providerCalls).toEqual([])
     expect(provider.completeSingleTurn).not.toHaveBeenCalled()
+  })
+})
+
+const codexTarget: PromptBridgeTarget = {
+  targetRef: 'codex-primary',
+  provider: 'codex-subscription',
+  model: 'gpt-5.1',
+  credentialSlot: '',
+  connectionRef: 'team-plus',
+}
+
+function installCodexBinding(): void {
+  replaceSdkOnlyCodexBinding({
+    connectionKey: 'team-plus',
+    catalogRevision: 1,
+    credentialRevision: 1,
+    model: codexTarget.model,
+    bindingHash: computeCodexPolicyHash({
+      model: codexTarget.model,
+      catalogRevision: 1,
+      credentialRevision: 1,
+      connectionKey: 'team-plus',
+    }),
+  })
+}
+
+/** Codex reserves index 1; any api-key fallback behind it reserves index 2. */
+function codexTicketIssuer() {
+  return {
+    issue: vi.fn(async ({ target }: { target: PromptBridgeTarget }) => ({
+      credentialTicket: target.provider === 'codex-subscription' ? '' : `fresh-${target.targetRef}`,
+      providerAttemptId: `sdk-${target.targetRef}`,
+      providerAttemptIndex: target.provider === 'codex-subscription' ? 1 : 2,
+    })),
+  }
+}
+
+const codexReceipt = {
+  providerAttemptId: `sdk-${codexTarget.targetRef}`,
+  providerAttemptIndex: 1,
+  target: codexTarget,
+  attemptCount: 1,
+  fallbackUsed: false,
+}
+
+describe('LlmBridge oauth-broker terminal accounting', () => {
+  afterEach(() => {
+    replaceSdkOnlyCodexBinding(null)
+  })
+
+  it('keeps a pre-dispatch Codex budget denial revivable and carries its receipt', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('budget denied')), {
+      code: LlmErrorCode.InsufficientQuota,
+      retryable: false,
+      providerCode: 'budget_denied',
+      providerDispatched: false,
+    })
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      [codexTarget.model]: codex,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codexTarget }, { target: fallback }],
+        credentialTicketIssuer: codexTicketIssuer(),
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'insufficient_quota',
+      providerMayHaveExecuted: false,
+      providerAttempt: codexReceipt,
+    })
+    // A denial that never reached the provider must stay terminal for the
+    // invocation and revivable for the idempotency key.
+    expect(providerCalls).toEqual([`${codexTarget.provider}/${codexTarget.model}`])
+    expect(second.completeSingleTurn).not.toHaveBeenCalled()
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'failed',
+    })
+  })
+
+  it('fences a dispatched Codex no_grant as an ambiguous physical outcome', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('grant revoked mid-flight')), {
+      code: LlmErrorCode.AuthenticationFailed,
+      retryable: false,
+      providerCode: 'no_grant',
+      providerDispatched: true,
+    })
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge } = makeBridge({
+      [codexTarget.model]: codex,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codexTarget }, { target: fallback }],
+        credentialTicketIssuer: codexTicketIssuer(),
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      providerMayHaveExecuted: true,
+      providerAttempt: codexReceipt,
+    })
+    expect(second.completeSingleTurn).not.toHaveBeenCalled()
+    // The physical status must agree with providerMayHaveExecuted; a hardcoded
+    // `failed` here would leave the key revivable after a possible charge.
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'provider_unavailable',
+    })
+  })
+
+  it.each(['insufficient_scope', 'host_binding_mismatch'])(
+    'closes a pre-dispatch Codex %s terminally with its receipt',
+    async providerCode => {
+      installCodexBinding()
+      const codex = new FakeProvider(() => Promise.reject(new Error(providerCode)), {
+        code: LlmErrorCode.AuthenticationFailed,
+        retryable: false,
+        providerCode,
+        providerDispatched: false,
+      })
+      const second = new FakeProvider(() => Promise.resolve(OK))
+      const { bridge } = makeBridge({
+        [codexTarget.model]: codex,
+        [fallback.model]: second,
+      })
+      const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+      await expect(
+        bridge.complete({
+          ...request,
+          targets: [{ target: codexTarget }, { target: fallback }],
+          credentialTicketIssuer: codexTicketIssuer(),
+          providerAttemptReporter,
+        })
+      ).rejects.toMatchObject({
+        code: 'provider_unavailable',
+        providerMayHaveExecuted: false,
+        providerAttempt: codexReceipt,
+      })
+      expect(second.completeSingleTurn).not.toHaveBeenCalled()
+      expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+        providerAttemptId: codexReceipt.providerAttemptId,
+        providerAttemptIndex: 1,
+        status: 'failed',
+      })
+    }
+  )
+
+  it('carries the reserved receipt on a terminal generic Codex failure', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('codex unavailable')))
+    const { bridge } = makeBridge({ [codexTarget.model]: codex })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codexTarget }],
+        credentialTicketIssuer: codexTicketIssuer(),
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'rate_limited',
+      providerAttempt: codexReceipt,
+    })
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'provider_unavailable',
+    })
+  })
+
+  it('fences a Codex budget denial whose acknowledgement was lost', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('budget denied')), {
+      code: LlmErrorCode.InsufficientQuota,
+      retryable: false,
+      providerCode: 'budget_denied',
+      providerDispatched: false,
+    })
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge } = makeBridge({
+      [codexTarget.model]: codex,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = {
+      report: vi.fn().mockRejectedValue(new Error('control-api unreachable')),
+    }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codexTarget }, { target: fallback }],
+        credentialTicketIssuer: codexTicketIssuer(),
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      reason: 'outcome_unknown',
+      providerMayHaveExecuted: true,
+      providerAttempt: codexReceipt,
+    })
+    expect(second.completeSingleTurn).not.toHaveBeenCalled()
+  })
+
+  it('treats an unclassified Codex dispatch state as executed', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('unrecognized failure')), {
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+    })
+    const { bridge } = makeBridge({ [codexTarget.model]: codex })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: codexTarget }],
+        credentialTicketIssuer: codexTicketIssuer(),
+        providerAttemptReporter,
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      providerMayHaveExecuted: true,
+    })
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'provider_unavailable',
+    })
+  })
+
+  it('honours the acknowledgement mode on a served Codex attempt', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(async () => ({
+      ...OK,
+      usage_reported: false,
+      usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+    }))
+    const { bridge } = makeBridge({ [codexTarget.model]: codex })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    const atomic = await bridge.complete({
+      ...request,
+      targets: [{ target: codexTarget }],
+      acknowledgementMode: 'atomic_terminal_finalization',
+      credentialTicketIssuer: codexTicketIssuer(),
+      providerAttemptReporter,
+    })
+    expect(atomic.providerAttemptAcknowledgement).toBe('owned_by_finalizer')
+    expect(providerAttemptReporter.report).not.toHaveBeenCalled()
+
+    const perAttempt = await bridge.complete({
+      ...request,
+      targets: [{ target: codexTarget }],
+      acknowledgementMode: 'per_attempt',
+      credentialTicketIssuer: codexTicketIssuer(),
+      providerAttemptReporter,
+    })
+    expect(perAttempt.providerAttemptAcknowledgement).toBe('confirmed')
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'complete',
+    })
+  })
+
+  it('reports a pre-dispatch eligible Codex failure as failed before failing over', async () => {
+    installCodexBinding()
+    const codex = new FakeProvider(() => Promise.reject(new Error('aborted before authorize')), {
+      code: LlmErrorCode.ModelOverloaded,
+      retryable: true,
+      providerDispatched: false,
+    })
+    const second = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({
+      [codexTarget.model]: codex,
+      [fallback.model]: second,
+    })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+
+    const result = await bridge.complete({
+      ...request,
+      targets: [{ target: codexTarget }, { target: fallback }],
+      credentialTicketIssuer: codexTicketIssuer(),
+      providerAttemptReporter,
+    })
+
+    expect(result).toMatchObject({ servedTarget: fallback, fallbackUsed: true, attemptCount: 2 })
+    expect(providerCalls).toEqual([
+      `${codexTarget.provider}/${codexTarget.model}`,
+      `${fallback.provider}/${fallback.model}`,
+    ])
+    expect(providerAttemptReporter.report).toHaveBeenNthCalledWith(1, {
+      providerAttemptId: codexReceipt.providerAttemptId,
+      providerAttemptIndex: 1,
+      status: 'failed',
+    })
   })
 })

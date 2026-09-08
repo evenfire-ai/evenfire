@@ -1,13 +1,20 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { getProviderLabel } from '../lib/llm'
+import { ConnectorCountHoverCard } from './ConnectorCountCell'
 import type { HostItem, HostRef } from './HostTable.types'
 import { LlmProviderIcon } from './LlmProviderIcon'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconRobot } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableEmptyRow } from './TableEmptyRow'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
@@ -16,7 +23,7 @@ import { IconRefresh } from './icons'
 
 const HOST_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
-  { key: 'context', label: 'Connectors', width: '14%' },
+  { key: 'connectors', label: 'Connectors', width: '14%' },
   { key: 'providers', label: 'Providers', minWidth: '8rem' },
   { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
@@ -42,74 +49,10 @@ export function collectProviderIds(spec: Record<string, unknown>): string[] {
   return out
 }
 
-// Hover card over the context cell. Mirrors the `cu-agent-context-mcp-summary`
-// block the create wizard shows for the selected context — the operator gets
-// the same list of attached MCP servers without navigating away. The card is
-// keyboard-accessible (focus + blur mirror hover) and `role="tooltip"` keeps
-// screen readers in sync with what's visible.
-function ContextMcpHoverCard({
-  contextRef,
-  mcpServers,
-  onOpenContext,
-}: {
-  contextRef: string
-  mcpServers: string[] | undefined
-  onOpenContext: (contextRef: string) => void
-}) {
-  const [open, setOpen] = useState(false)
-  const servers = Array.isArray(mcpServers) ? mcpServers : []
-  const hasServers = servers.length > 0
-  const cardId = `ctx-mcp-${contextRef}`
-
-  const trigger = (
-    <button
-      type="button"
-      className="cu-link cu-host-context-count"
-      onClick={e => {
-        e.stopPropagation()
-        onOpenContext(contextRef)
-      }}
-      onKeyDown={e => e.stopPropagation()}
-      aria-describedby={hasServers && open ? cardId : undefined}
-    >
-      {servers.length}
-    </button>
-  )
-
-  if (!hasServers) return trigger
-
-  return (
-    <span
-      className="cu-host-context-hover"
-      onMouseEnter={() => setOpen(true)}
-      onMouseLeave={() => setOpen(false)}
-      onFocus={() => setOpen(true)}
-      onBlur={() => setOpen(false)}
-    >
-      {trigger}
-      {open ? (
-        <div role="tooltip" id={cardId} className="cu-agent-context-mcp-summary">
-          <div className="cu-agent-context-mcp-summary__head">
-            <span>{contextRef}</span>
-            <span>{servers.length}</span>
-          </div>
-          <ul className="cu-agent-context-mcp-summary__list">
-            {servers.map(server => (
-              <li key={server} title={server}>
-                {server}
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-    </span>
-  )
-}
-
 export function HostTable({
   items,
   onOpen,
-  onOpenContext,
+  onOpenConnectors,
   onDelete,
   deletingKey,
   onRefresh,
@@ -120,16 +63,16 @@ export function HostTable({
 }: {
   items: HostItem[]
   onOpen: (host: HostRef) => void
-  onOpenContext: (contextName: string) => void
+  onOpenConnectors: (host: HostRef) => void
   onDelete: (host: HostRef) => Promise<void>
   deletingKey: string | null
   onRefresh: () => void
   onCreateHost: () => void
   refreshing: boolean
   loading?: boolean
-  // contextRef (host.spec.contextRef) → list of attached MCP server names. The
-  // page passes this from the same `/api/v1/admin/contexts` payload the
-  // creation wizard consumes, so the operator sees the same attribution here.
+  // Private contextRef (host.spec.contextRef) → list of attached MCP server
+  // names. Internal enrichment from the same `/api/v1/admin/contexts` payload
+  // the creation wizard consumes; the context itself is never rendered.
   contextsByRef?: Record<string, string[]>
 }) {
   const [searchQuery, setSearchQuery] = useState('')
@@ -153,15 +96,36 @@ export function HostTable({
     if (!normalizedSearch) return rows
     return rows.filter(({ name, displayName, namespace, item }) => {
       const spec = item.spec || {}
-      const contextRef = String(spec.contextRef || '').trim()
       const providers = collectProviderIds(spec)
       const providerLabels = providers.map(id => getProviderLabel(id)).join(' ')
-      return [name, displayName, namespace, contextRef, providerLabels]
+      return [name, displayName, namespace, providerLabels]
         .join(' ')
         .toLowerCase()
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const hostSort = useTableSort<(typeof filteredRows)[number], 'name' | 'connectors' | 'providers'>(
+    {
+      rows: filteredRows,
+      defaultKey: 'name',
+      accessors: {
+        name: row => row.displayName,
+        connectors: row =>
+          contextsByRef?.[String(row.item.spec?.contextRef || '').trim()]?.length ?? 0,
+        providers: row => collectProviderIds(row.item.spec || {}).join(','),
+      },
+      identity: row => row.key,
+    }
+  )
+  const hostColumns = HOST_COLUMNS.map(column => ({
+    ...column,
+    ...(column.key !== 'actions'
+      ? {
+          activeDirection: hostSort.key === column.key ? hostSort.direction : null,
+          onSort: () => hostSort.sortBy(column.key as 'name' | 'connectors' | 'providers'),
+        }
+      : {}),
+  }))
 
   const isInitialLoad = loading && items.length === 0
 
@@ -175,55 +139,52 @@ export function HostTable({
           </>
         }
         subtitle="Manage available agents and their host mappings."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search agents"
-              ariaLabel="Search agents"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload agents'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreateHost}
-              disabled={isInitialLoad}
-            >
-              Create agent
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreateHost}
+            disabled={isInitialLoad}
+          >
+            Create agent
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload agents'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search agents"
+            ariaLabel="Search agents"
+            disabled={isInitialLoad}
+          />
         }
       />
-      {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={4} rows={4} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={hostColumns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={hostColumns.length}
+                kind="loading"
+                message="Loading agents…"
+              />
+            ) : filteredRows.length === 0 ? (
               <TableEmptyRow
-                colSpan={HOST_COLUMNS.length}
+                colSpan={hostColumns.length}
                 message={normalizedSearch ? 'No agents match this search.' : 'No agents found.'}
                 action={
                   normalizedSearch
@@ -231,53 +192,29 @@ export function HostTable({
                     : undefined
                 }
               />
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={HOST_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredRows.map(({ key, namespace, name, displayName, item }) => {
+            ) : (
+              hostSort.sortedRows.map(({ key, namespace, name, displayName, item }) => {
                 const rawContext = String(item.spec?.contextRef || '').trim()
-                const contextRef = rawContext || '-'
-                const contextServers = contextsByRef?.[rawContext]
-                const contextClickable =
-                  Boolean(rawContext) && Array.isArray(contextServers) && contextServers.length > 0
+                const contextServers = rawContext ? contextsByRef?.[rawContext] : undefined
                 const providers = collectProviderIds(item.spec || {})
                 const openAgent = () => onOpen({ namespace, name })
                 return (
-                  <tr
+                  <TableRow
                     key={key}
                     className="cu-table__row cu-table__row--clickable"
-                    onClick={openAgent}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
-                        openAgent()
-                      }
-                    }}
-                    tabIndex={0}
+                    onNavigate={openAgent}
                     aria-label={`Open agent ${name}`}
                   >
                     <td>
-                      <span className="cu-expandable-row__name">{displayName}</span>
-                      {displayName !== name ? (
-                        <div className="cu-table__cell-subtle">{name}</div>
-                      ) : null}
+                      <span className="cu-table__cell-name">{displayName}</span>
                     </td>
                     <td>
-                      {contextClickable ? (
-                        <ContextMcpHoverCard
-                          contextRef={contextRef}
-                          mcpServers={contextServers}
-                          onOpenContext={onOpenContext}
+                      {rawContext ? (
+                        <ConnectorCountHoverCard
+                          hostKey={key}
+                          servers={Array.isArray(contextServers) ? contextServers : []}
+                          onOpenConnectors={() => onOpenConnectors({ namespace, name })}
                         />
-                      ) : rawContext ? (
-                        <span className="cu-table__cell-muted">0</span>
                       ) : (
                         <span className="cu-table__cell-muted">—</span>
                       )}
@@ -327,13 +264,13 @@ export function HostTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }

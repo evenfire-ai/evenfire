@@ -129,6 +129,7 @@ jobs:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
+              - 'packages/frontend-components/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:
@@ -136,9 +137,11 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
+              - 'packages/codex-catalog-projection/**'
             mcp-host:
               - 'mcp-host/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/codex-catalog-projection/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:
@@ -148,6 +151,7 @@ jobs:
             profile-ui:
               - 'profile-ui/**'
               - 'packages/desktop-app-links/**'
+              - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
             workflow-recipes:
@@ -157,6 +161,8 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
+              - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/codex-catalog-projection/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:

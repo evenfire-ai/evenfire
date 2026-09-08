@@ -90,9 +90,7 @@ describe('AppHeader global search idle collapse', () => {
 
     await user.click(input)
     expect(search?.classList.contains('is-open')).toBe(true)
-    expect(
-      screen.getByText('Search teams, contexts, members, agents or connectors...')
-    ).toBeTruthy()
+    expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
 
     await user.tab()
     expect(document.activeElement).not.toBe(input)
@@ -110,9 +108,7 @@ describe('AppHeader global search idle collapse', () => {
 
     await user.clear(input)
     expect(search?.classList.contains('is-open')).toBe(true)
-    expect(
-      screen.getByText('Search teams, contexts, members, agents or connectors...')
-    ).toBeTruthy()
+    expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
   })
 
   it('renders explicit titlebar search chrome for contrast', () => {
@@ -135,8 +131,6 @@ describe('AppHeader global search idle collapse', () => {
     rerender(<AppHeader placement="titlebar" searchFocusRequestId={1} />)
 
     expect(screen.getByRole('textbox', { name: 'Search' })).toBe(document.activeElement)
-    expect(
-      screen.getByText('Search teams, contexts, members, agents or connectors...')
-    ).toBeTruthy()
+    expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
   })
 })

@@ -81,6 +81,24 @@ export type CodexPolicyBinding = {
   models?: string[]
 }
 
+export type CodexEligiblePolicyBinding = {
+  connectionKey: string
+  catalogRevision: number
+  credentialRevision: number
+  model: string
+}
+
+export type CodexEligiblePolicyBindingProjection = {
+  binding: CodexEligiblePolicyBinding | null
+  eligibility: CodexEligibility
+  /**
+   * `eligible` | `unassigned` | `model_missing` | `revision_missing`, or the
+   * `reason` of the underlying `projectCodexExecution` (`flag_off`,
+   * `connection_<status>`, `no_eligible_broker_target`, `snapshot_<error>`).
+   */
+  reason: string
+}
+
 /** Empty or missing → `unassigned`. Never aliases `deployment-default`. */
 export declare function assignedCodexConnectionKey(value?: string | null): string
 export declare function isCodexUnassignedConnectionKey(value?: string | null): boolean
@@ -99,7 +117,24 @@ export declare function projectCodexExecution(
   spec: CodexHostSpec,
   snapshot: CodexCatalogSnapshot
 ): CodexExecutionProjection
+/**
+ * Structural revision view for the Host chat reader (`configStore`). It does
+ * NOT decide eligibility: a transiently `unavailable`/`reauth-required`
+ * connection still yields a binding here on purpose, so a live mcp-host
+ * binding is not wiped by a degraded snapshot. To mint an *execution* binding
+ * use `toEligiblePolicyBinding`.
+ */
 export declare function toPolicyBinding(
   cm: CodexConfigMapView | undefined | null,
   connectionKey?: string
 ): CodexPolicyBinding | null
+/**
+ * Execution-gate binding: `binding !== null` exactly when
+ * `projectCodexExecution` derives `llm:codex:execute` for the same model and
+ * grant. `reason` explains a null binding without a second projection.
+ */
+export declare function toEligiblePolicyBinding(
+  cm: CodexConfigMapView | undefined | null,
+  connectionKey: string | undefined,
+  model: string
+): CodexEligiblePolicyBindingProjection

@@ -6,7 +6,6 @@ import remarkGfm from 'remark-gfm'
 import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
-import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useSearchPluginsAppsController } from '@hooks/domain/useSearchPluginsAppsController'
 import { useTeamsDataController } from '@hooks/domain/useTeamsDataController'
@@ -17,13 +16,11 @@ import type {
   HeaderActionsProps,
   SearchAppResult,
   SearchEntityResult,
-  SearchMemberResult,
   SearchPluginResult,
-  SearchTeamResult,
 } from './types'
 
 const SEARCH_PLACEHOLDER = 'Search'
-const SEARCH_RESULTS_PROMPT = 'Search teams, contexts, members, agents or connectors...'
+const SEARCH_RESULTS_PROMPT = 'Search agents, connectors, plugins or apps...'
 
 function formatApprovalTimestamp(value: string, mode: 'relative' | 'absolute'): string {
   const date = new Date(value)
@@ -94,11 +91,9 @@ export const HeaderActions = React.memo(function HeaderActions({
   onShellOverlayOpenChange,
 }: HeaderActionsProps) {
   const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
-  const { contextIds, contextDisplayById } = useContextsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
-    teamMembers,
     teamDirectory,
     loading: teamDirectoryLoading,
     teamDirectoryHydrated,
@@ -111,8 +106,7 @@ export const HeaderActions = React.memo(function HeaderActions({
     loading: pluginsAppsLoading,
     ensureLoaded: ensurePluginsAppsLoaded,
   } = useSearchPluginsAppsController()
-  const { navItem, handleNavSelect, handleOpenContextDetails, handleOpenTeamDetails } =
-    useNavigationContext()
+  const { handleNavSelect } = useNavigationContext()
   const {
     notifications,
     unreadNotificationCount,
@@ -220,11 +214,6 @@ export const HeaderActions = React.memo(function HeaderActions({
 
   const currentTeamName = teamNameById[currentTeamId] || currentTeamId || 'Workspace team'
 
-  const memberInitial = (member: { label: string; email: string }) => {
-    const source = member.label || member.email
-    return source ? source.charAt(0).toUpperCase() : '?'
-  }
-
   const formatNotificationTime = (timestamp: number) => {
     const elapsedMs = Math.max(0, now - timestamp)
     if (elapsedMs < 60_000) return 'just now'
@@ -266,38 +255,6 @@ export const HeaderActions = React.memo(function HeaderActions({
     event.preventDefault()
     openNotification(notification)
   }
-
-  const selectedTeamMembers = useMemo<SearchMemberResult[]>(() => {
-    return teamMembers.map(member => ({
-      key: `${currentTeamId}:${member.id}`,
-      id: member.id,
-      label: (member.name || member.email).trim(),
-      email: member.email,
-      role: member.role,
-      teamId: currentTeamId,
-      teamName: currentTeamName,
-    }))
-  }, [currentTeamId, currentTeamName, teamMembers])
-
-  const otherTeamMembers = useMemo<SearchMemberResult[]>(() => {
-    const rows: SearchMemberResult[] = []
-    for (const team of teams) {
-      if (team.id === currentTeamId) continue
-      const members = teamDirectory[team.id]?.members || []
-      for (const member of members) {
-        rows.push({
-          key: `${team.id}:${member.id}`,
-          id: member.id,
-          label: (member.name || member.email).trim(),
-          email: member.email,
-          role: member.role,
-          teamId: team.id,
-          teamName: team.name,
-        })
-      }
-    }
-    return rows
-  }, [currentTeamId, teamDirectory, teams])
 
   const aggregatedAgents = useMemo<SearchEntityResult[]>(() => {
     const byName = new Map<
@@ -365,41 +322,6 @@ export const HeaderActions = React.memo(function HeaderActions({
       }))
   }, [accessCatalog, currentTeamId, currentTeamName, teamDirectory, teams])
 
-  const filteredSelectedMembers = useMemo(
-    () =>
-      hasSearch
-        ? selectedTeamMembers.filter(
-            member =>
-              member.label.toLowerCase().includes(normalizedSearch) ||
-              member.email.toLowerCase().includes(normalizedSearch) ||
-              member.role.toLowerCase().includes(normalizedSearch) ||
-              member.teamName.toLowerCase().includes(normalizedSearch)
-          )
-        : [],
-    [hasSearch, selectedTeamMembers, normalizedSearch]
-  )
-  const filteredOtherMembers = useMemo(
-    () =>
-      hasSearch
-        ? otherTeamMembers.filter(
-            member =>
-              member.label.toLowerCase().includes(normalizedSearch) ||
-              member.email.toLowerCase().includes(normalizedSearch) ||
-              member.role.toLowerCase().includes(normalizedSearch) ||
-              member.teamName.toLowerCase().includes(normalizedSearch)
-          )
-        : [],
-    [hasSearch, otherTeamMembers, normalizedSearch]
-  )
-  const filteredMembers = useMemo(
-    () =>
-      [...filteredSelectedMembers, ...filteredOtherMembers].sort((left, right) => {
-        const labelCompare = left.label.localeCompare(right.label)
-        if (labelCompare !== 0) return labelCompare
-        return left.teamName.localeCompare(right.teamName)
-      }),
-    [filteredOtherMembers, filteredSelectedMembers]
-  )
   const filteredAgents = useMemo(
     () =>
       hasSearch
@@ -411,59 +333,6 @@ export const HeaderActions = React.memo(function HeaderActions({
           )
         : [],
     [aggregatedAgents, hasSearch, normalizedSearch]
-  )
-  const aggregatedContexts = useMemo<SearchEntityResult[]>(() => {
-    const byId = new Map<string, { fromSelectedScope: boolean; teamNames: Set<string> }>()
-    const add = (contextId: string, options: { selectedScope?: boolean; teamName?: string }) => {
-      const normalized = contextId.trim()
-      if (!normalized) return
-      const current = byId.get(normalized) || {
-        fromSelectedScope: false,
-        teamNames: new Set<string>(),
-      }
-      if (options.selectedScope) current.fromSelectedScope = true
-      if (options.teamName) current.teamNames.add(options.teamName)
-      byId.set(normalized, current)
-    }
-
-    for (const contextId of contextIds) {
-      add(contextId, { selectedScope: true })
-    }
-
-    if (!contextIds.length) {
-      for (const team of teams) {
-        const ids = teamDirectory[team.id]?.contextIds || []
-        for (const contextId of ids) {
-          add(contextId, { teamName: team.name })
-        }
-      }
-    }
-
-    return [...byId.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([value, details]) => ({
-        key: value,
-        value,
-        // Visible name = context `spec.displayName`; fall back to the id (spec
-        // Decision #6) when no display exists OR the display is blank/whitespace-
-        // only (an out-of-band write must never render an empty context label).
-        display: (contextDisplayById[value] ?? '').trim() || value,
-        fromSelectedScope: details.fromSelectedScope,
-        fromUserScope: false,
-        teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
-      }))
-  }, [contextDisplayById, contextIds, teamDirectory, teams])
-  const filteredContexts = useMemo(
-    () =>
-      hasSearch
-        ? aggregatedContexts.filter(
-            context =>
-              context.value.toLowerCase().includes(normalizedSearch) ||
-              context.display.toLowerCase().includes(normalizedSearch) ||
-              context.teamNames.some(teamName => teamName.toLowerCase().includes(normalizedSearch))
-          )
-        : [],
-    [aggregatedContexts, hasSearch, normalizedSearch]
   )
   const filteredConnectors = useMemo<SearchEntityResult[]>(() => {
     if (!hasSearch) return []
@@ -498,31 +367,6 @@ export const HeaderActions = React.memo(function HeaderActions({
         teamNames: [...agentNames].sort((a, b) => a.localeCompare(b)),
       }))
   }, [globalMcpServers, hasSearch, mcpServersByAgent, normalizedSearch])
-  const filteredTeams = useMemo<SearchTeamResult[]>(
-    () =>
-      hasSearch
-        ? teams
-            .filter(team => {
-              const members =
-                team.id === currentTeamId
-                  ? teamMembers.length
-                  : (teamDirectory[team.id]?.members || []).length
-              return (
-                team.name.toLowerCase().includes(normalizedSearch) ||
-                String(members).includes(normalizedSearch)
-              )
-            })
-            .map(team => ({
-              id: team.id,
-              name: team.name,
-              memberCount:
-                team.id === currentTeamId
-                  ? teamMembers.length
-                  : (teamDirectory[team.id]?.members || []).length,
-            }))
-        : [],
-    [currentTeamId, hasSearch, normalizedSearch, teamDirectory, teamMembers.length, teams]
-  )
   const filteredPlugins = useMemo<SearchPluginResult[]>(
     () =>
       hasSearch
@@ -562,13 +406,7 @@ export const HeaderActions = React.memo(function HeaderActions({
   }, [hasSearch, normalizedSearch, searchApps])
 
   const totalMatches =
-    filteredTeams.length +
-    filteredMembers.length +
-    filteredAgents.length +
-    filteredContexts.length +
-    filteredConnectors.length +
-    filteredPlugins.length +
-    filteredApps.length
+    filteredAgents.length + filteredConnectors.length + filteredPlugins.length + filteredApps.length
   const pendingApprovalsCount = pendingApprovals.length
   const inboxNotificationCount = notifications.length
   const totalAttentionCount = pendingApprovalsCount + unreadNotificationCount
@@ -593,16 +431,6 @@ export const HeaderActions = React.memo(function HeaderActions({
       return
     }
     handleNavSelect(target === 'plugins' ? DESKTOP_ROUTES.plugins : DESKTOP_ROUTES.apps)
-  }
-
-  const navigateToTeam = (teamId: string) => {
-    setSearchOpen(false)
-    handleOpenTeamDetails(teamId)
-  }
-
-  const navigateToContext = (contextId: string) => {
-    setSearchOpen(false)
-    handleOpenContextDetails(contextId)
   }
 
   useEffect(() => {
@@ -680,97 +508,11 @@ export const HeaderActions = React.memo(function HeaderActions({
                 )}
 
                 {teamDirectoryLoading && !teamDirectoryHydrated && (
-                  <p className="search-results-loading">
-                    Loading members and agents from your other teams...
-                  </p>
+                  <p className="search-results-loading">Loading agents from your other teams...</p>
                 )}
 
                 {pluginsAppsLoading && !searchPlugins.length && !searchApps.length && (
                   <p className="search-results-loading">Loading plugins and apps...</p>
-                )}
-
-                {Boolean(filteredTeams.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Teams</header>
-                    <div className="search-results-list">
-                      {filteredTeams.map(team => (
-                        <SelectableOption
-                          key={team.id}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToTeam(team.id)}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{team.name}</strong>
-                            <span className="search-result-subline">
-                              {team.memberCount} member{team.memberCount === 1 ? '' : 's'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">Team</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredContexts.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Contexts</header>
-                    <div className="search-results-list">
-                      {filteredContexts.map(context => (
-                        <SelectableOption
-                          key={context.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToContext(context.value)}
-                          size="sm"
-                        >
-                          <div className="search-result-main">
-                            <strong>{context.display}</strong>
-                            <span className="search-result-subline">
-                              {context.teamNames.length
-                                ? `Teams: ${context.teamNames.join(', ')}`
-                                : 'Access scope'}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">Context</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
-                )}
-
-                {Boolean(filteredMembers.length) && (
-                  <section className="search-results-group">
-                    <header className="search-results-group-title">Members</header>
-                    <div className="search-results-list">
-                      {filteredMembers.map(member => (
-                        <SelectableOption
-                          key={member.key}
-                          className="search-result-item search-result-item-button"
-                          onClick={() => navigateToTeam(member.teamId)}
-                          size="sm"
-                        >
-                          <span className="team-member-initial-avatar">
-                            {memberInitial(member)}
-                          </span>
-                          <div className="search-result-main">
-                            <strong>{member.label}</strong>
-                            <span className="search-result-subline">
-                              {member.email}
-                              {member.role && (
-                                <>
-                                  {' '}
-                                  {' · '}
-                                  {member.role}
-                                </>
-                              )}
-                            </span>
-                          </div>
-                          <span className="search-result-tag">{member.teamName}</span>
-                        </SelectableOption>
-                      ))}
-                    </div>
-                  </section>
                 )}
 
                 {Boolean(filteredAgents.length) && (
@@ -874,8 +616,7 @@ export const HeaderActions = React.memo(function HeaderActions({
 
                 {hasSearch && !totalMatches && !teamDirectoryLoading && !pluginsAppsLoading && (
                   <p className="search-results-empty">
-                    No matches for "{searchQuery.trim()}". Try a member email, team name, context,
-                    agent, connector, plugin, or app.
+                    No matches for "{searchQuery.trim()}". Try an agent, connector, plugin, or app.
                   </p>
                 )}
               </div>
@@ -906,7 +647,7 @@ export const HeaderActions = React.memo(function HeaderActions({
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
-              strokeWidth={titlebarPlacement ? '2.3' : '2'}
+              strokeWidth={titlebarPlacement ? '2.25' : '2'}
             >
               <path
                 strokeLinecap="round"

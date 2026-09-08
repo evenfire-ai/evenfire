@@ -64,7 +64,6 @@ describe('Sidebar publisher gating', () => {
     expect(labels).toEqual([
       'Users & Teams',
       'Agents',
-      'Contexts',
       'Marketplace',
       'Installed Connectors',
       'Installed Plugins',

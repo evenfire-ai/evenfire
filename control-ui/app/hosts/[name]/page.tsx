@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
 import { SelectionDropdown } from '@components/SelectionDropdown'
@@ -106,7 +107,7 @@ function agentConnectorMutationError(error: unknown): string {
   if ((error as { status?: unknown } | null)?.status === 409) {
     return 'This agent’s connectors changed since they were loaded. Reload the agent and try again.'
   }
-  if (error instanceof Error && /context version is unavailable/i.test(error.message)) {
+  if (error instanceof Error && /required version is unavailable/i.test(error.message)) {
     return 'This agent’s connector settings are missing a server version. Reload the agent and try again.'
   }
   return contextMutationError(error, 'Failed to update connectors for this agent.')
@@ -1321,8 +1322,8 @@ export default function HostDetailsPage() {
                 </button>
               </div>
             </div>
-            <div className="cu-table-wrap">
-              <table className="cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
                 <thead>
                   <tr>
                     <th>Connector</th>
@@ -1369,8 +1370,8 @@ export default function HostDetailsPage() {
                     ))
                   )}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           </>
         )}
 

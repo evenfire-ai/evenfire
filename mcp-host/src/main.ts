@@ -107,6 +107,7 @@ import {
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
 } from './pluginWorkloadSdk/bootstrapIdentity'
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
+import { sdkOnlyBindingAsPolicy } from './pluginWorkloadSdk/sdkOnlyCodexBinding'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
 import { sanitizeError } from './progress/intentExtraction'
@@ -3183,6 +3184,7 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
   }
 
   console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
+  setCodexPolicyBindingReader(() => sdkOnlyBindingAsPolicy())
 
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   if (!runtimeAuth) {

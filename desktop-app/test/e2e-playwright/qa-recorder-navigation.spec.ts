@@ -77,15 +77,9 @@ test('optional QA recorder: Desktop navigation journey — footer settings menu'
     }
     await expect(settingsMenu).toHaveAttribute('aria-expanded', 'true')
 
-    // Resources submenu expands and exposes the data-route destinations.
-    const resourcesMenu = page.getByTestId('nav-data-menu')
-    await expect(resourcesMenu).toBeVisible({ timeout: 20_000 })
-    if ((await resourcesMenu.getAttribute('aria-expanded')) !== 'true') {
-      await resourcesMenu.click()
-    }
-    await expect(resourcesMenu).toHaveAttribute('aria-expanded', 'true')
-
-    for (const itemTestId of ['nav-agents', 'nav-contexts', 'nav-teams', 'nav-mcp-servers']) {
+    // The data-route destinations hang directly off the Settings popover — the
+    // intermediate "Resources" submenu (and the Contexts/Teams entries) is gone.
+    for (const itemTestId of ['nav-agents', 'nav-mcp-servers', 'nav-workflows']) {
       await expect(page.getByTestId(itemTestId)).toBeVisible({ timeout: 20_000 })
     }
 
@@ -121,21 +115,15 @@ test('optional QA recorder: Desktop navigation journey — resources pages', asy
       timeout: 20_000,
     })
 
-    // Contexts page shell.
-    await openResourcesNavItem(page, 'nav-contexts')
-    await expect(page.getByRole('heading', { name: 'Contexts', exact: true })).toBeVisible({
-      timeout: 20_000,
-    })
-
-    // Teams page heading reads "Members & Teams".
-    await openResourcesNavItem(page, 'nav-teams')
-    await expect(page.getByRole('heading', { name: /Members & Teams/ })).toBeVisible({
-      timeout: 20_000,
-    })
-
     // Connectors (MCP servers) page shell.
     await openResourcesNavItem(page, 'nav-mcp-servers')
     await expect(page.getByRole('heading', { name: 'Connectors', exact: true })).toBeVisible({
+      timeout: 20_000,
+    })
+
+    // Plugins (workflows) page shell.
+    await openResourcesNavItem(page, 'nav-workflows')
+    await expect(page.getByRole('heading', { name: 'Plugins', exact: true })).toBeVisible({
       timeout: 20_000,
     })
 

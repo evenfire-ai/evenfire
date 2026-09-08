@@ -78,12 +78,12 @@ function checkPolicyL1(parsed: { spec?: unknown } | null): ServerValidationError
       field: 'spec.security.allowContextRef',
       rule: 'agenticWorkflowContextRefBlocked',
       message:
-        `This agentic recipe references the shared Context "${ctxRef}". ` +
+        `This agentic recipe references the shared connector scope "${ctxRef}". ` +
         `Choose one of two paths:\n` +
         `  • Option A — opt in to sharing: add \`"security": { "allowContextRef": true }\` to spec, ` +
         `and ensure a WorkflowRecipePolicy with \`allowContextRef: true\` exists in the target namespace.\n` +
         `  • Option B — keep it private: remove \`spec.contextRef\` entirely. ` +
-        `WRC will auto-create a private Context "wf-<recipeName>" for this recipe, ` +
+        `WRC will auto-create a private connector scope for this recipe, ` +
         `with no first-party server sharing and no policy required.`,
     }
   }
@@ -2595,7 +2595,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
             or teams were authorized in the access panel above. Non-blocking: the
             recipe still deploys, but it becomes invisible to every Desktop App
             user because trigger authorization rejects callers without a direct
-            user grant or context-bound team grant. Admins can still see it in
+            user grant or scope-bound team grant. Admins can still see it in
             the Control UI, so this often goes unnoticed until a user asks why
             the recipe isn't in their list.
           */}

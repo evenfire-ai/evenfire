@@ -302,6 +302,54 @@ function toPolicyBinding(cm, connectionKey) {
   return { catalogRevision, credentialRevision, connectionKey: key }
 }
 
+/**
+ * Mint an execution policy binding for one (grant, model) pair using the SAME
+ * eligibility cascade that decides `llm:codex:execute`. It is deliberately a
+ * caller of `projectCodexExecution` with a synthetic single-target spec, not a
+ * second copy of the cascade: the invariant
+ * `binding !== null ⇔ derivedScopes.includes(CODEX_EXECUTE_SCOPE)`
+ * is what keeps the scope gate and the binding gate from drifting apart.
+ *
+ * Always returns an object so the caller can log `reason` (e.g.
+ * `connection_reauth-required`) without projecting a second time.
+ */
+function toEligiblePolicyBinding(cm, connectionKey, model) {
+  const key = assignedCodexConnectionKey(connectionKey)
+  const trimmedModel = typeof model === 'string' ? model.trim() : ''
+  if (key === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return { binding: null, eligibility: 'ineligible', reason: 'unassigned' }
+  }
+  if (!trimmedModel) {
+    return { binding: null, eligibility: 'ineligible', reason: 'model_missing' }
+  }
+  const snapshot = parseAllowedModelsSnapshot(cm, key)
+  const projection = projectCodexExecution(
+    { model: { provider: CODEX_PROVIDER, name: trimmedModel } },
+    snapshot
+  )
+  if (projection.eligibility !== 'eligible') {
+    return { binding: null, eligibility: projection.eligibility, reason: projection.reason }
+  }
+  // Revisions come from the normalized snapshot (assigned.* first, global
+  // annotations as the legacy shape). The writer always emits both.
+  if (
+    !Number.isInteger(snapshot.catalogRevision) ||
+    !Number.isInteger(snapshot.connectionRevision)
+  ) {
+    return { binding: null, eligibility: 'ineligible', reason: 'revision_missing' }
+  }
+  return {
+    binding: {
+      connectionKey: key,
+      catalogRevision: snapshot.catalogRevision,
+      credentialRevision: snapshot.connectionRevision,
+      model: trimmedModel,
+    },
+    eligibility: 'eligible',
+    reason: 'eligible',
+  }
+}
+
 module.exports = {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   CONTENT_HASH_ANNOTATION,
@@ -322,4 +370,5 @@ module.exports = {
   collectCodexTargets,
   projectCodexExecution,
   toPolicyBinding,
+  toEligiblePolicyBinding,
 }

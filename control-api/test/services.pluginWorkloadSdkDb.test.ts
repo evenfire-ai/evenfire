@@ -10,10 +10,12 @@ import {
   hasUsableClientNotificationRecipients,
   hashPromptTargetPolicy,
   markPluginWorkloadSdkProviderAttemptStatus,
+  promoteReservedOauthBrokerProviderAttempt,
   redeemPluginWorkloadSdkCredentialTicketJti,
   registerPluginWorkloadSdkCredentialTicketJti,
   reservePluginWorkloadSdkProviderAttempt,
   resolveRecipientProfiles,
+  reviveFailedInvocation,
   revokePluginWorkloadSdkForRecipe,
   updateInvocationStatus,
   upsertGrant,
@@ -400,7 +402,14 @@ describe('invocation retry lifecycle timestamps', () => {
   it('sweeps by the latest retry timestamp rather than the original reservation', async () => {
     vi.mocked(pool.query)
       .mockResolvedValueOnce({
-        rows: [{ id: 'inv-1', attempt_generation: 2 }],
+        rows: [
+          {
+            id: 'inv-1',
+            attempt_generation: 2,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
         rowCount: 1,
       } as never)
       .mockResolvedValueOnce({
@@ -419,27 +428,297 @@ describe('invocation retry lifecycle timestamps', () => {
         ],
         rowCount: 1,
       } as never)
-      .mockResolvedValue({ rows: [], rowCount: 1 } as never)
+      .mockResolvedValue({ rows: [{ id: 'inv-1' }], rowCount: 1 } as never)
     await expect(failStaleInvocations(150)).resolves.toBe(1)
     const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
-    expect(sql).toContain("SET status = 'provider_unavailable'")
+    expect(sql).toContain('FROM plugin_workload_sdk_invocations')
     expect(sql).toContain('lease_expires_at < now()')
     expect(sql).toContain('lease_expires_at IS NULL')
     expect(sql).toContain('updated_at < now()')
-    expect(sql).toContain('RETURNING id, attempt_generation')
-    expect(pool.query).toHaveBeenCalledTimes(5)
+    expect(sql).toContain('FOR UPDATE')
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([statement]: [string]) => statement.includes('pg_advisory_xact_lock'))
+    ).toBe(false)
+    expect(pool.query).toHaveBeenCalledTimes(6)
     expect(vi.mocked(pool.query).mock.calls[1]?.[0] as string).toContain(
       'FROM plugin_workload_sdk_provider_attempts'
     )
     expect(vi.mocked(pool.query).mock.calls[2]?.[0] as string).toContain(
-      'INSERT INTO plugin_workload_sdk_spend_outcomes'
+      "SET status = 'provider_unavailable'"
     )
     expect(vi.mocked(pool.query).mock.calls[3]?.[0] as string).toContain(
-      "SET status = 'provider_unavailable'"
+      'INSERT INTO plugin_workload_sdk_spend_outcomes'
     )
     expect(vi.mocked(pool.query).mock.calls[4]?.[0] as string).toContain(
       "SET status = 'provider_unavailable'"
     )
+    expect(vi.mocked(pool.query).mock.calls[5]?.[0] as string).toContain(
+      "SET status = 'provider_unavailable'"
+    )
+  })
+
+  it('does not freeze oauth spend while a linked Codex attempt is still in flight', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'inv-codex',
+            attempt_generation: 1,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-codex',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'primary-codex',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'codex-1',
+            caller_kind: 'recipe',
+            host_ref: 'sandbox-recipes/sdk-recipe',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            invocation_id: 'inv-codex',
+            attempt_generation: 1,
+            provider_attempt_index: 1,
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            request_hash: 'hash',
+            policy_revision: 1,
+            policy_hash: 'a'.repeat(64),
+            budget_reservation_id: 'budget-1',
+            connection_revision: 1,
+            plugin_workload_sdk_provider_attempt_id: 'attempt-codex',
+            status: 'authorized',
+            outcome: null,
+            usage_input_tokens: null,
+            usage_output_tokens: null,
+            created_at: new Date(),
+          },
+        ],
+        rowCount: 1,
+      } as never)
+    await expect(failStaleInvocations(150)).resolves.toBe(0)
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([sql]: [string]) =>
+          sql.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+        )
+    ).toBe(false)
+    expect(
+      vi
+        .mocked(pool.query)
+        .mock.calls.some(([sql]: [string]) => sql.includes("SET status = 'provider_unavailable'"))
+    ).toBe(false)
+  })
+
+  it('freezes oauth spend after the linked Codex in-flight grace expires', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'inv-codex-stale',
+            attempt_generation: 1,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-codex-stale',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'primary-codex',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'codex-stale',
+            caller_kind: 'recipe',
+            host_ref: 'sandbox-recipes/sdk-recipe',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            invocation_id: 'inv-codex-stale',
+            attempt_generation: 1,
+            provider_attempt_index: 1,
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            request_hash: 'hash',
+            policy_revision: 1,
+            policy_hash: 'a'.repeat(64),
+            budget_reservation_id: 'budget-1',
+            connection_revision: 1,
+            plugin_workload_sdk_provider_attempt_id: 'attempt-codex-stale',
+            status: 'authorized',
+            outcome: null,
+            usage_input_tokens: null,
+            usage_output_tokens: null,
+            created_at: new Date(Date.now() - 16 * 60 * 1000),
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValue({ rows: [{ id: 'inv-codex-stale' }], rowCount: 1 } as never)
+    await expect(failStaleInvocations(150)).resolves.toBe(1)
+    const insert = vi
+      .mocked(pool.query)
+      .mock.calls.find(([sql]: [string]) =>
+        sql.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+      ) as unknown as [string, unknown[]] | undefined
+    expect(insert).toBeDefined()
+    // No usage ever arrived, so unknown is the honest floor. Finalize derives
+    // exact later if the Codex row lands.
+    expect(insert?.[1]?.slice(11, 16)).toEqual(['unknown', 'stale_lease', null, null, null])
+  })
+
+  it('freezes oauth spend as exact when the linked Codex usage is already ready', async () => {
+    vi.mocked(pool.query)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'inv-codex-ready',
+            attempt_generation: 1,
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'attempt-codex-ready',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            attempt_generation: 1,
+            attempt_index: 1,
+            target_ref: 'primary-codex',
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            credential_slot: '',
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValueOnce({
+        rows: [
+          {
+            id: 'codex-ready',
+            caller_kind: 'recipe',
+            host_ref: 'sandbox-recipes/sdk-recipe',
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: 'sdk-recipe',
+            invocation_id: 'inv-codex-ready',
+            attempt_generation: 1,
+            provider_attempt_index: 1,
+            provider: 'codex-subscription',
+            model: 'gpt-5.1',
+            request_hash: 'hash',
+            policy_revision: 1,
+            policy_hash: 'a'.repeat(64),
+            budget_reservation_id: 'budget-1',
+            connection_revision: 1,
+            plugin_workload_sdk_provider_attempt_id: 'attempt-codex-ready',
+            status: 'finalized',
+            outcome: 'success',
+            usage_input_tokens: 12,
+            usage_output_tokens: 7,
+            created_at: new Date(),
+          },
+        ],
+        rowCount: 1,
+      } as never)
+      .mockResolvedValue({ rows: [{ id: 'inv-codex-ready' }], rowCount: 1 } as never)
+
+    await expect(failStaleInvocations(150)).resolves.toBe(1)
+
+    // Addendum A.4 "best-floor writers": a ready Codex row freezes exact in
+    // BOTH writers, so the sweeper no longer under-reports spend it can prove
+    // without a JWT. host_ref stays NULL (no host to attribute) and
+    // usage_request_id stays NULL (the sweeper ingests no usage_events row).
+    const insert = vi
+      .mocked(pool.query)
+      .mock.calls.find(([sql]: [string]) =>
+        sql.includes('INSERT INTO plugin_workload_sdk_spend_outcomes')
+      ) as unknown as [string, unknown[]] | undefined
+    expect(insert?.[1]?.[7]).toBeNull()
+    expect(insert?.[1]?.slice(11, 16)).toEqual(['exact', 'stale_lease', 12, 7, null])
+  })
+})
+
+describe('SQL contracts that a silent edit would otherwise break', () => {
+  beforeEach(() => {
+    vi.mocked(pool.query).mockReset()
+    txClient.query.mockClear()
+    vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 1 } as never)
+  })
+
+  it('refuses to promote a reserved attempt that already carries a credential jti', async () => {
+    // The JTI-free authorize-link path must never adopt an attempt that the
+    // secret-ticket path already claimed. Dropping this predicate leaves the
+    // whole suite green, so assert the clause itself.
+    await promoteReservedOauthBrokerProviderAttempt(
+      {
+        id: 'attempt-1',
+        invocationId: 'inv-1',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'sdk-recipe',
+        attemptGeneration: 1,
+        attemptIndex: 1,
+        model: 'gpt-5.1',
+        targetRef: 'primary-codex',
+      },
+      pool
+    )
+    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('AND credential_jti IS NULL')
+    expect(sql).toContain("AND status = 'reserved'")
+    expect(sql).toContain("AND provider = 'codex-subscription'")
+  })
+
+  it('only revives an invocation that is persisted as failed', async () => {
+    // The counterpart of finalize's double-charge guard: an oauth close whose
+    // Codex row was already billed is persisted as provider_unavailable, and
+    // this predicate is what makes that state non-revivable.
+    await reviveFailedInvocation({
+      id: 'inv-1',
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'sdk-recipe',
+      leaseSeconds: 180,
+    })
+    const [sql] = txClient.query.mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain("AND status = 'failed'")
+    expect(sql).not.toMatch(/status\s+IN\s*\(/i)
   })
 })
 

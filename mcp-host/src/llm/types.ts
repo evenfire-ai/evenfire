@@ -45,6 +45,18 @@ export interface ClassifiedError {
    */
   httpStatus?: number
   providerCode?: string
+  /**
+   * Execution-phase signal. `false` means the classifier PROVED that no call
+   * left this process (the attempt died before authorize or before the proxy
+   * stream), so the physical attempt cannot have billed. `true` means a call
+   * left the process or may have. `undefined` means the classifier does not
+   * know — consumers must assume the expensive direction (dispatched).
+   *
+   * Only a classifier that can prove the negative may set `false`: marking a
+   * dispatched attempt as `false` would leave the idempotency key revivable
+   * and permit a second billable call.
+   */
+  providerDispatched?: boolean
 }
 
 /**

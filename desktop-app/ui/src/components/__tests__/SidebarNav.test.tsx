@@ -114,9 +114,10 @@ describe('SidebarNav logo', () => {
     expect(filesItem.textContent).toContain('Files')
     expect(filesItem.textContent).not.toContain('Global File System')
 
-    // Files is no longer nested under the Settings → Resources submenu.
+    // Files is a top-level nav item, never nested inside the Settings popover.
     fireEvent.click(screen.getByTestId('nav-settings-menu'))
-    expect(screen.getByTestId('nav-data-menu').textContent).not.toContain('Global File System')
+    const settingsMenu = document.querySelector('.sidebar-settings-menu')
+    expect(settingsMenu?.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
   it('mounts the GFS solid-folder SVG inside the Files nav item so the icon is visible', () => {
@@ -219,5 +220,80 @@ describe('SidebarNav new-chat affordance', () => {
     render(<SidebarNav {...baseProps({ collapsed: true })} />)
 
     expect(screen.queryByTestId('nav-new-chat')).toBeNull()
+  })
+})
+
+describe('SidebarNav flattened resources menu', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    if (!window.matchMedia) {
+      Object.defineProperty(window, 'matchMedia', {
+        writable: true,
+        configurable: true,
+        value: vi.fn().mockImplementation((query: string) => ({
+          matches: false,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        })),
+      })
+    }
+  })
+
+  afterEach(() => {
+    cleanup()
+  })
+
+  it('exposes only Agents, Connectors and Plugins as data items, directly under Settings', () => {
+    render(<SidebarNav {...baseProps()} />)
+
+    // The three data items live inside the Settings popover, so open it first.
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+
+    expect(screen.getByTestId('nav-agents')).not.toBeNull()
+    expect(screen.getByTestId('nav-mcp-servers')).not.toBeNull()
+    expect(screen.getByTestId('nav-workflows')).not.toBeNull()
+  })
+
+  it('no longer renders the Contexts or Teams menu entries', () => {
+    render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+
+    expect(screen.queryByTestId('nav-contexts')).toBeNull()
+    expect(screen.queryByTestId('nav-teams')).toBeNull()
+  })
+
+  it('removes the intermediate "Resources" submenu level entirely', () => {
+    const { container } = render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+
+    // The "Resources" trigger and its submenu container are gone; the three
+    // items hang directly off the Settings popover.
+    expect(screen.queryByTestId('nav-data-menu')).toBeNull()
+    expect(container.querySelector('.sidebar-data-submenu')).toBeNull()
+  })
+
+  it('renders the three data items as direct children of the Settings popover menu', () => {
+    render(<SidebarNav {...baseProps()} />)
+    fireEvent.click(screen.getByTestId('nav-settings-menu'))
+
+    const settingsMenu = document.querySelector('.sidebar-settings-menu')
+    expect(settingsMenu).not.toBeNull()
+    // Direct descendants (no wrapping submenu element between them and the popover).
+    for (const testId of ['nav-agents', 'nav-mcp-servers', 'nav-workflows']) {
+      const item = screen.getByTestId(testId)
+      expect(item.closest('.sidebar-data-submenu')).toBeNull()
+      expect(settingsMenu?.contains(item)).toBe(true)
+    }
+  })
+
+  it('marks the Settings popover active when on a data route', () => {
+    render(<SidebarNav {...baseProps({ navItem: 'agents' })} />)
+    const trigger = screen.getByTestId('nav-settings-menu')
+    expect(trigger.classList.contains('active')).toBe(true)
   })
 })

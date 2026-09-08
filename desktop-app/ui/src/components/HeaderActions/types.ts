@@ -8,31 +8,15 @@ export type HeaderActionsProps = {
   onShellOverlayOpenChange?: (open: boolean) => void
 }
 
-export type SearchMemberResult = {
-  email: string
-  id: string
-  key: string
-  label: string
-  role: string
-  teamId: string
-  teamName: string
-}
-
 export type SearchEntityResult = {
   fromSelectedScope: boolean
   fromUserScope: boolean
   key: string
   teamNames: string[]
-  /** Stable identifier (agent `metadata.name` / context id) — used for keys, navigation and filtering. */
+  /** Stable agent or connector identifier used for keys, navigation and filtering. */
   value: string
-  /** Human-visible label rendered to the user (agent `spec.host` / context `spec.displayName`). */
+  /** Human-visible label rendered to the user. */
   display: string
-}
-
-export type SearchTeamResult = {
-  id: string
-  name: string
-  memberCount: number
 }
 
 export type SearchPluginResult = {
