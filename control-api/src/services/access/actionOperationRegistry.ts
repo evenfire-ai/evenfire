@@ -34,6 +34,7 @@ export type ActionOperationFamily =
   | 'workflow_read'
   | 'workflow_trigger'
   | 'workflow_run_management'
+  | 'workflow_artifact_list'
   | 'workflow_artifact_read'
   | 'workflow_artifact_delete'
   | 'workflow_approval'
@@ -87,6 +88,7 @@ const EXTERNAL_RPC_ADMISSION_CLASS_BY_OPERATION: Readonly<
   'workflow.read': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.trigger': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.run.manage': EXTERNAL_RPC_ADMISSION_CLASS,
+  'workflow.artifact.list': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.artifact.read': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.artifact.delete': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.approval.decide': EXTERNAL_RPC_ADMISSION_CLASS,
@@ -350,6 +352,13 @@ const definitions: ActionOperationDefinition[] = [
     ['workflow.run.manage'],
     BEHAVIOR_DIMENSIONS,
     effect('before_effect', ['control_api', 'workflow_runtime'])
+  ),
+  operation(
+    'workflow.artifact.list',
+    'workflow_artifact_list',
+    ['workflow.artifact.read'],
+    filesystem,
+    { ...read(), delegation: 'exact', downstreamVerifiers: ['control_api'] }
   ),
   operation(
     'workflow.artifact.read',

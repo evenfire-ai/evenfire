@@ -45,6 +45,7 @@ export declare const ACTION_OPERATION_IDS: readonly [
   'workflow.read',
   'workflow.trigger',
   'workflow.run.manage',
+  'workflow.artifact.list',
   'workflow.artifact.read',
   'workflow.artifact.delete',
   'workflow.approval.decide',
