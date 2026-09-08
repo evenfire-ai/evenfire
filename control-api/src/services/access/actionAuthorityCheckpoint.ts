@@ -6,6 +6,7 @@ import {
   canonicalActionTarget,
   hashActionTarget,
   requireActionOperationId,
+  validateCanonicalResourceIdentity,
 } from '@clerum/action-context-contracts'
 import type { K8sGateway } from '../../k8s.js'
 import type { ActionCheckpointCallerIdentity } from '../../middleware/actionCheckpointCaller.js'
@@ -35,19 +36,11 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
 }
 
 function parseResource(value: unknown): CanonicalResourceIdentity {
-  if (!isPlainObject(value)) throw new Error('invalid_binding')
-  const keys = ['environmentId', 'type', 'canonicalId', 'logicalId', 'displayName']
-  if (Object.prototype.hasOwnProperty.call(value, 'providerUid')) keys.push('providerUid')
-  if (!hasExactKeys(value, keys)) throw new Error('invalid_binding')
-  const resource = canonicalResourceIdentity({
-    environmentId: value.environmentId,
-    type: value.type,
-    logicalId: value.logicalId,
-    displayName: value.displayName,
-    ...(value.providerUid !== undefined ? { providerUid: value.providerUid } : {}),
-  })
-  if (JSON.stringify(resource) !== JSON.stringify(value)) throw new Error('invalid_binding')
-  return resource
+  try {
+    return validateCanonicalResourceIdentity(value) as CanonicalResourceIdentity
+  } catch {
+    throw new Error('invalid_binding')
+  }
 }
 
 export function parseActionAuthorityCheckpointRequest(
@@ -96,7 +89,10 @@ export function parseActionAuthorityCheckpointRequest(
     JSON.stringify(resource) !== JSON.stringify(domainResource) ||
     (caller.permittedResource !== undefined &&
       (resource.type !== caller.permittedResource.type ||
-        resource.logicalId !== caller.permittedResource.logicalId))
+        resource.logicalId !== caller.permittedResource.logicalId)) ||
+    (caller.permittedResourceTypes !== undefined &&
+      !caller.permittedResourceTypes.includes(resource.type as 'host' | 'workflow_recipe')) ||
+    (caller.permittedOperations !== undefined && !caller.permittedOperations.includes(operationId))
   ) {
     throw new Error('invalid_binding')
   }

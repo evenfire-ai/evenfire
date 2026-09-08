@@ -19,6 +19,12 @@ import { enqueueWorkflowApprovalTraceProjection } from './tracing/workflowApprov
 import type { WorkflowRunActorType, WorkflowRunRow } from './workflowRunService.js'
 import type { TriggerAllowedActor } from './workflows/types.js'
 import {
+  WORKFLOW_APPROVAL_CONSUME_TRANSITION_ID,
+  deriveApprovalConsumeAuthority,
+} from './workflows/workflowActionTransition.js'
+import type { WorkflowAuthorityBinding } from './workflows/workflowAuthorityBindingService.js'
+import { persistWorkflowAuthorityBinding } from './workflows/workflowAuthorityBindingService.js'
+import {
   type WorkflowTriggerGrantResult,
   resolveWorkflowTriggerGrant,
 } from './workflows/workflowTriggerGrantResolver.js'
@@ -82,6 +88,13 @@ export class ApprovalTriggerRunIdempotencyConflictError extends Error {
   }
 }
 
+export class WorkflowApprovalAuthorityRequiredError extends Error {
+  constructor(message = 'A v2 workflow approval requires exact decision authority') {
+    super(message)
+    this.name = 'WorkflowApprovalAuthorityRequiredError'
+  }
+}
+
 export type ApprovalPayload = { message: string; options?: string[]; metadata?: unknown }
 
 const WORKFLOW_RUN_ID_PREFIX =
@@ -97,7 +110,7 @@ export async function resolveWorkflowApprovalRunBinding(
     correlation?: { taskId?: string; stepId?: string }
     runBindingProof?: string
   }
-): Promise<{ runId: string; stepId: string } | null> {
+): Promise<{ runId: string; stepId: string; authorityBindingId: string | null } | null> {
   const proof = params.runBindingProof?.trim()
   const taskId = params.correlation?.taskId
   if (typeof taskId !== 'string' || !WORKFLOW_RUN_ID_PREFIX.test(taskId)) {
@@ -119,7 +132,8 @@ export async function resolveWorkflowApprovalRunBinding(
   }
   const proofSha256 = createHash('sha256').update(proof).digest('hex')
   const result = await db.query(
-    `SELECT wr.run_id::text AS "runId", step.step_id AS "stepId"
+    `SELECT wr.run_id::text AS "runId", step.step_id AS "stepId",
+            wr.initiating_authority_binding_id::text AS "authorityBindingId"
        FROM workflow_runs wr
        JOIN workflow_run_steps step
          ON step.run_id = wr.run_id
@@ -142,7 +156,12 @@ export async function resolveWorkflowApprovalRunBinding(
     [runId, params.recipeNamespace, params.recipeName, stepId, proofSha256, childRecipeName]
   )
   if (!result.rows[0]) throw new InvalidWorkflowApprovalRunBindingError()
-  return { runId, stepId }
+  const authorityBindingId = (result.rows[0] as { authorityBindingId?: unknown }).authorityBindingId
+  return {
+    runId,
+    stepId,
+    authorityBindingId: typeof authorityBindingId === 'string' ? authorityBindingId : null,
+  }
 }
 export type WorkflowTriggerIntent = {
   namespace: string
@@ -332,9 +351,9 @@ export async function createApprovalRequest(params: {
       `INSERT INTO workflow_approval_requests
          (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id,
           payload, idempotency_key, correlation, payload_hash,
-          bound_workflow_run_id, bound_workflow_step_id)
+          bound_workflow_run_id, bound_workflow_step_id, trigger_authority_binding_id)
        VALUES ($1, $2, NOW() + interval '1 second' * $3, 'pending', $4, $5,
-               $6::jsonb, $7, $8::jsonb, $9, $10::uuid, $11)
+               $6::jsonb, $7, $8::jsonb, $9, $10::uuid, $11, $12::uuid)
        ON CONFLICT (recipe_namespace, recipe_name, idempotency_key) DO NOTHING
        RETURNING id, expires_at, status`,
       [
@@ -349,6 +368,7 @@ export async function createApprovalRequest(params: {
         payloadHash,
         runBinding?.runId ?? null,
         runBinding?.stepId ?? null,
+        runBinding?.authorityBindingId ?? null,
       ]
     )
 
@@ -641,7 +661,8 @@ async function createWorkflowRunForApprovedTriggerIntent(
             watri.output_overrides AS "outputOverrides",
             watri.max_duration_seconds AS "maxDurationSeconds",
             watri.ttl_seconds_after_finished AS "ttlSecondsAfterFinished",
-            watri.idempotency_payload_hash AS "idempotencyPayloadHash"
+            watri.idempotency_payload_hash AS "idempotencyPayloadHash",
+            war.trigger_authority_binding_id AS "authorityBindingId"
        FROM workflow_approval_trigger_run_intents watri
        JOIN workflow_approval_trigger_intents wati
          ON wati.approval_request_id = watri.approval_request_id
@@ -669,6 +690,7 @@ async function createWorkflowRunForApprovedTriggerIntent(
     maxDurationSeconds: number | null
     ttlSecondsAfterFinished: number | null
     idempotencyPayloadHash: string
+    authorityBindingId: string | null
   }
 
   await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
@@ -689,7 +711,8 @@ async function createWorkflowRunForApprovedTriggerIntent(
     if (
       existingRow.idempotency_payload_hash !== row.idempotencyPayloadHash ||
       existingRow.approval_request_id !== params.approvalRequestId ||
-      existingRow.actor_id !== row.actorId
+      existingRow.actor_id !== row.actorId ||
+      existingRow.initiating_authority_binding_id !== row.authorityBindingId
     ) {
       throw new ApprovalTriggerRunIdempotencyConflictError()
     }
@@ -712,9 +735,9 @@ async function createWorkflowRunForApprovedTriggerIntent(
        recipe_namespace, recipe_name, phase, actor_type, team_id, usage_team_id, actor_id,
        idempotency_key, trigger_source, inputs, intermediate_parameters,
        output_overrides, max_duration_seconds, ttl_seconds_after_finished, approval_request_id,
-       idempotency_payload_hash
+       idempotency_payload_hash, initiating_authority_binding_id
      )
-     VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, $15)
+     VALUES ($1, $2, 'Pending', $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, $13, $14, $15, $16)
      RETURNING *`,
     [
       row.recipeNamespace,
@@ -735,6 +758,7 @@ async function createWorkflowRunForApprovedTriggerIntent(
       row.ttlSecondsAfterFinished,
       params.approvalRequestId,
       row.idempotencyPayloadHash,
+      row.authorityBindingId,
     ]
   )
 
@@ -751,7 +775,9 @@ export async function recordDecision(
   decidedBy: { userId: string; teamId?: string },
   note?: string,
   audit?: RecordDecisionAudit,
-  dbTx?: DbClient
+  dbTx?: DbClient,
+  authority?: WorkflowAuthorityBinding | null,
+  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
 ): Promise<RecordDecisionResult> {
   const work = async (db: DbClient): Promise<RecordDecisionResult> => {
     // Fetch requested_at so we can compute decision latency for the histogram
@@ -759,11 +785,13 @@ export async function recordDecision(
     const current = await db.query(
       `SELECT status,
               expires_at <= NOW() AS "isExpired",
+              expires_at AS "expiresAt",
               requested_at AS "requestedAt",
               recipe_namespace AS "recipeNamespace",
               recipe_name AS "recipeName",
               target_user_id AS "targetUserId",
               target_team_id AS "targetTeamId",
+              trigger_authority_binding_id AS "triggerAuthorityBindingId",
               payload
          FROM workflow_approval_requests
         WHERE id = $1
@@ -778,11 +806,13 @@ export async function recordDecision(
     const row = current.rows[0] as {
       status: ApprovalStatus
       isExpired?: boolean
+      expiresAt: string | Date
       requestedAt?: string | Date | null
       recipeNamespace: string
       recipeName: string
       targetUserId?: string | null
       targetTeamId?: string | null
+      triggerAuthorityBindingId?: string | null
       payload?: unknown
     }
     if (row.status !== 'pending') {
@@ -825,6 +855,24 @@ export async function recordDecision(
       return { ok: false, error: 'approval_requester_mismatch' }
     }
 
+    if (row.triggerAuthorityBindingId && !authority) {
+      throw new WorkflowApprovalAuthorityRequiredError()
+    }
+
+    const currentAuthority = reauthorize ? await reauthorize() : authority
+    if (authority && currentAuthority?.bindingHash !== authority.bindingHash) {
+      throw new Error('workflow_approval_authority_changed')
+    }
+
+    const decisionBindingId = currentAuthority
+      ? await persistWorkflowAuthorityBinding(db, {
+          authority: currentAuthority,
+          kind: 'approval_decision',
+          entityType: 'workflow_approval',
+          entityId: id,
+        })
+      : null
+
     const decidedAt = new Date()
     const decidedAtIso = decidedAt.toISOString()
     await db.query(
@@ -834,7 +882,8 @@ export async function recordDecision(
               decided_at = $4,
               decided_by_user_id = $5,
               client_ip = $6,
-              user_agent = $7
+              user_agent = $7,
+              decision_authority_binding_id = COALESCE($8, decision_authority_binding_id)
         WHERE id = $1`,
       [
         id,
@@ -849,6 +898,7 @@ export async function recordDecision(
         decidedBy.userId,
         audit?.clientIp ?? null,
         audit?.userAgent ?? null,
+        decisionBindingId,
       ]
     )
     await enqueueApprovalUpdatedNotification(db, {
@@ -867,6 +917,29 @@ export async function recordDecision(
             db
           )
         : null
+
+    if (decision === 'approve' && currentAuthority && decisionBindingId) {
+      const consumeAuthority = deriveApprovalConsumeAuthority({
+        parent: currentAuthority,
+        recipeNamespace: row.recipeNamespace,
+        recipeName: row.recipeName,
+        approvalExpiresAt: row.expiresAt,
+      })
+      const consumeBindingId = await persistWorkflowAuthorityBinding(db, {
+        authority: consumeAuthority,
+        kind: 'approval_consume',
+        entityType: 'workflow_approval',
+        entityId: id,
+        parentBindingId: decisionBindingId,
+        transitionId: WORKFLOW_APPROVAL_CONSUME_TRANSITION_ID,
+      })
+      await db.query(
+        `UPDATE workflow_approval_requests
+            SET consume_authority_binding_id = $2
+          WHERE id = $1 AND status = 'consumed'`,
+        [id, consumeBindingId]
+      )
+    }
 
     approvalsDecidedTotal.inc({ decision: decision === 'approve' ? 'approved' : 'denied' }, 1)
 
