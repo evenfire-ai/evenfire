@@ -1,6 +1,13 @@
 'use client'
 
-import React, { useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import {
   COMMUNICATION_CHANNEL_PROVIDERS,
   type CommunicationChannelProvider,
@@ -12,7 +19,6 @@ import { useConfirmDialog } from './ConfirmDialog'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconBroadcast } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -29,10 +35,10 @@ function summary(item: CommunicationChannelItem): string {
 }
 
 const COMMUNICATION_CHANNEL_COLUMNS: TableHeaderColumn[] = [
-  { key: 'name', label: 'Name' },
-  { key: 'agent', label: 'Agent', width: '18%' },
-  { key: 'type', label: 'Type', width: '18%' },
-  { key: 'actions', width: '7rem', align: 'right', ariaLabel: 'Actions' },
+  { key: 'name', label: 'Name', width: '50%' },
+  { key: 'agent', label: 'Agent', width: '22%' },
+  { key: 'type', label: 'Type', width: '16%' },
+  { key: 'actions', width: '3.5rem', align: 'right', ariaLabel: 'Actions' },
 ]
 
 function hasConversationEntries(
@@ -86,7 +92,6 @@ export function CommunicationChannelsTable({
   refreshing,
   onCreateChannel,
   onCopyChannel,
-  onEditChannel,
   onOpenChannel,
 }: {
   items: CommunicationChannelItem[]
@@ -96,7 +101,6 @@ export function CommunicationChannelsTable({
   refreshing?: boolean
   onCreateChannel?: () => void
   onCopyChannel?: (name: string, provider: CommunicationChannelProvider) => void
-  onEditChannel?: (name: string) => void
   onOpenChannel?: (name: string) => void
 }) {
   const [deletingKey, setDeletingKey] = useState<string | null>(null)
@@ -130,6 +134,30 @@ export function CommunicationChannelsTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const channelSort = useTableSort<(typeof filteredRows)[number], 'name' | 'agent' | 'type'>({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: row => row.key,
+    accessors: {
+      name: row => row.item.metadata?.name,
+      agent: row => row.item.spec?.hostRef,
+      type: row =>
+        COMMUNICATION_CHANNEL_PROVIDERS.filter(provider =>
+          configuredProviders(row.item).has(provider)
+        )
+          .map(communicationChannelProviderLabel)
+          .join(', '),
+    },
+  })
+  const columns = COMMUNICATION_CHANNEL_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: channelSort.key === column.key ? channelSort.direction : null,
+          onSort: () => channelSort.sortBy(column.key as 'name' | 'agent' | 'type'),
+        }
+  )
 
   async function deleteRow(item: CommunicationChannelItem) {
     const name = item.metadata?.name
@@ -172,39 +200,41 @@ export function CommunicationChannelsTable({
             </>
           }
           subtitle="Route channel messages to the selected agent."
-          actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search channels"
-                ariaLabel="Search communication channels"
-                disabled={isInitialLoad}
-              />
-              {onRefresh && (
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--icon cu-btn--toolbar"
-                  onClick={() => void onRefresh()}
-                  disabled={refreshing || isInitialLoad}
-                  aria-label={refreshing ? 'Refreshing…' : 'Reload communication channels'}
-                >
-                  <IconRefresh
-                    className={refreshing ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
-                </button>
-              )}
+          primaryAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => onCreateChannel?.()}
+              disabled={!onCreateChannel || isInitialLoad}
+            >
+              Add channel
+            </button>
+          }
+          refreshAction={
+            onRefresh ? (
               <button
                 type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => onCreateChannel?.()}
-                disabled={!onCreateChannel || isInitialLoad}
+                className="cu-btn cu-btn--icon cu-btn--toolbar"
+                onClick={() => void onRefresh()}
+                disabled={refreshing || isInitialLoad}
+                aria-label={refreshing ? 'Refreshing…' : 'Reload communication channels'}
               >
-                Add channel
+                <IconRefresh
+                  className={refreshing ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
               </button>
-            </>
+            ) : undefined
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search channels"
+              ariaLabel="Search communication channels"
+              disabled={isInitialLoad}
+            />
           }
         />
         {error ? (
@@ -212,29 +242,27 @@ export function CommunicationChannelsTable({
             {error}
           </div>
         ) : null}
-        {isInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
-              </thead>
-              <tbody>
-                <SkeletonTableRows columns={COMMUNICATION_CHANNEL_COLUMNS.length} rows={3} />
-              </tbody>
-            </table>
-          </div>
-        ) : filteredRows.length === 0 ? (
-          <div className="cu-empty">
-            {normalizedSearch ? 'No channels match this search.' : 'No resources found.'}
-          </div>
-        ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <TableHeaderRow columns={COMMUNICATION_CHANNEL_COLUMNS} />
-              </thead>
-              <tbody>
-                {filteredRows.map(({ key, item }) => {
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band cu-external-channels-table">
+            <thead>
+              <TableHeaderRow columns={columns} />
+            </thead>
+            <tbody>
+              {isInitialLoad ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  kind="loading"
+                  message="Loading communication channels…"
+                />
+              ) : filteredRows.length === 0 ? (
+                <TableStateRow
+                  colSpan={columns.length}
+                  message={
+                    normalizedSearch ? 'No channels match this search.' : 'No resources found.'
+                  }
+                />
+              ) : (
+                channelSort.sortedRows.map(({ key, item }) => {
                   const name = item.metadata?.name || '-'
                   const spec = item.spec || {}
                   const configuredProviderTypes = configuredProviders(item)
@@ -242,64 +270,58 @@ export function CommunicationChannelsTable({
                     configuredProviderTypes.has(provider)
                   )
                   return (
-                    <React.Fragment key={key}>
-                      <tr>
-                        <td>
-                          <button
-                            type="button"
-                            className="cu-channel-table__name"
-                            onClick={() => onOpenChannel?.(name)}
-                            disabled={!onOpenChannel}
-                          >
-                            {name}
-                          </button>
-                        </td>
-                        <td>
-                          <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
-                        </td>
-                        <td>
-                          {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
-                        </td>
-                        <td>
-                          <div className="cu-table-actions">
-                            <RowActionsMenu
-                              ariaLabel={`Actions for channel ${name}`}
-                              horizontalTrigger
-                              actions={[
-                                ...(onEditChannel
-                                  ? [
-                                      {
-                                        key: 'edit',
-                                        label: 'Edit',
-                                        onClick: () => onEditChannel(name),
-                                      },
-                                    ]
-                                  : []),
-                                ...copyTargetsForChannel(item).map(provider => ({
-                                  key: `copy-${provider}`,
-                                  label: `Copy config into ${communicationChannelProviderLabel(provider)}`,
-                                  onClick: () => onCopyChannel?.(name, provider),
-                                  disabled: !onCopyChannel,
-                                })),
-                                {
-                                  key: 'delete',
-                                  label: deletingKey === key ? 'Deleting…' : 'Delete',
-                                  danger: true,
-                                  disabled: deletingKey === key,
-                                  onClick: () => void deleteRow(item),
-                                },
-                              ]}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    </React.Fragment>
+                    <TableRow
+                      key={key}
+                      onNavigate={onOpenChannel ? () => onOpenChannel(name) : undefined}
+                    >
+                      <td>
+                        <span className="cu-channel-table__name">{name}</span>
+                      </td>
+                      <td>
+                        <span className="cu-table__cell-muted">{spec.hostRef || '-'}</span>
+                      </td>
+                      <td>
+                        {providerTypes.map(communicationChannelProviderLabel).join(', ') || '-'}
+                      </td>
+                      <td className="cu-table__cell-actions">
+                        <div className="cu-table-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for channel ${name}`}
+                            horizontalTrigger
+                            actions={[
+                              ...(onOpenChannel
+                                ? [
+                                    {
+                                      key: 'view',
+                                      label: 'View details',
+                                      onClick: () => onOpenChannel(name),
+                                    },
+                                  ]
+                                : []),
+                              ...copyTargetsForChannel(item).map(provider => ({
+                                key: `copy-${provider}`,
+                                label: `Copy config into ${communicationChannelProviderLabel(provider)}`,
+                                onClick: () => onCopyChannel?.(name, provider),
+                                disabled: !onCopyChannel,
+                              })),
+                              {
+                                key: 'delete',
+                                label: deletingKey === key ? 'Deleting…' : 'Delete',
+                                danger: true,
+                                disabled: deletingKey === key,
+                                onClick: () => void deleteRow(item),
+                              },
+                            ]}
+                          />
+                        </div>
+                      </td>
+                    </TableRow>
                   )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </TableViewport>
       </div>
       {confirmDialog}
     </>

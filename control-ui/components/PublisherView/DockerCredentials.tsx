@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useState } from 'react'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type CreatedRegistryApiKey,
@@ -231,8 +232,8 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
         view.keys.length === 0 ? (
           <p>No push credentials yet.</p>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={COLUMNS} />
               </thead>
@@ -258,8 +259,8 @@ export function DockerCredentialsPanel({ orgScope }: { orgScope: string }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+          </TableViewport>
         )
       ) : null}
 

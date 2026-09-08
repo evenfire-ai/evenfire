@@ -393,7 +393,7 @@ export function UsageDashboard() {
           </>
         }
         subtitle="Track token usage and request volume across LLM activity."
-        actions={
+        refreshAction={
           <button
             type="button"
             className="cu-btn cu-btn--icon cu-btn--toolbar"

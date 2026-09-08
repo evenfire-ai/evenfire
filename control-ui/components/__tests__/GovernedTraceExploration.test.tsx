@@ -42,6 +42,16 @@ vi.mock('../GovernedTraceSurface/InfrastructureOperationalSnapshot', () => ({
 
 const mockGetEvents = vi.mocked(getGovernedTraceEvents)
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, reject, resolve }
+}
+
 const BASE_EVENT = {
   streamSequence: '40',
   schemaVersion: 1,
@@ -301,5 +311,95 @@ describe('GovernedEventExplorer', () => {
       expect(screen.getByText('Target Host · host:1st:mcp-host/chatllm')).toBeInTheDocument()
     )
     expect(screen.queryByText('Service or resource-level change')).not.toBeInTheDocument()
+  })
+
+  it('ignores stale load-more results after the governed event order changes', async () => {
+    const stalePage = deferred<Awaited<ReturnType<typeof getGovernedTraceEvents>>>()
+    mockGetEvents.mockImplementation((_path, query) => {
+      if (query.cursor === 'old-cursor') return stalePage.promise
+      if (query.cursor === 'new-cursor') {
+        return Promise.resolve({
+          events: [
+            {
+              ...ADMIN_EVENT,
+              eventId: 'oldest-more',
+              targetRef: 'new-order-more',
+            },
+          ],
+          nextCursor: null,
+          capturedHighWatermark: '43',
+        })
+      }
+      if (query.order === 'oldest') {
+        return Promise.resolve({
+          events: [
+            {
+              ...ADMIN_EVENT,
+              eventId: 'oldest-base',
+              targetRef: 'new-order-base',
+            },
+          ],
+          nextCursor: 'new-cursor',
+          capturedHighWatermark: '42',
+        })
+      }
+      return Promise.resolve({
+        events: [
+          {
+            ...ADMIN_EVENT,
+            eventId: 'latest-base',
+            targetRef: 'old-order-base',
+          },
+        ],
+        nextCursor: 'old-cursor',
+        capturedHighWatermark: '41',
+      })
+    })
+
+    render(
+      <GovernedEventExplorer
+        family="administrative"
+        subtitle="Administrative changes"
+        title="Administrative"
+      />
+    )
+
+    await screen.findByText(content => content.includes('old-order-base'))
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Occurred ascending' }))
+
+    await screen.findByText(content => content.includes('new-order-base'))
+    stalePage.resolve({
+      events: [
+        {
+          ...ADMIN_EVENT,
+          eventId: 'stale-more',
+          targetRef: 'stale-old-order-row',
+        },
+      ],
+      nextCursor: 'stale-cursor',
+      capturedHighWatermark: '41',
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText(content => content.includes('stale-old-order-row'))
+      ).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
+
+    await waitFor(() => {
+      expect(mockGetEvents).toHaveBeenLastCalledWith(
+        '/api/v1/admin/tracing/events',
+        expect.objectContaining({
+          cursor: 'new-cursor',
+          order: 'oldest',
+        })
+      )
+    })
+    expect(
+      await screen.findByText(content => content.includes('new-order-more'))
+    ).toBeInTheDocument()
   })
 })

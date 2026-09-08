@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { copyTextToClipboard } from '@lib/clipboard'
 import {
   CODEX_DEVICE_VERIFICATION_URI,
@@ -130,6 +137,15 @@ export function CodexSubscriptionHub() {
       [grantLabel(row), row.connectionKey, row.status].join(' ').toLowerCase().includes(q)
     )
   }, [connections, searchQuery])
+  const subscriptionSort = useTableSort<CodexSubscriptionConnectionView, 'name' | 'status'>({
+    rows: filtered,
+    defaultKey: 'name',
+    identity: row => row.connectionKey,
+    accessors: {
+      name: grantLabel,
+      status: row => statusLabel(mapConnectionStatus(row.status)),
+    },
+  })
 
   // Create makes the grant with the typed display name and starts the device
   // sign-in right away — by the time the operator approves the code, the
@@ -395,41 +411,43 @@ export function CodexSubscriptionHub() {
             </>
           }
           subtitle="Manage LLM, connector, and recipe credentials in one place."
-          actions={
-            <>
-              <SectionSearchInput
-                value={searchQuery}
-                onChange={setSearchQuery}
-                placeholder="Search secrets"
-                ariaLabel="Search ChatGPT subscriptions"
-                disabled={initialLoad}
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() =>
-                  void load().catch(err => {
-                    setError(
-                      err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
-                    )
-                  })
-                }
-                disabled={initialLoad || loading}
-                aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
-              >
-                <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => {
-                  beginCreate()
-                }}
-                disabled={initialLoad}
-              >
-                Add subscription
-              </button>
-            </>
+          primaryAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => {
+                beginCreate()
+              }}
+              disabled={initialLoad}
+            >
+              Add subscription
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() =>
+                void load().catch(err => {
+                  setError(
+                    err instanceof Error ? err.message : 'Failed to load ChatGPT subscriptions'
+                  )
+                })
+              }
+              disabled={initialLoad || loading}
+              aria-label={loading ? 'Refreshing...' : 'Reload ChatGPT subscriptions'}
+            >
+              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={searchQuery}
+              onChange={setSearchQuery}
+              placeholder="Search secrets"
+              ariaLabel="Search ChatGPT subscriptions"
+              disabled={initialLoad}
+            />
           }
         />
 
@@ -443,51 +461,47 @@ export function CodexSubscriptionHub() {
           </div>
         ) : null}
 
-        {initialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: 3 }).map((_, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '55%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '40%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '4rem' }} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="cu-empty">
-            {searchQuery.trim()
-              ? 'No ChatGPT subscriptions match this search.'
-              : 'No ChatGPT subscriptions found.'}
-          </div>
-        ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Status</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map(row => {
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table cu-table--header-band">
+            <thead>
+              <tr>
+                <TableHeaderCell
+                  activeDirection={
+                    subscriptionSort.key === 'name' ? subscriptionSort.direction : null
+                  }
+                  label="Name"
+                  onSort={() => subscriptionSort.sortBy('name')}
+                />
+                <TableHeaderCell
+                  activeDirection={
+                    subscriptionSort.key === 'status' ? subscriptionSort.direction : null
+                  }
+                  label="Status"
+                  onSort={() => subscriptionSort.sortBy('status')}
+                />
+                <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
+              </tr>
+            </thead>
+            <tbody>
+              {initialLoad ? (
+                <TableStateRow
+                  colSpan={3}
+                  kind="loading"
+                  message="Loading ChatGPT subscriptions…"
+                />
+              ) : error && filtered.length === 0 ? (
+                <TableStateRow colSpan={3} kind="error" message={error} />
+              ) : filtered.length === 0 ? (
+                <TableStateRow
+                  colSpan={3}
+                  message={
+                    searchQuery.trim()
+                      ? 'No ChatGPT subscriptions match this search.'
+                      : 'No ChatGPT subscriptions found.'
+                  }
+                />
+              ) : (
+                subscriptionSort.sortedRows.map(row => {
                   const mapped = mapConnectionStatus(row.status)
                   return (
                     <tr key={row.connectionKey}>
@@ -495,35 +509,33 @@ export function CodexSubscriptionHub() {
                       <td>
                         <span className={statusTagClass(mapped)}>{statusLabel(mapped)}</span>
                       </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <RowActionsMenu
-                            ariaLabel={`Actions for ChatGPT subscription ${grantLabel(row)}`}
-                            horizontalTrigger
-                            actions={[
-                              {
-                                key: 'update',
-                                label: 'Update',
-                                onClick: () => void openEdit(row),
-                              },
-                              {
-                                key: 'delete',
-                                label: busyKey === row.connectionKey ? 'Deleting…' : 'Delete',
-                                danger: true,
-                                disabled: busyKey === row.connectionKey,
-                                onClick: () => void handleRevoke(row),
-                              },
-                            ]}
-                          />
-                        </div>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ChatGPT subscription ${grantLabel(row)}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'update',
+                              label: 'Update',
+                              onClick: () => void openEdit(row),
+                            },
+                            {
+                              key: 'delete',
+                              label: busyKey === row.connectionKey ? 'Deleting…' : 'Delete',
+                              danger: true,
+                              disabled: busyKey === row.connectionKey,
+                              onClick: () => void handleRevoke(row),
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   )
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
+                })
+              )}
+            </tbody>
+          </DataTable>
+        </TableViewport>
       </div>
       {creating || editing ? (
         <div
