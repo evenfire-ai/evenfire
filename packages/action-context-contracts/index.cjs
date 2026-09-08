@@ -789,12 +789,12 @@ targets(
 targets(
   ['sandbox.oauth.vend'],
   ['sandbox_app'],
-  targetSchema(['recipeNamespace', 'recipeName', 'provider'], ['grantId'], {}, recipeBinding)
+  targetSchema(['recipeNamespace', 'recipeName', 'oauthClientId'], [], {}, recipeBinding)
 )
 targets(
   ['sandbox.oauth.disconnect'],
   ['sandbox_app'],
-  targetSchema(['recipeNamespace', 'recipeName', 'provider', 'grantId'], [], {}, recipeBinding)
+  targetSchema(['recipeNamespace', 'recipeName', 'oauthClientId'], [], {}, recipeBinding)
 )
 targets(
   ['notification.read'],

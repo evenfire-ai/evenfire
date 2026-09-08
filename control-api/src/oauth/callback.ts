@@ -6,6 +6,7 @@ import {
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
 } from './providers.js'
+import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 import type { OAuthMcpStateClaims } from './state.js'
 import { signOAuthState, verifyOAuthStateSignature } from './state.js'
 import { bootstrapSharedOAuthGrant, setUserGrantBackground, upsertOAuthGrant } from './store.js'
@@ -246,7 +247,7 @@ export async function handleOAuthCallback(
   }
   if (!recipe) return { kind: 'recipe_not_found' }
 
-  const clientDecl = recipe.spec?.oauthClients?.find(c => c.id === oauthClientId)
+  const clientDecl = resolveExactRecipeOAuthClient(recipe, oauthClientId)
   if (!clientDecl) return { kind: 'unknown_oauth_client' }
 
   // ─── 3-4. Read secrets + exchange code ────────────────────────────────

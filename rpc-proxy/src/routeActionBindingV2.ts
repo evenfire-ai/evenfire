@@ -85,6 +85,22 @@ function candidateForRequest(req: AuthedRequest): {
       recipeNamespace: requiredString(req.params.recipeNs),
       recipeName: requiredString(req.params.recipeName),
     }
+    if (
+      method === 'POST' &&
+      (path === '/sandbox-ui/:recipeNs/:recipeName/oauth/authorize-url' ||
+        path === '/sandbox-ui/:recipeNs/:recipeName/oauth/token')
+    ) {
+      return {
+        operationId: 'sandbox.oauth.vend',
+        target: { ...target, oauthClientId: requiredString(record(req.body).oauthClientId) },
+      }
+    }
+    if (method === 'DELETE' && path === '/sandbox-ui/:recipeNs/:recipeName/oauth/grant') {
+      return {
+        operationId: 'sandbox.oauth.disconnect',
+        target: { ...target, oauthClientId: requiredString(record(req.body).oauthClientId) },
+      }
+    }
     if (method === 'POST' && path === '/sandbox-ui/:recipeNs/:recipeName/session') {
       return { operationId: 'sandbox.open', target }
     }
