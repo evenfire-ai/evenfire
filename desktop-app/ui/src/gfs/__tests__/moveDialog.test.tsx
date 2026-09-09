@@ -194,3 +194,59 @@ describe('GfsMoveDialog pagination', () => {
     expect(within(dialog).queryByRole('button', { name: 'Load more' })).toBeNull()
   })
 })
+
+describe('GfsMoveDialog no-op destination guard', () => {
+  it('does not preselect the current parent and reports the real current location', async () => {
+    const listAccessible = vi.fn(async () => ({
+      items: [folder('folder-1', 'Product'), folder('arch-1', 'Archive')],
+      nextCursor: null,
+    }))
+
+    renderDialog({ listAccessible }, { initialCrumbs: [parentCrumb] })
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // The location pill names the folder that CONTAINS the target (the last
+    // crumb), never the selection — and the old trap preselected exactly it.
+    expect(within(dialog).getByText('Product', { selector: 'strong' })).toBeTruthy()
+    expect(within(dialog).getByText('Select a destination folder')).toBeTruthy()
+    const moveButton = within(dialog).getByRole('button', { name: 'Move' }) as HTMLButtonElement
+    expect(moveButton.disabled).toBe(true)
+  })
+
+  it('refuses a no-op move into the folder that already contains the target', async () => {
+    const onMove = vi.fn(async () => undefined)
+    const listAccessible = vi.fn(async () => ({
+      items: [folder('folder-1', 'Product'), folder('arch-1', 'Archive')],
+      nextCursor: null,
+    }))
+
+    // Row-style target carrying its real parent id (e.g. a root-listed file
+    // that actually lives in a shared folder).
+    renderDialog(
+      { listAccessible },
+      {
+        onMove,
+        target: { ...target, parentResourceId: 'folder-1' },
+        initialCrumbs: [],
+      }
+    )
+
+    const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
+    // No breadcrumb context: the pill is honest about the unknown name.
+    expect(within(dialog).getByText('another shared folder')).toBeTruthy()
+
+    const productRow = await within(dialog).findByRole('button', { name: 'Product' })
+    await fireEvent.click(productRow)
+    const noOpButton = within(dialog).getByRole('button', {
+      name: 'Move here (Product)',
+    }) as HTMLButtonElement
+    expect(noOpButton.disabled).toBe(true)
+    expect(within(dialog).getByText(/is already in/)).toBeTruthy()
+
+    // A different destination still commits normally.
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    await fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+    expect(onMove).toHaveBeenCalledWith('arch-1', 'Archive')
+    expect(onMove).toHaveBeenCalledTimes(1)
+  })
+})

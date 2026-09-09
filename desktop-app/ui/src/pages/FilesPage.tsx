@@ -2,6 +2,7 @@ import {
   type DragEvent as ReactDragEvent,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -162,6 +163,9 @@ const GFS_UPLOAD_NAME_RETRY_LIMIT = 100
  *  guard). */
 type GfsActionTarget = Pick<GfsDriveResource, 'resourceId' | 'name' | 'version'> & {
   kind: 'file' | 'directory'
+  /** Present on list rows (GfsBrowserChild) — the move dialog uses it to
+   * refuse a no-op move into the folder that already contains the target. */
+  parentResourceId?: string | null
 }
 
 type GfsInlineRenameProps = {
@@ -232,6 +236,7 @@ function GfsInlineRename({
 export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
+  const [createFolderError, setCreateFolderError] = useState<string | null>(null)
   const [renameName, setRenameName] = useState('')
   const [renameOpen, setRenameOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -258,6 +263,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
   const uploadNameReservationsRef = useRef(new Map<string, Set<string>>())
+  const createFolderTitleId = useId()
+  const createFolderDescriptionId = useId()
+  const createFolderInputId = useId()
   const queryClient = useQueryClient()
   const ctrl = useGfsBrowserController({ grantsListEnabled: manageOpen })
   const {
@@ -353,6 +361,32 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     manageReturnCrumbsRef.current = null
     if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
   }, [ctrl.restoreCrumbs])
+  const closeCreateFolder = useCallback(() => {
+    setCreateFolderOpen(false)
+    setCreateFolderName('')
+    setCreateFolderError(null)
+    const returnCrumbs = manageReturnCrumbsRef.current
+    manageReturnCrumbsRef.current = null
+    if (returnCrumbs) ctrl.restoreCrumbs(returnCrumbs)
+  }, [ctrl.restoreCrumbs])
+  const openCreateFolder = useCallback(() => {
+    setCreateFolderName('')
+    setCreateFolderError(null)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+    setShareDetailsOpen(false)
+    setManageOpen(false)
+    setCreateFolderOpen(true)
+  }, [])
+
+  useEffect(() => {
+    if (!createFolderOpen) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !ctrl.mutating) closeCreateFolder()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [closeCreateFolder, createFolderOpen, ctrl.mutating])
   const accessRevoked = ctrl.accessState === 'revoked'
   // R4 spec §1: on an authority failure every local surface that could show
   // or act on stale GFS data must close — preview bytes, Manage, Move, rename,
@@ -600,15 +634,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()
     if (!requestedName) return
+    setCreateFolderError(null)
     try {
       const name = await normalizeGfsResourceName(requestedName)
       await ctrl.createFolder(name)
-      setCreateFolderName('')
-      setCreateFolderOpen(false)
+      closeCreateFolder()
       pushToast?.(`Folder ${name} created`, 'success')
     } catch (createError) {
       if (failClosedOnAuthorizationError(createError)) return
-      pushToast?.(createError instanceof Error ? createError.message : String(createError), 'error')
+      setCreateFolderError(createError instanceof Error ? createError.message : String(createError))
     }
   }
 
@@ -1149,17 +1183,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             </div>
             {currentIsFolder && canWriteCurrent ? (
               <div className="da-gfs-drive__header-actions">
-                <Button
-                  disabled={ctrl.mutating}
-                  onClick={() => {
-                    setCreateFolderName('')
-                    setCreateFolderOpen(true)
-                    setRenameOpen(false)
-                    setDeleteOpen(false)
-                    setManageOpen(true)
-                  }}
-                  size="sm"
-                >
+                <Button disabled={ctrl.mutating} onClick={openCreateFolder} size="sm">
                   <IconContexts width={16} height={16} />
                   New folder
                 </Button>
@@ -1589,13 +1613,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                       resourceName={current.name}
                       onCopyLink={() => void handleCopyLink(current.gfsUri)}
                       onCreateFolder={
-                        currentIsFolder && canWriteCurrent
-                          ? () => {
-                              setCreateFolderName('')
-                              setCreateFolderOpen(true)
-                              setDeleteOpen(false)
-                            }
-                          : undefined
+                        currentIsFolder && canWriteCurrent ? openCreateFolder : undefined
                       }
                       onDelete={
                         canDeleteCurrent
@@ -1649,45 +1667,6 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
             </header>
 
             <div className="da-gfs-manage-dialog__body">
-              {currentIsFolder && canWriteCurrent && createFolderOpen ? (
-                <form
-                  className="da-gfs-inline-form da-gfs-create-folder-form"
-                  aria-label="Create folder"
-                  onSubmit={event => {
-                    event.preventDefault()
-                    void handleCreateFolder()
-                  }}
-                >
-                  <div className="da-gfs-create-folder-form__heading">
-                    <h4>New folder</h4>
-                    <p className="muted">Create a folder in {current.name}.</p>
-                  </div>
-                  <label className="da-gfs-inline-form__field da-gfs-create-folder-form__field">
-                    <span>Folder name</span>
-                    <TextInput
-                      autoFocus
-                      value={createFolderName}
-                      onChange={event => setCreateFolderName(event.currentTarget.value)}
-                    />
-                  </label>
-                  <div className="da-gfs-create-folder-form__actions">
-                    <Button
-                      onClick={() => {
-                        setCreateFolderName('')
-                        setCreateFolderOpen(false)
-                      }}
-                      size="sm"
-                      type="button"
-                      variant="ghost"
-                    >
-                      Cancel
-                    </Button>
-                    <Button loading={ctrl.mutating} size="sm" type="submit">
-                      Create folder
-                    </Button>
-                  </div>
-                </form>
-              ) : null}
               {canDeleteCurrent && deleteOpen ? (
                 <div className="da-gfs-inline-form" role="alertdialog" aria-label="Delete resource">
                   <span className="da-gfs-inline-form__copy">Delete {current.name}?</span>
@@ -1767,6 +1746,69 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 </section>
               ) : null}
             </div>
+          </section>
+        </div>
+      ) : null}
+
+      {createFolderOpen && currentIsFolder && canWriteCurrent ? (
+        <div
+          className="da-gfs-manage-modal da-gfs-new-folder-modal"
+          role="presentation"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget && !ctrl.mutating) closeCreateFolder()
+          }}
+        >
+          <section
+            aria-describedby={createFolderDescriptionId}
+            aria-labelledby={createFolderTitleId}
+            aria-modal="true"
+            className="da-gfs-new-folder-dialog"
+            onMouseDown={event => event.stopPropagation()}
+            role="dialog"
+          >
+            <header className="da-gfs-new-folder-dialog__header">
+              <h3 id={createFolderTitleId}>New folder</h3>
+            </header>
+            <p className="da-gfs-new-folder-dialog__copy" id={createFolderDescriptionId}>
+              Create a new folder in {current.name}.
+            </p>
+            <form
+              aria-label="Create folder"
+              className="da-gfs-new-folder-dialog__form"
+              onSubmit={event => {
+                event.preventDefault()
+                void handleCreateFolder()
+              }}
+            >
+              <label className="da-gfs-new-folder-dialog__field" htmlFor={createFolderInputId}>
+                <span>Folder name</span>
+                <TextInput
+                  aria-label="Folder name"
+                  autoComplete="off"
+                  autoFocus
+                  disabled={ctrl.mutating}
+                  id={createFolderInputId}
+                  placeholder="e.g. research-notes"
+                  spellCheck={false}
+                  value={createFolderName}
+                  onChange={event => setCreateFolderName(event.currentTarget.value)}
+                />
+              </label>
+              {createFolderError ? <StatusBanner tone="error" text={createFolderError} /> : null}
+              <footer className="da-gfs-new-folder-dialog__actions">
+                <Button
+                  disabled={ctrl.mutating}
+                  onClick={closeCreateFolder}
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button disabled={!createFolderName.trim()} loading={ctrl.mutating} type="submit">
+                  Create folder
+                </Button>
+              </footer>
+            </form>
           </section>
         </div>
       ) : null}

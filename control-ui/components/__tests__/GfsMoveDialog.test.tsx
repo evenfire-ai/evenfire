@@ -49,13 +49,60 @@ describe('GfsMoveDialog', () => {
 
     const archive = await within(dialog).findByRole('button', { name: 'Archive' })
     expect(archive.classList.contains('cu-gfs-move-dialog__tree-select')).toBe(true)
+
+    // The location pill reports the folder that CONTAINS the target (from the
+    // crumbs) — never the pending selection.
+    expect(within(dialog).getAllByText('Product', { selector: 'strong' })).toHaveLength(1)
     fireEvent.click(archive)
 
     await waitFor(() => {
-      expect(within(dialog).getAllByText('Archive', { selector: 'strong' })).toHaveLength(2)
+      expect(within(dialog).getAllByText('Archive', { selector: 'strong' })).toHaveLength(1)
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() => expect(onMove).toHaveBeenCalledWith('archive-1', 'Archive'))
+  })
+
+  it('refuses a no-op move into the folder that already contains the target', async () => {
+    mockApiGet.mockImplementation(async path => {
+      if (path === '/api/v1/gfs/tree') {
+        return {
+          items: [
+            { resourceId: 'product-1', name: 'Product', kind: 'directory' },
+            { resourceId: 'archive-1', name: 'Archive', kind: 'directory' },
+          ],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const onMove = vi.fn(async () => undefined)
+
+    render(
+      <GfsMoveDialog
+        initialCrumbs={[{ id: 'product-1', name: 'Product' }]}
+        onClose={vi.fn()}
+        onMove={onMove}
+        target={{ resourceId: 'file-1', name: 'notes.txt', kind: 'file' }}
+      />
+    )
+
+    const dialog = screen.getByRole('dialog', { name: 'Move file notes.txt' })
+    // The current parent is never preselected.
+    expect(within(dialog).getByText('Select a destination folder')).toBeTruthy()
+
+    const product = await within(dialog).findByRole('button', { name: 'Product' })
+    fireEvent.click(product)
+    const noOpButton = within(dialog).getByRole('button', {
+      name: 'Move here (Product)',
+    }) as HTMLButtonElement
+    expect(noOpButton.disabled).toBe(true)
+    expect(within(dialog).getByText(/is already in Product/)).toBeTruthy()
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
+
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith('archive-1', 'Archive'))
+    expect(onMove).toHaveBeenCalledTimes(1)
   })
 })

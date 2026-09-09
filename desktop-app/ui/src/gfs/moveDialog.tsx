@@ -183,13 +183,34 @@ export function GfsMoveDialog({
   onAuthorityFailure,
 }: GfsMoveDialogProps) {
   const initialDestination = initialCrumbs[initialCrumbs.length - 1]
+  // The folder that already contains the target. Row moves carry the real
+  // parent id; for the current resource the sliced crumbs end at its parent.
+  // Selecting it as the destination is a no-op the server accepts (it bumps
+  // the version and changes nothing), so the dialog must refuse it instead
+  // of confirming a "successful" move that visibly changed nothing.
+  const currentParentId =
+    typeof target.parentResourceId === 'string'
+      ? target.parentResourceId
+      : initialDestination && initialDestination.resourceId !== target.resourceId
+        ? initialDestination.resourceId
+        : null
+  const currentParentName =
+    initialDestination && initialDestination.resourceId === currentParentId
+      ? initialDestination.name
+      : null
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.map(crumb => crumb.resourceId))
   )
-  const [selectedDestination, setSelectedDestination] = useState<SelectedDestination | null>(() =>
-    initialDestination && initialDestination.resourceId !== target.resourceId
-      ? { resourceId: initialDestination.resourceId, name: initialDestination.name }
-      : null
+  const [selectedDestination, setSelectedDestination] = useState<SelectedDestination | null>(
+    // Never preselect the target's own folder — in every entry path the last
+    // crumb IS the current parent, so the old preselect only ever armed the
+    // no-op move described above.
+    () =>
+      initialDestination &&
+      initialDestination.resourceId !== target.resourceId &&
+      initialDestination.resourceId !== currentParentId
+        ? { resourceId: initialDestination.resourceId, name: initialDestination.name }
+        : null
   )
   const [error, setError] = useState<string | null>(null)
   const scope = sessionScope ?? 'anonymous'
@@ -239,6 +260,9 @@ export function GfsMoveDialog({
   const pathPassesThroughTarget =
     initialCrumbs.some(crumb => crumb.resourceId === target.resourceId) ||
     selectedDestination?.resourceId === target.resourceId
+  const isNoOpDestination = Boolean(
+    selectedDestination && selectedDestination.resourceId === currentParentId
+  )
 
   // Destination listings are session-scoped GFS reads: an authority failure
   // here must reach the same fail-closed boundary as the page's queries (the
@@ -311,7 +335,10 @@ export function GfsMoveDialog({
             <span>Current location:</span>
             <span className="da-gfs-move-dialog__location-pill">
               <IconContexts />
-              <strong>{selectedDestination?.name ?? 'Choose a folder'}</strong>
+              <strong>
+                {currentParentName ??
+                  (currentParentId ? 'another shared folder' : 'Shared with me')}
+              </strong>
             </span>
           </div>
           <div className="da-gfs-move-dialog__tree-heading">
@@ -380,7 +407,7 @@ export function GfsMoveDialog({
                 aria-label={
                   selectedDestination ? `Move here (${selectedDestination.name})` : 'Move'
                 }
-                disabled={!selectedDestination || pathPassesThroughTarget}
+                disabled={!selectedDestination || pathPassesThroughTarget || isNoOpDestination}
                 loading={busy}
                 onClick={() => void commit()}
                 type="button"
@@ -391,6 +418,12 @@ export function GfsMoveDialog({
           </div>
           {pathPassesThroughTarget ? (
             <p className="muted">A folder can’t be moved into its own subtree.</p>
+          ) : null}
+          {isNoOpDestination ? (
+            <p className="muted">
+              {target.name} is already in {currentParentName ?? 'the folder you selected'} — pick a
+              different destination.
+            </p>
           ) : null}
         </div>
       </section>

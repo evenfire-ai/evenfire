@@ -12,6 +12,9 @@ type MoveFolder = {
   resourceId: string
   name: string
   kind: string
+  /** Present on browser rows — used to refuse a no-op move into the folder
+   * that already contains the target. */
+  parentResourceId?: string | null
 }
 
 type MoveCrumb = {
@@ -196,17 +199,24 @@ export function GfsMoveDialog({
   onClose,
   onMove,
 }: GfsMoveDialogProps) {
-  const initialDestination = [...initialCrumbs]
+  // The nearest crumb that is not the target itself is the folder that
+  // already contains it (both entry paths end there). Selecting it is a
+  // no-op the server accepts while visibly changing nothing, so it must not
+  // be preselected and must not be committable.
+  const currentParent = [...initialCrumbs]
     .reverse()
     .find(crumb => crumb.id && crumb.id !== target.resourceId)
-  const [selected, setSelected] = useState<SelectedDestination | null>(() =>
-    initialDestination?.id
-      ? {
-          resourceId: initialDestination.id,
-          name: initialDestination.name === '/' ? DRIVE : initialDestination.name,
-        }
+  const currentParentId =
+    typeof target.parentResourceId === 'string'
+      ? target.parentResourceId
+      : (currentParent?.id ?? null)
+  const currentParentName =
+    currentParent && currentParent.id === currentParentId
+      ? currentParent.name === '/'
+        ? DRIVE
+        : currentParent.name
       : null
-  )
+  const [selected, setSelected] = useState<SelectedDestination | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.flatMap(crumb => (crumb.id ? [crumb.id] : [])))
   )
@@ -276,6 +286,8 @@ export function GfsMoveDialog({
     }
   }
 
+  const isNoOpDestination = Boolean(selected && selected.resourceId === currentParentId)
+
   return (
     <div
       className="cu-modal-backdrop cu-gfs-move-modal"
@@ -311,7 +323,7 @@ export function GfsMoveDialog({
           <span>Current location:</span>
           <span className="cu-gfs-move-dialog__location-pill">
             <IconFolder />
-            <strong>{selected?.name ?? 'Choose a folder'}</strong>
+            <strong>{currentParentName ?? (currentParentId ? 'another folder' : DRIVE)}</strong>
           </span>
         </div>
 
@@ -372,7 +384,7 @@ export function GfsMoveDialog({
             </Button>
             <Button
               aria-label={selected ? `Move here (${selected.name})` : 'Move'}
-              disabled={!selected}
+              disabled={!selected || isNoOpDestination}
               loading={busy}
               onClick={() => void commit()}
               variant="primary"
@@ -381,6 +393,12 @@ export function GfsMoveDialog({
             </Button>
           </span>
         </footer>
+        {isNoOpDestination ? (
+          <p className="cu-gfs-move-dialog__notice">
+            {target.name} is already in {currentParentName ?? 'the folder you selected'} — pick a
+            different destination.
+          </p>
+        ) : null}
       </section>
     </div>
   )

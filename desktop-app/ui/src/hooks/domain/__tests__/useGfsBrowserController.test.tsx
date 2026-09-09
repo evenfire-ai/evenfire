@@ -2,7 +2,7 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { desktopQueryKeys } from '../queryKeys'
@@ -517,6 +517,201 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('team-folder'))
+  })
+
+  it('suppresses directly-shared files that live inside accessible folders (virtual-root hygiene)', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [
+              {
+                resourceId: 'marketing',
+                rid: 'marketing',
+                gfsUri: 'gfs://main/marketing',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'Marketing',
+                kind: 'directory',
+                path: '/Marketing',
+                version: 1,
+                bytes: 0,
+                sources: ['grant'],
+                permissions: ['read'],
+                coversDescendants: true,
+              },
+              {
+                resourceId: 'shared-file',
+                rid: 'sharedfile',
+                gfsUri: 'gfs://main/sharedfile',
+                drive: 'main',
+                parentResourceId: 'marketing',
+                name: 'enterprise-ai-agents-mockup.txt',
+                kind: 'file',
+                path: '/Marketing/enterprise-ai-agents-mockup.txt',
+                version: 1,
+                bytes: 7633,
+                sources: ['grant'],
+                permissions: ['read', 'share'],
+                coversDescendants: false,
+              },
+              {
+                // Nested under an accessible folder even though its immediate
+                // parent is not itself directly listed.
+                resourceId: 'nested-file',
+                rid: 'nestedfile',
+                gfsUri: 'gfs://main/nestedfile',
+                drive: 'main',
+                parentResourceId: 'not-listed-subfolder',
+                name: 'nested.txt',
+                kind: 'file',
+                path: '/Marketing/Assets/nested.txt',
+                version: 1,
+                bytes: 12,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+              {
+                // Orphan share: location not reachable — must stay listed.
+                resourceId: 'orphan-file',
+                rid: 'orphanfile',
+                gfsUri: 'gfs://main/orphanfile',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'lonely.md',
+                kind: 'file',
+                path: '/lonely.md',
+                version: 1,
+                bytes: 8,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+            ],
+            nextCursor: null,
+          })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    // The Marketing folder and the unreachable orphan stay; the two files
+    // reachable by navigating into Marketing are suppressed from the root.
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('2'))
+    expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'open lonely.md' })).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: 'open enterprise-ai-agents-mockup.txt' })
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'open nested.txt' })).toBeNull()
+  })
+
+  it('revalidates folder listings on revisit and window focus under production cache defaults', async () => {
+    const marketingFolder = {
+      resourceId: 'folder-a',
+      rid: 'foldera',
+      gfsUri: 'gfs://main/foldera',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Marketing',
+      kind: 'directory' as const,
+      path: '/Marketing',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const financeFolder = {
+      ...marketingFolder,
+      resourceId: 'folder-b',
+      rid: 'folderb',
+      gfsUri: 'gfs://main/folderb',
+      name: 'Finance',
+      path: '/Finance',
+    }
+    const file = (id: string, name: string) => ({
+      resourceId: id,
+      rid: id,
+      gfsUri: `gfs://main/${id}`,
+      drive: 'main',
+      parentResourceId: 'folder-a',
+      name,
+      kind: 'file' as const,
+      path: `/Marketing/${name}`,
+      version: 1,
+      bytes: 10,
+    })
+    // The out-of-band writer (an agent with a host grant, or an operator).
+    let marketingItems = [file('file-1', 'report.txt')]
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'folder-a'
+        ? { items: marketingItems, nextCursor: null }
+        : { items: [], nextCursor: null }
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [marketingFolder, financeFolder],
+            nextCursor: null,
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          resolve: vi.fn(),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy())
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+
+    // An agent creates a second file while the app is open.
+    marketingItems = [file('file-1', 'report.txt'), file('file-2', 'northstar.md')]
+
+    // Navigating away and back revalidates — no hard reload needed.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Finance' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('0'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+
+    // Focusing the window while the folder stays open revalidates in place.
+    marketingItems = [
+      file('file-1', 'report.txt'),
+      file('file-2', 'northstar.md'),
+      file('file-3', 'northstar-wordmark.svg'),
+    ]
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
   })
 
   it('hydrates readable parent folders for a directly opened file', async () => {

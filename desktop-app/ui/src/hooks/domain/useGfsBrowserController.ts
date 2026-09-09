@@ -69,6 +69,47 @@ function normalizeAccessibleResource(
   }
 }
 
+type NavigableShareRow = {
+  resourceId: string
+  kind: 'file' | 'directory'
+  path: string | null
+  parentResourceId: string | null
+}
+
+/**
+ * Virtual-root hygiene for the "Shared with me" surface. The server lists
+ * EVERY resource carrying a direct grant — including files that live inside
+ * folders the caller can already navigate into. Surfacing those twice (a
+ * loose root item with no location, plus the real folder child) hides where
+ * the file actually lives and invites acting on a different copy than
+ * intended. Suppress a file from the virtual root when an accessible folder
+ * covers it (path prefix, falling back to a direct parent match when the
+ * server omits paths). Orphan shares — files whose location is NOT otherwise
+ * reachable — stay listed; that is this surface's purpose. The filter only
+ * sees already-loaded pages, so a folder on a later page suppresses its
+ * files once that page loads.
+ */
+export function suppressNavigableShares<T extends NavigableShareRow>(rows: T[]): T[] {
+  const folderPathPrefixes = new Set(
+    rows
+      .filter(
+        (row): row is T & { path: string } =>
+          row.kind === 'directory' && typeof row.path === 'string' && row.path.length > 1
+      )
+      .map(row => (row.path.endsWith('/') ? row.path : `${row.path}/`))
+  )
+  const folderIds = new Set(rows.filter(row => row.kind === 'directory').map(row => row.resourceId))
+  return rows.filter(row => {
+    if (row.kind !== 'file') return true
+    if (typeof row.path === 'string' && row.path.length > 1) {
+      for (const prefix of folderPathPrefixes) {
+        if (row.path.startsWith(prefix)) return false
+      }
+    }
+    return !(row.parentResourceId && folderIds.has(row.parentResourceId))
+  })
+}
+
 export interface GfsCrumb {
   resourceId: string
   gfsUri: string
@@ -204,6 +245,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // Infinity-cached list must not survive a Files remount without a server
     // check — even though the app-level client defaults disable refetching.
     refetchOnMount: 'always',
+    // Grants are often made from another surface (control-ui, an operator,
+    // another user) while this window stays open; focusing the app must
+    // surface the new shares without a hard reload.
+    refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -232,6 +277,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
     enabled:
       Boolean(sessionScope) && Boolean(current) && currentIsDirectory && accessState === 'active',
+    // Folder contents change out-of-band: agents with host grants, other
+    // sessions, and operator writes never pass through this client. Revisit
+    // and window focus must revalidate — an Infinity-fresh cached listing
+    // otherwise hides new files until a hard app reload.
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -537,8 +588,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () =>
       authorityPending
         ? []
-        : (accessibleQuery.data?.pages ?? []).flatMap(page =>
-            page.items.map(normalizeAccessibleResource)
+        : suppressNavigableShares(
+            (accessibleQuery.data?.pages ?? []).flatMap(page =>
+              page.items.map(normalizeAccessibleResource)
+            )
           ),
     [accessibleQuery.data, authorityPending]
   )
@@ -643,38 +696,74 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
 
-  const openChild = useCallback((child: GfsBrowserChild) => {
-    if (child.kind !== 'directory') return
-    setCrumbs(prev => [
-      ...prev,
-      {
-        resourceId: child.resourceId,
-        gfsUri: child.gfsUri,
-        name: child.name,
-        kind: 'directory',
-        version: child.version,
-        bytes: child.bytes,
-      },
-    ])
-  }, [])
+  /**
+   * Revalidate a folder's children listing as navigation enters it. Folder
+   * contents change out-of-band (agents with host grants, other sessions,
+   * operator writes) and TanStack does not refetch on a live observer's
+   * query-key switch, so revisit would otherwise serve the Infinity-cached
+   * page until a hard app reload. `refetchType: 'all'` also refreshes the
+   * currently-inactive query so fresh data lands as the crumbs update.
+   */
+  const revalidateChildren = useCallback(
+    (resourceId: string) => {
+      if (!sessionScope) return
+      void queryClient.invalidateQueries({
+        exact: true,
+        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+        refetchType: 'all',
+      })
+    },
+    [queryClient, sessionScope]
+  )
 
-  const openResource = useCallback((resource: GfsBrowserChild) => {
-    setOpenError(null)
-    setCrumbs([
-      {
-        resourceId: resource.resourceId,
-        gfsUri: resource.gfsUri,
-        name: resource.name,
-        kind: resource.kind === 'directory' ? 'directory' : 'file',
-        version: resource.version,
-        bytes: resource.bytes,
-      },
-    ])
-  }, [])
+  const openChild = useCallback(
+    (child: GfsBrowserChild) => {
+      if (child.kind !== 'directory') return
+      revalidateChildren(child.resourceId)
+      setCrumbs(prev => [
+        ...prev,
+        {
+          resourceId: child.resourceId,
+          gfsUri: child.gfsUri,
+          name: child.name,
+          kind: 'directory',
+          version: child.version,
+          bytes: child.bytes,
+        },
+      ])
+    },
+    [revalidateChildren]
+  )
 
-  const goToCrumb = useCallback((index: number) => {
-    setCrumbs(prev => prev.slice(0, index + 1))
-  }, [])
+  const openResource = useCallback(
+    (resource: GfsBrowserChild) => {
+      setOpenError(null)
+      if (resource.kind === 'directory') revalidateChildren(resource.resourceId)
+      setCrumbs([
+        {
+          resourceId: resource.resourceId,
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          kind: resource.kind === 'directory' ? 'directory' : 'file',
+          version: resource.version,
+          bytes: resource.bytes,
+        },
+      ])
+    },
+    [revalidateChildren]
+  )
+
+  const goToCrumb = useCallback(
+    (index: number) => {
+      setCrumbs(prev => {
+        const next = prev.slice(0, index + 1)
+        const target = next[index]
+        if (target?.kind === 'directory') revalidateChildren(target.resourceId)
+        return next
+      })
+    },
+    [revalidateChildren]
+  )
 
   /** Restore an exact browser location after a transient resource selection
    *  (for example, opening a row's Manage dialog). */

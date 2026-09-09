@@ -589,12 +589,16 @@ describe('FilesPage', () => {
     await openManageDialog('Team folder')
     expect(screen.queryByText('Manage folder')).toBeNull()
     await chooseManageAction('Team folder', 'New folder')
+    const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
+    expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
+    expect(within(newFolderDialog).queryByText(/Add people/)).toBeNull()
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'new-folder' } })
       fireEvent.click(createFolderForm.querySelector('button[type="submit"]')!)
     })
 
+    await openManageDialog('Team folder')
     await chooseManageAction('Team folder', 'Rename')
     const renameForm = screen.getByRole('form', { name: 'Rename resource' })
     await act(async () => {
@@ -648,9 +652,13 @@ describe('FilesPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close GFS link dialog' }))
 
     fireEvent.click(newFolderButton)
+    const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
-    expect(within(createFolderForm).getByRole('heading', { name: 'New folder' })).toBeTruthy()
-    expect(createFolderForm.querySelector('.da-gfs-create-folder-form__actions')).not.toBeNull()
+    expect(within(newFolderDialog).getByRole('heading', { name: 'New folder' })).toBeTruthy()
+    expect(newFolderDialog.classList.contains('da-gfs-new-folder-dialog')).toBe(true)
+    expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
+    expect(createFolderForm.querySelector('.da-gfs-new-folder-dialog__actions')).not.toBeNull()
+    fireEvent.click(within(createFolderForm).getByRole('button', { name: 'Cancel' }))
 
     const upload = new File(['desktop file'], 'notes.md', { type: 'text/markdown' })
     await act(async () => {
@@ -2421,12 +2429,29 @@ describe('FilesPage', () => {
     expect(await within(dialog).findByRole('button', { name: 'Subfolder' })).toBeTruthy()
     expect(within(dialog).queryByRole('button', { name: 'notes.txt' })).toBeNull()
 
+    // The current parent is never preselected, and selecting it explicitly is
+    // refused — that "move" is a server-accepted no-op that would toast
+    // success while changing nothing.
     await act(async () => {
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Product)' }))
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Product' }))
+    })
+    const noOpButton = within(dialog).getByRole('button', {
+      name: 'Move here (Product)',
+    }) as HTMLButtonElement
+    expect(noOpButton.disabled).toBe(true)
+    expect(within(dialog).getByText(/is already in Product/)).toBeTruthy()
+
+    // A real destination commits and toasts.
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Subfolder' }))
+    })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Subfolder)' }))
     })
 
-    expect(moveResource).toHaveBeenCalledWith('child-1', 'folder-1', 3)
-    expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Product', 'success')
+    expect(moveResource).toHaveBeenCalledWith('child-1', 'sub-1', 3)
+    expect(moveResource).toHaveBeenCalledTimes(1)
+    expect(pushToast).toHaveBeenCalledWith('Moved notes.txt to Subfolder', 'success')
   })
 
   it('moves a dragged file onto a folder only after confirming destination write access', async () => {
@@ -3243,7 +3268,7 @@ describe('FilesPage', () => {
         name: 'Cancel',
       })
     )
-    await chooseManageAction('Product', 'New folder')
+    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
 
     expect((screen.getByLabelText('Folder name') as HTMLInputElement).value).toBe('')
   })
