@@ -92,7 +92,6 @@ const EXTERNAL_RPC_ADMISSION_CLASS_BY_OPERATION: Readonly<
   'workflow.artifact.read': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.artifact.delete': EXTERNAL_RPC_ADMISSION_CLASS,
   'workflow.approval.decide': EXTERNAL_RPC_ADMISSION_CLASS,
-  'workflow.approval.consume': EXTERNAL_RPC_ADMISSION_CLASS,
   'gfs.read': EXTERNAL_RPC_ADMISSION_CLASS,
   'gfs.write': EXTERNAL_RPC_ADMISSION_CLASS,
   'gfs.delete': EXTERNAL_RPC_ADMISSION_CLASS,

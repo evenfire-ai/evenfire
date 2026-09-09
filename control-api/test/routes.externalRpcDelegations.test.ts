@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   authorize: vi.fn(),
 }))
 const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
+const tokenIssuer = vi.hoisted(() => ({ issueUserDelegationV2: vi.fn() }))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: mocks.verifyV1,
@@ -38,6 +39,11 @@ vi.mock('../src/services/access/actionAuthorizer.js', () => ({
   authorizeActionV2: mocks.authorize,
 }))
 vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
+vi.mock('../src/utils/auth/userDelegationV2Token.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/utils/auth/userDelegationV2Token.js')>()
+  tokenIssuer.issueUserDelegationV2.mockImplementation(actual.issueUserDelegationV2)
+  return { ...actual, issueUserDelegationV2: tokenIssuer.issueUserDelegationV2 }
+})
 
 const { createExternalRpcDelegationsRouter } =
   await import('../src/routes/external/rpcDelegations.js')
@@ -201,5 +207,30 @@ describe('POST /external/rpc/delegations', () => {
 
     expect(response.status).toBe(400)
     expect(mocks.authorize).not.toHaveBeenCalled()
+  })
+
+  it('rejects child-only approval consume before authorization or delegation signing', async () => {
+    const approvalId = '60000000-0000-4000-8000-000000000006'
+    const response = await request(app())
+      .post('/external/rpc/delegations')
+      .set('x-user-session-token', 'session-v2')
+      .set('x-evenfire-access-path-id', accessPathId)
+      .set('x-evenfire-authorization-revision', authorizationRevision)
+      .send({
+        version: 2,
+        operationId: 'workflow.approval.consume',
+        resource: { type: 'workflow_approval', logicalId: approvalId },
+        target: {
+          approvalId,
+          decision: 'approve',
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'approval-demo',
+        },
+      })
+
+    expect(response.status).toBe(400)
+    expect(response.body).toMatchObject({ error: { code: 'invalid_request' } })
+    expect(mocks.authorize).not.toHaveBeenCalled()
+    expect(tokenIssuer.issueUserDelegationV2).not.toHaveBeenCalled()
   })
 })
