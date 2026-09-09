@@ -129,6 +129,7 @@ import {
   runtimeActionCheckpointDecision,
 } from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
+import { startPr2ReadinessReporter } from './runtime/pr2ReadinessReporter'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
@@ -255,6 +256,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+let stopPr2ReadinessReporter: (() => void) | null = null
 setCodexPlatformJwtReader(() =>
   (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
 )
@@ -2987,6 +2989,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
+  stopPr2ReadinessReporter?.()
   hostWatcher?.stop()
   llmHookWatcher?.stop()
   configStore?.stop()
@@ -3546,6 +3549,7 @@ async function main(): Promise<void> {
       }
     },
   })
+  if (runtimeAuth) stopPr2ReadinessReporter = startPr2ReadinessReporter(runtimeAuth)
 }
 
 // Run main only when this module is the executable entry point. Keeping imports
