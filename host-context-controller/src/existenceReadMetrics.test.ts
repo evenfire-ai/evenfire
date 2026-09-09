@@ -81,7 +81,7 @@ describe('Kubernetes existence-read instrumentation', () => {
     for (const kind of CREATE_KINDS) {
       for (const outcome of ['found', 'absent', 'error'])
         existenceReadsTotal.inc({ kind, outcome }, 0)
-      for (const outcome of ['issued', 'conflict', 'skipped'])
+      for (const outcome of ['created', 'conflict', 'error', 'skipped'])
         createsTotal.inc({ kind, outcome }, 0)
     }
   })
@@ -199,8 +199,9 @@ describe('Kubernetes existence-read instrumentation', () => {
       sample => sample.labels.kind === 'NetworkPolicy'
     )
     expect(samples.map(sample => [sample.labels.outcome, sample.value])).toEqual([
-      ['issued', 1],
+      ['created', 0],
       ['conflict', 1],
+      ['error', 0],
       ['skipped', 0],
     ])
   })

@@ -298,8 +298,8 @@ export const hostFleetLifecycleCatchTotal = counter({
   labelNames: ['decision'] as const,
 })
 
-// Events overlap: every conflict is also an issued request. Never sum outcomes
-// for request totals. The bounded kind inventory includes the read-first Secret.
+// Outcomes partition completed creates; sum created, conflict, and error for
+// completed attempts. The bounded kind inventory includes the read-first Secret.
 export const CREATE_KINDS = [
   'NetworkPolicy',
   'Service',
@@ -315,11 +315,11 @@ export const CREATE_KINDS = [
 export type CreateKind = (typeof CREATE_KINDS)[number]
 export const createsTotal = counter({
   name: 'clerum_hcc_creates_total',
-  help: 'Kubernetes create events: issued attempts, conflict responses (a subset of issued), and skipped (reserved; zero in this instrumentation stage), by kind.',
+  help: 'Completed Kubernetes create outcomes: created (resolved), conflict (409), or error; skipped is reserved and zero in this instrumentation stage, by kind.',
   labelNames: ['kind', 'outcome'] as const,
 })
 for (const kind of CREATE_KINDS) {
-  for (const outcome of ['issued', 'conflict', 'skipped']) {
+  for (const outcome of ['created', 'conflict', 'error', 'skipped']) {
     createsTotal.inc({ kind, outcome }, 0)
   }
 }

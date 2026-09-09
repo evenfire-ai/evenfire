@@ -16,13 +16,13 @@ export function getErrorCode(error: unknown): number | undefined {
 
 /** Observe only the create request, preserving its response and error identity. */
 export async function observeCreate<T>(kind: CreateKind, create: () => Promise<T>): Promise<T> {
-  createsTotal.inc({ kind, outcome: 'issued' })
   try {
-    return await create()
+    const result = await create()
+    createsTotal.inc({ kind, outcome: 'created' })
+    return result
   } catch (error) {
-    if (error != null && getErrorCode(error) === 409) {
-      createsTotal.inc({ kind, outcome: 'conflict' })
-    }
+    const outcome = error != null && getErrorCode(error) === 409 ? 'conflict' : 'error'
+    createsTotal.inc({ kind, outcome })
     throw error
   }
 }

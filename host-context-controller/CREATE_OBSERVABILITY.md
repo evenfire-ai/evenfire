@@ -12,42 +12,51 @@ ConfigMap, PersistentVolumeClaim, ServiceAccount, Role, RoleBinding,
 PodDisruptionBudget, and Secret. No resource names, namespaces, user identifiers,
 request bodies, or exception messages become metric labels.
 
-| Counter                            | Outcome    | Meaning                                                                                                  |
-| ---------------------------------- | ---------- | -------------------------------------------------------------------------------------------------------- |
-| `clerum_hcc_creates_total`         | `issued`   | One invocation of a Kubernetes create operation, including failed attempts.                              |
-|                                    | `conflict` | An issued create rejected with HTTP 409. This is a subset of `issued`, not an exclusive outcome.         |
-|                                    | `skipped`  | Reserved for a future presence-based create suppression; remains zero in this instrumentation change.    |
-| `clerum_hcc_existence_reads_total` | `found`    | An instrumented existence read resolved successfully. The wrapper does not validate or alter its result. |
-|                                    | `absent`   | An instrumented read rejected with HTTP 404; the original error still reaches the caller.                |
-|                                    | `error`    | An instrumented read rejected for any other reason, including HTTP 409.                                  |
+| Counter                            | Outcome    | Meaning                                                                                                               |
+| ---------------------------------- | ---------- | --------------------------------------------------------------------------------------------------------------------- |
+| `clerum_hcc_creates_total`         | `created`  | The create callback resolved successfully.                                                                            |
+|                                    | `conflict` | The create callback rejected with HTTP 409.                                                                           |
+|                                    | `error`    | The create callback rejected for any other reason, including 403, 5xx, network errors, or synchronous client failure. |
+|                                    | `skipped`  | Reserved for presence-based suppression in the read-first stage; remains zero in this PR.                             |
+| `clerum_hcc_existence_reads_total` | `found`    | An instrumented existence read resolved successfully; its result is not validated or altered.                         |
+|                                    | `absent`   | An instrumented read rejected with HTTP 404; the original error still reaches the caller.                             |
+|                                    | `error`    | An instrumented read rejected for any other reason, including HTTP 409.                                               |
 
-The bounded series are initialized at zero. Re-importing metrics must preserve
-the registry and existing values. A zero series alone is not proof that a path
-executed. Do not sum create outcomes to calculate request count.
+Create outcomes are mutually exclusive and increment only after the callback
+settles. The former `issued` series is removed. Summing `created + conflict + error`
+counts completed attempts; `skipped` is not an invocation and is excluded from that
+sum. Operations still in flight are not counted. A create resolving to null or
+undefined still counts as resolved; telemetry does not assert object persistence.
 
-`issued - conflict` is **not successful creates**: it includes other failures
-(403, 5xx, network errors) and operations that have not settled. Starts and
-responses can also fall in different observation windows. A successful-create
-count needs matching audit success events and resource/business evidence; this
-counter does not supply it by subtraction.
-
-Select the outcome explicitly in queries. For a single scoped environment:
+The bounded series are initialized at zero: 40 create series and 30 read series.
+Re-importing metrics must preserve the registry and existing values. A zero series
+alone is not proof that a path executed. For a single scoped environment:
 
 ```promql
-sum by (kind) (increase(clerum_hcc_creates_total{outcome="issued"}[5m]))
+sum by (kind) (increase(clerum_hcc_creates_total{outcome=~"created|conflict|error"}[5m]))
+sum by (kind) (increase(clerum_hcc_creates_total{outcome="created"}[5m]))
 sum by (kind) (increase(clerum_hcc_creates_total{outcome="conflict"}[5m]))
+sum by (kind) (increase(clerum_hcc_creates_total{outcome="error"}[5m]))
 ```
 
-Add the actual environment/target filters from the monitoring configuration
-before comparing a deployment. These queries report attempts and conflicts,
-not successful creations or a count of all completed operations.
+Add the actual environment/target filters from the monitoring configuration.
+These are client outcomes, not proof that every operation reached the API server;
+a lost response can reject even if the server created an object. Validate server
+outcomes and resource/business state separately when that distinction matters.
+
+**Accepted trade-off:** if the process dies before a callback settles, that attempt
+has no outcome sample. The previous pre-call increment could have been observed
+before the crash. This loss is accepted in favor of an unambiguous partition;
+server audit events can provide additional evidence for requests that reached the
+server, but cannot reconstruct every client invocation. No crash-loss rate is
+claimed or measured here. This contract is changed before downstream dashboards
+and the read-first acceptance depend on it.
 
 `observeCreate` and `observeExistenceRead` invoke their callbacks once and preserve
 the returned value or rejected value. They do not swallow a 404, turn it into
 `null`, retry a failed request, or convert an error into a create. Existing caller
-catch behavior remains responsible for those decisions. Synchronous client
-failures count as attempts/outcomes too, so these counters are client-operation
-observations rather than proof that every attempt reached the API server.
+catch behavior remains responsible for those decisions. Synchronous failures
+count as `error` when the wrapper catches them; the original rejection is retained.
 
 ## Coverage
 
@@ -124,7 +133,7 @@ command exits and retained-row counts; missing data is unknown, not zero. Local
 tests and a historical re-query do not replace simultaneous deployed validation.
 
 For create conflicts, compare the `conflict` subset with the audit's conflict
-result, not with all issued operations. The audit uses `google.rpc.Code=10`,
+result, not with all completed create outcomes. The audit uses `google.rpc.Code=10`,
 which represents conflict, while client errors use HTTP 409. Historical audit
 data did not contain GET records; no API-server read rate is inferred from that
 absence. The read counter only covers the explicit inventory above.
