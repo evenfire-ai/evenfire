@@ -286,7 +286,7 @@ export class GfsServingHandler {
       throw new GfsError('not_mounted', 'live filesystem authority checkpoint is unavailable')
     }
     const target = authority.binding.target
-    let operationId = authority.binding.operationId
+    let operationId: FilesystemActionAuthorityV2['binding']['operationId']
     const routeRid = resourceMatch?.[1] ? requireRid(resourceMatch[1]) : undefined
     const targetRid = target.resourceId
     if (
