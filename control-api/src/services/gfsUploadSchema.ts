@@ -46,8 +46,11 @@ export async function applyGfsUploadSessionSchema(db: DbClient): Promise<void> {
       completed_at TIMESTAMPTZ NULL,
       finalizing_started_at TIMESTAMPTZ NULL,
       cleanup_at TIMESTAMPTZ NULL,
+      action_authority JSONB NULL,
       CONSTRAINT gfs_upload_sessions_owner_idempotency_unique
-        UNIQUE (owner_subject, drive, idempotency_key)
+        UNIQUE (owner_subject, drive, idempotency_key),
+      CONSTRAINT gfs_upload_sessions_action_authority_object
+        CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object')
     );
 
     CREATE TABLE IF NOT EXISTS gfs_upload_parts (
@@ -94,4 +97,32 @@ export async function applyGfsUploadFinalizingSchema(db: DbClient): Promise<void
   await db.query(
     `ALTER TABLE IF EXISTS gfs_upload_sessions ADD COLUMN IF NOT EXISTS finalizing_started_at TIMESTAMPTZ NULL`
   )
+}
+
+/**
+ * Persist immutable, non-bearer v2 provenance for resumable upload sessions.
+ * Existing rows remain explicit legacy rows (NULL); controller code refuses to
+ * cross between legacy and v2 session modes.
+ */
+export async function applyGfsUploadAuthorityBindingSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE IF EXISTS gfs_upload_sessions
+      ADD COLUMN IF NOT EXISTS action_authority JSONB NULL;
+
+    DO $$
+    BEGIN
+      IF to_regclass('public.gfs_upload_sessions') IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_constraint
+            WHERE conname = 'gfs_upload_sessions_action_authority_object'
+              AND conrelid = 'gfs_upload_sessions'::regclass
+         ) THEN
+        ALTER TABLE gfs_upload_sessions
+          ADD CONSTRAINT gfs_upload_sessions_action_authority_object
+          CHECK (action_authority IS NULL OR jsonb_typeof(action_authority) = 'object');
+      END IF;
+    END
+    $$;
+  `)
 }
