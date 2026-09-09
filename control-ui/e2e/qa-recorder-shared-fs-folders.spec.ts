@@ -40,11 +40,14 @@ test.describe('optional QA recorder: Control UI SharedFileSystem folders', () =>
     const renamed = 'qa-recorder-folder-renamed'
     let createdUid: string | undefined
     try {
-      await test.step('sign in and navigate to Agent Files', async () => {
+      await test.step('sign in and enter the legacy Agent Files list', async () => {
         await loginThroughUi(page, adminCredentials())
         const nav = page.getByRole('navigation', { name: 'Main sections' })
         await expect(nav).toBeVisible()
-        await nav.getByRole('link', { name: 'Files', exact: true }).click()
+        // Agent Files is intentionally absent from the Files submenu (see the
+        // context-vocabulary journey). This list is the bookmarked entry point,
+        // not a created resource or terminal step; all later transitions use UI.
+        await page.goto(`${CONTROL_UI_URL}/agent-files`)
         await expect(page).toHaveURL(`${CONTROL_UI_URL}/agent-files`)
         await expect(page.getByRole('heading', { name: /^Agent Files/ })).toBeVisible()
         await expect(page.getByRole('button', { name: 'New', exact: true })).toBeEnabled()
