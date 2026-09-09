@@ -137,7 +137,33 @@ describe('Method gating', () => {
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'GET',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
-      { userSessionToken: 'good-token', throwOnHttpError: false }
+      { userSessionToken: 'good-token', extraHeaders: {}, throwOnHttpError: false }
+    )
+  })
+
+  it('forwards the exact v2 action delegation to the shared-filesystem proxy', async () => {
+    authTokenMock.verifyToken.mockReturnValue({ ...claims, sessionContract: 'v2' })
+    controlApiClientMock.controlApiStreamRequest.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    )
+
+    await request(buildApp())
+      .get('/me/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?path=docs')
+      .set('authorization', 'Bearer good-token')
+      .set('x-evenfire-action-delegation', 'delegation.fixture.value')
+      .expect(200)
+
+    expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
+      'GET',
+      '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?path=docs',
+      {
+        userSessionToken: 'good-token',
+        extraHeaders: { 'x-evenfire-action-delegation': 'delegation.fixture.value' },
+        throwOnHttpError: false,
+      }
     )
   })
 
@@ -188,7 +214,7 @@ describe('Method gating', () => {
     expect(controlApiClientMock.controlApiStreamRequest).toHaveBeenCalledWith(
       'HEAD',
       '/external/contexts/ctx-a/shared-filesystems/team-mission/proxy/files?download=1',
-      { userSessionToken: 'good-token', throwOnHttpError: false }
+      { userSessionToken: 'good-token', extraHeaders: {}, throwOnHttpError: false }
     )
   })
 })
