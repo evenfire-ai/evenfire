@@ -35,7 +35,7 @@ function controlClassName(action: WindowControlAction): string {
 }
 
 function getWindowControlsApi() {
-  return window.evenfire?.window
+  return window.clerum?.window
 }
 
 function targetOwnsPointerGesture(target: EventTarget | null): boolean {
