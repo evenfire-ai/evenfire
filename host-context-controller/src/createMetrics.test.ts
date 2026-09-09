@@ -34,7 +34,7 @@ describe('Kubernetes create instrumentation', () => {
 
   it('instruments the complete production create inventory with the matching kind', () => {
     const kinds: string[] = []
-    const root = new URL('.', import.meta.url).pathname
+    const root = __dirname
     for (const relative of readdirSync(root, { recursive: true }) as string[]) {
       if (
         !relative.endsWith('.ts') ||

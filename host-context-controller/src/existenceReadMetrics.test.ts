@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import ts from 'typescript'
 import { CREATE_KINDS, createsTotal, existenceReadsTotal, registry } from './metrics'
 import { applyNetworkPolicy, observeExistenceRead } from './utils'
@@ -38,7 +39,7 @@ it('observes the documented physical GET expressions without wrapping snapshots 
   for (const [path, expected] of Object.entries(inventory)) {
     const source = ts.createSourceFile(
       path,
-      readFileSync(new URL(path, import.meta.url), 'utf8'),
+      readFileSync(join(__dirname, path), 'utf8'),
       ts.ScriptTarget.Latest,
       true
     )
