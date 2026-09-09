@@ -16,6 +16,7 @@ import {
   workflowNeedsWorkloadStatusRefresh,
   workflowRecipeFromWatchObject,
 } from './k8sClient'
+import { captureLogger } from './reconciler/__tests__/captureLogger'
 import { TRANSIENT_REQUEUE_BASE_MS } from './reconciler/workflowRecipeReconciler'
 import type { WorkflowRecipeCRD } from './types'
 
@@ -86,6 +87,74 @@ describe('workflowRecipeFromWatchObject', () => {
         blockOwnerDeletion: true,
       },
     ])
+  })
+})
+
+describe('persisted transport external-egress admission', () => {
+  const pending = {
+    type: 'TransportExternalEgressReady',
+    status: 'False' as const,
+    reason: 'ExternalEgressPending',
+    message: 'Awaiting HCC admission',
+    lastTransitionTime: '2026-09-05T00:00:00.000Z',
+  }
+
+  it('publishes explicit admission clearance without treating observation as clearance', () => {
+    const recipe = makeWorkflowRecipe({
+      spec: { steps: [] },
+      status: { phase: 'active', message: 'Ready', conditions: [pending] },
+    })
+    const observed = { phase: 'active' as const, message: 'Ready', workloadStatuses: [] }
+    expect(shouldPatchRecipeStatus(recipe, observed)).toBe(false)
+    expect(shouldPatchRecipeStatus(recipe, { ...observed, transportNetworkConditions: [] })).toBe(
+      true
+    )
+    expect(
+      shouldPatchRecipeStatus(recipe, {
+        ...observed,
+        transportNetworkConditions: [
+          { ...pending, lastTransitionTime: '2026-09-06T00:00:00.000Z' },
+        ],
+      })
+    ).toBe(false)
+  })
+
+  it('restores retries only for live, pending admission rather than Pod-only degradation or terminal runs', () => {
+    const recipe = makeWorkflowRecipe({
+      spec: { steps: [] },
+      status: { phase: 'degraded', conditions: [pending] },
+    })
+    expect(workflowNeedsInfrastructureReconcile(recipe)).toBe(true)
+    expect(workflowNeedsInfrastructureReconcile({ ...recipe, status: { phase: 'degraded' } })).toBe(
+      false
+    )
+    expect(
+      workflowNeedsInfrastructureReconcile({
+        ...recipe,
+        status: { phase: 'failed', conditions: [pending] },
+      })
+    ).toBe(false)
+    expect(
+      workflowNeedsInfrastructureReconcile({
+        ...recipe,
+        metadata: { ...recipe.metadata, deletionTimestamp: '2026-09-05T00:00:00.000Z' },
+      })
+    ).toBe(false)
+    const workflow = {
+      ...recipe,
+      spec: { ...recipe.spec, steps: [{ id: 's', instruction: 'run' }] },
+    }
+    expect(workflowNeedsInfrastructureReconcile(workflow)).toBe(true)
+    expect(
+      workflowNeedsInfrastructureReconcile({
+        ...workflow,
+        status: {
+          phase: 'active',
+          conditions: [pending],
+          workflowExecution: { phase: 'completed' },
+        },
+      })
+    ).toBe(false)
   })
 })
 
@@ -1964,6 +2033,55 @@ describe('workload status refresh loop helpers', () => {
     expect(reconcile).not.toHaveBeenCalled()
   })
 
+  it.each([
+    { from: 'failed', to: 'candidate', runs: 1 },
+    { from: 'active', to: 'active', runs: 0 },
+    { from: 'active', to: 'degraded', runs: 0 },
+    { from: 'degraded', to: 'active', runs: 0 },
+    { from: 'failed', to: 'failed', runs: 0 },
+    { from: 'candidate', to: 'candidate', runs: 0 },
+  ] as const)(
+    'handles the supported retry transition $from -> $to without a generation bump',
+    async ({ from, to, runs }) => {
+      const cached = makeWorkloadRecipe({
+        metadata: { name: 'retry-recipe', namespace: 'sandbox-recipes', generation: 7 },
+        status: { phase: from },
+      })
+      const requested = {
+        ...cached,
+        status: { phase: to, message: 'Manual retry requested by operator' },
+      }
+      const reconcile = vi.fn().mockResolvedValue({
+        phase: 'active',
+        message: 'All workloads deployed',
+        workloadStatuses: [],
+      })
+      const watcher = Object.create(WorkflowRecipeWatcher.prototype) as {
+        recipes: Map<string, WorkflowRecipeCRD>
+        handleRecipeEvent: (type: string, recipe: WorkflowRecipeCRD) => Promise<void>
+      }
+      Object.assign(watcher, {
+        recipes: new Map([[cached.metadata.name, cached]]),
+        transientRetries: new Map(),
+        stopped: false,
+        traceReporter: null,
+        dbRunProcessor: null,
+        reconciler: {
+          reconcile,
+          isRecipeStillActive: vi.fn().mockResolvedValue(true),
+          ensureFinalizer: vi.fn().mockResolvedValue(undefined),
+          patchStatus: vi.fn().mockResolvedValue(undefined),
+        },
+      })
+      await watcher.handleRecipeEvent('MODIFIED', requested)
+      expect(reconcile).toHaveBeenCalledTimes(runs)
+      expect(watcher.recipes.get(cached.metadata.name)).toEqual(requested)
+      // Duplicate status events must not repeatedly execute the retry transition.
+      await watcher.handleRecipeEvent('MODIFIED', requested)
+      expect(reconcile).toHaveBeenCalledTimes(runs)
+    }
+  )
+
   it('reconciles when Codex connection-ref changes without a generation bump', async () => {
     const cached = makeWorkloadRecipe({
       metadata: { name: 'active-recipe', namespace: 'sandbox-recipes', generation: 7 },
@@ -2461,7 +2579,7 @@ describe('status-only events drive DB sync (terminal + heartbeat)', () => {
     const { internal, reconcile, sync } = makeInternal(cached, () =>
       Promise.reject(new Error('db down'))
     )
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
     await expect(internal.handleRecipeEvent('MODIFIED', completed)).resolves.toBeUndefined()
 
@@ -2569,7 +2687,7 @@ describe('infrastructure telemetry enqueue isolation', () => {
     const enqueueInfrastructureTelemetry = vi.fn()
     const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
     internal.reconciler.patchStatus.mockRejectedValue(new Error('patch failed'))
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
     await internal.handleRecipeEvent('ADDED', recipe)
 
@@ -2589,7 +2707,7 @@ describe('infrastructure telemetry enqueue isolation', () => {
       throw new Error('trace queue down')
     })
     const { internal } = makeInternal(recipe, { enqueueInfrastructureTelemetry })
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const errSpy = captureLogger('error').mockImplementation(() => undefined)
 
     await expect(internal.handleRecipeEvent('ADDED', recipe)).resolves.toBeUndefined()
 
@@ -2597,7 +2715,7 @@ describe('infrastructure telemetry enqueue isolation', () => {
     expect(enqueueInfrastructureTelemetry).toHaveBeenCalled()
     expect(errSpy).toHaveBeenCalledWith(
       '[WR-K8s] Infrastructure telemetry enqueue failed:',
-      expect.any(Error)
+      expect.objectContaining({ err: expect.any(Error) })
     )
     errSpy.mockRestore()
   })
@@ -2831,7 +2949,7 @@ describe('reconcile failure re-schedules the transient retry chain (issue #375 P
   }
 
   it('re-arms the transient retry after a non-404 reconcile failure (keeps the loud log)', async () => {
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const errSpy = captureLogger('error').mockImplementation(() => undefined)
     const recipe = makeWorkflowRecipe({ metadata: { name: 'flaky', namespace: 'sandbox-recipes' } })
     const internal = makeInternal(recipe, new Error('control-api unreachable'))
     try {
@@ -2839,8 +2957,8 @@ describe('reconcile failure re-schedules the transient retry chain (issue #375 P
 
       // fail-loud preserved: the reconciliation-failed error is still logged.
       expect(errSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Reconciliation failed for "flaky"'),
-        expect.anything()
+        expect.stringContaining('Reconciliation failed'),
+        expect.objectContaining({ name: 'flaky', err: expect.any(Error) })
       )
       // NEW: the 5s self-heal chain is re-armed instead of dying on first error.
       expect(internal.transientRetries.has('flaky')).toBe(true)
@@ -2851,7 +2969,7 @@ describe('reconcile failure re-schedules the transient retry chain (issue #375 P
   })
 
   it('does not re-arm a retry when the recipe is already gone (404)', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warnSpy = captureLogger('warn').mockImplementation(() => undefined)
     const recipe = makeWorkflowRecipe({ metadata: { name: 'gone', namespace: 'sandbox-recipes' } })
     const internal = makeInternal(recipe, { code: 404 })
     try {
@@ -2919,7 +3037,7 @@ describe('Plugin Workload SDK computed-vs-published state divergence log (issue 
   }
 
   it('logs the old→new SDK state and patchEmitted when the computed state diverges', async () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logSpy = captureLogger('info').mockImplementation(() => undefined)
     const recipe = sdkRecipe('awaiting_policy')
     const internal = makeInternal(recipe, {
       phase: 'active',
@@ -2938,9 +3056,13 @@ describe('Plugin Workload SDK computed-vs-published state divergence log (issue 
     try {
       await internal.handleRecipeEvent('ADDED', recipe)
       expect(logSpy).toHaveBeenCalledWith(
-        expect.stringMatching(
-          /Plugin Workload SDK state.*sdk-recipe.*awaiting_policy -> validated.*patchEmitted=true/
-        )
+        expect.stringContaining('Plugin Workload SDK state'),
+        expect.objectContaining({
+          name: 'sdk-recipe',
+          value2: 'awaiting_policy',
+          projectedSdkState: 'validated',
+          willPatch: true,
+        })
       )
     } finally {
       logSpy.mockRestore()
@@ -2948,7 +3070,7 @@ describe('Plugin Workload SDK computed-vs-published state divergence log (issue 
   })
 
   it('does not log a transition when the computed SDK state is unchanged', async () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logSpy = captureLogger('info').mockImplementation(() => undefined)
     const recipe = sdkRecipe('validated')
     const internal = makeInternal(recipe, {
       phase: 'active',
@@ -3030,7 +3152,7 @@ describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
   })
 
   it('discards and warns on a namespace mismatch — no enqueue (H4)', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warnSpy = captureLogger('warn').mockImplementation(() => undefined)
     const recipe = makeWorkflowRecipe({
       metadata: { name: 'sdk-recipe', namespace: 'sandbox-recipes' },
     })
@@ -3039,7 +3161,8 @@ describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
       internal.handleGrantUpdateNotification('other-namespace', 'sdk-recipe')
       expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Discarding grant-update NOTIFY for "other-namespace/sdk-recipe"')
+        expect.stringContaining('Discarding grant-update NOTIFY'),
+        expect.objectContaining({ recipeNamespace: 'other-namespace', recipeName: 'sdk-recipe' })
       )
     } finally {
       warnSpy.mockRestore()
@@ -3047,12 +3170,15 @@ describe('grant-update NOTIFY dispatch (issue #375 P3 wiring, H4/H5)', () => {
   })
 
   it('discards and warns on an unknown recipe — no enqueue (H4)', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warnSpy = captureLogger('warn').mockImplementation(() => undefined)
     const { internal } = makeInternal([])
     try {
       internal.handleGrantUpdateNotification('sandbox-recipes', 'nope')
       expect(internal.eventQueue.enqueue).not.toHaveBeenCalled()
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('unknown recipe'))
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Discarding grant-update NOTIFY'),
+        expect.objectContaining({ value3: 'unknown recipe' })
+      )
     } finally {
       warnSpy.mockRestore()
     }

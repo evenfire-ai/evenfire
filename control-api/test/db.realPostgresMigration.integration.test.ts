@@ -962,6 +962,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 50,
       promptState: 'disabled',
+      order: 'latest',
     })
     for (const [label, family, filters] of [
       ['administrative_list', 'administrative', { action: ['permission_grant'] }],
@@ -2518,6 +2519,100 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     ])
   })
 
+  it('paginates replay sessions from PostgreSQL in both orders with stable timestamp ties', async () => {
+    const prefix = `replay-pagination-${randomUUID()}`
+    const earlier = '2026-07-14T16:00:00.000Z'
+    const later = '2026-07-14T17:00:00.000Z'
+    const fixtures = [
+      { hostRef: `${prefix}-a`, sessionId: 'session-a', occurredAt: earlier },
+      { hostRef: `${prefix}-b`, sessionId: 'session-b', occurredAt: earlier },
+      { hostRef: `${prefix}-z`, sessionId: 'session-z', occurredAt: later },
+    ]
+
+    for (const fixture of fixtures) {
+      await dbPool.query(
+        `WITH inserted AS (
+           INSERT INTO agent_run_events (
+             source_kind, source_service, source_event_id, idempotency_key, run_id, session_id,
+             span_id, origin, event_type, outcome, agent_sub, effective_scopes, decision,
+             host_ref, recipe_namespace, recipe_name, payload_metadata, payload_sha256, occurred_at
+           ) VALUES (
+             'mcp_host_runtime', 'mcp-host', $1, $2, $3::uuid, $4,
+             $5, 'direct_chat', 'run_start', 'started',
+             'mcp-host:test', ARRAY[]::text[], 'not_applicable', $6,
+             'mcp-host', 'standalone', '{}'::jsonb, $7, $8::timestamptz
+           )
+           RETURNING event_id, occurred_at, ingested_at, run_id, payload_sha256
+         )
+         INSERT INTO governed_event_stream
+           (event_family, event_id, schema_version, occurred_at, ingested_at,
+            environment, run_id, payload_sha256)
+         SELECT 'agent_run', event_id, 1, occurred_at, ingested_at,
+                'integration', run_id, payload_sha256
+           FROM inserted`,
+        [
+          randomUUID(),
+          randomBytes(32).toString('hex'),
+          randomUUID(),
+          fixture.sessionId,
+          `span-${fixture.sessionId}`,
+          fixture.hostRef,
+          randomBytes(32).toString('hex'),
+          fixture.occurredAt,
+        ]
+      )
+    }
+
+    const replay = new PostgresGovernedSessionReplayRepository(dbPool)
+    const highWatermark = await replay.captureHighWatermark()
+    const filters = {
+      occurredFrom: '2026-07-14T15:59:00.000Z',
+      occurredTo: '2026-07-14T17:01:00.000Z',
+      outcome: [],
+      sourceService: [],
+      sessionId: [],
+      hostRef: fixtures.map(fixture => fixture.hostRef),
+      humanUserId: [],
+      agentSub: [],
+      origin: [],
+      toolName: [],
+      approvalState: [],
+    }
+
+    for (const scenario of [
+      {
+        order: 'latest' as const,
+        expected: [`${prefix}-z/session-z`, `${prefix}-b/session-b`, `${prefix}-a/session-a`],
+      },
+      {
+        order: 'oldest' as const,
+        expected: [`${prefix}-a/session-a`, `${prefix}-b/session-b`, `${prefix}-z/session-z`],
+      },
+    ]) {
+      const first = await replay.list({
+        filters,
+        highWatermark,
+        after: null,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+      const second = await replay.list({
+        filters,
+        highWatermark,
+        after: first.anchors.at(-1)!,
+        limit: 2,
+        promptState: 'disabled',
+        order: scenario.order,
+      })
+      const actual = [...first.summaries, ...second.summaries].map(
+        item => `${item.hostRef}/${item.sessionId}`
+      )
+      expect(actual).toEqual(scenario.expected)
+      expect(new Set(actual).size).toBe(actual.length)
+    }
+  })
+
   it('persists token usage atomically and serves session totals from the governed ledger', async () => {
     const runAsControlApiRuntime = async <T>(work: (client: PoolClient) => Promise<T>) => {
       const client = await dbPool.connect()
@@ -2665,6 +2760,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       after: null,
       limit: 10,
       promptState: 'disabled',
+      order: 'latest',
     })
     expect(page.summaries).toHaveLength(1)
     expect(page.summaries[0]).toMatchObject({

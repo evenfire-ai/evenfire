@@ -65,7 +65,7 @@ export function SessionReplayDetail({ hostRef, sessionId }: SessionReplayDetailP
     <section className="cu-trace-layout">
       <div className="cu-card cu-card--viewport-fill cu-trace-detail">
         <TablePanelHeader
-          actions={
+          refreshAction={
             <button
               aria-label={loading ? 'Refreshing session replay' : 'Refresh session replay'}
               className="cu-trace-refresh"

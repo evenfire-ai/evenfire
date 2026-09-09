@@ -72,14 +72,22 @@ def finalizer_failure_count(lines, recipe_name, since):
     if not deletion_timestamp(since):
         raise ValueError("invalid observation start")
     start = datetime.datetime.fromisoformat(since.replace("Z", "+00:00"))
-    message = f'[WR-K8s] Finalizer cleanup failed for "{recipe_name}":'
     count = 0
     for line in lines:
         timestamp, separator, payload = line.partition(" ")
         if not separator or not deletion_timestamp(timestamp):
             continue
         observed_at = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        if observed_at >= start and payload.startswith(message):
+        try:
+            event = json.loads(payload)
+        except (ValueError, TypeError):
+            continue
+        if (observed_at >= start and isinstance(event, dict)
+                and event.get("component") == "wrc"
+                and event.get("level") == "error"
+                and event.get("recipeName") == recipe_name
+                and event.get("name") == recipe_name
+                and event.get("msg") == "Finalizer cleanup failed"):
             count += 1
     return count
 

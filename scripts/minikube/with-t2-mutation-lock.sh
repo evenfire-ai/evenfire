@@ -4,7 +4,10 @@
 # of acquiring a second lock for the same profile.
 set -euo pipefail
 
-if [[ "${1:-}" != "--" || "$#" -lt 2 ]]; then
+WRC_RECOVERY_ONLY=false
+if [[ "${1:-}" == "--recover-wrc-egress" && "$#" -eq 1 ]]; then
+  WRC_RECOVERY_ONLY=true
+elif [[ "${1:-}" != "--" || "$#" -lt 2 ]]; then
   printf 'usage: %s -- command [args...]\n' "${0##*/}" >&2
   exit 2
 fi
@@ -60,7 +63,14 @@ if [[ "${T2_BOOTSTRAP_REQUIRED}" == true ]]; then
 fi
 t2_context_check
 t2_profile_context_identity_check
-t2_mutation_lock
+if [[ "$WRC_RECOVERY_ONLY" == true ]]; then
+  # Recovery is a dedicated command, not a general skip-guard environment flag.
+  # It still requires the exact live profile lease; only the recovery body is
+  # permitted to run while that profile has a pending fault-injection journal.
+  if [[ "$T2_SKIP_LOCK" == true ]]; then t2_lock_validate_inherited; else t2_lock_acquire; fi
+else
+  t2_mutation_lock
+fi
 
 export T2_PROJECT_DIR T2_PROFILE T2_CONTEXT T2_PROFILE_ROOT T2_PROFILE_ENV T2_PORTS_ENV \
   T2_LOCK_ROOT T2_LOCK_TOKEN MINIKUBE_PROFILE CONTROL_API_REAL_PG_CONTEXT
@@ -80,5 +90,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 run_status=0
-"$@" || run_status=$?
+if [[ "$WRC_RECOVERY_ONLY" == true ]]; then
+  bash "$ROOT/scripts/e2e/e2e-wrc-egress-degradation.sh" --recover || run_status=$?
+else
+  "$@" || run_status=$?
+fi
 exit "${run_status}"

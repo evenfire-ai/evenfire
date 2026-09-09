@@ -27,7 +27,18 @@ def document(uid, finalizers, timestamp=STAMP, version="42"):
 
 class EvidenceTests(unittest.TestCase):
     def test_cleanup_signal_requires_exact_recipe_and_current_timestamp(self):
+        event = {"component": "wrc", "level": "error", "recipeName": "owned",
+                 "name": "owned", "msg": "Finalizer cleanup failed"}
         lines = [
+            f'{STAMP} {json.dumps(event)}\n',
+            f'{STAMP} {json.dumps({**event, "recipeName": "foreign"})}\n',
+            f'{STAMP} {json.dumps({**event, "name": "owned-extra"})}\n',
+            f'{STAMP} {json.dumps({**event, "level": "info"})}\n',
+            f'{STAMP} {json.dumps({**event, "component": "coordinator"})}\n',
+            f'{STAMP} {json.dumps({**event, "msg": "Cleaning up recipe finalizer"})}\n',
+            f'2026-09-04T00:00:00Z {json.dumps(event)}\n',
+            f'{STAMP} {{malformed\n',
+            f'{STAMP} []\n',
             f'{STAMP} [WR-K8s] Finalizer cleanup failed for "owned": Error: cleanup pending\n',
             f'{STAMP} [WR-K8s] Finalizer cleanup failed for "owned-extra": Error\n',
             '2026-09-04T00:00:00Z [WR-K8s] Finalizer cleanup failed for "owned": Error\n',

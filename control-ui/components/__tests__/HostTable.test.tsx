@@ -168,8 +168,8 @@ describe('HostTable providers column rendering', () => {
 })
 
 // UT-9 — the row shows the editable display name (spec.host) as the primary
-// label, with the immutable identifier (metadata.name / slug) as visible
-// secondary text; the search haystack matches BOTH.
+// label. The immutable identifier (metadata.name / slug) remains searchable
+// without restoring a visible identifier column.
 describe('HostTable display name column (UT-9)', () => {
   function makeDisplayHost(name: string, displayName: string): HostItem {
     return {
@@ -182,19 +182,18 @@ describe('HostTable display name column (UT-9)', () => {
     }
   }
 
-  it('renders the display name as primary and the slug as secondary', () => {
+  it('renders the display name as the primary row label without an identifier column', () => {
     renderHostTable([makeDisplayHost('prod-x', 'Prod X')])
 
     const row = screen.getByLabelText('Open agent prod-x')
     expect(within(row).getByText('Prod X')).toBeInTheDocument()
-    expect(within(row).getByText('prod-x')).toBeInTheDocument()
+    expect(within(row).queryByText('prod-x')).not.toBeInTheDocument()
   })
 
   it('falls back to the slug as the primary label when spec.host is blank', () => {
     renderHostTable([makeDisplayHost('prod-x', '   ')])
 
     const row = screen.getByLabelText('Open agent prod-x')
-    // Only the slug renders — no separate secondary line duplicating it.
     expect(within(row).getAllByText('prod-x')).toHaveLength(1)
   })
 
@@ -302,22 +301,24 @@ describe('HostTable connectors hover card', () => {
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
-  it('renders the bare count without a tooltip when the agent has no connectors', () => {
+  it('shows an empty connector tooltip when the context has no MCP servers', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: [],
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
-    expect(within(row).getByText('0')).toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.mouseEnter(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 
-  it('renders a plain 0 when the context map is missing', () => {
+  it('keeps the zero count aligned when the context map is missing', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')])
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).getByText('0')).toBeInTheDocument()
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.focus(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 })
 
@@ -346,7 +347,7 @@ describe('HostTable — row actions kebab', () => {
 
     const viewItem = screen.getByRole('menuitem', { name: 'View agent details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(viewItem)
     expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })

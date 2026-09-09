@@ -184,15 +184,10 @@ describe('GfsGrantPanel bulk access', () => {
     expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(within(existing).getByText('Read')).toBeTruthy()
     expect(within(existing).getByText('Write')).toBeTruthy()
-    expect(within(existing).getByText('X')).toBeTruthy()
-    expect(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
-        .className
-    ).toContain('cu-gfs-existing-access__revoke')
-
     fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
     )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
@@ -204,6 +199,109 @@ describe('GfsGrantPanel bulk access', () => {
     )
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('distinguishes direct grant and share menus for the same principal', async () => {
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    mockGetGfsShares.mockResolvedValue({
+      items: [
+        {
+          id: '44444444-4444-4444-4444-444444444444',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          includeDescendants: false,
+        },
+      ],
+    })
+
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    expect(
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
+    ).toBeInTheDocument()
+    expect(
+      within(existing).getByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
+    ).toBeInTheDocument()
+  })
+
+  it('sorts access records by visible principal identity', async () => {
+    mockGetAdminUsers.mockResolvedValue({
+      items: [
+        {
+          id: '11111111-1111-1111-1111-111111111111',
+          email: 'ada@example.test',
+          name: 'Ada Lovelace',
+          displayName: 'Ada Lovelace',
+          picture: null,
+          activeTeamCount: 1,
+        },
+        {
+          id: '11111111-1111-1111-1111-111111111110',
+          email: 'ada-alt@example.test',
+          name: 'Ada Lovelace',
+          displayName: 'Ada Lovelace',
+          picture: null,
+          activeTeamCount: 1,
+        },
+      ],
+    })
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '77777777-7777-7777-7777-777777777777',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: { type: 'operator' },
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '33333333-3333-3333-3333-333333333333',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '22222222-2222-2222-2222-222222222222',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: { type: 'user', id: '11111111-1111-1111-1111-111111111110' },
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    renderPanel()
+
+    const list = await screen.findByRole('list', { name: 'Resource access' })
+    await waitFor(() => expect(within(list).getAllByText('Ada Lovelace')).toHaveLength(2))
+    const rows = within(list).getAllByRole('listitem')
+    expect(rows.map(row => row.textContent)).toEqual([
+      expect.stringContaining('Ada Lovelace'),
+      expect.stringContaining('Ada Lovelace'),
+      expect.stringContaining('Operator'),
+    ])
+    expect(rows.map(row => row.getAttribute('data-access-id'))).toEqual([
+      '22222222-2222-2222-2222-222222222222',
+      '33333333-3333-3333-3333-333333333333',
+      '77777777-7777-7777-7777-777777777777',
+    ])
   })
 
   it('self-heals a row that another admin already revoked without hiding other errors', async () => {
@@ -230,8 +328,9 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
     fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
     )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
@@ -265,8 +364,9 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'Who has access' })
     fireEvent.click(
-      within(existing).getByRole('button', { name: 'Remove grant access for Ada Lovelace' })
+      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
     )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
