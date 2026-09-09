@@ -31,6 +31,7 @@ export type SandboxUiPageProps = {
   shortcutOpenRequestId?: number
   localSearchRequestId?: number
   chatDrawerOpen?: boolean
+  titlebarLeadingContainer?: HTMLElement | null
   onToggleChatDrawer?: () => void
   onBackToConversation?: () => void | Promise<void>
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void

@@ -277,6 +277,14 @@ export function IconChevronRight(props: IconProps) {
   )
 }
 
+export function IconChevronLeft(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="m15 18-6-6 6-6" />
+    </svg>
+  )
+}
+
 export function IconClose(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>

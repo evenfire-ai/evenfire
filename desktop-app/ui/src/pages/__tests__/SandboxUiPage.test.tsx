@@ -2,7 +2,14 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SandboxUiPage } from '../SandboxUiPage'
+import { SandboxUiPage as SandboxUiPageBase } from '../SandboxUiPage'
+
+// The page portals its mounted-app actions into the title bar's leading slot.
+// In isolation there is no WindowTitleBar, so supply a container (document.body)
+// to exercise the real portal path and keep the actions queryable via `screen`.
+function SandboxUiPage(props: React.ComponentProps<typeof SandboxUiPageBase>) {
+  return <SandboxUiPageBase titlebarLeadingContainer={document.body} {...props} />
+}
 
 const sandboxUi = {
   listApps: vi.fn(),
@@ -181,8 +188,11 @@ describe('SandboxUiPage', () => {
         },
       })
     })
-    expect(await screen.findByRole('button', { name: 'Back to apps' })).toBeTruthy()
-    expect(screen.getAllByRole('button', { name: /^Back to / })).toHaveLength(1)
+    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
+    // "Back to apps" was removed by design — the sidebar owns the return to the
+    // app picker now. The mounted app-actions moved to the title-bar leading slot.
+    expect(screen.queryByRole('button', { name: 'Back to apps' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Refresh app content' })).toBeTruthy()
   })
 
   it('exposes a chat-drawer toggle in the mounted header that reflects and drives drawer state', async () => {
@@ -235,7 +245,7 @@ describe('SandboxUiPage', () => {
 
     render(<SandboxUiPage />)
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     expect(screen.queryByRole('button', { name: 'Toggle chat drawer' })).toBeNull()
   })
 
@@ -260,7 +270,7 @@ describe('SandboxUiPage', () => {
       <SandboxUiPage actionRequest={null} onEmbeddedAppBack={onEmbeddedAppBack} />
     )
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
-    await screen.findByRole('button', { name: 'Refresh' })
+    await screen.findByRole('button', { name: 'Refresh app content' })
 
     rerender(
       <SandboxUiPage
@@ -345,7 +355,7 @@ describe('SandboxUiPage', () => {
     }
     const { rerender } = render(<SandboxUiPage {...props} actionRequest={null} />)
     fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
-    await screen.findByRole('button', { name: 'Refresh' })
+    await screen.findByRole('button', { name: 'Refresh app content' })
 
     rerender(<SandboxUiPage {...props} actionRequest={{ id: 1, action: 'back-to-conversation' }} />)
 
@@ -636,10 +646,14 @@ describe('SandboxUiPage', () => {
     )
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    // The control is icon-only now: the full label stays the accessible name and
+    // native title, and its visible copy lives in the hover-tooltip flyout
+    // (role="tooltip") rather than an inline text span.
     const button = await screen.findByRole('button', { name: `Back to ${title}` })
 
     expect(button.getAttribute('title')).toBe(`Back to ${title}`)
-    expect(button.querySelector('span')?.textContent).toBe(`Back to ${title}`)
+    const tooltip = button.closest('.titlebar-leading-action')?.querySelector('[role="tooltip"]')
+    expect(tooltip?.textContent).toBe(`Back to ${title}`)
   })
 
   it('keeps the app mounted when returning to the conversation fails', async () => {
@@ -675,7 +689,8 @@ describe('SandboxUiPage', () => {
 
     await waitFor(() => expect(onBackToConversation).toHaveBeenCalledOnce())
     expect(sandboxUi.close).not.toHaveBeenCalled()
-    expect(screen.getByRole('button', { name: 'Back to apps' })).toBeTruthy()
+    // Still mounted (not returned to the picker) — the embed chrome is present.
+    expect(screen.getByTestId('sandbox-ui-mounted')).toBeTruthy()
   })
 
   it('keeps the conversation origin during Strict Mode effect replay', async () => {
@@ -767,7 +782,7 @@ describe('SandboxUiPage', () => {
     )
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     onEmbedBoundsApplied.mockClear()
 
     rerender(
@@ -798,7 +813,7 @@ describe('SandboxUiPage', () => {
     render(<SandboxUiPage onEmbedSlotTopChange={onEmbedSlotTopChange} />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
 
     // The slot rect (getBoundingClientRect mock -> top: 12) flows through the real
     // useEmbedBounds push, so the callback fires with Math.round(rect.top) = 12.
@@ -832,9 +847,9 @@ describe('SandboxUiPage', () => {
     render(<SandboxUiPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh app content' }))
 
     await waitFor(() => {
       expect(sandboxUi.reload).toHaveBeenCalledTimes(1)
@@ -862,7 +877,7 @@ describe('SandboxUiPage', () => {
     const { rerender } = render(<SandboxUiPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
 
     rerender(<SandboxUiPage headerShellOverlayOpen />)
 
@@ -922,7 +937,7 @@ describe('SandboxUiPage', () => {
     const { rerender } = render(<SandboxUiPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
     sandboxUi.setVisible.mockClear()
 
@@ -958,7 +973,7 @@ describe('SandboxUiPage', () => {
     const { rerender } = render(<SandboxUiPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
     sandboxUi.setVisible.mockClear()
 
@@ -1010,7 +1025,7 @@ describe('SandboxUiPage', () => {
     const { rerender } = render(<SandboxUiPage />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    await screen.findByTestId('sandbox-ui-mounted')
     await waitFor(() => expect(sandboxUi.setVisible).toHaveBeenLastCalledWith(true))
     sandboxUi.setVisible.mockClear()
 

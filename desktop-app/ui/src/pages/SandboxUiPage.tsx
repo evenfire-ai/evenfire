@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, StatusBanner } from '@components/Common'
+import { createPortal } from 'react-dom'
+import { IconButton, StatusBanner } from '@components/Common'
+import { joinClasses } from '@lib/classNames'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import {
   IconChat,
-  IconClose,
+  IconChevronLeft,
   IconCopy,
   IconRefresh,
   IconSandboxUi,
@@ -160,6 +162,42 @@ const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
+// Icon-only app action rendered into the native title bar's leading slot. The
+// visible label lives in an instant hover flyout (reusing the sidebar
+// `.nav-tooltip` treatment) so the collapsed control still announces itself;
+// `IconButton` keeps the accessible name and native title from `label`.
+function TitlebarLeadingAction({
+  className,
+  label,
+  pressed,
+  onClick,
+  children,
+}: {
+  className: string
+  label: string
+  pressed?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <span className="titlebar-leading-action">
+      <IconButton
+        variant="ghost"
+        size="sm"
+        className={joinClasses('titlebar-leading-action__btn', className)}
+        label={label}
+        aria-pressed={pressed}
+        onClick={onClick}
+      >
+        {children}
+      </IconButton>
+      <span className="nav-tooltip titlebar-leading-action__tooltip" role="tooltip">
+        {label}
+      </span>
+    </span>
+  )
+}
+
 export function SandboxUiPage({
   actionRequest = null,
   boundsRefreshKey = 0,
@@ -173,6 +211,7 @@ export function SandboxUiPage({
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
   chatDrawerOpen = false,
+  titlebarLeadingContainer = null,
   onToggleChatDrawer,
   onBackToConversation,
   onEmbeddedAppOpening,
@@ -569,88 +608,65 @@ export function SandboxUiPage({
     const showRefreshBanner =
       refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
     return (
-      <section className="page">
-        <div className="sandbox-ui-mounted-header">
-          {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
-            // The originating conversation lives in the drawer beside the live
-            // embed now, so "Back to {title}" toggles the drawer instead of
-            // destroying the embed and reconstructing the chat full-screen. When
-            // no drawer toggle is wired it falls back to the destroy-and-
-            // reconstitute path (also reachable via the app.backToConversation
-            // command).
-            <Button
-              color="neutral"
-              variant={onToggleChatDrawer && chatDrawerOpen ? 'solid' : 'soft'}
-              size="sm"
-              className="sandbox-ui-conversation-btn"
-              aria-label={`Back to ${conversationOrigin.title}`}
-              aria-pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
-              title={`Back to ${conversationOrigin.title}`}
-              onClick={
-                onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
-              }
-            >
-              <IconChat />
-              <span>Back to {conversationOrigin.title}</span>
-            </Button>
-          ) : null}
-          <Button
-            color="neutral"
-            variant="soft"
-            size="sm"
-            className="sandbox-ui-close-btn"
-            aria-label="Back to apps"
-            title="Back to apps"
-            onClick={() => void onBackToApps()}
-          >
-            <IconClose />
-            <span>Back to apps</span>
-          </Button>
-          {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
-            // No originating conversation to return to — a plain drawer toggle.
-            <Button
-              color="neutral"
-              variant={chatDrawerOpen ? 'solid' : 'soft'}
-              size="sm"
-              className="sandbox-ui-chat-drawer-btn"
-              aria-label="Toggle chat drawer"
-              aria-pressed={chatDrawerOpen}
-              title="Toggle chat drawer"
-              onClick={onToggleChatDrawer}
-            >
-              <IconChat />
-              <span>Chat</span>
-            </Button>
+      <section className="page" data-testid="sandbox-ui-mounted">
+        {/* App actions live in the native title bar's leading slot (icon-only,
+            label in a hover flyout). They render through a portal only once the
+            title bar has published its container; there is no inline fallback,
+            mirroring how the header search/bell portal works. "Back to apps" is
+            intentionally gone — the sidebar owns the return to the app picker. */}
+        {titlebarLeadingContainer &&
+          createPortal(
+            <div className="window-titlebar__leading-actions">
+              {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
+                // The originating conversation lives in the drawer beside the
+                // live embed now, so this toggles the drawer instead of
+                // destroying the embed and reconstructing the chat full-screen.
+                // When no drawer toggle is wired it falls back to the destroy-
+                // and-reconstitute path (also reachable via the
+                // app.backToConversation command).
+                <TitlebarLeadingAction
+                  className="sandbox-ui-conversation-btn"
+                  label={`Back to ${conversationOrigin.title}`}
+                  pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
+                  onClick={
+                    onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
+                  }
+                >
+                  <IconChevronLeft />
+                </TitlebarLeadingAction>
+              ) : null}
+              {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
+                // No originating conversation to return to — a plain drawer toggle.
+                <TitlebarLeadingAction
+                  className="sandbox-ui-chat-drawer-btn"
+                  label="Toggle chat drawer"
+                  pressed={chatDrawerOpen}
+                  onClick={onToggleChatDrawer}
+                >
+                  <IconChat />
+                </TitlebarLeadingAction>
+              )}
+              {launch.kind === 'mounted' && (
+                <>
+                  <TitlebarLeadingAction
+                    className="sandbox-ui-refresh-btn"
+                    label="Refresh app content"
+                    onClick={onRefresh}
+                  >
+                    <IconRefresh />
+                  </TitlebarLeadingAction>
+                  <TitlebarLeadingAction
+                    className="sandbox-ui-copy-link-btn"
+                    label="Copy current app link"
+                    onClick={() => void onCopyDeepLink()}
+                  >
+                    <IconCopy />
+                  </TitlebarLeadingAction>
+                </>
+              )}
+            </div>,
+            titlebarLeadingContainer
           )}
-          {launch.kind === 'mounted' && (
-            <>
-              <Button
-                color="neutral"
-                variant="soft"
-                size="sm"
-                className="sandbox-ui-refresh-btn"
-                aria-label="Refresh"
-                title="Refresh app content"
-                onClick={onRefresh}
-              >
-                <IconRefresh />
-                <span>Refresh</span>
-              </Button>
-              <Button
-                color="neutral"
-                variant="soft"
-                size="sm"
-                className="sandbox-ui-copy-link-btn"
-                aria-label="Copy current app link"
-                title="Copy current app link"
-                onClick={() => void onCopyDeepLink()}
-              >
-                <IconCopy />
-                <span>Copy URL</span>
-              </Button>
-            </>
-          )}
-        </div>
         {showRefreshBanner && (
           <StatusBanner
             tone="error"

@@ -179,25 +179,33 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       expect(Math.round(mobileSearch.width)).toBe(Math.round(mobileHeader.width))
     })
 
-    await test.step('long return label truncates while its full name and controls remain accessible', async () => {
+    await test.step('long return label stays accessible via tooltip while title-bar actions never overlap', async () => {
       await resizeDesktop(app!, 1100)
       const returnButton = page.getByRole('button', { name: `Back to ${LONG_CONVERSATION}` })
       await expect(returnButton).toHaveAttribute('title', `Back to ${LONG_CONVERSATION}`)
-      const visibleLabel = returnButton.locator('span')
-      const labelGeometry = await visibleLabel.evaluate(element => ({
-        clientWidth: element.clientWidth,
-        scrollWidth: element.scrollWidth,
-      }))
-      expect(labelGeometry.scrollWidth).toBeGreaterThan(labelGeometry.clientWidth)
+      // Icon-only now: the full conversation name is no longer a visible text
+      // span (the truncation/ellipsis invariant was retired with the max-width),
+      // it lives in the hover-tooltip flyout, which still carries the complete
+      // label for sighted users. Same intent: the full name stays accessible.
+      const returnTooltip = page
+        .locator('.titlebar-leading-action', {
+          has: page.getByRole('button', { name: `Back to ${LONG_CONVERSATION}` }),
+        })
+        .getByRole('tooltip')
+      await expect(returnTooltip).toHaveText(`Back to ${LONG_CONVERSATION}`)
 
-      const controls = page.locator('.sandbox-ui-mounted-header button')
+      // The app actions moved into the title bar's leading slot — a single row
+      // now, not a wrapped header, so the old multi-row "uniqueness" check is
+      // retired. What still matters: the leading actions never overlap each
+      // other or the header search that shares their row (D-A3 coexistence).
+      const controls = page.locator('.window-titlebar__leading button')
       const controlBoxes = await controls.evaluateAll(elements =>
         elements.map(element => {
           const rect = element.getBoundingClientRect()
           return { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
         })
       )
-      expect(new Set(controlBoxes.map(box => Math.round(box.y))).size).toBeGreaterThan(1)
+      expect(controlBoxes.length, 'title-bar leading actions must be present').toBeGreaterThan(0)
       const searchBox = await bounds(page.getByRole('textbox', { name: 'Search' }))
       for (let index = 0; index < controlBoxes.length; index += 1) {
         assertNoIntersection(controlBoxes[index]!, searchBox)

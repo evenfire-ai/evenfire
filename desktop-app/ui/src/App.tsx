@@ -309,6 +309,7 @@ export function App() {
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
   const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
   const [titlebarActionsRoot, setTitlebarActionsRoot] = React.useState<HTMLDivElement | null>(null)
+  const [titlebarLeadingRoot, setTitlebarLeadingRoot] = React.useState<HTMLDivElement | null>(null)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
     query: string
@@ -2012,7 +2013,7 @@ export function App() {
   return (
     <AuthContext.Provider value={authValue}>
       <div className="app-frame">
-        <WindowTitleBar actionsRef={setTitlebarActionsRoot} />
+        <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
@@ -2132,6 +2133,7 @@ export function App() {
                                       shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                       localSearchRequestId={sandboxLocalSearchRequestId}
                                       chatDrawerOpen={chatDrawerVisible}
+                                      titlebarLeadingContainer={titlebarLeadingRoot}
                                       onToggleChatDrawer={toggleChatDrawer}
                                       onBackToConversation={handleSandboxUiBackToConversation}
                                       onEmbeddedAppOpening={handleSandboxUiOpening}

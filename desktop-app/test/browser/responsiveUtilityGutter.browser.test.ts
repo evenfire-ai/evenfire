@@ -8,7 +8,7 @@ const SYSTEM_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 
 type HeaderGeometry = {
   appsPaddingRight: number
-  mountedPaddingRight: number
+  embedPaddingRight: number
   pagePaddingRight: number
 }
 
@@ -23,9 +23,11 @@ function launchOptions() {
 
 // The command-center (global-search) now lives in the window title bar on every
 // route, so the content panel and its headers reserve NO base gutter for it —
-// that fixture is deliberately absent here. The only horizontal reservation left
-// in the panel is the apps notification drawer's rail, applied to the page while
-// the drawer is open, which is what this geometry measures.
+// that fixture is deliberately absent here. The mounted-app actions also moved to
+// the title bar, so the mounted view's layout now anchors on the embed slot
+// (`.sandbox-ui-embed-slot`) rather than a header row. The only horizontal
+// reservation left in the panel is the apps notification drawer's rail, applied
+// to the page while the drawer is open, which is what this geometry measures.
 async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
   if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
@@ -33,7 +35,7 @@ async function headerGeometry(width: number, drawerOpen = false): Promise<Header
     <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
       <section class="page">
         <header class="apps-page-header">Apps</header>
-        <header class="sandbox-ui-mounted-header"><button>Back</button></header>
+        <div class="sandbox-ui-embed-slot"></div>
       </section>
     </div>
   `)
@@ -44,7 +46,7 @@ async function headerGeometry(width: number, drawerOpen = false): Promise<Header
       Number.parseFloat(getComputedStyle(document.querySelector(selector)!).paddingRight)
     return {
       appsPaddingRight: number('.apps-page-header'),
-      mountedPaddingRight: number('.sandbox-ui-mounted-header'),
+      embedPaddingRight: number('.sandbox-ui-embed-slot'),
       pagePaddingRight: number('.page'),
     }
   })
@@ -65,11 +67,11 @@ describe('responsive utility gutter', () => {
     const closed = await headerGeometry(1100)
     const open = await headerGeometry(1100, true)
 
-    // Closed: no base gutter on the mounted-app header (search is in the title
-    // bar). Open: the page reserves the drawer rail and the mounted-app header
-    // sits flush against it (its own padding stays 0).
-    expect(closed.mountedPaddingRight).toBe(0)
-    expect(open.mountedPaddingRight).toBe(0)
+    // Closed: no base gutter on the mounted embed (search is in the title bar).
+    // Open: the page reserves the drawer rail and the embed sits flush against it
+    // (the embed slot's own padding stays 0 — the page pads, not the slot).
+    expect(closed.embedPaddingRight).toBe(0)
+    expect(open.embedPaddingRight).toBe(0)
     expect(open.pagePaddingRight).toBe(466)
   })
 
@@ -78,13 +80,13 @@ describe('responsive utility gutter', () => {
     const desktop = await headerGeometry(1221)
 
     // With search in the title bar, neither the apps picker header nor the
-    // mounted-app header pads a base gutter at any width — the responsive
-    // "utility budget" that reserved space for the floating in-panel search is
-    // retired. Regression guard: re-introducing a floating in-panel search would
-    // make one of these non-zero again.
+    // mounted embed pads a base gutter at any width — the responsive "utility
+    // budget" that reserved space for the floating in-panel search is retired.
+    // Regression guard: re-introducing a floating in-panel search would make one
+    // of these non-zero again.
     expect(mobile.appsPaddingRight).toBe(0)
-    expect(mobile.mountedPaddingRight).toBe(0)
+    expect(mobile.embedPaddingRight).toBe(0)
     expect(desktop.appsPaddingRight).toBe(0)
-    expect(desktop.mountedPaddingRight).toBe(0)
+    expect(desktop.embedPaddingRight).toBe(0)
   })
 })

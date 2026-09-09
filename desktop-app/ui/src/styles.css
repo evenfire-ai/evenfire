@@ -81,7 +81,13 @@ h3 {
 
 .window-titlebar {
   position: relative;
-  z-index: var(--layer-header);
+  /* Sit above the sidebar's own stacking layer (.left-nav uses
+     --sidebar-flyout-layer = --layer-dropdown + 1000) so the leading slot's
+     downward hover flyout paints over the sidebar column instead of behind it.
+     Still below dialogs/toasts (2300+), which correctly cover the whole chrome.
+     The title bar never vertically overlaps lower chrome, so this only affects
+     that flyout. */
+  z-index: calc(var(--layer-dropdown) + 1010);
   isolation: isolate;
   height: var(--window-titlebar-height);
   display: flex;
@@ -356,6 +362,76 @@ h3 {
 
 .window-titlebar--platform-mac .window-titlebar__controls:hover .window-control-icon,
 .window-titlebar--platform-mac .window-control-button:focus-visible .window-control-icon {
+  opacity: 1;
+}
+
+/* Leading slot: mounted-app actions live here (icon-only), packed just after
+   the window controls in the same title-bar row so they sit at the top-left,
+   over the sidebar's content column and clear of the macOS traffic lights. The
+   header search + bell keep the right edge via .window-titlebar__actions. */
+.window-titlebar__leading {
+  /* .window-titlebar__actions is fixed and paints its (draggable, full-width)
+     .top-bar above this row; without a higher stacking order that band would
+     intercept pointer events over these actions and steal their clicks. */
+  position: relative;
+  z-index: calc(var(--layer-header) + 2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: var(--space-4);
+  min-width: 0;
+  height: var(--window-titlebar-height);
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__leading-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  pointer-events: auto;
+}
+
+.window-titlebar__leading .titlebar-leading-action {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Ghost affordance matching the title-bar bell / chat-drawer IconButtons:
+   no border or fill at rest, accent border + neutral fill on hover or when
+   the toggle is pressed. */
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--titlebar-control-ink);
+}
+
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button:hover:enabled,
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button[aria-pressed='true'] {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* Reuse the sidebar .nav-tooltip flyout for an instant hover label, reoriented
+   to drop below the action (this is a horizontal top bar, not a vertical rail). */
+.window-titlebar__leading .titlebar-leading-action__tooltip {
+  left: 50%;
+  top: calc(100% + var(--space-1));
+  transform: translateX(-50%);
+}
+
+.window-titlebar__leading .titlebar-leading-action:hover .titlebar-leading-action__tooltip,
+.window-titlebar__leading .titlebar-leading-action:focus-within .titlebar-leading-action__tooltip {
   opacity: 1;
 }
 
@@ -12804,85 +12880,30 @@ pre {
   }
 }
 
-/* Tight single-row header for the mounted sandbox-ui app view. The command
-   center now lives in the window title bar (not floating over the panel), so
-   this row spans the full width; the notification-drawer-open state reserves
-   the right rail on the page instead (see below). */
-.sandbox-ui-mounted-header {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: var(--space-2);
-  min-width: 0;
-  padding-top: var(--space-4);
-}
-
-.sandbox-ui-conversation-btn,
-.sandbox-ui-close-btn,
-.sandbox-ui-copy-link-btn,
-.sandbox-ui-refresh-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-color: rgba(var(--accent-rgb), 0.45);
-  background: rgba(var(--panel-rgb), 0.95);
-}
-
-.sandbox-ui-conversation-btn {
-  min-width: 0;
-  max-width: min(280px, 40vw);
-}
-
-.sandbox-ui-conversation-btn span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sandbox-ui-conversation-btn svg,
-.sandbox-ui-close-btn svg,
-.sandbox-ui-copy-link-btn svg,
-.sandbox-ui-refresh-btn svg {
-  width: 16px;
-  height: 16px;
-}
-
 /* Pull the embed up and let it fill the column: tighten the page-shell gap,
    trim the content-panel top padding, and switch the page to a flex column
    so the embed slot's flex: 1 stretches to the available height instead of
-   relying on a hardcoded min-height. The :has() selectors only fire when
-   the mounted-header is in the tree — the picker view (no header) keeps the
-   standard page chrome. */
-.page:has(.sandbox-ui-mounted-header) {
+   relying on a hardcoded min-height. The app actions moved to the title bar's
+   leading slot, so these :has() selectors now anchor on the embed slot itself
+   — present only in the mounted/minting view, never in the picker. */
+.page:has(.sandbox-ui-embed-slot) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   min-height: 0;
 }
 
-.content-panel:has(.sandbox-ui-mounted-header) {
+.content-panel:has(.sandbox-ui-embed-slot) {
   padding: var(--space-2) 0 0;
   align-content: stretch;
 }
 
-.content-panel:has(.sandbox-ui-mounted-header) > .top-bar {
+.content-panel:has(.sandbox-ui-embed-slot) > .top-bar {
   right: var(--space-4);
 }
 
-.content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+.content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-embed-slot) {
   padding-right: var(--app-header-utilities-width);
-}
-
-.content-panel.content-panel--app-notification-drawer-open .sandbox-ui-mounted-header {
-  padding-right: 0;
-}
-
-.sandbox-ui-mounted-header {
-  padding-left: var(--space-4);
 }
 
 /* Chat drawer — Cursor-style chat column beside the live app embed. It shrinks
@@ -12900,12 +12921,8 @@ pre {
   --app-header-utilities-width: var(--chat-drawer-width);
 }
 
-.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-embed-slot) {
   padding-right: var(--app-header-utilities-width);
-}
-
-.content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
-  padding-right: 0;
 }
 
 /* The chat drawer occupies the right rail at --layer-chat-overlay, above the
