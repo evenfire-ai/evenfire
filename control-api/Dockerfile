@@ -35,6 +35,8 @@ RUN npm run build
 RUN npm prune --production
 
 FROM node:24-alpine
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
 RUN addgroup -S app && adduser -S app -G app
 WORKDIR /app
 
@@ -44,6 +46,9 @@ COPY --from=builder --chown=app:app /app/control-api/dist ./control-api/dist
 COPY --from=builder --chown=app:app /app/control-api/node_modules ./control-api/node_modules
 
 ENV NODE_ENV=production
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 EXPOSE 8090
 USER app
 WORKDIR /app/control-api

@@ -20,6 +20,7 @@ import { PgBlobStagingStore, reconcileExpiredBlobs } from './db/blobStaging'
 import { PgResourceStore } from './db/resourceStore'
 import { GfsWriteService, PgTransactor } from './db/writeStore'
 import { GfsMetrics } from './metrics'
+import { startPr2ReadinessReporter } from './pr2ReadinessReporter'
 import { GfsServer, ReadinessDeps } from './server'
 import { BlobStore } from './storage/blobStore'
 import { createGfsUploadFinalizer } from './upload/uploadFinalizer'
@@ -299,6 +300,10 @@ async function main(): Promise<void> {
 
   const server = new GfsServer(config, readiness, serving, metrics)
   const port = await server.start()
+  const stopReadinessReporter = startPr2ReadinessReporter({
+    baseUrl: config.controlApiBaseUrl,
+    serviceToken: config.controlApiServiceToken,
+  })
   console.log(
     `[gfsc] listening on :${port} (role=${config.storageRole}, drive=${config.driveName}, ` +
       `serving=${serving ? 'on' : 'off'}, devMode=${config.devMode})`
@@ -306,6 +311,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[gfsc] ${signal} received, shutting down`)
+    stopReadinessReporter()
     await server.stop()
     if (invalidation) await invalidation.stop()
     if (cleanupTimer) clearInterval(cleanupTimer)

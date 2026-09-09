@@ -3,6 +3,7 @@
  */
 import { loadConfig } from './config'
 import { logger } from './logger'
+import { startPr2ReadinessReporter } from './pr2ReadinessReporter'
 import { createApp } from './server'
 
 async function main(): Promise<void> {
@@ -20,12 +21,18 @@ async function main(): Promise<void> {
   )
 
   const app = createApp(config)
+  let stopReadinessReporter: () => void = () => undefined
   const server = app.listen(config.port, () => {
+    stopReadinessReporter = startPr2ReadinessReporter({
+      baseUrl: config.controlApiBaseUrl!,
+      serviceToken: config.controlApiServiceToken!,
+    })
     logger.info({ port: config.port }, 'wfc listening')
   })
 
   const shutdown = (signal: string): void => {
     logger.info({ signal }, 'shutting down')
+    stopReadinessReporter()
     server.close(() => {
       logger.info('http server closed')
       process.exit(0)

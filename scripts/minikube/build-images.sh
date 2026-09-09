@@ -178,6 +178,22 @@ GHCR_NAMESPACE="ghcr.io/evenfire-ai"
 # --verify-only. Declared here, not next to the writer at the bottom, because
 # the verify path (which exits before the writer) needs it too.
 MANIFEST_FILE="${PROJECT_DIR}/deploy/minikube/.image-manifest.json"
+EVENFIRE_BUILD_SOURCE_REVISION=""
+
+resolve_build_source_revision() {
+  if [[ -n "$EVENFIRE_BUILD_SOURCE_REVISION" ]]; then
+    return
+  fi
+  EVENFIRE_BUILD_SOURCE_REVISION="$(git -C "${PROJECT_DIR}" rev-parse HEAD)"
+  if [[ ! "${EVENFIRE_BUILD_SOURCE_REVISION}" =~ ^[0-9a-f]{40}$ ]]; then
+    err "Could not resolve an immutable source revision for local images"
+    exit 1
+  fi
+  if [[ -n "$(git -C "${PROJECT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
+    EVENFIRE_BUILD_SOURCE_REVISION="uncommitted"
+    warn "Local image includes uncommitted source and cannot emit PR2 runtime readiness evidence"
+  fi
+}
 
 # The mode the cluster's images were actually acquired in. Prints nothing when
 # the manifest is absent, unparseable, or records anything other than
@@ -934,8 +950,21 @@ build_image() {
     warn "Directory '$dir' not found -- skipping ${name}"
     return
   fi
+  resolve_build_source_revision
   log "Building ${tag}..."
-  local docker_args=(-t "$tag")
+  local package_dir="$dir"
+  if [[ "$dir" = "$PROJECT_DIR" && -n "$dockerfile" ]]; then
+    package_dir="$(dirname "$dockerfile")"
+  fi
+  local service_version="unknown"
+  if [[ -f "${package_dir}/package.json" ]]; then
+    service_version="$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version))' "${package_dir}/package.json")"
+  fi
+  local docker_args=(
+    -t "$tag"
+    --build-arg "EVENFIRE_SOURCE_REVISION=${EVENFIRE_BUILD_SOURCE_REVISION}"
+    --build-arg "EVENFIRE_SERVICE_VERSION=${service_version}"
+  )
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi

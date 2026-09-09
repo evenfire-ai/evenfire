@@ -20,6 +20,11 @@ RUN npm run build
 # lscr.io/linuxserver/webtop:ubuntu-xfce && docker inspect --format
 # '{{index .RepoDigests 0}}' lscr.io/linuxserver/webtop:ubuntu-xfce`.
 FROM lscr.io/linuxserver/webtop:ubuntu-xfce@sha256:3c052ffab7a7b28ff7a592237c066a3985ff7d2c2345b2d5bbd36b82cface0ab
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 
 # Node.js 24.16.0 (matches builder stage). Pin the exact NodeSource patch:
 # `setup_24.x` otherwise installs the latest 24.x (24.17.0+), whose undici bump

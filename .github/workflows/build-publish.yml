@@ -384,6 +384,11 @@ jobs:
             echo "context=$MATRIX_PATH" >> "$GITHUB_OUTPUT"
             echo "file=$MATRIX_PATH/${MATRIX_DOCKERFILE:-Dockerfile}" >> "$GITHUB_OUTPUT"
           fi
+          if [ -f "$MATRIX_PATH/package.json" ]; then
+            echo "service-version=$(node -e 'const p=require(process.argv[1]); process.stdout.write(String(p.version))' "$MATRIX_PATH/package.json")" >> "$GITHUB_OUTPUT"
+          else
+            echo "service-version=unknown" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push by digest
         if: ${{ matrix.changed == 'true' || needs.detect.outputs.force_all == 'true' }}
@@ -405,6 +410,9 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            EVENFIRE_SOURCE_REVISION=${{ github.sha }}
+            EVENFIRE_SERVICE_VERSION=${{ steps.buildargs.outputs.service-version }}
           # Per-arch scope: each arch now builds in its own job/leg (see the
           # split above), so each needs its own gha cache scope. Before this
           # change, one job built both platforms in a single buildx
