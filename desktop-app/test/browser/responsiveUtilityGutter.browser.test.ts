@@ -86,7 +86,9 @@ describe('responsive utility gutter', () => {
 
     expect(mobile.appsPaddingRight).toBe(0)
     expect(mobile.mountedPaddingRight).toBe(0)
-    expect(desktop.appsPaddingRight).toBe(466)
-    expect(desktop.mountedPaddingRight).toBe(466)
+    // The titlebar owns the window controls, so the mounted app only reserves
+    // the 420px notification rail plus its 18px outer inset.
+    expect(desktop.appsPaddingRight).toBe(438)
+    expect(desktop.mountedPaddingRight).toBe(438)
   })
 })
