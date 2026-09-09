@@ -1,13 +1,13 @@
-import { generateKeyPairSync } from 'node:crypto'
-import { SignJWT, importPKCS8 } from 'jose'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { HttpError } from '../errors'
+import { SignJWT, importPKCS8 } from 'jose'
+import { generateKeyPairSync } from 'node:crypto'
 import {
   JwtVerifier,
   WFC_FILE_READ_SCOPE,
   WFC_FILE_SCOPES,
   WFC_FILE_WRITE_SCOPE,
 } from '../auth/jwtVerifier'
+import { HttpError } from '../errors'
 
 let publicKeyPem: string
 let privatePem: string
@@ -25,6 +25,7 @@ async function mintToken(opts: {
   sharedFileSystemNamespace?: string | null
   scopes?: unknown[] | null
   expiresIn?: string
+  actionAuthority?: unknown
 }): Promise<string> {
   const key = await importPKCS8(privatePem, 'RS256')
   const payload: Record<string, unknown> = {}
@@ -35,6 +36,7 @@ async function mintToken(opts: {
   if (opts.scopes !== null) {
     payload.scopes = opts.scopes ?? [WFC_FILE_READ_SCOPE, WFC_FILE_WRITE_SCOPE]
   }
+  if (opts.actionAuthority !== undefined) payload.actionAuthority = opts.actionAuthority
   return new SignJWT(payload)
     .setProtectedHeader({ alg: 'RS256' })
     .setIssuer(opts.issuer ?? 'control-api')
@@ -76,6 +78,69 @@ describe('JwtVerifier', () => {
     expect(payload.sharedFileSystemNamespace).toBe('mcp-host')
     expect(payload.scopes).toEqual([WFC_FILE_READ_SCOPE, WFC_FILE_WRITE_SCOPE])
     expect(payload.sub).toBe('user-1')
+  })
+
+  it('accepts complete v2 provenance issued before its filesystem wrapper', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    const actionAuthority = {
+      binding: {
+        version: 2,
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'shared_filesystem.read',
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'shared_filesystem',
+          canonicalId: 'shared_filesystem:mcp-host/team-mission',
+          logicalId: 'mcp-host/team-mission',
+          displayName: 'team-mission',
+        },
+        target: {
+          sharedFileSystemNamespace: 'mcp-host',
+          sharedFileSystemName: 'team-mission',
+          relationshipInstanceId: 'rel1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          canonicalRelativePath: 'docs',
+        },
+        targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      sourceIssuedAt: now - 1,
+      sourceExpiresAt: now + 60,
+    }
+    const key = await importPKCS8(privatePem, 'RS256')
+    const token = await new SignJWT({
+      sharedFileSystem: 'team-mission',
+      sharedFileSystemNamespace: 'mcp-host',
+      scopes: [WFC_FILE_READ_SCOPE],
+      actionAuthority,
+    })
+      .setProtectedHeader({ alg: 'RS256' })
+      .setIssuer('control-api')
+      .setAudience('workspace-files-controller')
+      .setSubject(actionAuthority.binding.userId)
+      .setIssuedAt(now)
+      .setExpirationTime(now + 300)
+      .sign(key)
+
+    await expect(makeVerifier().verifyBearer(`Bearer ${token}`)).resolves.toMatchObject({
+      actionAuthority,
+    })
+  })
+
+  it('rejects incomplete v2 provenance instead of treating it as legacy', async () => {
+    const token = await mintToken({
+      sharedFileSystem: 'team-mission',
+      actionAuthority: { binding: { version: 2 } },
+    })
+    await expect(makeVerifier().verifyBearer(`Bearer ${token}`)).rejects.toMatchObject({
+      code: 'forbidden',
+    })
   })
 
   it('rejects a missing Authorization header', async () => {
