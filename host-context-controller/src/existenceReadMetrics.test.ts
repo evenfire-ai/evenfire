@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import ts from 'typescript'
 import { CREATE_KINDS, createsTotal, existenceReadsTotal, registry } from './metrics'
@@ -25,9 +25,162 @@ it('initializes the real read registry before any test seeding', async () => {
     expect(Object.keys(sample.labels).sort()).toEqual(['kind', 'outcome'])
 })
 
-// Pins the documented wrapped inventory; does not discover new unwrapped reads.
-it('observes the documented physical GET expressions without wrapping snapshots or lists', () => {
-  const inventory: Record<string, number> = {
+// Review each exclusion when its enclosing operation changes. Counts describe
+// expressions, not executions; a newly added direct read must be classified.
+const readExclusions: Record<string, readonly [number, string]> = {
+  'hostReconciler.ts::readHostDeploymentOrNull::readNamespacedDeployment': [
+    1,
+    'Input to runtime binding and refresh decisions',
+  ],
+  'hostReconciler.ts::refreshCodexSnapshot::readNamespacedConfigMap': [
+    1,
+    'Input allowlist snapshot',
+  ],
+  'hostReconciler.ts::deleteHostRbac::readNamespacedRoleBinding': [1, 'Ownership before deletion'],
+  'hostReconciler.ts::deleteHostRbac::readNamespacedRole': [1, 'Ownership before deletion'],
+  'hostReconciler.ts::deleteHostRbac::readNamespacedServiceAccount': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteMcpHostRuntimeTokenSecret::readNamespacedSecret': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteLegacyChannelReaderRuntimeAuth::readNamespacedSecret': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::validateHostSecret::readNamespacedSecret': [1, 'Input validation'],
+  'hostReconciler.ts::computeChannelReaderRevisionForHost::readNamespacedSecret': [
+    1,
+    'Input to desired revision',
+  ],
+  'hostReconciler.ts::checkDeploymentReady::readNamespacedDeployment': [1, 'Readiness observation'],
+  'hostReconciler.ts::checkChannelReaderStatus::readNamespacedDeployment': [
+    1,
+    'Status observation',
+  ],
+  'hostReconciler.ts::deleteRuntimeResources::readNamespacedDeployment': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteRuntimeResources::readNamespacedService': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteRuntimeResources::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteWorkspacePvc::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteChannelReaderDeployment::readNamespacedDeployment': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteChannelReaderService::readNamespacedService': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteMcpHostCodexProxyEgressNetworkPolicy::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'hostReconciler.ts::deleteHostNetworkPolicies::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'k8sClient.ts::readSecretMetadata::readNamespacedSecret': [1, 'Authorization input metadata'],
+  'k8sClient.ts::readSecret::readNamespacedSecret': [1, 'Authorization input data'],
+  'llmHookReconciler.ts::validateSecret::readNamespacedSecret': [1, 'Input validation'],
+  'llmHookReconciler.ts::deleteServiceTargetNetworkPolicy::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'llmHookReconciler.ts::readServiceSelector::readNamespacedService': [
+    1,
+    'Input selector for another resource',
+  ],
+  'llmHookReconciler.ts::deleteHostEgressNetworkPolicy::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'llmHookReconciler.ts::gcPodKey::readNamespacedDeployment': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'llmHookReconciler.ts::gcPodKey::readNamespacedService': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'llmHookReconciler.ts::gcPodKey::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'llmHookReconciler.ts::readDeploymentRollout::readNamespacedDeployment': [
+    1,
+    'Readiness observation',
+  ],
+  'networkPolicyReconciler.ts::judgeLiveExactHostEgress::readNamespacedNetworkPolicy': [
+    1,
+    'Retain or revoke verdict after failure',
+  ],
+  'networkPolicyReconciler.ts::replaceSafetyPolicySnapshot::readNamespacedNetworkPolicy': [
+    1,
+    'Identity check for replace-only safety path',
+  ],
+  'networkPolicyReconciler.ts::deleteLegacyStaticPolicy::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
+  'reconciler.ts::readDeploymentRollout::readNamespacedDeployment': [1, 'Readiness observation'],
+  'reconciler.ts::validateSecret::readNamespacedSecret': [1, 'Input validation'],
+  'reconciler.ts::deleteDeploymentIfHccOwned::readNamespacedDeployment': [
+    1,
+    'Ownership before deletion',
+  ],
+  'reconciler.ts::deleteConfigMapIfHccOwned::readNamespacedConfigMap': [
+    1,
+    'Ownership before deletion',
+  ],
+  'reconciler.ts::deleteServiceIfHccOwned::readNamespacedService': [1, 'Ownership before deletion'],
+  'sharedFileSystemReconciler.ts::assessReadiness::readNamespacedPersistentVolumeClaim': [
+    1,
+    'Readiness observation',
+  ],
+  'sharedFileSystemReconciler.ts::assessReadiness::readNamespacedDeployment': [
+    1,
+    'Readiness observation',
+  ],
+  'statelessLifecycleExecutor.ts::handleWakeFastPath::readNamespacedDeployment': [
+    1,
+    'Scale-only compatibility path',
+  ],
+  'k8s/gfsK8sApi.ts::scaleDeployment::readNamespacedDeployment': [
+    2,
+    'Scale-only initial and retry reads',
+  ],
+  'k8s/gfsK8sApi.ts::isDeploymentAvailable::readNamespacedDeployment': [1, 'Readiness observation'],
+}
+
+function readProductionSources(): Record<string, string> {
+  const sources: Record<string, string> = {}
+  for (const relative of readdirSync(__dirname, { recursive: true }) as string[]) {
+    if (
+      !relative.endsWith('.ts') ||
+      relative.endsWith('.test.ts') ||
+      relative.includes('__tests__')
+    )
+      continue
+    sources[relative] = readFileSync(join(__dirname, relative), 'utf8')
+  }
+  return sources
+}
+
+function assertReadInventory(sources: Record<string, string>): void {
+  const expectedWrapped: Record<string, number> = {
     'utils.ts': 1,
     'hostReconciler.ts': 8,
     'reconciler.ts': 3,
@@ -36,42 +189,92 @@ it('observes the documented physical GET expressions without wrapping snapshots 
     'k8s/gfsK8sApi.ts': 3,
     'networkPolicyReconciler.ts': 2,
   }
-  let total = 0
-  for (const [path, expected] of Object.entries(inventory)) {
-    const source = ts.createSourceFile(
-      path,
-      readFileSync(join(__dirname, path), 'utf8'),
-      ts.ScriptTarget.Latest,
-      true
-    )
-    let calls = 0
+  const wrapped: Record<string, number> = {}
+  const excluded: Record<string, number> = {}
+  for (const [path, text] of Object.entries(sources)) {
+    const source = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true)
     const visit = (node: ts.Node): void => {
       if (
         ts.isCallExpression(node) &&
         ts.isIdentifier(node.expression) &&
         node.expression.text === 'observeExistenceRead'
       ) {
-        calls++
+        wrapped[path] = (wrapped[path] ?? 0) + 1
+        expect(node.arguments).toHaveLength(2)
         const [kind, read] = node.arguments
         expect(ts.isStringLiteral(kind), path).toBe(true)
         expect(ts.isArrowFunction(read), path).toBe(true)
         if (ts.isStringLiteral(kind) && ts.isArrowFunction(read)) {
+          expect(CREATE_KINDS).toContain(kind.text)
+          expect(read.parameters).toHaveLength(0)
           expect(ts.isCallExpression(read.body), path).toBe(true)
           if (
             ts.isCallExpression(read.body) &&
             ts.isPropertyAccessExpression(read.body.expression)
           ) {
             expect(read.body.expression.name.text, path).toBe(`readNamespaced${kind.text}`)
-          } else throw new Error(`${path}: the wrapper must observe a direct API read`)
+          } else throw new Error(`${path}: wrapper must observe a direct API read`)
+        }
+      }
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        /^read(?:Namespaced|Cluster)/.test(node.expression.name.text)
+      ) {
+        const parent = node.parent
+        const isWrapped =
+          ts.isArrowFunction(parent) &&
+          ts.isCallExpression(parent.parent) &&
+          ts.isIdentifier(parent.parent.expression) &&
+          parent.parent.expression.text === 'observeExistenceRead'
+        if (!isWrapped) {
+          let owner: ts.Node | undefined = node.parent
+          while (owner && !ts.isMethodDeclaration(owner) && !ts.isFunctionDeclaration(owner))
+            owner = owner.parent
+          const name =
+            owner && (ts.isMethodDeclaration(owner) || ts.isFunctionDeclaration(owner))
+              ? owner.name?.getText(source)
+              : undefined
+          const id = `${path}::${name ?? '<module>'}::${node.expression.name.text}`
+          if (!Object.hasOwn(readExclusions, id))
+            throw new Error(`Unclassified Kubernetes read: ${id}`)
+          excluded[id] = (excluded[id] ?? 0) + 1
         }
       }
       ts.forEachChild(node, visit)
     }
     visit(source)
-    expect(calls, path).toBe(expected)
-    total += calls
   }
-  expect(total).toBe(21)
+  expect(wrapped).toEqual(expectedWrapped)
+  for (const [id, [count, reason]] of Object.entries(readExclusions)) {
+    expect(reason.length, id).toBeGreaterThan(0)
+    expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
+  }
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(21)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
+}
+
+it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {
+  assertReadInventory(readProductionSources())
+})
+
+it.each(['utils.ts', 'new-reader.ts'])('rejects an unclassified read introduced in %s', path => {
+  const sources = readProductionSources()
+  // Synthetic source is parsed only: no client method or network request executes.
+  sources[path] =
+    (sources[path] ?? '') +
+    '\nfunction unclassifiedRead(client) { return client.readNamespacedService({}) }'
+  expect(() => assertReadInventory(sources)).toThrow(
+    `Unclassified Kubernetes read: ${path}::unclassifiedRead::readNamespacedService`
+  )
+})
+
+it('rejects an exclusion after its read disappears or moves', () => {
+  const sources = readProductionSources()
+  delete sources['statelessLifecycleExecutor.ts']
+  expect(() => assertReadInventory(sources)).toThrow(
+    'Stale or changed read exclusion: statelessLifecycleExecutor.ts::handleWakeFastPath::readNamespacedDeployment'
+  )
 })
 
 describe('Kubernetes existence-read instrumentation', () => {

@@ -26,7 +26,12 @@ Create outcomes are mutually exclusive and increment only after the callback
 settles. The former `issued` series is removed. Summing `created + conflict + error`
 counts completed attempts; `skipped` is not an invocation and is excluded from that
 sum. Operations still in flight are not counted. A create resolving to null or
-undefined still counts as resolved; telemetry does not assert object persistence.
+undefined still counts as resolved; telemetry does not assert object persistence. The same applies to
+`found`: it reports a resolved read callback, not semantic presence, readiness,
+or authorization correctness. Read `error` intentionally groups status and
+transport failures for the instrumented paths; it cannot identify a 403 storm
+or describe errors from excluded reads by itself. Diagnostics require separate
+bounded evidence, without placing status messages or resource data in labels.
 
 The bounded series are initialized at zero: 40 create series and 30 read series.
 Re-importing metrics must preserve the registry and existing values. A zero series
@@ -85,6 +90,16 @@ a desired spec, readiness checks, scale-only operations, and safety replace/dele
 paths unrelated to a create decision are excluded. An already-available snapshot
 does not represent another API read. The inventory must be updated when a writer
 or its read path changes; do not instrument both the API call and its retry wrapper.
+
+The read-inventory test scans all production TypeScript under `src` for direct
+dot-property `readNamespaced*`/`readCluster*` calls. Each must be observed or match an explicit
+exclusion keyed by file, enclosing operation and SDK method, with an expected
+expression count and reason. It currently accounts for 21 observed expressions
+and 43 excluded ones. New unclassified reads and stale exclusions fail the test.
+This is structural coverage, not execution evidence: changed purpose inside an
+excluded operation still needs review, and computed-property or indirect/aliased calls are outside this
+static-analysis guarantee. The behavioral tests and deployed validation
+remain separate; an AST pass does not prove all those paths ran.
 
 ## Historical evidence and attribution limits
 
