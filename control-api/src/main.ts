@@ -6,6 +6,10 @@ import { rootLogger } from './observability/logger.js'
 import { logRegistryConnectionState } from './registryBootGuard.js'
 import { ControlApiServer } from './server.js'
 import { OperationalAccessIndexer } from './services/access/operationalAccessIndexer.js'
+import {
+  bootstrapConfiguredPr2Readiness,
+  startControlApiPr2RuntimeEvidence,
+} from './services/access/pr2ReadinessEvidence.js'
 import { resolveEffectiveUserAccessPolicy } from './services/access/userAccessRuntimePolicy.js'
 import {
   startAdminRevokedTokenCleanup,
@@ -55,6 +59,7 @@ import {
 import { validateStartupGuards } from './startupGuards.js'
 
 let stopOperationalAccessIndexer: (() => void) | null = null
+let stopPr2RuntimeEvidence: (() => void) | null = null
 
 async function main(): Promise<void> {
   console.log('[ControlAPI] Starting')
@@ -67,6 +72,7 @@ async function main(): Promise<void> {
 
   await assertDbReady()
   console.log('[ControlAPI] Database schema ready')
+  await bootstrapConfiguredPr2Readiness()
   const userAccessPolicy = await resolveEffectiveUserAccessPolicy()
   console.log(`[ControlAPI] User-access policy ready: ${userAccessPolicy.policyRevision}`)
 
@@ -222,6 +228,7 @@ async function main(): Promise<void> {
   const server = new ControlApiServer(gateway, config.port)
 
   await server.start()
+  stopPr2RuntimeEvidence = startControlApiPr2RuntimeEvidence()
   console.log('[ControlAPI] Running')
 
   // Hosted member-registration self-enrollment (spec §8.4): degrade, never
@@ -252,6 +259,7 @@ main().catch(error => {
   stopSubscriptionCatalogSyncCron()
   stopWorkflowApprovalTraceProjector()
   stopOperationalAccessIndexer?.()
+  stopPr2RuntimeEvidence?.()
   void pool.end()
   void rateLimitPool.end()
   process.exit(1)

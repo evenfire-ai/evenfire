@@ -178,10 +178,10 @@ describe('central user-access rollout compiler', () => {
   })
 
   it.each([
-    'workflow_lifecycle',
-    'filesystem_controllers',
-    'derived_session_transitions',
-    'activity_session_search_resumable',
+    'workflow_authority_bindings',
+    'gfs_controller_checkpoint',
+    'sandbox_derived_view',
+    'activity_session_search_provenance',
   ] as const)(
     'does not advertise action-context v2 while the %s PR 2 hop is unavailable',
     missingHop => {
@@ -325,8 +325,8 @@ describe('central user-access rollout compiler', () => {
     }
   )
 
-  it('does not query operational readiness or advertise families while catalog rollout is off', async () => {
-    const query = vi.fn()
+  it('preserves the query-free legacy path while catalog and v2 readiness are off', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })
     const policy = await resolveEffectiveUserAccessPolicy({
       intent: intent(),
       db: { query } as never,
