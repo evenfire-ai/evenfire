@@ -1304,7 +1304,8 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
   it('creates host-scoped rpc-proxy ingress and egress policies', async () => {
     const networkingApi = {
       createNamespacedNetworkPolicy: vi.fn(async () => ({})),
-      readNamespacedNetworkPolicy: vi.fn(async () => ({})),
+      // This initial-provisioning case starts with no NetworkPolicies.
+      readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
       replaceNamespacedNetworkPolicy: vi.fn(async () => ({})),
     }
     const desktopHost: HostCRD = {

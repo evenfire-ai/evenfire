@@ -741,15 +741,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     const host = makeStatelessHost({ status: suspendedStatus(4) })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       cacheSynced = false
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
     expect(provision).toHaveBeenCalledWith(
@@ -779,12 +781,14 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     })
     const host = makeStatelessHost({ status: suspendedStatus(5) })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     const deployment = hostDeploymentBody(appsApi, host.name)
     expect(deployment.spec?.replicas).toBe(1)
@@ -814,9 +818,10 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
     const issueTokens = vi.mocked(issueMcpHostRuntimeTokens)
     const mintGfs = vi.mocked(mintHostGfsToken)
@@ -824,6 +829,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
     mintGfs.mockClear()
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(issueTokens).toHaveBeenCalledOnce()
     expect(mintGfs).toHaveBeenCalledOnce()
@@ -1012,15 +1018,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       channelCount = 1
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host, true))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
   })
@@ -1034,15 +1042,17 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 1 } },
     })
     customApi.getNamespacedCustomObject.mockImplementation(async () => hostApiObject(host))
-    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async () => {
+    const readPolicy = networkingApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
       cacheSynced = false
-      return {}
+      return readPolicy(request)
     })
     const provision = vi
       .spyOn(reconciler as any, 'provisionRuntimeTokenRevision')
       .mockResolvedValue(runtimeTokenProvision(host))
 
     await reconciler.reconcile(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
 
     expect(provision).toHaveBeenCalledOnce()
     const deployment = hostDeploymentBody(appsApi, host.name)

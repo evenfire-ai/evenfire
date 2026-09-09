@@ -44,6 +44,68 @@ export async function observeExistenceRead<T>(
 }
 
 /**
+ * Read before creating, then retain each caller's convergence policy. The first
+ * observed object is consumed once by the existing retry loop; a conflict must
+ * always reread the API. SDK calls and their metric labels stay at the call site.
+ */
+export async function ensureResource<T extends { metadata?: { name?: string } }>(opts: {
+  read: () => Promise<T>
+  create: () => Promise<unknown>
+  existing?: T | null
+  /** False preserves a caller's non-throwing failure without counting a skip. */
+  converge: (read: () => Promise<T>, observed?: T) => Promise<void | false>
+  onSkipped: () => void
+  mutationAllowed?: () => boolean
+}): Promise<void> {
+  const { read, create, converge, onSkipped, mutationAllowed } = opts
+  if (mutationAllowed && !mutationAllowed()) return
+
+  const validate = (value: T): T => {
+    if (!value || typeof value.metadata?.name !== 'string' || !value.metadata.name.trim()) {
+      throw new Error('Kubernetes existence read must resolve to an object with metadata.name')
+    }
+    return value
+  }
+  const readFresh = async (): Promise<T> => validate(await read())
+  let existing = opts.existing
+  if (existing === undefined) {
+    try {
+      existing = await readFresh()
+    } catch (error) {
+      if (error == null || getErrorCode(error) !== 404) throw error
+      existing = null
+    }
+  } else if (existing !== null) {
+    validate(existing)
+  }
+  if (mutationAllowed && !mutationAllowed()) return
+
+  if (existing !== null) {
+    let snapshot: T | undefined = existing
+    const readOnce = async (): Promise<T> => {
+      if (snapshot !== undefined) {
+        const observed = snapshot
+        snapshot = undefined
+        return observed
+      }
+      return readFresh()
+    }
+    const result = await converge(readOnce, existing)
+    if (result !== false && (!mutationAllowed || mutationAllowed())) onSkipped()
+    return
+  }
+
+  try {
+    await create()
+  } catch (error) {
+    if (error == null || getErrorCode(error) !== 409) throw error
+    if (mutationAllowed && !mutationAllowed()) return
+    // Absence observed before the POST cannot survive a create conflict.
+    await converge(readFresh)
+  }
+}
+
+/**
  * Re-read + replace with optimistic-lock retry. K8s rejects a replace whose
  * `metadata.resourceVersion` does not match the current value; the only
  * recovery is read-modify-write. Concurrent reconcilers (McpServer/Context/
@@ -482,7 +544,7 @@ export function normalizeVolumeDefaults(volume: k8s.V1Volume): void {
   }
 }
 
-/** Create-or-replace a NetworkPolicy (409 catch → conflict-retry replace). */
+/** Read-first create or converge a NetworkPolicy with the existing retry policy. */
 export async function applyNetworkPolicy(
   api: k8s.NetworkingV1Api,
   name: string,
@@ -491,33 +553,35 @@ export async function applyNetworkPolicy(
   logPrefix = '[NetPol]',
   mutationAllowed?: () => boolean,
   validateExisting?: (existing: k8s.V1NetworkPolicy) => void,
-  missingIsError = false
+  missingIsError = false,
+  existing?: k8s.V1NetworkPolicy | null
 ): Promise<void> {
-  if (mutationAllowed && !mutationAllowed()) return
-  try {
-    await observeCreate('NetworkPolicy', () =>
-      api.createNamespacedNetworkPolicy({ namespace, body: policy })
-    )
-    hccLogger.info('NetworkPolicy created', { scope: logPrefix, policy: name, namespace })
-    return
-  } catch (error: unknown) {
-    if (getErrorCode(error) !== 409) {
-      throw error
-    }
-  }
-  await replaceWithConflictRetry<k8s.V1NetworkPolicy>({
-    description: `policy "${name}" in ${namespace}`,
-    logPrefix,
-    body: policy,
+  await ensureResource<k8s.V1NetworkPolicy>({
+    existing,
+    mutationAllowed,
     read: () =>
       observeExistenceRead('NetworkPolicy', () =>
         api.readNamespacedNetworkPolicy({ name, namespace })
       ),
-    replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
-    mutationAllowed,
-    validateExisting,
-    missingIsError,
-    isUpToDate: networkPolicyMatchesDesired,
+    create: async () => {
+      await observeCreate('NetworkPolicy', () =>
+        api.createNamespacedNetworkPolicy({ namespace, body: policy })
+      )
+      hccLogger.info('NetworkPolicy created', { scope: logPrefix, policy: name, namespace })
+    },
+    onSkipped: () => createsTotal.inc({ kind: 'NetworkPolicy', outcome: 'skipped' }),
+    converge: read =>
+      replaceWithConflictRetry<k8s.V1NetworkPolicy>({
+        description: `policy "${name}" in ${namespace}`,
+        logPrefix,
+        body: policy,
+        read,
+        replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+        mutationAllowed,
+        validateExisting,
+        missingIsError,
+        isUpToDate: networkPolicyMatchesDesired,
+      }),
   })
 }
 

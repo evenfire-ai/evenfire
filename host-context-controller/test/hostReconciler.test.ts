@@ -817,15 +817,17 @@ describe('HostReconciler — desktop support', () => {
     expect(resources.limits.cpu).toBe('1')
   })
 
-  it('creates desktop NetworkPolicy when desktop enabled', async () => {
+  it('converges desktop NetworkPolicy when desktop enabled', async () => {
     const { reconciler, networkingApi } = createReconciler()
     const host = makeDesktopHost({ x11: true })
     await reconciler.reconcile(host)
 
-    // reconcile creates per-host ingress, rpc-proxy egress, desktop,
+    // Reconcile updates existing per-host ingress, rpc-proxy egress, desktop,
     // GFS egress, channel-reader, and workflow-approval-reader policies.
-    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(8)
-    const names = networkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(8)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+    const names = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(
       (c: any[]) => c[0].body.metadata.name
     )
     expect(names).toEqual(
@@ -835,25 +837,27 @@ describe('HostReconciler — desktop support', () => {
         'workflow-approval-reader-desktop-host-egress-mcp-host',
       ])
     )
-    const call = networkingApi.createNamespacedNetworkPolicy.mock.calls.find(
+    const call = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.find(
       (c: any[]) => c[0].body.metadata.name === 'allow-rpc-proxy-desktop-desktop-host'
     )![0]
     expect(call.body.metadata.name).toBe('allow-rpc-proxy-desktop-desktop-host')
     expect(call.body.spec.podSelector).toEqual({ matchLabels: { app: 'desktop-host' } })
   })
 
-  it('does not create desktop NetworkPolicy for non-desktop hosts', async () => {
+  it('does not converge desktop NetworkPolicy for non-desktop hosts', async () => {
     const { reconciler, networkingApi } = createReconciler()
     const host = makeHost()
     await reconciler.reconcile(host)
 
-    // reconcile creates 6 NPs for non-desktop hosts:
+    // Reconcile updates 7 existing NPs for non-desktop hosts:
     // mcp-host ingress from channel-reader, mcp-host ingress from rpc-proxy,
     // mcp-host GFS egress, rpc-proxy host egress, channel-reader egress,
     // and workflow-approval-reader policies.
     // (no desktop NP)
-    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(7)
-    const names = networkingApi.createNamespacedNetworkPolicy.mock.calls.map(
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(7)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
+    const names = networkingApi.replaceNamespacedNetworkPolicy.mock.calls.map(
       (c: any[]) => c[0].body.metadata.name
     )
     expect(names).toEqual(

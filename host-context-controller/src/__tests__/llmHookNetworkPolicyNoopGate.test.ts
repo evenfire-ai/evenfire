@@ -106,6 +106,11 @@ describe('LlmHook NetworkPolicy no-op gate', () => {
     const log = vi.spyOn(console, 'log')
     try {
       await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+      expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+        name: desired.metadata!.name,
+        namespace: 'llm-hooks',
+      })
+      expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(updatedPolicyLogs(log, `NetworkPolicy "${desired.metadata?.name}"`)).toEqual([])
     } finally {
@@ -193,5 +198,41 @@ describe('LlmHook NetworkPolicy no-op gate', () => {
     } finally {
       log.mockRestore()
     }
+  })
+
+  it('preserves live annotations when a present policy needs convergence without POST', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const desired = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    const existing = asApiserverNetworkPolicy(desired)
+    existing.metadata = {
+      ...existing.metadata,
+      annotations: { 'example.com/operator': 'retained' },
+    }
+    existing.spec = { ...existing.spec!, ingress: [{}] }
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(existing)
+    await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    const body = networkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0].body
+    expect(body.metadata?.annotations?.['example.com/operator']).toBe('retained')
+    expect(body.spec?.ingress).toEqual(desired.spec?.ingress)
+  })
+
+  it('propagates GET 403 without creating or replacing a policy', async () => {
+    const error = { code: 403 }
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue(error)
+    const hook = makeImageHook()
+    await expect(
+      (reconciler as any).ensureNetworkPolicy(computePodKey(hook)!, [hook], [])
+    ).rejects.toBe(error)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 })

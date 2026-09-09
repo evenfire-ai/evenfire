@@ -145,6 +145,26 @@ describe('llm-hooks effective pod egress (N5)', () => {
     coreApi = createMockCoreApi()
     customApi = createMockCustomApi()
     networkingApi = createMockNetworkingApi()
+    // Start with an empty API inventory and retain real desired objects, including
+    // their ownership labels, so subsequent reads model present policies.
+    const policies = new Map<string, k8s.V1NetworkPolicy>()
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+      const policy = policies.get(`${namespace}/${name}`)
+      if (!policy) throw { code: 404 }
+      return structuredClone(policy)
+    })
+    networkingApi.createNamespacedNetworkPolicy.mockImplementation(async ({ namespace, body }) => {
+      const key = `${namespace}/${body.metadata!.name}`
+      if (policies.has(key)) throw { code: 409 }
+      policies.set(key, structuredClone(body))
+      return body
+    })
+    networkingApi.replaceNamespacedNetworkPolicy.mockImplementation(
+      async ({ name, namespace, body }) => {
+        policies.set(`${namespace}/${name}`, structuredClone(body))
+        return body
+      }
+    )
     customApi.getNamespacedCustomObjectStatus.mockResolvedValue({
       metadata: { resourceVersion: '1' },
       status: { conditions: [] },

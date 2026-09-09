@@ -35,10 +35,13 @@ import {
   MANAGED_BY_VALUE,
   POLICY_TYPE_LABEL,
 } from './constants'
+import { hccLogger } from './logger'
+import { createsTotal } from './metrics'
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   networkPolicyMatchesDesired,
   observeCreate,
@@ -825,30 +828,33 @@ export class LlmHookReconciler {
     await this.applyNetworkPolicy(this.buildNetworkPolicy(podKey, members, egressRules))
   }
 
-  /** Idempotent create-then-409-replace of a NetworkPolicy in its own namespace. */
+  /** Read first, preserving the existing NetworkPolicy convergence policy. */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
     const name = policy.metadata!.name!
     const namespace = policy.metadata!.namespace ?? config.llmHooksNamespace
-    try {
-      await observeCreate('NetworkPolicy', () =>
-        this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-      )
-      console.log(`${LOG} Created NetworkPolicy "${name}" (${namespace})`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `NetworkPolicy "${name}"`,
-      logPrefix: LOG,
-      body: policy,
-      mergeExisting: preserveObjectAnnotations,
-      isUpToDate: networkPolicyMatchesDesired,
+    await ensureResource({
       read: () =>
         observeExistenceRead('NetworkPolicy', () =>
           this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
         ),
-      replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+      create: async () => {
+        await observeCreate('NetworkPolicy', () =>
+          this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+        )
+        hccLogger.info('NetworkPolicy created', { scope: LOG, policy: name, namespace })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `NetworkPolicy "${name}"`,
+          logPrefix: LOG,
+          body: policy,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: networkPolicyMatchesDesired,
+          read,
+          replace: body =>
+            this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'NetworkPolicy', outcome: 'skipped' }),
     })
   }
 

@@ -34,11 +34,15 @@ function fakeNetworkingApi() {
 }
 
 describe('applyNetworkPolicy no-op gate', () => {
-  it('CREATE-NP-1: successful create never reads or replaces', async () => {
+  it('CREATE-NP-1: absent policy creates after one GET and never replaces', async () => {
     const api = fakeNetworkingApi()
+    api.readNamespacedNetworkPolicy.mockRejectedValueOnce(apiException(404))
     await applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
     expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
-    expect(api.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+      name: 'np',
+      namespace: 'ns',
+    })
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
@@ -47,11 +51,12 @@ describe('applyNetworkPolicy no-op gate', () => {
     const existing = asApiserverNetworkPolicy(desired)
     expect(existing.spec).toBeDefined()
     const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     api.readNamespacedNetworkPolicy.mockResolvedValue(existing)
     const log = vi.spyOn(console, 'log')
     try {
       await applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desired)
+      expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
       expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(updatedPolicyLogs(log, 'policy "np" in ns')).toEqual([])
     } finally {
@@ -62,13 +67,14 @@ describe('applyNetworkPolicy no-op gate', () => {
   it('NOOP-NP-2 / LOG-NP-2: drift replaces once and logs once', async () => {
     const desired = desiredPolicy()
     const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     api.readNamespacedNetworkPolicy.mockResolvedValue(
       asApiserverNetworkPolicy(desired, { port: 9090 })
     )
     const log = vi.spyOn(console, 'log')
     try {
       await applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desired)
+      expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
       expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledOnce()
       expect(updatedPolicyLogs(log, 'policy "np" in ns')).toEqual([
         '[NetPol] Updated policy "np" in ns',
@@ -81,7 +87,6 @@ describe('applyNetworkPolicy no-op gate', () => {
   it('ORDER-NP-1: validateExisting throws before isUpToDate; replace is not called', async () => {
     const desired = desiredPolicy()
     const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     api.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
     const validateExisting = vi.fn(() => {
       throw new Error('NetworkPolicy "np" has conflicting ownership for the context-ingress lane')
@@ -99,24 +104,8 @@ describe('applyNetworkPolicy no-op gate', () => {
       )
     ).rejects.toThrow(/ownership/)
 
-    expect(validateExisting).toHaveBeenCalledOnce()
-    expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
-  })
-
-  it.each([
-    { form: 'ApiException', error: apiException(404) },
-    { form: 'statusCode', error: { response: { statusCode: 404 } } },
-  ])('TOCTOU-NP-1: create 409 + read 404 ($form) returns without replace', async ({ error }) => {
-    const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-    api.readNamespacedNetworkPolicy.mockRejectedValue(error)
-
-    await expect(
-      applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
-    ).resolves.toBeUndefined()
-
-    expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
-    expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    expect(validateExisting).toHaveBeenCalledExactlyOnceWith(asApiserverNetworkPolicy(desired))
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
@@ -124,11 +113,35 @@ describe('applyNetworkPolicy no-op gate', () => {
     { form: 'ApiException', error: apiException(404) },
     { form: 'statusCode', error: { response: { statusCode: 404 } } },
   ])(
-    'admission-sensitive create409/read404 ($form) rejects instead of certifying absence',
+    'TOCTOU-NP-1: GET404 + create409 + fresh GET404 ($form) returns without replace',
     async ({ error }) => {
       const api = fakeNetworkingApi()
       api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-      api.readNamespacedNetworkPolicy.mockRejectedValue(error)
+      api.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce(apiException(404))
+        .mockRejectedValueOnce(error)
+
+      await expect(
+        applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
+      ).resolves.toBeUndefined()
+
+      expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+      expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    }
+  )
+
+  it.each([
+    { form: 'ApiException', error: apiException(404) },
+    { form: 'statusCode', error: { response: { statusCode: 404 } } },
+  ])(
+    'admission-sensitive GET404/create409/fresh GET404 ($form) rejects instead of certifying absence',
+    async ({ error }) => {
+      const api = fakeNetworkingApi()
+      api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      api.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce(apiException(404))
+        .mockRejectedValueOnce(error)
 
       await expect(
         applyNetworkPolicy(
@@ -143,6 +156,8 @@ describe('applyNetworkPolicy no-op gate', () => {
         )
       ).rejects.toBe(error)
 
+      expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+      expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
       expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     }
   )
@@ -152,28 +167,36 @@ describe('applyNetworkPolicy no-op gate', () => {
     { status: 403, form: 'statusCode', error: { response: { statusCode: 403 } } },
     { status: 500, form: 'ApiException', error: apiException(500) },
     { status: 500, form: 'statusCode', error: { response: { statusCode: 500 } } },
-  ])('TOCTOU-NP-2-APPLY: create 409 + read $status ($form) still throws', async ({ error }) => {
-    const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-    api.readNamespacedNetworkPolicy.mockRejectedValue(error)
+  ])(
+    'TOCTOU-NP-2-APPLY: GET404 + create409 + fresh GET$status ($form) still throws',
+    async ({ error }) => {
+      const api = fakeNetworkingApi()
+      api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+      api.readNamespacedNetworkPolicy
+        .mockRejectedValueOnce(apiException(404))
+        .mockRejectedValueOnce(error)
 
-    await expect(
-      applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
-    ).rejects.toBe(error)
+      await expect(
+        applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
+      ).rejects.toBe(error)
 
-    expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
-    expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
-    expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
-  })
+      expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+      expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+      expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    }
+  )
 
-  it('GATE-NP-1: mutationAllowed false after create-409 skips replace on drift', async () => {
+  it('GATE-NP-1: expiry during existence GET suppresses POST and drift PUT', async () => {
     const desired = desiredPolicy()
     const drifted = asApiserverNetworkPolicy(desired, { port: 9090 })
     expect(networkPolicyMatchesDesired(desired, drifted)).toBe(false)
     const api = fakeNetworkingApi()
-    api.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
-    api.readNamespacedNetworkPolicy.mockResolvedValue(drifted)
-    const mutationAllowed = vi.fn().mockReturnValueOnce(true).mockReturnValueOnce(false)
+    let active = true
+    api.readNamespacedNetworkPolicy.mockImplementation(async () => {
+      active = false
+      return drifted
+    })
+    const mutationAllowed = vi.fn(() => active)
 
     await applyNetworkPolicy(
       api as unknown as k8s.NetworkingV1Api,
@@ -184,7 +207,9 @@ describe('applyNetworkPolicy no-op gate', () => {
       mutationAllowed
     )
 
-    expect(mutationAllowed).toHaveBeenCalledTimes(2)
+    expect(mutationAllowed.mock.results.map(result => result.value)).toEqual([true, false])
+    expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 })

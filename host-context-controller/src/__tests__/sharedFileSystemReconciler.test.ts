@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type SharedFileSystemFactoryConfig,
   WFC_MOUNT_PATH,
+  buildEgressNetworkPolicy,
+  buildIngressNetworkPolicy,
   pvcName,
   wfcDeploymentName,
   wfcEgressPolicyName,
@@ -50,7 +52,13 @@ function err(code: number, msg = 'k8s error'): Error & { code: number } {
 const notFound = () => err(404, 'not found')
 const alreadyExists = () => err(409, 'already exists')
 
-function makeMocks() {
+function makeMocks(systems: SharedFileSystemCRD[] = [makeSfs()]) {
+  // Status/cleanup tests use already-converged policies with real identity and
+  // ownership. Cold-start tests explicitly arrange absence for their own reads.
+  const policies = systems.flatMap(sfs => [
+    buildIngressNetworkPolicy(sfs, factoryConfig),
+    buildEgressNetworkPolicy(sfs, factoryConfig),
+  ])
   const appsApi = {
     createNamespacedDeployment: vi.fn().mockResolvedValue({}),
     // Truthful status (#592) reads readyReplicas; conflict-retry reads metadata.
@@ -82,7 +90,11 @@ function makeMocks() {
   }
   const networkingApi = {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+    readNamespacedNetworkPolicy: vi.fn(async ({ name }: { name: string }) => {
+      const policy = policies.find(item => item.metadata?.name === name)
+      if (!policy) throw new Error(`Missing NetworkPolicy fixture for ${name}`)
+      return { ...policy, metadata: { ...policy.metadata, resourceVersion: '1' } }
+    }),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
   }
@@ -167,6 +179,9 @@ describe('SharedFileSystemReconciler — happy path', () => {
 
   it('creates PVC, Service, Deployment, and both NetworkPolicies — and NEVER an init Job', async () => {
     const sfs = makeSfs()
+    mocks.networkingApi.readNamespacedNetworkPolicy
+      .mockRejectedValueOnce(notFound())
+      .mockRejectedValueOnce(notFound())
     await reconciler.reconcile(sfs)
 
     expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
@@ -292,6 +307,23 @@ describe('SharedFileSystemReconciler — legacy init-Job cleanup', () => {
 })
 
 describe('SharedFileSystemReconciler — idempotence', () => {
+  it('leaves existing equivalent NetworkPolicies in place without POST or PUT', async () => {
+    const mocks = makeMocks()
+    await makeReconciler(mocks).reconcile(makeSfs())
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    expect(mocks.networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mocks.networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('propagates a denied NetworkPolicy read without attempting creation', async () => {
+    const mocks = makeMocks()
+    const denied = err(403, 'policy read denied')
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce(denied)
+    await expect(makeReconciler(mocks).reconcile(makeSfs())).rejects.toBe(denied)
+    expect(mocks.networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(mocks.networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
   it('PVC 409 (already exists) is treated as success — no replace attempt', async () => {
     const mocks = makeMocks()
     mocks.coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce(alreadyExists())
@@ -475,17 +507,17 @@ describe('SharedFileSystemReconciler — reconcileDelete', () => {
 
 describe('SharedFileSystemReconciler — fullReconcile', () => {
   it('reconciles every desired SFS and continues past errors on individual SFSes', async () => {
-    const mocks = makeMocks()
-    mocks.coreApi.createNamespacedPersistentVolumeClaim
-      .mockResolvedValueOnce({})
-      .mockRejectedValueOnce(err(500, 'cluster down'))
-      .mockResolvedValueOnce({})
-    const reconciler = makeReconciler(mocks)
     const desired = [
       makeSfs({ name: 'sfs-a' }),
       makeSfs({ name: 'sfs-b' }),
       makeSfs({ name: 'sfs-c' }),
     ]
+    const mocks = makeMocks(desired)
+    mocks.coreApi.createNamespacedPersistentVolumeClaim
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(err(500, 'cluster down'))
+      .mockResolvedValueOnce({})
+    const reconciler = makeReconciler(mocks)
     await expect(reconciler.fullReconcile(desired)).resolves.toBeUndefined()
     expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(3)
     expect(reconciler.getStatus(desired[0]).phase).toBe('Ready')

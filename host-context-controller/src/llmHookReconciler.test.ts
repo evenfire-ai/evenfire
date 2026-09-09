@@ -494,6 +494,8 @@ describe('LlmHookReconciler', () => {
   // ─── NetworkPolicy ingress reverse-index (§10) ─────────────────────
 
   it('NetworkPolicy ingress admits exactly the referencing Hosts', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: { target: { image: { ref: IMG, port: 8080 } }, lifecyclePoints: ['preCall'] },
@@ -517,6 +519,8 @@ describe('LlmHookReconciler', () => {
   })
 
   it('co-located members: NetworkPolicy label values are comma-free (member list is an annotation)', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     // Two hooks with the SAME image target share one pod key → one shared NP.
     const a = makeHook({
       name: 'a',
@@ -551,6 +555,8 @@ describe('LlmHookReconciler', () => {
   })
 
   it('re-reconciles NetworkPolicy ingress on a Host reference change (fan-out)', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: { target: { image: { ref: IMG, port: 8080 } }, lifecyclePoints: ['preCall'] },
@@ -594,6 +600,8 @@ describe('LlmHookReconciler', () => {
     }
 
     it('creates an ingress NP selecting the Service pods and admitting only referencing hosts', async () => {
+      // This scenario starts without a policy; the API reports absence explicitly.
+      networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       withSelector({ app: 'ref-hook' })
       const s = makeServiceHook('s1')
       hooks.set('s1', s)
@@ -619,6 +627,8 @@ describe('LlmHookReconciler', () => {
     })
 
     it('creates a deny-all (empty ingress) NP when no Host references the hook', async () => {
+      // This scenario starts without a policy; the API reports absence explicitly.
+      networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       withSelector({ app: 'ref-hook' })
       const s = makeServiceHook('s1')
       hooks.set('s1', s)
@@ -646,6 +656,8 @@ describe('LlmHookReconciler', () => {
     })
 
     it('refreshes the admitted hosts on a Host reference change (fan-out)', async () => {
+      // This scenario starts without a policy; the API reports absence explicitly.
+      networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       withSelector({ app: 'ref-hook' })
       const s = makeServiceHook('s1')
       hooks.set('s1', s)
@@ -675,6 +687,8 @@ describe('LlmHookReconciler', () => {
 
   describe('per-host egress (reconcileHostEgress)', () => {
     it('allows egress only to the referenced image hook pod-key + port', async () => {
+      // This scenario starts without a policy; the API reports absence explicitly.
+      networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const hook = makeHook({ name: 'img1' }) // default image target, port 8080
       hooks.set('img1', hook)
       const host = makeHostRef('host-1', ['img1'])
@@ -705,6 +719,8 @@ describe('LlmHookReconciler', () => {
     })
 
     it('uses the Service selector + port for a service-target hook', async () => {
+      // This scenario starts without a policy; the API reports absence explicitly.
+      networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       coreApi.readNamespacedService.mockResolvedValue({
         metadata: {},
         spec: { selector: { app: 'svc-hook' } },
@@ -782,6 +798,8 @@ describe('LlmHookReconciler', () => {
   })
 
   it('grants scoped CoreDNS egress only when a hook declares egressBindings (N5)', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const withEgress = makeHook({
       name: 'out',
       spec: {
@@ -817,6 +835,8 @@ describe('LlmHookReconciler', () => {
   // "grants NO egress (not even DNS)" is what let namespace-wide DNS through
   // while the suite stayed green.
   it('declares no Egress in the per-pod-key policy for a pure responder (no egressBindings)', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const responder = makeHook({ name: 'resp' }) // default image, no egressBindings
     hooks.set('resp', responder)
     await reconciler.reconcile(responder)
@@ -829,6 +849,8 @@ describe('LlmHookReconciler', () => {
   })
 
   it('allows a valid public-CIDR egress binding as an Egress NetworkPolicy rule', async () => {
+    // This scenario starts without a policy; the API reports absence explicitly.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: {
