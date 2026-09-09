@@ -55,6 +55,7 @@ import {
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
 import {
+  contextMetadataOnlyEventsTotal,
   hostDeleteCleanupTotal,
   hostFleetLifecycleCatchTotal,
   hostFleetRequestsTotal,
@@ -4334,7 +4335,16 @@ export class McpServerWatcher implements McpServerProvider {
       if (type === 'ADDED' || type === 'MODIFIED') {
         desiredStateChanged =
           previous === undefined || !sameContextDesiredRevision(previous, context)
-        this.contexts.set(context.name, context)
+        // Keep the cached object identity when desired revision did not move.
+        // Scoped revoke uses `contexts.get(name) === selectedContext`; replacing
+        // the entry on every label/status MODIFIED aborts an in-flight pass.
+        // `desiredStateChanged` was just computed as
+        // `previous === undefined || !sameContextDesiredRevision(...)`, so the
+        // bootstrap case already implies it; a second disjunct here was dead
+        // (#568 review, jozer-rami minors).
+        if (desiredStateChanged) {
+          this.contexts.set(context.name, context)
+        }
       } else if (type === 'DELETED') {
         desiredStateChanged = this.contexts.delete(context.name)
       }
@@ -4361,17 +4371,41 @@ export class McpServerWatcher implements McpServerProvider {
         void this.runInitialNetworkPolicyConvergence()
       }
 
+      // Metadata-only Context MODIFIED (label ping-pong, annotation churn)
+      // does not change desired revision. Skip SFS propagate and Host fan-out
+      // — that accidental resync is the #460 Loop A storm. Keep scoped
+      // NetworkPolicy revoke: without a delta certificate honorsLostFence is
+      // false, so a lost delete fence still throws into full convergence.
+      // Periodic resync (default 0 / #478) is not the healer for this path.
+      // No changeCallback here. The Context watch never notified before this PR,
+      // and adding the notification on THIS path would have fired it exactly
+      // where nothing changed — the label ping-pong this gate exists to silence —
+      // while a real desired-state change on the same watch still would not fire
+      // it. The only subscriber is a `console.log` in main.ts that reports the
+      // McpServer cache, so for a Context event the line is wrong, and the
+      // `getAllServers()` behind it is an O(n) rebuild on the hot path this PR
+      // removes work from (#568 review: jozer-rami #2 / zach88 R1-M1, converged).
+      const metadataOnlyModified = type === 'MODIFIED' && !desiredStateChanged
+      // The absorption must not be invisible: if the Loop A storm ever returns,
+      // HCC now silently eats it. A COUNTER rather than a log line, because this
+      // fires on exactly the churn that made the logs unreadable in the first
+      // place (#492) — a per-event line would reproduce the problem it is meant
+      // to make observable (claude[bot] audit, finding 1).
+      if (metadataOnlyModified) contextMetadataOnlyEventsTotal.inc()
+
       // Re-reconcile every SFS this Context referenced before or after the
       // change so SharedFileSystem.status.mountedByContexts stays in sync
       // without waiting for an SFS-level event.
       const nextForSfs = type === 'DELETED' ? undefined : context
       const contextInventoryAuthoritative = () => this.hasContextInventoryAuthority(watchGeneration)
       const serverInventoryGeneration = this.mcpWatchGeneration
-      void this.reconcileSharedFileSystemsReferencedByContext(
-        previous,
-        nextForSfs,
-        contextInventoryAuthoritative
-      )
+      if (!metadataOnlyModified) {
+        void this.reconcileSharedFileSystemsReferencedByContext(
+          previous,
+          nextForSfs,
+          contextInventoryAuthoritative
+        )
+      }
 
       const previousContextId = previous?.spec.contextId
       const effectContextIds =
@@ -4418,9 +4452,9 @@ export class McpServerWatcher implements McpServerProvider {
                   this.contexts.get(selectedContext.name) === selectedContext,
                 // Only opt in when there is a certificate to withhold. Without
                 // one the result below is discarded, so a reported lost fence
-                // would vanish: no throw to reach the retry, and the recovery
-                // in the desired-state branch does not run for an event that
-                // did not move the revision.
+                // would vanish: no throw to reach the retry. Metadata-only
+                // MODIFIED never builds a certificate, so this stays false and
+                // a 409 still reaches full convergence without Host/SFS fan-out.
                 honorsLostFence: deltaSafetyCertificate !== undefined,
               }
             )
@@ -4452,6 +4486,9 @@ export class McpServerWatcher implements McpServerProvider {
         }
 
         if (this.stopped || watchGeneration !== this.contextWatchGeneration) return
+        if (metadataOnlyModified) {
+          return
+        }
         // Re-reconcile any Host that points at this Context so that changes to
         // spec.sharedFileSystems[] propagate into the mcp-host pod template.
         try {

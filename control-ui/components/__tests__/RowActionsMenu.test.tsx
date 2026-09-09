@@ -22,6 +22,18 @@ describe('RowActionsMenu', () => {
     expect(menu.parentElement).toBe(document.body)
   })
 
+  it('preserves the horizontal trigger variant through the compatibility adapter', () => {
+    render(
+      <RowActionsMenu
+        ariaLabel="Entry actions"
+        horizontalTrigger
+        actions={[{ key: 'edit', label: 'Edit', onClick: vi.fn() }]}
+      />
+    )
+
+    expect(screen.getByRole('button', { name: 'Entry actions' })).toHaveTextContent('⋯')
+  })
+
   it('focuses the first enabled item and supports arrow-key navigation', () => {
     render(
       <RowActionsMenu
