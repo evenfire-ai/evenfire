@@ -395,7 +395,7 @@ test('Control UI operator manages workflow access contracts without implicit cou
       await approvalTargetTeams.getByRole('button', { name: 'Allow team' }).click()
       await expect(
         approvalTargetTeams.getByRole('button', {
-          name: `Remove approval target team: ${approvalTeam.name}`,
+          name: `Actions for ${approvalTeam.name}`,
         })
       ).toBeVisible()
       await expect
@@ -433,11 +433,13 @@ test('Control UI operator manages workflow access contracts without implicit cou
       const refreshedApprovalTargetTeams = page.getByTestId('workflow-access-approval-target-teams')
 
       await refreshedTriggerTeams
-        .getByRole('button', { name: `Revoke team trigger access: ${triggerTeam.name}` })
+        .getByRole('button', { name: `Actions for ${triggerTeam.name}` })
         .click()
+      await page.getByRole('menuitem', { name: 'Remove team trigger access' }).click()
+      await page.getByRole('button', { name: 'Remove access' }).click()
       await expect(
         refreshedTriggerTeams.getByRole('button', {
-          name: `Revoke team trigger access: ${triggerTeam.name}`,
+          name: `Actions for ${triggerTeam.name}`,
         })
       ).not.toBeVisible()
       await expect
@@ -448,11 +450,13 @@ test('Control UI operator manages workflow access contracts without implicit cou
         .not.toContain(triggerTeam.id)
 
       await refreshedApprovalTargetTeams
-        .getByRole('button', { name: `Remove approval target team: ${approvalTeam.name}` })
+        .getByRole('button', { name: `Actions for ${approvalTeam.name}` })
         .click()
+      await page.getByRole('menuitem', { name: 'Remove approval target team' }).click()
+      await page.getByRole('button', { name: 'Remove target' }).click()
       await expect(
         refreshedApprovalTargetTeams.getByRole('button', {
-          name: `Remove approval target team: ${approvalTeam.name}`,
+          name: `Actions for ${approvalTeam.name}`,
         })
       ).not.toBeVisible()
       await expect

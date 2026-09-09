@@ -36,6 +36,7 @@ function fixture(options: { allowed?: boolean } = {}) {
   const rename = vi.fn(async (_input: unknown) => ({
     resourceId: RID, drive: "main", parentResourceId: PARENT, name: "renamed", kind: "directory" as const,
     pathCache: "/docs/renamed", version: 5, bytes: 0, blobKey: null, contentSha256: null, deletedAt: null,
+    updatedAt: "2026-01-01T00:00:00.000Z",
   }));
   const deps: ServingDeps = {
     verifyToken: () => claims,

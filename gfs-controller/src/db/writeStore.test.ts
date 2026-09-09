@@ -31,6 +31,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
     blob_key: null,
     content_sha256: null,
     deleted_at: null,
+    updated_at: new Date("2026-01-01T00:00:00.000Z"),
     ...over,
   };
 }
@@ -144,8 +145,9 @@ describe("GfsWriteService.create legacy contract", () => {
     });
     const blobs = new RecordingBlobs();
     const created = await service(client, blobs).create({ drive: "main", parentId: PARENT, name: "new.txt", content: Buffer.from("hello") });
-    expect(created).toMatchObject({ name: "new.txt", pathCache: "/docs/new.txt", version: 0, bytes: 5 });
+    expect(created).toMatchObject({ name: "new.txt", pathCache: "/docs/new.txt", version: 0, bytes: 5, updatedAt: "2026-01-01T00:00:00.000Z" });
     const insert = client.calls.find(call => call.sql.includes("INSERT INTO gfs_resources"))!;
+    expect(insert.sql).toContain("updated_at");
     expect(insert.values.slice(1, 7)).toEqual(["main", PARENT, "new.txt", "file", "/docs/new.txt", 5]);
     expect(blobs.writes).toEqual([{ resourceId: RESOURCE, bytes: 5 }]);
     expect(client.calls[0].sql).toContain("hashtext('gfs:structure:' || $1)::bigint");
@@ -238,7 +240,8 @@ describe("GfsWriteService.replace legacy contract", () => {
   it("bumps version and bytes under a resource row lock", async () => {
     const client = new FakeClient({ lock: () => [row({ version: 3 })], update: values => [row({ version: 4, bytes: values[2], blob_key: values[3], content_sha256: values[4] })] });
     const updated = await service(client).replace({ drive: "main", resourceId: RESOURCE, ifMatch: 3, content: Buffer.from("howdy") });
-    expect(updated).toMatchObject({ resourceId: RESOURCE, version: 4, bytes: 5 });
+    expect(updated).toMatchObject({ resourceId: RESOURCE, version: 4, bytes: 5, updatedAt: "2026-01-01T00:00:00.000Z" });
+    expect(client.calls.find(call => call.sql.includes("UPDATE gfs_resources"))?.sql).toContain("updated_at");
     expect(client.calls.some(call => call.sql.includes("'legacy_flat'"))).toBe(true);
   });
 

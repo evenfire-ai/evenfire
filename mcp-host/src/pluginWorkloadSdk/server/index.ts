@@ -360,12 +360,15 @@ export function maybeCreatePluginWorkloadSdkServer(
         : undefined,
       finalizePromptBridge:
         config.pluginWorkloadSdkRuntimeMode === 'sdk-only'
-          ? input =>
-              controlApiClient.finalizePromptBridge({
-                recipeNamespace: binding.recipeNamespace,
-                recipeName: binding.recipeName,
-                ...input,
-              })
+          ? (input, options) =>
+              controlApiClient.finalizePromptBridge(
+                {
+                  recipeNamespace: binding.recipeNamespace,
+                  recipeName: binding.recipeName,
+                  ...input,
+                },
+                options
+              )
           : undefined,
       onUsage: usage => {
         if (!usageReporter) return

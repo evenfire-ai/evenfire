@@ -526,7 +526,16 @@ describe('linked Desktop operator authority contract', () => {
       if (lifecycle) return lifecycle
       if (text.includes('parent_resource_id IS NULL')) {
         return {
-          rows: [{ resource_id: R, drive: 'main', name: '', kind: 'directory', path_cache: '/' }],
+          rows: [
+            {
+              resource_id: R,
+              drive: 'main',
+              name: '',
+              kind: 'directory',
+              path_cache: '/',
+              updated_at: new Date('2026-01-01T00:00:00.000Z'),
+            },
+          ],
         }
       }
       if (text.includes('parent_resource_id = $2::uuid')) {
@@ -539,6 +548,7 @@ describe('linked Desktop operator authority contract', () => {
               path_cache: '/all-operator-visible',
               bytes: 0,
               version: 1,
+              updated_at: new Date('2026-01-01T00:00:00.000Z'),
             },
           ],
         }
@@ -554,7 +564,13 @@ describe('linked Desktop operator authority contract', () => {
     expect(res.body).toEqual({
       ok: true,
       data: {
-        items: [expect.objectContaining({ resourceId: R2, name: 'all-operator-visible' })],
+        items: [
+          expect.objectContaining({
+            resourceId: R2,
+            name: 'all-operator-visible',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          }),
+        ],
         nextCursor: null,
         rootResourceId: R,
         view: 'operator',
@@ -1842,6 +1858,7 @@ describe('GET /external/gfs/resources', () => {
               path_cache: '/team-folder-tree',
               version: 1,
               bytes: 0,
+              updated_at: new Date('2026-01-01T00:00:00.000Z'),
               sources: ['grant'],
               permissions: ['read'],
               covers_descendants: true,
@@ -1855,6 +1872,7 @@ describe('GET /external/gfs/resources', () => {
               path_cache: '/other-org/external-file.pdf',
               version: 2,
               bytes: 128,
+              updated_at: new Date('2026-06-01T12:00:00.000Z'),
               sources: ['share'],
               permissions: ['read'],
               covers_descendants: false,
@@ -1877,6 +1895,7 @@ describe('GET /external/gfs/resources', () => {
         kind: 'directory',
         sources: ['grant'],
         coversDescendants: true,
+        updatedAt: '2026-01-01T00:00:00.000Z',
       }),
       expect.objectContaining({
         resourceId: R2,
@@ -1884,6 +1903,7 @@ describe('GET /external/gfs/resources', () => {
         kind: 'file',
         sources: ['share'],
         coversDescendants: false,
+        updatedAt: '2026-06-01T12:00:00.000Z',
       }),
     ])
   })

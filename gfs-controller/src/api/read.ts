@@ -17,6 +17,8 @@ export interface GfsResource {
   /** Digest of the committed generation. Never exposed in GfsResourceView. */
   contentSha256: string | null;
   deletedAt: string | null;
+  /** ISO 8601 UTC from gfs_resources.updated_at. Always present on live rows. */
+  updatedAt: string;
 }
 
 /** Public view returned to clients — includes the canonical gfs:// URI. */
@@ -31,6 +33,7 @@ export interface GfsResourceView {
   path: string | null;
   version: number;
   bytes: number;
+  updatedAt: string;
 }
 
 /**
@@ -101,6 +104,7 @@ export function toView(resource: GfsResource): GfsResourceView {
     path: resource.pathCache,
     version: resource.version,
     bytes: resource.bytes,
+    updatedAt: resource.updatedAt,
   };
 }
 

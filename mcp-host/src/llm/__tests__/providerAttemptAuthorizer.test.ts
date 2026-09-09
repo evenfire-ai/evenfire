@@ -131,4 +131,70 @@ describe('ProviderAttemptAuthorizer', () => {
     expect(fetchFn.mock.calls[1][1].headers.authorization).toBe('Bearer fresh-jwt')
     expect(result.executionTicket).toBe('ticket-123456')
   })
+
+  it('forwards the caller deadline to the authorize hop and to its post-401 retry', async () => {
+    const controller = new AbortController()
+    const refreshOnUnauthorized = vi.fn().mockResolvedValue(undefined)
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: 'Unauthorized' }),
+      })
+      .mockResolvedValueOnce({ ok: true, json: async () => validAuthorize })
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+      readPlatformJwt: () => 'platform-jwt',
+      refreshOnUnauthorized,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+
+    await authorizer.authorize(
+      {
+        request: { schemaVersion: 'codex-completion-request.v1' },
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      },
+      { signal: controller.signal }
+    )
+    // The retry after a refresh must not outlive the deadline that bounded the
+    // first hop — a second, unbounded call would be a second clock.
+    expect(fetchFn.mock.calls[0][1].signal).toBe(controller.signal)
+    expect(fetchFn.mock.calls[1][1].signal).toBe(controller.signal)
+  })
+
+  it('fails loudly on an already-expired deadline without rotating credentials', async () => {
+    const refreshOnUnauthorized = vi.fn()
+    // Faithful to real fetch: an aborted signal rejects before any response.
+    const fetchFn = vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.signal?.aborted) throw new DOMException('operation aborted', 'AbortError')
+      throw new Error('fetch must not proceed with an aborted signal')
+    })
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl('http://gateway:8092'),
+      readPlatformJwt: () => 'platform-jwt',
+      refreshOnUnauthorized,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    })
+
+    await expect(
+      authorizer.authorize(
+        {
+          request: {},
+          invocationId: 'inv-1',
+          attemptGeneration: 1,
+          providerAttemptIndex: 1,
+          policyRevision: 1,
+          policyHash: 'b'.repeat(64),
+        },
+        { signal: AbortSignal.abort() }
+      )
+    ).rejects.toThrow(/aborted/i)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
+    expect(refreshOnUnauthorized).not.toHaveBeenCalled()
+  })
 })

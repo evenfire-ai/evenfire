@@ -1,15 +1,16 @@
 /**
  * Tests for RecipeIntegrationsPanel — per-user background grants subsection.
  *
- * These tests cover the "Show users" toggle, user row rendering, and the
- * Revoke admin action on the per-user grants subsection that appears when
+ * These tests cover the user-grants action, user row rendering, and the
+ * Revoke admin action in the grants dialog that appears when
  * an oauthClient has backgroundAccess: true.
  */
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { WorkflowRecipeResource } from '../../lib/api'
+import { RecipeIntegrationsPanel } from '../RecipeIntegrationsPanel'
 import { ToastProvider } from '../Toast'
 
 // ── Mock declarations ────────────────────────────────────────────────────────
@@ -50,8 +51,6 @@ vi.mock('../icons', () => ({
   IconRefresh: () => <span data-testid="icon-refresh" />,
 }))
 
-import { RecipeIntegrationsPanel } from '../RecipeIntegrationsPanel'
-
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
 const recipe: WorkflowRecipeResource = {
@@ -71,14 +70,14 @@ function renderPanel() {
     ...render(
       <ToastProvider>
         <RecipeIntegrationsPanel recipe={recipe} />
-      </ToastProvider>,
+      </ToastProvider>
     ),
     user,
   }
 }
 
 /**
- * Render the panel, wait for status to load, click "Show users", and wait for
+ * Render the panel, wait for status to load, open "Manage user grants", and wait for
  * the resolved user grants to appear. Returns `user` for further interactions.
  */
 async function renderAndExpandGrants() {
@@ -95,8 +94,8 @@ async function renderAndExpandGrants() {
   // Wait for initial status fetch ("Not connected" or any status chip appears)
   await screen.findByText('Not connected')
 
-  // Click "Show users" to trigger loadUserGrants()
-  await user.click(screen.getByRole('button', { name: /Show users/i }))
+  await user.click(screen.getByRole('button', { name: 'Actions for salesforce' }))
+  await user.click(screen.getByRole('menuitem', { name: 'Manage user grants' }))
 
   // Confirm the subsection is expanded and loading
   await screen.findByText('Per-user connections')
@@ -134,17 +133,17 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
     expect(screen.getByText('Salesforce')).toBeInTheDocument()
     expect(screen.getByText('Not connected')).toBeInTheDocument()
 
-    // "Show users" button present and enabled when recipeName is set
-    const showBtn = screen.getByRole('button', { name: /Show users/i })
-    expect(showBtn).toBeInTheDocument()
-    expect(showBtn).not.toBeDisabled()
+    const actions = screen.getByRole('button', { name: 'Actions for salesforce' })
+    expect(actions).toBeInTheDocument()
+    expect(actions).not.toBeDisabled()
   })
 
-  it('clicking "Show users" calls adminListUserGrants(recipeName, oauthClientId)', async () => {
+  it('selecting "Manage user grants" calls adminListUserGrants', async () => {
     const { user } = renderPanel()
     await screen.findByText('Not connected')
 
-    await user.click(screen.getByRole('button', { name: /Show users/i }))
+    await user.click(screen.getByRole('button', { name: 'Actions for salesforce' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Manage user grants' }))
 
     await waitFor(() =>
       expect(mocks.adminListUserGrants).toHaveBeenCalledWith('crm-recipe', 'salesforce')
@@ -158,19 +157,41 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
     const { user } = renderPanel()
     await screen.findByText('Not connected')
 
-    await user.click(screen.getByRole('button', { name: /Show users/i }))
+    await user.click(screen.getByRole('button', { name: 'Actions for salesforce' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Manage user grants' }))
 
     await screen.findByText('Per-user connections')
     expect(screen.getByText('Loading…')).toBeInTheDocument()
-    // Toggle button flips to "Hide users" while expanded
-    expect(screen.getByRole('button', { name: /Hide users/i })).toBeInTheDocument()
+    expect(screen.getByRole('dialog', { name: 'Per-user connections' })).toBeInTheDocument()
+  })
+
+  it('traps modal focus, closes with Escape, and restores the opener', async () => {
+    const { user } = renderPanel()
+    await screen.findByText('Not connected')
+
+    const opener = screen.getByRole('button', { name: 'Actions for salesforce' })
+    await user.click(opener)
+    await user.click(screen.getByRole('menuitem', { name: 'Manage user grants' }))
+
+    const close = await screen.findByRole('button', { name: 'Close user grants' })
+    const refresh = screen.getByRole('button', { name: 'Refresh' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab', shiftKey: true })
+    expect(refresh).toHaveFocus()
+    fireEvent.keyDown(window, { key: 'Tab' })
+    expect(close).toHaveFocus()
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Per-user connections' })).toBeNull()
+    expect(opener).toHaveFocus()
   })
 
   it('renders the user row after adminListUserGrants resolves', async () => {
     await renderAndExpandGrants()
 
     await waitFor(() => expect(screen.getByText('user-abc-123')).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: /Revoke/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
+    expect(screen.getByRole('menuitem', { name: /Revoke/i })).toBeInTheDocument()
   })
 
   it('calls adminRevokeUserGrant when admin confirms the revoke dialog', async () => {
@@ -178,13 +199,14 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
 
     await renderAndExpandGrants()
 
-    await waitFor(() => screen.getByRole('button', { name: /Revoke/i }))
+    await waitFor(() => screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
 
     // Reset after initial load so the post-revoke reload doesn't confuse assertions
     mocks.adminListUserGrants.mockResolvedValue({ users: [] })
 
     const { user } = { user: userEvent.setup({ delay: null }) }
-    await user.click(screen.getByRole('button', { name: /Revoke/i }))
+    await user.click(screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
+    await user.click(screen.getByRole('menuitem', { name: /Revoke/i }))
 
     await waitFor(() =>
       expect(mocks.adminRevokeUserGrant).toHaveBeenCalledWith(
@@ -200,10 +222,11 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
 
     await renderAndExpandGrants()
 
-    await waitFor(() => screen.getByRole('button', { name: /Revoke/i }))
+    await waitFor(() => screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
 
     const { user } = { user: userEvent.setup({ delay: null }) }
-    await user.click(screen.getByRole('button', { name: /Revoke/i }))
+    await user.click(screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
+    await user.click(screen.getByRole('menuitem', { name: /Revoke/i }))
 
     // Give any pending promises a tick to settle
     await new Promise(r => setTimeout(r, 0))
@@ -219,10 +242,11 @@ describe('RecipeIntegrationsPanel — per-user grants subsection', () => {
 
     await renderAndExpandGrants()
 
-    await waitFor(() => screen.getByRole('button', { name: /Revoke/i }))
+    await waitFor(() => screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
 
     const { user } = { user: userEvent.setup({ delay: null }) }
-    await user.click(screen.getByRole('button', { name: /Revoke/i }))
+    await user.click(screen.getByRole('button', { name: 'Actions for user user-abc-123' }))
+    await user.click(screen.getByRole('menuitem', { name: /Revoke/i }))
 
     await waitFor(() => expect(mocks.confirm).toHaveBeenCalled())
   })

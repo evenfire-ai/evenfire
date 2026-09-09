@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/llm-provider-attempt-contract/
+!packages/llm-provider-attempt-contract/**
 !packages/codex-catalog-projection/
 !packages/codex-catalog-projection/**
 !packages/network-policy-core/

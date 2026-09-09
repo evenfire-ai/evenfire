@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { WorkflowRecipeSpec } from '../types'
+import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
 import type { PluginWorkloadSdkProvisionerDeps } from './pluginWorkloadSdkProvisioner'
 import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
@@ -16,19 +17,21 @@ const RECIPE = 'demo'
 function podWithPhase(
   image: string,
   phase: 'Running' | 'Pending',
-  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
+  opts: { deleting?: boolean; runtimeContractHash?: string; tokenGeneration?: string } = {}
 ) {
+  const annotations = {
+    ...(opts.runtimeContractHash
+      ? { 'clerum.io/plugin-workload-sdk-runtime-contract-hash': opts.runtimeContractHash }
+      : {}),
+    ...(opts.tokenGeneration
+      ? { 'clerum.io/mcp-host-runtime-token-generation': opts.tokenGeneration }
+      : {}),
+  }
   return {
     metadata: {
       uid: 'pod-uid-1',
       ...(opts.deleting ? { deletionTimestamp: '2026-06-19T18:00:00Z' } : {}),
-      ...(opts.runtimeContractHash
-        ? {
-            annotations: {
-              'clerum.io/plugin-workload-sdk-runtime-contract-hash': opts.runtimeContractHash,
-            },
-          }
-        : {}),
+      ...(Object.keys(annotations).length > 0 ? { annotations } : {}),
     },
     spec: { containers: [{ name: 'mcp-host', image }] },
     status: { phase, conditions: [], containerStatuses: [] },
@@ -38,9 +41,24 @@ function podWithPhase(
 function makeProvisioner(
   podImage: string,
   phase: 'Running' | 'Pending' = 'Running',
-  opts: { deleting?: boolean; runtimeContractHash?: string } = {}
+  opts: {
+    deleting?: boolean
+    runtimeContractHash?: string
+    tokenRefresh?: {
+      reminted: boolean
+      reason?: 'scope' | 'binding' | 'ttl'
+      tokenGeneration?: string
+    }
+    tokenGeneration?: string
+  } = {}
 ) {
-  const readNamespacedPod = vi.fn().mockResolvedValue(podWithPhase(podImage, phase, opts))
+  const readNamespacedPod = vi.fn().mockResolvedValue(
+    podWithPhase(podImage, phase, {
+      deleting: opts.deleting,
+      runtimeContractHash: opts.runtimeContractHash,
+      tokenGeneration: opts.tokenGeneration,
+    })
+  )
   const deleteNamespacedPod = vi.fn().mockResolvedValue({})
   const createNamespacedPod = vi.fn().mockResolvedValue({})
   const coreApi = {
@@ -54,7 +72,7 @@ function makeProvisioner(
     config: TEST_CONFIG,
     tokenFactory: {},
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
+    ensureMcpHostSecrets: vi.fn().mockResolvedValue(opts.tokenRefresh),
     applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
     ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
     modelConfigHandler: {
@@ -118,6 +136,31 @@ function desiredRuntimeContractHash(): string {
   return pluginWorkloadSdkRuntimeContractHash(desiredPod)
 }
 
+/**
+ * The one verdict the provisioner reads. These image-drift cases are about pod
+ * rolls, not Codex policy, so they use an authoritative-but-ineligible verdict:
+ * a real decision, never uncertainty (which would take the configure skip).
+ */
+const decidedVerdict: CodexRecipeVerdict = {
+  provenance: 'authoritative',
+  provenanceReason: 'standalone',
+  connectionKey: 'unassigned',
+  projection: {
+    targets: [],
+    eligibleTargets: [],
+    derivedScopes: [],
+    requiresCodexProxyEgress: false,
+    catalogContentHash: null,
+    catalogRevision: null,
+    connectionRevision: null,
+    eligibility: 'ineligible',
+    reason: 'unassigned',
+    driftHashInput: '{}',
+  },
+  hostBinding: null,
+  hostBindingReason: 'unassigned',
+}
+
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
   it('rolls a healthy eager mcp-host pod when its image drifts from the platform image', async () => {
     const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(STALE_IMAGE)
@@ -129,7 +172,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     // Pod deleted so the next reconcile recreates it from the platform image;
@@ -158,7 +201,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(deleteNamespacedPod).not.toHaveBeenCalled()
@@ -175,7 +218,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -198,7 +241,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Pending' }
+      { mcpHostPhase: 'Pending', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -223,7 +266,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -269,7 +312,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: undefined }
+      { mcpHostPhase: undefined, codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -334,7 +377,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       SPEC,
       RUNTIME,
-      { mcpHostPhase: 'Pending' }
+      { mcpHostPhase: 'Pending', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -399,7 +442,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
       RECIPE,
       promptBridgeSpec,
       RUNTIME,
-      { mcpHostPhase: 'Running' }
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
     )
 
     expect(status).toBe('deploying')
@@ -481,6 +524,7 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
         RUNTIME,
         {
           mcpHostPhase: 'Running',
+          codexVerdict: decidedVerdict,
         }
       )
 
@@ -496,5 +540,201 @@ describe('ensureEagerSdkMcpHost image-drift roll', () => {
     // mocked UID, because the roll reset the budget.
     podImage = DESIRED_IMAGE
     expect(await reconcile()).toBe('deploying')
+  })
+})
+
+describe('ensureEagerSdkMcpHost runtime token roll', () => {
+  it('rolls a healthy eager mcp-host when runtime JWT scopes were reminted', async () => {
+    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(
+      DESIRED_IMAGE,
+      'Running',
+      {
+        runtimeContractHash: desiredRuntimeContractHash(),
+        tokenRefresh: { reminted: true, reason: 'scope' },
+      }
+    )
+
+    const status = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+    )
+
+    expect(status).toBe('deploying')
+    expect(deleteNamespacedPod).toHaveBeenCalledWith({
+      name: `${RECIPE}-mcp-host`,
+      namespace: SANDBOX_NS,
+    })
+    expect(createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('does not roll the eager mcp-host on a TTL-only runtime token remint', async () => {
+    const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE, 'Running', {
+      runtimeContractHash: desiredRuntimeContractHash(),
+      tokenRefresh: { reminted: true, reason: 'ttl' },
+    })
+
+    await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+    )
+
+    expect(deleteNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('rolls a healthy eager mcp-host when Secret token generation drifted after a failed roll', async () => {
+    const { provisioner, deleteNamespacedPod, createNamespacedPod } = makeProvisioner(
+      DESIRED_IMAGE,
+      'Running',
+      {
+        runtimeContractHash: desiredRuntimeContractHash(),
+        tokenGeneration: '1',
+        tokenRefresh: { reminted: false, tokenGeneration: '2' },
+      }
+    )
+
+    const status = await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+    )
+
+    expect(status).toBe('deploying')
+    expect(deleteNamespacedPod).toHaveBeenCalledWith({
+      name: `${RECIPE}-mcp-host`,
+      namespace: SANDBOX_NS,
+    })
+    expect(createNamespacedPod).not.toHaveBeenCalled()
+  })
+
+  it('does not roll when Secret and pod token generations already match', async () => {
+    const { provisioner, deleteNamespacedPod } = makeProvisioner(DESIRED_IMAGE, 'Running', {
+      runtimeContractHash: desiredRuntimeContractHash(),
+      tokenGeneration: '2',
+      tokenRefresh: { reminted: false, tokenGeneration: '2' },
+    })
+
+    await provisioner.ensureEagerSdkMcpHost(
+      RECIPE,
+      'recipe-uid',
+      SANDBOX_NS,
+      RECIPE,
+      SPEC,
+      RUNTIME,
+      { mcpHostPhase: 'Running', codexVerdict: decidedVerdict }
+    )
+
+    expect(deleteNamespacedPod).not.toHaveBeenCalled()
+  })
+})
+
+describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
+  const CODEX_SPEC = {
+    agent: { provider: 'codex-subscription', model: 'gpt-5.6-luna' },
+    pluginWorkloadSdk: { promptBridge: {} },
+  } as unknown as WorkflowRecipeSpec
+
+  function desiredCodexRuntimeContractHash(): string {
+    const desiredPod = buildMcpHostPod(
+      RECIPE,
+      CODEX_SPEC.agent,
+      TEST_CONFIG,
+      RECIPE,
+      SANDBOX_NS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      }
+    )
+    return pluginWorkloadSdkRuntimeContractHash(desiredPod)
+  }
+
+  it('does not send a binding-less Codex configure when the allowlist snapshot is unavailable', async () => {
+    const configure = vi.fn()
+    const signWrcConfigureToken = vi.fn()
+    const readNamespacedPod = vi.fn().mockResolvedValue({
+      metadata: {
+        uid: 'pod-uid-1',
+        annotations: {
+          'clerum.io/plugin-workload-sdk-runtime-contract-hash': desiredCodexRuntimeContractHash(),
+        },
+      },
+      spec: { containers: [{ name: 'mcp-host', image: DESIRED_IMAGE }] },
+      status: {
+        phase: 'Running',
+        conditions: [{ type: 'Ready', status: 'True' }],
+        containerStatuses: [],
+      },
+    })
+    const deps = {
+      coreApi: {
+        readNamespacedPod,
+        deleteNamespacedPod: vi.fn(),
+        createNamespacedPod: vi.fn(),
+      },
+      config: TEST_CONFIG,
+      tokenFactory: { signWrcConfigureToken },
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+      ensureMcpHostSecrets: vi.fn().mockResolvedValue(undefined),
+      applyWorkflowNetworkPolicies: vi.fn().mockResolvedValue(undefined),
+      ensureMcpHostHeadlessService: vi.fn().mockResolvedValue(undefined),
+      modelConfigHandler: { configurePluginWorkloadSdkBootstrap: configure },
+      createIfNotExists: vi.fn().mockResolvedValue(true),
+      safeDelete: vi.fn().mockResolvedValue(undefined),
+    } as unknown as PluginWorkloadSdkProvisionerDeps
+    const provisioner = new PluginWorkloadSdkProvisioner(deps)
+
+    await expect(
+      provisioner.ensureEagerSdkMcpHost(
+        RECIPE,
+        'recipe-uid',
+        SANDBOX_NS,
+        RECIPE,
+        CODEX_SPEC,
+        RUNTIME,
+        {
+          mcpHostPhase: 'Running',
+          // Undecidable is now a field of the one verdict.
+          codexVerdict: {
+            provenance: 'uncertain',
+            provenanceReason: 'parent_spec_unavailable',
+            connectionKey: 'team-plus',
+            projection: {
+              targets: [],
+              eligibleTargets: [],
+              derivedScopes: [],
+              requiresCodexProxyEgress: false,
+              catalogContentHash: null,
+              catalogRevision: null,
+              connectionRevision: null,
+              eligibility: 'uncertain',
+              reason: 'provenance_uncertain',
+              driftHashInput: '{}',
+            },
+            hostBinding: null,
+            hostBindingReason: 'provenance_uncertain',
+          } satisfies CodexRecipeVerdict,
+        }
+      )
+    ).resolves.toBe('awaiting_policy')
+    expect(configure).not.toHaveBeenCalled()
+    expect(deps.tokenFactory.signWrcConfigureToken).not.toHaveBeenCalled()
   })
 })

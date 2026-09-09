@@ -1578,7 +1578,9 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       'zai',
       'glm-4.7',
       expect.any(String),
-      'wrc-configure-token'
+      'wrc-configure-token',
+      'promptBridge',
+      null
     )
   })
 
@@ -1872,7 +1874,9 @@ describe('WorkflowReconciler — Plugin Workload SDK eager mcp-host', () => {
       'zai',
       'glm-4.7',
       expect.any(String),
-      'wrc-configure-token'
+      'wrc-configure-token',
+      'promptBridge',
+      null
     )
   })
 

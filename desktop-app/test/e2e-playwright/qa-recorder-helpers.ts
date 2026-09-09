@@ -228,9 +228,11 @@ export async function visitSettingsTab(
   await expect(page.getByRole('tabpanel')).toContainText(expectedContent)
 }
 
-/** Expand footer Resources submenu and click one of its items by test id. */
+/** Open a footer data item (Agents / Connectors / Plugins) by test id. */
 export async function openResourcesNavItem(page: Page, itemTestId: string): Promise<void> {
   const item = page.getByTestId(itemTestId)
+  // Top-level items (e.g. nav-files) are always visible; the data items now
+  // hang directly off the footer Settings popover — no "Resources" submenu.
   if (!(await item.isVisible().catch(() => false))) {
     const settingsMenu = page.getByTestId('nav-settings-menu')
     await expect(settingsMenu).toBeVisible({ timeout: 15_000 })
@@ -238,12 +240,6 @@ export async function openResourcesNavItem(page: Page, itemTestId: string): Prom
       await settingsMenu.click()
     }
     await expect(settingsMenu).toHaveAttribute('aria-expanded', 'true', { timeout: 15_000 })
-
-    const resourcesMenu = page.getByTestId('nav-data-menu')
-    await expect(resourcesMenu).toBeVisible({ timeout: 15_000 })
-    if (!(await item.isVisible().catch(() => false))) {
-      await resourcesMenu.click()
-    }
   }
   await expect(item).toBeVisible({ timeout: 15_000 })
   await item.click()
@@ -264,13 +260,10 @@ export async function openExactAgentChat(page: Page, hostRef: string): Promise<v
     await settingsMenu.click()
   }
 
-  const resourcesMenu = page.getByTestId('nav-data-menu')
-  await expect(resourcesMenu).toBeVisible()
-  if ((await resourcesMenu.getAttribute('aria-expanded')) !== 'true') {
-    await resourcesMenu.click()
-  }
-
-  await page.getByTestId('nav-agents').click()
+  // Agents now sits directly inside the Settings popover (no Resources submenu).
+  const agentsItem = page.getByTestId('nav-agents')
+  await expect(agentsItem).toBeVisible({ timeout: 15_000 })
+  await agentsItem.click()
   const chatInput = page.getByRole('textbox', { name: 'Agent message composer' })
   const exactAgent = page.locator('.agents-table-row-clickable', { hasText: hostRef }).first()
   const emptyState = page.getByText('No agents available')

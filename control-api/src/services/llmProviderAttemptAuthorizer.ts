@@ -23,6 +23,12 @@ import {
   insertLlmProviderAttempt,
 } from './llmProviderAttemptStore.js'
 import { issueRegisteredCodexExecutionTicket } from './llmProviderAttemptTicket.js'
+import {
+  getPluginWorkloadSdkProviderAttemptForUpdate,
+  lockPluginWorkloadSdkRecipe,
+  pluginWorkloadSdkSpendOutcomeExists,
+  promoteReservedOauthBrokerProviderAttempt,
+} from './pluginWorkloadSdkDb.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -41,7 +47,10 @@ const AUTHORIZE_BODY_KEYS = new Set([
   'recipeNamespace',
   'recipeName',
   'userId',
+  'pluginWorkloadSdkProviderAttemptId',
+  'targetRef',
 ])
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export type LlmProviderAttemptAuthorizeErrorCode =
   | 'disabled'
@@ -312,6 +321,45 @@ export async function authorizeLlmProviderAttempt(
       )
     }
 
+    const pluginWorkloadSdkProviderAttemptId =
+      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+        ? body.pluginWorkloadSdkProviderAttemptId.trim()
+        : ''
+    let sdkLinkRecipe: { namespace: string; name: string } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'invalid_request',
+          'pluginWorkloadSdkProviderAttemptId must be a UUID'
+        )
+      }
+      if (caller.callerKind === 'host') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'host Codex chat cannot bind a Plugin Workload SDK provider attempt'
+        )
+      }
+      if (!caller.recipeNamespace || !caller.recipeName) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
+    }
+
+    // Recipe authorize and promptBridge finalize share this advisory. Take it
+    // before budget reservation work so concurrent Codex + fallback cannot
+    // deadlock (budget rows then advisory vs advisory then spend/invocation).
+    //
+    // Only an SDK-linked authorize goes on to take plugin_workload_sdk_*
+    // rows FOR UPDATE, which is the order finalize follows after this advisory.
+    // The workflow lane touches neither, so taking it for every recipe caller
+    // serialized that lane per recipe for no ordering benefit.
+    if (sdkLinkRecipe) {
+      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
+    }
+
     const presentedReservationId =
       typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
     let budgetReservationId = presentedReservationId || 'unbudgeted'
@@ -356,6 +404,58 @@ export async function authorizeLlmProviderAttempt(
       budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
     }
 
+    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    let reservedSdkAttemptToPromote: {
+      id: string
+      invocationId: string
+      recipeNamespace: string
+      recipeName: string
+      attemptGeneration: number
+      attemptIndex: number
+      model: string
+      targetRef: string
+    } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
+        pluginWorkloadSdkProviderAttemptId,
+        db
+      )
+      const spendExists = sdkAttempt
+        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+        : false
+      if (
+        !sdkAttempt ||
+        spendExists ||
+        sdkAttempt.invocationId !== invocationId ||
+        sdkAttempt.attemptGeneration !== attemptGeneration ||
+        sdkAttempt.attemptIndex !== providerAttemptIndex ||
+        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+        sdkAttempt.recipeName !== caller.recipeName ||
+        sdkAttempt.provider !== PROVIDER ||
+        sdkAttempt.model !== request.model ||
+        !sdkAttempt.targetRef.trim() ||
+        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
+        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      if (sdkAttempt.status === 'reserved') {
+        reservedSdkAttemptToPromote = {
+          id: sdkAttempt.id,
+          invocationId: sdkAttempt.invocationId,
+          recipeNamespace: sdkAttempt.recipeNamespace,
+          recipeName: sdkAttempt.recipeName,
+          attemptGeneration: sdkAttempt.attemptGeneration,
+          attemptIndex: sdkAttempt.attemptIndex,
+          model: sdkAttempt.model,
+          targetRef: sdkAttempt.targetRef,
+        }
+      }
+    }
+
     try {
       const attempt = await resolvedDeps.insertAttempt(db, {
         callerKind: caller.callerKind,
@@ -372,7 +472,29 @@ export async function authorizeLlmProviderAttempt(
         budgetReservationId,
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
+        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
       })
+      if (reservedSdkAttemptToPromote) {
+        const promoted = await promoteReservedOauthBrokerProviderAttempt(
+          reservedSdkAttemptToPromote,
+          db
+        )
+        if (!promoted) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Codex authorize'
+          )
+        }
+        log.info(
+          {
+            event: 'sdk_oauth_attempt_promoted',
+            pluginWorkloadSdkProviderAttemptId: reservedSdkAttemptToPromote.id,
+            providerAttemptId: attempt.id,
+            credentialJtiPresent: false,
+          },
+          'promoted reserved SDK oauth attempt after Codex authorize-link'
+        )
+      }
       const issued = await resolvedDeps.issueTicket(db, {
         sub: claims.sub,
         hostRef: caller.hostRef,

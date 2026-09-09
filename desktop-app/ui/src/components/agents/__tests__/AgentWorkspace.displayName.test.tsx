@@ -3,25 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { AgentWorkspace } from '../AgentWorkspace'
 
-// UT-11 (spec §5, F3 desktop-app) — Context display with the single sanctioned
-// fallback `contextDisplayById[id] ?? id`:
-//  - WITH display: a context whose displayName ("Prod Ctx") differs from its id
-//    renders the display.
-//  - WITHOUT display: a context with no displayName renders its id
-//    (metadata.name) — the only fallback.
-
-const contextsMock = vi.hoisted(() => ({
-  contextIds: [] as string[],
-  contextDisplayById: {} as Record<string, string>,
-}))
-
 const mcpMock = vi.hoisted(() => ({
   agentDisplayByName: {} as Record<string, string>,
 }))
 
 const navMock = vi.hoisted(() => ({
   selectedAgent: 'product-agent' as string | null,
-  selectedAgentRoute: 'contexts' as string,
+  selectedAgentRoute: 'members' as string,
 }))
 
 const agentsMock = vi.hoisted(() => ({
@@ -33,12 +21,7 @@ vi.mock('@hooks/domain/useAgentsDataController', () => ({
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
-  useContextsDataController: () => ({
-    contextIds: contextsMock.contextIds,
-    contextDisplayById: contextsMock.contextDisplayById,
-    loading: false,
-    error: null,
-  }),
+  useContextsDataController: () => ({ accessCatalog: null }),
 }))
 
 vi.mock('@hooks/domain/useMcpServersDataController', () => ({
@@ -49,6 +32,20 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   }),
 }))
 
+vi.mock('@hooks/domain/useTeamsDataController', () => ({
+  useTeamsDataController: () => ({
+    teams: [],
+    currentTeamId: '',
+    teamMembers: [],
+    teamDirectory: {},
+    ensureHydrated: vi.fn(async () => undefined),
+  }),
+}))
+
+vi.mock('@contexts/AuthContext', () => ({
+  useAuthContext: () => ({ me: null }),
+}))
+
 vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     selectedAgent: navMock.selectedAgent,
@@ -56,7 +53,6 @@ vi.mock('@contexts/NavigationContext', () => ({
     handleBackToAgents: vi.fn(),
     handleOpenAgentWorkspace: vi.fn(),
     handleSelectChatAgent: vi.fn(),
-    handleOpenContextDetails: vi.fn(),
   }),
 }))
 
@@ -77,68 +73,47 @@ vi.mock('@contexts/AgentChatActionsContext', () => ({
 
 vi.mock('@hooks/useClickOutside', () => ({ useClickOutside: vi.fn() }))
 
+// AgentWorkspace now mounts useConnectorsController (Connectors tab OAuth
+// actions). Its useQuery needs a QueryClientProvider these render() calls don't
+// set up; stub the hook while keeping the real pure helpers (isActionableConnector).
+vi.mock('@hooks/domain/useConnectorsController', async importActual => ({
+  ...(await importActual<typeof import('@hooks/domain/useConnectorsController')>()),
+  useConnectorsController: () => ({
+    loading: false,
+    error: null,
+    agents: [],
+    pendingKey: null,
+    refresh: vi.fn(),
+    reset: vi.fn(),
+    authorize: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+  }),
+}))
+
 // Chat-mode children pull in a web of chat/composer contexts that are irrelevant
 // to the title-selector label under test; stub them so the selector renders in
 // isolation.
 vi.mock('../ComposerPanel', () => ({ ComposerPanel: () => null }))
 vi.mock('../ChatThread', () => ({ ChatThread: () => null }))
 
-describe('AgentWorkspace context rows — visible name (UT-11)', () => {
-  afterEach(() => {
-    cleanup()
-    contextsMock.contextIds = []
-    contextsMock.contextDisplayById = {}
-    mcpMock.agentDisplayByName = {}
-    navMock.selectedAgent = 'product-agent'
-    navMock.selectedAgentRoute = 'contexts'
-    vi.clearAllMocks()
-  })
-
-  it('renders the context display when present and the id when absent', () => {
-    contextsMock.contextIds = ['ctx-with', 'ctx-plain']
-    contextsMock.contextDisplayById = { 'ctx-with': 'Prod Ctx' }
-
-    render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
-
-    // Branch WITH display: renders "Prod Ctx", not the id.
-    expect(screen.getByText('Prod Ctx')).toBeTruthy()
-    expect(screen.queryByText('ctx-with')).toBeNull()
-    // Branch WITHOUT display: renders the id (metadata.name) — single fallback.
-    expect(screen.getByText('ctx-plain')).toBeTruthy()
-  })
-
-  it('falls back to the id when the context display is blank/whitespace-only', () => {
-    // An out-of-band write (e.g. kubectl bypassing control-api validation) can
-    // leave a whitespace-only spec.displayName. The row must render the stable
-    // id, never a blank context label (same class as R4-M1 GfsAgentAccessSection).
-    contextsMock.contextIds = ['ctx-blank']
-    contextsMock.contextDisplayById = { 'ctx-blank': '   ' }
-
-    render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
-
-    // Observable text is the id, not the whitespace-only display.
-    expect(screen.getByText('ctx-blank')).toBeTruthy()
-  })
-})
-
 // R1-M3 (desktop-app): the workspace hero title must show the agent DISPLAY name
 // (spec.host, arriving as agentDisplayByName[name]) — not the raw identifier
 // (metadata.name) the tables map to a display elsewhere. Single sanctioned
 // fallback `agentDisplayByName[name] ?? name` (Decision #6): the id shows only
-// when no display exists. The hero renders on the details route.
+// when no display exists. The hero renders on any resource route (here Members).
 describe('AgentWorkspace hero + breadcrumb — visible agent name (R1-M3)', () => {
   afterEach(() => {
     cleanup()
     mcpMock.agentDisplayByName = {}
     navMock.selectedAgent = 'product-agent'
-    navMock.selectedAgentRoute = 'contexts'
+    navMock.selectedAgentRoute = 'members'
     agentsMock.agentNames = ['product-agent']
     vi.clearAllMocks()
   })
 
   it('renders the agent display name in the hero AND the breadcrumb when a display differs from the id', () => {
     navMock.selectedAgent = 'alpha'
-    navMock.selectedAgentRoute = 'details'
+    navMock.selectedAgentRoute = 'members'
     mcpMock.agentDisplayByName = { alpha: 'Alpha Host' }
 
     render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
@@ -157,7 +132,7 @@ describe('AgentWorkspace hero + breadcrumb — visible agent name (R1-M3)', () =
 
   it('falls back to the identifier in the hero AND the breadcrumb when no display exists', () => {
     navMock.selectedAgent = 'alpha'
-    navMock.selectedAgentRoute = 'details'
+    navMock.selectedAgentRoute = 'members'
     mcpMock.agentDisplayByName = {}
 
     render(<AgentWorkspace scrollContainerRef={{ current: null }} />)
@@ -177,7 +152,7 @@ describe('AgentWorkspace title selector — visible agent name (R1-M3)', () => {
     cleanup()
     mcpMock.agentDisplayByName = {}
     navMock.selectedAgent = 'product-agent'
-    navMock.selectedAgentRoute = 'contexts'
+    navMock.selectedAgentRoute = 'members'
     agentsMock.agentNames = ['product-agent']
     vi.clearAllMocks()
   })

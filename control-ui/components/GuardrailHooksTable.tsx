@@ -2,6 +2,8 @@
 
 import React, { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { CONTROL_ROUTES } from '@constants/routes'
 import type { LlmHookStatus } from '../lib/api'
 import type {
@@ -11,11 +13,10 @@ import type {
 } from './GuardrailHooksTable.types'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconShield } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
-import { IconChevronRight, IconRefresh, IconX } from './icons'
+import { IconRefresh } from './icons'
 
 const HOOK_COLUMNS: TableHeaderColumn[] = [
   { key: 'name', label: 'Name' },
@@ -24,7 +25,6 @@ const HOOK_COLUMNS: TableHeaderColumn[] = [
   { key: 'failMode', label: 'Fail mode' },
   { key: 'status', label: 'Status' },
   { key: 'actions', align: 'right', ariaLabel: 'Actions' },
-  { key: 'navigation', align: 'right', ariaLabel: 'Navigation' },
 ]
 
 function StatusBadge({ status }: { status?: LlmHookStatus }) {
@@ -115,6 +115,32 @@ export function GuardrailHooksTable({
         .includes(normalizedSearch)
     })
   }, [normalizedSearch, rows])
+  const hookSort = useTableSort<
+    (typeof filteredRows)[number],
+    'name' | 'lifecycle' | 'order' | 'failMode' | 'status'
+  >({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: row => row.key,
+    accessors: {
+      name: row => row.name,
+      lifecycle: row => ((row.item.spec || {}) as LlmHookSpecView).lifecyclePoints?.join(', '),
+      order: row => ((row.item.spec || {}) as LlmHookSpecView).order,
+      failMode: row => ((row.item.spec || {}) as LlmHookSpecView).failMode,
+      status: row =>
+        row.item.status?.conditions?.find(condition => condition.type === 'Ready')?.status,
+    },
+  })
+  const columns = HOOK_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: hookSort.key === column.key ? hookSort.direction : null,
+          onSort: () =>
+            hookSort.sortBy(column.key as 'name' | 'lifecycle' | 'order' | 'failMode' | 'status'),
+        }
+  )
 
   React.useEffect(() => {
     if (!onRefresh) return
@@ -140,66 +166,62 @@ export function GuardrailHooksTable({
           </>
         }
         subtitle="Installed LLM guardrail hooks across the cluster."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search guardrails"
-              ariaLabel="Search installed guardrails"
+        primaryAction={
+          onInstall ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={onInstall}
               disabled={isInitialLoad}
-            />
-            {onRefresh ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => void onRefresh()}
-                disabled={refreshing || isInitialLoad}
-                aria-label={refreshing ? 'Refreshing...' : 'Reload installed guardrails'}
-              >
-                <IconRefresh
-                  className={refreshing ? 'cu-spin' : undefined}
-                  width={18}
-                  height={18}
-                />
-              </button>
-            ) : null}
-            {onInstall ? (
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={onInstall}
-                disabled={isInitialLoad}
-              >
-                Install Guardrail
-              </button>
-            ) : null}
-          </>
+            >
+              Install Guardrail
+            </button>
+          ) : undefined
+        }
+        refreshAction={
+          onRefresh ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => void onRefresh()}
+              disabled={refreshing || isInitialLoad}
+              aria-label={refreshing ? 'Refreshing...' : 'Reload installed guardrails'}
+            >
+              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+            </button>
+          ) : undefined
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search guardrails"
+            ariaLabel="Search installed guardrails"
+            disabled={isInitialLoad}
+          />
         }
       />
-      {isInitialLoad ? (
-        <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-guardrails-table">
-            <thead>
-              <TableHeaderRow columns={HOOK_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={HOOK_COLUMNS.length} rows={5} />
-            </tbody>
-          </table>
-        </div>
-      ) : filteredRows.length === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'}
-        </div>
-      ) : (
-        <div className="cu-table-wrap cu-guardrails-table-wrap">
-          <table className="cu-table cu-table--header-band cu-guardrails-table">
-            <thead>
-              <TableHeaderRow columns={HOOK_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredRows.map(({ key, name, item }) => {
+      <TableViewport className="cu-table-wrap cu-guardrails-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band cu-guardrails-table">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow
+                colSpan={columns.length}
+                kind="loading"
+                message="Loading guardrails…"
+              />
+            ) : filteredRows.length === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch ? 'No guardrails match this search.' : 'No guardrails installed.'
+                }
+              />
+            ) : (
+              hookSort.sortedRows.map(({ key, name, item }) => {
                 const spec = (item.spec || {}) as LlmHookSpecView
                 const lifecycle = (spec.lifecyclePoints || []).join(', ')
                 return (
@@ -218,7 +240,7 @@ export function GuardrailHooksTable({
                     aria-label={`View guardrail ${name}`}
                   >
                     <td>
-                      <span className="cu-expandable-row__name">{name}</span>
+                      <span className="cu-table__cell-name">{name}</span>
                     </td>
                     <td>{lifecycle ? lifecycle : <span className="cu-muted">—</span>}</td>
                     <td>
@@ -239,39 +261,31 @@ export function GuardrailHooksTable({
                       onClick={event => event.stopPropagation()}
                       onKeyDown={event => event.stopPropagation()}
                     >
-                      <div className="cu-table-actions">
-                        {onUninstall ? (
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void onUninstall({ name })}
-                            disabled={uninstallingKey === key}
-                            aria-label={
-                              uninstallingKey === key
-                                ? 'Uninstalling...'
-                                : `Uninstall guardrail ${name}`
-                            }
-                            title={
-                              uninstallingKey === key
-                                ? 'Uninstalling...'
-                                : `Uninstall guardrail ${name}`
-                            }
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td className="cu-installed-plugin__navigation" aria-hidden="true">
-                      <IconChevronRight width={18} height={18} />
+                      <RowActionsMenu
+                        ariaLabel={`Actions for guardrail ${name}`}
+                        actions={[
+                          { key: 'view', label: 'View details', onClick: () => openDetail(name) },
+                          ...(onUninstall
+                            ? [
+                                {
+                                  key: 'uninstall',
+                                  label: uninstallingKey === key ? 'Uninstalling…' : 'Uninstall',
+                                  danger: true,
+                                  disabled: uninstallingKey === key,
+                                  onClick: () => void onUninstall({ name }),
+                                },
+                              ]
+                            : []),
+                        ]}
+                      />
                     </td>
                   </tr>
                 )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }

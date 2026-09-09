@@ -23,6 +23,7 @@ function child(name: string, n: number): ChildRow {
     pathCache: `/${name}`,
     bytes: 0,
     version: 0,
+    updatedAt: '2026-01-01T00:00:00.000Z',
   }
 }
 
@@ -84,5 +85,16 @@ describe('listChildrenPaged', () => {
     const view = toChildView('main', child('org', 5))
     expect(view.gfsUri).toBe(`gfs://main/${rid(5)}`)
     expect(view.path).toBe('/org')
+  })
+
+  it('child view exposes updatedAt as an ISO 8601 UTC string', () => {
+    const view = toChildView('main', child('org', 5))
+    expect(view.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(view.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T.*Z$/)
+  })
+
+  it('does not encode updatedAt into the pagination cursor', () => {
+    expect(decodeCursor(encodeCursor('org', rid(5)))).toEqual({ n: 'org', i: rid(5) })
+    expect(JSON.stringify(decodeCursor(encodeCursor('org', rid(5))))).not.toContain('updatedAt')
   })
 })

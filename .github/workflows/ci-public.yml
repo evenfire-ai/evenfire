@@ -95,6 +95,15 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
+      # profile-ui consumes the source-only shared frontend package through a file
+      # link. Install the package's own React type dependencies before Next follows
+      # that link to its real path; a consumer-only install cannot resolve them from
+      # the sibling package directory on a clean runner.
+      - name: Install frontend components dependencies
+        if: matrix.service == 'profile-ui'
+        working-directory: packages/frontend-components
+        run: npm ci
+
       - name: Install dependencies
         working-directory: ${{ matrix.service }}
         run: npm ci
@@ -225,7 +234,8 @@ jobs:
             services.llmProviderAttemptAuthorization.realPostgres.integration \
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
-            services.llmProviderAttemptFinalization.realPostgres.integration
+            services.llmProviderAttemptFinalization.realPostgres.integration \
+            pluginWorkloadSdkCodexDualLedger.realPostgres.integration
           do
             grep -Fq "$suite" "$normalized_log" || {
               echo "real-Postgres control-api lane omitted Codex suite ${suite}" >&2
@@ -284,6 +294,9 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: control-ui/package-lock.json
+      - name: Install frontend components dependencies
+        working-directory: packages/frontend-components
+        run: npm ci
       - name: Install dependencies
         working-directory: control-ui
         run: npm ci
@@ -412,6 +425,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
       - name: Run bash -n on all .sh files
         run: |
           fail=0
@@ -459,6 +476,12 @@ jobs:
 
       - name: Test WRC internal dependency NetworkPolicy contracts
         run: bash scripts/tests/test-wrc-internal-dependency-networkpolicy-gate.sh
+
+      - name: Test WRC egress oracle, DNS and lifecycle (unit/integration, cluster-free)
+        run: bash scripts/tests/test-wrc-egress-degradation-gate.sh
+
+      - name: Test Minikube mutation and WRC recovery admission (hermetic, cluster-free)
+        run: bash scripts/tests/test-minikube-mutation-boundary.sh
 
       - name: Test minikube sandbox-ui NetworkPolicy lint (static-policy ownership + DNS)
         run: bash scripts/tests/test-lint-networkpolicies.sh

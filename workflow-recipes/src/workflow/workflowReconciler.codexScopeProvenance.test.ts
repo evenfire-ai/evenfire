@@ -378,6 +378,7 @@ describe('WorkflowReconciler Codex scope provenance', () => {
       },
     })
     runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens.mockClear()
+    crashRecoveryMocks.deletePodIfExists.mockClear()
 
     await reconcileRecipe(
       reconciler,
@@ -386,6 +387,17 @@ describe('WorkflowReconciler Codex scope provenance', () => {
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-recipe-mcp-host',
+      sandboxNamespace
+    )
+    const remintPatch = coreApi.patchNamespacedSecret.mock.calls.at(-1)?.[0] as {
+      body?: { metadata?: { annotations?: Record<string, string> } }
+    }
+    expect(
+      remintPatch.body?.metadata?.annotations?.['clerum.io/mcp-host-runtime-token-generation']
+    ).toBe('1')
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: CODEX_PROXY_POLICY,
       namespace: sandboxNamespace,
@@ -399,11 +411,46 @@ describe('WorkflowReconciler Codex scope provenance', () => {
     expect(issuedScopes()).toContain('llm:codex:execute')
 
     coreApi.readNamespacedConfigMap.mockResolvedValue(eligibleCodexConfigMap(true))
+    const futureExp = Math.floor(Date.now() / 1000) + 3600
+    const binding = {
+      exp: futureExp,
+      recipeNamespace: sandboxNamespace,
+      recipeName: 'codex-recipe',
+      hostRefs: [`${sandboxNamespace}/codex-recipe`],
+      workflowControlScopes: ['llm:codex:execute'],
+      scopes: ['llm:codex:execute', 'gfs.read'],
+    }
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      data: {
+        'mcp-host-runtime-access-token': Buffer.from(unsignedRuntimeJwt(binding)).toString(
+          'base64'
+        ),
+        'mcp-host-runtime-refresh-token': Buffer.from(unsignedRuntimeJwt(binding)).toString(
+          'base64'
+        ),
+        'mcp-host-workflow-control-token': Buffer.from(unsignedRuntimeJwt(binding)).toString(
+          'base64'
+        ),
+        'mcp-host-gfs-token': Buffer.from(
+          unsignedRuntimeJwt({
+            ...binding,
+            sub: `host:3rd:${sandboxNamespace}/codex-recipe`,
+            scopes: ['gfs.read'],
+          })
+        ).toString('base64'),
+      },
+    })
     runtimeTokenIssuerMocks.issueMcpHostRuntimeTokens.mockClear()
+    crashRecoveryMocks.deletePodIfExists.mockClear()
     await reconcileRecipe(reconciler, makeCodexSpec())
 
     expect(issueMcpHostRuntimeTokens).toHaveBeenCalled()
     expect(issuedScopes()).not.toContain('llm:codex:execute')
+    expect(crashRecoveryMocks.deletePodIfExists).not.toHaveBeenCalledWith(
+      expect.anything(),
+      'codex-recipe-mcp-host',
+      sandboxNamespace
+    )
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
       name: CODEX_PROXY_POLICY,
       namespace: sandboxNamespace,

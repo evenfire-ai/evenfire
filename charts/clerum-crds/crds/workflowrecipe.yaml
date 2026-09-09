@@ -477,6 +477,16 @@ spec:
                                       maxOutputTokens:
                                         type: integer
                                         minimum: 1
+                                        description: >-
+                                          Per-grant output ceiling. Enforced
+                                          as max_tokens on API-key providers
+                                          (OpenAI, Claude, Z.AI, Bedrock,
+                                          Google). codex-subscription cannot
+                                          bind it: the ChatGPT wire rejects
+                                          max_output_tokens, so there it only
+                                          shapes the authorize request identity
+                                          and the enforced bound is the
+                                          contract limit of 16384.
                                   clientNotifications:
                                     type: object
                                     required: [allowedEventTypes]
@@ -1711,6 +1721,14 @@ spec:
                         maxOutputTokens:
                           type: integer
                           minimum: 1
+                          description: >-
+                            Per-grant output ceiling. Enforced as max_tokens
+                            on API-key providers (OpenAI, Claude, Z.AI,
+                            Bedrock, Google). codex-subscription cannot bind
+                            it: the ChatGPT wire rejects max_output_tokens, so
+                            there it only shapes the authorize request identity
+                            and the enforced bound is the contract limit of
+                            16384.
                         maxRequestsPerRun:
                           type: integer
                           minimum: 1
@@ -2168,7 +2186,12 @@ spec:
                       format: date-time
                     bootstrapContractVersion:
                       type: integer
-                      enum: [2]
+                      # v2 = static-credential SDK bootstrap; v3 = Codex
+                      # reservation-only binding. WRC persists 3 when the
+                      # eager-resolved agent provider is codex-subscription:
+                      # spec.agent, or — when spec.agent is absent — the
+                      # first step that declares a complete agent.
+                      enum: [2, 3]
                     bootstrapPodUid:
                       type: string
                     bootstrapProvider:

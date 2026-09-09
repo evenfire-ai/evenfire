@@ -1702,29 +1702,6 @@ h3 {
   white-space: nowrap;
 }
 
-.sidebar-data-submenu {
-  position: absolute;
-  left: calc(100% - 1px);
-  top: auto;
-  bottom: 0;
-  width: 220px;
-  display: none;
-  gap: var(--space-0-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.4);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.4);
-  backdrop-filter: none;
-  padding: var(--space-1-5);
-  z-index: calc(var(--sidebar-flyout-layer) + 30);
-}
-
-.sidebar-settings-menu-item-wrapper--data:hover .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data:focus-within .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-  display: grid;
-}
-
 .sidebar-footer-row {
   display: flex;
   align-items: center;
@@ -2137,11 +2114,6 @@ h3 {
   bottom: 16px;
   width: 230px;
   z-index: calc(var(--sidebar-flyout-layer) + 60);
-}
-
-.left-nav.collapsed .sidebar-data-submenu {
-  top: auto;
-  bottom: 0;
 }
 
 .left-nav.collapsed .sidebar-profile-menu-wrapper {
@@ -7703,14 +7675,9 @@ h3 {
   grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
 }
 
-/* `.contexts-fleet-page` / `.mcp-servers-page` were legacy layout hooks.
-   They were removed from list-page JSX in favor of `.page`, so the only
-   remaining page-specific hooks are `context-detail-page` / `team-detail-page`
-   (used for scoped token overrides). */
-
 /* Card that frames the connectors `da-table` (which renders frameless + full
-   bleed), mirroring `.contexts-board-card`: the page-card supplies the single
-   frame; the table lays out inside it. */
+   bleed): the page-card supplies the single frame; the table lays out inside
+   it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
@@ -7904,46 +7871,6 @@ h3 {
   box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.16);
 }
 
-.contexts-board-card,
-.contexts-details-section {
-  min-height: 0;
-  min-width: 0;
-  display: grid;
-  align-content: start;
-}
-
-/* `.workflows-list-card` is a standalone-grid card — the da-grid itself owns
-   the visual frame (border/radius/bg). Remove the redundant page-card frame
-   so there is only one border around the table. */
-.workflows-list-card {
-  border: none;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
-  gap: var(--space-2);
-}
-
-/* Subtler `--list-item-*` palette so multiple board listings share the same
-   understated visual instead of the stronger default `--grid-card-*` look. */
-.contexts-board-card .da-grid,
-.context-detail-page .da-grid,
-.team-detail-page .da-grid,
-.workflows-list-card .da-grid {
-  --grid-card-bg: var(--list-item-bg);
-  --grid-card-border: rgba(var(--edge-rgb), 0.14);
-  --grid-card-bg-hover: var(--list-item-hover-bg);
-  --grid-card-border-hover: rgba(var(--accent-rgb), 0.34);
-  --grid-card-bg-selected: var(--list-item-selected-bg);
-  --grid-card-border-selected: var(--list-item-selected-border);
-}
-
-.contexts-board-card .da-grid__row,
-.context-detail-page .da-grid__row,
-.team-detail-page .da-grid__row,
-.workflows-list-card .da-grid__row {
-  border-radius: var(--radius-lg); /* 12px — matches legacy `.context-table-row` */
-}
-
 /* `.context-id-cell` is the first column in the contexts/agents/workflows
    listings — large title with overflow handling. */
 .context-id-cell {
@@ -7967,50 +7894,27 @@ h3 {
   flex: 0 0 auto;
 }
 
-.workflows-list-card .workflow-row--expanded {
-  border-bottom-right-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.workflows-detail-extension {
-  display: grid;
-  gap: var(--space-3);
-  margin-top: calc(-1 * var(--grid-row-gap));
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  border: 1px solid var(--grid-card-border-selected);
-  border-top: 0;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.workflows-detail-extension__header {
+/* Compact "Recent Runs" cell for the flat Plugins table (spec 12 §5.F):
+   latest run summary on one line, its artifact download buttons wrapping below.
+   Replaces the old inline accordion detail panel. */
+.workflow-recent-runs {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.workflows-detail-extension__title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-tight);
-}
-
-.workflows-detail-extension__title-group {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1-5);
   min-width: 0;
 }
 
-.workflows-detail-extension__section {
-  display: grid;
-  gap: var(--space-2);
+.workflow-recent-runs__summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
 }
 
-.workflows-detail-extension__section h4 {
-  margin: 0;
+.workflow-recent-runs__artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 /* When `.context-id-cell` is the first cell of a `.da-grid__row`, every
@@ -8133,16 +8037,6 @@ h3 {
   gap: var(--space-2);
 }
 
-.workflow-run-row {
-  align-items: flex-start;
-}
-
-.workflow-run-main {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1-5);
-}
-
 .workflow-run-artifacts {
   display: flex;
   flex-wrap: wrap;
@@ -8191,19 +8085,6 @@ h3 {
 
 .contexts-footnote {
   font-size: var(--font-size-sm);
-}
-
-/* `.teams-page` was a legacy layout hook; removed from list-page JSX. */
-
-.team-detail-page {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.context-detail-page {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: var(--space-2-5);
 }
 
 .teams-detail-page-card {
@@ -11001,21 +10882,6 @@ pre {
     box-shadow: none;
   }
 
-  .sidebar-data-submenu {
-    position: static;
-    width: auto;
-    margin-top: var(--space-1);
-    box-shadow: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data:not(.is-open) .sidebar-data-submenu {
-    display: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-    display: grid;
-  }
-
   .nav-tooltip {
     display: none;
   }
@@ -11065,17 +10931,6 @@ pre {
   .search-result-tag {
     white-space: normal;
     text-align: right;
-  }
-
-  /* Responsive: tighten 4-col contexts/agents/teams-tab listings. Workflows
-     is excluded (3 columns). */
-  .contexts-board-card .da-grid__head,
-  .contexts-board-card .da-grid__row,
-  .context-detail-page .da-grid__head,
-  .context-detail-page .da-grid__row,
-  .team-detail-page .da-grid__head,
-  .team-detail-page .da-grid__row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
   }
 
   /* Responsive behavior now comes from `.page-card__header`. */
@@ -11594,7 +11449,7 @@ pre {
 }
 
 .mcp-servers-data-table {
-  min-width: 860px;
+  min-width: 680px;
 }
 
 .context-agents-data-table,

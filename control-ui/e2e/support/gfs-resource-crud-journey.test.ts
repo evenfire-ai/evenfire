@@ -43,12 +43,12 @@ export async function exerciseGfsResourceCrudJourney({
       .getByRole('menuitem', { name: 'Share' })
       .click()
     await expect(
-      page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
+      page.getByRole('dialog', { name: `Share folder ${fixture.name}`, exact: true })
     ).toBeVisible()
   })
 
   await test.step('operator creates, uploads, renames, replaces, and deletes resources from the folder UI', async () => {
-    await page.getByRole('button', { name: 'Close manage dialog' }).click()
+    await page.getByRole('button', { name: 'Close share dialog' }).click()
     await folderRow(fixture.name).getByRole('button', { name: fixture.name, exact: true }).click()
     const currentResources = page.getByRole('list', { name: 'Current folder resources' })
     await expect(
@@ -188,9 +188,13 @@ export async function exerciseGfsResourceCrudJourney({
     await folderRow(fixture.name)
       .getByRole('button', { name: `Actions for ${fixture.name}` })
       .click()
-    await page.getByRole('menuitem', { name: 'Manage access' }).click()
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    await page
+      .getByRole('menu', { name: `Share options for ${fixture.name}` })
+      .getByRole('menuitem', { name: 'Share' })
+      .click()
     await expect(
-      page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
+      page.getByRole('dialog', { name: `Share folder ${fixture.name}`, exact: true })
     ).toBeVisible()
   })
 }

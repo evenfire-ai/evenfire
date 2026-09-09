@@ -121,6 +121,7 @@ declare global {
           path?: string | null
           version: number
           bytes?: number
+          updatedAt?: string
         }>
         download: (uri: string) => Promise<{
           resource: {
@@ -135,6 +136,7 @@ declare global {
             path?: string | null
             version: number
             bytes?: number
+            updatedAt?: string
           }
           bytes: ArrayBuffer
         }>
@@ -153,6 +155,7 @@ declare global {
             path: string | null
             version: number
             bytes: number
+            updatedAt?: string
             sources?: string[]
             permissions?: string[]
             coversDescendants?: boolean
@@ -177,6 +180,7 @@ declare global {
             path: string | null
             version: number
             bytes: number
+            updatedAt?: string
           }>
           nextCursor: string | null
         }>
