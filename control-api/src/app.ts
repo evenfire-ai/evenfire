@@ -27,6 +27,7 @@ import { createInternalInfrastructureTelemetryEventsRouter } from './routes/inte
 import { createInternalLlmProviderAttemptRoutes } from './routes/internal/llmProviderAttempts.js'
 import { createInternalOAuthRouter } from './routes/internal/oauth.js'
 import { createInternalPluginWorkloadSdkRouter } from './routes/internal/pluginWorkloadSdk.js'
+import { createInternalPr2ReadinessEvidenceRouter } from './routes/internal/pr2ReadinessEvidence.js'
 import { createInternalSandboxUiRouter } from './routes/internal/sandboxUi.js'
 import { createInternalApprovalPromptHistoryRouter } from './routes/internal/tracing/approvalPromptHistory.routes.js'
 import { createInternalUsageEventsRouter } from './routes/internal/usageEvents.js'
@@ -167,6 +168,7 @@ export function createApp(gateway: K8sGateway) {
   // Must be mounted BEFORE requireInternalToken which would block them.
   api.use(createMcpHostRoutes(gateway, directRunAttributionBindingService))
   api.use(createInternalActionAuthorityCheckpointRouter(gateway))
+  api.use(createInternalPr2ReadinessEvidenceRouter())
   api.use(createInternalActionAuthorityHostWakeRouter(gateway))
   api.use(
     createInternalAgentRunEventsRouter({

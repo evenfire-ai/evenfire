@@ -8,6 +8,7 @@ import { config } from './config.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import { applyPr2ReadinessEvidenceSchema } from './services/access/pr2ReadinessEvidenceSchema.js'
 import {
   applyCatalogUtf8OrderingSchema,
   applyComposableCatalogRevisionSchema,
@@ -6190,6 +6191,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0110_gfs_upload_authority_bindings',
     apply: applyGfsUploadAuthorityBindingSchema,
+  },
+  {
+    version: '0111_pr2_readiness_evidence',
+    apply: applyPr2ReadinessEvidenceSchema,
   },
 ]
 
