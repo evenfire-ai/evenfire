@@ -7,6 +7,30 @@ const resource = (rv = '1') => ({
 })
 
 describe('ensureResource', () => {
+  it('does not count a resource that disappears during presence-path convergence', async () => {
+    const read = vi.fn().mockResolvedValueOnce(resource()).mockRejectedValueOnce({ code: 404 })
+    const create = vi.fn()
+    const replace = vi.fn().mockRejectedValue({ code: 409 })
+    const onSkipped = vi.fn()
+    await ensureResource({
+      read,
+      create,
+      onSkipped,
+      converge: readOnce =>
+        replaceWithConflictRetry({
+          description: 'policy',
+          logPrefix: '[Test]',
+          body: resource(),
+          read: readOnce,
+          replace,
+        }),
+    })
+    expect(read).toHaveBeenCalledTimes(2)
+    expect(replace).toHaveBeenCalledTimes(1)
+    expect(create).not.toHaveBeenCalled()
+    expect(onSkipped).not.toHaveBeenCalled()
+  })
+
   it.each([{ code: 404 }, { response: { statusCode: 404 } }])(
     'creates only after an actual absence read (%j)',
     async absent => {

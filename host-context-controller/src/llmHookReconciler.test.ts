@@ -439,18 +439,42 @@ describe('LlmHookReconciler', () => {
   // ─── Concurrency (§10) ─────────────────────────────────────────────
 
   it('serializes concurrent reconciles of two CRs sharing a pod key', async () => {
-    // First materialization is absent; subsequent reads still use the live-state fixture.
-    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    // The server may expose the first create before its response settles. Force
+    // the second pass onto a real PUT, and observe both mutation paths.
+    const readExisting = appsApi.readNamespacedDeployment.getMockImplementation()!
+    expect(readExisting).toBeDefined()
+    appsApi.readNamespacedDeployment
+      .mockImplementation(async request => {
+        const observed = await readExisting(request)
+        return { ...observed, spec: { ...observed.spec, replicas: 0 } }
+      })
+      .mockRejectedValueOnce({ code: 404 })
     coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
+    let releaseFirst!: () => void
+    const firstBlocked = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    let markFirstStarted!: () => void
+    const firstStarted = new Promise<void>(resolve => {
+      markFirstStarted = resolve
+    })
     let inFlight = 0
     let maxInFlight = 0
-    appsApi.createNamespacedDeployment.mockImplementation(async () => {
+    const mutate = async (hold: boolean) => {
       inFlight++
       maxInFlight = Math.max(maxInFlight, inFlight)
-      await new Promise(r => setTimeout(r, 5))
-      inFlight--
-      return {}
-    })
+      try {
+        if (hold) {
+          markFirstStarted()
+          await firstBlocked
+        }
+        return {}
+      } finally {
+        inFlight--
+      }
+    }
+    appsApi.createNamespacedDeployment.mockImplementation(() => mutate(true))
+    appsApi.replaceNamespacedDeployment.mockImplementation(() => mutate(false))
     const a = makeHook({
       name: 'a',
       spec: {
@@ -469,7 +493,21 @@ describe('LlmHookReconciler', () => {
     })
     hooks.set('a', a)
     hooks.set('b', b)
-    await Promise.all([reconciler.reconcile(a), reconciler.reconcile(b)])
+    const pending = Promise.all([reconciler.reconcile(a), reconciler.reconcile(b)])
+    try {
+      await firstStarted
+      // Flush runnable work while the first mutation is deliberately held;
+      // the second reconcile must still be waiting behind the same pod key.
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+      expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+      expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+    } finally {
+      releaseFirst()
+      await pending
+    }
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
     expect(maxInFlight).toBe(1)
   })
 

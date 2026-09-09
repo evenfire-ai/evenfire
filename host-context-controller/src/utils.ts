@@ -66,7 +66,19 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
     }
     return value
   }
-  const readFresh = async (): Promise<T> => validate(await read())
+  // The existing retry may deliberately return void after a missing read.
+  // Retain that policy while distinguishing it from completed preservation.
+  let latestReadSucceeded = true
+  const readFresh = async (): Promise<T> => {
+    try {
+      const value = validate(await read())
+      latestReadSucceeded = true
+      return value
+    } catch (error) {
+      latestReadSucceeded = false
+      throw error
+    }
+  }
   let existing = opts.existing
   if (existing === undefined) {
     try {
@@ -91,7 +103,9 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
       return readFresh()
     }
     const result = await converge(readOnce, existing)
-    if (result !== false && (!mutationAllowed || mutationAllowed())) onSkipped()
+    if (result !== false && latestReadSucceeded && (!mutationAllowed || mutationAllowed())) {
+      onSkipped()
+    }
     return
   }
 
