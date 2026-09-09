@@ -94,6 +94,13 @@ h3 {
   -webkit-app-region: drag;
 }
 
+/* Titlebar actions are portalled outside the content panel. Raise their owning
+   stacking context while the fixed chat drawer is present so search and inbox
+   overlays remain usable above that drawer. */
+.app-frame:has(.chat-drawer) > .window-titlebar {
+  z-index: var(--layer-dropdown);
+}
+
 .window-titlebar__actions {
   --titlebar-action-border: var(--titlebar-control-border);
   --titlebar-action-ink: var(--titlebar-control-ink);
@@ -12895,17 +12902,6 @@ pre {
 
 .content-panel.content-panel--chat-drawer-open .sandbox-ui-mounted-header {
   padding-right: 0;
-}
-
-/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
-   header (`.top-bar` at --layer-header) within the shared content-panel stacking
-   context — so the header's transient dropdowns (the notification Inbox popover,
-   global search) would paint BEHIND the drawer and never surface. While the chat
-   drawer is open, lift the header to the dropdown layer so those overlays surface
-   over it, exactly as they do over chat content in full-screen. Toasts
-   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
-.content-panel.content-panel--chat-drawer-open .top-bar {
-  z-index: var(--layer-dropdown);
 }
 
 .chat-drawer {

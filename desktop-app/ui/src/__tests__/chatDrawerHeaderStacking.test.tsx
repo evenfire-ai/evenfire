@@ -1,14 +1,14 @@
 // @vitest-environment jsdom
+import React from 'react'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { ChatDrawer } from '@components/ChatDrawer'
+import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 
-// The notification Inbox popover / global-search dropdowns live in `.top-bar`
-// (AppHeader) inside the same content-panel stacking context as the fixed
-// `.chat-drawer`. When the chat drawer is open the header must paint ABOVE it so
-// the bell popover surfaces instead of being trapped behind the drawer column.
-// jsdom does not resolve `var()`, so we assert the declared layer each element
-// lands on and confirm the numeric ordering of those layers from tokens.css.
+// The titlebar actions are rendered through a React portal. Exercise that DOM
+// topology instead of recreating the pre-portal content-panel header.
 
 const tokensCss = readFileSync(
   path.join(process.cwd(), 'ui', 'src', 'styles', 'tokens.css'),
@@ -45,35 +45,73 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  cleanup()
   document.querySelector('[data-test-styles="header-stacking"]')?.remove()
   document.body.innerHTML = ''
 })
 
-describe('chat drawer header stacking', () => {
-  it('lifts the header above the chat drawer while the drawer is open', () => {
-    document.body.innerHTML =
-      '<section class="content-panel content-panel--chat-drawer-open">' +
-      '<header class="top-bar"></header><aside class="chat-drawer"></aside></section>'
-    const topBar = document.querySelector('.top-bar') as HTMLElement
-    const drawer = document.querySelector('.chat-drawer') as HTMLElement
+function PortalStackingHarness({ chatDrawerOpen }: { chatDrawerOpen: boolean }) {
+  const [actionsRoot, setActionsRoot] = React.useState<HTMLDivElement | null>(null)
+  const drawerRef = React.useRef<HTMLDivElement>(null)
 
-    // Header is raised to the dropdown layer; the drawer stays at chat-overlay.
-    expect(getComputedStyle(topBar).zIndex).toBe('var(--layer-dropdown)')
+  return (
+    <div className="app-frame">
+      <WindowTitleBar actionsRef={setActionsRoot} />
+      <div className="app-root">
+        <section
+          className={
+            chatDrawerOpen ? 'content-panel content-panel--chat-drawer-open' : 'content-panel'
+          }
+        >
+          {chatDrawerOpen ? (
+            <ChatDrawer
+              containerRef={drawerRef}
+              header={<span>Chat</span>}
+              onClose={() => undefined}
+              onNewChat={() => undefined}
+              onResizeHandleKeyDown={() => undefined}
+              onResizeHandleMouseDown={() => undefined}
+              ready
+              resizing={false}
+              width={340}
+            >
+              <span>Chat content</span>
+            </ChatDrawer>
+          ) : null}
+        </section>
+      </div>
+      <TitlebarActionsPortal container={actionsRoot}>
+        <header className="top-bar">
+          <div className="global-search-results" data-testid="titlebar-search-results" />
+        </header>
+      </TitlebarActionsPortal>
+    </div>
+  )
+}
+
+describe('chat drawer header stacking', () => {
+  it('lifts the real titlebar portal above the chat drawer while it is open', async () => {
+    render(<PortalStackingHarness chatDrawerOpen />)
+
+    const searchResults = await screen.findByTestId('titlebar-search-results')
+    const titlebar = searchResults.closest('.window-titlebar') as HTMLElement
+    const drawer = screen.getByRole('complementary', { name: 'Chat' })
+
+    expect(titlebar).toBeTruthy()
+    expect(searchResults.closest('.content-panel')).toBeNull()
+    expect(getComputedStyle(titlebar).zIndex).toBe('var(--layer-dropdown)')
     expect(getComputedStyle(drawer).zIndex).toBe('var(--layer-chat-overlay)')
-    // The dropdown layer paints ABOVE the chat-overlay layer, so the notification
-    // Inbox popover surfaces over the drawer instead of behind it.
     expect(layer('layer-dropdown')).toBeGreaterThan(layer('layer-chat-overlay'))
-    // Toasts still sit above the raised header (no occlusion of the toast stack).
     expect(toastStackZIndex()).toBeGreaterThan(layer('layer-dropdown'))
   })
 
-  it('documents the baseline: the header layer is below the drawer when it is not open', () => {
-    document.body.innerHTML =
-      '<section class="content-panel"><header class="top-bar"></header></section>'
-    const topBar = document.querySelector('.top-bar') as HTMLElement
-    expect(getComputedStyle(topBar).zIndex).toBe('var(--layer-header)')
-    // This is exactly why the un-lifted header would hide behind the chat drawer.
-    expect(layer('layer-header')).toBeLessThan(layer('layer-chat-overlay'))
+  it('keeps the titlebar at its normal layer when no chat drawer exists', async () => {
+    render(<PortalStackingHarness chatDrawerOpen={false} />)
+
+    const searchResults = await screen.findByTestId('titlebar-search-results')
+    const titlebar = searchResults.closest('.window-titlebar') as HTMLElement
+
+    expect(getComputedStyle(titlebar).zIndex).toBe('var(--layer-header)')
   })
 
   it('anchors alerts below the custom titlebar with the shared spacing token', () => {
