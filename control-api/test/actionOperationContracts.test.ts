@@ -39,6 +39,7 @@ import {
   type AccessResourceType,
   canonicalResourceIdentity,
 } from '../src/services/access/resourceIdentity.js'
+import { WORKFLOW_ACTION_TRANSITIONS } from '../src/services/workflows/workflowActionTransition.js'
 
 const environmentId = 'cluster.local/evenfire'
 const userId = '10000000-0000-4000-8000-000000000001'
@@ -180,15 +181,37 @@ describe('canonical action-operation registry', () => {
     ])
   })
 
-  it('uses an explicit existing admission class for every externally delegatable operation', () => {
+  it('keeps external root issuance explicit and excludes child-only operations', () => {
+    const childOnlyOperations = new Set<string>(WORKFLOW_ACTION_TRANSITIONS.map(edge => edge.child))
+    const dispositions = {
+      externallyRootIssuable: [] as string[],
+      childOnly: [] as string[],
+      internalOnly: [] as string[],
+      nonDelegatable: [] as string[],
+    }
+
     for (const definition of ACTION_OPERATION_REGISTRY) {
       const admissionClass = externalRpcAdmissionClassForOperation(definition.operationId)
-      if (definition.delegation === 'none' || definition.pathMode !== 'selected_path') {
+      if (childOnlyOperations.has(definition.operationId)) {
+        dispositions.childOnly.push(definition.operationId)
         expect(admissionClass).toBeNull()
         continue
       }
-      expect(admissionClass).toBe(EXTERNAL_RPC_ADMISSION_CLASS)
+      if (definition.delegation === 'none' || definition.pathMode !== 'selected_path') {
+        dispositions.nonDelegatable.push(definition.operationId)
+        expect(admissionClass).toBeNull()
+        continue
+      }
+      if (admissionClass === EXTERNAL_RPC_ADMISSION_CLASS) {
+        dispositions.externallyRootIssuable.push(definition.operationId)
+      } else {
+        dispositions.internalOnly.push(definition.operationId)
+      }
     }
+
+    expect(dispositions.childOnly).toEqual(['workflow.approval.consume'])
+    expect(dispositions.externallyRootIssuable).not.toContain('workflow.approval.consume')
+    expect(Object.values(dispositions).flat()).toHaveLength(ACTION_OPERATION_REGISTRY.length)
   })
 
   it('accepts each exact registered target and rejects missing or additional authority fields', () => {
