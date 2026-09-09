@@ -76,6 +76,8 @@ describe('GfsResourceMenu', () => {
         .querySelector('[data-gfs-action="share-access"] .ui-menu-item__icon path')
         ?.getAttribute('d')
     ).toBe('M5 7a4 4 0 1 0 8 0a4 4 0 0 0 -8 0')
+    fireEvent.mouseEnter(within(menu).getByRole('menuitem', { name: 'Preview' }))
+    expect(screen.getByRole('menu', { name: 'Share options for report.txt' })).toBeTruthy()
     fireEvent.click(within(shareMenu).getByRole('menuitem', { name: 'Share' }))
     expect(onManage).toHaveBeenCalledOnce()
     expect(screen.queryByRole('menu', { name: 'Actions for report.txt' })).toBeNull()

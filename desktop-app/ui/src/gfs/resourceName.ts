@@ -25,6 +25,7 @@ function truncatedBaseForSuffix(base: string, suffix: string): string {
  * Returns the first available sibling name using the familiar `(1)`, `(2)`
  * suffix convention. The extension stays at the end and the result remains
  * within the same limit as normalizeGfsResourceName.
+ * Precondition: `name` has already passed through normalizeGfsResourceName.
  */
 export function nextAvailableGfsResourceName(
   name: string,

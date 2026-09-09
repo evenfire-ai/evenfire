@@ -376,7 +376,7 @@ export function GfsResourceMenu({
                         role="menuitem"
                         ref={action.submenu ? shareTriggerRef : undefined}
                         trailingIcon={action.submenu ? <IconChevronRight /> : undefined}
-                        onMouseEnter={() => setShareOpen(action.submenu === true)}
+                        onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
                         onClick={() => {
                           if (action.submenu) {
                             action.onClick()

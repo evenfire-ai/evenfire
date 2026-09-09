@@ -316,7 +316,7 @@ export function GfsResourceMenu({
                         disabled={action.disabled}
                         ref={action.submenu ? shareTriggerRef : undefined}
                         title={action.key === 'copy-link' ? resourceUri : undefined}
-                        onMouseEnter={() => setShareOpen(action.submenu === true)}
+                        onMouseEnter={action.submenu ? () => setShareOpen(true) : undefined}
                         onClick={event => {
                           event.stopPropagation()
                           if (action.submenu) {
