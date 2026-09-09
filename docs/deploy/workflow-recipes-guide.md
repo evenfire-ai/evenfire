@@ -345,8 +345,11 @@ it cannot hide later drift.
   not emit a WorkflowRecipe event. The following reconcile is read-only.
 - **Retryable races schedule their own recovery.** A terminating object, create conflict
   whose winner disappears, missing live `resourceVersion`, replace 404/409 or transient
-  API failure re-enqueues the parent with bounded backoff. A status-only update is not
-  treated as the retry trigger.
+  API failure re-enqueues the parent with exponential backoff (5 seconds initially,
+  capped at 60 seconds for consecutive transient results). The cap limits the delay,
+  not the total number of attempts: a policy waiting on a finalizer can recover when
+  deletion eventually completes without another parent event. A status-only update
+  is not treated as the retry trigger.
 - **Metadata ownership applies to writes too.** Replacing a policy preserves external
   labels, annotations and finalizers from the validated snapshot. Desired WRC keys win;
   retired egress state and the legacy spec-hash are removed. Additional foreign lifecycle

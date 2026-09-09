@@ -74,6 +74,25 @@ must_reject() {
   fi
 }
 
+assert_no_delete_calls() {
+  local status=0
+  grep -q '^delete ' "$1" || status=$?
+  # Only grep's no-match result proves absence. A missing binary or unreadable
+  # call log must fail, rather than becoming a successful negative assertion.
+  [[ "$status" -eq 1 ]]
+}
+
+printf 'delete fixture\n' > "$TEST_ROOT/calls"
+must_reject assert_no_delete_calls "$TEST_ROOT/calls"
+: > "$TEST_ROOT/calls"
+assert_no_delete_calls "$TEST_ROOT/calls"
+must_reject assert_no_delete_calls "$TEST_ROOT/missing-calls"
+(
+  grep() { return 127; }
+  must_reject assert_no_delete_calls "$TEST_ROOT/calls"
+)
+echo 'PASS: no-delete assertion rejects writes, unreadable logs, and unavailable search dependency'
+
 reset_fixture
 create_fixture
 jq -e '.metadata.uid=="created-uid" and .metadata.labels["e2e.clerum.io/run"]=="contract123" and (has("data")|not)' \
@@ -85,12 +104,12 @@ echo 'PASS: collision preserves prior object and does not enroll it twice'
 
 MODE=read-error
 must_reject wrc_delete_owned sandbox-recipes ConfigMap fixture
-[[ "$(rg -c '^delete ' "$TEST_ROOT/calls" || true)" == '' ]]
+assert_no_delete_calls "$TEST_ROOT/calls"
 MODE=normal
 jq '.metadata.uid="replacement-uid"' "$TEST_ROOT/live.json" > "$TEST_ROOT/replacement.json"
 mv "$TEST_ROOT/replacement.json" "$TEST_ROOT/live.json"
 must_reject wrc_delete_owned sandbox-recipes ConfigMap fixture
-[[ "$(rg -c '^delete ' "$TEST_ROOT/calls" || true)" == '' ]]
+assert_no_delete_calls "$TEST_ROOT/calls"
 echo 'PASS: read errors and changed UID refuse deletion'
 
 reset_fixture

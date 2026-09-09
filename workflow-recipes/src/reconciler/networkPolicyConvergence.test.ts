@@ -9,6 +9,8 @@ import {
 
 const SPEC_HASH = 'clerum.io/spec-hash'
 
+// These minimal fixtures isolate comparison and ownership edge cases. Real
+// producer output and Kubernetes serialization are covered by the property suite.
 function policy(): k8s.V1NetworkPolicy {
   return {
     apiVersion: 'networking.k8s.io/v1',
@@ -82,6 +84,20 @@ describe('NetworkPolicy live convergence', () => {
     live.spec = { podSelector: {}, policyTypes: ['Ingress'] }
 
     expect(networkPolicyMatchesDesired(desired, live)).toBe(true)
+  })
+
+  it('compares inferred mixed policyTypes with API defaults in either order', () => {
+    const desired = policy()
+    delete desired.spec!.policyTypes
+    desired.spec!.egress = [{ ports: [{ port: 443 }] }]
+    for (const policyTypes of [
+      ['Ingress', 'Egress'],
+      ['Egress', 'Ingress'],
+    ]) {
+      const live = structuredClone(desired)
+      live.spec!.policyTypes = policyTypes
+      expect(networkPolicyMatchesDesired(desired, live)).toBe(true)
+    }
   })
 
   it('normalizes the client model _from field and the Kubernetes wire from field', () => {

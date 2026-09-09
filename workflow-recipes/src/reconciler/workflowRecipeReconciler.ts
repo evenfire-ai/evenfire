@@ -5691,6 +5691,8 @@ export class WorkflowRecipeReconciler {
       )
     }
     if (decision.action === 'retry') {
+      // The early deletion guard currently handles this before ownership checks.
+      // Keep the pure decision's retry outcome fail-closed at this consumer too.
       throw new RetryableReconcileError(
         `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
       )

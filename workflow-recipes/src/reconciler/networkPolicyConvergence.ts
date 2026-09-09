@@ -165,9 +165,8 @@ function normalizeProjectedNetworkPolicy(normalized: k8s.V1NetworkPolicy): unkno
     const hasEgressRules = (spec.egress?.length ?? 0) > 0
     if (!spec.policyTypes?.length) {
       spec.policyTypes = hasEgressRules ? ['Ingress', 'Egress'] : ['Ingress']
-    } else {
-      spec.policyTypes = [...spec.policyTypes].sort()
     }
+    spec.policyTypes = [...spec.policyTypes].sort()
     for (const rule of spec.ingress ?? []) normalizeIngressFrom(rule)
     for (const rule of [...(spec.ingress ?? []), ...(spec.egress ?? [])]) {
       for (const port of rule.ports ?? []) {
@@ -179,10 +178,6 @@ function normalizeProjectedNetworkPolicy(normalized: k8s.V1NetworkPolicy): unkno
   }
 
   return canonicalizeValue(normalized)
-}
-
-export function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unknown {
-  return normalizeProjectedNetworkPolicy(projectNetworkPolicyForComparison(policy, policy))
 }
 
 export function networkPolicyMatchesDesired(
