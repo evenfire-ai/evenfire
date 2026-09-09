@@ -97,6 +97,10 @@ test.describe('optional QA recorder: Control UI SharedFileSystem folders', () =>
         expect(resource.metadata?.uid).toEqual(expect.any(String))
         createdUid = resource.metadata!.uid
         expect(createdUid).not.toBe('')
+        testInfo.annotations.push({
+          type: 'owned-shared-filesystem',
+          description: JSON.stringify({ name, uid: createdUid, retainOnDelete: false }),
+        })
         expect(resource.spec).toMatchObject({
           size: '5Gi',
           accessModes: ['ReadWriteOnce'],

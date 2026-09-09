@@ -110,6 +110,8 @@ describe('McpServer generated pod hardening', () => {
   })
 
   it('applies the same token and seccomp boundary to remote egress proxy pods', async () => {
+    // This case starts without the nginx ConfigMap.
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcile(
       makeServer({
         name: 'remote-mcp',

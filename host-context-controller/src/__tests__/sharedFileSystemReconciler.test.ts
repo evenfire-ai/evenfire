@@ -6,6 +6,7 @@ import {
   buildDeployment,
   buildEgressNetworkPolicy,
   buildIngressNetworkPolicy,
+  buildPvc,
   buildService,
   pvcName,
   wfcDeploymentName,
@@ -64,6 +65,14 @@ function liveDeployment(
   return { ...desired, metadata: { ...desired.metadata, resourceVersion: '1' }, status }
 }
 
+function livePvc(
+  sfs = makeSfs(),
+  status: k8s.V1PersistentVolumeClaimStatus = { phase: 'Bound', capacity: { storage: '5Gi' } }
+): k8s.V1PersistentVolumeClaim {
+  const desired = buildPvc(sfs, factoryConfig)
+  return { ...desired, metadata: { ...desired.metadata, resourceVersion: '1' }, status }
+}
+
 function makeMocks(systems: SharedFileSystemCRD[] = [makeSfs()]) {
   // Status/cleanup tests use already-converged policies with real identity and
   // ownership. Cold-start tests explicitly arrange absence for their own reads.
@@ -104,9 +113,14 @@ function makeMocks(systems: SharedFileSystemCRD[] = [makeSfs()]) {
     // Truthful status (#592): assessReadiness reads the PVC bind state, and
     // detectWfcWedge lists the wfc Pod. Defaults = happy path (PVC Bound, no
     // wedged pod) so existing tests reach phase=Ready.
-    readNamespacedPersistentVolumeClaim: vi
-      .fn()
-      .mockResolvedValue({ status: { phase: 'Bound', capacity: { storage: '5Gi' } } }),
+    readNamespacedPersistentVolumeClaim: vi.fn(
+      async ({ name }: { name: string }): Promise<k8s.V1PersistentVolumeClaim> => {
+        const sfs = systems.find(item => pvcName(item) === name)
+        if (!sfs) throw new Error(`Missing PVC fixture for ${name}`)
+        return livePvc(sfs)
+      }
+    ),
+    replaceNamespacedPersistentVolumeClaim: vi.fn(),
     listNamespacedPod: vi.fn().mockResolvedValue({ items: [] }),
   }
   const batchApi = {
@@ -175,9 +189,9 @@ describe('SharedFileSystemReconciler — monotonic status on re-reconcile (#592 
     // not-Ready SFS and deferred the mount forever. ensurePvc + ensureService run
     // before assessReadiness restores the truthful phase, so they are the probes.
     const phasesSeenMidReconcile: Array<string | undefined> = []
-    mocks.coreApi.createNamespacedPersistentVolumeClaim.mockImplementation(async () => {
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockImplementation(async () => {
       phasesSeenMidReconcile.push(reconciler.getStatus(sfs).phase)
-      return {}
+      return livePvc(sfs)
     })
     mocks.coreApi.readNamespacedService.mockImplementation(async () => {
       phasesSeenMidReconcile.push(reconciler.getStatus(sfs).phase)
@@ -188,7 +202,7 @@ describe('SharedFileSystemReconciler — monotonic status on re-reconcile (#592 
     await reconciler.reconcile(sfs)
 
     expect(reconciler.getStatus(sfs).phase).toBe('Ready')
-    expect(phasesSeenMidReconcile).toHaveLength(2)
+    expect(phasesSeenMidReconcile).toHaveLength(3) // PVC existence + Service existence + PVC readiness
     for (const phase of phasesSeenMidReconcile) {
       expect(phase).toBe('Ready')
     }
@@ -206,6 +220,7 @@ describe('SharedFileSystemReconciler — happy path', () => {
 
   it('creates PVC, Service, Deployment, and both NetworkPolicies — and NEVER an init Job', async () => {
     const sfs = makeSfs()
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce(notFound())
     mocks.appsApi.readNamespacedDeployment.mockRejectedValueOnce(notFound())
     mocks.coreApi.readNamespacedService.mockRejectedValueOnce(notFound())
     mocks.networkingApi.readNamespacedNetworkPolicy
@@ -358,12 +373,16 @@ describe('SharedFileSystemReconciler — idempotence', () => {
     expect(mocks.networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
-  it('PVC 409 (already exists) is treated as success — no replace attempt', async () => {
+  it('PVC GET404/create409 rereads the concurrent object without replacing it', async () => {
     const mocks = makeMocks()
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce(notFound())
     mocks.coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce(alreadyExists())
     const reconciler = makeReconciler(mocks)
     await expect(reconciler.reconcile(makeSfs())).resolves.toBeUndefined()
     expect(reconciler.getStatus(makeSfs()).phase).toBe('Ready')
+    expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(mocks.coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(3) // existence, conflict, readiness
+    expect(mocks.coreApi.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
   })
 
   it('Deployment 409 (already exists) triggers a replace via the conflict-retry helper', async () => {
@@ -453,6 +472,7 @@ describe('SharedFileSystemReconciler — idempotence', () => {
 describe('SharedFileSystemReconciler — failure handling', () => {
   it('writes phase=Failed with a Reconciled=False condition when PVC create errors (non-409)', async () => {
     const mocks = makeMocks()
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockRejectedValueOnce(notFound())
     mocks.coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValueOnce(
       err(500, 'cluster down')
     )
@@ -557,13 +577,20 @@ describe('SharedFileSystemReconciler — fullReconcile', () => {
       makeSfs({ name: 'sfs-c' }),
     ]
     const mocks = makeMocks(desired)
-    mocks.coreApi.createNamespacedPersistentVolumeClaim
-      .mockResolvedValueOnce({})
-      .mockRejectedValueOnce(err(500, 'cluster down'))
-      .mockResolvedValueOnce({})
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockImplementation(async ({ name }) => {
+      const sfs = desired.find(item => pvcName(item) === name)
+      if (!sfs) throw new Error(`Missing PVC fixture for ${name}`)
+      if (sfs.name === 'sfs-b') throw err(500, 'cluster down')
+      return livePvc(sfs)
+    })
     const reconciler = makeReconciler(mocks)
     await expect(reconciler.fullReconcile(desired)).resolves.toBeUndefined()
-    expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(3)
+    expect(
+      new Set(
+        mocks.coreApi.readNamespacedPersistentVolumeClaim.mock.calls.map(([{ name }]) => name)
+      )
+    ).toEqual(new Set(desired.map(pvcName)))
+    expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
     expect(reconciler.getStatus(desired[0]).phase).toBe('Ready')
     expect(reconciler.getStatus(desired[1]).phase).toBe('Failed')
     expect(reconciler.getStatus(desired[2]).phase).toBe('Ready')
@@ -597,9 +624,9 @@ describe('SharedFileSystemReconciler — truthful status (#592)', () => {
   // PVC Pending under WaitForFirstConsumer while the wfc pod is still scheduling
   // is the NORMAL warm-up path — must report Initializing, never a false Degraded.
   it('reports Initializing (not Degraded) while the PVC is Pending and no pod is wedged', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(
+      livePvc(makeSfs(), { phase: 'Pending' })
+    )
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -610,9 +637,9 @@ describe('SharedFileSystemReconciler — truthful status (#592)', () => {
   })
 
   it('reports Degraded (PVCUnbound) when the wfc Pod is Unschedulable', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(
+      livePvc(makeSfs(), { phase: 'Pending' })
+    )
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -647,9 +674,9 @@ describe('SharedFileSystemReconciler — truthful status (#592)', () => {
   // must NOT be mislabeled PVCUnbound, and must NOT carry the "check the PVC
   // accessModes" hint that would misdirect the operator. (Review fix #592.)
   it('reports Degraded (Unschedulable, NOT PVCUnbound) for a non-volume scheduling failure', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(
+      livePvc(makeSfs(), { phase: 'Pending' })
+    )
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -679,9 +706,9 @@ describe('SharedFileSystemReconciler — truthful status (#592)', () => {
   })
 
   it('reports Degraded (WfcNotReady) when the wfc container is CrashLoopBackOff', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Bound' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(
+      livePvc(makeSfs(), { phase: 'Bound' })
+    )
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -710,9 +737,9 @@ describe('SharedFileSystemReconciler — truthful status (#592)', () => {
   // to Ready once the PVC binds and the wfc pod serves — no manual intervention.
   it('auto-recovers to Ready on a later reconcile once the PVC binds and the wfc is ready', async () => {
     const sfs = makeSfs()
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValueOnce({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim
+      .mockResolvedValueOnce(livePvc(makeSfs(), { phase: 'Pending' }))
+      .mockResolvedValueOnce(livePvc(makeSfs(), { phase: 'Pending' }))
     mocks.appsApi.readNamespacedDeployment
       .mockResolvedValueOnce(liveDeployment(makeSfs(), { readyReplicas: 0 }))
       .mockResolvedValueOnce(liveDeployment(makeSfs(), { readyReplicas: 0 }))
@@ -785,9 +812,9 @@ describe('SharedFileSystemReconciler — status-write dirty check + lastTransiti
     const sfs = makeSfs()
 
     // First reconcile: PVC still Pending, no wedged pod → Initializing.
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValueOnce({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim
+      .mockResolvedValueOnce(livePvc(makeSfs(), { phase: 'Pending' }))
+      .mockResolvedValueOnce(livePvc(makeSfs(), { phase: 'Pending' }))
     mocks.appsApi.readNamespacedDeployment
       .mockResolvedValueOnce(liveDeployment(makeSfs(), { readyReplicas: 0 }))
       .mockResolvedValueOnce(liveDeployment(makeSfs(), { readyReplicas: 0 }))
@@ -830,9 +857,7 @@ describe('SharedFileSystemReconciler — mountability decoupled from wfc readine
   // drops the SFS out of Ready, but the PVC stays Bound — so the RO mount MUST
   // remain mountable and never be ripped out of a running consumer pod.
   it('isMountable STAYS TRUE when the wfc is not serving but the PVC is Bound (Initializing)', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Bound', capacity: { storage: '5Gi' } },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(livePvc())
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -844,9 +869,7 @@ describe('SharedFileSystemReconciler — mountability decoupled from wfc readine
   })
 
   it('isMountable STAYS TRUE on a Bound PVC even when the wfc container is CrashLoopBackOff (Degraded)', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Bound', capacity: { storage: '5Gi' } },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(livePvc())
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -871,9 +894,9 @@ describe('SharedFileSystemReconciler — mountability decoupled from wfc readine
   })
 
   it('isMountable is FALSE while the PVC is not Bound (Pending) — nothing to mount', async () => {
-    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      status: { phase: 'Pending' },
-    })
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue(
+      livePvc(makeSfs(), { phase: 'Pending' })
+    )
     mocks.appsApi.readNamespacedDeployment.mockResolvedValue(
       liveDeployment(makeSfs(), { readyReplicas: 0 })
     )
@@ -898,111 +921,158 @@ describe('SharedFileSystemReconciler — mountability decoupled from wfc readine
 
 // Exercise the actual resource adapters without readiness reads masking their
 // physical GET counts. Integration status and recovery remain covered above.
-describe.each(['Deployment', 'Service'] as const)('SFS %s read-first contract', kind => {
-  beforeEach(() => {
-    createsTotal.reset()
-    existenceReadsTotal.reset()
-  })
-  function setup() {
-    const mocks = makeMocks()
-    const reconciler = makeReconciler(mocks) as unknown as {
-      ensureDeployment(sfs: SharedFileSystemCRD): Promise<string>
-      ensureService(sfs: SharedFileSystemCRD): Promise<string>
-    }
-    const sfs = makeSfs()
-    const name = kind === 'Deployment' ? wfcDeploymentName(sfs) : wfcServiceName(sfs)
-    const read =
-      kind === 'Deployment'
-        ? mocks.appsApi.readNamespacedDeployment
-        : mocks.coreApi.readNamespacedService
-    const create =
-      kind === 'Deployment'
-        ? mocks.appsApi.createNamespacedDeployment
-        : mocks.coreApi.createNamespacedService
-    const replace =
-      kind === 'Deployment'
-        ? mocks.appsApi.replaceNamespacedDeployment
-        : mocks.coreApi.replaceNamespacedService
-    const run = () =>
-      kind === 'Deployment' ? reconciler.ensureDeployment(sfs) : reconciler.ensureService(sfs)
-    return { mocks, sfs, name, read, create, replace, run }
-  }
-  async function count(metric: typeof createsTotal, outcome: string) {
-    return (
-      (await metric.get()).values.find(
-        row => row.labels.kind === kind && row.labels.outcome === outcome
-      )?.value ?? 0
-    )
-  }
-
-  it('returns the existing name with one GET and no POST or PUT', async () => {
-    const h = setup()
-    await expect(h.run()).resolves.toBe(h.name)
-    expect(h.read).toHaveBeenCalledExactlyOnceWith({ name: h.name, namespace: 'mcp-host' })
-    expect(h.create).not.toHaveBeenCalled()
-    expect(h.replace).not.toHaveBeenCalled()
-    expect(await count(createsTotal, 'skipped')).toBe(1)
-    expect(await count(existenceReadsTotal, 'found')).toBe(1)
-  })
-
-  it('creates only after GET404 and returns the created name', async () => {
-    const h = setup()
-    h.read.mockRejectedValueOnce(notFound())
-    await expect(h.run()).resolves.toBe(h.name)
-    expect(h.read).toHaveBeenCalledTimes(1)
-    expect(h.create).toHaveBeenCalledExactlyOnceWith({
-      namespace: 'mcp-host',
-      body:
-        kind === 'Deployment'
-          ? buildDeployment(h.sfs, factoryConfig)
-          : buildService(h.sfs, factoryConfig),
+describe.each(['Deployment', 'Service', 'PersistentVolumeClaim'] as const)(
+  'SFS %s read-first contract',
+  kind => {
+    beforeEach(() => {
+      createsTotal.reset()
+      existenceReadsTotal.reset()
     })
-    expect(h.read.mock.invocationCallOrder[0]).toBeLessThan(h.create.mock.invocationCallOrder[0])
-    expect(h.replace).not.toHaveBeenCalled()
-    expect(await count(createsTotal, 'created')).toBe(1)
-    expect(await count(createsTotal, 'skipped')).toBe(0)
-  })
+    function setup() {
+      const mocks = makeMocks()
+      const reconciler = makeReconciler(mocks) as unknown as {
+        ensureDeployment(sfs: SharedFileSystemCRD): Promise<string>
+        ensureService(sfs: SharedFileSystemCRD): Promise<string>
+        ensurePvc(sfs: SharedFileSystemCRD): Promise<string>
+      }
+      const sfs = makeSfs()
+      const selected = {
+        Deployment: {
+          name: wfcDeploymentName(sfs),
+          read: mocks.appsApi.readNamespacedDeployment,
+          create: mocks.appsApi.createNamespacedDeployment,
+          replace: mocks.appsApi.replaceNamespacedDeployment,
+          run: () => reconciler.ensureDeployment(sfs),
+        },
+        Service: {
+          name: wfcServiceName(sfs),
+          read: mocks.coreApi.readNamespacedService,
+          create: mocks.coreApi.createNamespacedService,
+          replace: mocks.coreApi.replaceNamespacedService,
+          run: () => reconciler.ensureService(sfs),
+        },
+        PersistentVolumeClaim: {
+          name: pvcName(sfs),
+          read: mocks.coreApi.readNamespacedPersistentVolumeClaim,
+          create: mocks.coreApi.createNamespacedPersistentVolumeClaim,
+          replace: mocks.coreApi.replaceNamespacedPersistentVolumeClaim,
+          run: () => reconciler.ensurePvc(sfs),
+        },
+      }[kind]
+      const { name, read, create, replace, run } = selected
+      return { mocks, sfs, name, read, create, replace, run }
+    }
+    async function count(metric: typeof createsTotal, outcome: string) {
+      return (
+        (await metric.get()).values.find(
+          row => row.labels.kind === kind && row.labels.outcome === outcome
+        )?.value ?? 0
+      )
+    }
 
-  it('consumes a fresh GET after POST409 rather than reusing absence', async () => {
-    const h = setup()
-    h.read.mockRejectedValueOnce(notFound())
-    h.create.mockRejectedValueOnce(alreadyExists())
-    await expect(h.run()).resolves.toBe(h.name)
-    expect(h.read).toHaveBeenCalledTimes(2)
-    expect(h.create).toHaveBeenCalledTimes(1)
-    expect(h.read.mock.invocationCallOrder[0]).toBeLessThan(h.create.mock.invocationCallOrder[0])
-    expect(h.create.mock.invocationCallOrder[0]).toBeLessThan(h.read.mock.invocationCallOrder[1])
-    expect(h.replace).not.toHaveBeenCalled()
-    expect(await count(createsTotal, 'conflict')).toBe(1)
-    expect(await count(createsTotal, 'skipped')).toBe(0)
-  })
+    it('returns the existing name with one GET and no POST or PUT', async () => {
+      const h = setup()
+      await expect(h.run()).resolves.toBe(h.name)
+      expect(h.read).toHaveBeenCalledExactlyOnceWith({ name: h.name, namespace: 'mcp-host' })
+      expect(h.create).not.toHaveBeenCalled()
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'skipped')).toBe(1)
+      expect(await count(existenceReadsTotal, 'found')).toBe(1)
+    })
 
-  it.each([403, 500])('propagates GET%s without any writes or skip', async code => {
-    const h = setup()
-    const failure = err(code)
-    h.read.mockRejectedValueOnce(failure)
-    await expect(h.run()).rejects.toBe(failure)
-    expect(h.read).toHaveBeenCalledTimes(1)
-    expect(h.create).not.toHaveBeenCalled()
-    expect(h.replace).not.toHaveBeenCalled()
-    expect(await count(createsTotal, 'skipped')).toBe(0)
-    expect(await count(existenceReadsTotal, 'error')).toBe(1)
-  })
+    it('creates only after GET404 and returns the created name', async () => {
+      const h = setup()
+      h.read.mockRejectedValueOnce(notFound())
+      await expect(h.run()).resolves.toBe(h.name)
+      expect(h.read).toHaveBeenCalledTimes(1)
+      expect(h.create).toHaveBeenCalledExactlyOnceWith({
+        namespace: 'mcp-host',
+        body:
+          kind === 'Deployment'
+            ? buildDeployment(h.sfs, factoryConfig)
+            : kind === 'Service'
+              ? buildService(h.sfs, factoryConfig)
+              : buildPvc(h.sfs, factoryConfig),
+      })
+      expect(h.read.mock.invocationCallOrder[0]).toBeLessThan(h.create.mock.invocationCallOrder[0])
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'created')).toBe(1)
+      expect(await count(createsTotal, 'skipped')).toBe(0)
+    })
 
-  it('propagates fresh GET403 after POST409', async () => {
-    const h = setup()
-    const failure = err(403)
-    h.read.mockRejectedValueOnce(notFound()).mockRejectedValueOnce(failure)
-    h.create.mockRejectedValueOnce(alreadyExists())
-    await expect(h.run()).rejects.toBe(failure)
-    expect(h.read).toHaveBeenCalledTimes(2)
-    expect(h.create).toHaveBeenCalledTimes(1)
-    expect(h.replace).not.toHaveBeenCalled()
-    expect(await count(createsTotal, 'skipped')).toBe(0)
-  })
-})
+    it('consumes a fresh GET after POST409 rather than reusing absence', async () => {
+      const h = setup()
+      h.read.mockRejectedValueOnce(notFound())
+      h.create.mockRejectedValueOnce(alreadyExists())
+      await expect(h.run()).resolves.toBe(h.name)
+      expect(h.read).toHaveBeenCalledTimes(2)
+      expect(h.create).toHaveBeenCalledTimes(1)
+      expect(h.read.mock.invocationCallOrder[0]).toBeLessThan(h.create.mock.invocationCallOrder[0])
+      expect(h.create.mock.invocationCallOrder[0]).toBeLessThan(h.read.mock.invocationCallOrder[1])
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'conflict')).toBe(1)
+      expect(await count(createsTotal, 'skipped')).toBe(0)
+    })
+
+    it.each([403, 500])('propagates GET%s without any writes or skip', async code => {
+      const h = setup()
+      const failure = err(code)
+      h.read.mockRejectedValueOnce(failure)
+      await expect(h.run()).rejects.toBe(failure)
+      expect(h.read).toHaveBeenCalledTimes(1)
+      expect(h.create).not.toHaveBeenCalled()
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'skipped')).toBe(0)
+      expect(await count(existenceReadsTotal, 'error')).toBe(1)
+    })
+
+    it('preserves benign disappearance after POST409 without another create or skip', async () => {
+      const h = setup()
+      h.read.mockRejectedValueOnce(notFound()).mockRejectedValueOnce(notFound())
+      h.create.mockRejectedValueOnce(alreadyExists())
+      await expect(h.run()).resolves.toBe(h.name)
+      expect(h.read).toHaveBeenCalledTimes(2)
+      expect(h.create).toHaveBeenCalledTimes(1)
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'skipped')).toBe(0)
+    })
+
+    it('propagates fresh GET403 after POST409', async () => {
+      const h = setup()
+      const failure = err(403)
+      h.read.mockRejectedValueOnce(notFound()).mockRejectedValueOnce(failure)
+      h.create.mockRejectedValueOnce(alreadyExists())
+      await expect(h.run()).rejects.toBe(failure)
+      expect(h.read).toHaveBeenCalledTimes(2)
+      expect(h.create).toHaveBeenCalledTimes(1)
+      expect(h.replace).not.toHaveBeenCalled()
+      expect(await count(createsTotal, 'skipped')).toBe(0)
+    })
+  }
+)
 
 describe('SFS preserve and retry contracts', () => {
+  it('keeps an existing PVC unchanged even when desired size or access modes differ', async () => {
+    const mocks = makeMocks()
+    const sfs = makeSfs()
+    const pvc = livePvc(sfs)
+    pvc.spec = {
+      ...pvc.spec,
+      accessModes: ['ReadOnlyMany'],
+      resources: { requests: { storage: '9Gi' } },
+    }
+    mocks.coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValueOnce(pvc)
+    const reconciler = makeReconciler(mocks) as unknown as {
+      ensurePvc(sfs: SharedFileSystemCRD): Promise<string>
+    }
+    await expect(reconciler.ensurePvc(sfs)).resolves.toBe(pvcName(sfs))
+    expect(mocks.coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(mocks.coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    expect(mocks.coreApi.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    expect(pvc.spec.accessModes).toEqual(['ReadOnlyMany'])
+    expect(pvc.spec.resources?.requests?.storage).toBe('9Gi')
+  })
+
   it('keeps an existing Service unchanged even when its fields differ from desired', async () => {
     const mocks = makeMocks()
     const sfs = makeSfs()

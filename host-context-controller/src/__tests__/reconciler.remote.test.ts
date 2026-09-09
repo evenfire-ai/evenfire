@@ -12,6 +12,7 @@ import {
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from '../constants'
+import { createsTotal } from '../metrics'
 import { McpServerReconciler } from '../reconciler'
 import { McpServerCRD } from '../types'
 
@@ -719,6 +720,8 @@ describe('McpServerReconciler remote egress proxy', () => {
 
   describe('reconcile call order for remote servers', () => {
     it('should create ConfigMap before Deployment', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       // First materialization is absent; subsequent reads still use the live-state fixture.
       appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
       coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
@@ -748,6 +751,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should use the platform image without rewriting a divergent remote desired image', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       // First materialization is absent; subsequent reads still use the live-state fixture.
       appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
       coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
@@ -798,6 +803,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should call createNamespacedConfigMap with correct namespace', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       await reconciler.reconcile(REMOTE_SERVER)
 
       expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledWith(
@@ -813,6 +820,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should also create Deployment and Service', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       // First materialization is absent; subsequent reads still use the live-state fixture.
       appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
       coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
@@ -961,10 +970,115 @@ describe('McpServerReconciler remote egress proxy', () => {
   // ─── Test 8: ensureConfigMap handles 409 conflict ──────────────────────
 
   describe('ensureConfigMap conflict handling', () => {
+    async function skippedConfigMaps() {
+      const samples = await createsTotal.get()
+      const sample = samples.values.find(
+        value => value.labels.kind === 'ConfigMap' && value.labels.outcome === 'skipped'
+      )
+      expect(sample, 'initialized ConfigMap skipped series').toBeDefined()
+      return sample!.value
+    }
+
+    it('propagates a ConfigMap GET 403 without writing', async () => {
+      const forbidden = { code: 403 }
+      coreApi.readNamespacedConfigMap.mockRejectedValue(forbidden)
+      await expect((reconciler as any).ensureConfigMap(REMOTE_SERVER)).rejects.toBe(forbidden)
+      expect(coreApi.readNamespacedConfigMap).toHaveBeenCalledTimes(1)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
+    })
+
+    it('orders the cold ConfigMap request as GET then POST', async () => {
+      const events: string[] = []
+      coreApi.readNamespacedConfigMap.mockImplementation(async () => {
+        events.push('GET')
+        throw { code: 404 }
+      })
+      coreApi.createNamespacedConfigMap.mockImplementation(async () => {
+        events.push('POST')
+        return {}
+      })
+      await (reconciler as any).ensureConfigMap(REMOTE_SERVER)
+      expect(events).toEqual(['GET', 'POST'])
+      expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
+    })
+
+    it('counts one skipped POST for an unchanged present ConfigMap', async () => {
+      const desired = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER) as k8s.V1ConfigMap
+      const existing = {
+        ...desired,
+        metadata: {
+          ...desired.metadata,
+          resourceVersion: '7',
+          annotations: { 'example.com/operator': 'retained' },
+        },
+      }
+      coreApi.readNamespacedConfigMap.mockResolvedValue(existing)
+      const before = await skippedConfigMaps()
+      await (reconciler as any).ensureConfigMap(REMOTE_SERVER)
+      expect(coreApi.readNamespacedConfigMap).toHaveBeenCalledTimes(1)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(await skippedConfigMaps()).toBe(before + 1)
+    })
+
+    it('rereads after a ConfigMap PUT conflict and preserves the fresh annotations', async () => {
+      const desired = (reconciler as any).buildNginxConfigMap(REMOTE_SERVER) as k8s.V1ConfigMap
+      const events: string[] = []
+      let reads = 0
+      coreApi.readNamespacedConfigMap.mockImplementation(async () => {
+        const revision = String(++reads)
+        events.push(`GET:${revision}`)
+        return {
+          ...desired,
+          metadata: {
+            ...desired.metadata,
+            resourceVersion: revision,
+            annotations: { 'example.com/operator': revision },
+          },
+          data: { 'default.conf.template': 'old-config' },
+        }
+      })
+      coreApi.replaceNamespacedConfigMap.mockImplementation(async ({ body }) => {
+        events.push(`PUT:${body.metadata.resourceVersion}`)
+        if (body.metadata.resourceVersion === '1') throw { code: 409 }
+        return body
+      })
+      const before = await skippedConfigMaps()
+      await (reconciler as any).ensureConfigMap(REMOTE_SERVER)
+      expect(events).toEqual(['GET:1', 'PUT:1', 'GET:2', 'PUT:2'])
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      const final = coreApi.replaceNamespacedConfigMap.mock.calls[1][0].body
+      expect(final.metadata.annotations['example.com/operator']).toBe('2')
+      expect(final.data).toEqual(desired.data)
+      expect(await skippedConfigMaps()).toBe(before + 1)
+    })
+
+    it('does not create after the ConfigMap GET retires authority', async () => {
+      let active = true
+      coreApi.readNamespacedConfigMap.mockImplementation(async () => {
+        active = false
+        throw { code: 404 }
+      })
+      const before = await skippedConfigMaps()
+      await (reconciler as any).ensureConfigMap(REMOTE_SERVER, () => active)
+      expect(coreApi.readNamespacedConfigMap).toHaveBeenCalledTimes(1)
+      expect(coreApi.createNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(await skippedConfigMaps()).toBe(before)
+    })
+
     it('should call replaceNamespacedConfigMap on 409 conflict', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       coreApi.createNamespacedConfigMap.mockRejectedValue(make409Error())
       coreApi.readNamespacedConfigMap.mockResolvedValue({
-        metadata: { resourceVersion: '42' },
+        metadata: {
+          name: 'mcp-sentry-remote-nginx-conf',
+          namespace: REMOTE_SERVER.namespace,
+          resourceVersion: '42',
+          labels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE, [MCPSERVER_LABEL]: REMOTE_SERVER.name },
+        },
         data: { 'default.conf.template': 'old-config' },
       })
 
@@ -991,7 +1105,12 @@ describe('McpServerReconciler remote egress proxy', () => {
     it('should preserve the resourceVersion from the existing ConfigMap on replace', async () => {
       coreApi.createNamespacedConfigMap.mockRejectedValue(make409Error())
       coreApi.readNamespacedConfigMap.mockResolvedValue({
-        metadata: { resourceVersion: '99' },
+        metadata: {
+          name: 'mcp-sentry-remote-nginx-conf',
+          namespace: REMOTE_SERVER.namespace,
+          resourceVersion: '99',
+          labels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE, [MCPSERVER_LABEL]: REMOTE_SERVER.name },
+        },
         data: {},
       })
 
@@ -1002,6 +1121,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should rethrow non-409 errors from createNamespacedConfigMap', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       const err = new Error('Forbidden') as Error & { code?: number }
       err.code = 403
       coreApi.createNamespacedConfigMap.mockRejectedValue(err)
@@ -1012,11 +1133,17 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should succeed on first create when no conflict', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       coreApi.createNamespacedConfigMap.mockResolvedValue({})
 
       await expect((reconciler as any).ensureConfigMap(REMOTE_SERVER)).resolves.not.toThrow()
 
-      expect(coreApi.readNamespacedConfigMap).not.toHaveBeenCalled()
+      expect(coreApi.readNamespacedConfigMap).toHaveBeenCalledExactlyOnceWith({
+        name: 'mcp-sentry-remote-nginx-conf',
+        namespace: REMOTE_SERVER.namespace,
+      })
+      expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1)
       expect(coreApi.replaceNamespacedConfigMap).not.toHaveBeenCalled()
     })
   })
@@ -1069,6 +1196,8 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should clear status tracking after delete', async () => {
+      // This case starts without the nginx ConfigMap.
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       // First materialization is absent; subsequent reads still use the live-state fixture.
       appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
       coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
@@ -1206,12 +1335,14 @@ describe('McpServerReconciler remote egress proxy', () => {
 
   describe('reconcile failure modes for remote servers', () => {
     it('should set status deployed:false when ConfigMap creation fails', async () => {
+      coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
       const err = new Error('Quota exceeded') as Error & { code?: number }
       err.code = 403
       coreApi.createNamespacedConfigMap.mockRejectedValue(err)
 
       await reconciler.reconcile(REMOTE_SERVER)
 
+      expect(coreApi.createNamespacedConfigMap).toHaveBeenCalledTimes(1)
       const status = reconciler.getStatus('mcp-sentry-remote')
       expect(status.deployed).toBe(false)
       expect(status.ready).toBe(false)

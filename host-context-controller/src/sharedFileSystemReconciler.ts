@@ -275,22 +275,31 @@ export class SharedFileSystemReconciler {
   private async ensurePvc(sfs: SharedFileSystemCRD): Promise<string> {
     const pvc = buildPvc(sfs, this.factoryConfig)
     const name = pvcName(sfs)
-    try {
-      await observeCreate('PersistentVolumeClaim', () =>
-        this.coreApi.createNamespacedPersistentVolumeClaim({
-          namespace: this.factoryConfig.hostNamespace,
-          body: pvc,
-        })
-      )
-      console.log(`${LOG} Created PVC "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        throw err
-      }
-      // PVC spec is largely immutable post-create (size can grow, accessModes
-      // can't change). We don't attempt to replace — just log and continue.
-      console.log(`${LOG} PVC "${name}" already exists`)
-    }
+    const namespace = this.factoryConfig.hostNamespace
+    await ensureResource<k8s.V1PersistentVolumeClaim>({
+      read: () =>
+        observeExistenceRead('PersistentVolumeClaim', () =>
+          this.coreApi.readNamespacedPersistentVolumeClaim({ namespace, name })
+        ),
+      create: async () => {
+        await observeCreate('PersistentVolumeClaim', () =>
+          this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
+        )
+        hccLogger.info('SharedFileSystem PVC created', { scope: LOG, name, namespace })
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
+      converge: async read => {
+        // Preserve the existing PVC without resizing or changing accessModes.
+        // After POST409, consume a fresh read; only disappearance is benign.
+        try {
+          await read()
+        } catch (err) {
+          if (err == null || getErrorCode(err) !== 404) throw err
+          return
+        }
+        hccLogger.info('SharedFileSystem PVC already exists', { scope: LOG, name, namespace })
+      },
+    })
     return name
   }
 

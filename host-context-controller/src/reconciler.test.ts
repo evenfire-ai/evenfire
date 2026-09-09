@@ -373,6 +373,8 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('completes a remote proxy reconcile without rewriting the desired image', async () => {
+    // This case starts without the nginx ConfigMap.
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
     // First materialization is absent; subsequent reads still use the live-state fixture.
     appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })

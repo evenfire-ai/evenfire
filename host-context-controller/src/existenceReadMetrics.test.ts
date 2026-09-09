@@ -182,10 +182,10 @@ function readProductionSources(): Record<string, string> {
 function assertReadInventory(sources: Record<string, string>): void {
   const expectedWrapped: Record<string, number> = {
     'utils.ts': 1,
-    'hostReconciler.ts': 7,
+    'hostReconciler.ts': 9,
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
-    'sharedFileSystemReconciler.ts': 2,
+    'sharedFileSystemReconciler.ts': 3,
     'k8s/gfsK8sApi.ts': 5,
     'networkPolicyReconciler.ts': 2,
   }
@@ -250,7 +250,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(reason.length, id).toBeGreaterThan(0)
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
-  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(23)
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
   expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
 }
 

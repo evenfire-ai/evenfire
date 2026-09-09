@@ -289,7 +289,7 @@ describe('HostReconciler', () => {
     ).toBe(true)
   })
 
-  it('converges existing deployment and service and creates pvc for valid host', async () => {
+  it('converges existing deployment, service, and unbound pvc for valid host', async () => {
     const { reconciler, appsApi, coreApi } = createReconciler()
 
     const host = makeHost()
@@ -299,7 +299,9 @@ describe('HostReconciler', () => {
       namespace: 'mcp-host',
       name: 'host-secret',
     })
-    expect(coreApi.createNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
+    expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
     // Reconcile updates two existing Services: the host (mcp-host ns) and its
     // channel-reader handoff Service (channels ns).
     expect(coreApi.readNamespacedService).toHaveBeenCalledTimes(2)
@@ -671,7 +673,16 @@ describe('HostReconciler', () => {
     const { reconciler, coreApi } = createReconciler()
     coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValue({ code: 409 })
     coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      metadata: { resourceVersion: '42' },
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '42',
+      },
       spec: {
         volumeName: 'pvc-aaaa-bbbb-cccc-dddd',
         storageClassName: 'standard',
@@ -681,6 +692,8 @@ describe('HostReconciler', () => {
     })
 
     await reconciler.reconcile(makeHost())
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
 
     expect(coreApi.replaceNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
   })
@@ -689,7 +702,16 @@ describe('HostReconciler', () => {
     const { reconciler, coreApi } = createReconciler()
     coreApi.createNamespacedPersistentVolumeClaim.mockRejectedValue({ code: 409 })
     coreApi.readNamespacedPersistentVolumeClaim.mockResolvedValue({
-      metadata: { resourceVersion: '7' },
+      metadata: {
+        name: 'alpha-host-workspace',
+        namespace: 'mcp-host',
+        uid: 'pvc-uid',
+        labels: {
+          'clerum.io/host': 'alpha-host',
+          'clerum.io/managed-by': 'host-context-controller',
+        },
+        resourceVersion: '7',
+      },
       spec: {
         storageClassName: 'standard',
         accessModes: ['ReadWriteOnce'],
@@ -698,6 +720,8 @@ describe('HostReconciler', () => {
     })
 
     await reconciler.reconcile(makeHost())
+    expect(coreApi.readNamespacedPersistentVolumeClaim).toHaveBeenCalledOnce()
+    expect(coreApi.createNamespacedPersistentVolumeClaim).not.toHaveBeenCalled()
 
     expect(coreApi.replaceNamespacedPersistentVolumeClaim).toHaveBeenCalledTimes(1)
   })
@@ -975,6 +999,10 @@ describe('HostReconciler — desktop support', () => {
 describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('provisions per-Host SA + Role + RoleBinding before the Deployment', async () => {
     const { reconciler, coreApi, rbacApi } = createReconciler()
+    // Initial provisioning explicitly starts without these three RBAC objects.
+    coreApi.readNamespacedServiceAccount.mockRejectedValueOnce({ code: 404 })
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
+    rbacApi.readNamespacedRoleBinding.mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcile(makeHost())
 
     expect(coreApi.createNamespacedServiceAccount).toHaveBeenCalledTimes(1)
@@ -1046,6 +1074,8 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('rewrites Role resourceNames when spec.secretRef changes (replace path)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    // Race: the first absence is superseded by a conflicting creator.
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
     rbacApi.readNamespacedRole.mockImplementation(async () => {
       const desired = rbacApi.createNamespacedRole.mock.calls[0][0].body as {
         metadata?: { labels?: Record<string, string> }
@@ -1086,7 +1116,14 @@ describe('HostReconciler — per-Host RBAC scaffolding', () => {
   it('replaces a live Role that has no rules (fail-open-to-write)', async () => {
     const { reconciler, rbacApi } = createReconciler()
     rbacApi.createNamespacedRole.mockRejectedValueOnce({ code: 409 })
-    rbacApi.readNamespacedRole.mockResolvedValue({ metadata: { resourceVersion: '7' } })
+    rbacApi.readNamespacedRole.mockResolvedValue({
+      metadata: {
+        name: 'host-alpha-host-config-reader',
+        namespace: 'mcp-host',
+        uid: 'role-uid',
+        resourceVersion: '7',
+      },
+    })
 
     await reconciler.reconcile(makeHost({ spec: { secretRef: 'rotated-secret' } } as never))
 

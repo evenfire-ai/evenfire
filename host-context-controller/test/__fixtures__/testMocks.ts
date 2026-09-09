@@ -184,10 +184,17 @@ export function createMockCoreApi(): MockCoreApi {
     patchNamespacedSecret: vi.fn().mockResolvedValue({}),
     deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
     createNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
-    readNamespacedPersistentVolumeClaim: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedPersistentVolumeClaim: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     replaceNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
     deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
@@ -199,10 +206,17 @@ export function createMockCoreApi(): MockCoreApi {
     deleteNamespacedConfigMap: vi.fn().mockResolvedValue({}),
     // Per-Host ServiceAccount (lives on CoreV1Api)
     createNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
-    readNamespacedServiceAccount: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedServiceAccount: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     deleteNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
     // #827 partial-leftover discovery lists these owned kinds by ownership label.
@@ -268,18 +282,31 @@ export function createMockNetworkingApi(): MockNetworkingApi {
 export function createMockRbacApi(): MockRbacApi {
   return {
     createNamespacedRole: vi.fn().mockResolvedValue({}),
-    readNamespacedRole: vi.fn(({ name }: { name?: string } = {}) =>
+    readNamespacedRole: vi.fn(({ name, namespace }: { name?: string; namespace?: string } = {}) =>
       Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
+        metadata: {
+          name,
+          namespace,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: hccOwnedLabels(name),
+        },
       } as MockK8sResource)
     ),
     replaceNamespacedRole: vi.fn().mockResolvedValue({}),
     deleteNamespacedRole: vi.fn().mockResolvedValue({}),
     createNamespacedRoleBinding: vi.fn().mockResolvedValue({}),
-    readNamespacedRoleBinding: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedRoleBinding: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     deleteNamespacedRoleBinding: vi.fn().mockResolvedValue({}),
     // #827 partial-leftover discovery lists RBAC by ownership label.

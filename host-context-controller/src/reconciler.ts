@@ -951,35 +951,37 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean = () => true
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
-    if (!isCurrent()) return
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
-    try {
-      await observeCreate('ConfigMap', () =>
-        this.coreApi.createNamespacedConfigMap({
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('ConfigMap', () =>
+          this.coreApi.readNamespacedConfigMap({ name, namespace })
+        ),
+      create: async () => {
+        await observeCreate('ConfigMap', () =>
+          this.coreApi.createNamespacedConfigMap({ namespace, body: cm })
+        )
+        hccLogger.info('nginx ConfigMap created', {
+          scope: '[Reconciler]',
+          configMap: name,
           namespace,
-          body: cm,
         })
-      )
-      console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        throw error
-      }
-      await replaceWithConflictRetry({
-        description: `nginx ConfigMap "${name}"`,
-        logPrefix: '[Reconciler]',
-        body: cm,
-        mergeExisting: preserveObjectAnnotations,
-        isUpToDate: configMapMatchesDesired,
-        mutationAllowed: isCurrent,
-        read: () =>
-          observeExistenceRead('ConfigMap', () =>
-            this.coreApi.readNamespacedConfigMap({ name, namespace })
-          ),
-        replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
-      })
-    }
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `nginx ConfigMap "${name}"`,
+          logPrefix: '[Reconciler]',
+          body: cm,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: configMapMatchesDesired,
+          mutationAllowed: isCurrent,
+          read,
+          replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
+    })
   }
 
   /**

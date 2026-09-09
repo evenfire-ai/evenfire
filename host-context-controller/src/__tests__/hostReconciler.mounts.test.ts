@@ -1259,7 +1259,19 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),
-        createNamespacedServiceAccount: vi.fn(async () => ({})),
+        createNamespacedServiceAccount: vi.fn(),
+        readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
         createNamespacedService: vi.fn(),
         readNamespacedService: vi.fn(async ({ name, namespace }) => ({
           metadata: {
@@ -1279,11 +1291,48 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
         replaceNamespacedSecret: vi.fn(async () => ({})),
         deleteNamespacedPersistentVolumeClaim: vi.fn(),
         createNamespacedPersistentVolumeClaim: vi.fn(async () => ({})),
-        readNamespacedPersistentVolumeClaim: vi.fn(),
+        readNamespacedPersistentVolumeClaim: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { volumeName: 'bound-context-volume' },
+        })),
       } as unknown as k8s.CoreV1Api,
       rbacApi: {
-        createNamespacedRole: vi.fn(async () => ({})),
-        createNamespacedRoleBinding: vi.fn(async () => ({})),
+        createNamespacedRole: vi.fn(),
+        readNamespacedRole: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        replaceNamespacedRole: vi.fn(async ({ body }) => body),
+        createNamespacedRoleBinding: vi.fn(),
+        readNamespacedRoleBinding: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
       } as unknown as k8s.RbacAuthorizationV1Api,
       networkingApi: {
         createNamespacedNetworkPolicy: vi.fn(async () => ({})),
@@ -1356,7 +1405,19 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
     const reconciler = new HostReconciler(makeStubKc(), {
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(desktopHost),
-        createNamespacedServiceAccount: vi.fn(async () => ({})),
+        createNamespacedServiceAccount: vi.fn(),
+        readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
         createNamespacedService: vi.fn(),
         readNamespacedService: vi.fn(async ({ name, namespace }) => ({
           metadata: {
@@ -1376,11 +1437,48 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
         replaceNamespacedSecret: vi.fn(async () => ({})),
         deleteNamespacedPersistentVolumeClaim: vi.fn(),
         createNamespacedPersistentVolumeClaim: vi.fn(async () => ({})),
-        readNamespacedPersistentVolumeClaim: vi.fn(),
+        readNamespacedPersistentVolumeClaim: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { volumeName: 'bound-context-volume' },
+        })),
       } as unknown as k8s.CoreV1Api,
       rbacApi: {
-        createNamespacedRole: vi.fn(async () => ({})),
-        createNamespacedRoleBinding: vi.fn(async () => ({})),
+        createNamespacedRole: vi.fn(),
+        readNamespacedRole: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        replaceNamespacedRole: vi.fn(async ({ body }) => body),
+        createNamespacedRoleBinding: vi.fn(),
+        readNamespacedRoleBinding: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
       } as unknown as k8s.RbacAuthorizationV1Api,
       networkingApi: networkingApi as unknown as k8s.NetworkingV1Api,
       appsApi: {

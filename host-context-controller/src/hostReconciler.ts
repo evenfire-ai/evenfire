@@ -1023,22 +1023,38 @@ export class HostReconciler {
   /**
    * Ensure a per-Host ServiceAccount exists. Idempotent.
    */
-  private async ensureHostServiceAccount(host: HostCRD): Promise<void> {
+  private async ensureHostServiceAccount(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostSaName(host)
     const body: k8s.V1ServiceAccount = {
       apiVersion: 'v1',
       kind: 'ServiceAccount',
       metadata: { name, namespace: host.namespace, labels: this.rbacLabels(host) },
     }
-    try {
-      await observeCreate('ServiceAccount', () =>
-        this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created ServiceAccount "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) === 409) return // already exists; SA itself has no spec to update
-      console.error(`[HostReconciler] Failed to ensure ServiceAccount "${name}":`, err)
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('ServiceAccount', () =>
+          this.coreApi.readNamespacedServiceAccount({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('ServiceAccount', () =>
+          this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
+        ),
+      // Existing ServiceAccounts have always been retained without an update.
+      converge: async read => {
+        try {
+          await read()
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'ServiceAccount', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1047,7 +1063,7 @@ export class HostReconciler {
    * On secretRef change the resourceNames are rewritten so Host A can never
    * read Host B's Secret.
    */
-  private async ensureHostRole(host: HostCRD): Promise<void> {
+  private async ensureHostRole(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostRoleName(host)
     const body: k8s.V1Role = {
       apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -1085,36 +1101,43 @@ export class HostReconciler {
         },
       ],
     }
-    try {
-      await observeCreate('Role', () =>
-        this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created Role "${name}"`)
-      return
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create Role "${name}":`, err)
-        return
-      }
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
-    // Already exists — replace to pick up rotated secretRef / new resourceNames.
-    try {
-      const existing = await observeExistenceRead('Role', () =>
-        this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
-      )
-      if (roleMatchesDesired(body, existing)) return
-      body.metadata!.resourceVersion = existing.metadata?.resourceVersion
-      await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
-      console.log(`[HostReconciler] Updated Role "${name}"`)
-    } catch (err) {
-      console.error(`[HostReconciler] Failed to update Role "${name}":`, err)
-    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Role', () =>
+          this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('Role', () =>
+          this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
+        ),
+      converge: async read => {
+        try {
+          const existing = await read()
+          revalidate?.()
+          if (roleMatchesDesired(body, existing)) return
+          body.metadata!.resourceVersion = existing.metadata?.resourceVersion
+          await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
+          log.info('Updated Host Role', { host: host.name })
+        } catch (error) {
+          // Preserve the existing disappearance policy, without swallowing
+          // authorization, transport, or terminal conflict failures.
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Role', outcome: 'skipped' }),
+    })
   }
 
   /**
    * Ensure a per-Host RoleBinding binding the per-Host Role to the per-Host SA.
    */
-  private async ensureHostRoleBinding(host: HostCRD): Promise<void> {
+  private async ensureHostRoleBinding(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostRoleName(host)
     const body: k8s.V1RoleBinding = {
       apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -1133,15 +1156,31 @@ export class HostReconciler {
         name,
       },
     }
-    try {
-      await observeCreate('RoleBinding', () =>
-        this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created RoleBinding "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) === 409) return
-      console.error(`[HostReconciler] Failed to ensure RoleBinding "${name}":`, err)
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('RoleBinding', () =>
+          this.rbacApi.readNamespacedRoleBinding({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('RoleBinding', () =>
+          this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
+        ),
+      // Preserve the existing binding; this path does not update subjects/roleRef.
+      converge: async read => {
+        try {
+          await read()
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'RoleBinding', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -3311,43 +3350,54 @@ export class HostReconciler {
     this.readinessTimers.set(name, timer)
   }
 
-  private async ensurePvc(host: HostCRD): Promise<void> {
+  private async ensurePvc(host: HostCRD, revalidate?: () => void): Promise<void> {
     const pvc = this.buildPvc(host)
     const name = this.pvcName(host)
-    try {
-      await observeCreate('PersistentVolumeClaim', () =>
-        this.coreApi.createNamespacedPersistentVolumeClaim({
-          namespace: host.namespace,
-          body: pvc,
-        })
-      )
-      console.log(`[HostReconciler] Created PVC "${name}"`)
-    } catch (error) {
-      if (getErrorCode(error) === 409) {
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    // Initial GET errors must propagate; retain only the established
+    // non-throwing POST and convergence failures of this PVC writer.
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('PersistentVolumeClaim', () =>
+          this.coreApi.readNamespacedPersistentVolumeClaim({ namespace: host.namespace, name })
+        ),
+      create: async () => {
         try {
-          const existing = await observeExistenceRead('PersistentVolumeClaim', () =>
-            this.coreApi.readNamespacedPersistentVolumeClaim({
+          await observeCreate('PersistentVolumeClaim', () =>
+            this.coreApi.createNamespacedPersistentVolumeClaim({
               namespace: host.namespace,
-              name,
+              body: pvc,
             })
           )
-          if (existing.spec?.volumeName) {
-            return
-          }
+        } catch (error) {
+          if (isBenignSupersessionError(error) || (error != null && getErrorCode(error) === 409))
+            throw error
+          log.error('Failed to create Host PVC', { host: host.name, err: error })
+        }
+      },
+      converge: async read => {
+        try {
+          const existing = await read()
+          revalidate?.()
+          if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
           await this.coreApi.replaceNamespacedPersistentVolumeClaim({
             namespace: host.namespace,
             name,
             body: pvc,
           })
-          console.log(`[HostReconciler] Updated PVC "${name}"`)
-        } catch (updateError) {
-          console.error(`[HostReconciler] Failed to update PVC "${name}":`, updateError)
+        } catch (error) {
+          if (isBenignSupersessionError(error)) throw error
+          log.error('Failed to update Host PVC', { host: host.name, err: error })
+          return false
         }
-      } else {
-        console.error(`[HostReconciler] Failed to create PVC "${name}":`, error)
-      }
-    }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
+    })
   }
 
   private async ensureService(host: HostCRD, revalidate?: () => void): Promise<void> {
@@ -4355,11 +4405,11 @@ export class HostReconciler {
     // otherwise the kubelet can't mount the SA token and the pod will
     // crash-loop until RBAC is created.
     revalidateHostMutationBoundary()
-    await this.ensureHostServiceAccount(host)
+    await this.ensureHostServiceAccount(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
-    await this.ensureHostRole(host)
+    await this.ensureHostRole(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
-    await this.ensureHostRoleBinding(host)
+    await this.ensureHostRoleBinding(host, revalidateHostMutationBoundary)
 
     let mounts: ResolvedSfsMount[] = []
     try {
@@ -4406,7 +4456,7 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
-    await this.ensurePvc(host)
+    await this.ensurePvc(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
     await this.ensureService(host, revalidateHostMutationBoundary)
 
