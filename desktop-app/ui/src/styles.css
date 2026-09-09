@@ -12871,7 +12871,12 @@ pre {
    drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
    so this higher-specificity override is unambiguous. */
 .content-panel.content-panel--chat-drawer-open {
-  --app-header-utilities-width: calc(var(--chat-drawer-width) + var(--space-2) + 16px);
+  /* Docked drawer: the embed shrinks by exactly the drawer's width so its right
+     edge meets the drawer's left edge at the 1px resize seam — no transparent
+     gutter between them. (The drag/clamp math in useChatDrawerResize keeps its
+     own, deliberately more conservative, embed-floor reserve; this value only
+     drives the visual padding.) */
+  --app-header-utilities-width: var(--chat-drawer-width);
 }
 
 .content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-mounted-header) {
@@ -12900,17 +12905,21 @@ pre {
      header wraps in a narrow window. The fallback keeps the pre-measure/test
      behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
   top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
-  right: var(--space-4);
-  bottom: var(--space-4);
+  /* Docked, VS Code secondary-side-bar style: flush to the panel's right and
+     bottom edges (no floating inset), square corners, no shadow. The only
+     visible edge is the 1px resize seam on the LEFT (see __resize-handle::after),
+     which owns the border between the embed and the drawer — the drawer itself
+     carries no border. */
+  right: 0;
+  bottom: 0;
   width: var(--chat-drawer-width);
   z-index: var(--layer-chat-overlay);
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border: 1px solid rgba(var(--edge-rgb), 0.32);
-  border-radius: var(--radius-md);
-  background: var(--panel);
-  box-shadow: var(--shadow-hard);
+  /* Pairs with the sidebar surface so the drawer reads as a secondary side bar,
+     distinct from the editor/embed zone (which is --surface-0/--panel). */
+  background: var(--surface-3);
   overflow: hidden;
   /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
      mirroring the notification drawer's bounds-ack gate. */
@@ -12923,9 +12932,10 @@ pre {
   pointer-events: auto;
 }
 
-/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip with a
-   slim accent rule that surfaces on hover / during a drag. Sits inside the
-   drawer (which clips overflow), above the header/surface content. */
+/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip (the
+   hit-area) whose ::after paints the docked seam: a persistent 1px rule at rest
+   that thickens to a 2px accent on hover / during a drag. Sits inside the drawer
+   (which clips overflow), above the header/surface content. */
 .chat-drawer__resize-handle {
   position: absolute;
   top: 0;
@@ -12943,14 +12953,15 @@ pre {
   position: absolute;
   top: 0;
   left: 0;
-  width: 2px;
+  width: 1px;
   height: 100%;
-  background: transparent;
+  background: var(--zone-border);
   transition: background var(--motion-fast);
 }
 
 .chat-drawer__resize-handle:hover::after,
 .chat-drawer.is-resizing .chat-drawer__resize-handle::after {
+  width: 2px;
   background: rgba(var(--accent-rgb), 0.55);
 }
 
