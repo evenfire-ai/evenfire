@@ -1475,41 +1475,7 @@ export function GfsBrowser(): React.JSX.Element {
                     busy={renaming}
                   />
                 ) : (
-                  <span className="cu-gfs-manage-dialog__title-row">
-                    <h3>Share “{selected.name}”</h3>
-                    <GfsResourceMenu
-                      resourceName={selected.name}
-                      resourceUri={selected.gfsUri}
-                      downloading={downloadingIds.has(selected.resourceId)}
-                      onPreview={
-                        selected.kind !== 'directory' && isGfsPreviewFile(selected.name)
-                          ? () => openFilePreview(selected)
-                          : undefined
-                      }
-                      onDownload={
-                        selected.kind !== 'directory'
-                          ? () => void downloadFile(selected)
-                          : undefined
-                      }
-                      onCopyLink={() => void copyGfsUri(selected.gfsUri)}
-                      onRename={() => {
-                        setRenameName(selected.name)
-                        setRenameTarget(null)
-                        setRenameOpen(true)
-                        setDeleteOpen(false)
-                      }}
-                      onMove={() => openMove(selected)}
-                      onReplace={
-                        selected.kind !== 'directory'
-                          ? file => void replaceFile(selected, file)
-                          : undefined
-                      }
-                      onDelete={() => {
-                        setDeleteOpen(true)
-                        setRenameOpen(false)
-                      }}
-                    />
-                  </span>
+                  <h3>Share “{selected.name}”</h3>
                 )}
               </span>
               <span className="cu-gfs-manage-dialog__top-actions">
@@ -1615,7 +1581,6 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="Before upload starts, the 1 GiB Upload v2 protocol ceiling is the local safety bound. When upload begins, the writer resolves and enforces the actual product file limit. Each request is streamed in 8 MiB parts (16 MiB hard maximum)."
           progress={
             uploadSnapshot
               ? {

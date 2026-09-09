@@ -13056,23 +13056,12 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-manage-dialog__heading h3 {
   margin: 0;
   overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--cu-text);
   font-size: 1.375rem;
   font-weight: 600;
   line-height: 1.2;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cu-gfs-manage-dialog__title-row {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--cu-space-1);
-}
-
-.cu-gfs-manage-dialog__title-row h3 {
-  min-width: 0;
   white-space: normal;
 }
 
@@ -13122,10 +13111,6 @@ button.cu-gfs-tree__button:focus-visible,
   display: flex;
   align-items: center;
   gap: var(--cu-space-1);
-}
-
-.cu-gfs-manage-dialog__title-row .cu-gfs-resource-menu {
-  z-index: 40;
 }
 
 .cu-gfs-manage-dialog__close.cu-btn {
@@ -13346,7 +13331,11 @@ button.cu-gfs-tree__button:focus-visible,
   flex: 0 0 1.25rem;
   display: grid;
   place-items: center;
-  color: var(--cu-warning);
+  color: var(--cu-accent);
+}
+
+.cu-gfs-move-dialog__tree-root + .cu-gfs-move-dialog__tree-item {
+  margin-top: calc(var(--cu-space-1) / 2);
 }
 
 .cu-gfs-move-dialog__tree-folder-icon svg {
@@ -13468,7 +13457,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-grant__composer {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 12.75rem;
-  align-items: stretch;
+  align-items: start;
   gap: var(--cu-space-2);
 }
 
@@ -13479,9 +13468,11 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-role-select {
   width: 100%;
   min-width: 0;
+  align-self: start;
 }
 
 .cu-gfs-role-select .cu-selection-dropdown__button {
+  height: 2.875rem;
   min-height: 2.875rem;
   background-color: var(--cu-bg-elevated);
   font-weight: 500;

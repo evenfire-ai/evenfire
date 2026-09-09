@@ -18,6 +18,7 @@ describe('GfsMoveDialog', () => {
     mockApiGet.mockImplementation(async path => {
       if (path === '/api/v1/gfs/tree') {
         return {
+          rootResourceId: 'root-1',
           items: [
             {
               resourceId: 'archive-1',
@@ -61,6 +62,30 @@ describe('GfsMoveDialog', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (Archive)' }))
 
     await waitFor(() => expect(onMove).toHaveBeenCalledWith('archive-1', 'Archive'))
+  })
+
+  it('moves a file to the main root', async () => {
+    mockApiGet.mockResolvedValue({
+      rootResourceId: 'root-1',
+      items: [{ resourceId: 'archive-1', name: 'Archive', kind: 'directory' }],
+      nextCursor: null,
+    })
+    const onMove = vi.fn(async () => undefined)
+
+    render(
+      <GfsMoveDialog
+        initialCrumbs={[{ id: 'product-1', name: 'Product' }]}
+        onClose={vi.fn()}
+        onMove={onMove}
+        target={{ resourceId: 'file-1', name: 'notes.txt', kind: 'file' }}
+      />
+    )
+
+    const dialog = screen.getByRole('dialog', { name: 'Move file notes.txt' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'main' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (main)' }))
+
+    await waitFor(() => expect(onMove).toHaveBeenCalledWith('root-1', 'main'))
   })
 
   it('refuses a no-op move into the folder that already contains the target', async () => {

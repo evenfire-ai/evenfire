@@ -23,6 +23,7 @@ type MoveCrumb = {
 }
 
 type TreePage = {
+  rootResourceId?: string
   items: MoveFolder[]
   nextCursor: string | null
 }
@@ -221,6 +222,7 @@ export function GfsMoveDialog({
     () => new Set(initialCrumbs.flatMap(crumb => (crumb.id ? [crumb.id] : [])))
   )
   const [rootFolders, setRootFolders] = useState<MoveFolder[]>([])
+  const [rootResourceId, setRootResourceId] = useState<string | null>(null)
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
@@ -234,6 +236,7 @@ export function GfsMoveDialog({
       if (cursor) query.cursor = cursor
       const page = (await apiGet('/api/v1/gfs/tree', query)) as TreePage
       setRootFolders(previous => (cursor ? [...previous, ...page.items] : page.items))
+      if (page.rootResourceId) setRootResourceId(page.rootResourceId)
       setNextCursor(page.nextCursor)
       setLoaded(true)
     } catch (loadError) {
@@ -287,6 +290,7 @@ export function GfsMoveDialog({
   }
 
   const isNoOpDestination = Boolean(selected && selected.resourceId === currentParentId)
+  const rootSelected = Boolean(rootResourceId && selected?.resourceId === rootResourceId)
 
   return (
     <div
@@ -335,6 +339,36 @@ export function GfsMoveDialog({
 
         <div className="cu-gfs-move-dialog__tree-heading">Global File System</div>
         <div className="cu-gfs-move-dialog__tree" role="tree" aria-label="GFS destination folders">
+          {rootResourceId && rootResourceId !== target.resourceId ? (
+            <div
+              aria-expanded="true"
+              aria-level={1}
+              aria-selected={rootSelected}
+              className="cu-gfs-move-dialog__tree-item cu-gfs-move-dialog__tree-root"
+              role="treeitem"
+            >
+              <div className="cu-gfs-move-dialog__tree-row">
+                <span className="cu-gfs-move-dialog__tree-toggle-placeholder" aria-hidden="true" />
+                <button
+                  aria-label="main"
+                  aria-selected={rootSelected}
+                  className="cu-gfs-move-dialog__tree-select"
+                  onClick={() =>
+                    selectFolder({ resourceId: rootResourceId, name: DRIVE, kind: 'directory' })
+                  }
+                  type="button"
+                >
+                  <span className="cu-gfs-move-dialog__tree-folder-icon" aria-hidden="true">
+                    <IconFolder />
+                  </span>
+                  <span className="cu-gfs-move-dialog__tree-folder-name">main</span>
+                  <span className="cu-gfs-move-dialog__tree-selected-icon" aria-hidden="true">
+                    {rootSelected ? <IconCheck /> : null}
+                  </span>
+                </button>
+              </div>
+            </div>
+          ) : null}
           {loading && !loaded ? (
             <p className="cu-gfs-move-dialog__notice" role="status">
               Loading folders…
@@ -348,7 +382,7 @@ export function GfsMoveDialog({
                 expandedIds={expandedIds}
                 folder={folder}
                 key={folder.resourceId}
-                level={1}
+                level={rootResourceId ? 2 : 1}
                 onSelect={selectFolder}
                 onToggle={toggleFolder}
                 selected={selected}

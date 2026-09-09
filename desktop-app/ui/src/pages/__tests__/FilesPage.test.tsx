@@ -106,10 +106,9 @@ async function openManageDialog(resourceName: string) {
   })
 }
 
-async function chooseManageAction(resourceName: string, actionName: string) {
-  const dialog = screen.getByRole('dialog', { name: new RegExp(`Share .* ${resourceName}`) })
+async function chooseResourceAction(resourceName: string, actionName: string) {
   await act(async () => {
-    fireEvent.click(within(dialog).getByRole('button', { name: `Options for ${resourceName}` }))
+    fireEvent.click(screen.getByRole('button', { name: `Options for ${resourceName}` }))
   })
   await act(async () => {
     fireEvent.click(screen.getByRole('menuitem', { name: actionName }))
@@ -586,9 +585,8 @@ describe('FilesPage', () => {
 
     renderFilesPage()
 
-    await openManageDialog('Team folder')
     expect(screen.queryByText('Manage folder')).toBeNull()
-    await chooseManageAction('Team folder', 'New folder')
+    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
     const createFolderForm = screen.getByRole('form', { name: 'Create folder' })
     expect(within(newFolderDialog).queryByText('People with access')).toBeNull()
@@ -598,18 +596,17 @@ describe('FilesPage', () => {
       fireEvent.click(createFolderForm.querySelector('button[type="submit"]')!)
     })
 
-    await openManageDialog('Team folder')
-    await chooseManageAction('Team folder', 'Rename')
+    await chooseResourceAction('Team folder', 'Rename')
     const renameForm = screen.getByRole('form', { name: 'Rename resource' })
     await act(async () => {
       fireEvent.change(screen.getByLabelText('New name'), { target: { value: 'renamed' } })
       fireEvent.click(renameForm.querySelector('button[type="submit"]')!)
     })
 
-    await chooseManageAction('Team folder', 'Delete')
-    const deleteDialog = screen.getByRole('alertdialog', { name: 'Delete resource' })
+    await chooseResourceAction('Team folder', 'Delete')
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete Team folder?' })
     await act(async () => {
-      fireEvent.click(deleteDialog.querySelector('button')!)
+      fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
     })
 
     expect(createFolder).toHaveBeenCalledWith('new-folder')
@@ -1185,17 +1182,16 @@ describe('FilesPage', () => {
 
     renderFilesPage(pushToast)
 
-    await openManageDialog('Team folder')
-    await chooseManageAction('Team folder', 'Delete')
-    const deleteDialog = screen.getByRole('alertdialog', { name: 'Delete resource' })
+    await chooseResourceAction('Team folder', 'Delete')
+    const deleteDialog = screen.getByRole('dialog', { name: 'Delete Team folder?' })
     await act(async () => {
-      fireEvent.click(deleteDialog.querySelector('button')!)
+      fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete' }))
       await Promise.resolve()
     })
 
     expect(deleteResource).toHaveBeenCalledWith('folder-1', 7)
     expect(pushToast).toHaveBeenCalledWith('not_empty: folder has children', 'error')
-    expect(screen.getByRole('alertdialog', { name: 'Delete resource' })).toBeTruthy()
+    expect(screen.queryByRole('dialog', { name: 'Delete Team folder?' })).toBeNull()
   })
 
   it('surfaces stale replace and rename precondition failures for the current file', async () => {
@@ -1229,8 +1225,11 @@ describe('FilesPage', () => {
 
     await openManageDialog('report.txt')
     const manageDialog = screen.getByRole('dialog', { name: 'Share file report.txt' })
-    expect(within(manageDialog).queryByRole('button', { name: 'Replace file' })).toBeNull()
-    await chooseManageAction('report.txt', 'Replace file')
+    expect(
+      within(manageDialog).queryByRole('button', { name: 'Options for report.txt' })
+    ).toBeNull()
+    fireEvent.click(within(manageDialog).getByRole('button', { name: 'Close share dialog' }))
+    await chooseResourceAction('report.txt', 'Replace file')
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Replace report.txt'), {
         target: {
@@ -1239,7 +1238,7 @@ describe('FilesPage', () => {
       })
       await Promise.resolve()
     })
-    await chooseManageAction('report.txt', 'Rename')
+    await chooseResourceAction('report.txt', 'Rename')
     const renameForm = screen.getByRole('form', { name: 'Rename resource' })
     await act(async () => {
       fireEvent.change(screen.getByLabelText('New name'), {
@@ -1662,7 +1661,7 @@ describe('FilesPage', () => {
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
   })
 
-  it('does not offer Create share from the manage dialog resource menu', async () => {
+  it('does not render resource options inside the share dialog', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -1711,11 +1710,8 @@ describe('FilesPage', () => {
     await openManageDialog('Team folder')
 
     const dialog = screen.getByRole('dialog', { name: 'Share folder Team folder' })
-    const menuTrigger = within(dialog).getByRole('button', { name: 'Options for Team folder' })
-    await act(async () => {
-      fireEvent.click(menuTrigger)
-    })
-    expect(within(dialog).queryByRole('menuitem', { name: 'Create share' })).toBeNull()
+    expect(within(dialog).queryByRole('button', { name: 'Options for Team folder' })).toBeNull()
+    expect(within(dialog).queryByRole('menu')).toBeNull()
   })
 
   it('issues ONE atomic bulk grant and does not refetch or toast when it is rejected', async () => {
@@ -2039,7 +2035,7 @@ describe('FilesPage', () => {
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
   })
 
-  it('closes the move dialog and manage dialog when authority is revoked mid-session', async () => {
+  it('closes the move dialog when authority is revoked mid-session', async () => {
     const moveResource = vi.fn(async () => ({}))
     const controllerState = {
       ...baseController(),
@@ -2080,18 +2076,7 @@ describe('FilesPage', () => {
     )
     const { rerender } = render(makeElement())
 
-    // Open the manage dialog, then the move dialog from its menu.
-    await openManageDialog('Product')
-    await act(async () => {
-      fireEvent.click(
-        within(screen.getByRole('dialog', { name: 'Share folder Product' })).getByRole('button', {
-          name: 'Options for Product',
-        })
-      )
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
-    })
+    await chooseResourceAction('Product', 'Move to…')
     expect(await screen.findByRole('dialog', { name: 'Move folder Product' })).toBeTruthy()
 
     controllerState.accessState = 'revoked'
@@ -2099,9 +2084,6 @@ describe('FilesPage', () => {
 
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: 'Move folder Product' })).toBeNull()
-    )
-    await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Share folder Product' })).toBeNull()
     )
     expect(await screen.findByText('File access is not authorized')).toBeTruthy()
     expect(moveResource).not.toHaveBeenCalled()
@@ -3260,8 +3242,7 @@ describe('FilesPage', () => {
     })
     renderFilesPage()
 
-    await openManageDialog('Product')
-    await chooseManageAction('Product', 'New folder')
+    fireEvent.click(screen.getByRole('button', { name: 'New folder' }))
     fireEvent.change(screen.getByLabelText('Folder name'), { target: { value: 'unfinished' } })
     fireEvent.click(
       within(screen.getByRole('form', { name: 'Create folder' })).getByRole('button', {

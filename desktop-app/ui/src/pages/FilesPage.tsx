@@ -1286,6 +1286,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                         }
                         onCopyLink={() => void handleCopyLink(current.gfsUri)}
                         onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
+                        onReplace={
+                          canWriteCurrent ? file => void handleReplaceCurrentFile(file) : undefined
+                        }
                         onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
                         onMove={requestMoveCurrent}
                         onPreview={
@@ -1607,50 +1610,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     </Button>
                   </form>
                 ) : (
-                  <span className="da-gfs-manage-dialog__title-row">
-                    <h3>Share “{current.name}”</h3>
-                    <GfsResourceMenu
-                      resourceName={current.name}
-                      onCopyLink={() => void handleCopyLink(current.gfsUri)}
-                      onCreateFolder={
-                        currentIsFolder && canWriteCurrent ? openCreateFolder : undefined
-                      }
-                      onDelete={
-                        canDeleteCurrent
-                          ? () => {
-                              setDeleteOpen(true)
-                              setCreateFolderOpen(false)
-                            }
-                          : undefined
-                      }
-                      onMove={requestMoveCurrent}
-                      onDownload={
-                        currentIsFile
-                          ? () => void handleDownload(current.gfsUri, current.name)
-                          : undefined
-                      }
-                      onPreview={
-                        currentIsFile && currentPreviewAvailable
-                          ? () => void openFilePreview(current)
-                          : undefined
-                      }
-                      onRename={
-                        canWriteCurrent
-                          ? () => {
-                              setRenameName(current.name)
-                              setRenameOpen(true)
-                              setCreateFolderOpen(false)
-                              setDeleteOpen(false)
-                            }
-                          : undefined
-                      }
-                      onReplace={
-                        currentIsFile && canWriteCurrent
-                          ? file => void handleReplaceCurrentFile(file)
-                          : undefined
-                      }
-                    />
-                  </span>
+                  <h3>Share “{current.name}”</h3>
                 )}
               </span>
               <span className="da-gfs-manage-dialog__top-actions">

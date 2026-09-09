@@ -367,12 +367,7 @@ describe('GfsBrowser', () => {
 
     fireEvent.click(newFile)
     const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
-    expect(
-      within(uploadDialog).getByText(/1 GiB Upload v2 protocol ceiling is the local safety bound/i)
-    ).toBeTruthy()
-    expect(
-      within(uploadDialog).getByText(/writer resolves and enforces the actual product file limit/i)
-    ).toBeTruthy()
+    expect(within(uploadDialog).queryByText(/Upload v2 protocol ceiling/i)).toBeNull()
     expect(within(uploadDialog).getByText(/drag and drop, or click to browse/i)).toBeTruthy()
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Cancel' }))
 
@@ -911,7 +906,7 @@ describe('GfsBrowser', () => {
     )
   })
 
-  it('keeps manage-dialog rename inline with the shared confirmation controls', async () => {
+  it('keeps the share dialog focused on sharing without resource actions', async () => {
     mockApiGet.mockResolvedValueOnce({
       items: [child('report.txt', 'file', 2)],
       nextCursor: null,
@@ -920,17 +915,11 @@ describe('GfsBrowser', () => {
 
     await openManage('report.txt')
     const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
-    const manageMenuTrigger = within(manageDialog).getByRole('button', {
-      name: 'Actions for report.txt',
-    })
-    fireEvent.click(manageMenuTrigger)
-    fireEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename' }))
-
-    const renameForm = within(manageDialog).getByRole('form', { name: 'Rename resource' })
-    expect(within(renameForm).getByRole('button', { name: 'Save name' })).toBeTruthy()
-    expect(within(renameForm).getByRole('button', { name: 'Cancel rename' })).toBeTruthy()
-    fireEvent.click(within(renameForm).getByRole('button', { name: 'Cancel rename' }))
-    expect(within(manageDialog).queryByRole('form', { name: 'Rename resource' })).toBeNull()
+    expect(within(manageDialog).getByRole('heading', { name: 'Share “report.txt”' })).toBeTruthy()
+    expect(
+      within(manageDialog).queryByRole('button', { name: 'Actions for report.txt' })
+    ).toBeNull()
+    expect(within(manageDialog).queryByRole('menu')).toBeNull()
   })
 
   it('downloads a file through the operator content proxy using rid + name', async () => {
@@ -1516,20 +1505,7 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     await waitFor(() => expect(mockGetAdminTeams).toHaveBeenCalled())
     const manageDialog = screen.getByRole('dialog', { name: 'Share file report.md' })
-    const manageMenuTrigger = within(manageDialog).getByRole('button', {
-      name: 'Actions for report.md',
-    })
-    expect(within(manageDialog).queryByRole('button', { name: 'Replace file' })).toBeNull()
-    expect(within(manageDialog).queryByText('Quick actions')).toBeNull()
-    fireEvent.click(manageMenuTrigger)
-    const manageMenu = screen.getByRole('menu')
-    expect(within(manageMenu).getByRole('menuitem', { name: 'Download' })).toBeTruthy()
-    expect(within(manageMenu).getByRole('menuitem', { name: 'Replace file' })).toBeTruthy()
-    expect(within(manageMenu).getByRole('menuitem', { name: 'Copy link' })).toBeTruthy()
-    expect(within(manageMenu).getByRole('menuitem', { name: 'Rename' })).toBeTruthy()
-    expect(within(manageMenu).getByRole('menuitem', { name: 'Delete' })).toBeTruthy()
-    expect(within(manageMenu).queryByRole('menuitem', { name: 'Share' })).toBeNull()
-    fireEvent.click(manageMenuTrigger)
+    expect(within(manageDialog).queryByRole('button', { name: 'Actions for report.md' })).toBeNull()
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
@@ -1582,13 +1558,10 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(mockGetAdminUsers).toHaveBeenCalledWith(''))
     expect(screen.queryByRole('checkbox', { name: /Include contents of this folder/ })).toBeNull()
     const manageDialog = screen.getByRole('dialog', { name: 'Share folder team-folder' })
-    const manageMenuTrigger = within(manageDialog).getByRole('button', {
-      name: 'Actions for team-folder',
-    })
+    expect(
+      within(manageDialog).queryByRole('button', { name: 'Actions for team-folder' })
+    ).toBeNull()
     expect(within(manageDialog).queryByRole('button', { name: 'Upload file' })).toBeNull()
-    fireEvent.click(manageMenuTrigger)
-    expect(within(manageDialog).queryByRole('menuitem', { name: 'Create share' })).toBeNull()
-    fireEvent.click(manageMenuTrigger)
     await openSubjectPicker()
     fireEvent.click(await screen.findByRole('option', { name: 'Ada Lovelace' }))
     selectPermission('Read')
