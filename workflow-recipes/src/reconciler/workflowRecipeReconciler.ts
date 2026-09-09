@@ -107,6 +107,7 @@ import {
 import {
   type NetworkPolicyFamily,
   buildNetworkPolicyReplacement,
+  classifyOwnerlessNetworkPolicyOwnership,
   decideNetworkPolicyConvergence,
   networkPolicyMetadataMatchesDesired,
 } from './networkPolicyConvergence'
@@ -5296,7 +5297,24 @@ export class WorkflowRecipeReconciler {
     if (!policyName || !resourceVersion) {
       throw new Error('NetworkPolicy contraction requires policy name and resourceVersion')
     }
-    this.assertRecipeNetworkPolicyOwnership(existing, recipeName, policyName, namespace)
+    const assertMutableSnapshot = (snapshot: k8s.V1NetworkPolicy): void => {
+      // These recipe-scoped policies are label-owned, not garbage-collection
+      // owned. Apply the same lifecycle veto as final convergence before even
+      // a no-op/delete, and again before trusting or revoking the read-back.
+      if (snapshot.metadata?.deletionTimestamp) {
+        throw new RetryableReconcileError(
+          `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+        )
+      }
+      this.assertRecipeNetworkPolicyOwnership(snapshot, recipeName, policyName, namespace)
+      const ownership = classifyOwnerlessNetworkPolicyOwnership(snapshot)
+      if (ownership.kind === 'conflict') {
+        throw new NetworkPolicyOwnershipConflictError(
+          `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: ${ownership.reason}`
+        )
+      }
+    }
+    assertMutableSnapshot(existing)
 
     if (desired === null) {
       const uid = existing.metadata?.uid
@@ -5321,12 +5339,12 @@ export class WorkflowRecipeReconciler {
     }
 
     if (!contractionWriteNeeded(existing, desired)) return existing
-    desired.metadata = { ...(desired.metadata ?? {}), resourceVersion }
+    const replacement = buildNetworkPolicyReplacement(desired, existing)
     try {
       await this.networkingApi.replaceNamespacedNetworkPolicy({
         name: policyName,
         namespace,
-        body: desired,
+        body: replacement,
       })
     } catch (error: unknown) {
       throwNetworkPolicyMutationError(error, policyName, namespace)
@@ -5341,7 +5359,7 @@ export class WorkflowRecipeReconciler {
       if (getErrorCode(error) === 404) return null
       throw error
     }
-    this.assertRecipeNetworkPolicyOwnership(live, recipeName, policyName, namespace)
+    assertMutableSnapshot(live)
     const liveUid = live.metadata?.uid
     const liveResourceVersion = live.metadata?.resourceVersion
     if (

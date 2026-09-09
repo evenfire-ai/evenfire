@@ -269,6 +269,15 @@ function gatewayIdentityLabelsMatch(
   )
 }
 
+/** Label-owned policies must not acquire another controller's GC authority. */
+export function classifyOwnerlessNetworkPolicyOwnership(
+  existing: k8s.V1NetworkPolicy
+): NetworkPolicyOwnershipDecision {
+  return (existing.metadata?.ownerReferences?.length ?? 0) === 0
+    ? { kind: 'owned' }
+    : { kind: 'conflict', reason: 'owner-reference-mismatch' }
+}
+
 export function classifyNetworkPolicyOwnership(
   family: NetworkPolicyFamily,
   desired: k8s.V1NetworkPolicy,
@@ -277,9 +286,7 @@ export function classifyNetworkPolicyOwnership(
   const desiredOwners = controllerOwners(desired)
   const existingOwners = controllerOwners(existing)
   if (desiredOwners.length === 0) {
-    return (existing.metadata?.ownerReferences?.length ?? 0) === 0
-      ? { kind: 'owned' }
-      : { kind: 'conflict', reason: 'owner-reference-mismatch' }
+    return classifyOwnerlessNetworkPolicyOwnership(existing)
   }
 
   const desiredOwner = desiredOwners[0]

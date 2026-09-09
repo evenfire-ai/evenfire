@@ -215,6 +215,9 @@ observe() {
     write-after)
       log_event '2026-09-04T00:00:03.000000000Z' "$noop_event"
       log_event '2026-09-04T00:00:03.100000000Z' "$write_event" ;;
+    historical-write)
+      log_event '2026-09-04T00:00:01.999999999Z' "$write_event"
+      log_event '2026-09-04T00:00:03.000000000Z' "$noop_event" ;;
     wrong-family)
       log_event '2026-09-04T00:00:03.000000000Z' "${noop_event/workload-ingress/oauth-broker-egress}" ;;
     missing-witness) ;;
@@ -230,8 +233,37 @@ observe() {
 }
 
 expect_pass 'complete no-write window with an exact active reconcile and stable observer/UID/RV' observe clean
-for scenario in write-before write-after delayed-write wrong-family missing-witness old-logs observer-changed pretrigger-rv-drift; do
+for scenario in wrong-family missing-witness old-logs observer-changed pretrigger-rv-drift; do
   expect_reject "$scenario despite a completed parent reconcile" observe "$scenario"
+done
+
+# Exercise every logged final-apply operation and both pre-DNS contraction
+# actions. Keep UID/RV constant deliberately: log evidence must independently
+# reject writes even when an API snapshot does not reveal them. The ordinary
+# writer's wrong family and the contraction writer's absent family are real
+# reasons to bind mutation events by namespace/name, not by family.
+for operation in created replaced 'create failed' 'replace failed' 'read failed' read-retry contraction-replace contraction-delete; do
+  case "$operation" in
+    read-retry)
+      write_event='{"msg":"network policy read unavailable; retrying once","namespace":"sandbox-recipes","policy":"policy","family":"workload-ingress"}' ;;
+    contraction-*)
+      write_event="$(jq -cn --arg action "${operation#contraction-}" \
+        '{msg:"contracted recipe network policy",namespace:"sandbox-recipes",policy:"policy",action:$action}')" ;;
+    *)
+      write_event="$(jq -cn --arg msg "network policy $operation" \
+        '{msg:$msg,namespace:"sandbox-recipes",policy:"policy",family:"wrong-family"}')" ;;
+  esac
+  tracked_write_event=$write_event
+  for scenario in write-before write-after delayed-write; do
+    expect_reject "$operation $scenario despite no-op and stable UID/RV" observe "$scenario"
+  done
+  expect_pass "$operation before observation cursor is excluded" observe historical-write
+  for binding in namespace policy; do
+    write_event="$(printf '%s' "$tracked_write_event" | jq -c --arg binding "$binding" '.[$binding] = "unrelated"')"
+    for scenario in write-before write-after delayed-write; do
+      expect_pass "$operation with unrelated $binding $scenario does not contaminate tracked policy" observe "$scenario"
+    done
+  done
 done
 
 # Exercise the actual OAuth caller sequence as well as the shared assertions.

@@ -306,7 +306,55 @@ ok "WRC repaired live spec drift for all three families"
 wrc_assert_http_allowed "sandbox UI route recovered after NetworkPolicy repair" "$SANDBOX_UI_NS" "deploy/$UI_DEPLOYMENT" "$API_CLUSTER_IP" 8080 "api-ok"
 wrc_assert_http_allowed "workload sibling route recovered after NetworkPolicy repair" "$SANDBOX_NS" "deploy/$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" "db-ok"
 
-header "Phase 5 — terminating race self-heals without another parent event"
+header "Phase 5 — contraction preserves external metadata and live routes"
+# Add only an unused port to each fixture ingress. Repair must remove that
+# permission without discarding another controller's metadata. This exercises
+# the pre-DNS contraction writer, not merely the final additive apply.
+for policy in "$UI_INGRESS_POLICY" "$WL_INGRESS_POLICY"; do
+  live="$(kctl get networkpolicy "$policy" -n "$SANDBOX_NS" -o json)"
+  printf '%s' "$live" | wrc_record_owned
+  if [ "$policy" = "$WL_INGRESS_POLICY" ]; then
+    HELD_POLICY_UID="$(printf '%s' "$live" | jq -er '.metadata.uid')"
+  else
+    UI_CONTRACTION_UID="$(printf '%s' "$live" | jq -er '.metadata.uid')"
+  fi
+  contraction_patch="$(printf '%s' "$live" | jq -ce --arg run "$E2E_RUN_ID" \
+    --arg policy "$policy" --arg held "$WL_INGRESS_POLICY" '
+    [{op:"test",path:"/metadata/uid",value:.metadata.uid},
+     {op:"test",path:"/metadata/resourceVersion",value:.metadata.resourceVersion},
+     {op:"add",path:"/metadata/labels",value:((.metadata.labels // {}) + {"e2e.invalid/external-label":$run})},
+     {op:"add",path:"/metadata/annotations",value:((.metadata.annotations // {}) + {"e2e.invalid/external-annotation":$run})},
+     {op:"add",path:"/spec/ingress/0/ports/-",value:{protocol:"TCP",port:18443}}]
+    + (if $policy == $held then
+       [{op:"add",path:"/metadata/finalizers",value:((.metadata.finalizers // []) + ["e2e.invalid/hold-deletion"])}]
+       else [] end)')"
+  kctl patch networkpolicy "$policy" -n "$SANDBOX_NS" --type=json -p "$contraction_patch" >/dev/null
+  if [ "$policy" = "$WL_INGRESS_POLICY" ]; then HELD_POLICY_FINALIZER=1; fi
+done
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_spec_hash "$SANDBOX_NS" "$UI_INGRESS_POLICY" "$ui_hash" 120
+wrc_wait_for_np_spec_hash "$SANDBOX_NS" "$WL_INGRESS_POLICY" "$wl_ingress_hash" 120
+for policy in "$UI_INGRESS_POLICY" "$WL_INGRESS_POLICY"; do
+  expected_uid=$UI_CONTRACTION_UID
+  if [ "$policy" = "$WL_INGRESS_POLICY" ]; then expected_uid=$HELD_POLICY_UID; fi
+  kctl get networkpolicy "$policy" -n "$SANDBOX_NS" -o json | jq -e \
+    --arg run "$E2E_RUN_ID" --arg policy "$policy" --arg held "$WL_INGRESS_POLICY" --arg uid "$expected_uid" '
+    .metadata.labels["e2e.invalid/external-label"] == $run and
+    .metadata.annotations["e2e.invalid/external-annotation"] == $run and
+    .metadata.uid == $uid and
+    (if $policy == $held then
+      ((.metadata.finalizers // []) | index("e2e.invalid/hold-deletion") != null)
+     else true end)' >/dev/null || {
+    fail 'Ingress contraction discarded external metadata, finalizer, or policy identity'
+    exit 1
+  }
+done
+release_policy_hold
+ok 'Ingress contraction removed extra permissions while preserving external metadata and finalizer'
+wrc_assert_http_allowed 'UI route survives ingress contraction' "$SANDBOX_UI_NS" "deploy/$UI_DEPLOYMENT" "$API_CLUSTER_IP" 8080 'api-ok'
+wrc_assert_http_allowed 'Sibling route survives ingress contraction' "$SANDBOX_NS" "deploy/$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" 'db-ok'
+
+header "Phase 6 — terminating race self-heals without another parent event"
 terminating_uid="$(wrc_np_uid "$SANDBOX_NS" "$WL_INGRESS_POLICY")"
 HELD_POLICY_UID=$terminating_uid
 terminating_generation="$(kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o jsonpath='{.metadata.generation}')"
@@ -330,7 +378,7 @@ wrc_wait_for_np_recreated "$SANDBOX_NS" "$WL_INGRESS_POLICY" "$terminating_uid" 
 wait_for_recipe_active 120
 wrc_assert_http_allowed "workload sibling route recovered after scheduled NetworkPolicy retry" "$SANDBOX_NS" "deploy/$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" "db-ok"
 
-header "Phase 6 — steady-state no-churn"
+header "Phase 7 — steady-state no-churn"
 wrc_begin_np_observation
 wrc_track_np "$SANDBOX_NS" "$UI_INGRESS_POLICY" ui-ingress
 wrc_track_np "$SANDBOX_NS" "$WL_EGRESS_POLICY" workload-egress workload-egress-prefilter
@@ -338,7 +386,7 @@ wrc_track_np "$SANDBOX_NS" "$WL_INGRESS_POLICY" workload-ingress
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
 wrc_assert_np_observation_clean "$STABILITY_SECONDS" 120
 
-header "Phase 7 — cleanup"
+header "Phase 8 — cleanup"
 cleanup
 CREATED=0
 for policy in "$UI_INGRESS_POLICY" "$WL_EGRESS_POLICY" "$WL_INGRESS_POLICY"; do

@@ -16,6 +16,8 @@ import type { NetworkPolicyFamily } from './networkPolicyConvergence'
 import * as brokerIssuer from './oauthBrokerTokenIssuerClient'
 import { PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE } from './pluginWorkloadSdkValidator'
 import {
+  buildUiIngressNetworkPolicy,
+  buildWorkloadIngressNetworkPolicy,
   resolveResourceName,
   resolveScopedStatefulSetResourceName,
   resolveScopedWorkloadResourceName,
@@ -508,6 +510,177 @@ describe('WorkflowRecipeReconciler', () => {
   })
 
   describe('#567 regression: policy contraction', () => {
+    describe('#580 contraction lifecycle regression', () => {
+      const namespace = 'sandbox-recipes'
+      type Pipeline = {
+        applyNetworkPolicyContraction(input: {
+          existing: k8s.V1NetworkPolicy
+          desired: k8s.V1NetworkPolicy | null
+          namespace: string
+          recipeName: string
+        }): Promise<k8s.V1NetworkPolicy | null>
+        applyNetworkPolicy(
+          policy: k8s.V1NetworkPolicy,
+          namespace: string,
+          options: {
+            family: NetworkPolicyFamily
+            recipeName: string
+            existing: k8s.V1NetworkPolicy | null
+          }
+        ): Promise<void>
+      }
+      for (const family of ['ui-ingress', 'workload-ingress'] as const) {
+        const build = (ports: number[]) => {
+          const recipe = makeRecipe()
+          return (
+            family === 'ui-ingress'
+              ? buildUiIngressNetworkPolicy(recipe, 'app', ports, namespace, 'sandbox-ui')
+              : buildWorkloadIngressNetworkPolicy(
+                  recipe.spec.workloads![0],
+                  recipe,
+                  namespace,
+                  ports.map(port => ({
+                    fromWorkloadId: 'source',
+                    fromNamespace: namespace,
+                    port,
+                    protocol: 'TCP' as const,
+                  }))
+                )
+          )!
+        }
+        const decorated = (ports = [443, 8443]) => {
+          const policy = build(ports)
+          policy.metadata!.labels!['external.example/team'] = 'payments'
+          policy.metadata!.annotations = { 'external.example/review': 'retained' }
+          policy.metadata!.finalizers = ['external.example/cleanup']
+          return policy
+        }
+        it(`${family}: preserves external metadata through contraction and final apply`, async () => {
+          const original = decorated()
+          const live = policyStore([original])
+          const name = original.metadata!.name!
+          const desired = build([443])
+          const pipeline = reconciler as unknown as Pipeline
+          const contracted = await pipeline.applyNetworkPolicyContraction({
+            existing: structuredClone(live.get(name)!),
+            desired,
+            namespace,
+            recipeName: 'test-recipe',
+          })
+          await pipeline.applyNetworkPolicy(desired, namespace, {
+            family,
+            recipeName: 'test-recipe',
+            existing: contracted,
+          })
+          expect(live.get(name)?.metadata).toMatchObject({
+            labels: { 'external.example/team': 'payments' },
+            annotations: { 'external.example/review': 'retained' },
+            finalizers: ['external.example/cleanup'],
+          })
+          expect(live.get(name)?.spec).toEqual(desired.spec)
+          expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+        })
+        it(`${family}: keeps owned metadata on a no-op and fences an authorized delete`, async () => {
+          const original = decorated([443])
+          const live = policyStore([original])
+          const existing = structuredClone(live.get(original.metadata!.name!)!)
+          const pipeline = reconciler as unknown as Pipeline
+          const input = { existing, namespace, recipeName: 'test-recipe' }
+          expect(
+            await pipeline.applyNetworkPolicyContraction({ ...input, desired: build([443]) })
+          ).toEqual(existing)
+          expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+          expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+          await pipeline.applyNetworkPolicyContraction({ ...input, desired: null })
+          expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
+            name: original.metadata!.name,
+            namespace,
+            body: {
+              preconditions: {
+                uid: existing.metadata!.uid,
+                resourceVersion: existing.metadata!.resourceVersion,
+              },
+            },
+          })
+        })
+        for (const lifecycle of ['foreign-owner', 'terminating'] as const) {
+          it(`${family}: does not revoke an unsafe ${lifecycle} read-back`, async () => {
+            const original = decorated()
+            const live = policyStore([original])
+            const name = original.metadata!.name!
+            const existing = structuredClone(live.get(name)!)
+            mockNetworkingApi.readNamespacedNetworkPolicy.mockImplementation(async () => {
+              const readBack = structuredClone(live.get(name)!)
+              // Admission/concurrency re-broadens the spec; the defensive
+              // deletion must not override a new lifecycle owner or termination.
+              readBack.spec = original.spec
+              if (lifecycle === 'terminating') readBack.metadata!.deletionTimestamp = new Date()
+              else
+                readBack.metadata!.ownerReferences = [
+                  {
+                    apiVersion: 'v1',
+                    kind: 'ConfigMap',
+                    name: 'foreign',
+                    uid: 'foreign-uid',
+                    controller: true,
+                  },
+                ]
+              return readBack
+            })
+            await expect(
+              (reconciler as unknown as Pipeline).applyNetworkPolicyContraction({
+                existing,
+                desired: build([443]),
+                namespace,
+                recipeName: 'test-recipe',
+              })
+            ).rejects.toThrow(
+              lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
+            )
+            expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+            expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+          })
+        }
+        for (const operation of ['replace', 'delete', 'unchanged'] as const) {
+          for (const lifecycle of [
+            'controller-owner',
+            'non-controller-owner',
+            'terminating',
+          ] as const) {
+            it(`${family}: vetoes ${lifecycle} before contraction ${operation}`, async () => {
+              const original = decorated()
+              if (lifecycle === 'terminating') original.metadata!.deletionTimestamp = new Date()
+              else
+                original.metadata!.ownerReferences = [
+                  {
+                    apiVersion: 'v1',
+                    kind: 'ConfigMap',
+                    name: 'foreign',
+                    uid: 'foreign-uid',
+                    controller: lifecycle === 'controller-owner',
+                  },
+                ]
+              const live = policyStore([original])
+              await expect(
+                (reconciler as unknown as Pipeline).applyNetworkPolicyContraction({
+                  existing: live.get(original.metadata!.name!)!,
+                  namespace,
+                  recipeName: 'test-recipe',
+                  desired:
+                    operation === 'delete'
+                      ? null
+                      : build(operation === 'replace' ? [443] : [443, 8443]),
+                })
+              ).rejects.toThrow(
+                lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
+              )
+              expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+              expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+            })
+          }
+        }
+      }
+    })
     function policyStore(policies: k8s.V1NetworkPolicy[]) {
       const live = new Map<string, k8s.V1NetworkPolicy>()
       let version = 0

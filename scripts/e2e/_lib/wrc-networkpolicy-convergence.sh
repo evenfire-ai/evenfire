@@ -243,10 +243,14 @@ wrc_assert_np_observation_clean() {
       return 1
     }
     events="$(printf '%s' "$logs" | wrc_log_events "$WRC_NP_OBSERVATION_SINCE")" || return 1
-    # Match writes by namespace/name even if a broken writer mislabels family.
+    # Match every final-apply and pre-DNS contraction event by namespace/name:
+    # contraction logs omit family, and a broken writer can mislabel it. Reject
+    # the contraction message regardless of action so a new action fails closed.
     if printf '%s' "$events" | jq -e --argjson tracked "$WRC_NP_TRACKED" '
       any(.[]; . as $event | any($tracked[]; .namespace == $event.namespace and .policy == $event.policy)
-        and ((.msg // "") | test("^network policy (created|replaced|create failed|replace failed|read failed)$")))' >/dev/null; then
+        and (.msg == "contracted recipe network policy"
+          or .msg == "network policy read unavailable; retrying once"
+          or ((.msg // "") | test("^network policy (created|replaced|create failed|replace failed|read failed)$"))))' >/dev/null; then
       fail 'NetworkPolicy window contains a write or failed operation, even if a no-op also occurred'
       return 1
     fi
