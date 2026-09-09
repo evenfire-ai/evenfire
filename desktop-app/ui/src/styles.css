@@ -689,14 +689,16 @@ h3 {
   text-overflow: ellipsis;
 }
 
+/* Ghost affordance: no border or fill at rest, a border + neutral fill only on
+   hover — same behavior as the drawer's new-chat / close IconButtons. Border,
+   fill and radius come from the shared ghost .ui-icon-button base; this rule
+   only sets the bell's own box metrics so it must NOT reimpose a persistent
+   border/background or a pill radius. */
 .notification-bell {
   width: 36px;
   height: 36px;
   min-height: 36px;
   padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(var(--edge-rgb), 0.36);
-  background: var(--surface-soft);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -1688,8 +1690,14 @@ h3 {
   text-align: left;
 }
 
+/* __main is a bare <button>, so the global button:hover:enabled accent fill
+   leaks onto it on hover and paints the row accent-blue over the neutral row
+   hover. Reset it back to transparent so the row's own neutral hover shows
+   through — the menu-button already has the same guard below. */
 .nav-latest-session:hover .nav-latest-session__main,
 .nav-latest-session:hover .nav-latest-session__menu-button {
+  background: transparent;
+  border-color: transparent;
   color: var(--text);
 }
 
@@ -6688,24 +6696,33 @@ h3 {
   width: 100%;
 }
 
-/* D-2: the user turn is the single turn with a fill — a solid neutral band,
-   right-aligned, no border, small control radius. Not an accent tint.
-   Uses the solid --surface-3 (widget) level: --surface-soft is a translucent
-   panel, and the thread sits ON --panel, so surface-soft composited to the same
-   color and read as an invisible container. */
+/* D-2: the user turn is the single turn with a fill. The band wraps ONLY the
+   message text — the meta row (timestamp) rides below it, outside the fill,
+   mirroring VS Code. So the bubble is a transparent, right-aligned column and
+   the fill lives on the .message-block child, not the bubble container. */
 .chat-group.user .chat-bubble {
   justify-self: end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   border: none;
-  border-radius: var(--radius-control);
-  background: var(--surface-3);
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
   min-width: 0;
 }
 
+/* The fill band: a solid neutral surface (not an accent tint), small control
+   radius, shrink-wrapped to the message and right-aligned by the column above.
+   Uses the solid --surface-3 (widget) level: --surface-soft is a translucent
+   panel and the thread sits ON --panel, so it composited to the same color and
+   read as an invisible container. */
 .chat-group.user .chat-bubble .message-block {
+  max-width: 100%;
+  padding: var(--space-2-5);
   border: none;
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
 }
 
 .message-attachments-list {
@@ -12322,8 +12339,12 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-group.user .chat-bubble {
-  background: var(--surface-3);
+  background: transparent;
   border-color: transparent;
+}
+
+:root[data-theme='dark'] .chat-group.user .chat-bubble .message-block {
+  background: var(--surface-3);
 }
 
 :root[data-theme='dark'] .chat-thread::-webkit-scrollbar-thumb {
@@ -13240,15 +13261,10 @@ pre {
   color: transparent !important;
 }
 
-.window-titlebar__actions .notification-bell {
-  border-color: var(--titlebar-action-border) !important;
-  background: var(--titlebar-action-surface) !important;
-  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
-}
-
+/* The titlebar bell is a ghost control: border and fill live on :hover only
+   (see the .window-titlebar__actions .notification-bell block above). Only its
+   icon ink is pinned here so the glyph stays legible against the title bar. */
 .window-titlebar__actions .notification-bell--titlebar {
-  border-color: var(--titlebar-action-border) !important;
-  background: var(--titlebar-action-surface) !important;
   color: var(--titlebar-action-ink) !important;
   opacity: 1 !important;
 }
@@ -13259,8 +13275,7 @@ pre {
   stroke: var(--titlebar-action-ink) !important;
 }
 
-:root[data-theme='dark'] .window-titlebar__actions .search-input,
-:root[data-theme='dark'] .window-titlebar__actions .notification-bell {
+:root[data-theme='dark'] .window-titlebar__actions .search-input {
   border-color: var(--titlebar-action-border) !important;
   background: var(--titlebar-action-surface) !important;
 }
