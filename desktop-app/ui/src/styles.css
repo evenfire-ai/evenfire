@@ -196,15 +196,15 @@ h3 {
   width: min(720px, calc(100vw - var(--space-4)));
 }
 
+/* Ghost affordance, matching the chat drawer's new-chat / close IconButtons:
+   no border or fill at rest, an accent border + neutral fill on hover. */
 .window-titlebar__actions .notification-bell {
   width: 30px;
   height: 30px;
   min-height: 30px;
-  border-color: var(--titlebar-action-border);
-  background: var(--titlebar-action-surface);
-  box-shadow:
-    0 0 0 1px rgba(var(--overlay-rgb), 0.08),
-    0 6px 14px rgba(var(--overlay-rgb), 0.1);
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
 
 .window-titlebar__actions .notification-bell svg {
@@ -214,7 +214,7 @@ h3 {
 }
 
 .window-titlebar__actions .notification-bell:hover {
-  border-color: rgba(var(--accent-rgb), 0.64);
+  border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--surface-hover);
 }
 
@@ -3887,6 +3887,9 @@ h3 {
   max-width: 160px;
   padding-inline: var(--space-2);
   gap: var(--space-1-5);
+  /* Square control radius (F1 §5): the base Pill is fully rounded, but in the
+     composer footer this chip is a control, not a status pill. */
+  border-radius: var(--radius-control);
   border-color: rgba(var(--edge-rgb), 0.32);
   background: var(--surface-soft);
   color: var(--text-muted);
@@ -6685,13 +6688,16 @@ h3 {
   width: 100%;
 }
 
-/* D-2: the user turn is the single turn with a fill — a subtle neutral band,
-   right-aligned, no border, small control radius. Not an accent tint. */
+/* D-2: the user turn is the single turn with a fill — a solid neutral band,
+   right-aligned, no border, small control radius. Not an accent tint.
+   Uses the solid --surface-3 (widget) level: --surface-soft is a translucent
+   panel, and the thread sits ON --panel, so surface-soft composited to the same
+   color and read as an invisible container. */
 .chat-group.user .chat-bubble {
   justify-self: end;
   border: none;
   border-radius: var(--radius-control);
-  background: var(--surface-soft);
+  background: var(--surface-3);
   min-width: 0;
 }
 
@@ -7383,7 +7389,7 @@ h3 {
   min-height: 36px;
   min-width: 36px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   display: inline-grid;
   place-items: center;
 }
@@ -12316,7 +12322,7 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-group.user .chat-bubble {
-  background: var(--surface-soft);
+  background: var(--surface-3);
   border-color: transparent;
 }
 
@@ -13484,7 +13490,7 @@ pre {
   width: 34px;
   min-width: 34px;
   height: 34px;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   line-height: 0;
 }
 
@@ -16600,24 +16606,22 @@ pre {
   backdrop-filter: none;
 }
 
-/* --- Title bar command center: fixed-width pill, centered VS Code style --- */
+/* --- Title bar command center: search + notifications grouped at the right - */
 .window-titlebar__actions .top-bar {
   position: relative;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
 .window-titlebar__actions .header-left {
   flex: 0 0 auto;
-  justify-content: center;
+  justify-content: flex-end;
 }
 
-/* Utilities (notification bell) pin to the right edge while the search pill
-   stays centered in the action strip. */
+/* Search pill and the notification bell sit together at the right edge, in
+   flow (the .top-bar gap separates them). Drop the base margin-left:auto so the
+   bell hugs the search instead of being pushed to the far edge. */
 .window-titlebar__actions .header-utilities {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
+  margin-left: 0;
 }
 
 .window-titlebar__actions .global-search {
@@ -16657,4 +16661,38 @@ pre {
   border-radius: var(--radius-xs);
   background: var(--accent);
   pointer-events: none;
+}
+
+/* --- Sidebar item states: neutral VS Code fills (dark AND light) ----------
+   Bug fix: hover/active of sidebar rows previously painted an ACCENT tint under
+   the label (rgba(accent,.16/.22), and the accent-based --list-item and
+   --surface-hover tokens). On the translucent sidebar surface that blue wash
+   crushed label contrast. The active destination is marked by the vertical
+   accent bar (.nav-link.active::before) plus a NEUTRAL raised fill and full
+   text — never an accent fill. Values are neutral edge overlays measured to
+   clear AA (>=4.5:1) for the label in both themes. Scoped to .left-nav so the
+   global --list-item-* / --surface-hover tokens (tables, grids, menus) are
+   untouched. */
+.left-nav .nav-link:hover,
+.left-nav .nav-link--with-toggle:hover,
+.left-nav .nav-available-app:hover:enabled,
+.left-nav .nav-latest-session:hover,
+.left-nav .nav-latest-sessions__toggle:hover:enabled,
+.left-nav .sidebar-settings-trigger:hover:enabled,
+.left-nav .sidebar-settings-trigger.open {
+  background: rgba(var(--edge-rgb), 0.16);
+}
+
+.left-nav .nav-link.active,
+.left-nav .nav-available-app.active,
+.left-nav .nav-latest-session.active {
+  background: rgba(var(--edge-rgb), 0.26);
+  border-color: transparent;
+  color: var(--text);
+}
+
+/* The nested session label carries its own explicit color, so lift it to full
+   text on the selected row (the row-level color above cannot reach it). */
+.left-nav .nav-latest-session.active .nav-latest-session__main {
+  color: var(--text);
 }
