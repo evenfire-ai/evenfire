@@ -201,6 +201,9 @@ describe('llm-hooks effective pod egress (N5)', () => {
   // Positive control: without this, the two assertions above would also pass if
   // effectiveEgress() were simply blind to egress rules.
   it('does surface the egress a declaring hook is granted (scoped DNS + its target)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const dialer = makeHook('dialer', {
       target: {
         image: { ref: IMG, port: 8080, egressBindings: [{ cidr: '8.8.8.8/32', ports: [443] }] },

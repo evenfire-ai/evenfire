@@ -182,10 +182,10 @@ function readProductionSources(): Record<string, string> {
 function assertReadInventory(sources: Record<string, string>): void {
   const expectedWrapped: Record<string, number> = {
     'utils.ts': 1,
-    'hostReconciler.ts': 8,
+    'hostReconciler.ts': 7,
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
-    'sharedFileSystemReconciler.ts': 1,
+    'sharedFileSystemReconciler.ts': 2,
     'k8s/gfsK8sApi.ts': 5,
     'networkPolicyReconciler.ts': 2,
   }

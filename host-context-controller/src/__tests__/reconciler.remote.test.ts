@@ -119,15 +119,15 @@ function mockHccOwnedRuntimeReads(
   }
 
   appsApi.readNamespacedDeployment.mockResolvedValue({
-    metadata: { resourceVersion: '1', labels },
+    metadata: { name, namespace: 'mcp-server', resourceVersion: '1', labels },
     status: { readyReplicas: 1 },
   })
   coreApi.readNamespacedConfigMap.mockResolvedValue({
-    metadata: { resourceVersion: '1', labels },
+    metadata: { name, namespace: 'mcp-server', resourceVersion: '1', labels },
     data: {},
   })
   coreApi.readNamespacedService.mockResolvedValue({
-    metadata: { resourceVersion: '1', labels },
+    metadata: { name, namespace: 'mcp-server', resourceVersion: '1', labels },
     spec: { clusterIP: '10.0.0.1' },
   })
 }
@@ -719,6 +719,9 @@ describe('McpServerReconciler remote egress proxy', () => {
 
   describe('reconcile call order for remote servers', () => {
     it('should create ConfigMap before Deployment', async () => {
+      // First materialization is absent; subsequent reads still use the live-state fixture.
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       const callOrder: string[] = []
 
       coreApi.createNamespacedConfigMap.mockImplementation(async () => {
@@ -745,6 +748,9 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should use the platform image without rewriting a divergent remote desired image', async () => {
+      // First materialization is absent; subsequent reads still use the live-state fixture.
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       const callOrder: string[] = []
       const staleRemote = cloneServer(REMOTE_SERVER, {
         image: LEGACY_REMOTE_EGRESS_IMAGE,
@@ -807,6 +813,9 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should also create Deployment and Service', async () => {
+      // First materialization is absent; subsequent reads still use the live-state fixture.
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       await reconciler.reconcile(REMOTE_SERVER)
 
       expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
@@ -836,6 +845,9 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should still create Deployment and Service', async () => {
+      // First materialization is absent; subsequent reads still use the live-state fixture.
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       await reconciler.reconcile(LOCAL_SERVER)
 
       expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
@@ -907,7 +919,12 @@ describe('McpServerReconciler remote egress proxy', () => {
     it('should replace an existing remote egress proxy Deployment with the current image', async () => {
       appsApi.createNamespacedDeployment.mockRejectedValue(make409Error())
       appsApi.readNamespacedDeployment.mockResolvedValue({
-        metadata: { resourceVersion: 'old-rv' },
+        metadata: {
+          name: REMOTE_SERVER.name,
+          namespace: REMOTE_SERVER.namespace,
+          resourceVersion: 'old-rv',
+          labels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE, [MCPSERVER_LABEL]: REMOTE_SERVER.name },
+        },
         spec: {
           template: {
             spec: {
@@ -1052,6 +1069,9 @@ describe('McpServerReconciler remote egress proxy', () => {
     })
 
     it('should clear status tracking after delete', async () => {
+      // First materialization is absent; subsequent reads still use the live-state fixture.
+      appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+      coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       let current: McpServerCRD | undefined = REMOTE_SERVER
       reconciler.setResolveCurrentServer(() => current)
       // First reconcile to populate status
@@ -1237,6 +1257,9 @@ describe('plugin image-host allowlist (2.3)', () => {
     const appsApi = createMockAppsApi()
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const reconciler = buildReconciler(appsApi, coreApi, customApi)
     const server = cloneServer(LOCAL_SERVER, { image: 'docker.io/evil/x:1' })
 
@@ -1277,6 +1300,9 @@ describe('plugin image-host allowlist (2.3)', () => {
     const appsApi = createMockAppsApi()
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const reconciler = buildReconciler(appsApi, coreApi, customApi)
     const server = cloneServer(LOCAL_SERVER, { image: 'registry.evenfire.ai/acme/x:1' })
 
@@ -1292,6 +1318,9 @@ describe('plugin image-host allowlist (2.3)', () => {
     const appsApi = createMockAppsApi()
     const coreApi = createMockCoreApi()
     const customApi = createMockCustomApi()
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const reconciler = buildReconciler(appsApi, coreApi, customApi)
     const cfg = (await import('../config')).config as { enforcePluginImageAllowlist: boolean }
     cfg.enforcePluginImageAllowlist = true

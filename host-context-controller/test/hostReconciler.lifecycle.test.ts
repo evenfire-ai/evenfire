@@ -418,7 +418,8 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     await (reconciler as any).ensureDeployment(host, [], 'revision-a')
 
-    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledOnce()
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledWith({
       namespace: 'mcp-host',
       name: 'chatllm',
@@ -628,8 +629,11 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
       'CLERUM_STATELESS_LIFECYCLE'
     )
 
-    appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
-    appsApi.readNamespacedDeployment.mockResolvedValueOnce(runningStateful)
+    appsApi.replaceNamespacedDeployment.mockClear()
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request =>
+      request.name === stateful.name ? Promise.resolve(runningStateful) : readDeployment(request)
+    )
 
     const stateless = makeStatelessHost({ name: 'transition-host' })
     customApi.getNamespacedCustomObject.mockResolvedValue({
@@ -640,9 +644,11 @@ describe('HostReconciler ensureDeployment — idempotent replacement', () => {
 
     await reconciler.reconcile(stateless)
 
-    expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
-    const replacement = appsApi.replaceNamespacedDeployment.mock.calls[0][0]
-      .body as k8s.V1Deployment
+    const hostReplacements = appsApi.replaceNamespacedDeployment.mock.calls.filter(
+      ([request]) => request.name === stateful.name
+    )
+    expect(hostReplacements).toHaveLength(1)
+    const replacement = hostReplacements[0][0].body as k8s.V1Deployment
     expect(replacement.spec?.replicas).toBe(1)
     expect(replacement.spec?.template.spec?.priorityClassName).toBe('clerum-interactive-host')
     expect(
@@ -672,6 +678,17 @@ describe('HostReconciler stateless lifecycle — env injection', () => {
       status: { lifecycle: { state: 'active', wakeHandledGeneration: 0 } },
     })
 
+    // Model a genuinely new principal Deployment, then expose its created state.
+    let principalCreated = false
+    const readDeployment = appsApi.readNamespacedDeployment.getMockImplementation()!
+    appsApi.readNamespacedDeployment.mockImplementation(request => {
+      if (request.name === stateless.name && !principalCreated) return Promise.reject({ code: 404 })
+      return readDeployment(request)
+    })
+    appsApi.createNamespacedDeployment.mockImplementation(async request => {
+      if (request.body.metadata?.name === stateless.name) principalCreated = true
+      return request.body
+    })
     await reconciler.reconcile(stateless)
 
     const creates = appsApi.createNamespacedDeployment.mock.calls.filter(
@@ -938,7 +955,7 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
   it('propagates the principal Deployment mutation failure so lifecycle convergence can retry', async () => {
     const { reconciler, appsApi } = createReconciler()
     const failure = Object.assign(new Error('Deployment API unavailable'), { code: 503 })
-    appsApi.createNamespacedDeployment.mockImplementation(
+    appsApi.replaceNamespacedDeployment.mockImplementation(
       async ({ body }: { body: k8s.V1Deployment }) => {
         if (body.metadata?.name === 'stateless-host') throw failure
         return {}
@@ -948,12 +965,13 @@ describe('HostReconciler stateless lifecycle — rejection matrix', () => {
 
     try {
       await expect(reconciler.reconcile(makeStatelessHost())).rejects.toBe(failure)
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledOnce()
     } finally {
       errorSpy.mockRestore()
     }
   })
 
-  it('rechecks channel policy after a Deployment create conflict before replace', async () => {
+  it('rechecks channel policy when the Deployment existence read observes a late channel', async () => {
     let channelCount = 0
     let hostDeploymentReads = 0
     const { reconciler, appsApi, customApi } = createReconciler({

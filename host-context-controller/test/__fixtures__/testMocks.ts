@@ -131,11 +131,18 @@ function hccOwnedLabels(name = ''): Record<string, string> {
 export function createMockAppsApi(): MockAppsApi {
   return {
     createNamespacedDeployment: vi.fn().mockResolvedValue({}),
-    readNamespacedDeployment: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        status: { readyReplicas: 1 },
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedDeployment: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          status: { readyReplicas: 1 },
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     replaceNamespacedDeployment: vi.fn().mockResolvedValue({}),
     patchNamespacedDeployment: vi.fn().mockResolvedValue({}),
@@ -147,11 +154,18 @@ export function createMockAppsApi(): MockAppsApi {
 export function createMockCoreApi(): MockCoreApi {
   return {
     createNamespacedService: vi.fn().mockResolvedValue({}),
-    readNamespacedService: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-        spec: { clusterIP: '10.0.0.1' },
-      } as MockK8sResource)
+    readNamespacedService: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+          spec: { clusterIP: '10.0.0.1' },
+        } as MockK8sResource)
     ),
     listNamespacedService: vi.fn().mockResolvedValue({ items: [] }),
     replaceNamespacedService: vi.fn().mockResolvedValue({}),

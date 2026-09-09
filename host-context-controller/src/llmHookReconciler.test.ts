@@ -248,6 +248,9 @@ describe('LlmHookReconciler', () => {
   // ─── Dedup (§10) ───────────────────────────────────────────────────
 
   it('co-locates two same-pod-key hooks on ONE Deployment/Service', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: {
@@ -275,6 +278,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('distinct pod keys → two Deployments', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: { target: { image: { ref: IMG, port: 8080 } }, lifecyclePoints: ['preCall'] },
@@ -286,6 +292,9 @@ describe('LlmHookReconciler', () => {
     hooks.set('a', a)
     hooks.set('b', b)
     await reconciler.reconcile(a)
+    // The second pod key names a different absent workload.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcile(b)
     expect(new Set(deploymentNames(appsApi)).size).toBe(2)
   })
@@ -293,6 +302,9 @@ describe('LlmHookReconciler', () => {
   // ─── Path collision (§10) ──────────────────────────────────────────
 
   it('fails the path-collision loser closed while serving the winner', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const a = makeHook({
       name: 'a',
       spec: {
@@ -427,6 +439,9 @@ describe('LlmHookReconciler', () => {
   // ─── Concurrency (§10) ─────────────────────────────────────────────
 
   it('serializes concurrent reconciles of two CRs sharing a pod key', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     let inFlight = 0
     let maxInFlight = 0
     appsApi.createNamespacedDeployment.mockImplementation(async () => {
@@ -477,9 +492,13 @@ describe('LlmHookReconciler', () => {
         labels: { [MANAGED_BY_LABEL]: MANAGED_BY_VALUE, [HOOK_PODKEY_LABEL]: oldKey },
       },
     }
-    appsApi.readNamespacedDeployment.mockResolvedValue(ownedOld)
-    coreApi.readNamespacedService.mockResolvedValue(ownedOld)
-    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(ownedOld)
+    const readOld = async ({ name }: { name: string }) => {
+      if (name !== podKeyResourceName(oldKey)) throw { code: 404 }
+      return { ...ownedOld, metadata: { ...ownedOld.metadata, name } }
+    }
+    appsApi.readNamespacedDeployment.mockImplementation(readOld)
+    coreApi.readNamespacedService.mockImplementation(readOld)
+    networkingApi.readNamespacedNetworkPolicy.mockImplementation(readOld)
 
     await reconciler.reconcile(newHook, oldKey)
 
@@ -494,6 +513,9 @@ describe('LlmHookReconciler', () => {
   // ─── NetworkPolicy ingress reverse-index (§10) ─────────────────────
 
   it('NetworkPolicy ingress admits exactly the referencing Hosts', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // This scenario starts without a policy; the API reports absence explicitly.
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const a = makeHook({
@@ -519,6 +541,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('co-located members: NetworkPolicy label values are comma-free (member list is an annotation)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // This scenario starts without a policy; the API reports absence explicitly.
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     // Two hooks with the SAME image target share one pod key → one shared NP.
@@ -760,6 +785,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('hardens the hook pod: non-root, read-only root fs, dropped caps, no SA token (N8)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const a = makeHook({ name: 'a' })
     hooks.set('a', a)
     await reconciler.reconcile(a)
@@ -798,6 +826,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('grants scoped CoreDNS egress only when a hook declares egressBindings (N5)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // This scenario starts without a policy; the API reports absence explicitly.
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const withEgress = makeHook({
@@ -835,6 +866,9 @@ describe('LlmHookReconciler', () => {
   // "grants NO egress (not even DNS)" is what let namespace-wide DNS through
   // while the suite stayed green.
   it('declares no Egress in the per-pod-key policy for a pure responder (no egressBindings)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // This scenario starts without a policy; the API reports absence explicitly.
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const responder = makeHook({ name: 'resp' }) // default image, no egressBindings
@@ -849,6 +883,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('allows a valid public-CIDR egress binding as an Egress NetworkPolicy rule', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // This scenario starts without a policy; the API reports absence explicitly.
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
     const a = makeHook({
@@ -907,6 +944,9 @@ describe('LlmHookReconciler', () => {
   })
 
   it('writes conditions[] + observedDigest + readyReplicas for a ready image hook', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const digest = 'sha256:' + 'b'.repeat(64)
     coreApi.listNamespacedPod.mockResolvedValue({
       items: [

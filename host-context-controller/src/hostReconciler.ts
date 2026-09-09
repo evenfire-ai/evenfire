@@ -39,6 +39,7 @@ import {
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
+  createsTotal,
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
   hostFleetBenignSupersessionsTotal,
@@ -77,6 +78,7 @@ import {
   canonicalStringify,
   canonicalizeValue,
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   observeCreate,
   observeExistenceRead,
@@ -2496,50 +2498,40 @@ export class HostReconciler {
     }
   }
 
-  private async reconcileChannelReaderService(host: HostCRD): Promise<void> {
+  private async reconcileChannelReaderService(
+    host: HostCRD,
+    revalidate?: () => void
+  ): Promise<void> {
     const name = `channel-reader-${host.name}`
     const ns = config.channelsNamespace
     const service = this.buildChannelReaderService(host)
-
-    try {
-      await observeCreate('Service', () =>
-        this.coreApi.createNamespacedService({
-          namespace: ns,
-          body: service,
-        })
-      )
-      console.log(`[HostReconciler] Created channel-reader Service "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create channel-reader Service "${name}":`, err)
-        throw err
-      }
-      try {
-        await replaceWithConflictRetry({
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ name, namespace: ns })
+        ),
+      create: () =>
+        observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({ namespace: ns, body: service })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `channel-reader Service "${name}"`,
           logPrefix: '[HostReconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
-          read: () =>
-            observeExistenceRead('Service', () =>
-              this.coreApi.readNamespacedService({ name, namespace: ns })
-            ),
-          replace: body =>
-            this.coreApi.replaceNamespacedService({
-              name,
-              namespace: ns,
-              body,
-            }),
-        })
-      } catch (replaceErr) {
-        console.error(
-          `[HostReconciler] Failed to update channel-reader Service "${name}":`,
-          replaceErr
-        )
-        throw replaceErr
-      }
-    }
+          mutationAllowed,
+          read,
+          replace: body => this.coreApi.replaceNamespacedService({ name, namespace: ns, body }),
+        }),
+    })
   }
 
   /**
@@ -2550,73 +2542,62 @@ export class HostReconciler {
    *   clerum.io/credentials-revision pod template annotation, so the initial
    *   pod boots with the right hash and doesn't get rolled twice when
    *   SecretInformer fires later.
-   * - On 409 from create, compares a fresh, server-normalized Deployment and
+   * - Reads before creation and compares a server-normalized Deployment; it
    *   replaces only meaningful drift. Conflict retries rebuild against the
    *   latest live replica count. A Deployment owned by a different host is
    *   never overwritten: the initial read skips, and a retry-time ownership
    *   change throws so write_skips_total does not count the refusal as a
    *   healthy no-op.
    */
-  private async reconcileChannelReaderDeployment(host: HostCRD): Promise<void> {
+  private async reconcileChannelReaderDeployment(
+    host: HostCRD,
+    revalidate?: () => void
+  ): Promise<void> {
     const name = `channel-reader-${host.name}`
     const ns = config.channelsNamespace
-
     const revision = await this.computeChannelReaderRevisionForHost(host.name)
     const desired = this.buildChannelReaderDeployment(host, revision)
-
-    try {
-      await observeCreate('Deployment', () =>
-        this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
-      )
-      console.log(`[HostReconciler] Created channel-reader Deployment "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create channel-reader "${name}":`, err)
-        throw err
-      }
-      let existing: k8s.V1Deployment
-      try {
-        existing = await observeExistenceRead('Deployment', () =>
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ name, namespace: ns })
-        )
-      } catch (readErr) {
-        if (getErrorCode(readErr) === 404) {
-          console.warn(
-            `[HostReconciler] channel-reader "${name}" disappeared after create conflict; treating the reconcile as a transient failure`
-          )
-          throw readErr
+        ),
+      create: () =>
+        observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: async (read, observed) => {
+        // A post-create-conflict read still throws on 404. Later retry reads
+        // keep the existing benign-disappearance policy in the retry helper.
+        const existing = observed ?? (await read())
+        const ownerHost = existing.metadata?.labels?.[HOST_LABEL]
+        if (ownerHost && ownerHost !== host.name) {
+          log.warn('Channel-reader Deployment belongs to another Host; refusing update', { name })
+          return false
         }
-        console.error(`[HostReconciler] Failed to read channel-reader "${name}":`, readErr)
-        throw readErr
-      }
-      const ownerHost = existing.metadata?.labels?.[HOST_LABEL]
-      if (ownerHost && ownerHost !== host.name) {
-        console.warn(
-          `[HostReconciler] channel-reader "${name}" owned by host="${ownerHost}", skipping`
-        )
-        return
-      }
-      // The outer read above treats 404 as a transient throw so this Host
-      // reconcile requeues and recreates. The helper read below is the #472
-      // contract: 404 means gone, return, and the next Host reconcile
-      // recreates. Same object, two 404 policies — accepted, not a bug.
-      try {
+        // ensureResource already supplies a consume-once snapshot for the
+        // initial presence path. Only POST409 needs its owner-check read retained.
+        let snapshot: k8s.V1Deployment | undefined = observed === undefined ? existing : undefined
         await replaceWithConflictRetry({
           description: `channel-reader Deployment "${name}"`,
           logPrefix: '[HostReconciler]',
-          // B2: rebuild against each fresh read so an unsynced CC cache
-          // preserves the live replica count even after a 409 retry.
           body: this.buildChannelReaderDeployment(host, revision, existing.spec?.replicas),
-          read: () =>
-            observeExistenceRead('Deployment', () =>
-              this.appsApi.readNamespacedDeployment({ name, namespace: ns })
-            ),
-          replace: body =>
-            this.appsApi.replaceNamespacedDeployment({
-              name,
-              namespace: ns,
-              body,
-            }),
+          mutationAllowed,
+          read: () => {
+            if (snapshot !== undefined) {
+              const first = snapshot
+              snapshot = undefined
+              return Promise.resolve(first)
+            }
+            return read()
+          },
+          replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace: ns, body }),
           mergeExisting: (_body, fresh) => {
             const desiredWithLiveReplicas = this.buildChannelReaderDeployment(
               host,
@@ -2631,9 +2612,6 @@ export class HostReconciler {
           },
           validateExisting: fresh => {
             const freshOwnerHost = fresh.metadata?.labels?.[HOST_LABEL]
-            // Never replace an object whose ownership changed during a retry.
-            // Veto here — not via isUpToDate — so write_skips_total stays a
-            // genuine no-op count.
             if (freshOwnerHost && freshOwnerHost !== host.name) {
               throw new Error(
                 `channel-reader Deployment ownership changed to host "${freshOwnerHost}"; refusing replace`
@@ -2642,11 +2620,8 @@ export class HostReconciler {
           },
           isUpToDate: deploymentMatchesDesired,
         })
-      } catch (replaceErr) {
-        console.error(`[HostReconciler] Failed to update channel-reader "${name}":`, replaceErr)
-        throw replaceErr
-      }
-    }
+      },
+    })
   }
 
   /**
@@ -3375,18 +3350,33 @@ export class HostReconciler {
     }
   }
 
-  private async ensureService(host: HostCRD): Promise<void> {
+  private async ensureService(host: HostCRD, revalidate?: () => void): Promise<void> {
     const service = this.buildService(host)
-    try {
-      await observeCreate('Service', () =>
-        this.coreApi.createNamespacedService({
-          namespace: host.namespace,
-          body: service,
-        })
-      )
-      console.log(`[HostReconciler] Created Service "${host.name}"`)
-    } catch (error) {
-      if (getErrorCode(error) === 409) {
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    // Initial read errors propagate. Only the existing POST/convergence paths
+    // retain their historical non-throwing failures.
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ namespace: host.namespace, name: host.name })
+        ),
+      create: async () => {
+        try {
+          await observeCreate('Service', () =>
+            this.coreApi.createNamespacedService({ namespace: host.namespace, body: service })
+          )
+        } catch (error) {
+          if (isBenignSupersessionError(error) || (error != null && getErrorCode(error) === 409))
+            throw error
+          log.error('Failed to create Host Service', { host: host.name, err: error })
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      converge: async read => {
         try {
           await replaceWithConflictRetry({
             description: `Service "${host.name}"`,
@@ -3394,13 +3384,8 @@ export class HostReconciler {
             body: service,
             mergeExisting: preserveServiceAssignedFields,
             isUpToDate: serviceMatchesDesired,
-            read: () =>
-              observeExistenceRead('Service', () =>
-                this.coreApi.readNamespacedService({
-                  namespace: host.namespace,
-                  name: host.name,
-                })
-              ),
+            mutationAllowed,
+            read,
             replace: body =>
               this.coreApi.replaceNamespacedService({
                 namespace: host.namespace,
@@ -3408,13 +3393,13 @@ export class HostReconciler {
                 body,
               }),
           })
-        } catch (updateError) {
-          console.error(`[HostReconciler] Failed to update Service "${host.name}":`, updateError)
+        } catch (error) {
+          if (isBenignSupersessionError(error)) throw error
+          log.error('Failed to update Host Service', { host: host.name, err: error })
+          return false
         }
-      } else {
-        console.error(`[HostReconciler] Failed to create Service "${host.name}":`, error)
-      }
-    }
+      },
+    })
   }
 
   private async ensureDeployment(
@@ -3422,7 +3407,8 @@ export class HostReconciler {
     mounts: ResolvedSfsMount[],
     runtimeTokenRevision: string,
     lifecycle?: EffectiveHostLifecycle,
-    resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>
+    resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>,
+    revalidate?: () => void
   ): Promise<void> {
     const buildDesiredDeployment = async (): Promise<k8s.V1Deployment> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
@@ -3433,47 +3419,43 @@ export class HostReconciler {
         state?.lifecycle ?? lifecycle
       )
     }
-    const deployment = await buildDesiredDeployment()
-    try {
-      await observeCreate('Deployment', () =>
-        this.appsApi.createNamespacedDeployment({
-          namespace: host.namespace,
-          body: deployment,
-        })
-      )
-      console.log(`[HostReconciler] Created Deployment "${host.name}"`)
-    } catch (error) {
-      if (getErrorCode(error) !== 409) {
-        console.error(`[HostReconciler] Failed to create Deployment "${host.name}":`, error)
-        throw error
-      }
-      try {
-        await replaceWithConflictRetry({
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ namespace: host.namespace, name: host.name })
+        ),
+      create: async () => {
+        // The initial GET may outlive the lifecycle or token-scope observation.
+        const deployment = await buildDesiredDeployment()
+        revalidate?.()
+        return observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
+        )
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `Deployment "${host.name}"`,
           logPrefix: '[HostReconciler]',
-          body: deployment,
+          body: this.buildDeployment(host, mounts, runtimeTokenRevision, lifecycle),
           resolveBody: buildDesiredDeployment,
           mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
-          read: () =>
-            observeExistenceRead('Deployment', () =>
-              this.appsApi.readNamespacedDeployment({
-                namespace: host.namespace,
-                name: host.name,
-              })
-            ),
+          mutationAllowed,
+          read,
           replace: body =>
             this.appsApi.replaceNamespacedDeployment({
               namespace: host.namespace,
               name: host.name,
               body,
             }),
-        })
-      } catch (updateError) {
-        console.error(`[HostReconciler] Failed to update Deployment "${host.name}":`, updateError)
-        throw updateError
-      }
-    }
+        }),
+    })
   }
 
   private async deleteRuntimeResources(name: string, namespace: string): Promise<void> {
@@ -4426,7 +4408,7 @@ export class HostReconciler {
     revalidateHostMutationBoundary()
     await this.ensurePvc(host)
     revalidateHostMutationBoundary()
-    await this.ensureService(host)
+    await this.ensureService(host, revalidateHostMutationBoundary)
 
     // NetworkPolicies before Deployments. Calico/Cilium evaluate egress and
     // ingress against the policies that exist when the connection is opened,
@@ -4576,7 +4558,8 @@ export class HostReconciler {
       mounts,
       runtimeTokenProvision.revision,
       lifecycle.effective,
-      resolveDeploymentState
+      resolveDeploymentState,
+      revalidateHostMutationBoundary
     )
     revalidateHostMutationBoundary()
 
@@ -4619,8 +4602,8 @@ export class HostReconciler {
     // expected error path — not just defense in depth.
     const channelReaderFailures: unknown[] = []
     for (const reconcileResource of [
-      () => this.reconcileChannelReaderService(host),
-      () => this.reconcileChannelReaderDeployment(host),
+      () => this.reconcileChannelReaderService(host, revalidateHostMutationBoundary),
+      () => this.reconcileChannelReaderDeployment(host, revalidateHostMutationBoundary),
     ]) {
       try {
         revalidateHostMutationBoundary()
