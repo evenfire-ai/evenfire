@@ -16590,3 +16590,82 @@ pre {
   border-color: rgba(var(--danger-rgb), 0.25);
   color: var(--danger);
 }
+
+/* ==========================================================================
+   F2 · Shell — VS Code app frame
+   Structural surfaces (title bar / activity bar / sidebar / editor) read as
+   flat zones with a single crisp 1px separation border, no translucent "glass"
+   edges or backdrop blur. This block lands last so it wins by source order over
+   the earlier per-surface declarations it supersedes.
+   ========================================================================== */
+
+/* --- Zone separation: one solid 1px border, no backdrop blur ------------- */
+.window-titlebar {
+  border-bottom: 1px solid var(--zone-border);
+}
+
+.left-nav {
+  border-right: 1px solid var(--zone-border);
+  /* Structural zone: drop the .glass-card blur so the sidebar reads as an
+     opaque VS Code activity-bar surface, not a frosted overlay. */
+  backdrop-filter: none;
+}
+
+/* --- Title bar command center: fixed-width pill, centered VS Code style --- */
+.window-titlebar__actions .top-bar {
+  position: relative;
+  justify-content: center;
+}
+
+.window-titlebar__actions .header-left {
+  flex: 0 0 auto;
+  justify-content: center;
+}
+
+/* Utilities (notification bell) pin to the right edge while the search pill
+   stays centered in the action strip. */
+.window-titlebar__actions .header-utilities {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.window-titlebar__actions .global-search {
+  --global-search-expanded: var(--titlebar-search-width);
+  flex: 0 0 auto;
+  width: var(--titlebar-search-width);
+  max-width: 100%;
+  margin-right: 0;
+}
+
+.window-titlebar__actions .global-search:focus-within,
+.window-titlebar__actions .global-search.is-open {
+  width: var(--titlebar-search-width);
+}
+
+/* --- Windows/Linux close control: red destructive hover ------------------ */
+.window-titlebar--platform-windows .window-control-button--close:hover:enabled,
+.window-titlebar--platform-linux .window-control-button--close:hover:enabled {
+  background: var(--window-control-close-hover-bg);
+  border-color: var(--window-control-close-hover-bg);
+  color: var(--window-control-close-hover-ink);
+}
+
+/* --- Sidebar: accent bar on the active item (expanded AND collapsed) ------ */
+/* VS Code marks the active destination with a 2px vertical accent bar at the
+   left edge, in both the labeled list (328px) and the icon-only activity bar
+   (74px). Anchors to .nav-link (position: relative); the active class sits on
+   the row wrapper for Chat/Apps and on the bare row otherwise. */
+.nav-link.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 60%;
+  border-radius: var(--radius-xs);
+  background: var(--accent);
+  pointer-events: none;
+}

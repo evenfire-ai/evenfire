@@ -180,6 +180,17 @@
   --titlebar-control-ink: #ffffff;
   --titlebar-control-border: rgba(255, 255, 255, 0.3);
   --titlebar-control-surface: rgb(var(--panel-rgb));
+  /* VS Code command center: a fixed-width pill centered in the title bar. */
+  --titlebar-search-width: 320px;
+  /* Close-control hover is the one destructive window control — a solid red
+     hover on Windows/Linux (mac keeps its own traffic-light styling). The red
+     signal reads on both themes, so it lives in the shared root block. */
+  --window-control-close-hover-bg: #e81123;
+  --window-control-close-hover-ink: #ffffff;
+  /* Flat 1px zone-separation border between structural surfaces (title bar /
+     activity bar / sidebar / editor). Solid, not translucent, so the boundary
+     stays crisp like VS Code instead of bleeding the zone color through. */
+  --zone-border: #26282c;
 
   /* chat-view session tabs (Chrome-style: shrink to a floor, cap at a ceiling) */
   --chat-tab-max: 220px;
@@ -307,4 +318,5 @@
   --titlebar-control-ink: #000000;
   --titlebar-control-border: rgba(var(--overlay-rgb), 0.3);
   --titlebar-control-surface: rgb(var(--panel-rgb));
+  --zone-border: #d3ddef;
 }
