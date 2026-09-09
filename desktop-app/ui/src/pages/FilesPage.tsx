@@ -8,6 +8,13 @@ import {
   useState,
 } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
+  GFS_UPLOAD_NAME_RETRY_LIMIT,
+  createGfsUploadNameReservationBook,
+  gfsUploadNameRetryDecision,
+  normalizeGfsResourceName,
+} from '@clerum/gfs-interaction-policy'
 import { Badge, Button, EmptyState, IconButton, StatusBanner, TextInput } from '@components/Common'
 import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsFileIcon } from '@components/GfsFileIcon'
@@ -46,7 +53,6 @@ import {
 } from '@/gfs/delegation'
 import { GfsFilePicker } from '@/gfs/filePicker'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
-import { nextAvailableGfsResourceName, normalizeGfsResourceName } from '@/gfs/resourceName'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type {
   FilesPageProps,
@@ -125,37 +131,6 @@ function mergeErrorMessages(...errors: unknown[]): string | null {
   const messages = errors.map(pickErrorMessage).filter((value): value is string => Boolean(value))
   return messages.length > 0 ? messages.join(' · ') : null
 }
-
-function isGfsNameConflict(error: unknown): boolean {
-  const details =
-    error && typeof error === 'object'
-      ? (error as {
-          status?: unknown
-          bodyText?: unknown
-          message?: unknown
-          response?: { status?: unknown }
-        })
-      : null
-  const status = details?.status ?? details?.response?.status
-  if (status === 409 || status === '409') return true
-
-  const messageParts = details
-    ? [details.message, details.bodyText].filter(value => value != null).map(String)
-    : []
-  const message =
-    error instanceof Error
-      ? error.message
-      : messageParts.length > 0
-        ? messageParts.join(' ')
-        : String(error)
-  return (
-    /\b409\b[\s\S]*\bconflict\b/i.test(message) ||
-    /\bconflict\b[\s\S]*\b409\b/i.test(message) ||
-    /\b(?:already exists|duplicate|name[_ ]?conflict|resource[_ ]?exists)\b/i.test(message)
-  )
-}
-
-const GFS_UPLOAD_NAME_RETRY_LIMIT = 100
 
 /** Any row/header action target — a listing row (GfsDriveResource) or the
  *  current breadcrumb (GfsCrumb); both carry the identity fields the delete /
@@ -262,7 +237,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const dragSessionRef = useRef(0)
   const manageReturnCrumbsRef = useRef<GfsCrumb[] | null>(null)
   const uploadInputRef = useRef<HTMLInputElement | null>(null)
-  const uploadNameReservationsRef = useRef(new Map<string, Set<string>>())
+  const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const createFolderTitleId = useId()
   const createFolderDescriptionId = useId()
   const createFolderInputId = useId()
@@ -652,43 +627,41 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     occupiedNames = new Set(items.map(item => item.name))
   ) => {
     if (!file || !parentResourceId) return
-    const attemptedNames = new Set<string>()
     try {
       assertGfsFileUploadSize(file.size)
       const normalizedName = await normalizeGfsResourceName(file.name)
       const filePath = window.clerum.gfs.getPathForFile(file)
       if (!filePath) throw new Error('Could not resolve the selected local file')
+      const nameReservation = uploadNameReservationsRef.current.begin(
+        parentResourceId,
+        normalizedName,
+        occupiedNames
+      )
+      try {
+        for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+          const name = nameReservation.reserveNext()
 
-      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
-        const reservations =
-          uploadNameReservationsRef.current.get(parentResourceId) ?? new Set<string>()
-        uploadNameReservationsRef.current.set(parentResourceId, reservations)
-        const name = nextAvailableGfsResourceName(normalizedName, [
-          ...occupiedNames,
-          ...reservations,
-        ])
-        reservations.add(name)
-        attemptedNames.add(name)
+          try {
+            await ctrl.createFileFromPath(parentResourceId, name, filePath)
+            nameReservation.markSuccess(name)
+            pushToast?.(`Uploaded ${name}`, 'success')
+            return
+          } catch (uploadError) {
+            const decision = gfsUploadNameRetryDecision(uploadError, { attempt })
+            if (decision === 'terminal') throw uploadError
 
-        try {
-          await ctrl.createFileFromPath(parentResourceId, name, filePath)
-          occupiedNames.add(name)
-          pushToast?.(`Uploaded ${name}`, 'success')
-          return
-        } catch (uploadError) {
-          if (!isGfsNameConflict(uploadError)) throw uploadError
-          occupiedNames.add(name)
+            nameReservation.markConflict(name)
+            if (decision === 'exhausted') throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+          }
         }
-      }
 
-      throw new Error('Could not create a unique GFS resource name.')
+        throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+      } finally {
+        nameReservation.release()
+      }
     } catch (uploadError) {
       if (failClosedOnAuthorizationError(uploadError)) return
       pushToast?.(uploadError instanceof Error ? uploadError.message : String(uploadError), 'error')
-    } finally {
-      const reservations = uploadNameReservationsRef.current.get(parentResourceId)
-      for (const name of attemptedNames) reservations?.delete(name)
-      if (reservations?.size === 0) uploadNameReservationsRef.current.delete(parentResourceId)
     }
   }
 

@@ -4,7 +4,7 @@ import {
   GFS_RESOURCE_NAME_MAX_LENGTH,
   nextAvailableGfsResourceName,
   normalizeGfsResourceName,
-} from '../resourceName'
+} from '@clerum/gfs-interaction-policy'
 
 const HASH_LENGTH = 12
 const EXTENSION_MAX_LENGTH = 48

@@ -1,6 +1,9 @@
 import { type Locator, type Page, expect, test } from '@playwright/test'
+import {
+  GFS_RESOURCE_NAME_MAX_LENGTH,
+  normalizeGfsResourceName,
+} from '@clerum/gfs-interaction-policy'
 import { getGfsChildResourceSummary, uniqueGfsFixtureName } from '../../../tests/e2e/gfsUiFixtures'
-import { GFS_RESOURCE_NAME_MAX_LENGTH, normalizeGfsResourceName } from '../../lib/gfsResourceName'
 
 type GfsCrudFixture = {
   childName: string

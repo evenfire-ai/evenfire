@@ -1,5 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { normalizeGfsResourceName } from '@clerum/gfs-interaction-policy'
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
@@ -22,7 +23,6 @@ import {
   normalizeUploadProductMaxBytes,
   uploadGfsFile,
 } from '@lib/gfsFileUpload'
-import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { GfsBrowser } from '../GfsBrowser'
 import { ToastProvider } from '../Toast'
 
@@ -139,7 +139,24 @@ describe('GfsBrowser', () => {
     mockPutGfsGrant.mockReset()
     mockGfsDownload.mockReset()
     mockGfsFetchFileBlob.mockReset()
-    mockCreateGfsUploadJob.mockClear()
+    mockCreateGfsUploadJob.mockReset()
+    mockCreateGfsUploadJob.mockImplementation(
+      (input: { file: File; onState?: (snapshot: unknown) => void }) => ({
+        start: vi.fn(async () => {
+          input.onState?.({
+            state: 'completed',
+            session: { uploadId: 'test-upload', state: 'completed' },
+            uploadedBytes: input.file.size,
+            totalBytes: input.file.size,
+          })
+          return { state: 'completed', uploadId: 'test-upload' }
+        }),
+        pause: vi.fn(),
+        resume: vi.fn(),
+        cancel: vi.fn(),
+        snapshot: vi.fn(() => ({ state: 'failed' })),
+      })
+    )
     mockUploadGfsFile.mockReset()
     window.localStorage.clear()
     mockUploadGfsFile.mockImplementation(async ({ file }: { file: File }) => {
@@ -180,6 +197,10 @@ describe('GfsBrowser', () => {
     })
     mockGetGfsGrants.mockResolvedValue({ items: [] })
     mockGetGfsShares.mockResolvedValue({ items: [] })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
   })
 
   it('loads the root tree and renders directories + files', async () => {
@@ -525,11 +546,119 @@ describe('GfsBrowser', () => {
     })
   })
 
-  it('retries a stale duplicate conflict with the next available name', async () => {
+  it('retries the real Upload v2 409 producer error with the next available name', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'
     mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
-    const failedJob = {
+    const actualUpload =
+      await vi.importActual<typeof import('@lib/gfsFileUpload')>('@lib/gfsFileUpload')
+    const producerErrors: unknown[] = []
+    const uploadNames: string[] = []
+    const session = {
+      uploadId: 'producer-upload',
+      drive: 'main',
+      operation: 'create' as const,
+      expectedBytes: 0,
+      partBytes: 1,
+      partCount: 0,
+      state: 'initiated',
+      committedBytes: 0,
+      committedPartCount: 0,
+      activePartCount: 0,
+    }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url.endsWith('/api/v1/gfs/proxy/v1/capabilities')) {
+        return new Response(
+          JSON.stringify({
+            upload: {
+              resumableV2: {
+                enabled: true,
+                maxFileBytes: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES,
+                preferredChunkBytes: 1,
+                maxChunkBytes: 1,
+              },
+            },
+          }),
+          { status: 200 }
+        )
+      }
+      if (method === 'POST' && url.endsWith('/api/v1/gfs/proxy/v1/uploads')) {
+        const body = JSON.parse(String(init?.body)) as { name: string }
+        uploadNames.push(body.name)
+        if (uploadNames.length === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: { code: 'conflict', message: 'resource already exists' },
+            }),
+            { status: 409, statusText: 'Conflict' }
+          )
+        }
+        return new Response(JSON.stringify({ ok: true, data: session }), { status: 201 })
+      }
+      if (
+        method === 'POST' &&
+        url.endsWith(`/api/v1/gfs/proxy/v1/uploads/${session.uploadId}/complete`)
+      ) {
+        return new Response(
+          JSON.stringify({ ok: true, data: { ...session, state: 'completed' } }),
+          { status: 200 }
+        )
+      }
+      throw new Error(`Unexpected producer request: ${method} ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    mockCreateGfsUploadJob.mockImplementation(input => {
+      const job = actualUpload.createGfsUploadJob(input)
+      return {
+        start: async () => {
+          try {
+            return await job.start()
+          } catch (error) {
+            producerErrors.push(error)
+            throw error
+          }
+        },
+        pause: job.pause.bind(job),
+        resume: job.resume.bind(job),
+        cancel: job.cancel.bind(job),
+        snapshot: job.snapshot.bind(job),
+      }
+    })
+    renderBrowser()
+    await screen.findByText('No resources are visible in this folder.')
+
+    fireEvent.click(screen.getByRole('button', { name: /upload file/i }))
+    const uploadDialog = await screen.findByRole('dialog', { name: 'Upload file' })
+    fireEvent.change(within(uploadDialog).getByLabelText('Choose file to upload'), {
+      target: { files: [new File([], 'report.txt', { type: 'text/plain' })] },
+    })
+    fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
+
+    await waitFor(() => {
+      expect(uploadNames).toEqual(['report.txt', 'report (1).txt'])
+    })
+    const conflict = producerErrors[0] as Error & { status?: number; code?: string }
+    expect(conflict).toBeInstanceOf(Error)
+    expect(conflict.message).toBe('409 resource already exists')
+    expect(conflict.status).toBe(409)
+    expect(conflict.code).toBe('conflict')
+    expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        name: 'report (1).txt',
+        target: { operation: 'create', parentRid: rootRid },
+      })
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Upload file' })).toBeNull())
+  })
+
+  it('keeps the legacy Electron conflict string as a separate compatibility path', async () => {
+    const rootId = '11111111-1111-1111-1111-111111111111'
+    mockApiGet.mockResolvedValue({ rootResourceId: rootId, items: [], nextCursor: null })
+    mockCreateGfsUploadJob.mockImplementationOnce(() => ({
       start: vi
         .fn()
         .mockRejectedValue(
@@ -541,8 +670,7 @@ describe('GfsBrowser', () => {
       resume: vi.fn(),
       cancel: vi.fn(),
       snapshot: vi.fn(() => ({ state: 'failed' })),
-    }
-    mockCreateGfsUploadJob.mockImplementationOnce(() => failedJob)
+    }))
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
 
@@ -554,20 +682,11 @@ describe('GfsBrowser', () => {
     fireEvent.click(within(uploadDialog).getByRole('button', { name: 'Upload' }))
 
     await waitFor(() => {
-      expect(mockCreateGfsUploadJob).toHaveBeenCalledTimes(2)
-      expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({ name: 'report.txt' })
-      )
       expect(mockCreateGfsUploadJob).toHaveBeenNthCalledWith(
         2,
-        expect.objectContaining({
-          name: 'report (1).txt',
-          target: { operation: 'create', parentRid: rootRid },
-        })
+        expect.objectContaining({ name: 'report (1).txt' })
       )
     })
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Upload file' })).toBeNull())
   })
 
   it('moves a dragged file into a visible folder without treating it as an upload', async () => {

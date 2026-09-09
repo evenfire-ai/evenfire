@@ -13157,9 +13157,9 @@ button.cu-gfs-tree__button:focus-visible,
   overflow: hidden;
   margin: 0;
   color: var(--cu-text);
-  font-size: 1.25rem;
-  font-weight: 600;
-  line-height: 1.25;
+  font-size: var(--cu-font-size-2xl);
+  font-weight: var(--cu-font-weight-semibold);
+  line-height: var(--cu-line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -13192,7 +13192,7 @@ button.cu-gfs-tree__button:focus-visible,
   gap: var(--cu-space-2);
   padding: 0 var(--cu-space-5) var(--cu-space-3);
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
 }
 
 .cu-gfs-move-dialog__location-pill {
@@ -13217,7 +13217,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-move-dialog__location-pill strong {
   min-width: 0;
   overflow: hidden;
-  font-weight: 500;
+  font-weight: var(--cu-font-weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -13234,8 +13234,8 @@ button.cu-gfs-tree__button:focus-visible,
   border-top: 1px solid var(--cu-border-subtle);
   border-bottom: 1px solid var(--cu-border-subtle);
   color: var(--cu-text);
-  font-size: 0.8125rem;
-  font-weight: 600;
+  font-size: var(--cu-font-size-sm);
+  font-weight: var(--cu-font-weight-semibold);
 }
 
 .cu-gfs-move-dialog__tree {
@@ -13344,8 +13344,8 @@ button.cu-gfs-tree__button:focus-visible,
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  font-size: 0.8125rem;
-  font-weight: 500;
+  font-size: var(--cu-font-size-sm);
+  font-weight: var(--cu-font-weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -13373,7 +13373,7 @@ button.cu-gfs-tree__button:focus-visible,
 .cu-gfs-move-dialog__notice {
   margin: var(--cu-space-2);
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
 }
 
 .cu-gfs-move-dialog__load-more.cu-btn {
@@ -13396,14 +13396,14 @@ button.cu-gfs-tree__button:focus-visible,
   flex: 1 1 auto;
   overflow: hidden;
   color: var(--cu-text-soft);
-  font-size: 0.8125rem;
+  font-size: var(--cu-font-size-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .cu-gfs-move-dialog__selection strong {
   color: var(--cu-text);
-  font-weight: 600;
+  font-weight: var(--cu-font-weight-semibold);
 }
 
 .cu-gfs-move-dialog__actions {

@@ -5,38 +5,17 @@ import { IconFolder } from '@components/Sidebar/icons'
 import { IconCheck, IconChevronRight, IconX } from '@components/icons'
 import { Button } from '@components/ui'
 import { apiGet } from '@lib/api'
+import type {
+  GfsMoveDialogProps,
+  MoveFolder,
+  MoveTreeFolderProps,
+  MoveTreePage,
+  SelectedMoveDestination,
+} from './types'
+
+export type { GfsMoveDialogProps } from './types'
 
 const DRIVE = 'main'
-
-type MoveFolder = {
-  resourceId: string
-  name: string
-  kind: string
-  /** Present on browser rows — used to refuse a no-op move into the folder
-   * that already contains the target. */
-  parentResourceId?: string | null
-}
-
-type MoveCrumb = {
-  id: string | null
-  name: string
-}
-
-type TreePage = {
-  rootResourceId?: string
-  items: MoveFolder[]
-  nextCursor: string | null
-}
-
-type SelectedDestination = Pick<MoveFolder, 'resourceId' | 'name'>
-
-export type GfsMoveDialogProps = {
-  target: MoveFolder
-  initialCrumbs: MoveCrumb[]
-  busy?: boolean
-  onClose: () => void
-  onMove: (destinationId: string, destinationName: string) => Promise<void>
-}
 
 function foldersOnly(items: MoveFolder[], excludedIds: ReadonlySet<string>): MoveFolder[] {
   return items
@@ -48,17 +27,6 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-type TreeFolderProps = {
-  ancestors: ReadonlySet<string>
-  expandedIds: ReadonlySet<string>
-  folder: MoveFolder
-  level: number
-  selected: SelectedDestination | null
-  targetId: string
-  onSelect: (folder: MoveFolder) => void
-  onToggle: (folderId: string) => void
-}
-
 function TreeFolder({
   ancestors,
   expandedIds,
@@ -68,7 +36,7 @@ function TreeFolder({
   targetId,
   onSelect,
   onToggle,
-}: TreeFolderProps) {
+}: MoveTreeFolderProps) {
   const expanded = expandedIds.has(folder.resourceId)
   const [children, setChildren] = useState<MoveFolder[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -95,7 +63,7 @@ function TreeFolder({
       const page = (await apiGet(
         `/api/v1/gfs/resources/${encodeURIComponent(folder.resourceId)}/children`,
         query
-      )) as TreePage
+      )) as MoveTreePage
       setChildren(previous => (cursor ? [...previous, ...page.items] : page.items))
       setNextCursor(page.nextCursor)
       setLoaded(true)
@@ -217,7 +185,7 @@ export function GfsMoveDialog({
         ? DRIVE
         : currentParent.name
       : null
-  const [selected, setSelected] = useState<SelectedDestination | null>(null)
+  const [selected, setSelected] = useState<SelectedMoveDestination | null>(null)
   const [expandedIds, setExpandedIds] = useState<Set<string>>(
     () => new Set(initialCrumbs.flatMap(crumb => (crumb.id ? [crumb.id] : [])))
   )
@@ -234,7 +202,7 @@ export function GfsMoveDialog({
     try {
       const query: Record<string, string> = { drive: DRIVE }
       if (cursor) query.cursor = cursor
-      const page = (await apiGet('/api/v1/gfs/tree', query)) as TreePage
+      const page = (await apiGet('/api/v1/gfs/tree', query)) as MoveTreePage
       setRootFolders(previous => (cursor ? [...previous, ...page.items] : page.items))
       if (page.rootResourceId) setRootResourceId(page.rootResourceId)
       setNextCursor(page.nextCursor)

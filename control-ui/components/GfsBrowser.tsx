@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
+  GFS_UPLOAD_NAME_RETRY_LIMIT,
+  createGfsUploadNameReservationBook,
+  gfsUploadNameRetryDecision,
+  normalizeGfsResourceName,
+} from '@clerum/gfs-interaction-policy'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
@@ -37,7 +44,6 @@ import {
 } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { nextAvailableGfsResourceName, normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
@@ -195,38 +201,6 @@ function isEventFromNestedInteractive(
   )
 }
 
-function isGfsNameConflict(error: unknown): boolean {
-  const details =
-    error && typeof error === 'object'
-      ? (error as {
-          status?: unknown
-          bodyText?: unknown
-          message?: unknown
-          code?: unknown
-          response?: { status?: unknown }
-        })
-      : null
-  const status = details?.status ?? details?.response?.status
-  if (status === 409 || status === '409') return true
-
-  const messageParts = details
-    ? [details.message, details.bodyText, details.code].filter(value => value != null).map(String)
-    : []
-  const message =
-    error instanceof Error
-      ? error.message
-      : messageParts.length > 0
-        ? messageParts.join(' ')
-        : String(error)
-  return (
-    /\b409\b[\s\S]*\bconflict\b/i.test(message) ||
-    /\bconflict\b[\s\S]*\b409\b/i.test(message) ||
-    /\b(?:already exists|duplicate|name[_ ]?conflict|resource[_ ]?exists)\b/i.test(message)
-  )
-}
-
-const GFS_UPLOAD_NAME_RETRY_LIMIT = 100
-
 export function GfsBrowser(): React.JSX.Element {
   const { showToast } = useToast()
   const [crumbs, setCrumbs] = useState<Crumb[]>([{ id: null, rid: null, name: '/' }])
@@ -250,7 +224,7 @@ export function GfsBrowser(): React.JSX.Element {
   const [uploadCandidate, setUploadCandidate] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const uploadJobRef = useRef<GfsUploadJob | null>(null)
-  const uploadNameReservationsRef = useRef(new Map<string, Set<string>>())
+  const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadJobSnapshot | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
@@ -777,7 +751,6 @@ export function GfsBrowser(): React.JSX.Element {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid || !file) return
     setUploading(true)
-    const attemptedNames = new Set<string>()
     let resumeUploadId: string | undefined
     let legacyFallbackAnnounced = false
     try {
@@ -785,105 +758,107 @@ export function GfsBrowser(): React.JSX.Element {
       const normalizedName = await normalizeGfsResourceName(file.name)
       const target = { operation: 'create' as const, parentRid: rid }
       resumeUploadId = matchingPendingResumeUploadId(file, target, normalizedName)
+      const nameReservation = uploadNameReservationsRef.current.begin(
+        rid,
+        normalizedName,
+        occupiedNames
+      )
+      try {
+        for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+          const resumeUploadIdForAttempt = attempt === 0 ? resumeUploadId : undefined
+          const name = nameReservation.reserveNext({ exact: Boolean(resumeUploadIdForAttempt) })
 
-      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
-        const reservations = uploadNameReservationsRef.current.get(rid) ?? new Set<string>()
-        uploadNameReservationsRef.current.set(rid, reservations)
-        const name = resumeUploadId
-          ? normalizedName
-          : nextAvailableGfsResourceName(normalizedName, [...occupiedNames, ...reservations])
-        reservations.add(name)
-        attemptedNames.add(name)
-        const resumeUploadIdForAttempt = attempt === 0 ? resumeUploadId : undefined
-
-        try {
           try {
-            const job = createGfsUploadJob({
-              file,
-              name,
-              target,
-              resumeUploadId: resumeUploadIdForAttempt,
-              onPersistPending: record => {
-                persistPendingGfsUpload({
-                  idempotencyKey: record.idempotencyKey,
-                  fileName: record.fileName,
-                  fileSize: record.fileSize,
-                  lastModified: record.lastModified,
-                  target: record.target,
-                  name: record.name,
-                })
-              },
-              onProgress: progress => mergeUploadProgress(progress.uploadedBytes),
-              onState: snapshot => mergeUploadSnapshot(snapshot),
-              onPersist: record => {
-                persistPendingGfsUpload({
-                  uploadId: record.uploadId,
-                  fileName: record.fileName,
-                  fileSize: record.fileSize,
-                  lastModified: record.lastModified,
-                  target: record.target,
-                  name: record.name,
-                })
-              },
-              onClearPersisted: uploadId => clearPendingGfsUpload(uploadId),
-            })
-            uploadJobRef.current = job
-            const receipt = await job.start()
-            if (receipt.state === 'paused') {
-              setUploading(false)
-              return
-            }
-          } catch (err) {
-            if (!(err instanceof GfsUploadCapabilityError) || !err.allowLegacyFallback) throw err
-            if (resumeUploadIdForAttempt) {
-              throw new GfsUploadCapabilityError(
-                'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
-                { cause: err }
-              )
-            }
-            if (!legacyFallbackAnnounced) {
-              showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
-                tone: 'info',
+            try {
+              const job = createGfsUploadJob({
+                file,
+                name,
+                target,
+                resumeUploadId: resumeUploadIdForAttempt,
+                onPersistPending: record => {
+                  persistPendingGfsUpload({
+                    idempotencyKey: record.idempotencyKey,
+                    fileName: record.fileName,
+                    fileSize: record.fileSize,
+                    lastModified: record.lastModified,
+                    target: record.target,
+                    name: record.name,
+                  })
+                },
+                onProgress: progress => mergeUploadProgress(progress.uploadedBytes),
+                onState: snapshot => mergeUploadSnapshot(snapshot),
+                onPersist: record => {
+                  persistPendingGfsUpload({
+                    uploadId: record.uploadId,
+                    fileName: record.fileName,
+                    fileSize: record.fileSize,
+                    lastModified: record.lastModified,
+                    target: record.target,
+                    name: record.name,
+                  })
+                },
+                onClearPersisted: uploadId => clearPendingGfsUpload(uploadId),
               })
-              legacyFallbackAnnounced = true
+              uploadJobRef.current = job
+              const receipt = await job.start()
+              if (receipt.state === 'paused') {
+                setUploading(false)
+                return
+              }
+            } catch (err) {
+              if (!(err instanceof GfsUploadCapabilityError) || !err.allowLegacyFallback) throw err
+              if (resumeUploadIdForAttempt) {
+                throw new GfsUploadCapabilityError(
+                  'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+                  { cause: err }
+                )
+              }
+              if (!legacyFallbackAnnounced) {
+                showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
+                  tone: 'info',
+                })
+                legacyFallbackAnnounced = true
+              }
+              await uploadGfsFileLegacy({ file, name, target })
+              clearPendingGfsUpload()
+              setUploadCandidate(null)
+              setUploadOpen(false)
+              setUploadSnapshot(null)
+              uploadJobRef.current = null
             }
-            await uploadGfsFileLegacy({ file, name, target })
-            clearPendingGfsUpload()
+
+            nameReservation.markSuccess(name)
+            showToast('File uploaded.', { tone: 'success' })
             setUploadCandidate(null)
             setUploadOpen(false)
             setUploadSnapshot(null)
             uploadJobRef.current = null
-          }
+            await refreshCurrent()
+            return
+          } catch (err) {
+            if (uploadJobRef.current?.snapshot().state === 'aborted') return
+            const decision = gfsUploadNameRetryDecision(err, {
+              attempt,
+              resuming: Boolean(resumeUploadIdForAttempt),
+            })
+            if (decision === 'terminal') throw err
 
-          occupiedNames.add(name)
-          showToast('File uploaded.', { tone: 'success' })
-          setUploadCandidate(null)
-          setUploadOpen(false)
-          setUploadSnapshot(null)
-          uploadJobRef.current = null
-          await refreshCurrent()
-          return
-        } catch (err) {
-          if (uploadJobRef.current?.snapshot().state === 'aborted') return
-          if (!resumeUploadIdForAttempt && isGfsNameConflict(err)) {
-            occupiedNames.add(name)
+            nameReservation.markConflict(name)
             clearPendingGfsUpload()
             uploadJobRef.current = null
             setUploadSnapshot(null)
-            continue
+            if (decision === 'exhausted') throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
           }
-          throw err
         }
-      }
 
-      throw new Error('Could not create a unique GFS resource name.')
+        throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+      } finally {
+        nameReservation.release()
+      }
     } catch (err) {
       if (uploadJobRef.current?.snapshot().state === 'aborted') return
       showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
     } finally {
-      const reservations = uploadNameReservationsRef.current.get(rid)
-      for (const name of attemptedNames) reservations?.delete(name)
-      if (reservations?.size === 0) uploadNameReservationsRef.current.delete(rid)
       setUploading(false)
     }
   }
