@@ -4327,12 +4327,11 @@ h3 {
   font-family: inherit;
   font-size: var(--font-size-xs);
   cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.15s;
+  transition: color var(--motion-fast);
 }
 
 .stepper-details-toggle:hover {
-  opacity: 1;
+  color: var(--text-muted);
 }
 
 .stepper-details-chevron {
@@ -6497,8 +6496,8 @@ h3 {
   max-height: none;
   overflow: auto;
   display: grid;
-  gap: var(--space-2);
-  padding: 16px;
+  gap: var(--space-3);
+  padding: var(--space-3);
 }
 
 .chat-thread-dedicated {
@@ -6545,7 +6544,7 @@ h3 {
 
 .virtualized-message-chunk {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
   content-visibility: auto;
   contain-intrinsic-size: auto 720px;
@@ -6672,7 +6671,6 @@ h3 {
 
 .chat-bubble {
   max-width: min(760px, 74ch);
-  min-width: 320px;
   padding: var(--space-2-5);
   border-radius: var(--radius-lg);
   border: 1px solid rgba(var(--edge-rgb), 0.3);
@@ -6687,11 +6685,13 @@ h3 {
   width: 100%;
 }
 
+/* D-2: the user turn is the single turn with a fill — a subtle neutral band,
+   right-aligned, no border, small control radius. Not an accent tint. */
 .chat-group.user .chat-bubble {
   justify-self: end;
-  border-color: rgba(var(--accent-rgb), 0.2);
-  background: rgba(var(--accent-rgb), 0.08);
-  margin-bottom: 28px;
+  border: none;
+  border-radius: var(--radius-control);
+  background: var(--surface-soft);
   min-width: 0;
 }
 
@@ -6823,12 +6823,11 @@ h3 {
   margin-top: var(--space-1);
 }
 
+/* The user meta-row rides in normal flow at the foot of the band (mirroring the
+   assistant row), right-aligned. Inherits margin-top: var(--space-1) from the
+   base row. */
 .chat-message-meta-row--user {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  margin-top: 0;
-  z-index: 1;
+  justify-content: flex-end;
   white-space: nowrap;
 }
 
@@ -7063,19 +7062,16 @@ h3 {
   max-height: none;
 }
 
+/* §8: prose is a single voice — sans, body size, no box. The box (mono + fill +
+   border + radius) is reserved for code/JSON, applied via `.json-content`, not
+   the turn container. Assistant prose adds `.markdown-content` (already sans);
+   user prose is a bare `.message-block` and inherits this default. */
 .message-block {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
-  font-size: var(--font-size-sm);
-  line-height: 18px;
-  padding: var(--space-2-5);
-  border-radius: var(--radius-md);
-  background: rgba(var(--panel-rgb), 0.92);
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  font-size: var(--font-size-md);
+  line-height: 1.55;
 }
 
 .json-content {
@@ -7084,6 +7080,14 @@ h3 {
     monospace;
   font-size: var(--font-size-sm);
   line-height: 18px;
+}
+
+/* Code/JSON is the boxed voice: mono content in a subtle framed surface. */
+.message-block.json-content {
+  padding: var(--space-2-5);
+  border-radius: var(--radius-md);
+  background: rgba(var(--panel-rgb), 0.66);
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
 }
 
 .markdown-content {
@@ -7205,16 +7209,6 @@ h3 {
   opacity: 1;
 }
 
-.chat-group.user .chat-bubble::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 34px;
-  pointer-events: auto;
-}
-
 .message-copy-button:focus-visible {
   outline: 1px solid rgba(var(--focus-rgb), 0.7);
   outline-offset: 2px;
@@ -7285,7 +7279,7 @@ h3 {
   border-radius: var(--radius-md);
   font-size: var(--font-size-lg);
   line-height: 20px;
-  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   resize: none;
 }
@@ -7294,7 +7288,7 @@ h3 {
   position: relative;
   display: grid;
   gap: var(--space-1-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
   background: var(--surface-soft);
 }
@@ -7306,9 +7300,7 @@ h3 {
 
 .composer-input-shell:focus-within {
   border-color: rgba(var(--focus-rgb), 0.76);
-  box-shadow:
-    0 0 0 1px rgba(var(--focus-rgb), 0.56),
-    0 0 0 3px rgba(var(--focus-rgb), 0.22);
+  box-shadow: 0 0 0 1px rgba(var(--focus-rgb), 0.56);
 }
 
 .composer-input-shell--drag-active textarea {
@@ -12312,7 +12304,7 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-bubble,
-:root[data-theme='dark'] .message-block,
+:root[data-theme='dark'] .message-block.json-content,
 :root[data-theme='dark'] pre {
   background: rgba(var(--panel-rgb), 0.94);
   border-color: rgba(var(--edge-rgb), 0.34);
@@ -12324,8 +12316,8 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-group.user .chat-bubble {
-  background: rgba(var(--accent-rgb), 0.18);
-  border-color: rgba(var(--accent-rgb), 0.36);
+  background: var(--surface-soft);
+  border-color: transparent;
 }
 
 :root[data-theme='dark'] .chat-thread::-webkit-scrollbar-thumb {
@@ -15860,7 +15852,7 @@ pre {
   align-items: center;
   background: var(--surface-soft);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-radius: 0;
   display: flex;
   flex: 1 1 var(--chat-tab-max);
   min-width: var(--chat-tab-min);
@@ -15868,17 +15860,23 @@ pre {
   transition: background var(--motion-fast);
 }
 
+/* Flat VS Code tabs: inactive tabs drop their side/top edges and read only as a
+   surface; the shared bottom shelf border is kept (it is the strip baseline). */
 .chat-view-tab:not(.is-active) {
   border-bottom: 1px solid var(--chat-view-selected-border);
-  border-left-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
-  border-right-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
-  border-top-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-top-color: transparent;
 }
 
+/* The active tab is set apart by a stronger surface plus a top accent bar, not
+   by an accent outline on every edge. The bar is an inset shadow so it adds no
+   layout box. */
 .chat-view-tab.is-active {
-  background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
-  border-color: var(--chat-view-selected-border);
+  background: var(--surface-strong);
+  border-color: transparent;
   border-bottom: 0;
+  box-shadow: inset 0 2px 0 0 var(--accent);
   flex-shrink: 0.4;
   position: relative;
   z-index: 1;
@@ -15889,7 +15887,7 @@ pre {
 }
 
 .chat-view-tab.is-active:hover {
-  background: linear-gradient(var(--surface-hover), var(--surface-hover)), var(--panel);
+  background: var(--surface-strong);
 }
 
 .chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
@@ -15973,7 +15971,7 @@ pre {
   align-self: flex-end;
   background: var(--surface-strong);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   display: flex;
   gap: var(--space-1);
   margin: var(--space-2) var(--space-3) 0;
@@ -16020,9 +16018,9 @@ pre {
 
 .progress-stepper {
   margin-top: var(--space-2);
-  border: 1px solid rgba(var(--edge-rgb), 0.28);
-  border-radius: 10px;
-  background: rgba(var(--panel-rgb), 0.78);
+  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: transparent;
   padding: var(--space-2) var(--space-2-5);
   font-family:
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
@@ -16044,21 +16042,10 @@ pre {
   }
 }
 
+/* Completed tools collapse to a single dim line (see the chat-scoped override
+   below), not a dimmed card — no opacity fade, no collapse animation. */
 .progress-stepper.status-completed {
   padding: var(--space-1) var(--space-2-5);
-  opacity: 0.7;
-  animation: stepper-collapse 0.3s ease-out;
-}
-
-@keyframes stepper-collapse {
-  from {
-    opacity: 1;
-    padding: var(--space-2) var(--space-2-5);
-  }
-  to {
-    opacity: 0.7;
-    padding: var(--space-1) var(--space-2-5);
-  }
 }
 
 .stepper-completed-row {
