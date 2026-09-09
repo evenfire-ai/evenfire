@@ -1,6 +1,6 @@
 import type { RecordWithTtl } from 'node:dns'
-import { resolve4, resolve6 } from 'node:dns/promises'
-import { classifyDnsError } from '@clerum/network-policy-core'
+import { resolve4 } from 'node:dns/promises'
+import { classifyDnsRejection } from '@clerum/network-policy-core'
 import type { SandboxUiExternalEgress } from '../types'
 
 const BLOCKED_EGRESS_CIDRS = [
@@ -85,81 +85,93 @@ export interface ResolvedExternalEgress {
 export type FqdnLookupResult =
   // `ttlSeconds` is the MINIMUM TTL (seconds) across the resolved A records —
   // the binding window for the whole FQDN, consumed by the egress accumulator
-  // (issue #299). It is 0 when only AAAA resolved (A-less), since no /32 is
-  // emitted for an IPv4-only enforcement target in that case.
+  // (issue #299). `ipv6` remains as an empty compatibility field until the
+  // platform has an explicit dual-stack enforcement capability.
   | { kind: 'ok'; ipv4: string[]; ipv6: string[]; ttlSeconds: number }
   // `retryable` distinguishes a transient resolver failure (SERVFAIL, timeout,
   // unreachable upstream) — worth retrying on a later reconcile — from a
-  // permanent one (the name genuinely has no A/AAAA records). Absent ⇒ permanent.
+  // permanent one (the name has no enforceable A records, or is malformed).
+  // Absent ⇒ permanent. A failure that is not a DNS verdict at all never becomes
+  // a result: the lookup throws (issue #513).
   | { kind: 'error'; error: string; retryable?: boolean }
 
 export type FqdnLookup = (host: string) => Promise<FqdnLookupResult>
 
 /**
  * Transient-vs-permanent DNS classification is centralized in
- * `@clerum/network-policy-core` (`classifyDnsError`) so WRC and HCC agree on what
- * a transient failure is — a single source of truth avoids drift between the two
- * controllers' fail-static behavior (issue #299 audit F6). c-ares / system codes
- * meaning "resolver/upstream temporarily unavailable" map to `retryable: true`;
- * stable answers (ENODATA, ENOTFOUND/NXDOMAIN, empty) fail closed permanently.
+ * `@clerum/network-policy-core` (`classifyDnsRejection`) so WRC and HCC agree on
+ * a total resolver-boundary verdict. Unknown/missing values remain faults;
+ * c-ares/system outage codes map to `retryable: true`; stable negative answers
+ * fail closed permanently.
  */
 
 /**
- * Default FQDN lookup using node:dns/promises. Returns ipv4 and ipv6 record
- * sets independently; a missing record type for one family is fine as long as
- * the other resolves, so `api.example.com` (A only) and `ipv6-only.example.com`
- * both resolve cleanly.
+ * Rejection payloads are unknown by construction. Keep diagnostics total so an
+ * unusual promise rejection cannot replace the controller fault it is reporting.
+ */
+function describeRejection(err: unknown): string {
+  try {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      typeof (err as { message?: unknown }).message === 'string'
+    ) {
+      return (err as { message: string }).message
+    }
+    return String(err)
+  } catch {
+    // A hostile Proxy/toString must not hide the original fault classification.
+    return 'unprintable rejection value'
+  }
+}
+
+/**
+ * Default FQDN lookup using node:dns/promises. The current NetworkPolicy
+ * dataplane emits only IPv4 /32 entries, so A is the sole enforceable family.
+ * Querying AAAA and treating it as success would let an A failure erase/fail to
+ * freeze the actual IPv4 window. Dual-stack must arrive as an explicit future
+ * capability rather than an inert resolver side channel.
  *
- * When neither family yields a record, the lookup inspects the underlying DNS
- * error code to decide whether the empty answer is permanent (no records) or a
- * transient resolver failure (SERVFAIL/timeout/unreachable upstream). The latter
- * is reported with `retryable: true` and the real code in the message, so the
- * reconciler can retry instead of collapsing every failure into the misleading
- * "no A or AAAA records".
+ * Only the catch around resolve4 classifies a rejection. Downstream validation
+ * faults occur outside that boundary and therefore cannot be laundered by a
+ * DNS-looking `.code`.
  */
 export const defaultFqdnLookup: FqdnLookup = async host => {
-  // A records are requested WITH per-record TTLs (`{ ttl: true }`) so the
-  // accumulator can size the sliding window off the real DNS TTL (issue #299).
-  // AAAA is resolved without TTLs: /128 blocks are dropped (IPv4-only targets),
-  // so their TTL would be inert.
-  const settleV4 = (p: Promise<RecordWithTtl[]>) =>
-    p.then(
-      records => ({ records }) as { records: RecordWithTtl[] },
-      (err: NodeJS.ErrnoException) => ({ err }) as { err: NodeJS.ErrnoException }
-    )
-  const settleV6 = (p: Promise<string[]>) =>
-    p.then(
-      addrs => ({ addrs }) as { addrs: string[] },
-      (err: NodeJS.ErrnoException) => ({ err }) as { err: NodeJS.ErrnoException }
-    )
-
-  const [v4, v6] = await Promise.all([
-    settleV4(resolve4(host, { ttl: true })),
-    settleV6(resolve6(host)),
-  ])
-
-  const v4Records = 'records' in v4 ? v4.records : []
-  const ipv4 = v4Records.map(r => r.address)
-  const ipv6 = 'addrs' in v6 ? v6.addrs : []
-  if (ipv4.length > 0 || ipv6.length > 0) {
-    // Minimum TTL across the A records = the window for the whole FQDN. 0 when
-    // A-less (AAAA-only), where no /32 is emitted anyway.
-    const ttlSeconds = v4Records.length > 0 ? Math.min(...v4Records.map(r => r.ttl)) : 0
-    return { kind: 'ok', ipv4, ipv6, ttlSeconds }
-  }
-
-  const codes = ['err' in v4 ? v4.err.code : undefined, 'err' in v6 ? v6.err.code : undefined]
-  const transientCode = codes.find(
-    code => code !== undefined && classifyDnsError(code) === 'transient'
-  )
-  if (transientCode) {
-    return {
-      kind: 'error',
-      error: `DNS resolution for "${host}" failed (${transientCode}) — resolver or upstream unavailable`,
-      retryable: true,
+  let records: RecordWithTtl[]
+  try {
+    records = await resolve4(host, { ttl: true })
+  } catch (error: unknown) {
+    const verdict = classifyDnsRejection(error)
+    if (verdict.kind === 'transient') {
+      return {
+        kind: 'error',
+        error: `DNS resolution for "${host}" failed (${verdict.code}) — resolver or upstream unavailable`,
+        retryable: true,
+      }
     }
+    if (verdict.kind === 'negative') {
+      if (verdict.reason === 'invalid-name') {
+        return {
+          kind: 'error',
+          error: `malformed hostname "${host}" (${verdict.code}) — the resolver refused to query it`,
+        }
+      }
+      return { kind: 'error', error: 'no A records for IPv4 egress enforcement' }
+    }
+    throw new Error(
+      `DNS lookup for "${host}" failed with a non-DNS error (${verdict.code ?? 'no code'}): ${describeRejection(verdict.cause)}`,
+      { cause: verdict.cause }
+    )
   }
-  return { kind: 'error', error: 'no A or AAAA records' }
+
+  // Everything below is downstream of a successful resolver call. Exceptions
+  // here are controller/contract faults even if they happen to carry a DNS code.
+  const ipv4 = records.map(record => record.address)
+  if (ipv4.length === 0) {
+    return { kind: 'error', error: 'no A records for IPv4 egress enforcement' }
+  }
+  const ttlSeconds = Math.min(...records.map(record => record.ttl))
+  return { kind: 'ok', ipv4, ipv6: [], ttlSeconds }
 }
 
 export interface ResolveResult {
@@ -186,9 +198,13 @@ export interface ResolveResult {
  * apply a stale or partial NetworkPolicy off the back of one. Each failure
  * carries a `retryable` flag: transient resolver failures (SERVFAIL/timeout)
  * are retryable, while a genuine no-records answer or a blocked-address
- * rejection fails closed permanently. If any A record for a hostname resolves
- * to a blocked range, the entire hostname fails closed and no public siblings
- * are emitted.
+ * rejection fails closed permanently. If any A record for a hostname resolves to
+ * a blocked range, the entire hostname fails closed and no public siblings are
+ * emitted.
+ *
+ * A lookup that cannot produce a DNS verdict at all throws instead of returning
+ * a failure, so the reconciler's existing error routing reports the real fault
+ * (issue #513).
  */
 export async function resolveExternalEgress(
   externals: SandboxUiExternalEgress[],

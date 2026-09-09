@@ -1,4 +1,5 @@
 import * as k8s from '@kubernetes/client-node'
+import { hccLogger } from './logger'
 import { writeSkipsTotal, writesTotal } from './metrics'
 
 /** Extract HTTP status code from a K8s client error (handles both error formats). */
@@ -41,6 +42,8 @@ export async function replaceWithConflictRetry<
   validateExisting?: (existing: T) => void
   /** Rechecked immediately before every Kubernetes write attempt. */
   mutationAllowed?: () => boolean
+  /** Admission-sensitive callers must not treat an absent object as applied. */
+  missingIsError?: boolean
   maxAttempts?: number
 }): Promise<void> {
   const {
@@ -54,6 +57,7 @@ export async function replaceWithConflictRetry<
     isUpToDate,
     validateExisting,
     mutationAllowed,
+    missingIsError = false,
     maxAttempts = 3,
   } = opts
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -62,7 +66,11 @@ export async function replaceWithConflictRetry<
       existing = await read()
     } catch (err) {
       if (getErrorCode(err) === 404) {
-        console.warn(`${logPrefix} ${description} disappeared (404); skipping replace`)
+        if (missingIsError) throw err
+        hccLogger.warn('Kubernetes resource disappeared; skipping replace', {
+          scope: logPrefix,
+          description,
+        })
         return
       }
       throw err
@@ -83,8 +91,7 @@ export async function replaceWithConflictRetry<
     try {
       await replace(next)
       writesTotal.inc({ kind: next.kind ?? 'unknown' })
-      const suffix = attempt > 1 ? ` (after ${attempt} attempts)` : ''
-      console.log(`${logPrefix} Updated ${description}${suffix}`)
+      hccLogger.info('Kubernetes resource updated', { scope: logPrefix, description, attempt })
       return
     } catch (err) {
       if (getErrorCode(err) === 409 && attempt < maxAttempts) {
@@ -448,12 +455,13 @@ export async function applyNetworkPolicy(
   policy: k8s.V1NetworkPolicy,
   logPrefix = '[NetPol]',
   mutationAllowed?: () => boolean,
-  validateExisting?: (existing: k8s.V1NetworkPolicy) => void
+  validateExisting?: (existing: k8s.V1NetworkPolicy) => void,
+  missingIsError = false
 ): Promise<void> {
   if (mutationAllowed && !mutationAllowed()) return
   try {
     await api.createNamespacedNetworkPolicy({ namespace, body: policy })
-    console.log(`${logPrefix} Created policy "${name}" in ${namespace}`)
+    hccLogger.info('NetworkPolicy created', { scope: logPrefix, policy: name, namespace })
     return
   } catch (error: unknown) {
     if (getErrorCode(error) !== 409) {
@@ -468,6 +476,7 @@ export async function applyNetworkPolicy(
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     mutationAllowed,
     validateExisting,
+    missingIsError,
     isUpToDate: networkPolicyMatchesDesired,
   })
 }
