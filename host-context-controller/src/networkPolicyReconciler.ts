@@ -58,6 +58,8 @@ import {
   canonicalizeValue,
   getErrorCode,
   networkPolicyMatchesDesired,
+  observeCreate,
+  observeExistenceRead,
   replaceWithConflictRetry,
 } from './utils'
 
@@ -2105,10 +2107,12 @@ export class NetworkPolicyReconciler {
   ): Promise<FreshExternalEgressPolicy> {
     let policy: k8s.V1NetworkPolicy
     try {
-      policy = await this.networkingApi.readNamespacedNetworkPolicy({
-        name,
-        namespace: server.namespace,
-      })
+      policy = await observeExistenceRead('NetworkPolicy', () =>
+        this.networkingApi.readNamespacedNetworkPolicy({
+          name,
+          namespace: server.namespace,
+        })
+      )
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) return { policy: null, repairRequired: false }
       throw error
@@ -3504,10 +3508,12 @@ export class NetworkPolicyReconciler {
     if (!isCurrent()) return false
     let created: k8s.V1NetworkPolicy
     try {
-      created = await this.networkingApi.createNamespacedNetworkPolicy({
-        namespace,
-        body: desired,
-      })
+      created = await observeCreate('NetworkPolicy', () =>
+        this.networkingApi.createNamespacedNetworkPolicy({
+          namespace,
+          body: desired,
+        })
+      )
     } catch (error: unknown) {
       if (getErrorCode(error) !== 409) throw error
       // This is the only creation route that does not go through
@@ -3534,7 +3540,10 @@ export class NetworkPolicyReconciler {
         description: `policy "${name}" in ${namespace}`,
         logPrefix: '[NetPol]',
         body: desired,
-        read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+        read: () =>
+          observeExistenceRead('NetworkPolicy', () =>
+            this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+          ),
         replace: body =>
           this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
         mutationAllowed: isCurrent,

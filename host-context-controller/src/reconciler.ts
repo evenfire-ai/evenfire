@@ -32,6 +32,8 @@ import {
   configMapMatchesDesired,
   deploymentMatchesDesired,
   getErrorCode,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
@@ -951,10 +953,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
     try {
-      await this.coreApi.createNamespacedConfigMap({
-        namespace,
-        body: cm,
-      })
+      await observeCreate('ConfigMap', () =>
+        this.coreApi.createNamespacedConfigMap({
+          namespace,
+          body: cm,
+        })
+      )
       console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
     } catch (error: unknown) {
       if (getErrorCode(error) !== 409) {
@@ -967,7 +971,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         mergeExisting: preserveObjectAnnotations,
         isUpToDate: configMapMatchesDesired,
         mutationAllowed: isCurrent,
-        read: () => this.coreApi.readNamespacedConfigMap({ name, namespace }),
+        read: () =>
+          observeExistenceRead('ConfigMap', () =>
+            this.coreApi.readNamespacedConfigMap({ name, namespace })
+          ),
         replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
       })
     }
@@ -1478,10 +1485,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
     if (!isCurrent()) return
     try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: server.namespace,
-        body: deployment,
-      })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({
+          namespace: server.namespace,
+          body: deployment,
+        })
+      )
       console.log(`[Reconciler] Created Deployment "${server.name}"`)
       return
     } catch (error: unknown) {
@@ -1502,10 +1511,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         mergeExisting: preserveDeploymentAnnotations,
         isUpToDate: deploymentMatchesDesired,
         read: () =>
-          this.appsApi.readNamespacedDeployment({
-            name: server.name,
-            namespace: server.namespace,
-          }),
+          observeExistenceRead('Deployment', () =>
+            this.appsApi.readNamespacedDeployment({
+              name: server.name,
+              namespace: server.namespace,
+            })
+          ),
         replace: body =>
           this.appsApi.replaceNamespacedDeployment({
             name: server.name,
@@ -1528,10 +1539,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
     if (!isCurrent()) return
     try {
-      await this.coreApi.createNamespacedService({
-        namespace: server.namespace,
-        body: service,
-      })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({
+          namespace: server.namespace,
+          body: service,
+        })
+      )
     } catch (error: unknown) {
       if (getErrorCode(error) === 409) {
         await replaceWithConflictRetry({
@@ -1541,10 +1554,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
           read: () =>
-            this.coreApi.readNamespacedService({
-              name: server.name,
-              namespace: server.namespace,
-            }),
+            observeExistenceRead('Service', () =>
+              this.coreApi.readNamespacedService({
+                name: server.name,
+                namespace: server.namespace,
+              })
+            ),
           replace: body =>
             this.coreApi.replaceNamespacedService({
               name: server.name,

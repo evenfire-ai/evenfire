@@ -298,6 +298,45 @@ export const hostFleetLifecycleCatchTotal = counter({
   labelNames: ['decision'] as const,
 })
 
+// Events overlap: every conflict is also an issued request. Never sum outcomes
+// for request totals. The bounded kind inventory includes the read-first Secret.
+export const CREATE_KINDS = [
+  'NetworkPolicy',
+  'Service',
+  'Deployment',
+  'ConfigMap',
+  'PersistentVolumeClaim',
+  'ServiceAccount',
+  'Role',
+  'RoleBinding',
+  'PodDisruptionBudget',
+  'Secret',
+] as const
+export type CreateKind = (typeof CREATE_KINDS)[number]
+export const createsTotal = counter({
+  name: 'clerum_hcc_creates_total',
+  help: 'Kubernetes create events: issued attempts, conflict responses (a subset of issued), and creates skipped after reading an existing object, by kind.',
+  labelNames: ['kind', 'outcome'] as const,
+})
+for (const kind of CREATE_KINDS) {
+  for (const outcome of ['issued', 'conflict', 'skipped']) {
+    createsTotal.inc({ kind, outcome }, 0)
+  }
+}
+
+// Actual GETs in the documented create/converge paths, including retry reads.
+// LIST results and reused caller snapshots do not represent new requests.
+export const existenceReadsTotal = counter({
+  name: 'clerum_hcc_existence_reads_total',
+  help: 'Kubernetes existence GET outcomes in instrumented create/converge paths: found, absent (404), or error, by kind.',
+  labelNames: ['kind', 'outcome'] as const,
+})
+for (const kind of CREATE_KINDS) {
+  for (const outcome of ['found', 'absent', 'error']) {
+    existenceReadsTotal.inc({ kind, outcome }, 0)
+  }
+}
+
 // #493: successful replace() only, inside replaceWithConflictRetry. Kind is
 // next.kind ?? 'unknown'. Direct Role PUTs stay invisible until G5.
 export const writesTotal = counter({

@@ -41,6 +41,8 @@ import {
   deploymentMatchesDesired,
   getErrorCode,
   networkPolicyMatchesDesired,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
@@ -755,10 +757,12 @@ export class LlmHookReconciler {
     const deployment = this.buildDeployment(podKey, members, credentialsRevision)
     const name = deployment.metadata!.name!
     try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: config.llmHooksNamespace,
-        body: deployment,
-      })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({
+          namespace: config.llmHooksNamespace,
+          body: deployment,
+        })
+      )
       console.log(`${LOG} Created Deployment "${name}"`)
       return
     } catch (error) {
@@ -771,7 +775,9 @@ export class LlmHookReconciler {
       mergeExisting: preserveDeploymentAnnotations,
       isUpToDate: deploymentMatchesDesired,
       read: () =>
-        this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace }),
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace })
+        ),
       replace: body =>
         this.appsApi.replaceNamespacedDeployment({
           name,
@@ -785,10 +791,12 @@ export class LlmHookReconciler {
     const service = this.buildService(podKey, port)
     const name = service.metadata!.name!
     try {
-      await this.coreApi.createNamespacedService({
-        namespace: config.llmHooksNamespace,
-        body: service,
-      })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({
+          namespace: config.llmHooksNamespace,
+          body: service,
+        })
+      )
       console.log(`${LOG} Created Service "${name}"`)
       return
     } catch (error) {
@@ -800,7 +808,10 @@ export class LlmHookReconciler {
       body: service,
       mergeExisting: preserveServiceAssignedFields,
       isUpToDate: serviceMatchesDesired,
-      read: () => this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace }),
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace })
+        ),
       replace: body =>
         this.coreApi.replaceNamespacedService({ name, namespace: config.llmHooksNamespace, body }),
     })
@@ -819,7 +830,9 @@ export class LlmHookReconciler {
     const name = policy.metadata!.name!
     const namespace = policy.metadata!.namespace ?? config.llmHooksNamespace
     try {
-      await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+      await observeCreate('NetworkPolicy', () =>
+        this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+      )
       console.log(`${LOG} Created NetworkPolicy "${name}" (${namespace})`)
       return
     } catch (error) {
@@ -831,7 +844,10 @@ export class LlmHookReconciler {
       body: policy,
       mergeExisting: preserveObjectAnnotations,
       isUpToDate: networkPolicyMatchesDesired,
-      read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
+      read: () =>
+        observeExistenceRead('NetworkPolicy', () =>
+          this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+        ),
       replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     })
   }

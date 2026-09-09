@@ -48,6 +48,8 @@ import {
   applyNetworkPolicy,
   deploymentMatchesDesired,
   getErrorCode,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   replaceWithConflictRetry,
 } from './utils'
@@ -271,10 +273,12 @@ export class SharedFileSystemReconciler {
     const pvc = buildPvc(sfs, this.factoryConfig)
     const name = pvcName(sfs)
     try {
-      await this.coreApi.createNamespacedPersistentVolumeClaim({
-        namespace: this.factoryConfig.hostNamespace,
-        body: pvc,
-      })
+      await observeCreate('PersistentVolumeClaim', () =>
+        this.coreApi.createNamespacedPersistentVolumeClaim({
+          namespace: this.factoryConfig.hostNamespace,
+          body: pvc,
+        })
+      )
       console.log(`${LOG} Created PVC "${name}"`)
     } catch (err) {
       if (getErrorCode(err) !== 409) {
@@ -343,10 +347,12 @@ export class SharedFileSystemReconciler {
     const dep = buildDeployment(sfs, this.factoryConfig)
     const name = wfcDeploymentName(sfs)
     try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: this.factoryConfig.hostNamespace,
-        body: dep,
-      })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({
+          namespace: this.factoryConfig.hostNamespace,
+          body: dep,
+        })
+      )
       console.log(`${LOG} Created Deployment "${name}"`)
     } catch (err) {
       if (getErrorCode(err) !== 409) {
@@ -357,10 +363,12 @@ export class SharedFileSystemReconciler {
         logPrefix: LOG,
         body: dep,
         read: () =>
-          this.appsApi.readNamespacedDeployment({
-            namespace: this.factoryConfig.hostNamespace,
-            name,
-          }),
+          observeExistenceRead('Deployment', () =>
+            this.appsApi.readNamespacedDeployment({
+              namespace: this.factoryConfig.hostNamespace,
+              name,
+            })
+          ),
         // The public auth-key reconciler may use `kubectl rollout restart` on
         // this HCC-owned Deployment. Preserve the pod-template restart marker
         // when the periodic SFS reconcile replaces the raw desired manifest;
@@ -385,10 +393,12 @@ export class SharedFileSystemReconciler {
     const svc = buildService(sfs, this.factoryConfig)
     const name = wfcServiceName(sfs)
     try {
-      await this.coreApi.createNamespacedService({
-        namespace: this.factoryConfig.hostNamespace,
-        body: svc,
-      })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({
+          namespace: this.factoryConfig.hostNamespace,
+          body: svc,
+        })
+      )
       console.log(`${LOG} Created Service "${name}"`)
     } catch (err) {
       if (getErrorCode(err) !== 409) {
