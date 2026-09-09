@@ -2045,11 +2045,7 @@ export function App() {
                                 ref={contentPanelRef}
                                 className={`content-panel glass-card${
                                   isAgentChatView ? ' content-panel--agent-chat' : ''
-                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
-                                  vm.navItem === DESKTOP_ROUTES.chat
-                                    ? ' content-panel--titlebar-actions'
-                                    : ''
-                                }${
+                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
                                   appNotificationDrawerOpen
                                     ? ' content-panel--app-notification-drawer-open'
                                     : ''
@@ -2069,22 +2065,13 @@ export function App() {
                                     : undefined
                                 }
                               >
-                                {vm.navItem === DESKTOP_ROUTES.chat ? (
-                                  <TitlebarActionsPortal container={titlebarActionsRoot}>
-                                    <AppHeader
-                                      placement="titlebar"
-                                      searchFocusRequestId={globalSearchFocusRequestId}
-                                      notificationOpenRequestId={notificationOpenRequestId}
-                                      notificationTrayMode={
-                                        notificationTrayUsesDrawer ? 'drawer' : 'overlay'
-                                      }
-                                      notificationTrayReady={notificationDrawerReady}
-                                      onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                      onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                                    />
-                                  </TitlebarActionsPortal>
-                                ) : (
+                                {/* Every route mounts the command-center header in the
+                                    window title bar via the same portal — the search
+                                    pill and notification bell live in the title bar on
+                                    all routes, never floating inline over the panel. */}
+                                <TitlebarActionsPortal container={titlebarActionsRoot}>
                                   <AppHeader
+                                    placement="titlebar"
                                     searchFocusRequestId={globalSearchFocusRequestId}
                                     notificationOpenRequestId={notificationOpenRequestId}
                                     notificationTrayMode={
@@ -2094,7 +2081,7 @@ export function App() {
                                     onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
                                     onShellOverlayOpenChange={setHeaderShellOverlayOpen}
                                   />
-                                )}
+                                </TitlebarActionsPortal>
                                 <ToastStack items={vm.toasts} />
                                 {vm.navItem === DESKTOP_ROUTES.chat && (
                                   <ChatViewWorkspace

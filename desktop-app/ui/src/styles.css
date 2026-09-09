@@ -760,7 +760,10 @@ h3 {
 
 .notification-menu--app-drawer {
   position: fixed;
-  top: calc(var(--space-4) + 36px + var(--space-2));
+  /* Anchored just below the window title bar, where the notification bell now
+     lives on every route, so the drawer opens flush under the bell instead of
+     floating over the panel. */
+  top: calc(var(--window-titlebar-height) + var(--space-2));
   right: var(--space-4);
   bottom: var(--space-4);
   width: var(--app-notification-drawer-width);
@@ -2569,7 +2572,6 @@ h3 {
   flex: 0 0 auto;
   display: grid;
   gap: 4px;
-  padding-right: clamp(480px, 54vw, 620px);
 }
 
 .page-header h2 {
@@ -11914,7 +11916,6 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12784,8 +12785,10 @@ pre {
   }
 }
 
-/* Tight single-row header for the mounted sandbox-ui app view. Keep the
-   Close button away from the absolute global top-bar controls. */
+/* Tight single-row header for the mounted sandbox-ui app view. The command
+   center now lives in the window title bar (not floating over the panel), so
+   this row spans the full width; the notification-drawer-open state reserves
+   the right rail on the page instead (see below). */
 .sandbox-ui-mounted-header {
   display: flex;
   align-items: center;
@@ -12795,7 +12798,6 @@ pre {
   gap: var(--space-2);
   min-width: 0;
   padding-top: var(--space-4);
-  padding-right: var(--app-header-utilities-width);
 }
 
 .sandbox-ui-conversation-btn,
@@ -13176,17 +13178,6 @@ pre {
   .global-search {
     --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
     --global-search-expanded-min: 160px;
-  }
-
-  .apps-page-header {
-    padding-right: 0;
-  }
-}
-
-@media (max-width: 900px) {
-  .apps-page-header,
-  .sandbox-ui-mounted-header {
-    padding-right: 0;
   }
 }
 

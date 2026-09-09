@@ -10,7 +10,6 @@ type HeaderGeometry = {
   appsPaddingRight: number
   mountedPaddingRight: number
   pagePaddingRight: number
-  searchWidth: number
 }
 
 let browser: Browser | undefined
@@ -22,16 +21,16 @@ function launchOptions() {
   return { headless: true }
 }
 
-async function headerGeometry(
-  width: number,
-  drawerOpen = false,
-  searchOpen = false
-): Promise<HeaderGeometry> {
+// The command-center (global-search) now lives in the window title bar on every
+// route, so the content panel and its headers reserve NO base gutter for it —
+// that fixture is deliberately absent here. The only horizontal reservation left
+// in the panel is the apps notification drawer's rail, applied to the page while
+// the drawer is open, which is what this geometry measures.
+async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
   if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
   await page.setContent(`
     <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
-      <div class="top-bar"><div class="header-left"><div class="global-search${searchOpen ? ' is-open' : ''}"></div></div></div>
       <section class="page">
         <header class="apps-page-header">Apps</header>
         <header class="sandbox-ui-mounted-header"><button>Back</button></header>
@@ -41,13 +40,12 @@ async function headerGeometry(
   await page.addStyleTag({ path: path.join(UI_ROOT, 'styles/tokens.css') })
   await page.addStyleTag({ path: path.join(UI_ROOT, 'styles.css') })
   const geometry = await page.evaluate(() => {
-    const number = (selector: string, property: 'paddingRight' | 'width') =>
-      Number.parseFloat(getComputedStyle(document.querySelector(selector)!)[property])
+    const number = (selector: string) =>
+      Number.parseFloat(getComputedStyle(document.querySelector(selector)!).paddingRight)
     return {
-      appsPaddingRight: number('.apps-page-header', 'paddingRight'),
-      mountedPaddingRight: number('.sandbox-ui-mounted-header', 'paddingRight'),
-      pagePaddingRight: number('.page', 'paddingRight'),
-      searchWidth: number('.global-search', 'width'),
+      appsPaddingRight: number('.apps-page-header'),
+      mountedPaddingRight: number('.sandbox-ui-mounted-header'),
+      pagePaddingRight: number('.page'),
     }
   })
   await page.close()
@@ -63,30 +61,30 @@ describe('responsive utility gutter', () => {
     await browser?.close()
   })
 
-  it('uses the compact closed-header reservation at tablet widths and retains drawer-open space', async () => {
+  it('reserves the apps notification-drawer rail only while open, never a base gutter', async () => {
     const closed = await headerGeometry(1100)
     const open = await headerGeometry(1100, true)
-    const searchExpanded = await headerGeometry(1100, false, true)
 
-    // Idle, the global-search collapses to the 40px magnifier; it grows to its
-    // tablet expanded width (clamp(160px, 32vw, …) = 352px at 1100) only on
-    // focus/open. The utility gutter still reserves for the *expanded* search
-    // (352 + space-2 + 36 = 398) so expansion never collides with page content.
-    expect(closed.searchWidth).toBe(40)
-    expect(searchExpanded.searchWidth).toBe(352)
-    expect(closed.mountedPaddingRight).toBe(398)
-    expect(closed.mountedPaddingRight).toBeLessThan(open.pagePaddingRight)
+    // Closed: no base gutter on the mounted-app header (search is in the title
+    // bar). Open: the page reserves the drawer rail and the mounted-app header
+    // sits flush against it (its own padding stays 0).
+    expect(closed.mountedPaddingRight).toBe(0)
     expect(open.mountedPaddingRight).toBe(0)
     expect(open.pagePaddingRight).toBe(466)
   })
 
-  it('retains mobile zero-reservation and the wide desktop utility budget', async () => {
+  it('reserves no base utility gutter at any width, mobile or wide desktop', async () => {
     const mobile = await headerGeometry(900)
     const desktop = await headerGeometry(1221)
 
+    // With search in the title bar, neither the apps picker header nor the
+    // mounted-app header pads a base gutter at any width — the responsive
+    // "utility budget" that reserved space for the floating in-panel search is
+    // retired. Regression guard: re-introducing a floating in-panel search would
+    // make one of these non-zero again.
     expect(mobile.appsPaddingRight).toBe(0)
     expect(mobile.mountedPaddingRight).toBe(0)
-    expect(desktop.appsPaddingRight).toBe(466)
-    expect(desktop.mountedPaddingRight).toBe(466)
+    expect(desktop.appsPaddingRight).toBe(0)
+    expect(desktop.mountedPaddingRight).toBe(0)
   })
 })
