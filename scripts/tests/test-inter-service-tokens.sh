@@ -150,6 +150,17 @@ minikube_capture="$TMP/minikube-control-api-internal-tokens.json"
 run_apply clerum-codex-member-registration-test "$minikube_capture" env
 jq -e '.stringData.CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET and .stringData.CONTROL_API_INTERNAL_TOKENS and .stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS' "$minikube_capture" >/dev/null
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("codex-llm-proxy=")' "$minikube_capture" >/dev/null
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("gfs-controller=")' "$minikube_capture" >/dev/null
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("workspace-files-controller=")' "$minikube_capture" >/dev/null
+
+duplicate_capture="$TMP/duplicate-filesystem-token.json"
+if run_apply clerum-codex-member-registration-test "$duplicate_capture" env \
+  CONTROL_API_INTERNAL_TOKEN_GFSC=duplicate-filesystem-controller-token \
+  CONTROL_API_INTERNAL_TOKEN_WFC=duplicate-filesystem-controller-token; then
+  echo "expected duplicate filesystem controller identities to fail" >&2
+  exit 1
+fi
+grep -q 'filesystem controller service tokens must be distinct' "$TMP/stderr"
 jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("grok-llm-proxy=")' "$minikube_capture" >/dev/null
 
 branch_profile_capture="$TMP/branch-profile-control-api-internal-tokens.json"
