@@ -71,4 +71,18 @@ describe('0097_gfs_upload_sessions', () => {
     expect(source).toContain("version: '0099_gfs_upload_finalizing_recovery'")
     expect(schema).toContain('finalizing_started_at TIMESTAMPTZ')
   })
+
+  it('registers additive immutable v2 upload provenance without rewriting legacy rows', () => {
+    const source = readFileSync(new URL('../src/db.ts', import.meta.url), 'utf8')
+    const schema = readFileSync(
+      new URL('../src/services/gfsUploadSchema.ts', import.meta.url),
+      'utf8'
+    )
+
+    expect(source).toContain("version: '0110_gfs_upload_authority_bindings'")
+    expect(schema).toContain('ADD COLUMN IF NOT EXISTS action_authority JSONB NULL')
+    expect(schema).toContain('gfs_upload_sessions_action_authority_object')
+    expect(schema).toContain("jsonb_typeof(action_authority) = 'object'")
+    expect(schema).not.toMatch(/UPDATE\s+gfs_upload_sessions\s+SET\s+action_authority/i)
+  })
 })

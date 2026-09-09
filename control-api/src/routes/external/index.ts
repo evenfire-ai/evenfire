@@ -27,7 +27,7 @@ export function createExternalRouter(gateway: K8sGateway): Router {
   router.use(createExternalMembersRouter())
   router.use(createExternalDirectoryRouter())
   router.use(createExternalSharedFilesystemsRouter(gateway))
-  router.use(createExternalGfsRouter())
+  router.use(createExternalGfsRouter(gateway))
   router.use(createExternalNotificationsRouter())
   router.use(createExternalUserApprovalDecisionsRouter(gateway))
   router.use(createExternalWorkflowApprovalMediumsRouter(gateway))

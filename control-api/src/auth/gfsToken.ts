@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken'
 import { createHash, createPublicKey } from 'node:crypto'
+import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import { config } from '../config.js'
 
 /**
@@ -50,6 +51,13 @@ export interface GfsTokenClaims extends jwt.JwtPayload {
   authGeneration?: number
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
+  actionAuthority?: FilesystemActionAuthorityV2
+}
+
+export interface FilesystemActionAuthorityV2 {
+  binding: AuthorityBindingV2
+  sourceIssuedAt: number
+  sourceExpiresAt: number
 }
 
 export interface GfsBrokeredAuthority {
@@ -97,6 +105,7 @@ export function signGfsToken(input: {
   authGeneration?: number
   brokeredAuthority?: GfsBrokeredAuthority
   principalType?: 'user' | 'control-admin'
+  actionAuthority?: FilesystemActionAuthorityV2
 }): { token: string; expiresInSeconds: number } {
   const claims: Omit<GfsTokenClaims, 'iat' | 'exp'> = {
     sub: input.subject,
@@ -106,6 +115,15 @@ export function signGfsToken(input: {
     ...(input.authGeneration === undefined ? {} : { authGeneration: input.authGeneration }),
     ...(input.brokeredAuthority ? { brokeredAuthority: { ...input.brokeredAuthority } } : {}),
     ...(input.principalType ? { principalType: input.principalType } : {}),
+    ...(input.actionAuthority
+      ? {
+          actionAuthority: {
+            binding: input.actionAuthority.binding,
+            sourceIssuedAt: input.actionAuthority.sourceIssuedAt,
+            sourceExpiresAt: input.actionAuthority.sourceExpiresAt,
+          },
+        }
+      : {}),
   }
   const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
     algorithm: 'RS256',

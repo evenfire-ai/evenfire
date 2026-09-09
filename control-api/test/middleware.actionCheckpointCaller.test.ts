@@ -30,6 +30,8 @@ describe('requireActionCheckpointCaller', () => {
     mockedConfig.internalServiceTokens = {
       'rpc-proxy': 'rpc-proxy-token1',
       'external-rest-api': 'external-token-1',
+      'gfs-controller': 'gfs-controller-token1',
+      'workspace-files-controller': 'workspace-files-token1',
     }
     internalControlMock.verifyInternalControlJwt.mockReset().mockReturnValue(null)
   })
@@ -104,6 +106,50 @@ describe('requireActionCheckpointCaller', () => {
       service: 'rpc-proxy',
       trustPlane: 'internal_service_token',
     })
+  })
+
+  it.each([
+    [
+      'gfs-controller',
+      'gfs-controller-token1',
+      ['gfs_resource'],
+      ['gfs.read', 'gfs.write', 'gfs.delete', 'gfs.manage_acl', 'gfs.share'],
+    ],
+    [
+      'workspace-files-controller',
+      'workspace-files-token1',
+      ['shared_filesystem'],
+      ['shared_filesystem.read', 'shared_filesystem.write'],
+    ],
+  ])(
+    'authenticates %s as a distinct least-privilege checkpoint caller',
+    async (service, token, permittedResourceTypes, permittedOperations) => {
+      const response = await request(app())
+        .post('/checkpoint')
+        .set('authorization', `Bearer ${token}`)
+        .set('x-service-token', service)
+
+      expect(response.status).toBe(200)
+      expect(response.body).toEqual({
+        service,
+        trustPlane: 'internal_service_token',
+        permittedResourceTypes,
+        permittedOperations,
+      })
+    }
+  )
+
+  it.each([
+    ['gfs-controller', 'workspace-files-token1'],
+    ['workspace-files-controller', 'gfs-controller-token1'],
+    ['gfs-controller', 'rpc-proxy-token1'],
+    ['workspace-files-controller', 'rpc-proxy-token1'],
+  ])('rejects cross-plane token substitution for %s', async (service, token) => {
+    await request(app())
+      .post('/checkpoint')
+      .set('authorization', `Bearer ${token}`)
+      .set('x-service-token', service)
+      .expect(401, { error: 'Unauthorized' })
   })
 
   it('accepts only the existing WRC internal-control identity for workflow checkpoints', async () => {
