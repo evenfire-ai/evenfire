@@ -189,6 +189,16 @@ describe('POST /external/rpc/delegations', () => {
     })
     expect(claims?.targets['chat.message.invoke']).toEqual(prepared.target)
     expect(rateLimiter.checkAndIncrement).toHaveBeenCalledTimes(2)
+    expect(rateLimiter.checkAndIncrement).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/^external_rpc_token:ip:(?:::ffff:)?127\.0\.0\.1$/),
+      10
+    )
+    expect(rateLimiter.checkAndIncrement).toHaveBeenNthCalledWith(
+      2,
+      `external_rpc_token:user:${userId}`,
+      10
+    )
     expect(rateLimiter.checkAndIncrement.mock.invocationCallOrder[1]).toBeLessThan(
       mocks.authorize.mock.invocationCallOrder[0]!
     )
