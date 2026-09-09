@@ -186,7 +186,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
     'sharedFileSystemReconciler.ts': 1,
-    'k8s/gfsK8sApi.ts': 3,
+    'k8s/gfsK8sApi.ts': 5,
     'networkPolicyReconciler.ts': 2,
   }
   const wrapped: Record<string, number> = {}
@@ -250,7 +250,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(reason.length, id).toBeGreaterThan(0)
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
-  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(21)
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(23)
   expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
 }
 
