@@ -443,6 +443,7 @@ describe('GFS collision policy invariants (property-based)', () => {
       const before = [...book.reservedNames('parent')].sort()
       holder.release()
       assert.deepEqual([...book.reservedNames('parent')].sort(), before)
+      assert.ok(book.reservedNames('parent').includes(witnessName))
       assert.throws(() => holder.reserveNext(), /already settled/)
 
       witness.release()
