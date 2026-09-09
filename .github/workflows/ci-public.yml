@@ -272,6 +272,7 @@ jobs:
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
             services.llmProviderAttemptFinalization.realPostgres.integration \
+            pr2ReadinessEvidence.realPostgres.integration \
             userAccessRuntimeContract.realPostgres.integration \
             userSessionDatabaseClock.realPostgres.integration \
             workflowAuthorityBindings.realPostgres.integration \
