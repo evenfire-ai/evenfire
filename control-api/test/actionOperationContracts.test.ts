@@ -210,6 +210,13 @@ describe('canonical action-operation registry', () => {
     }
 
     expect(dispositions.childOnly).toEqual(['workflow.approval.consume'])
+    expect(
+      new Set(
+        dispositions.externallyRootIssuable.map(operationId =>
+          externalRpcAdmissionClassForOperation(operationId as ActionOperationId)
+        )
+      )
+    ).toEqual(new Set([EXTERNAL_RPC_ADMISSION_CLASS]))
     expect(dispositions.externallyRootIssuable).not.toContain('workflow.approval.consume')
     expect(Object.values(dispositions).flat()).toHaveLength(ACTION_OPERATION_REGISTRY.length)
   })
