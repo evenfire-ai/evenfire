@@ -1,7 +1,13 @@
 import * as k8s from '@kubernetes/client-node'
 import type { GfsK8sApi } from '../gfsReconciler'
 import type { GlobalFileSystemStatus } from '../types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from '../utils'
+import {
+  applyNetworkPolicy,
+  getErrorCode,
+  observeCreate,
+  observeExistenceRead,
+  replaceWithConflictRetry,
+} from '../utils'
 import { GFS_TEMPLATE_HASH_ANNOTATION } from './gfsFactory'
 
 const GROUP = 'clerum.io'
@@ -37,7 +43,9 @@ export class K8sGfsApi implements GfsK8sApi {
 
   async applyPvc(pvc: k8s.V1PersistentVolumeClaim, namespace: string): Promise<void> {
     try {
-      await this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
+      await observeCreate('PersistentVolumeClaim', () =>
+        this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
+      )
     } catch (err) {
       // A PVC spec is immutable once bound; an existing one is left as-is.
       if (getErrorCode(err) !== 409) throw err
@@ -48,7 +56,9 @@ export class K8sGfsApi implements GfsK8sApi {
     const name = dep.metadata?.name ?? ''
     const desired = dep.metadata?.annotations?.[GFS_TEMPLATE_HASH_ANNOTATION]
     try {
-      const existing = await this.appsApi.readNamespacedDeployment({ name, namespace })
+      const existing = await observeExistenceRead('Deployment', () =>
+        this.appsApi.readNamespacedDeployment({ name, namespace })
+      )
       const current = existing.metadata?.annotations?.[GFS_TEMPLATE_HASH_ANNOTATION]
       return !desired || current !== desired
     } catch (err) {
@@ -88,7 +98,9 @@ export class K8sGfsApi implements GfsK8sApi {
   async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<void> {
     const name = dep.metadata?.name ?? ''
     try {
-      await this.appsApi.createNamespacedDeployment({ namespace, body: dep })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({ namespace, body: dep })
+      )
       return
     } catch (err) {
       if (getErrorCode(err) !== 409) throw err
@@ -97,7 +109,10 @@ export class K8sGfsApi implements GfsK8sApi {
       description: `deployment "${name}" in ${namespace}`,
       logPrefix: LOG,
       body: dep,
-      read: () => this.appsApi.readNamespacedDeployment({ name, namespace }),
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ name, namespace })
+        ),
       replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
     })
   }
@@ -105,7 +120,9 @@ export class K8sGfsApi implements GfsK8sApi {
   async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget, namespace: string): Promise<void> {
     const name = pdb.metadata?.name ?? ''
     try {
-      await this.policyApi.createNamespacedPodDisruptionBudget({ namespace, body: pdb })
+      await observeCreate('PodDisruptionBudget', () =>
+        this.policyApi.createNamespacedPodDisruptionBudget({ namespace, body: pdb })
+      )
       return
     } catch (err) {
       if (getErrorCode(err) !== 409) throw err
@@ -114,7 +131,10 @@ export class K8sGfsApi implements GfsK8sApi {
       description: `pod disruption budget "${name}" in ${namespace}`,
       logPrefix: LOG,
       body: pdb,
-      read: () => this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace }),
+      read: () =>
+        observeExistenceRead('PodDisruptionBudget', () =>
+          this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace })
+        ),
       replace: body =>
         this.policyApi.replaceNamespacedPodDisruptionBudget({ name, namespace, body }),
     })
@@ -122,7 +142,9 @@ export class K8sGfsApi implements GfsK8sApi {
 
   async applyService(svc: k8s.V1Service, namespace: string): Promise<void> {
     try {
-      await this.coreApi.createNamespacedService({ namespace, body: svc })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({ namespace, body: svc })
+      )
     } catch (err) {
       // clusterIP is immutable; the gfsc Service spec is stable, so an existing
       // Service is left in place rather than risking an invalid replace.

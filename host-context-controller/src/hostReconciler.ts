@@ -78,6 +78,8 @@ import {
   canonicalizeValue,
   deploymentMatchesDesired,
   getErrorCode,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveServiceAssignedFields,
   replaceWithConflictRetry,
@@ -1027,7 +1029,9 @@ export class HostReconciler {
       metadata: { name, namespace: host.namespace, labels: this.rbacLabels(host) },
     }
     try {
-      await this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
+      await observeCreate('ServiceAccount', () =>
+        this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
+      )
       console.log(`[HostReconciler] Created ServiceAccount "${name}"`)
     } catch (err) {
       if (getErrorCode(err) === 409) return // already exists; SA itself has no spec to update
@@ -1080,7 +1084,9 @@ export class HostReconciler {
       ],
     }
     try {
-      await this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
+      await observeCreate('Role', () =>
+        this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
+      )
       console.log(`[HostReconciler] Created Role "${name}"`)
       return
     } catch (err) {
@@ -1091,7 +1097,9 @@ export class HostReconciler {
     }
     // Already exists — replace to pick up rotated secretRef / new resourceNames.
     try {
-      const existing = await this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      const existing = await observeExistenceRead('Role', () =>
+        this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+      )
       if (roleMatchesDesired(body, existing)) return
       body.metadata!.resourceVersion = existing.metadata?.resourceVersion
       await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
@@ -1124,7 +1132,9 @@ export class HostReconciler {
       },
     }
     try {
-      await this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
+      await observeCreate('RoleBinding', () =>
+        this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
+      )
       console.log(`[HostReconciler] Created RoleBinding "${name}"`)
     } catch (err) {
       if (getErrorCode(err) === 409) return
@@ -1616,7 +1626,9 @@ export class HostReconciler {
         const name = mcpHostRuntimeTokenSecretName(host)
         let existing: k8s.V1Secret | null = null
         try {
-          existing = await this.coreApi.readNamespacedSecret({ name, namespace: host.namespace })
+          existing = await observeExistenceRead('Secret', () =>
+            this.coreApi.readNamespacedSecret({ name, namespace: host.namespace })
+          )
         } catch (err) {
           if (getErrorCode(err) !== 404) throw err
         }
@@ -1833,7 +1845,9 @@ export class HostReconciler {
         }
 
         if (!existing) {
-          await this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
+          await observeCreate('Secret', () =>
+            this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
+          )
           this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
             gfs_subject: expectedGfsSubject,
             gfs_outcome: 'minted',
@@ -2488,10 +2502,12 @@ export class HostReconciler {
     const service = this.buildChannelReaderService(host)
 
     try {
-      await this.coreApi.createNamespacedService({
-        namespace: ns,
-        body: service,
-      })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({
+          namespace: ns,
+          body: service,
+        })
+      )
       console.log(`[HostReconciler] Created channel-reader Service "${name}"`)
     } catch (err) {
       if (getErrorCode(err) !== 409) {
@@ -2505,7 +2521,10 @@ export class HostReconciler {
           body: service,
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
-          read: () => this.coreApi.readNamespacedService({ name, namespace: ns }),
+          read: () =>
+            observeExistenceRead('Service', () =>
+              this.coreApi.readNamespacedService({ name, namespace: ns })
+            ),
           replace: body =>
             this.coreApi.replaceNamespacedService({
               name,
@@ -2546,7 +2565,9 @@ export class HostReconciler {
     const desired = this.buildChannelReaderDeployment(host, revision)
 
     try {
-      await this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
+      )
       console.log(`[HostReconciler] Created channel-reader Deployment "${name}"`)
     } catch (err) {
       if (getErrorCode(err) !== 409) {
@@ -2555,7 +2576,9 @@ export class HostReconciler {
       }
       let existing: k8s.V1Deployment
       try {
-        existing = await this.appsApi.readNamespacedDeployment({ name, namespace: ns })
+        existing = await observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ name, namespace: ns })
+        )
       } catch (readErr) {
         if (getErrorCode(readErr) === 404) {
           console.warn(
@@ -2584,7 +2607,10 @@ export class HostReconciler {
           // B2: rebuild against each fresh read so an unsynced CC cache
           // preserves the live replica count even after a 409 retry.
           body: this.buildChannelReaderDeployment(host, revision, existing.spec?.replicas),
-          read: () => this.appsApi.readNamespacedDeployment({ name, namespace: ns }),
+          read: () =>
+            observeExistenceRead('Deployment', () =>
+              this.appsApi.readNamespacedDeployment({ name, namespace: ns })
+            ),
           replace: body =>
             this.appsApi.replaceNamespacedDeployment({
               name,
@@ -3314,18 +3340,22 @@ export class HostReconciler {
     const pvc = this.buildPvc(host)
     const name = this.pvcName(host)
     try {
-      await this.coreApi.createNamespacedPersistentVolumeClaim({
-        namespace: host.namespace,
-        body: pvc,
-      })
+      await observeCreate('PersistentVolumeClaim', () =>
+        this.coreApi.createNamespacedPersistentVolumeClaim({
+          namespace: host.namespace,
+          body: pvc,
+        })
+      )
       console.log(`[HostReconciler] Created PVC "${name}"`)
     } catch (error) {
       if (getErrorCode(error) === 409) {
         try {
-          const existing = await this.coreApi.readNamespacedPersistentVolumeClaim({
-            namespace: host.namespace,
-            name,
-          })
+          const existing = await observeExistenceRead('PersistentVolumeClaim', () =>
+            this.coreApi.readNamespacedPersistentVolumeClaim({
+              namespace: host.namespace,
+              name,
+            })
+          )
           if (existing.spec?.volumeName) {
             return
           }
@@ -3348,10 +3378,12 @@ export class HostReconciler {
   private async ensureService(host: HostCRD): Promise<void> {
     const service = this.buildService(host)
     try {
-      await this.coreApi.createNamespacedService({
-        namespace: host.namespace,
-        body: service,
-      })
+      await observeCreate('Service', () =>
+        this.coreApi.createNamespacedService({
+          namespace: host.namespace,
+          body: service,
+        })
+      )
       console.log(`[HostReconciler] Created Service "${host.name}"`)
     } catch (error) {
       if (getErrorCode(error) === 409) {
@@ -3363,10 +3395,12 @@ export class HostReconciler {
             mergeExisting: preserveServiceAssignedFields,
             isUpToDate: serviceMatchesDesired,
             read: () =>
-              this.coreApi.readNamespacedService({
-                namespace: host.namespace,
-                name: host.name,
-              }),
+              observeExistenceRead('Service', () =>
+                this.coreApi.readNamespacedService({
+                  namespace: host.namespace,
+                  name: host.name,
+                })
+              ),
             replace: body =>
               this.coreApi.replaceNamespacedService({
                 namespace: host.namespace,
@@ -3401,10 +3435,12 @@ export class HostReconciler {
     }
     const deployment = await buildDesiredDeployment()
     try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: host.namespace,
-        body: deployment,
-      })
+      await observeCreate('Deployment', () =>
+        this.appsApi.createNamespacedDeployment({
+          namespace: host.namespace,
+          body: deployment,
+        })
+      )
       console.log(`[HostReconciler] Created Deployment "${host.name}"`)
     } catch (error) {
       if (getErrorCode(error) !== 409) {
@@ -3420,10 +3456,12 @@ export class HostReconciler {
           mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
           read: () =>
-            this.appsApi.readNamespacedDeployment({
-              namespace: host.namespace,
-              name: host.name,
-            }),
+            observeExistenceRead('Deployment', () =>
+              this.appsApi.readNamespacedDeployment({
+                namespace: host.namespace,
+                name: host.name,
+              })
+            ),
           replace: body =>
             this.appsApi.replaceNamespacedDeployment({
               namespace: host.namespace,
