@@ -25,6 +25,7 @@ import {
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
+  applyGfsUploadAuthorityBindingSchema,
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
@@ -6185,6 +6186,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '010f_workflow_authority_bindings',
     apply: applyWorkflowAuthorityBindingsSchema,
+  },
+  {
+    version: '0110_gfs_upload_authority_bindings',
+    apply: applyGfsUploadAuthorityBindingSchema,
   },
 ]
 

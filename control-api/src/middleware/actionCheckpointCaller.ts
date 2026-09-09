@@ -7,16 +7,26 @@ import { requireInternalControlJwt } from './internalControlJwt.js'
 import { requireInternalToken } from './internalServiceAuth.js'
 import { requireMcpHostJwt } from './mcpHostJwtAuth.js'
 
-export type ActionCheckpointCallerService = 'rpc-proxy' | 'mcp-host' | 'workflow-recipes'
+export type ActionCheckpointCallerService =
+  | 'rpc-proxy'
+  | 'mcp-host'
+  | 'workflow-recipes'
+  | 'gfs-controller'
+  | 'workspace-files-controller'
 
 export type ActionCheckpointCallerIdentity = Readonly<{
   service: ActionCheckpointCallerService
   trustPlane: 'internal_service_token' | 'internal_control_jwt' | 'mcp_host_runtime_jwt'
   permittedResource?: Readonly<{
-    type: 'host' | 'workflow_recipe'
+    type: 'host' | 'workflow_recipe' | 'gfs_resource' | 'shared_filesystem'
     logicalId: string
   }>
-  permittedResourceTypes?: readonly ('host' | 'workflow_recipe')[]
+  permittedResourceTypes?: readonly (
+    | 'host'
+    | 'workflow_recipe'
+    | 'gfs_resource'
+    | 'shared_filesystem'
+  )[]
   permittedOperations?: readonly ActionOperationId[]
 }>
 
@@ -43,6 +53,27 @@ function rpcProxyAuthenticator(): CallerAuthenticator {
     identity: req =>
       req.internalService?.name === 'rpc-proxy'
         ? Object.freeze({ service: 'rpc-proxy', trustPlane: 'internal_service_token' })
+        : null,
+  })
+}
+
+function filesystemControllerAuthenticator(input: {
+  service: Extract<ActionCheckpointCallerService, 'gfs-controller' | 'workspace-files-controller'>
+  resourceType: 'gfs_resource' | 'shared_filesystem'
+  operations: readonly ActionOperationId[]
+}): CallerAuthenticator {
+  return Object.freeze({
+    service: input.service,
+    matches: req => String(req.header('x-service-token') || '').trim() === input.service,
+    authenticate: requireInternalToken,
+    identity: req =>
+      req.internalService?.name === input.service
+        ? Object.freeze({
+            service: input.service,
+            trustPlane: 'internal_service_token' as const,
+            permittedResourceTypes: Object.freeze([input.resourceType]),
+            permittedOperations: Object.freeze([...input.operations]),
+          })
         : null,
   })
 }
@@ -100,6 +131,22 @@ function workflowRecipesAuthenticator(): CallerAuthenticator {
 // checkpoint-wide credential or treats service claims as user authority.
 const callerAuthenticators: readonly CallerAuthenticator[] = Object.freeze([
   rpcProxyAuthenticator(),
+  filesystemControllerAuthenticator({
+    service: 'gfs-controller',
+    resourceType: 'gfs_resource',
+    operations: Object.freeze([
+      'gfs.read',
+      'gfs.write',
+      'gfs.delete',
+      'gfs.manage_acl',
+      'gfs.share',
+    ]),
+  }),
+  filesystemControllerAuthenticator({
+    service: 'workspace-files-controller',
+    resourceType: 'shared_filesystem',
+    operations: Object.freeze(['shared_filesystem.read', 'shared_filesystem.write']),
+  }),
   workflowRecipesAuthenticator(),
   mcpHostAuthenticator(),
 ])

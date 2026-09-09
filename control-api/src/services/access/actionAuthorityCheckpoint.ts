@@ -91,7 +91,9 @@ export function parseActionAuthorityCheckpointRequest(
       (resource.type !== caller.permittedResource.type ||
         resource.logicalId !== caller.permittedResource.logicalId)) ||
     (caller.permittedResourceTypes !== undefined &&
-      !caller.permittedResourceTypes.includes(resource.type as 'host' | 'workflow_recipe')) ||
+      !caller.permittedResourceTypes.includes(
+        resource.type as (typeof caller.permittedResourceTypes)[number]
+      )) ||
     (caller.permittedOperations !== undefined && !caller.permittedOperations.includes(operationId))
   ) {
     throw new Error('invalid_binding')

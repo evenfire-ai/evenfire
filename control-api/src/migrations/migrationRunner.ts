@@ -11,7 +11,10 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '010e_legacy_password_security_epoch_backfill',
 ] as const)
 
-export const PR2_MIGRATION_VERSIONS = Object.freeze(['010f_workflow_authority_bindings'] as const)
+export const PR2_MIGRATION_VERSIONS = Object.freeze([
+  '010f_workflow_authority_bindings',
+  '0110_gfs_upload_authority_bindings',
+] as const)
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
   '0107_llm_provider_attempts_sdk_link',
