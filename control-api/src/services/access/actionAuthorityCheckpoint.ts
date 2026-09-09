@@ -14,11 +14,7 @@ import type { AccessExecutionBudget } from './accessExecutionBudget.js'
 import { authorizeActionV2 } from './actionAuthorizer.js'
 import { requestedActionContextV2 } from './actionContextV2.js'
 import { resolveActionDestination } from './actionDestination.js'
-import {
-  type CanonicalResourceIdentity,
-  canonicalResourceIdentity,
-  resourceIdentityKey,
-} from './resourceIdentity.js'
+import { type CanonicalResourceIdentity, resourceIdentityKey } from './resourceIdentity.js'
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const HASH_PATTERN = /^[A-Za-z][A-Za-z0-9_-]{2,127}$/

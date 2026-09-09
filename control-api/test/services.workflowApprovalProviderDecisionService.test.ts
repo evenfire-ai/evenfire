@@ -30,7 +30,6 @@ vi.mock('../src/services/userApprovalRequestService.js', () => ({
   },
   ApprovalTriggerRunIdempotencyConflictError: class ApprovalTriggerRunIdempotencyConflictError extends Error {},
   WorkflowApprovalAuthorityRequiredError: class WorkflowApprovalAuthorityRequiredError extends Error {},
-  WorkflowApprovalAuthorityRequiredError: class WorkflowApprovalAuthorityRequiredError extends Error {},
   parseWorkflowTriggerIntent: vi.fn((payload: unknown) => {
     const record =
       payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : {}
