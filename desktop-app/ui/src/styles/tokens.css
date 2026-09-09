@@ -94,6 +94,7 @@
   --radius-sm: 8px;
   --radius-xs: 2px; /* micro indicators */
   --radius-control: 4px; /* buttons, inputs, selects, menu items, square chips, card tabs */
+  --radius-pill: 999px; /* status Pill only — the single fully-rounded control */
 
   /* Single compact control height (VS Code language) */
   --control-height-sm: 24px;

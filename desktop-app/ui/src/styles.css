@@ -1279,8 +1279,8 @@ h3 {
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--edge-rgb), 0.4);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: rgba(var(--edge-rgb), 0.1);
   padding: var(--space-1) var(--space-2);
   font-size: var(--font-size-sm);
@@ -2622,28 +2622,9 @@ h3 {
   padding-bottom: 2px;
 }
 
-.page-tab,
-.agents-fleet-tab,
-.context-tab,
-.team-tab {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: var(--font-size-lg);
-  font-weight: 600;
-}
-
-.page-tab.active,
-.agents-fleet-tab.active,
-.context-tab.active,
-.team-tab.active {
-  border-bottom-color: rgba(var(--accent-rgb), 0.72);
-  color: var(--text);
-}
+/* .page-tab / .agents-fleet-tab / .context-tab / .team-tab share the
+   .ui-tab-button design language (base, hover, active, focus grouped in the
+   Common controls section). Only the container spacing lives here. */
 
 .badge-row {
   display: flex;
@@ -2652,20 +2633,26 @@ h3 {
   margin-top: var(--space-1-5);
 }
 
-.badge {
+/* Shared square-chip base for Badge and ReferenceTag (§5 chip consolidation).
+   Identical geometry + edge; each keeps its own tone / kind accents and the
+   Pill is the fully-rounded variant. */
+.badge,
+.reference-tag {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   width: fit-content;
   max-width: 22ch;
   height: 22px;
+  min-height: 22px;
+  box-sizing: border-box;
   overflow: hidden;
-  border-radius: 20px;
-  border: 1px solid rgba(var(--edge-rgb), 0.44);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
   line-height: 1;
-  padding: 0 8px;
+  padding: 0 var(--space-1-5);
   color: var(--text-muted);
   background: rgba(var(--edge-rgb), 0.12);
   text-overflow: ellipsis;
@@ -2678,10 +2665,29 @@ h3 {
   background: rgba(var(--success-rgb), 0.18);
 }
 
+/* tone-accent is the blue accent (was mis-mapped to --success). */
 .badge.tone-accent {
-  color: color-mix(in srgb, var(--success) 72%, var(--text) 28%);
-  border-color: rgba(var(--success-rgb), 0.22);
-  background: rgba(var(--success-rgb), 0.055);
+  color: color-mix(in srgb, var(--accent) 72%, var(--text) 28%);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.badge.tone-warning {
+  color: color-mix(in srgb, var(--warning) 42%, var(--text) 58%);
+  border-color: rgba(var(--warning-rgb), 0.34);
+  background: rgba(var(--warning-rgb), 0.16);
+}
+
+.badge.tone-danger {
+  color: var(--danger);
+  border-color: rgba(var(--danger-rgb), 0.32);
+  background: rgba(var(--danger-rgb), 0.14);
+}
+
+.badge.tone-info {
+  color: color-mix(in srgb, var(--info) 48%, var(--text) 52%);
+  border-color: rgba(var(--info-rgb), 0.34);
+  background: rgba(var(--info-rgb), 0.16);
 }
 
 .badge.tone-accent::before {
@@ -8049,28 +8055,8 @@ h3 {
   flex-wrap: wrap;
 }
 
-.reference-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: fit-content;
-  max-width: 22ch;
-  height: 22px;
-  overflow: hidden;
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: 20px;
-  background: rgba(var(--edge-rgb), 0.12);
-  color: var(--text-muted);
-  padding: 0 8px;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  line-height: 1;
-  min-height: 22px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  box-sizing: border-box;
-}
-
+/* .reference-tag base geometry is shared with .badge in the chip base rule
+   (§5 chip consolidation). Only the interactive/kind deltas live here. */
 .reference-tag--button {
   appearance: none;
   border-style: solid;
@@ -8108,7 +8094,7 @@ h3 {
 }
 
 .reference-tag--disabled {
-  opacity: 0.64;
+  opacity: 0.5;
 }
 
 .reference-tag__icon {
@@ -8162,8 +8148,8 @@ h3 {
 }
 
 .reference-tag--button:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.56);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.16);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* `.context-id-cell` is the first column in the contexts/agents/workflows
@@ -9004,7 +8990,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .detail-row {
   border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   padding: var(--space-1-5) var(--space-2);
   display: grid;
   gap: var(--space-0-5);
@@ -9420,8 +9406,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-control--dense {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: var(--control-height-lg);
+  padding: 0 var(--space-2);
   font-size: var(--font-size-md);
 }
 
@@ -9432,10 +9418,10 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-dropdown-select__trigger.ui-button {
   min-width: 0;
-  min-height: 42px;
+  min-height: var(--control-height);
   padding-inline: var(--space-2-5);
   border-color: var(--control-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   background: var(--control-bg-strong);
   color: var(--text);
   font-size: var(--font-size-md);
@@ -9451,8 +9437,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-dropdown-select__trigger.ui-button:hover:enabled,
 .ui-dropdown-select__trigger.ui-button[aria-expanded='true'] {
-  border-color: rgba(var(--accent-rgb), 0.62);
-  background: rgba(var(--accent-rgb), 0.09);
+  border-color: var(--control-border-hover);
+  background: var(--surface-hover);
 }
 
 .ui-dropdown-select__placeholder {
@@ -9503,6 +9489,10 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .ui-button,
 .ui-icon-button,
 .ui-tab-button,
+.page-tab,
+.agents-fleet-tab,
+.context-tab,
+.team-tab,
 .ui-menu-item,
 .ui-nav-item,
 .ui-selectable-option {
@@ -9532,7 +9522,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   border: 1px solid transparent;
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
@@ -9584,8 +9574,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-button--solid.ui-button--primary {
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .ui-button--solid.ui-button--danger {
@@ -9616,7 +9606,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-button--solid:hover:enabled {
   border-color: rgba(var(--accent-rgb), 0.45);
-  background: color-mix(in srgb, var(--accent-strong) 72%, var(--surface-strong) 28%);
+  background: var(--accent-strong);
 }
 
 .ui-button--solid.ui-button--neutral:hover:enabled,
@@ -9751,11 +9741,25 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .ui-button:focus-visible,
 .ui-icon-button:focus-visible,
 .ui-tab-button:focus-visible,
+.page-tab:focus-visible,
+.agents-fleet-tab:focus-visible,
+.context-tab:focus-visible,
+.team-tab:focus-visible,
 .ui-menu-item:focus-visible,
 .ui-nav-item:focus-visible,
 .ui-selectable-option:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.68);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.24);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ui-button:disabled,
+.ui-icon-button:disabled,
+.ui-tab-button:disabled,
+.ui-menu-item:disabled,
+.ui-nav-item:disabled,
+.ui-selectable-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .ui-icon-button {
@@ -9767,7 +9771,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-muted);
 }
@@ -9801,8 +9805,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-icon-button--solid {
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .ui-icon-button--solid.ui-icon-button--neutral,
@@ -9828,6 +9832,12 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+.ui-icon-button--solid:hover:enabled {
+  background: var(--accent-strong);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--accent-contrast);
+}
+
 .ui-icon-button--solid.ui-icon-button--neutral:hover:enabled,
 .ui-icon-button--solid.ui-icon-button--secondary:hover:enabled {
   background: var(--surface-hover);
@@ -9842,8 +9852,12 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--danger);
 }
 
-.ui-tab-button {
-  min-height: 32px;
+.ui-tab-button,
+.page-tab,
+.agents-fleet-tab,
+.context-tab,
+.team-tab {
+  min-height: var(--control-height-lg);
   padding: 0 var(--space-2);
   border: 0;
   border-bottom: 2px solid transparent;
@@ -9865,12 +9879,20 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   font-size: var(--font-size-xl);
 }
 
-.ui-tab-button:hover:enabled {
+.ui-tab-button:hover:enabled,
+.page-tab:hover:enabled,
+.agents-fleet-tab:hover:enabled,
+.context-tab:hover:enabled,
+.team-tab:hover:enabled {
   background: rgba(var(--accent-rgb), 0.08);
   color: var(--text);
 }
 
-.ui-tab-button.active {
+.ui-tab-button.active,
+.page-tab.active,
+.agents-fleet-tab.active,
+.context-tab.active,
+.team-tab.active {
   border-bottom-color: rgba(var(--accent-rgb), 0.72);
   color: var(--text);
 }
@@ -9883,7 +9905,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   gap: var(--space-2);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-muted);
   font-size: var(--font-size-md);
@@ -9966,8 +9988,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   justify-content: center;
   gap: var(--space-0-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: 999px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   color: var(--text-muted);
   font-weight: var(--font-weight-semibold);
@@ -10030,8 +10052,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: grid;
   gap: var(--space-1);
   text-align: left;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   color: var(--text);
 }
@@ -10070,7 +10092,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2-5);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   border: 1px dashed rgba(var(--edge-rgb), 0.3);
   background: var(--surface-strong);
 }
@@ -10141,7 +10163,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: flex;
   align-items: flex-start;
   gap: var(--space-1-5);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   border: 1px solid rgba(var(--edge-rgb), 0.3);
   background: var(--surface-strong);
   padding: var(--space-2) var(--space-2-5);
@@ -10822,7 +10844,7 @@ select,
 button {
   width: 100%;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   background: var(--control-bg);
   color: var(--text);
   font: inherit;
@@ -10833,24 +10855,30 @@ button {
     background var(--motion-fast);
 }
 
+/* Single-line controls carry the shared control height as a floor. */
+input,
+select {
+  min-height: var(--control-height);
+}
+
 textarea {
   background: var(--control-bg-strong);
 }
 
 button {
   width: auto;
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
+  background: var(--accent);
   border-color: transparent;
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: 9px;
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
   font-size: var(--font-size-md);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   cursor: pointer;
-  color: var(--text-inverse);
+  color: var(--accent-contrast);
 }
 
 button:hover:enabled {
+  background: var(--accent-strong);
   transform: none;
   filter: none;
 }
@@ -10888,18 +10916,16 @@ button:hover:enabled {
 }
 
 button:disabled {
-  opacity: 0.7;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-input:focus,
-textarea:focus,
-select:focus,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
 button:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.76);
-  box-shadow:
-    0 0 0 1px rgba(var(--focus-rgb), 0.56),
-    0 0 0 3px rgba(var(--focus-rgb), 0.22);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 pre {
@@ -11472,9 +11498,9 @@ pre {
 
 .da-table-filter__select {
   width: 150px;
-  min-height: 30px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
+  min-height: var(--control-height);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   color: var(--text);
   font-size: var(--font-size-sm);
@@ -11485,13 +11511,12 @@ pre {
 
 .da-table-filter__select:hover {
   background: var(--surface-hover);
-  border-color: rgba(var(--accent-rgb), 0.38);
+  border-color: var(--control-border-hover);
 }
 
 .da-table-filter__select:focus-visible {
-  outline: none;
-  border-color: rgba(var(--focus-rgb), 0.62);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.2);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .da-table-filter--icon {
@@ -11680,46 +11705,6 @@ pre {
 .section-card {
   border-color: rgba(var(--edge-rgb), 0.34);
   background: var(--surface-strong);
-}
-
-.status-banner {
-  border-color: rgba(var(--edge-rgb), 0.4);
-  background: rgba(var(--edge-rgb), 0.1);
-}
-
-.status-banner.tone-info {
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel) 78%, var(--accent) 22%);
-}
-
-.status-banner.tone-success {
-  color: color-mix(in srgb, var(--success) 20%, var(--text) 80%);
-  background: color-mix(in srgb, var(--panel) 80%, var(--success) 20%);
-  border-color: rgba(var(--success-rgb), 0.36);
-}
-
-.status-banner.tone-error {
-  color: color-mix(in srgb, var(--danger) 26%, var(--text) 74%);
-  background: color-mix(in srgb, var(--panel) 78%, var(--danger) 22%);
-  border-color: rgba(var(--danger-rgb), 0.36);
-}
-
-.badge {
-  border-color: rgba(var(--edge-rgb), 0.44);
-  color: var(--text-muted);
-  background: rgba(var(--edge-rgb), 0.12);
-}
-
-.badge.tone-success {
-  color: color-mix(in srgb, var(--success) 20%, var(--text) 80%);
-  border-color: rgba(var(--success-rgb), 0.46);
-  background: rgba(var(--success-rgb), 0.18);
-}
-
-.badge.tone-accent {
-  color: color-mix(in srgb, var(--success) 72%, var(--text) 28%);
-  border-color: rgba(var(--success-rgb), 0.22);
-  background: rgba(var(--success-rgb), 0.055);
 }
 
 .da-table__row--selected {
@@ -14053,7 +14038,7 @@ pre {
 .status-banner--compact {
   padding: var(--space-0-5) var(--space-1-5);
   font-size: var(--font-size-xs);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
 }
 
 /* Sidebar chat-state badges — icon/dot-only (no text children) */
