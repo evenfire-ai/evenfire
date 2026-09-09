@@ -1,11 +1,46 @@
 import * as k8s from '@kubernetes/client-node'
 import { hccLogger } from './logger'
-import { writeSkipsTotal, writesTotal } from './metrics'
+import {
+  type CreateKind,
+  createsTotal,
+  existenceReadsTotal,
+  writeSkipsTotal,
+  writesTotal,
+} from './metrics'
 
 /** Extract HTTP status code from a K8s client error (handles both error formats). */
 export function getErrorCode(error: unknown): number | undefined {
   const e = error as { code?: number; response?: { statusCode?: number } }
   return e.code ?? e.response?.statusCode
+}
+
+/** Observe only the create request, preserving its response and error identity. */
+export async function observeCreate<T>(kind: CreateKind, create: () => Promise<T>): Promise<T> {
+  try {
+    const result = await create()
+    createsTotal.inc({ kind, outcome: 'created' })
+    return result
+  } catch (error) {
+    const outcome = error != null && getErrorCode(error) === 409 ? 'conflict' : 'error'
+    createsTotal.inc({ kind, outcome })
+    throw error
+  }
+}
+
+/** Observe one existence GET without changing its value or error handling. */
+export async function observeExistenceRead<T>(
+  kind: CreateKind,
+  read: () => Promise<T>
+): Promise<T> {
+  try {
+    const result = await read()
+    existenceReadsTotal.inc({ kind, outcome: 'found' })
+    return result
+  } catch (error) {
+    const outcome = error != null && getErrorCode(error) === 404 ? 'absent' : 'error'
+    existenceReadsTotal.inc({ kind, outcome })
+    throw error
+  }
 }
 
 /**
@@ -460,7 +495,9 @@ export async function applyNetworkPolicy(
 ): Promise<void> {
   if (mutationAllowed && !mutationAllowed()) return
   try {
-    await api.createNamespacedNetworkPolicy({ namespace, body: policy })
+    await observeCreate('NetworkPolicy', () =>
+      api.createNamespacedNetworkPolicy({ namespace, body: policy })
+    )
     hccLogger.info('NetworkPolicy created', { scope: logPrefix, policy: name, namespace })
     return
   } catch (error: unknown) {
@@ -472,7 +509,10 @@ export async function applyNetworkPolicy(
     description: `policy "${name}" in ${namespace}`,
     logPrefix,
     body: policy,
-    read: () => api.readNamespacedNetworkPolicy({ name, namespace }),
+    read: () =>
+      observeExistenceRead('NetworkPolicy', () =>
+        api.readNamespacedNetworkPolicy({ name, namespace })
+      ),
     replace: body => api.replaceNamespacedNetworkPolicy({ name, namespace, body }),
     mutationAllowed,
     validateExisting,

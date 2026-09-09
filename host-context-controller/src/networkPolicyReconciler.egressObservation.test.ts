@@ -19,6 +19,8 @@ vi.mock('./config', () => ({
 }))
 vi.mock('node:dns/promises', () => ({ resolve4: vi.fn() }))
 vi.mock('./metrics', () => ({
+  createsTotal: { inc: vi.fn() },
+  existenceReadsTotal: { inc: vi.fn() },
   writesTotal: { inc: vi.fn() },
   writeSkipsTotal: { inc: vi.fn() },
   externalEgressRetriesAtCap: { set: vi.fn() },
