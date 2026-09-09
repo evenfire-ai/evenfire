@@ -19,20 +19,17 @@ import multer from 'multer'
 import { createReadStream } from 'node:fs'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
+import type { WfcActionAuthorityV2, WfcOperation, WfcTarget } from '../auth/actionAuthority'
 import {
-  requireWfcFileScope,
-  WFC_FILE_READ_SCOPE,
-  WFC_FILE_WRITE_SCOPE,
   type BrowsingJwtPayload,
   type JwtVerifier,
+  WFC_FILE_READ_SCOPE,
+  WFC_FILE_WRITE_SCOPE,
   type WfcFileScope,
+  requireWfcFileScope,
 } from '../auth/jwtVerifier'
 import { envelopeFromError, err, ok } from '../errors'
-import {
-  pathFromQuery,
-  resolveSafePhysicalPath,
-  type ResolvedPhysicalPath,
-} from '../fs/pathSafety'
+import { type ResolvedPhysicalPath, pathFromQuery, resolveSafePhysicalPath } from '../fs/pathSafety'
 
 export interface FilesRouterOptions {
   mountPath: string
@@ -40,6 +37,10 @@ export interface FilesRouterOptions {
   maxPathDepth: number
   maxUploadBytes: number
   verifier: JwtVerifier
+  checkpointAuthority?: (
+    authority: WfcActionAuthorityV2,
+    expected: { operationId: WfcOperation; target: WfcTarget }
+  ) => Promise<void>
 }
 
 interface DirEntry {
@@ -99,6 +100,27 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   const requireRead = scopeMiddleware(WFC_FILE_READ_SCOPE)
   const requireWrite = scopeMiddleware(WFC_FILE_WRITE_SCOPE)
 
+  async function checkpoint(
+    res: Response,
+    operationId: WfcOperation,
+    canonicalRelativePath: string,
+    action?: string,
+    destinationPath?: string
+  ): Promise<void> {
+    const authority = (res.locals as { jwt?: BrowsingJwtPayload }).jwt?.actionAuthority
+    if (!authority) return
+    if (!opts.checkpointAuthority) {
+      throw err('not_mounted', 'live filesystem authority checkpoint is unavailable')
+    }
+    const target = {
+      ...authority.binding.target,
+      canonicalRelativePath: canonicalRelativePath || '.',
+      ...(action === undefined ? {} : { action }),
+      ...(destinationPath === undefined ? {} : { destinationPath }),
+    }
+    await opts.checkpointAuthority(authority, { operationId, target })
+  }
+
   function resolvePhysical(rel: string, mode: 'existing-target' | 'existing-parent') {
     return resolveSafePhysicalPath(rel, {
       mountRoot: opts.mountPath,
@@ -138,6 +160,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   router.get('/files', requireRead, async (req, res) => {
     try {
       const rel = pathFromQuery(req.query.path)
+      await checkpoint(res, 'shared_filesystem.read', rel)
       const { absPath: abs } = await resolvePhysical(rel, 'existing-target')
 
       // lstat the directory itself first to reject symlinks at the listing
@@ -180,6 +203,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   router.get('/files/stat', requireRead, async (req, res) => {
     try {
       const rel = pathFromQuery(req.query.path)
+      await checkpoint(res, 'shared_filesystem.read', rel)
       const { absPath: abs } = await resolvePhysical(rel, 'existing-target')
       const lst = await fs.lstat(abs)
       if (lst.isSymbolicLink()) {
@@ -202,6 +226,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   router.get('/files/download', requireRead, async (req, res) => {
     try {
       const rel = pathFromQuery(req.query.path)
+      await checkpoint(res, 'shared_filesystem.read', rel)
       const { absPath: abs } = await resolvePhysical(rel, 'existing-target')
       const lst = await fs.lstat(abs)
       if (lst.isSymbolicLink()) {
@@ -356,6 +381,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
         if (!file) {
           throw err('path_invalid', 'multipart "file" field is required')
         }
+        await checkpoint(res, 'shared_filesystem.write', rawPath, 'upload')
         const { absPath: abs } = await resolvePhysical(rawPath, 'existing-parent')
         if (abs === opts.mountPath) {
           throw err('path_invalid', 'cannot upload to mount root itself')
@@ -392,6 +418,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
         if (!file) {
           throw err('path_invalid', 'multipart "file" field is required')
         }
+        await checkpoint(res, 'shared_filesystem.write', rawPath, 'replace')
         const { absPath: abs } = await resolvePhysical(rawPath, 'existing-target')
         if (abs === opts.mountPath) {
           throw err('path_invalid', 'cannot replace the mount root')
@@ -427,6 +454,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   router.post('/files/mkdir', requireWrite, async (req, res) => {
     try {
       const rawPath = pathFromBody(req.body, 'path')
+      await checkpoint(res, 'shared_filesystem.write', rawPath, 'mkdir')
       const { absPath: abs } = await resolvePhysical(rawPath, 'existing-parent')
       if (abs === opts.mountPath) {
         // mkdir on the mount root is a no-op success — it always exists.
@@ -459,6 +487,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
     try {
       const fromRaw = pathFromBody(req.body, 'from')
       const toRaw = pathFromBody(req.body, 'to')
+      await checkpoint(res, 'shared_filesystem.write', fromRaw, 'move', toRaw)
       const { absPath: toAbs } = await resolvePhysical(toRaw, 'existing-parent')
       const { absPath: fromAbs } = await resolvePhysical(fromRaw, 'existing-target')
       if (fromAbs === opts.mountPath || toAbs === opts.mountPath) {
@@ -499,6 +528,7 @@ export function createFilesRouter(opts: FilesRouterOptions): Router {
   router.delete('/files', requireWrite, async (req, res) => {
     try {
       const rel = pathFromQuery(req.query.path)
+      await checkpoint(res, 'shared_filesystem.write', rel, 'delete')
       const recursive = req.query.recursive === 'true'
       const { absPath: abs } = await resolvePhysical(rel, 'existing-target')
       if (abs === opts.mountPath) {
