@@ -1094,7 +1094,7 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-runtime-gate.sh
 
 .PHONY: test-e2e-wrc-internal-dependency-networkpolicy
-test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
+test-e2e-wrc-internal-dependency-networkpolicy: ## Run issues #485/#582 WRC dependency convergence/finalizer E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
 

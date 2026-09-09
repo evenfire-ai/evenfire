@@ -59,6 +59,26 @@ export const reconciliationsTotal = counter({
   labelNames: ['result'] as const,
 })
 
+/**
+ * Stale NetworkPolicies the reap was FORBIDDEN from deleting (issue #582).
+ *
+ * A 401/403 here is an enforcement leak: the policy is no longer desired but
+ * stays enforced until the level-triggered retry succeeds. This monotonic
+ * counter records denial EVENTS; `NetworkPolicyReapFailed` is the durable current
+ * state. Alert on recent activity (`increase(...[5m]) > 0`), never on the
+ * counter's absolute value, which cannot clear after recovery.
+ *
+ * Also answers issue #578's criticism that a persistent failure raises no metric.
+ */
+export const networkPolicyReapDeniedTotal = counter({
+  name: 'clerum_wrc_networkpolicy_reap_denied_total',
+  help: 'NetworkPolicy reap operations denied by RBAC (401/403); stale policies remain enforced',
+  // `operation` matters more than `family` for triage: `delete` leaks one policy,
+  // `list` means the controller is blind to a whole namespace and reaped nothing
+  // there. A denied list carries `family: 'all'` because no policy was examined.
+  labelNames: ['family', 'operation'] as const,
+})
+
 export const mcpSessionsActive = gauge({
   name: 'clerum_wrc_mcp_sessions_active',
   help: 'Number of active MCP sessions',

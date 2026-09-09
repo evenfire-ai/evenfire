@@ -198,6 +198,17 @@ export function buildWorkflowNetworkPolicies(
   // centralized in reconcileDelete() and some companion policies live in
   // mcp-server for transport children.
 
+  // `'wrc'` — NOT `'workflow-recipes'` — and since issue #582 that difference is
+  // a boundary, not a naming quirk. The recipe lane's reap LISTs by
+  // `clerum.io/managed-by=workflow-recipes` and then decides ownership from the
+  // policy NAME. A recipe legitimately named `wl-egress`, `ui-ingress`,
+  // `wr-intdep-egress` (all valid DNS-1123) would make this lane's names —
+  // `wl-egress-coord-to-wrc`, `ui-ingress-mcp-host-to-gfs`, … — classify into one
+  // of its families. This label is the only reason it never sees them.
+  //
+  // So do not "harmonise" it to `workflow-recipes`: the next reconcile would
+  // delete every run-lane policy of any such recipe. Some tests assert `'wrc'`
+  // and would go red, but for reasons that point nowhere near the reap.
   const commonLabels = {
     'clerum.io/recipe': config.recipeName,
     'clerum.io/managed-by': 'wrc',

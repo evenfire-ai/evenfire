@@ -3,10 +3,19 @@ import type { DeploymentDef, WorkflowRecipeCRD } from '../types'
 import {
   buildWorkloadEgressNetworkPolicy,
   buildWorkloadIngressNetworkPolicy,
+  classifyRecipeNetworkPolicyName,
+  oauthBrokerEgressPolicyName,
+  oauthBrokerEgressPolicyNames,
   parseClusterLocalFqdn,
   resolveClusterLocalBinding,
+  uiEgressPolicyName,
+  uiEgressPolicyNames,
+  uiIngressPolicyName,
+  uiIngressPolicyNames,
   workloadEgressPolicyName,
+  workloadEgressPolicyNames,
   workloadIngressPolicyName,
+  workloadIngressPolicyNames,
 } from './resourceBuilder'
 
 function makeRecipe(workloads: DeploymentDef[]): WorkflowRecipeCRD {
@@ -218,6 +227,14 @@ describe('buildWorkloadIngressNetworkPolicy', () => {
 })
 
 describe('policy name composition', () => {
+  it('keeps every already-valid short policy name byte-identical', () => {
+    expect(workloadEgressPolicyName('sales', 'api')).toBe('wl-egress-sales-api')
+    expect(workloadIngressPolicyName('sales', 'api')).toBe('wl-ingress-sales-api')
+    expect(uiIngressPolicyName('sales', 'api')).toBe('ui-ingress-sales-api')
+    expect(uiEgressPolicyName('sales')).toBe('ui-egress-sales')
+    expect(oauthBrokerEgressPolicyName('sales')).toBe('wf-sales-oauth-broker-egress')
+  })
+
   it('fits inside 63 chars even with a long recipe name', () => {
     const longRecipe = 'recipe-with-an-extremely-long-name-that-might-overflow'
     const e = workloadEgressPolicyName(longRecipe, 'api')
@@ -229,5 +246,96 @@ describe('policy name composition', () => {
     // Trailing hyphens are stripped so we never produce `prefix--workload`.
     expect(e).not.toMatch(/--/)
     expect(i).not.toMatch(/--/)
+  })
+
+  it('exposes valid legacy aliases so upgrades preserve live policy identity', () => {
+    const recipeName = 'recipe-with-an-extremely-long-name-that-might-overflow'
+    expect(workloadEgressPolicyNames(recipeName, 'worker')).toEqual([
+      workloadEgressPolicyName(recipeName, 'worker'),
+      'wl-egress-recipe-with-an-extremely-long-name-that-might-worker',
+    ])
+    expect(workloadIngressPolicyNames(recipeName, 'worker')).toHaveLength(2)
+    expect(uiIngressPolicyNames(recipeName, 'worker')).toHaveLength(2)
+    expect(workloadEgressPolicyNames('sales', 'api')).toEqual(['wl-egress-sales-api'])
+  })
+
+  it('retains API-valid legacy aliases above the new 63-character naming budget', () => {
+    const recipe = 'r'.repeat(63)
+    const workload = 'w'.repeat(63)
+    expect(uiEgressPolicyNames(recipe)).toContain(`ui-egress-${recipe}`)
+    expect(oauthBrokerEgressPolicyNames(recipe)).toContain(`wf-${recipe}-oauth-broker-egress`)
+    expect(workloadEgressPolicyNames('r', workload)).toContain(`wl-egress-r-${workload}`)
+    expect(uiIngressPolicyNames('r', workload)).toContain(`ui-ingress-r-${workload}`)
+  })
+
+  it('keeps every valid maximum-length workload id within the DNS-1123 limit', () => {
+    const workloadId = 'a'.repeat(63)
+
+    for (const name of [
+      workloadEgressPolicyName('r', workloadId),
+      workloadIngressPolicyName('r', workloadId),
+      uiIngressPolicyName('r', workloadId),
+    ]) {
+      expect(name).toMatch(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/)
+      expect(name.length).toBeLessThanOrEqual(63)
+    }
+  })
+
+  it('keeps the entire CRD-valid recipe/workload length matrix within 63 characters', () => {
+    for (let recipeLength = 1; recipeLength <= 63; recipeLength += 1) {
+      for (let workloadLength = 1; workloadLength <= 63; workloadLength += 1) {
+        const recipeName = 'r'.repeat(recipeLength)
+        const workloadId = 'w'.repeat(workloadLength)
+        for (const name of [
+          workloadEgressPolicyName(recipeName, workloadId),
+          workloadIngressPolicyName(recipeName, workloadId),
+          uiIngressPolicyName(recipeName, workloadId),
+        ]) {
+          expect(name.length).toBeLessThanOrEqual(63)
+        }
+      }
+    }
+  })
+
+  it('keeps per-recipe UI and OAuth policy names valid for maximum recipe names', () => {
+    const recipeName = 'r'.repeat(63)
+    for (const name of [uiEgressPolicyName(recipeName), oauthBrokerEgressPolicyName(recipeName)]) {
+      expect(name).toMatch(/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/)
+      expect(name.length).toBeLessThanOrEqual(63)
+    }
+    expect(oauthBrokerEgressPolicyName(recipeName)).toMatch(/^wf-/)
+    expect(oauthBrokerEgressPolicyName(recipeName)).toMatch(/-oauth-broker-egress$/)
+  })
+
+  it('hashes overflow identities so trimming at a hyphen cannot collapse distinct workloads', () => {
+    const egressA = `${'a'.repeat(51)}-${'x'.repeat(11)}`
+    const egressB = `${'a'.repeat(51)}-${'y'.repeat(11)}`
+    const ingressA = `${'a'.repeat(50)}-${'x'.repeat(12)}`
+    const ingressB = `${'a'.repeat(50)}-${'y'.repeat(12)}`
+
+    expect(workloadEgressPolicyName('r', egressA)).not.toBe(workloadEgressPolicyName('r', egressB))
+    expect(workloadIngressPolicyName('r', ingressA)).not.toBe(
+      workloadIngressPolicyName('r', ingressB)
+    )
+    expect(uiIngressPolicyName('r', ingressA)).not.toBe(uiIngressPolicyName('r', ingressB))
+  })
+
+  it('classifies every overflow-safe builder name back to its owning family', () => {
+    const recipeName = 'r'.repeat(63)
+    const workloadId = 'w'.repeat(63)
+
+    expect(classifyRecipeNetworkPolicyName(workloadEgressPolicyName(recipeName, workloadId))).toBe(
+      'wl-egress'
+    )
+    expect(classifyRecipeNetworkPolicyName(workloadIngressPolicyName(recipeName, workloadId))).toBe(
+      'wl-ingress'
+    )
+    expect(classifyRecipeNetworkPolicyName(uiIngressPolicyName(recipeName, workloadId))).toBe(
+      'ui-ingress'
+    )
+    expect(classifyRecipeNetworkPolicyName(uiEgressPolicyName(recipeName))).toBe('ui-egress')
+    expect(classifyRecipeNetworkPolicyName(oauthBrokerEgressPolicyName(recipeName))).toBe(
+      'oauth-broker-egress'
+    )
   })
 })

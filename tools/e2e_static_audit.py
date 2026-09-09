@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Small, dependency-free E2E Guardian gate for changed Playwright specs.
+"""Small, dependency-free E2E Guardian gate for changed E2E files.
 
 This is intentionally a conservative source audit. It does not replace a real
-browser run; it prevents common shortcuts from entering the large-upload
-project where a green test must represent a user journey.
+journey; browser-only requirements are applied only to browser spec files.
 """
 
 from __future__ import annotations
@@ -22,10 +21,13 @@ RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("core-route success mock", re.compile(r"(?:route|fulfill)\s*\([^\n]*(?:uploads|gfs|complete|parts)[^\n]*(?:status\s*:\s*2|status\s*:\s*20)")),
 )
 
+BROWSER_SPEC_SUFFIXES = {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"}
+
 
 def audit_file(path: Path) -> list[str]:
     text = path.read_text(encoding="utf-8")
     findings: list[str] = []
+    is_browser_spec = path.suffix.lower() in BROWSER_SPEC_SUFFIXES
     for label, pattern in RULES:
         for match in pattern.finditer(text):
             line = text.count("\n", 0, match.start()) + 1
@@ -36,7 +38,8 @@ def audit_file(path: Path) -> list[str]:
     # opt in with an explicit, explanatory marker rather than adding a fake
     # network wait that can hide a broken user transition.
     if (
-        "waitForResponse" not in text
+        is_browser_spec
+        and "waitForResponse" not in text
         and "waitForRequest" not in text
         and "E2E_GUARDIAN_IPC_FLOW" not in text
     ):
@@ -45,7 +48,7 @@ def audit_file(path: Path) -> list[str]:
     # Direct navigation is allowed only in an explicitly negative terminal
     # guard, or as the first application-root entry when the spec opts into
     # E2E_GUARDIAN_ENTRY_POINT. Deep links stay forbidden on that path.
-    for match in re.finditer(r"\bpage\.goto\s*\(", text):
+    for match in re.finditer(r"\bpage\.goto\s*\(", text if is_browser_spec else ""):
         before = text[max(0, match.start() - 240) : match.start()]
         after = text[match.end() : match.end() + 80]
         if re.search(r"terminal|deep.?link|foreign|missing|guard", before, re.IGNORECASE):

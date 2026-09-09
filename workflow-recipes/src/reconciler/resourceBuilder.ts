@@ -24,6 +24,10 @@ import {
   buildPluginWorkloadSdkEndpoint,
   buildPluginWorkloadSdkTokenSecretName,
 } from '../workflow/resourceNames'
+import {
+  INTERNAL_DEPENDENCY_EGRESS_PREFIX,
+  INTERNAL_DEPENDENCY_INGRESS_PREFIX,
+} from './internalDependencyNetworkPolicies'
 import { OWNER_RECIPE_LABEL_KEY } from './secretOwnership'
 import { buildWithOverrides } from './securityContext'
 import { workloadEffectiveContextRef } from './workflowContext'
@@ -494,7 +498,21 @@ export function buildOAuthBrokerTokenSecret(
 const CONTROL_API_PORT = 8090
 
 export function oauthBrokerEgressPolicyName(recipeName: string): string {
-  return `wf-${recipeName}-oauth-broker-egress`
+  const direct = `${OAUTH_BROKER_EGRESS_PREFIX}${recipeName}${OAUTH_BROKER_EGRESS_SUFFIX}`
+  if (direct.length <= 63) return direct
+
+  const hash = policyNameHash(['oauth-broker-egress', recipeName])
+  const recipeBudget =
+    63 - OAUTH_BROKER_EGRESS_PREFIX.length - 1 - hash.length - OAUTH_BROKER_EGRESS_SUFFIX.length
+  const recipeStem = dns1123Stem(recipeName, recipeBudget, 'recipe')
+  return `${OAUTH_BROKER_EGRESS_PREFIX}${recipeStem}-${hash}${OAUTH_BROKER_EGRESS_SUFFIX}`
+}
+
+export function oauthBrokerEgressPolicyNames(recipeName: string): string[] {
+  return compatiblePolicyNames(
+    oauthBrokerEgressPolicyName(recipeName),
+    `wf-${recipeName}-oauth-broker-egress`
+  )
 }
 
 /**
@@ -1427,7 +1445,7 @@ export function buildUiEgressNetworkPolicy(
     apiVersion: 'networking.k8s.io/v1',
     kind: 'NetworkPolicy',
     metadata: {
-      name: `ui-egress-${recipeName}`,
+      name: uiEgressPolicyName(recipeName),
       namespace: sandboxUiNamespace,
       labels: {
         [MANAGED_BY_LABEL]: 'workflow-recipes',
@@ -1457,7 +1475,26 @@ export function buildUiEgressNetworkPolicy(
  * to fit the DNS-1123 63-char limit.
  */
 export function uiIngressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('ui-ingress', recipeName, workloadId)
+  return composePolicyName(UI_INGRESS_PREFIX, recipeName, workloadId)
+}
+
+/**
+ * Name for the per-recipe UI egress NetworkPolicy.
+ *
+ * Unlike every other recipe NetworkPolicy this one is per-RECIPE, not per
+ * workload. Short legacy names remain byte-identical; overflow names use the
+ * same deterministic hash rule as the workload families.
+ * Extracted from three duplicated template literals (this builder, the
+ * reconciler's finalizer, and `reconcileUiEgressPolicy`) because issue #582's
+ * reap classifies live policies by name prefix: a name built in one place and
+ * classified in another has to have exactly one definition, or the two drift.
+ */
+export function uiEgressPolicyName(recipeName: string): string {
+  return composePerRecipePolicyName(UI_EGRESS_PREFIX, recipeName)
+}
+
+export function uiEgressPolicyNames(recipeName: string): string[] {
+  return compatiblePolicyNames(uiEgressPolicyName(recipeName), `ui-egress-${recipeName}`)
 }
 
 /**
@@ -1638,21 +1675,172 @@ export function resolveClusterLocalBinding(
  * truncated when (stem + suffix) would overflow; trailing hyphens are
  * stripped so we never produce `foo--egress`.
  */
-function composePolicyName(prefix: string, recipeName: string, workloadId: string): string {
-  // prefix-<recipe>-<workload> shape. Suffix budget: prefix + 2 separators + workloadId.
-  const reserved = prefix.length + 1 + 1 + workloadId.length
+function policyNameHash(parts: readonly string[]): string {
+  return createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 8)
+}
+
+function dns1123Stem(value: string, budget: number, fallback: string): string {
+  const normalized = value.slice(0, Math.max(1, budget)).replace(/-+$/g, '')
+  return normalized || fallback.slice(0, Math.max(1, budget))
+}
+
+function composePerRecipePolicyName(prefix: string, recipeName: string): string {
+  const direct = `${prefix}-${recipeName}`
+  if (direct.length <= 63) return direct
+
+  const hash = policyNameHash([prefix, recipeName])
+  const recipeBudget = 63 - prefix.length - 2 - hash.length
+  return `${prefix}-${dns1123Stem(recipeName, recipeBudget, 'recipe')}-${hash}`
+}
+
+/**
+ * Physical name emitted before the collision-safe hash format was introduced.
+ * Existing policies with this shape are valid identities and must be adopted
+ * in place during upgrade so their DNS accumulator state is not discarded.
+ */
+function legacyComposePolicyName(prefix: string, recipeName: string, workloadId: string): string {
+  const reserved = prefix.length + 2 + workloadId.length
   const maxRecipe = Math.max(1, 63 - reserved)
   const stem =
     recipeName.length > maxRecipe ? recipeName.slice(0, maxRecipe).replace(/-+$/g, '') : recipeName
   return `${prefix}-${stem || 'recipe'}-${workloadId}`
 }
 
+function compatiblePolicyNames(primary: string, legacy: string): string[] {
+  // NetworkPolicy metadata.name uses DNS subdomain validation (253 characters),
+  // even though new WRC names intentionally fit the stricter 63-character budget.
+  const validLegacy = legacy.length <= 253 && /^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(legacy)
+  return legacy !== primary && validLegacy ? [primary, legacy] : [primary]
+}
+
+function composePolicyName(prefix: string, recipeName: string, workloadId: string): string {
+  const direct = `${prefix}-${recipeName}-${workloadId}`
+  if (direct.length <= 63) return direct
+
+  // New overflow identities use a hash for collision safety. Existing releases
+  // emitted a different, recipe-truncated name that can still be valid; callers
+  // must resolve the aliases below before choosing the physical identity.
+  const hash = policyNameHash([prefix, recipeName, workloadId])
+  const segmentBudget = 63 - prefix.length - 3 - hash.length
+  let recipeBudget = Math.max(1, Math.floor(segmentBudget / 2))
+  let workloadBudget = Math.max(1, segmentBudget - recipeBudget)
+  let remaining =
+    segmentBudget -
+    Math.min(recipeName.length, recipeBudget) -
+    Math.min(workloadId.length, workloadBudget)
+
+  if (remaining > 0 && recipeBudget < recipeName.length) {
+    const add = Math.min(remaining, recipeName.length - recipeBudget)
+    recipeBudget += add
+    remaining -= add
+  }
+  if (remaining > 0 && workloadBudget < workloadId.length) {
+    workloadBudget += Math.min(remaining, workloadId.length - workloadBudget)
+  }
+
+  const recipeStem = dns1123Stem(recipeName, recipeBudget, 'recipe')
+  const workloadStem = dns1123Stem(workloadId, workloadBudget, 'workload')
+  return `${prefix}-${recipeStem}-${workloadStem}-${hash}`
+}
+
 export function workloadEgressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('wl-egress', recipeName, workloadId)
+  return composePolicyName(WORKLOAD_EGRESS_PREFIX, recipeName, workloadId)
+}
+
+export function workloadEgressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    workloadEgressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(WORKLOAD_EGRESS_PREFIX, recipeName, workloadId)
+  )
 }
 
 export function workloadIngressPolicyName(recipeName: string, workloadId: string): string {
-  return composePolicyName('wl-ingress', recipeName, workloadId)
+  return composePolicyName(WORKLOAD_INGRESS_PREFIX, recipeName, workloadId)
+}
+
+export function workloadIngressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    workloadIngressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(WORKLOAD_INGRESS_PREFIX, recipeName, workloadId)
+  )
+}
+
+export function uiIngressPolicyNames(recipeName: string, workloadId: string): string[] {
+  return compatiblePolicyNames(
+    uiIngressPolicyName(recipeName, workloadId),
+    legacyComposePolicyName(UI_INGRESS_PREFIX, recipeName, workloadId)
+  )
+}
+
+// ─── issue #582: classifying a LIVE policy back to its family ────────────────
+//
+// The reap no longer deletes per workload; it lists the recipe's policies and
+// deletes whatever is live but no longer desired. Deciding "is this one of the
+// six families I own?" is a name question, because five of the six carry no
+// distinguishing label (#524 — only wr-intdep-* has `policy-type`).
+//
+// Name parsing is safe here for one specific reason: NEITHER `composePolicyName`
+// implementation can touch the prefix. Both preserve it whole and hash only the
+// shortened identity suffix when a direct name would overflow.
+//
+// Anything unrecognised classifies as `null` and is NEVER deleted: the run lane's
+// policies, the coordinator-GFS one, and anything a human created by hand.
+//
+// The webhook gateway's three policies are excluded by the SELECTOR, not by the
+// classifier: they do carry `clerum.io/managed-by: workflow-recipes`, but stamp
+// the recipe under `clerum.io/recipe-name`, so the AND-selector never returns
+// them. Their names also classify `null`, which is belt and braces rather than
+// the primary defence — worth knowing before anyone "harmonises" that label.
+
+const UI_INGRESS_PREFIX = 'ui-ingress'
+const UI_EGRESS_PREFIX = 'ui-egress'
+const WORKLOAD_EGRESS_PREFIX = 'wl-egress'
+const WORKLOAD_INGRESS_PREFIX = 'wl-ingress'
+const OAUTH_BROKER_EGRESS_PREFIX = 'wf-'
+const OAUTH_BROKER_EGRESS_SUFFIX = '-oauth-broker-egress'
+
+export type RecipeNetworkPolicyFamily =
+  | 'ui-ingress'
+  | 'ui-egress'
+  | 'wl-egress'
+  | 'wl-ingress'
+  | 'internal-dependency'
+  | 'oauth-broker-egress'
+
+export const RECIPE_NETWORK_POLICY_FAMILIES: ReadonlySet<RecipeNetworkPolicyFamily> =
+  new Set<RecipeNetworkPolicyFamily>([
+    'ui-ingress',
+    'ui-egress',
+    'wl-egress',
+    'wl-ingress',
+    'internal-dependency',
+    'oauth-broker-egress',
+  ])
+
+/**
+ * Map a live NetworkPolicy name back to the recipe family that authors it, or
+ * `null` when this codebase does not author it.
+ *
+ * Order matters: `ui-ingress`/`ui-egress` and `wl-ingress`/`wl-egress` are
+ * mutually exclusive prefixes, but the oauth-broker name puts the recipe name in
+ * the MIDDLE (`wf-<recipe>-oauth-broker-egress`), so it needs both ends. A
+ * prefix-only test on `wf-` would swallow any future `wf-*` family.
+ */
+export function classifyRecipeNetworkPolicyName(name: string): RecipeNetworkPolicyFamily | null {
+  if (name.startsWith(`${UI_INGRESS_PREFIX}-`)) return 'ui-ingress'
+  if (name.startsWith(`${UI_EGRESS_PREFIX}-`)) return 'ui-egress'
+  if (name.startsWith(`${WORKLOAD_EGRESS_PREFIX}-`)) return 'wl-egress'
+  if (name.startsWith(`${WORKLOAD_INGRESS_PREFIX}-`)) return 'wl-ingress'
+  if (
+    name.startsWith(`${INTERNAL_DEPENDENCY_EGRESS_PREFIX}-`) ||
+    name.startsWith(`${INTERNAL_DEPENDENCY_INGRESS_PREFIX}-`)
+  ) {
+    return 'internal-dependency'
+  }
+  if (name.startsWith(OAUTH_BROKER_EGRESS_PREFIX) && name.endsWith(OAUTH_BROKER_EGRESS_SUFFIX)) {
+    return 'oauth-broker-egress'
+  }
+  return null
 }
 
 /**

@@ -40,3 +40,15 @@ describe('WRC governed tracing metrics', () => {
     for (const [name] of expected) expect(scrape).toContain(`# HELP ${name}`)
   })
 })
+
+describe('WRC NetworkPolicy reap metrics', () => {
+  it('exposes a bounded event counter suitable for rate/increase alerts', async () => {
+    const { networkPolicyReapDeniedTotal, registry } = await import('./metrics')
+
+    expect(
+      (networkPolicyReapDeniedTotal as unknown as { labelNames: string[] }).labelNames
+    ).toEqual(['family', 'operation'])
+    const scrape = await registry.metrics()
+    expect(scrape).toContain('# TYPE clerum_wrc_networkpolicy_reap_denied_total counter')
+  })
+})

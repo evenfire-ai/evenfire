@@ -1111,13 +1111,21 @@ describe('routes/admin/workflows', () => {
       expect(mockPoolQuery).toHaveBeenCalledTimes(1)
     })
 
-    it('creates operator runs after transport MCP runtime endpoints are ready', async () => {
+    it('creates operator runs while reap cleanup is pending when transport endpoints are ready', async () => {
       await gateway.createResource(
         'workflowrecipes',
         makeTransportRecipe({
           status: {
             phase: 'active',
             workloadInstances: { 'web-search': 'test-recipe-web-search-a1b2c3d4' },
+            conditions: [
+              {
+                type: 'NetworkPolicyReapFailed',
+                status: 'Unknown',
+                reason: 'ReapRetrying',
+                message: 'stale policy cleanup is retrying',
+              },
+            ],
           },
         }) as never,
         RECIPE_NS
