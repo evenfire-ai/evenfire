@@ -674,9 +674,15 @@ describe('WorkflowRecipeReconciler', () => {
                 namespace,
                 recipeName: 'test-recipe',
               })
-            ).rejects.toThrow(
-              lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
-            )
+            ).rejects.toMatchObject({
+              name:
+                lifecycle === 'terminating'
+                  ? 'RetryableReconcileError'
+                  : 'NetworkPolicyOwnershipConflictError',
+              message: expect.stringContaining(
+                lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
+              ),
+            })
             expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
             expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
           })
@@ -711,9 +717,15 @@ describe('WorkflowRecipeReconciler', () => {
                       ? null
                       : build(operation === 'replace' ? [443] : [443, 8443]),
                 })
-              ).rejects.toThrow(
-                lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
-              )
+              ).rejects.toMatchObject({
+                name:
+                  lifecycle === 'terminating'
+                    ? 'RetryableReconcileError'
+                    : 'NetworkPolicyOwnershipConflictError',
+                message: expect.stringContaining(
+                  lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
+                ),
+              })
               expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
               expect(mockNetworkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
             })
@@ -2088,6 +2100,16 @@ describe('WorkflowRecipeReconciler', () => {
             }
           ).body.metadata?.resourceVersion
         ).toBe('9')
+        expect(captured.entries).toContainEqual(
+          expect.objectContaining({
+            level: 'info',
+            msg: 'network policy replaced',
+            policy: desired.metadata!.name,
+            namespace: NS,
+            family: 'workload-ingress',
+            reason: 'read-recovery',
+          })
+        )
         const warning = captured.entries.find(
           entry => entry.msg === 'network policy read unavailable; retrying once'
         )

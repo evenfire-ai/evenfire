@@ -163,9 +163,15 @@ describe('UI egress dedicated writer metadata and lifecycle', () => {
           return raced
         })
 
-      await expect(fixture.reconcile()).rejects.toThrow(
-        lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
-      )
+      await expect(fixture.reconcile()).rejects.toMatchObject({
+        name:
+          lifecycle === 'terminating'
+            ? 'RetryableReconcileError'
+            : 'NetworkPolicyOwnershipConflictError',
+        message: expect.stringContaining(
+          lifecycle === 'terminating' ? 'terminating' : 'owner-reference-mismatch'
+        ),
+      })
       expect(fixture.read).toHaveBeenCalledTimes(2)
       expect(fixture.create).toHaveBeenCalledTimes(1)
       expect(fixture.replace).not.toHaveBeenCalled()
