@@ -200,6 +200,9 @@ export function networkPolicyMatchesDesired(
       )
     )
   } catch {
+    // An uncomparable live object cannot prove convergence. Keep it on the
+    // guarded repair path rather than treating a failed comparison as a no-op;
+    // ownership/lifecycle checks and resourceVersion fencing still apply.
     return false
   }
 }

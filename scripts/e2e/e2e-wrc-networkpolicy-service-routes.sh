@@ -32,6 +32,7 @@ DB_DEPLOYMENT=""
 OTHER_DB_DEPLOYMENT=""
 
 UI_INGRESS_POLICY="ui-ingress-${RECIPE_NAME}-${API_ID}"
+UI_EGRESS_POLICY="ui-egress-${RECIPE_NAME}"
 WL_EGRESS_POLICY="wl-egress-${RECIPE_NAME}-${API_ID}"
 WL_INGRESS_POLICY="wl-ingress-${RECIPE_NAME}-${DB_ID}"
 
@@ -307,6 +308,19 @@ wrc_assert_http_allowed "sandbox UI route recovered after NetworkPolicy repair" 
 wrc_assert_http_allowed "workload sibling route recovered after NetworkPolicy repair" "$SANDBOX_NS" "deploy/$API_DEPLOYMENT" "$DB_CLUSTER_IP" "$DB_PORT" "db-ok"
 
 header "Phase 5 — contraction preserves external metadata and live routes"
+# The dedicated UI egress writer also sees the shared metadata prefilter.
+# Remove one authored identity label without changing any network permission;
+# its repair must preserve unrelated metadata rather than replacing it blindly.
+ui_egress_live="$(kctl get networkpolicy "$UI_EGRESS_POLICY" -n "$SANDBOX_UI_NS" -o json)"
+printf '%s' "$ui_egress_live" | wrc_record_owned
+ui_egress_uid="$(printf '%s' "$ui_egress_live" | jq -er '.metadata.uid')"
+ui_egress_patch="$(printf '%s' "$ui_egress_live" | jq -ce --arg run "$E2E_RUN_ID" '
+  [{op:"test",path:"/metadata/uid",value:.metadata.uid},
+   {op:"test",path:"/metadata/resourceVersion",value:.metadata.resourceVersion},
+   {op:"remove",path:"/metadata/labels/clerum.io~1recipe-namespace"},
+   {op:"add",path:"/metadata/annotations",value:((.metadata.annotations // {}) + {"e2e.invalid/external-annotation":$run})},
+   {op:"add",path:"/metadata/labels/e2e.invalid~1external-label",value:$run}]')"
+kctl patch networkpolicy "$UI_EGRESS_POLICY" -n "$SANDBOX_UI_NS" --type=json -p "$ui_egress_patch" >/dev/null
 # Add only an unused port to each fixture ingress. Repair must remove that
 # permission without discarding another controller's metadata. This exercises
 # the pre-DNS contraction writer, not merely the final additive apply.
@@ -332,6 +346,16 @@ for policy in "$UI_INGRESS_POLICY" "$WL_INGRESS_POLICY"; do
   if [ "$policy" = "$WL_INGRESS_POLICY" ]; then HELD_POLICY_FINALIZER=1; fi
 done
 wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+kctl get networkpolicy "$UI_EGRESS_POLICY" -n "$SANDBOX_UI_NS" -o json | jq -e \
+  --arg run "$E2E_RUN_ID" --arg uid "$ui_egress_uid" --arg recipe_ns "$WORKFLOW_RECIPE_NS" '
+  .metadata.uid == $uid and
+  .metadata.labels["clerum.io/recipe-namespace"] == $recipe_ns and
+  .metadata.labels["e2e.invalid/external-label"] == $run and
+  .metadata.annotations["e2e.invalid/external-annotation"] == $run' >/dev/null || {
+  fail 'Dedicated UI egress repair failed to restore authored metadata while preserving external metadata'
+  exit 1
+}
+ok 'Dedicated UI egress repair preserved external metadata and policy identity'
 wrc_wait_for_np_spec_hash "$SANDBOX_NS" "$UI_INGRESS_POLICY" "$ui_hash" 120
 wrc_wait_for_np_spec_hash "$SANDBOX_NS" "$WL_INGRESS_POLICY" "$wl_ingress_hash" 120
 for policy in "$UI_INGRESS_POLICY" "$WL_INGRESS_POLICY"; do

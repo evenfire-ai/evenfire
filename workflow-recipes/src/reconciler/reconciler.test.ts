@@ -509,6 +509,32 @@ describe('WorkflowRecipeReconciler', () => {
     })
   })
 
+  function captureNetworkPolicyLogs(): {
+    entries: Array<Record<string, unknown>>
+    restore: () => void
+  } {
+    const previousLevel = process.env.LOG_LEVEL
+    process.env.LOG_LEVEL = 'info'
+    const entries: Array<Record<string, unknown>> = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
+      for (const line of text.split('\n')) {
+        if (!line.startsWith('{')) continue
+        const parsed = JSON.parse(line) as Record<string, unknown>
+        if (String(parsed.msg).startsWith('network policy')) entries.push(parsed)
+      }
+      return true
+    }) as unknown as typeof process.stdout.write)
+    return {
+      entries,
+      restore: () => {
+        spy.mockRestore()
+        if (previousLevel === undefined) delete process.env.LOG_LEVEL
+        else process.env.LOG_LEVEL = previousLevel
+      },
+    }
+  }
+
   describe('#567 regression: policy contraction', () => {
     describe('#580 contraction lifecycle regression', () => {
       const namespace = 'sandbox-recipes'
@@ -567,11 +593,25 @@ describe('WorkflowRecipeReconciler', () => {
             namespace,
             recipeName: 'test-recipe',
           })
-          await pipeline.applyNetworkPolicy(desired, namespace, {
-            family,
-            recipeName: 'test-recipe',
-            existing: contracted,
-          })
+          const captured = captureNetworkPolicyLogs()
+          try {
+            await pipeline.applyNetworkPolicy(desired, namespace, {
+              family,
+              recipeName: 'test-recipe',
+              existing: contracted,
+            })
+            expect(captured.entries).toContainEqual(
+              expect.objectContaining({
+                level: 'info',
+                msg: 'network policy unchanged; skipping update',
+                policy: name,
+                namespace,
+                family,
+              })
+            )
+          } finally {
+            captured.restore()
+          }
           expect(live.get(name)?.metadata).toMatchObject({
             labels: { 'external.example/team': 'payments' },
             annotations: { 'external.example/review': 'retained' },
@@ -1857,32 +1897,6 @@ describe('WorkflowRecipeReconciler', () => {
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
     })
 
-    function captureNetworkPolicyLogs(): {
-      entries: Array<Record<string, unknown>>
-      restore: () => void
-    } {
-      const previousLevel = process.env.LOG_LEVEL
-      process.env.LOG_LEVEL = 'info'
-      const entries: Array<Record<string, unknown>> = []
-      const spy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
-        const text = typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString()
-        for (const line of text.split('\n')) {
-          if (!line.startsWith('{')) continue
-          const parsed = JSON.parse(line) as Record<string, unknown>
-          if (String(parsed.msg).startsWith('network policy')) entries.push(parsed)
-        }
-        return true
-      }) as unknown as typeof process.stdout.write)
-      return {
-        entries,
-        restore: () => {
-          spy.mockRestore()
-          if (previousLevel === undefined) delete process.env.LOG_LEVEL
-          else process.env.LOG_LEVEL = previousLevel
-        },
-      }
-    }
-
     it('T1 skips a live-equivalent policy and emits a structured liveness witness', async () => {
       const desired = plainPolicy()
       const live = livePolicy(desired, { annotations: { [SPEC_HASH]: 'legacy-seal' } })
@@ -2004,6 +2018,7 @@ describe('WorkflowRecipeReconciler', () => {
 
       await apply(desired)
       expect(mockNetworkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
       const created = clone(
         (
           mockNetworkingApi.createNamespacedNetworkPolicy.mock.calls[0][0] as {
@@ -2017,6 +2032,7 @@ describe('WorkflowRecipeReconciler', () => {
       mockNetworkingApi.readNamespacedNetworkPolicy.mockResolvedValue(livePolicy(created))
 
       await apply(desired)
+      expect(mockNetworkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
       expect(mockNetworkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(mockNetworkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     })

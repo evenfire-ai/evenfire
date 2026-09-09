@@ -315,7 +315,10 @@ it cannot hide later drift.
 
 - `ui-egress-*` and the `coordinator-to-gfs` policy keep their existing dedicated
   comparisons (#299 and #579 respectively); they do not use the recipe NetworkPolicy
-  helper.
+  live-convergence helper. The dedicated UI egress writer still preserves external
+  metadata and rejects foreign lifecycle owners or terminating objects before a
+  replacement, using the freshly read resourceVersion. This does not convert its
+  create-first write path into the read-first no-write contract above.
 - `wl-egress-*` still uses the #299 content/renewal prefilter before the live convergence
   helper. External/mixed egress carries temporal resolution state; a cluster-local-only
   policy does not. In both cases, once the prefilter requires a write, the downstream
@@ -325,6 +328,9 @@ it cannot hide later drift.
 
 **Operational consequences:**
 
+- The zero-write E2E observer covers only the six live-convergence families listed
+  above. It does not certify UI egress or coordinator-to-GFS: their dedicated
+  comparisons and generic resource logs are not that observer's event contract.
 - **Logs:** the live-convergence helper and the `wl-egress-*` prefilter use the structured
   WRC logger. In steady state expect `network policy unchanged; skipping update` or
   `network policy egress set unchanged; skipping live apply` with `policy`, `namespace`

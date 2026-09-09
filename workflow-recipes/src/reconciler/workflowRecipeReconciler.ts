@@ -5279,6 +5279,28 @@ export class WorkflowRecipeReconciler {
     }
   }
 
+  private assertMutableRecipeNetworkPolicy(
+    snapshot: k8s.V1NetworkPolicy,
+    recipeName: string,
+    policyName: string,
+    namespace: string
+  ): void {
+    // Recipe-scoped policies are label-owned, not garbage-collection owned.
+    // Check every freshly read snapshot, including final apply after DNS.
+    if (snapshot.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+    this.assertRecipeNetworkPolicyOwnership(snapshot, recipeName, policyName, namespace)
+    const ownership = classifyOwnerlessNetworkPolicyOwnership(snapshot)
+    if (ownership.kind === 'conflict') {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: ${ownership.reason}`
+      )
+    }
+  }
+
   /**
    * Apply a strictly subtractive pre-DNS transition against the exact snapshot
    * that was read. This path never creates a policy and therefore cannot add an
@@ -5297,24 +5319,7 @@ export class WorkflowRecipeReconciler {
     if (!policyName || !resourceVersion) {
       throw new Error('NetworkPolicy contraction requires policy name and resourceVersion')
     }
-    const assertMutableSnapshot = (snapshot: k8s.V1NetworkPolicy): void => {
-      // These recipe-scoped policies are label-owned, not garbage-collection
-      // owned. Apply the same lifecycle veto as final convergence before even
-      // a no-op/delete, and again before trusting or revoking the read-back.
-      if (snapshot.metadata?.deletionTimestamp) {
-        throw new RetryableReconcileError(
-          `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
-        )
-      }
-      this.assertRecipeNetworkPolicyOwnership(snapshot, recipeName, policyName, namespace)
-      const ownership = classifyOwnerlessNetworkPolicyOwnership(snapshot)
-      if (ownership.kind === 'conflict') {
-        throw new NetworkPolicyOwnershipConflictError(
-          `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: ${ownership.reason}`
-        )
-      }
-    }
-    assertMutableSnapshot(existing)
+    this.assertMutableRecipeNetworkPolicy(existing, recipeName, policyName, namespace)
 
     if (desired === null) {
       const uid = existing.metadata?.uid
@@ -5359,7 +5364,7 @@ export class WorkflowRecipeReconciler {
       if (getErrorCode(error) === 404) return null
       throw error
     }
-    assertMutableSnapshot(live)
+    this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
     const liveUid = live.metadata?.uid
     const liveResourceVersion = live.metadata?.resourceVersion
     if (
@@ -5429,21 +5434,18 @@ export class WorkflowRecipeReconciler {
           }
           throw error
         }
-        this.assertRecipeNetworkPolicyOwnership(live, recipeName, policyName, namespace)
+        this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
         if (!live.metadata?.resourceVersion) {
           throw new NetworkPolicyOwnershipConflictError(
             `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: live resourceVersion is missing`
           )
         }
-        policy.metadata = {
-          ...(policy.metadata ?? {}),
-          resourceVersion: live.metadata?.resourceVersion,
-        }
+        const replacement = buildNetworkPolicyReplacement(policy, live)
         try {
           return await this.networkingApi.replaceNamespacedNetworkPolicy({
             name: policyName,
             namespace,
-            body: policy,
+            body: replacement,
           })
         } catch (error: unknown) {
           // This PUT is fenced by the freshly checked owner/resourceVersion.
