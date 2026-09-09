@@ -115,6 +115,8 @@ describe('Kubernetes create instrumentation', () => {
     expect(await count('NetworkPolicy', 'skipped')).toBe(0)
   })
 
+  // Minimal fixtures isolate getErrorCode's supported layouts: ApiException.code
+  // from the installed client and response.statusCode for compatibility.
   it.each([{ code: 409 }, { response: { statusCode: 409 } }])(
     'counts a conflict as a subset of attempts and preserves the error: %j',
     async error => {

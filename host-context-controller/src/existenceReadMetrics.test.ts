@@ -98,6 +98,8 @@ describe('Kubernetes existence-read instrumentation', () => {
     }
   )
 
+  // Minimal fixtures pin classification and rejection identity without constructing
+  // SDK errors: ApiException.code and getErrorCode's response.statusCode compatibility.
   it.each([
     [{ code: 404 }, 'absent'],
     [{ response: { statusCode: 404 } }, 'absent'],
