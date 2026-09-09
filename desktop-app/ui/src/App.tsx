@@ -2069,22 +2069,9 @@ export function App() {
                                     : undefined
                                 }
                               >
-                                {vm.navItem === DESKTOP_ROUTES.chat ? (
-                                  <TitlebarActionsPortal container={titlebarActionsRoot}>
-                                    <AppHeader
-                                      placement="titlebar"
-                                      searchFocusRequestId={globalSearchFocusRequestId}
-                                      notificationOpenRequestId={notificationOpenRequestId}
-                                      notificationTrayMode={
-                                        notificationTrayUsesDrawer ? 'drawer' : 'overlay'
-                                      }
-                                      notificationTrayReady={notificationDrawerReady}
-                                      onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                      onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                                    />
-                                  </TitlebarActionsPortal>
-                                ) : (
+                                <TitlebarActionsPortal container={titlebarActionsRoot}>
                                   <AppHeader
+                                    placement="titlebar"
                                     searchFocusRequestId={globalSearchFocusRequestId}
                                     notificationOpenRequestId={notificationOpenRequestId}
                                     notificationTrayMode={
@@ -2094,7 +2081,7 @@ export function App() {
                                     onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
                                     onShellOverlayOpenChange={setHeaderShellOverlayOpen}
                                   />
-                                )}
+                                </TitlebarActionsPortal>
                                 <ToastStack items={vm.toasts} />
                                 {vm.navItem === DESKTOP_ROUTES.chat && (
                                   <ChatViewWorkspace

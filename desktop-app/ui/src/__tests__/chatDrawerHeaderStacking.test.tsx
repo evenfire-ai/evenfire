@@ -31,6 +31,12 @@ function toastStackZIndex(): number {
   return Number(match[1])
 }
 
+function toastStackTop(): string {
+  const match = /\.toast-stack\s*\{[^}]*top:\s*([^;]+);/.exec(stylesCss)
+  if (!match) throw new Error('.toast-stack top offset not found')
+  return match[1].trim()
+}
+
 beforeEach(() => {
   const style = document.createElement('style')
   style.dataset.testStyles = 'header-stacking'
@@ -68,5 +74,23 @@ describe('chat drawer header stacking', () => {
     expect(getComputedStyle(topBar).zIndex).toBe('var(--layer-header)')
     // This is exactly why the un-lifted header would hide behind the chat drawer.
     expect(layer('layer-header')).toBeLessThan(layer('layer-chat-overlay'))
+  })
+
+  it('anchors alerts below the custom titlebar with the shared spacing token', () => {
+    expect(toastStackTop()).toBe('calc(var(--window-titlebar-height) + var(--space-2))')
+  })
+
+  it('shares the titlebar divider border with its interactive controls', () => {
+    expect(stylesCss).toMatch(
+      /\.window-titlebar\s*\{[^}]*border-bottom:\s*1px solid var\(--titlebar-divider-border\)/
+    )
+    expect(tokensCss).toMatch(/--titlebar-control-border:\s*var\(--titlebar-divider-border\)/)
+  })
+
+  it('reserves exactly the notification drawer rail for a mounted app', () => {
+    expect(stylesCss).toMatch(
+      /--app-header-utilities-width:\s*calc\(var\(--app-notification-drawer-width\) \+ var\(--space-4\)\)/
+    )
+    expect(stylesCss).toMatch(/\.notification-menu--app-drawer\s*\{[^}]*right:\s*var\(--space-4\)/)
   })
 })
