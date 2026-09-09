@@ -2012,7 +2012,7 @@ export function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-frame">
+      <div className="app-frame" data-sidebar-collapsed={sidebarCollapsed || undefined}>
         <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (

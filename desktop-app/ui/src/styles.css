@@ -10,10 +10,20 @@ body,
 }
 
 .app-frame {
+  /* Published on the common ancestor of the title bar and the sidebar so the
+     title bar's leading slot can align its actions to the app content's left
+     edge (= sidebar width). Mirrors .left-nav / .left-nav.collapsed widths;
+     App.tsx toggles data-sidebar-collapsed from the same sidebarCollapsed state
+     that drives the sidebar's .collapsed class. */
+  --sidebar-width: 328px;
   min-height: 100vh;
   display: grid;
   grid-template-rows: var(--window-titlebar-height) minmax(0, 1fr);
   background: var(--topbar-gradient);
+}
+
+.app-frame[data-sidebar-collapsed] {
+  --sidebar-width: 74px;
 }
 
 /* Root wrapper around the app/auth tree. It exists so the BootSplash overlay
@@ -370,19 +380,48 @@ h3 {
    over the sidebar's content column and clear of the macOS traffic lights. The
    header search + bell keep the right edge via .window-titlebar__actions. */
 .window-titlebar__leading {
-  /* .window-titlebar__actions is fixed and paints its (draggable, full-width)
-     .top-bar above this row; without a higher stacking order that band would
-     intercept pointer events over these actions and steal their clicks. */
-  position: relative;
+  /* Fixed so its left edge tracks the app content's left edge (= the sidebar
+     width, which changes with collapse) instead of flowing a fixed gap after
+     the window controls. The window controls sit on the LEFT on every platform,
+     so the left edge is clamped to clear them (same offset as
+     .window-titlebar__actions): collapsed the sidebar (74px) is narrower than
+     the controls, so the clamp wins; expanded it aligns to the 328px content
+     edge. The mac override uses the smaller traffic-light size. z-index keeps it
+     above .window-titlebar__actions' fixed, full-width .top-bar so that band
+     can't intercept pointer events over these actions. */
+  position: fixed;
+  top: 0;
+  left: max(
+    calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4)),
+    var(--sidebar-width)
+  );
   z-index: calc(var(--layer-header) + 2);
   display: flex;
   align-items: center;
   gap: var(--space-1);
-  margin-left: var(--space-4);
-  min-width: 0;
   height: var(--window-titlebar-height);
   pointer-events: none;
   -webkit-app-region: no-drag;
+}
+
+/* mac: never overlap the traffic-light semaphore, even when the sidebar is
+   narrower than the controls (collapsed). */
+.window-titlebar--platform-mac .window-titlebar__leading {
+  left: max(
+    calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4)),
+    var(--sidebar-width)
+  );
+}
+
+/* Narrow/mobile layout: the sidebar collapses into a full-width top bar, so
+   there is no left content column to track. Zero the tracked width so the
+   leading actions fall back to just clearing the window controls (the max()
+   clamp above), instead of anchoring to the now-irrelevant 328/74 px. */
+@media (max-width: 900px) {
+  .app-frame,
+  .app-frame[data-sidebar-collapsed] {
+    --sidebar-width: 0px;
+  }
 }
 
 .window-titlebar__leading-actions {
@@ -390,6 +429,10 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   pointer-events: auto;
+  /* This is the interactive element: without no-drag it inherits the title
+     bar's `drag` region and the OS swallows its clicks/hover as a window drag.
+     no-drag propagates to the descendant buttons. */
+  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__leading .titlebar-leading-action {
@@ -1542,6 +1585,10 @@ h3 {
   padding: var(--sidebar-logo-pad-top) var(--space-1) var(--space-2);
   margin-bottom: var(--space-1);
   min-height: 56px;
+  /* It's a logo, not selectable copy — hovering/clicking must not blue-highlight
+     the wordmark as a text selection. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-link {
@@ -1557,6 +1604,8 @@ h3 {
   font: inherit;
   min-width: 0;
   border-radius: var(--radius-md);
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-link:focus-visible {
@@ -1609,6 +1658,8 @@ h3 {
   object-position: left center;
   flex-shrink: 0;
   background: transparent;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-lockup--dark {
