@@ -9,8 +9,9 @@
  *
  * Session JWTs (different aud) are rejected by the audience check.
  */
-import { errors as joseErrors, importSPKI, jwtVerify, type JWTPayload } from 'jose'
+import { type JWTPayload, importSPKI, errors as joseErrors, jwtVerify } from 'jose'
 import { err } from '../errors'
+import { type WfcActionAuthorityV2, parseWfcActionAuthority } from './actionAuthority'
 
 type ImportedKey = Awaited<ReturnType<typeof importSPKI>>
 
@@ -23,6 +24,7 @@ export interface BrowsingJwtPayload extends JWTPayload {
   sharedFileSystem: string
   sharedFileSystemNamespace: string
   scopes: WfcFileScope[]
+  actionAuthority?: WfcActionAuthorityV2
 }
 
 export interface VerifierConfig {
@@ -140,6 +142,20 @@ export class JwtVerifier {
       )
     }
     const scopes = normalizeScopes(payload)
-    return { ...payload, scopes } as BrowsingJwtPayload
+    const actionAuthority = parseWfcActionAuthority(
+      (payload as { actionAuthority?: unknown }).actionAuthority,
+      {
+        sub: String(payload.sub ?? ''),
+        iat: payload.iat,
+        exp: payload.exp,
+        name: this.expectedSharedFileSystem,
+        namespace: this.expectedSharedFileSystemNamespace,
+      }
+    )
+    return {
+      ...payload,
+      scopes,
+      ...(actionAuthority ? { actionAuthority } : {}),
+    } as BrowsingJwtPayload
   }
 }
