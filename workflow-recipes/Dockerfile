@@ -30,6 +30,8 @@ COPY workflow-recipes/src ./src
 RUN npm run build:docker
 
 FROM node:24-alpine
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
 
 WORKDIR /app
 
@@ -51,6 +53,9 @@ COPY packages/image-policy ./packages/image-policy
 
 COPY workflow-recipes/package.json workflow-recipes/package-lock.json ./workflow-recipes/
 WORKDIR /app/workflow-recipes
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 RUN npm ci --omit=dev
 
 COPY --from=builder /app/workflow-recipes/dist ./dist

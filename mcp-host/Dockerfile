@@ -18,6 +18,7 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/action-context-contracts ./packages/action-context-contracts
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -35,6 +36,8 @@ RUN npm run build && npm prune --omit=dev
 
 # Production image
 FROM node:24.16.0-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
 
 WORKDIR /app
 
@@ -44,8 +47,12 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 COPY --from=builder /app/mcp-host/node_modules ./node_modules
 COPY --from=builder /app/mcp-host/dist ./dist
 
