@@ -400,8 +400,14 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   height: var(--window-titlebar-height);
-  pointer-events: none;
-  -webkit-app-region: no-drag;
+  /* This slot overlaps .window-titlebar__actions' full-width, draggable .top-bar.
+     A no-drag element in a SEPARATE stacking context does not reliably carve a
+     hole out of that overlapping drag band (the OS then swallows the buttons'
+     clicks as a window drag). Instead mirror the .top-bar + search/bell pattern
+     that works: make this slot its OWN `drag` region and let the action buttons
+     carve out as no-drag DESCENDANTS. */
+  pointer-events: auto;
+  -webkit-app-region: drag;
 }
 
 /* mac: never overlap the traffic-light semaphore, even when the sidebar is
@@ -451,6 +457,9 @@ h3 {
   background: transparent;
   box-shadow: none;
   color: var(--titlebar-control-ink);
+  /* Carve the clickable button out of the slot's drag region (like the window
+     controls each carry their own no-drag). */
+  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
@@ -1643,6 +1652,12 @@ h3 {
   flex-shrink: 0;
   background: transparent;
   display: none;
+  /* An <img>: user-select alone doesn't stop the blue image selection/drag ghost
+     on hover/click. Make it inert so the <button> parent owns the interaction. */
+  pointer-events: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-lockup {
@@ -1658,6 +1673,10 @@ h3 {
   object-position: left center;
   flex-shrink: 0;
   background: transparent;
+  /* An <img> (logotype SVG): make it inert so hover/click can't blue-highlight
+     it as an image selection/drag; the <button> parent owns the click. */
+  pointer-events: none;
+  -webkit-user-drag: none;
   -webkit-user-select: none;
   user-select: none;
 }
