@@ -155,6 +155,11 @@ export const netPolResyncTicksSkippedTotal = counter({
   labelNames: ['reason'] as const,
 })
 
+export const contextMetadataOnlyEventsTotal = counter({
+  name: 'clerum_hcc_context_metadata_only_events_total',
+  help: 'Context MODIFIED watch events that did not move the desired revision, so Host and SharedFileSystem fan-out were skipped (#460 Loop A label churn absorbed by HCC). A rising rate here is the storm returning; it is deliberately a counter and not a log line, because the event fires on exactly the churn that made the logs unreadable (#492).',
+})
+
 export const netPolDefaultsOnlyTicksTotal = counter({
   name: 'clerum_hcc_netpol_defaults_only_ticks_total',
   help: 'NetworkPolicy defaults-only ticks by named result (success/error).',
