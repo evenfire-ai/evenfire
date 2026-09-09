@@ -140,7 +140,7 @@ describe('Kubernetes create instrumentation', () => {
     }
   )
 
-  it('observes the existing POST-first conflict path without counting replace conflicts', async () => {
+  it('observes the POST-first conflict path without replacing an unchanged policy', async () => {
     const policy: k8s.V1NetworkPolicy = {
       kind: 'NetworkPolicy',
       metadata: { name: 'metrics-policy' },

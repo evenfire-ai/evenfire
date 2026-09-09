@@ -1,6 +1,6 @@
 # HCC create and existence-read metrics
 
-This instrumentation supports issue #598. It observes the existing reconciliation
+This instrumentation supports [issue #598](https://github.com/evenfire-ai/evenfire/issues/598). It observes the existing reconciliation
 paths; it does not introduce read-before-create, extra Kubernetes requests,
 ownership rules, retries, or updates to resources currently left unchanged.
 
@@ -24,6 +24,23 @@ request bodies, or exception messages become metric labels.
 The bounded series are initialized at zero. Re-importing metrics must preserve
 the registry and existing values. A zero series alone is not proof that a path
 executed. Do not sum create outcomes to calculate request count.
+
+`issued - conflict` is **not successful creates**: it includes other failures
+(403, 5xx, network errors) and operations that have not settled. Starts and
+responses can also fall in different observation windows. A successful-create
+count needs matching audit success events and resource/business evidence; this
+counter does not supply it by subtraction.
+
+Select the outcome explicitly in queries. For a single scoped environment:
+
+```promql
+sum by (kind) (increase(clerum_hcc_creates_total{outcome="issued"}[5m]))
+sum by (kind) (increase(clerum_hcc_creates_total{outcome="conflict"}[5m]))
+```
+
+Add the actual environment/target filters from the monitoring configuration
+before comparing a deployment. These queries report attempts and conflicts,
+not successful creations or a count of all completed operations.
 
 `observeCreate` and `observeExistenceRead` invoke their callbacks once and preserve
 the returned value or rejected value. They do not swallow a 404, turn it into
@@ -62,14 +79,21 @@ or its read path changes; do not instrument both the API call and its retry wrap
 
 ## Historical evidence and attribution limits
 
-The original five five-minute windows contained 1,684 / 1,833 / 1,669 / 1,171 /
-2,107 HCC create conflicts. These are historical observations, not acceptance
+The historical aggregate `regimen-2026-09-09-agregado.csv` and its companion
+BRIEF contain five-minute observations for `base1`, `base2`, `reg1`, `reg2`, and
+`reg3`: respectively 1,684 / 1,833 / 1,669 / 1,171 / 2,107 HCC create conflicts.
+The [measurement table in issue #598](https://github.com/evenfire-ai/evenfire/issues/598)
+is the accessible published reference: its hourly rates are these observed
+counts multiplied by 12. These are historical observations, not acceptance
 thresholds, a performance benchmark, or validation of this candidate.
 
-A metadata-only re-query of the historical `reg3` window (2026-09-09
-08:30:00–08:35:00 UTC) returned 1,846 conflicts for the four selected kinds,
-below its 20,000-result cap: NetworkPolicy 1,020; Service 389; Deployment 381;
-PVC 56. These exactly match the archived aggregate for those kinds.
+`reg3` is the third post-deployment observation window, 2026-09-09
+08:30:00–08:35:00 UTC. A separate metadata-only re-query of that window returned
+1,846 conflicts for the four selected kinds, below its 20,000-result cap:
+NetworkPolicy 1,020; Service 389; Deployment 381; PVC 56. These exactly match
+the archived aggregate for those kinds. The remaining 261 conflicts in the
+all-kind total of 2,107 are ConfigMap 189 + ServiceAccount 22 + Role 22 +
+RoleBinding 22 + PodDisruptionBudget 6; the selected-kind query did not include them.
 
 | Kind          | Observed name-family counts                                                                                           |
 | ------------- | --------------------------------------------------------------------------------------------------------------------- |

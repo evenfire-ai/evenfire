@@ -25,6 +25,7 @@ it('initializes the real read registry before any test seeding', async () => {
     expect(Object.keys(sample.labels).sort()).toEqual(['kind', 'outcome'])
 })
 
+// Pins the documented wrapped inventory; does not discover new unwrapped reads.
 it('observes the documented physical GET expressions without wrapping snapshots or lists', () => {
   const inventory: Record<string, number> = {
     'utils.ts': 1,
