@@ -29,6 +29,13 @@ import type { SingleTurnProvider } from './types'
 
 export type MakeProviderOptions = {
   codex?: CodexSubscriptionDeps
+  /**
+   * The generic `openai-compatible` provider has no static baseURL: the caller
+   * (`createLLMProvider`) derives the per-Host egress-broker URL and passes it
+   * here. Absent ⇒ the provider cannot be built (fail-closed — NEVER a public
+   * default endpoint).
+   */
+  openaiCompatible?: { brokerBaseURL: string }
 }
 
 export {
@@ -87,6 +94,28 @@ export function makeProvider(
         credentials[primarySlot(d).dataKey],
         model ?? d.defaultModel ?? ''
       )
+    case 'openai-compatible': {
+      // The effective baseURL is the per-Host egress-broker URL derived by
+      // createLLMProvider (host + slotId + the LAN baseURL's pathname). Fail
+      // closed if it was not derivable — NEVER fall through to the data-driven
+      // baseURL arm or a public default. The model is always explicit (no
+      // descriptor default). The apiKey mcp-host sends is inert: the broker
+      // overrides the Authorization header from its own mirrored credential, so
+      // '' is a safe placeholder (an undefined key would make the OpenAI SDK
+      // throw on the missing OPENAI_API_KEY env).
+      const brokerBaseURL = options?.openaiCompatible?.brokerBaseURL
+      if (!brokerBaseURL) {
+        throw new Error('[LLM] makeProvider: openai-compatible requires a derived broker baseURL')
+      }
+      if (!model?.trim()) {
+        throw new Error('[LLM] makeProvider: openai-compatible requires an explicit model')
+      }
+      return new OpenAICompatibleProvider(
+        { id: d.id, baseURL: brokerBaseURL, defaultModel: model },
+        credentials[primarySlot(d).dataKey] ?? '',
+        model
+      )
+    }
     case 'codex-subscription':
       if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
         throw new Error('[LLM] makeProvider: codex-subscription is disabled')

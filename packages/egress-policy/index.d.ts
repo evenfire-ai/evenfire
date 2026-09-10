@@ -23,3 +23,18 @@ export declare function classifyLanBaseURL(
   baseURL: unknown,
   options?: ClassifyLanOptions
 ): LanBaseUrlDecision
+
+export declare const PRIMARY_SLOT_ID: string
+export declare function fallbackSlotId(index: number): string
+export declare function brokerNameFor(hostName: string, slotId: string): string
+export declare function brokerServiceHost(brokerName: string, namespace: string): string
+export interface BrokerInternalUrlOptions {
+  namespace: string
+  port: number
+  pathname?: string
+}
+export declare function brokerInternalUrl(
+  hostName: string,
+  slotId: string,
+  options: BrokerInternalUrlOptions
+): string

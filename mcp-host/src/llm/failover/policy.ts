@@ -48,14 +48,20 @@ export function parseCooldownAndTriggers(rec: Record<string, unknown>): Cooldown
   return { cooldownSeconds, triggerOn }
 }
 
-function parseFallbackEntry(raw: unknown): FallbackEntry | null {
+function parseFallbackEntry(raw: unknown, rawIndex: number): FallbackEntry | null {
   if (!raw || typeof raw !== 'object') return null
   const rec = raw as Record<string, unknown>
   if (typeof rec.provider !== 'string' || rec.provider.length === 0) return null
   if (typeof rec.model !== 'string' || rec.model.length === 0) return null
-  const entry: FallbackEntry = { provider: rec.provider, model: rec.model }
+  // `slotIndex` is the RAW position in `spec.llmPolicy.fallbacks` (before any
+  // malformed entries are dropped) so it aligns with HCC's `fallback-<i>` broker
+  // hash — see FallbackEntry.slotIndex.
+  const entry: FallbackEntry = { provider: rec.provider, model: rec.model, slotIndex: rawIndex }
   if (typeof rec.credentialSlot === 'string' && rec.credentialSlot.length > 0) {
     entry.credentialSlot = rec.credentialSlot
+  }
+  if (typeof rec.baseURL === 'string' && rec.baseURL.length > 0) {
+    entry.baseURL = rec.baseURL
   }
   return entry
 }
@@ -73,10 +79,10 @@ export function parseLlmPolicy(raw: unknown): LlmPolicy | null {
 
   if (!Array.isArray(rec.fallbacks)) return null
   const fallbacks: FallbackEntry[] = []
-  for (const item of rec.fallbacks) {
-    const entry = parseFallbackEntry(item)
+  rec.fallbacks.forEach((item, rawIndex) => {
+    const entry = parseFallbackEntry(item, rawIndex)
     if (entry) fallbacks.push(entry)
-  }
+  })
   if (fallbacks.length === 0) return null
 
   const { cooldownSeconds, triggerOn } = parseCooldownAndTriggers(rec)

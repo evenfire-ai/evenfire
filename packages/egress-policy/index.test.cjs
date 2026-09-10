@@ -102,3 +102,48 @@ test('classifyLanBaseURL: clusterInternalCidrs shadows a LAN IP when provided', 
     { ok: false, reason: 'cluster_internal' }
   )
 })
+
+test('brokerNameFor: deterministic, DNS-safe, per-(host,slot)', () => {
+  const name = policy.brokerNameFor('h1', 'primary')
+  // Stable across calls (deterministic hash).
+  assert.equal(name, policy.brokerNameFor('h1', 'primary'))
+  // Shape: oai-egress- + 16 hex chars.
+  assert.match(name, /^oai-egress-[0-9a-f]{16}$/)
+  // DNS-1123 label (<= 63 chars, lowercase alnum/-).
+  assert.ok(name.length <= 63)
+  // Distinct host, slot, and the (host,slot) separator all change the name.
+  assert.notEqual(name, policy.brokerNameFor('h2', 'primary'))
+  assert.notEqual(name, policy.brokerNameFor('h1', 'fallback-0'))
+  // Separator is unambiguous: ('h1','x') must not collide with ('h1x','') etc.
+  assert.notEqual(policy.brokerNameFor('a', 'bc'), policy.brokerNameFor('ab', 'c'))
+})
+
+test('fallbackSlotId / PRIMARY_SLOT_ID match the HCC scheme', () => {
+  assert.equal(policy.PRIMARY_SLOT_ID, 'primary')
+  assert.equal(policy.fallbackSlotId(0), 'fallback-0')
+  assert.equal(policy.fallbackSlotId(3), 'fallback-3')
+})
+
+test('brokerServiceHost builds the in-cluster FQDN from a caller-supplied namespace', () => {
+  assert.equal(
+    policy.brokerServiceHost('oai-egress-abc', 'llm-egress'),
+    'oai-egress-abc.llm-egress.svc.cluster.local'
+  )
+})
+
+test('brokerInternalUrl composes the full dial URL and defaults an empty path to /', () => {
+  const name = policy.brokerNameFor('h1', 'primary')
+  assert.equal(
+    policy.brokerInternalUrl('h1', 'primary', {
+      namespace: 'llm-egress',
+      port: 3000,
+      pathname: '/v1',
+    }),
+    `http://${name}.llm-egress.svc.cluster.local:3000/v1`
+  )
+  // Missing/empty pathname → '/'
+  assert.equal(
+    policy.brokerInternalUrl('h1', 'primary', { namespace: 'llm-egress', port: 3000 }),
+    `http://${name}.llm-egress.svc.cluster.local:3000/`
+  )
+})

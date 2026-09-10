@@ -38,6 +38,22 @@ export interface FallbackEntry {
   provider: string
   model: string
   credentialSlot?: string
+  /**
+   * LAN endpoint of a local `openai-compatible` fallback. Used only to derive the
+   * egress-broker URL (pathname) and detect changes; mcp-host never dials it.
+   * Ignored for every other provider. (See `types.ts#ModelConfig.baseURL`.)
+   */
+  baseURL?: string
+  /**
+   * RAW index of this entry in `spec.llmPolicy.fallbacks` — the same index HCC
+   * hashes into the broker name (`fallback-<slotIndex>`). It is NOT the position
+   * in this (filtered) array: `parseLlmPolicy` drops malformed entries, so a
+   * later valid entry keeps its original raw index here. Always set by
+   * `parseLlmPolicy` (the sole production producer); optional only so the engine
+   * unit tests can build entries for providers whose dial never derives a broker.
+   * The openai-compatible dial fails closed if it is ever absent.
+   */
+  slotIndex?: number
 }
 
 /**

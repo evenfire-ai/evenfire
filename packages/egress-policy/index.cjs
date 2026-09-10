@@ -1,11 +1,19 @@
 'use strict'
 
+const { createHash } = require('crypto')
+
 // Single source of truth for the non-public/reserved IPv4 CIDR set and the
 // LAN-baseURL classifier. The CIDR list below is the SAME data that ships in
 // deploy/base/public-egress-exceptions.yaml (spec.ranges) and that the
 // NetworkPolicy reconciler excludes from public egress. control-api and HCC
 // both import it from here so the three copies cannot drift; a drift-guard test
 // pins it against the YAML.
+//
+// It also owns the per-slot egress-broker NAMING scheme: the deterministic
+// broker name (a sha256 over host+slotId) and the in-cluster URL derived from
+// it. HCC provisions the broker under that name; mcp-host must dial the SAME
+// name without any handshake, so the hash — the drift-critical bit — lives here
+// once. A drift here would make mcp-host dial a Service HCC never created.
 
 // The 18 non-public/reserved IPv4 ranges, VERBATIM and in the same order as the
 // deploy YAML. Any change here must be mirrored to the YAML (and vice versa) —
@@ -123,6 +131,52 @@ function classifyLanBaseURL(baseURL, options) {
   return { ok: true, ip }
 }
 
+// ─── Per-slot egress-broker naming ─────────────────────────────────────────
+
+// The slotId of the PRIMARY model's broker. Fallbacks use fallbackSlotId(i).
+const PRIMARY_SLOT_ID = 'primary'
+
+/**
+ * The slotId of the fallback at index `i` in `spec.llmPolicy.fallbacks` (the
+ * RAW array index, the same one HCC iterates). The broker hash is derived from
+ * it, so a consumer that filters/renumbers the fallback list before deriving a
+ * broker name would dial the wrong Service — always pass the raw index.
+ */
+function fallbackSlotId(index) {
+  return `fallback-${index}`
+}
+
+/**
+ * Deterministic broker name for a (hostName, slotId) pair — DNS-1123 safe. This
+ * is the drift-critical value: HCC names the per-slot broker with it, and
+ * mcp-host must reconstruct the identical name to dial it (no handshake). The
+ * \x1f separator is an unambiguous, non-DNS byte so distinct (host, slot) pairs
+ * cannot collide by string concatenation.
+ */
+function brokerNameFor(hostName, slotId) {
+  const digest = createHash('sha256').update(`${hostName}\x1f${slotId}`).digest('hex').slice(0, 16)
+  return `oai-egress-${digest}`
+}
+
+/** In-cluster Service DNS name of a broker. `namespace` is caller-supplied. */
+function brokerServiceHost(brokerName, namespace) {
+  return `${brokerName}.${namespace}.svc.cluster.local`
+}
+
+/**
+ * The complete in-cluster URL mcp-host dials for a (hostName, slotId) broker:
+ *   http://<brokerName>.<namespace>.svc.cluster.local:<port><pathname>
+ * `namespace`/`port` are platform config each service supplies; `pathname` is
+ * the path component of the original LAN baseURL (the broker's nginx serves
+ * exactly that location). The drift-critical brokerName comes from the shared
+ * hash above so HCC and mcp-host cannot disagree on which Service to reach.
+ */
+function brokerInternalUrl(hostName, slotId, options) {
+  const { namespace, port, pathname } = options || {}
+  const path = pathname || '/'
+  return `http://${brokerServiceHost(brokerNameFor(hostName, slotId), namespace)}:${port}${path}`
+}
+
 module.exports = {
   NON_PUBLIC_EGRESS_CIDRS,
   PRIVATE_LAN_CIDRS,
@@ -130,4 +184,9 @@ module.exports = {
   parseCidr,
   cidrOverlaps,
   classifyLanBaseURL,
+  PRIMARY_SLOT_ID,
+  fallbackSlotId,
+  brokerNameFor,
+  brokerServiceHost,
+  brokerInternalUrl,
 }

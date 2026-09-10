@@ -13,6 +13,7 @@
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
 import * as path from 'node:path'
+import { fallbackSlotId } from '@clerum/egress-policy'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
@@ -524,9 +525,17 @@ function buildFallbackProvider(entry: FallbackEntry): SingleTurnProvider | null 
   if (!configStore) return null
   const creds = buildFallbackCredentials(configStore, entry)
   if (!creds) return null
+  // A local openai-compatible fallback dials ITS OWN broker, addressed by
+  // `fallback-<rawIndex>`. Without slotIndex we cannot derive the right broker,
+  // and a missing slotId would otherwise default to the PRIMARY broker below —
+  // a dial to the wrong Service. Fail closed instead: no slotIndex, no provider.
+  if (entry.provider === 'openai-compatible' && entry.slotIndex == null) return null
   return createLLMProvider(
     { [entry.provider]: creds },
-    { provider: entry.provider as LlmProvider, name: entry.model }
+    { provider: entry.provider as LlmProvider, name: entry.model, baseURL: entry.baseURL },
+    {
+      openaiCompatibleSlotId: entry.slotIndex != null ? fallbackSlotId(entry.slotIndex) : undefined,
+    }
   )
 }
 
@@ -594,7 +603,13 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
-  return createLLMProvider(keys, { provider: modelCfg.provider, name: model })
+  // baseURL carries the local openai-compatible LAN endpoint (broker pathname
+  // source); inert for every other provider. slotId defaults to 'primary'.
+  return createLLMProvider(keys, {
+    provider: modelCfg.provider,
+    name: model,
+    baseURL: modelCfg.baseURL,
+  })
 }
 
 /**
@@ -1353,7 +1368,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
-  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged } =
+  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged, baseURLChanged } =
     hostPrimaryLlmBindingChanged(
       currentHost
         ? {
@@ -1361,6 +1376,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
             name: currentHost.spec.model?.name,
             connectionRef: currentHost.spec.model?.connectionRef,
             secretRef: currentHost.spec.secretRef,
+            baseURL: currentHost.spec.model?.baseURL,
           }
         : null,
       {
@@ -1368,6 +1384,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
         name: host.spec.model?.name,
         connectionRef: host.spec.model?.connectionRef,
         secretRef: host.spec.secretRef,
+        baseURL: host.spec.model?.baseURL,
       }
     )
 
@@ -1407,8 +1424,12 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // may clear a sticky runtime cooldown; unrelated CR edits must not (see
   // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
   // the store.onChange clearCooldown path never fires for it — this covers it.
+  // A baseURL-only edit repoints the local openai-compatible primary (a new
+  // derived broker URL / pathname): it is part of the primary's connectable
+  // surface, so it re-binds the provider AND clears a sticky cooldown so the
+  // repointed primary is retried immediately (same rationale as secretRef).
   await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
+    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged || baseURLChanged,
   })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line

@@ -1,6 +1,7 @@
 /**
  * LLM Provider factory.
  */
+import { PRIMARY_SLOT_ID, brokerInternalUrl } from '@clerum/egress-policy'
 import { config } from '../config'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
@@ -10,8 +11,8 @@ import { readLiveCodexPolicyBinding, resolveCodexAttemptPolicy } from './codexPo
 import type { CodexAttemptContext } from './codexSubscription'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
-import { makeProvider } from './registry'
-import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from './registryCore'
+import { type MakeProviderOptions, makeProvider } from './registry'
+import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './registryCore'
 // Re-export the transport interfaces (moved to ./types to break the registry
 // import cycle) so existing `import { SingleTurnProvider, ClassifiedError }
 // from '../llm'` sites keep working unchanged.
@@ -56,6 +57,42 @@ function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
 
 export type CreateLlmProviderOptions = {
   capturedCodexAttemptContext?: CodexAttemptContext
+  /**
+   * slotId used to derive the `openai-compatible` egress-broker URL: 'primary'
+   * for the Host primary model (default), or `fallback-<rawIndex>` for a fallback
+   * entry. MUST match the slotId HCC hashed into the broker name, so a fallback
+   * passes the entry's RAW `spec.llmPolicy.fallbacks` index. Ignored for every
+   * other provider.
+   */
+  openaiCompatibleSlotId?: string
+}
+
+/**
+ * The complete in-cluster egress-broker URL a local `openai-compatible` provider
+ * dials, derived with the SHARED helper so it is byte-identical to the Service
+ * HCC provisioned (no handshake). mcp-host never dials the LAN endpoint: it uses
+ * `lanBaseURL` only to extract the pathname the broker's nginx serves. Returns
+ * null (→ fail-closed, no provider) when the Host name is missing or the LAN
+ * baseURL is unparseable — NEVER a public default.
+ */
+function deriveOpenAiCompatibleBrokerURL(
+  slotId: string,
+  lanBaseURL: string | undefined
+): string | null {
+  const hostName = config.hostName?.trim()
+  if (!hostName) return null
+  if (!lanBaseURL) return null
+  let pathname: string
+  try {
+    pathname = new URL(lanBaseURL).pathname || '/'
+  } catch {
+    return null
+  }
+  return brokerInternalUrl(hostName, slotId, {
+    namespace: config.llmEgressNamespace,
+    port: config.brokerPort,
+    pathname,
+  })
 }
 
 /**
@@ -92,20 +129,44 @@ export function createLLMProvider(
   // return null (→ degraded), never crash the process. The four original arms
   // never throw here (their empty-key case is already handled above), so their
   // behaviour is byte-identical.
+  // openai-compatible has no static endpoint: derive the per-Host egress-broker
+  // URL BEFORE construction so a failure to derive fails closed (return null →
+  // degraded) rather than surfacing later. Never falls back to a public default.
+  let makeOptions: MakeProviderOptions | undefined
+  if (provider === 'codex-subscription') {
+    makeOptions = { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
+  } else if (provider === 'openai-compatible') {
+    const slotId = options?.openaiCompatibleSlotId ?? PRIMARY_SLOT_ID
+    const brokerBaseURL = deriveOpenAiCompatibleBrokerURL(slotId, modelConfig?.baseURL)
+    if (!brokerBaseURL) {
+      console.error(
+        '[LLM] openai-compatible: cannot derive egress-broker URL (missing host name or invalid baseURL) — not constructing'
+      )
+      return null
+    }
+    makeOptions = { openaiCompatible: { brokerBaseURL } }
+  }
+
   try {
-    return makeProvider(
-      provider,
-      credentials,
-      modelName,
-      provider === 'codex-subscription'
-        ? { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
-        : undefined
-    )
+    return makeProvider(provider, credentials, modelName, makeOptions)
   } catch (err) {
     console.error('[LLM] failed to construct provider')
     return null
   }
 }
+
+/**
+ * Providers excluded from env-key autodetection (dev mode + Plugin Workload SDK
+ * env mode). `openai-compatible` declares an OPTIONAL `OPENAI_COMPATIBLE_API_KEY`
+ * slot, so a bare `authMode === 'static-credentials'` scan would auto-select it
+ * whenever that env var happens to be set — but it has no static endpoint (its
+ * baseURL is the per-Host egress broker, which does not exist in dev auto-mode)
+ * and no default model, so an auto-selection could only fail. Exclude it
+ * EXPLICITLY rather than relying on the absence of a defaultModel.
+ */
+export const ENV_AUTODETECT_EXCLUDED_PROVIDERS: ReadonlySet<LlmProvider> = new Set<LlmProvider>([
+  'openai-compatible',
+])
 
 /**
  * Build the `ApiKeys` bag from an env map (dev mode + Plugin Workload SDK env
@@ -118,6 +179,7 @@ export function apiKeysFromEnv(env: NodeJS.ProcessEnv = process.env): ApiKeys {
   const keys: ApiKeys = {}
   for (const p of ALL_PROVIDERS) {
     if (descriptorFor(p).authMode !== 'static-credentials') continue
+    if (ENV_AUTODETECT_EXCLUDED_PROVIDERS.has(p)) continue
     const slots = descriptorFor(p).credentialSlots
     const bag: Record<string, string> = {}
     for (const slot of slots) {

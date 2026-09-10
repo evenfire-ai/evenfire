@@ -35,7 +35,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
-import { classifyLanBaseURL } from '@clerum/egress-policy'
+import { brokerNameFor, classifyLanBaseURL } from '@clerum/egress-policy'
 import { config } from './config'
 import {
   HOST_LABEL,
@@ -92,16 +92,12 @@ type DesiredBroker = {
   credentialDataKey: string
 }
 
-/** Deterministic broker name for a (host, slotId) pair — DNS-1123 safe. */
-export function brokerNameFor(hostName: string, slotId: string): string {
-  const digest = createHash('sha256').update(`${hostName}\x1f${slotId}`).digest('hex').slice(0, 16)
-  return `oai-egress-${digest}`
-}
-
-/** In-cluster Service FQDN + port the mcp-host dials (phase 5 derives this). */
-export function brokerServiceHost(brokerName: string): string {
-  return `${brokerName}.${config.llmEgressNamespace}.svc.cluster.local`
-}
+// The deterministic broker name + in-cluster FQDN now live in
+// @clerum/egress-policy (brokerNameFor / brokerServiceHost / brokerInternalUrl)
+// so mcp-host (phase 5) derives the IDENTICAL Service without a handshake — the
+// drift-critical hash cannot be duplicated. Re-exported here so existing
+// importers of this module keep working.
+export { brokerNameFor }
 
 /**
  * True when a Host declares an openai-compatible provider on its primary model

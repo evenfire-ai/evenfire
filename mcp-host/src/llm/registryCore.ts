@@ -199,6 +199,12 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   // data-driven baseURL arm. Tokenizer 'openai' (it serves OpenAI models) and
   // defaultModel is the Azure DEPLOYMENT name the operator expects by default.
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
+  // Generic OpenAI-compatible endpoint (local/self-hosted). Deliberately carries
+  // NO static baseURL and NO defaultModel: the baseURL is runtime-supplied
+  // per-Host (the derived egress-broker URL) and the model is always explicit, so
+  // it must NOT hit makeProvider's data-driven `descriptor.baseURL` arm — it gets
+  // its own factory case. Tokenizer 'fallback' (arbitrary third-party models).
+  'openai-compatible': { tokenizer: 'fallback' },
   // Broker: explicit model required later; no Secret slot and no default.
   'codex-subscription': { tokenizer: 'fallback' },
 }
