@@ -8,6 +8,7 @@ import type { WindowControlsState } from '../types'
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  Reflect.deleteProperty(window, 'clerum')
 })
 
 function setNavigatorPlatform(platform: string): void {
@@ -17,7 +18,7 @@ function setNavigatorPlatform(platform: string): void {
   })
 }
 
-function installWindowControls(
+function installClerumWindowControls(
   state: WindowControlsState = { fullscreen: false, maximized: false }
 ) {
   const controlsStateListeners = new Set<(nextState: WindowControlsState) => void>()
@@ -32,7 +33,7 @@ function installWindowControls(
     toggleMaximize: vi.fn(async () => undefined),
   }
 
-  Object.defineProperty(window, 'evenfire', {
+  Object.defineProperty(window, 'clerum', {
     configurable: true,
     value: {
       window: api,
@@ -44,6 +45,7 @@ function installWindowControls(
     emitControlsState: (nextState: WindowControlsState) => {
       controlsStateListeners.forEach(listener => listener(nextState))
     },
+    listenerCount: () => controlsStateListeners.size,
   }
 }
 
@@ -58,7 +60,7 @@ describe('resolveWindowControlsPlatform', () => {
 describe('WindowTitleBar', () => {
   it('uses macOS traffic-light ordering and native window actions', async () => {
     setNavigatorPlatform('MacIntel')
-    const { api } = installWindowControls()
+    const { api } = installClerumWindowControls()
 
     render(<WindowTitleBar />)
 
@@ -80,7 +82,10 @@ describe('WindowTitleBar', () => {
 
   it('uses the Windows/Linux icon order and updates the maximize label when restored', async () => {
     setNavigatorPlatform('Win32')
-    const { emitControlsState } = installWindowControls({ fullscreen: false, maximized: true })
+    const { emitControlsState } = installClerumWindowControls({
+      fullscreen: false,
+      maximized: true,
+    })
 
     render(<WindowTitleBar />)
 
@@ -100,7 +105,7 @@ describe('WindowTitleBar', () => {
 
   it('renders reusable titlebar actions beside the native window controls', () => {
     setNavigatorPlatform('MacIntel')
-    installWindowControls()
+    installClerumWindowControls()
 
     render(
       <WindowTitleBar
@@ -118,7 +123,7 @@ describe('WindowTitleBar', () => {
 
   it('toggles maximize when the draggable titlebar area is double clicked', () => {
     setNavigatorPlatform('MacIntel')
-    const { api } = installWindowControls()
+    const { api } = installClerumWindowControls()
     const { container } = render(<WindowTitleBar />)
 
     fireEvent.doubleClick(container.querySelector('.window-titlebar') as HTMLElement)
@@ -128,7 +133,7 @@ describe('WindowTitleBar', () => {
 
   it('keeps double clicks on titlebar controls scoped to that control', () => {
     setNavigatorPlatform('MacIntel')
-    const { api } = installWindowControls()
+    const { api } = installClerumWindowControls()
     render(
       <WindowTitleBar
         actions={
@@ -147,7 +152,7 @@ describe('WindowTitleBar', () => {
 
   it('portals provider-backed actions above the titlebar background', async () => {
     setNavigatorPlatform('MacIntel')
-    installWindowControls()
+    installClerumWindowControls()
 
     function Harness() {
       const [actionsRoot, setActionsRoot] = React.useState<HTMLDivElement | null>(null)
@@ -171,5 +176,21 @@ describe('WindowTitleBar', () => {
     const search = await screen.findByRole('button', { name: 'Search' })
     expect(search.closest('.window-titlebar')).toBeTruthy()
     expect(search.closest('.app-root')).toBeNull()
+  })
+
+  it('cleans up the exposed controls-state listener when unmounted', async () => {
+    setNavigatorPlatform('Win32')
+    const { api, listenerCount } = installClerumWindowControls()
+    const { unmount } = render(<WindowTitleBar />)
+
+    await waitFor(() => {
+      expect(api.getControlsState).toHaveBeenCalledTimes(1)
+    })
+    expect(api.onControlsStateChange).toHaveBeenCalledTimes(1)
+    expect(listenerCount()).toBe(1)
+
+    unmount()
+
+    expect(listenerCount()).toBe(0)
   })
 })

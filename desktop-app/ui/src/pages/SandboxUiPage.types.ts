@@ -40,6 +40,7 @@ export type SandboxUiPageProps = {
   onEmbeddedAppRemoved?: () => void
   onEmbedBoundsApplied?: () => void
   onEmbedSlotTopChange?: (topPx: number) => void
+  onEmbedSlotRightChange?: (rightPx: number) => void
   onNotify?: (message: string, tone: Tone) => void
   onShortcutOpenResult?: (
     requestId: number,

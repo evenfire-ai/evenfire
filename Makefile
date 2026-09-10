@@ -1083,7 +1083,7 @@ test-contracts: test-e2e-deps ## Run contract tests only
 test-e2e-bash: ## Run bash-based E2E suites (scripts/e2e/*.sh)
 	@echo "Running bash E2E suites..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-runtime-gate.sh
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-backend-compat.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-legacy-job-cleanup.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-security.sh
@@ -1096,7 +1096,19 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 .PHONY: test-e2e-wrc-internal-dependency-networkpolicy
 test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+
+.PHONY: test-e2e-wrc-networkpolicy-live-convergence
+test-e2e-wrc-networkpolicy-live-convergence: ## Run all PR #580 WRC NetworkPolicy family, route, repair, owner, and no-churn E2E gates
+	@echo "Running WRC NetworkPolicy live-convergence E2E gate..."
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
+
+.PHONY: test-wrc-networkpolicy-contracts
+test-wrc-networkpolicy-contracts: ## Run hermetic WRC NetworkPolicy runner, probe, observation, and fixture contracts
+	bash scripts/tests/test-wrc-networkpolicy-live-convergence-e2e.sh
+	bash scripts/tests/test-wrc-networkpolicy-probe-contract.sh
+	bash scripts/tests/test-wrc-fixtures.sh
+	bash scripts/tests/test-wrc-fixtures-parent-ownership.sh
 
 .PHONY: test-e2e-codex-subscription-network-boundary
 test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
@@ -1261,6 +1273,23 @@ test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC w
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
 
+.PHONY: test-e2e-wrc-egress-degradation
+test-e2e-wrc-egress-degradation: ## Prove valid UI/workload services survive transient DNS while removed/raced egress is contracted
+	@echo "Running WRC external-egress degradation gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-egress-degradation.sh
+
+.PHONY: test-e2e-wrc-egress-recover
+test-e2e-wrc-egress-recover: ## Restore only the recorded, owned WRC DNS fault intervention; never certify the interrupted gate
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh --recover-wrc-egress
+
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
 	@echo "Running HCC initial-fleet readiness gate..."
@@ -1278,6 +1307,14 @@ test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Cont
 	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
+
+.PHONY: test-e2e-wrc-hcc-context-noop-resync
+test-e2e-wrc-hcc-context-noop-resync: ## Prove WRC Context no-op plus HCC periodic policy self-heal (PR #568 T14)
+	@echo "Running WRC/HCC Context no-op and periodic NetworkPolicy resync gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_WRC_HCC_CONTEXT_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+	  MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) \
+	  bash scripts/e2e/e2e-wrc-hcc-context-noop-resync.sh
 
 .PHONY: test-e2e-hcc-rollout-readiness
 test-e2e-hcc-rollout-readiness: ## Measure the HCC Recreate rollout window (D1/c4). EXPECT_STUCK=1 reproduces the D1b outage; EXPECT_RECOVERY=1 proves the evenfire#391 rollout-undo path. The two flags are EXCLUSIVE; default both 0 = healthy measurement.

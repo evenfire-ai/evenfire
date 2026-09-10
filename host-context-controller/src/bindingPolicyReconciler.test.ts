@@ -13,7 +13,27 @@ function deferred<T = void>() {
 function makeMockNetworkingApi() {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
-    readNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ metadata: { resourceVersion: '1' } }),
+    readNamespacedNetworkPolicy: vi.fn(
+      async ({
+        name,
+        namespace,
+      }: {
+        name: string
+        namespace: string
+      }): Promise<k8s.V1NetworkPolicy> => ({
+        metadata: {
+          name,
+          namespace,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: {
+            'clerum.io/managed-by': 'host-context-controller',
+            'clerum.io/policy-type': 'binding-allow',
+            'clerum.io/recipe': 'my-recipe',
+          },
+        },
+      })
+    ),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
     listNamespacedNetworkPolicy: vi.fn().mockResolvedValue({ items: [] }),
     deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -48,10 +68,15 @@ describe('BindingPolicyReconciler', () => {
   const singleBinding: BindingDef[] = [{ from: 'redis-mcp', to: 'redis', port: 6379 }]
 
   it('creates egress + ingress policies for a binding', async () => {
+    // Both policies are absent only in this initial-creation case.
+    mockApi.readNamespacedNetworkPolicy
+      .mockRejectedValueOnce({ code: 404 })
+      .mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
       isCurrent: () => true,
     })
 
+    expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
     // 2 calls: 1 egress + 1 ingress
     expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
 
@@ -89,7 +114,10 @@ describe('BindingPolicyReconciler', () => {
       isCurrent: () => true,
     })
 
-    for (const call of mockApi.createNamespacedNetworkPolicy.mock.calls) {
+    expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    for (const call of mockApi.replaceNamespacedNetworkPolicy.mock.calls) {
       const labels = (call[0] as { body: { metadata: { labels: Record<string, string> } } }).body
         .metadata.labels
       expect(labels['clerum.io/policy-type']).toBe('binding-allow')
@@ -98,20 +126,33 @@ describe('BindingPolicyReconciler', () => {
     }
   })
 
-  it('handles 409 conflict with create-or-replace pattern', async () => {
+  it('rereads and converges when a policy appears between GET and POST', async () => {
+    const readPolicy = mockApi.readNamespacedNetworkPolicy.getMockImplementation()!
+    const observedNames = new Set<string>()
+    mockApi.readNamespacedNetworkPolicy.mockImplementation(async request => {
+      if (!observedNames.has(request.name)) {
+        observedNames.add(request.name)
+        throw { code: 404 }
+      }
+      return readPolicy(request)
+    })
     mockApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
 
     await reconciler.reconcileBindings('my-recipe', singleBinding, 'redis-mcp', 'redis-mcp', {
       isCurrent: () => true,
     })
 
-    expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalled()
-    expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalled()
+    expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(4)
+    expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
+    for (const [request] of mockApi.replaceNamespacedNetworkPolicy.mock.calls) {
+      expect(request.body.metadata.resourceVersion).toBe('1')
+    }
   })
 
   it('does not replace or start another apply after its authority lease is retired', async () => {
     const readStarted = deferred()
-    const releaseRead = deferred<{ metadata: { resourceVersion: string } }>()
+    const releaseRead = deferred<{ metadata: { name: string; resourceVersion: string } }>()
     mockApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
     mockApi.readNamespacedNetworkPolicy.mockImplementationOnce(async () => {
       readStarted.resolve()
@@ -129,12 +170,14 @@ describe('BindingPolicyReconciler', () => {
     await readStarted.promise
 
     current = false
-    releaseRead.resolve({ metadata: { resourceVersion: '1' } })
+    releaseRead.resolve({
+      metadata: { name: 'bind-my-recipe-redis-mcp-redis-egress', resourceVersion: '1' },
+    })
     await reconcile
 
-    // The first create was authorized and returned 409 without mutating. Once
-    // the lease is retired, no replacement or second policy apply may start.
-    expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    // Retirement during the initial GET prevents every mutation and the next apply.
+    expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(mockApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
   })
 
@@ -211,7 +254,7 @@ describe('BindingPolicyReconciler', () => {
       isCurrent: () => true,
     })
 
-    const calls = mockApi.createNamespacedNetworkPolicy.mock.calls
+    const calls = mockApi.replaceNamespacedNetworkPolicy.mock.calls
     const ingressCall = calls.find(
       (c: unknown[]) =>
         (c[0] as { body: { spec: { policyTypes: string[] } } }).body.spec.policyTypes[0] ===
@@ -230,7 +273,7 @@ describe('BindingPolicyReconciler', () => {
       isCurrent: () => true,
     })
 
-    const calls = mockApi.createNamespacedNetworkPolicy.mock.calls
+    const calls = mockApi.replaceNamespacedNetworkPolicy.mock.calls
     const egressCall = calls.find(
       (c: unknown[]) =>
         (c[0] as { body: { spec: { policyTypes: string[] } } }).body.spec.policyTypes[0] ===
@@ -302,7 +345,7 @@ describe('BindingPolicyReconciler', () => {
       { isCurrent: () => true }
     )
 
-    const calls = mockApi.createNamespacedNetworkPolicy.mock.calls
+    const calls = mockApi.replaceNamespacedNetworkPolicy.mock.calls
     const egressCall = calls.find(
       (c: unknown[]) =>
         (c[0] as { body: { spec: { policyTypes: string[] } } }).body.spec.policyTypes[0] ===

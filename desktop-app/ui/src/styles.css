@@ -105,9 +105,16 @@ h3 {
   justify-content: flex-start;
   padding: 0 var(--space-2);
   background: var(--topbar-gradient);
-  border-bottom: 1px solid rgba(var(--edge-rgb), 0.28);
+  border-bottom: 1px solid var(--titlebar-divider-border);
   user-select: none;
   -webkit-app-region: drag;
+}
+
+/* Titlebar actions are portalled outside the content panel. Raise their owning
+   stacking context while the fixed chat drawer is present so search and inbox
+   overlays remain usable above that drawer. */
+.app-frame:has(.chat-drawer) > .window-titlebar {
+  z-index: var(--layer-dropdown);
 }
 
 .window-titlebar__actions {
@@ -881,6 +888,11 @@ h3 {
   bottom: var(--space-4);
   width: var(--app-notification-drawer-width);
   max-height: none;
+}
+
+.notification-menu--app-drawer.notification-menu--embed-aligned {
+  left: var(--notification-drawer-left);
+  width: auto;
 }
 
 .notification-menu-title-row {
@@ -2611,7 +2623,7 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
-  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-4));
   /* Chat drawer owns its own width, decoupled from the notification drawer.
      React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
      clamp is only the pre-mount / closed-state fallback. Floor 340px == the
@@ -10308,7 +10320,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .toast-stack {
   position: fixed;
-  top: 16px;
+  top: calc(var(--window-titlebar-height) + var(--space-2));
   right: 16px;
   z-index: 4000;
   display: grid;
@@ -12998,17 +13010,6 @@ pre {
   padding-right: var(--app-header-utilities-width);
 }
 
-/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
-   header (`.top-bar` at --layer-header) within the shared content-panel stacking
-   context — so the header's transient dropdowns (the notification Inbox popover,
-   global search) would paint BEHIND the drawer and never surface. While the chat
-   drawer is open, lift the header to the dropdown layer so those overlays surface
-   over it, exactly as they do over chat content in full-screen. Toasts
-   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
-.content-panel.content-panel--chat-drawer-open .top-bar {
-  z-index: var(--layer-dropdown);
-}
-
 .chat-drawer {
   position: fixed;
   /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
@@ -13272,18 +13273,6 @@ pre {
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
-  .content-panel {
-    --app-header-utilities-width: calc(
-      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
-    );
-  }
-
-  .content-panel.content-panel--app-notification-drawer-open {
-    --app-header-utilities-width: calc(
-      var(--app-notification-drawer-width) + var(--space-2) + 36px
-    );
-  }
-
   .global-search {
     --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
     --global-search-expanded-min: 160px;

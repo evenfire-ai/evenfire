@@ -35,7 +35,7 @@ function controlClassName(action: WindowControlAction): string {
 }
 
 function getWindowControlsApi() {
-  return window.evenfire?.window
+  return window.clerum?.window
 }
 
 function targetOwnsPointerGesture(target: EventTarget | null): boolean {
@@ -117,7 +117,7 @@ export function WindowTitleBar({ actions, actionsRef, leadingRef }: WindowTitleB
       data-platform={platform}
       onDoubleClick={handleTitlebarDoubleClick}
     >
-      <div className="window-titlebar__controls" aria-label="Window controls">
+      <div className="window-titlebar__controls" role="group" aria-label="Window controls">
         {controlOrder.map(action => (
           <button
             key={action}

@@ -239,6 +239,18 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(true)
   })
 
+  it('aligns the embedded-app drawer to the measured embed slot edge', () => {
+    render(
+      <AppHeader notificationTrayMode="drawer" notificationTrayReady notificationTrayLeft={416} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const tray = screen.getByRole('dialog', { name: 'Notifications and approvals' })
+    expect(tray.classList.contains('notification-menu--embed-aligned')).toBe(true)
+    expect(tray.style.getPropertyValue('--notification-drawer-left')).toBe('416px')
+  })
+
   it('keeps the existing floating overlay outside embedded apps', async () => {
     const onShellOverlayOpenChange = vi.fn()
     render(<AppHeader onShellOverlayOpenChange={onShellOverlayOpenChange} />)

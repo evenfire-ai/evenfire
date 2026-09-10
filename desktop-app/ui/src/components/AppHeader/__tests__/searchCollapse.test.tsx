@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
+import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { AppHeader } from '../index'
 
 // The titlebar search opens its reusable results surface on focus, even before
@@ -132,5 +134,32 @@ describe('AppHeader global search idle collapse', () => {
 
     expect(screen.getByRole('textbox', { name: 'Search' })).toBe(document.activeElement)
     expect(screen.getByText('Search agents, connectors, plugins or apps...')).toBeTruthy()
+  })
+
+  it('keeps titlebar actions out of a second banner while preserving the default banner', async () => {
+    function TitlebarHarness() {
+      const [actionsRoot, setActionsRoot] = React.useState<HTMLDivElement | null>(null)
+
+      return (
+        <div className="app-frame">
+          <WindowTitleBar actionsRef={setActionsRoot} />
+          <div className="app-root">
+            <section className="content-panel">
+              <TitlebarActionsPortal container={actionsRoot}>
+                <AppHeader placement="titlebar" />
+              </TitlebarActionsPortal>
+            </section>
+          </div>
+        </div>
+      )
+    }
+
+    const titlebar = render(<TitlebarHarness />)
+    await screen.findByRole('textbox', { name: 'Search' })
+    expect(screen.getAllByRole('banner')).toHaveLength(1)
+    titlebar.unmount()
+
+    render(<AppHeader />)
+    expect(screen.getAllByRole('banner')).toHaveLength(1)
   })
 })

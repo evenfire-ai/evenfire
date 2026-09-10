@@ -264,6 +264,7 @@ export function App() {
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
   const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
+  const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
@@ -2079,6 +2080,9 @@ export function App() {
                                       notificationTrayUsesDrawer ? 'drawer' : 'overlay'
                                     }
                                     notificationTrayReady={notificationDrawerReady}
+                                    notificationTrayLeft={
+                                      notificationTrayUsesDrawer ? notificationTrayLeft : null
+                                    }
                                     onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
                                     onShellOverlayOpenChange={setHeaderShellOverlayOpen}
                                   />
@@ -2142,6 +2146,7 @@ export function App() {
                                       onEmbeddedAppRemoved={handleSandboxUiRemoved}
                                       onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
                                       onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                      onEmbedSlotRightChange={setNotificationTrayLeft}
                                       onNotify={vm.pushToast}
                                       onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
                                     />

@@ -1501,19 +1501,27 @@ describe('HostReconciler Host inventory mutation authority', () => {
     })
     vi.spyOn(reconciler as any, 'hasChannelIngress').mockReturnValue(false)
     appsApi.createNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
     appsApi.readNamespacedDeployment.mockImplementationOnce(async () => {
       current = {
         ...host,
         generation: 4,
         spec: { ...host.spec, contextRef: 'replacement-context' },
       }
-      return { metadata: { resourceVersion: 'rv-existing' } }
+      return {
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: 'deployment-uid',
+          resourceVersion: 'rv-existing',
+        },
+      }
     })
 
     await expect(reconciler.reconcile(host)).rejects.toThrow(/Host spec generation/)
 
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
-    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
     expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
@@ -1550,7 +1558,14 @@ describe('HostReconciler Host inventory mutation authority', () => {
           spec: { ...host.spec, contextRef: 'replacement-context' },
         }
       }
-      return { metadata: { resourceVersion: `rv-existing-${deploymentReads}` } }
+      return {
+        metadata: {
+          name: host.name,
+          namespace: host.namespace,
+          uid: 'deployment-uid',
+          resourceVersion: `rv-existing-${deploymentReads}`,
+        },
+      }
     })
     appsApi.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
     const random = vi.spyOn(Math, 'random').mockReturnValue(0)
@@ -1561,7 +1576,7 @@ describe('HostReconciler Host inventory mutation authority', () => {
       random.mockRestore()
     }
 
-    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(appsApi.readNamespacedDeployment).toHaveBeenCalledTimes(2)
     expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
   })
