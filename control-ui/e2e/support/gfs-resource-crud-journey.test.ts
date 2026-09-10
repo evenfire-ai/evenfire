@@ -1,6 +1,9 @@
 import { type Locator, type Page, expect, test } from '@playwright/test'
+import {
+  GFS_RESOURCE_NAME_MAX_LENGTH,
+  normalizeGfsResourceName,
+} from '@clerum/gfs-interaction-policy'
 import { getGfsChildResourceSummary, uniqueGfsFixtureName } from '../../../tests/e2e/gfsUiFixtures'
-import { GFS_RESOURCE_NAME_MAX_LENGTH, normalizeGfsResourceName } from '../../lib/gfsResourceName'
 
 type GfsCrudFixture = {
   childName: string
@@ -27,7 +30,9 @@ export async function exerciseGfsResourceCrudJourney({
     await expect(row).toBeVisible({ timeout: 20_000 })
     const actionsButton = row.getByRole('button', { name: `Actions for ${fixture.name}` })
     await actionsButton.click()
-    const copyButton = page.getByRole('menuitem', { name: 'Copy GFS link' })
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    const shareMenu = page.getByRole('menu', { name: `Share options for ${fixture.name}` })
+    const copyButton = shareMenu.getByRole('menuitem', { name: 'Copy link' })
     await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
       origin: new URL(baseUi).origin,
     })
@@ -35,14 +40,18 @@ export async function exerciseGfsResourceCrudJourney({
     await copyButton.click()
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(fixture.uri)
     await actionsButton.click()
-    await page.getByRole('menuitem', { name: 'Manage access' }).click()
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    await page
+      .getByRole('menu', { name: `Share options for ${fixture.name}` })
+      .getByRole('menuitem', { name: 'Share' })
+      .click()
     await expect(
-      page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
+      page.getByRole('dialog', { name: `Share folder ${fixture.name}`, exact: true })
     ).toBeVisible()
   })
 
   await test.step('operator creates, uploads, renames, replaces, and deletes resources from the folder UI', async () => {
-    await page.getByRole('button', { name: 'Close manage dialog' }).click()
+    await page.getByRole('button', { name: 'Close share dialog' }).click()
     await folderRow(fixture.name).getByRole('button', { name: fixture.name, exact: true }).click()
     const currentResources = page.getByRole('list', { name: 'Current folder resources' })
     await expect(
@@ -182,9 +191,13 @@ export async function exerciseGfsResourceCrudJourney({
     await folderRow(fixture.name)
       .getByRole('button', { name: `Actions for ${fixture.name}` })
       .click()
-    await page.getByRole('menuitem', { name: 'Manage access' }).click()
+    await page.getByRole('menuitem', { name: 'Share' }).hover()
+    await page
+      .getByRole('menu', { name: `Share options for ${fixture.name}` })
+      .getByRole('menuitem', { name: 'Share' })
+      .click()
     await expect(
-      page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
+      page.getByRole('dialog', { name: `Share folder ${fixture.name}`, exact: true })
     ).toBeVisible()
   })
 }

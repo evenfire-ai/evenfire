@@ -11,7 +11,6 @@ import {
   getGfsShares,
   getHosts,
   getRecipes,
-  postGfsShare,
   putGfsGrant,
 } from '@lib/api'
 import { GfsGrantPanel } from '../GfsGrantPanel'
@@ -26,7 +25,6 @@ vi.mock('@lib/api', () => ({
   getGfsShares: vi.fn(),
   deleteGfsGrant: vi.fn(),
   deleteGfsShare: vi.fn(),
-  postGfsShare: vi.fn(),
   putGfsGrant: vi.fn(),
 }))
 
@@ -38,7 +36,6 @@ const mockGetGfsGrants = vi.mocked(getGfsGrants)
 const mockGetGfsShares = vi.mocked(getGfsShares)
 const mockDeleteGfsGrant = vi.mocked(deleteGfsGrant)
 const mockDeleteGfsShare = vi.mocked(deleteGfsShare)
-const mockPostGfsShare = vi.mocked(postGfsShare)
 const mockPutGfsGrant = vi.mocked(putGfsGrant)
 
 const resource = {
@@ -58,9 +55,6 @@ const workflowHostSubject = {
 } as const
 const operatorSubject = { type: 'operator' } as const
 
-let createShareAction: (() => void) | null = null
-let createShareDisabled = true
-
 function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse {
   return { ok: true, resourceId: resource.resourceId, updated, count: updated.length }
 }
@@ -68,13 +62,7 @@ function successfulMutation(...updated: GfsSubjectInput[]): GfsMutationResponse 
 function renderPanel(target = resource) {
   return render(
     <ToastProvider>
-      <GfsGrantPanel
-        resource={target}
-        onCreateShareActionChange={(action, disabled) => {
-          createShareAction = action
-          createShareDisabled = disabled
-        }}
-      />
+      <GfsGrantPanel resource={target} />
     </ToastProvider>
   )
 }
@@ -93,42 +81,18 @@ async function chooseSubjects(...names: string[]) {
   for (const name of names) fireEvent.click(screen.getByRole('option', { name }))
 }
 
-function openPermissionMenu() {
-  let menu = screen.queryByRole('menu', { name: 'Permissions' })
-  if (!menu) {
-    const trigger = document.querySelector<HTMLButtonElement>(
-      '.cu-gfs-permission-dropdown__trigger'
-    )
-    if (!trigger) throw new Error('permission trigger missing')
-    fireEvent.click(trigger)
-    menu = screen.getByRole('menu', { name: 'Permissions' })
-  }
-  return menu
-}
-
 function selectPermission(name: string) {
-  fireEvent.click(within(openPermissionMenu()).getByRole('menuitemcheckbox', { name }))
+  fireEvent.click(screen.getByRole('button', { name: 'Access role for selected recipients' }))
+  fireEvent.click(screen.getByRole('option', { name: name === 'Read' ? 'Read' : 'Editor' }))
 }
 
-async function submit(action: 'Grant access' | 'Create share') {
-  if (action === 'Create share') {
-    await waitFor(() => {
-      expect(createShareAction).not.toBeNull()
-      expect(createShareDisabled).toBe(false)
-    })
-    createShareAction?.()
-  } else {
-    fireEvent.click(screen.getByRole('button', { name: action }))
-  }
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: action }))
+async function submit(action: 'Share') {
+  fireEvent.click(screen.getByRole('button', { name: action }))
 }
 
 describe('GfsGrantPanel bulk access', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    createShareAction = null
-    createShareDisabled = true
     mockGetAdminUsers.mockResolvedValue({
       items: [
         {
@@ -179,14 +143,15 @@ describe('GfsGrantPanel bulk access', () => {
       .mockResolvedValueOnce({ items: [] })
     renderPanel()
 
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
+    const existing = await screen.findByRole('region', { name: 'People with access' })
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
-    expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
-    expect(within(existing).getByText('Read')).toBeTruthy()
-    expect(within(existing).getByText('Write')).toBeTruthy()
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    const userRow = within(existing).getByTestId('gfs-access-row-user')
+    expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
+    expect(within(userRow).queryByText(/direct grant|\buser\b/i)).toBeNull()
+    expect(
+      within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' })
+    ).toHaveTextContent('Editor')
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -194,14 +159,110 @@ describe('GfsGrantPanel bulk access', () => {
     await waitFor(() =>
       expect(mockDeleteGfsGrant).toHaveBeenCalledWith('33333333-3333-3333-3333-333333333333')
     )
-    await waitFor(() =>
-      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
-    )
+    await waitFor(() => expect(within(existing).getByText('No one has access yet.')).toBeTruthy())
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
   })
 
-  it('distinguishes direct grant and share menus for the same principal', async () => {
+  it('shows each existing principal with its entity icon and no access-source metadata', async () => {
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '10000000-0000-0000-0000-000000000001',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000002',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: teamSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000003',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: statefulHostSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000004',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: workflowHostSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000005',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: operatorSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    renderPanel()
+
+    const expectedKinds = [
+      ['Ada Lovelace', 'user'],
+      ['Research', 'team'],
+      ['chatllm (Stateful)', 'agent'],
+      ['sandbox-ui-hello', 'workflow'],
+      ['Operator', 'operator'],
+    ] as const
+    for (const [label, kind] of expectedKinds) {
+      const row = (await screen.findByText(label)).closest('[data-testid^="gfs-access-row-"]')
+      expect(row?.querySelector(`[data-subject-kind="${kind}"] svg`)).not.toBeNull()
+    }
+    expect(screen.queryByText(/direct grant|direct share/i)).toBeNull()
+  })
+
+  it('changes an existing member between Editor and Read', async () => {
+    const persistedGrant = {
+      id: '33333333-3333-3333-3333-333333333333',
+      drive: 'main',
+      resourceId: resource.resourceId,
+      subject: userSubject,
+      permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+      inherit: false,
+    }
+    mockGetGfsGrants
+      .mockResolvedValueOnce({ items: [persistedGrant] })
+      .mockResolvedValueOnce({ items: [{ ...persistedGrant, permissions: ['read', 'share'] }] })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
+    renderPanel()
+
+    const role = await screen.findByRole('button', { name: 'Access role for Ada Lovelace' })
+    expect(role).toHaveTextContent('Editor')
+    fireEvent.click(role)
+    expect(screen.getByRole('listbox').parentElement?.parentElement).toBe(document.body)
+    fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'share'],
+        inherit: false,
+      })
+    )
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Access role for Ada Lovelace' })
+      ).toHaveTextContent('Read')
+    )
+  })
+
+  it('merges a legacy grant and share for the same principal into one toggleable row', async () => {
     mockGetGfsGrants.mockResolvedValue({
       items: [
         {
@@ -222,20 +283,79 @@ describe('GfsGrantPanel bulk access', () => {
           resourceId: resource.resourceId,
           subject: userSubject,
           permissions: ['read'],
-          includeDescendants: false,
+          includeDescendants: true,
         },
       ],
     })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
 
     renderPanel()
 
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
-    expect(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    ).toBeInTheDocument()
-    expect(
-      within(existing).getByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
-    ).toBeInTheDocument()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    // ONE row for the principal — not one per backend row kind.
+    expect(within(existing).getAllByText('Ada Lovelace')).toHaveLength(1)
+    expect(within(existing).queryByText(/direct grant|direct share|\buser\b/i)).toBeNull()
+    expect(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' })).toBeTruthy()
+    // The descendant-coverage badge stays out of the row.
+    expect(within(existing).queryByText('Includes contents')).toBeNull()
+
+    // Role change consolidates: the grant upsert supersedes the legacy share.
+    fireEvent.click(within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: true,
+      })
+    )
+    await waitFor(() =>
+      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
+    )
+  })
+
+  it('offers a toggleable role for a share-only principal and migrates it on change', async () => {
+    mockGetGfsShares.mockResolvedValue({
+      items: [
+        {
+          id: '44444444-4444-4444-4444-444444444444',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+    })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
+
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const role = await within(existing).findByRole('button', {
+      name: 'Access role for Ada Lovelace',
+    })
+    expect(role).toHaveTextContent('Read')
+    expect(within(existing).queryByText(/direct share|\buser\b/i)).toBeNull()
+
+    fireEvent.click(role)
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: true,
+      })
+    )
+    await waitFor(() =>
+      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
+    )
   })
 
   it('sorts access records by visible principal identity', async () => {
@@ -326,18 +446,14 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
     expect(await screen.findByText('Access was already removed.')).toBeTruthy()
-    await waitFor(() =>
-      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
-    )
+    await waitFor(() => expect(within(existing).getByText('No one has access yet.')).toBeTruthy())
     expect(screen.queryByRole('alert')).toBeNull()
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
   })
@@ -362,10 +478,8 @@ describe('GfsGrantPanel bulk access', () => {
       })
     )
     renderPanel()
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -399,15 +513,15 @@ describe('GfsGrantPanel bulk access', () => {
     const initialSignal = mockGetGfsGrants.mock.calls[0][2]
     await chooseSubjects('Ada Lovelace')
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
-    const existing = await screen.findByRole('region', { name: 'Who has access' })
-    expect(await within(existing).findByText('Direct grant · user')).toBeTruthy()
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    expect(await within(existing).findByTestId('gfs-access-row-user')).toBeTruthy()
     expect(initialSignal?.aborted).toBe(true)
     resolveInitialGrants({ items: [] })
 
-    await waitFor(() => expect(within(existing).getByText('Direct grant · user')).toBeTruthy())
-    expect(within(existing).queryByText('No direct grants or shares yet.')).toBeNull()
+    await waitFor(() => expect(within(existing).getByText('Ada Lovelace')).toBeTruthy())
+    expect(within(existing).queryByText('No one has access yet.')).toBeNull()
   })
 
   it('aborts the active access hydration when the panel unmounts', async () => {
@@ -449,18 +563,14 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    selectPermission('Delete')
+    selectPermission('Editor')
     await chooseSubjects('chatllm (Stateful)', 'chatllm-stateless (Stateless)', 'sandbox-ui-hello')
 
-    const permissions = openPermissionMenu()
-    expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Read' })).toBeChecked()
-    expect(within(permissions).getByRole('menuitemcheckbox', { name: 'Write' })).not.toBeChecked()
-    expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Delete' })).toBeNull()
-    expect(within(permissions).queryByRole('menuitemcheckbox', { name: 'Share' })).toBeNull()
-    expect(createShareDisabled).toBe(true)
-
-    await submit('Grant access')
+    expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
+    expect(
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
+    await submit('Share')
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
@@ -473,52 +583,24 @@ describe('GfsGrantPanel bulk access', () => {
           { type: 'host', id: '1st:mcp-host/chatllm-stateless' },
           { type: 'host', id: '3rd:sandbox-recipes/sandbox-ui-hello' },
         ],
-        permissions: ['read'],
+        permissions: ['read', 'write'],
         inherit: false,
       })
     )
     await waitFor(() => expect(mockGetGfsGrants).toHaveBeenCalledTimes(2))
   })
 
-  it('creates one bulk share for user and team subjects', async () => {
-    mockPostGfsShare.mockResolvedValue(successfulMutation(userSubject, teamSubject))
-    renderPanel()
-    await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    await submit('Create share')
-
-    await waitFor(() =>
-      expect(mockPostGfsShare).toHaveBeenCalledWith({
-        drive: 'main',
-        resourceId: resource.resourceId,
-        subjects: [
-          { type: 'user', id: '11111111-1111-1111-1111-111111111111' },
-          { type: 'team', id: '22222222-2222-2222-2222-222222222222' },
-        ],
-        permissions: ['read'],
-        includeDescendants: false,
-      })
-    )
-  })
-
-  it('requires an explicit scope review before creating access', async () => {
+  it('shows scope and role only after a recipient is selected', async () => {
     const directory = { ...resource, name: 'reports', kind: 'directory' as const }
     renderPanel(directory)
+    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull()
+    expect(screen.queryByRole('checkbox', { name: /Include contents/ })).toBeNull()
     await chooseSubjects('Ada Lovelace', 'Research')
-    selectPermission('Read')
-    selectPermission('Write')
-
-    fireEvent.click(screen.getByRole('button', { name: 'Grant access' }))
-    const dialog = await screen.findByRole('alertdialog')
-    expect(dialog).toHaveTextContent('2 recipients (1 user, 1 team)')
-    expect(dialog).toHaveTextContent('"reports"')
-    expect(dialog).toHaveTextContent('Permissions: read, write')
-    expect(dialog).toHaveTextContent('Scope: this resource and all descendants')
-    expect(createShareDisabled).toBe(true)
-
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
-    expect(mockPutGfsGrant).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Share' })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: /Include contents/ })).toBeChecked()
+    expect(
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Read')
   })
 
   it('keeps operator singular and prevents mixing it with bulk subjects', async () => {
@@ -529,14 +611,14 @@ describe('GfsGrantPanel bulk access', () => {
     expect(screen.queryByRole('button', { name: 'Remove Ada Lovelace' })).toBeNull()
     expect(screen.getByRole('button', { name: 'Remove Operator' })).toBeTruthy()
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
     await waitFor(() =>
       expect(mockPutGfsGrant).toHaveBeenCalledWith({
         drive: 'main',
         resourceId: resource.resourceId,
         subject: { type: 'operator' },
-        permissions: ['read'],
+        permissions: ['read', 'share'],
         inherit: false,
       })
     )
@@ -555,23 +637,21 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace', 'Research')
     selectPermission('Write')
-    await submit('Grant access')
+    await submit('Share')
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'escalation_rejected: Requested permissions exceed operator authority. (invalid indexes: 1)'
     )
     expect(screen.getByRole('button', { name: 'Remove Ada Lovelace' })).toBeTruthy()
     expect(screen.getByRole('button', { name: 'Remove Research' })).toBeTruthy()
-    expect(document.querySelector('.cu-gfs-permission-dropdown__trigger')).toHaveTextContent(
-      'Write'
-    )
+    expect(
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
 
-    await submit('Grant access')
+    await submit('Share')
     await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(2))
     expect(screen.queryByRole('button', { name: 'Remove Ada Lovelace' })).toBeNull()
-    expect(document.querySelector('.cu-gfs-permission-dropdown__trigger')).toHaveTextContent(
-      'Permissions'
-    )
+    expect(screen.queryByRole('button', { name: 'Access role for selected recipients' })).toBeNull()
   })
 
   it('does not duplicate the machine code when the server message matches it', async () => {
@@ -584,29 +664,26 @@ describe('GfsGrantPanel bulk access', () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace')
     selectPermission('Read')
-    await submit('Grant access')
+    await submit('Share')
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent('subjects_invalid')
     expect(alert).not.toHaveTextContent('subjects_invalid: subjects_invalid')
   })
 
-  it('does not restore incompatible permissions after the final host is removed', async () => {
+  it('adapts the Editor role to the read/write-only host permission model', async () => {
     renderPanel()
     await chooseSubjects('Ada Lovelace')
-    selectPermission('Delete')
+    selectPermission('Editor')
     await chooseSubjects('chatllm (Stateful)')
 
-    expect(
-      within(openPermissionMenu()).queryByRole('menuitemcheckbox', { name: 'Delete' })
-    ).toBeNull()
+    expect(screen.getByText(/use read\/write access only/i)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Remove chatllm (Stateful)' }))
 
     expect(
-      within(openPermissionMenu()).getByRole('menuitemcheckbox', { name: 'Delete' })
-    ).not.toBeChecked()
+      screen.getByRole('button', { name: 'Access role for selected recipients' })
+    ).toHaveTextContent('Editor')
     selectPermission('Read')
-    await waitFor(() => expect(createShareDisabled).toBe(false))
   })
 
   it('caps the UI selection at 100 subjects', async () => {

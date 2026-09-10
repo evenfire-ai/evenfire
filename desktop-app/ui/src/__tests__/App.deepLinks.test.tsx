@@ -24,7 +24,11 @@ const confirmDialogHarness = vi.hoisted(() => ({
 }))
 
 const appHeaderHarness = vi.hoisted(() => ({
-  props: null as null | { searchFocusRequestId?: number; notificationOpenRequestId?: number },
+  props: null as null | {
+    placement?: 'default' | 'titlebar'
+    searchFocusRequestId?: number
+    notificationOpenRequestId?: number
+  },
 }))
 
 const chatLocalSearchHarness = vi.hoisted(() => ({ rendered: vi.fn() }))
@@ -393,6 +397,22 @@ describe('App deep-link orchestration', () => {
 
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppRemoved?.())
     expect(sidebarHarness.props?.collapsed).toBe(true)
+  })
+
+  it('uses the shared titlebar header on every authenticated route', () => {
+    const routes = Object.values(DESKTOP_ROUTES)
+
+    for (const navItem of routes) {
+      currentController = makeController({
+        initialExperienceLoading: false,
+        navItem,
+      } as Partial<AppController>)
+      const view = render(<App />)
+
+      expect(appHeaderHarness.props?.placement).toBe('titlebar')
+
+      view.unmount()
+    }
   })
 
   it('runs registered new-tab and composer-focus commands through existing chat selection', () => {

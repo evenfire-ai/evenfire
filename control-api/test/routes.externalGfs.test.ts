@@ -1019,7 +1019,7 @@ describe('indexed upload relay canonical drive', () => {
 })
 
 describe('PUT /external/gfs/grants (user delegation via existing engine)', () => {
-  it('honors a user-session grant when the caller holds manage_acl (no-escalation OK)', async () => {
+  it('honors a user-session grant and preserves false when inherit is omitted', async () => {
     auth()
     // The user holds manage_acl + read on R directly → may grant read.
     dbReturning([
@@ -1039,12 +1039,12 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
         resourceId: R,
         subject: { type: 'user', id: U2 },
         permissions: ['read'],
-        inherit: false,
       })
     expect(res.status).toBe(200)
     expect(res.body.ok).toBe(true)
     // The INSERT recorded the caller as the user (granted_by user:user-1).
     const insert = mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO gfs_grants'))
+    expect(insert?.[1]?.[5]).toBe(false)
     expect(insert?.[1]?.[6]).toBe(`user:${U1}`)
     const audit = mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO gfs_audit'))
     expect(audit?.[1]?.[1]).toBeNull()

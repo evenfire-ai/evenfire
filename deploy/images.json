@@ -37,7 +37,8 @@
         "control-ui/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/display-field/**",
-        "packages/frontend-components/**"
+        "packages/frontend-components/**",
+        "packages/gfs-interaction-policy/**"
       ],
       "published": true,
       "deployed_to_minikube": true

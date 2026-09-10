@@ -35,12 +35,17 @@ import {
   MANAGED_BY_VALUE,
   POLICY_TYPE_LABEL,
 } from './constants'
+import { hccLogger } from './logger'
+import { createsTotal } from './metrics'
 import { isAllowedExternalEgressCidr, isPublicDnsHostname } from './networkPolicyReconciler'
 import { HostCRD, LlmHookCRD, LlmHookCondition, LlmHookImageTarget, LlmHookStatus } from './types'
 import {
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   networkPolicyMatchesDesired,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
@@ -745,7 +750,7 @@ export class LlmHookReconciler {
     }
   }
 
-  // ─── Apply helpers (create-then-409 replaceWithConflictRetry) ─────────
+  // ─── Read-first resource convergence ───────────────────────────────
 
   private async ensureDeployment(
     podKey: string,
@@ -754,55 +759,86 @@ export class LlmHookReconciler {
   ): Promise<void> {
     const deployment = this.buildDeployment(podKey, members, credentialsRevision)
     const name = deployment.metadata!.name!
-    try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: config.llmHooksNamespace,
-        body: deployment,
-      })
-      console.log(`${LOG} Created Deployment "${name}"`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `Deployment "${name}"`,
-      logPrefix: LOG,
-      body: deployment,
-      mergeExisting: preserveDeploymentAnnotations,
-      isUpToDate: deploymentMatchesDesired,
+    await ensureResource({
       read: () =>
-        this.appsApi.readNamespacedDeployment({ name, namespace: config.llmHooksNamespace }),
-      replace: body =>
-        this.appsApi.replaceNamespacedDeployment({
-          name,
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({
+            name,
+            namespace: config.llmHooksNamespace,
+          })
+        ),
+      create: async () => {
+        await observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({
+            namespace: config.llmHooksNamespace,
+            body: deployment,
+          })
+        )
+        hccLogger.info('Deployment created', {
+          scope: LOG,
+          deployment: name,
           namespace: config.llmHooksNamespace,
-          body,
+        })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `Deployment "${name}"`,
+          logPrefix: LOG,
+          body: deployment,
+          mergeExisting: preserveDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
+          read,
+          replace: body =>
+            this.appsApi.replaceNamespacedDeployment({
+              name,
+              namespace: config.llmHooksNamespace,
+              body,
+            }),
         }),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
     })
   }
 
   private async ensureService(podKey: string, port: number): Promise<void> {
     const service = this.buildService(podKey, port)
     const name = service.metadata!.name!
-    try {
-      await this.coreApi.createNamespacedService({
-        namespace: config.llmHooksNamespace,
-        body: service,
-      })
-      console.log(`${LOG} Created Service "${name}"`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `Service "${name}"`,
-      logPrefix: LOG,
-      body: service,
-      mergeExisting: preserveServiceAssignedFields,
-      isUpToDate: serviceMatchesDesired,
-      read: () => this.coreApi.readNamespacedService({ name, namespace: config.llmHooksNamespace }),
-      replace: body =>
-        this.coreApi.replaceNamespacedService({ name, namespace: config.llmHooksNamespace, body }),
+    await ensureResource({
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({
+            name,
+            namespace: config.llmHooksNamespace,
+          })
+        ),
+      create: async () => {
+        await observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({
+            namespace: config.llmHooksNamespace,
+            body: service,
+          })
+        )
+        hccLogger.info('Service created', {
+          scope: LOG,
+          service: name,
+          namespace: config.llmHooksNamespace,
+        })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `Service "${name}"`,
+          logPrefix: LOG,
+          body: service,
+          mergeExisting: preserveServiceAssignedFields,
+          isUpToDate: serviceMatchesDesired,
+          read,
+          replace: body =>
+            this.coreApi.replaceNamespacedService({
+              name,
+              namespace: config.llmHooksNamespace,
+              body,
+            }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
     })
   }
 
@@ -814,25 +850,33 @@ export class LlmHookReconciler {
     await this.applyNetworkPolicy(this.buildNetworkPolicy(podKey, members, egressRules))
   }
 
-  /** Idempotent create-then-409-replace of a NetworkPolicy in its own namespace. */
+  /** Read first, preserving the existing NetworkPolicy convergence policy. */
   private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy): Promise<void> {
     const name = policy.metadata!.name!
     const namespace = policy.metadata!.namespace ?? config.llmHooksNamespace
-    try {
-      await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
-      console.log(`${LOG} Created NetworkPolicy "${name}" (${namespace})`)
-      return
-    } catch (error) {
-      if (getErrorCode(error) !== 409) throw error
-    }
-    await replaceWithConflictRetry({
-      description: `NetworkPolicy "${name}"`,
-      logPrefix: LOG,
-      body: policy,
-      mergeExisting: preserveObjectAnnotations,
-      isUpToDate: networkPolicyMatchesDesired,
-      read: () => this.networkingApi.readNamespacedNetworkPolicy({ name, namespace }),
-      replace: body => this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+    await ensureResource({
+      read: () =>
+        observeExistenceRead('NetworkPolicy', () =>
+          this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
+        ),
+      create: async () => {
+        await observeCreate('NetworkPolicy', () =>
+          this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy })
+        )
+        hccLogger.info('NetworkPolicy created', { scope: LOG, policy: name, namespace })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `NetworkPolicy "${name}"`,
+          logPrefix: LOG,
+          body: policy,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: networkPolicyMatchesDesired,
+          read,
+          replace: body =>
+            this.networkingApi.replaceNamespacedNetworkPolicy({ name, namespace, body }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'NetworkPolicy', outcome: 'skipped' }),
     })
   }
 

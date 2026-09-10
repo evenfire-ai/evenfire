@@ -1954,8 +1954,9 @@ export class AppService {
   /**
    * Delegate a grant to one or more subjects (each subjectKey → structured
    * subject) in a single atomic bulk PUT. No-escalation is server-side.
-   * `inherit` is renderer-driven (agent grants on directories default it ON so
-   * contained files are covered); omitted means the client's historical `false`.
+   * `inherit` is renderer-driven; omitting it defaults the wire body to
+   * `true` so a folder grant always covers the folder's contents (the
+   * historical `false` default is what produced unreadable children).
    */
   async grantGfs(
     resourceId: string,
