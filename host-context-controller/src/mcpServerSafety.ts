@@ -103,6 +103,9 @@ export function shouldFailClosedForSecretFailure(reason: string | undefined): bo
  * HCC owns policies for both runtime owners, but its Secret verdict only
  * controls HCC-managed runtime. WRC permits optional keys HCC cannot judge.
  * A removed reference makes an old SecretResolved condition irrelevant.
+ * Before the first published verdict, policy intent is optimistic: allows may
+ * exist while the runtime owner validates the Secret before creating runtime
+ * resources. A published failure then revokes those allows through convergence.
  */
 export function runtimeDesired(server: McpServerCRD): boolean {
   if (server.spec.enabled === false) return false

@@ -37,7 +37,53 @@ t2_evidence_write() { :; }
 run_healthcheck_if_requested
 unset -f node
 awk 'last=="--kill-grace-seconds" && $0=="300" {found=1} {last=$0} END {exit !found}' "$tmp/runner-args"
-echo 'PASS: health grace defaults to 5, validates 1..300 and reaches the runner'
+# The declaration is normally a shell variable, not inherited by child scripts.
+# Exercise the actual runner and child shell, not only its argument list.
+export -n T2_HEALTHCHECK_KILL_GRACE_SECONDS
+T2_HEALTHCHECK_COMMAND='test "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" = 300'
+run_healthcheck_if_requested
+echo 'PASS: health grace defaults to 5, validates 1..300 and reaches the runner and child'
+
+# Intercept only the wrapper's final exec. Invalid grace must fail before it
+# can enter the mutating gate, and the canonical 300-second target must enter.
+mkdir -p "$tmp/wrapper-bin"
+cat > "$tmp/wrapper-bin/bash" <<'SH'
+#!/bin/bash
+printf '%s\n' "$*" > "$WRAPPER_GATE_ENTERED"
+SH
+chmod +x "$tmp/wrapper-bin/bash"
+for value in missing 5 269 270 299 invalid 301; do
+  rm -f "$tmp/wrapper-entered"
+  (
+    unset T2_HEALTHCHECK_KILL_GRACE_SECONDS
+    if [ "$value" != missing ]; then export T2_HEALTHCHECK_KILL_GRACE_SECONDS="$value"; fi
+    PATH="$tmp/wrapper-bin:$PATH" WRAPPER_GATE_ENTERED="$tmp/wrapper-entered" \
+      MINIKUBE_PROFILE=fixture-context CONTROL_API_REAL_PG_CONTEXT=fixture-context \
+      /bin/bash "$ROOT/scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh"
+  ) > "$tmp/wrapper-output" 2>&1 && {
+    echo "FAIL: lifecycle wrapper accepted grace $value" >&2; exit 1
+  }
+  [[ ! -e "$tmp/wrapper-entered" ]]
+  grep -q 'requires T2_HEALTHCHECK_KILL_GRACE_SECONDS=300' "$tmp/wrapper-output"
+done
+PATH="$tmp/wrapper-bin:$PATH" WRAPPER_GATE_ENTERED="$tmp/wrapper-entered" \
+  MINIKUBE_PROFILE=fixture-context CONTROL_API_REAL_PG_CONTEXT=fixture-context \
+  T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 \
+  /bin/bash "$ROOT/scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh"
+grep -q 'e2e-hcc-watch-churn-readiness.sh' "$tmp/wrapper-entered"
+echo 'PASS: lifecycle rejects missing/insufficient grace before gate entry and accepts 300'
+
+# The fixture helper submits deletion only; the lifecycle cleanup owns the
+# shared-budget absence proof. A private owner wait must not return here.
+(
+  source "$ROOT/scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh"
+  NP604_CREATED=1 MCP_NS=fixture-mcp RUN_ID=fixture
+  np604_kctl() { printf '%s\n' "$*" > "$tmp/fixture-delete"; }
+  wait_until() { echo 'FAIL: fixture cleanup started its own wait' >&2; return 1; }
+  np604_cleanup
+  grep -q -- '--wait=false' "$tmp/fixture-delete"
+)
+echo 'PASS: fixture cleanup requests deletion without a separate owner wait'
 
 # Execute the actual callback and supervisor, replacing only the kubectl process.
 python3 - "$ROOT" "$tmp" <<'PY'
@@ -94,6 +140,18 @@ print_hcc_watch_gate_lock_instructions() { echo lock-retained >> "$TRACE"; }
 print_repair_instructions() { echo repair-required >> "$TRACE"; }
 print_results() { :; }
 ''' + cleanup + '\n' + traps + '''
+if [[ "${SIGNAL_AT_CLEANUP_HANDOFF:-0}" = 1 ]]; then
+  # Probe parent and helper startup separately. Calling the real cleanup
+  # explicitly makes DEBUG observable even where Bash suppresses it in EXIT.
+  set -T
+  HANDOFF_ARMED=1
+  HANDOFF_PARENT=$BASHPID
+  trap 'if [[ "$HANDOFF_ARMED" = 1 && "$BASH_COMMAND" = "trap - EXIT" ]] && { [[ "$HANDOFF_TARGET" = parent && "$BASHPID" = "$HANDOFF_PARENT" ]] || [[ "$HANDOFF_TARGET" = helper && "$BASHPID" != "$HANDOFF_PARENT" ]]; }; then HANDOFF_ARMED=0; echo "handoff-injected:$HANDOFF_TARGET" >> "$TRACE"; kill -TERM "$BASHPID"; fi' DEBUG
+  set +e
+  status_before_cleanup() { return "$DIRECT_EXIT"; }
+  status_before_cleanup
+  cleanup
+fi
 echo ready > "${TRACE}.ready"
 if [[ "${DIRECT_EXIT:-}" != '' ]]; then exit "$DIRECT_EXIT"; fi
 sleep 30
@@ -129,6 +187,8 @@ def run_case(name, *, mode='timeout', **extra):
     expected = 124 if mode == 'timeout' else 143 if mode == 'term' else int(extra['DIRECT_EXIT'])
     assert process.returncode == expected, (name, process.returncode, stdout, stderr)
     lines = trace.read_text().splitlines()
+    if extra.get('SIGNAL_AT_CLEANUP_HANDOFF') == '1':
+        assert 'handoff-injected:' + extra['HANDOFF_TARGET'] in lines, (name, lines)
     restore = next(i for i, line in enumerate(lines) if ' rollout status ' in line)
     fixture = [i for i, line in enumerate(lines) if ' delete mcpserver,secret ' in line]
     if extra.get('FAIL_RESTORE') == '1':
@@ -146,6 +206,10 @@ for mode in ('timeout', 'term'):
 run_case('restore-failure', mode='exit', DIRECT_EXIT='7', FAIL_RESTORE='1')
 run_case('fixture-failure', mode='exit', DIRECT_EXIT='7', FAIL_FIXTURE='1')
 print('PASS: restoration precedes fixture work; restoration/fixture failures retain the lock')
+for target in ('parent', 'helper'):
+    run_case('handoff-term-' + target, mode='exit', DIRECT_EXIT='7',
+             SIGNAL_AT_CLEANUP_HANDOFF='1', HANDOFF_TARGET=target)
+print('PASS: TERM at both parent handoff and helper startup preserves restoration and original status')
 
 # Deliberate transport stall, bounded by the production command wrapper.
 trace = tmp / 'budget.trace'

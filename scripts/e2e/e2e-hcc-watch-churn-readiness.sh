@@ -301,6 +301,12 @@ assert_hcc_sampled_recoveries() {
 
 cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1
+  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+    # Ignore cancellation across the handoff: unlike a caught handler, this
+    # disposition survives subshell creation until cleanup installs its traps.
+    # The supervisor still escalates repeated cancellation to SIGKILL.
+    trap '' TERM INT HUP QUIT
+  fi
   trap - EXIT
   set +e
   if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then

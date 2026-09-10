@@ -6413,8 +6413,28 @@ describe('NetworkPolicyReconciler', () => {
         if (reason === 'Disabled') failed.spec.enabled = false
         else failed.status = { conditions: [{ type: 'SecretResolved', status: 'False', reason }] }
         f.cache.set(failed.name, failed)
+        mockCustomApi.patchNamespacedCustomObjectStatus.mockClear()
         await f.run()
         expect(f.store.size).toBe(0)
+        const statusPatch = mockCustomApi.patchNamespacedCustomObjectStatus.mock.lastCall?.[0]
+        expect(statusPatch).toMatchObject({ name: failed.name, namespace: failed.namespace })
+        const conditionPatch = statusPatch?.body.find(
+          (operation: { path: string }) =>
+            operation.path === '/status' || operation.path === '/status/conditions'
+        )
+        const publishedConditions =
+          conditionPatch?.path === '/status'
+            ? conditionPatch.value.conditions
+            : conditionPatch?.value
+        expect(publishedConditions).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'ExternalEgressReady',
+              status: 'False',
+              reason: 'RuntimeNotDesired',
+            }),
+          ])
+        )
         expect(f.events.filter(event => event.startsWith('delete:'))).toHaveLength(4)
         const settled = f.events.length
         for (let cycle = 0; cycle < 3; cycle++) await f.run()

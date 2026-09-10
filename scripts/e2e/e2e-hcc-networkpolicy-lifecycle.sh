@@ -9,6 +9,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
   echo 'FAIL: profile and context must match' >&2
   exit 2
 }
+# Restoration owns 270 seconds plus a 30-second supervisor margin. T2 exports
+# its validated actual runner grace; refuse direct/default-grace entry before
+# enabling fault injection. The runner's maximum grace is also 300 seconds.
+[[ "${T2_HEALTHCHECK_KILL_GRACE_SECONDS:-}" = 300 ]] || {
+  echo 'FAIL: lifecycle requires T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 (270s cleanup + 30s margin); use make minikube-t2-hcc-networkpolicy-lifecycle' >&2
+  exit 2
+}
 export KUBECONTEXT="$CONTROL_API_REAL_PG_CONTEXT"
 export E2E_HCC_WATCH_FAULT_INJECTION=1
 export E2E_HCC_POLICY_LIFECYCLE=1

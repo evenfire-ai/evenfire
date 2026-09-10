@@ -93,9 +93,6 @@ hcc_lifecycle_fixture_absent() {
 cleanup_hcc_lifecycle() (
   local status=$1 cleanup_failed=0 restore_ok=1 started=$SECONDS
   local HCC_CLEANUP_PHASE_DEADLINE=$((SECONDS + 150)) HCC_CLEANUP_HOSTS=''
-  # Consumed through Bash dynamic scope by np604_cleanup in the sourced helper.
-  # shellcheck disable=SC2034
-  local HCC_CLEANUP_NONBLOCKING=true
   trap - EXIT
   trap ':' TERM INT HUP QUIT
   set +e
