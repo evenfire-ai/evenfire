@@ -113,12 +113,14 @@ function useEmbedBounds(
   parked: boolean,
   refreshKey: string | number,
   onBoundsApplied?: () => void,
-  onSlotTopChange?: (topPx: number) => void
+  onSlotTopChange?: (topPx: number) => void,
+  onSlotRightChange?: (rightPx: number) => void
 ): void {
   // Dedupe the emitted slot-top across pushes AND across effect re-runs, so a
   // resize/scroll storm (or a dep change) never churns the parent's state when
   // the measured top is unchanged.
   const lastEmittedTopRef = useRef<number | null>(null)
+  const lastEmittedRightRef = useRef<number | null>(null)
   useLayoutEffect(() => {
     if (!enabled) return
     const target = ref.current
@@ -134,6 +136,13 @@ function useEmbedBounds(
           if (lastEmittedTopRef.current !== top) {
             lastEmittedTopRef.current = top
             onSlotTopChange(top)
+          }
+        }
+        if (onSlotRightChange) {
+          const right = Math.round(rect.right)
+          if (lastEmittedRightRef.current !== right) {
+            lastEmittedRightRef.current = right
+            onSlotRightChange(right)
           }
         }
         void window.clerum.sandboxUi
@@ -153,7 +162,7 @@ function useEmbedBounds(
       window.removeEventListener('resize', push)
       window.removeEventListener('scroll', push, true)
     }
-  }, [parked, ref, enabled, onBoundsApplied, onSlotTopChange, refreshKey])
+  }, [parked, ref, enabled, onBoundsApplied, onSlotTopChange, onSlotRightChange, refreshKey])
 }
 
 const APP_PAGE_SIZE = 6
@@ -181,6 +190,7 @@ export function SandboxUiPage({
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
   onEmbedSlotTopChange,
+  onEmbedSlotRightChange,
   onNotify,
   onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
@@ -510,7 +520,8 @@ export function SandboxUiPage({
     shellOverlayOpen,
     boundsRefreshKey,
     onEmbedBoundsApplied,
-    onEmbedSlotTopChange
+    onEmbedSlotTopChange,
+    onEmbedSlotRightChange
   )
 
   // Native WebContentsView content always paints above renderer DOM. Capture

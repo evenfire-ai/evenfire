@@ -9,12 +9,21 @@ body,
   min-height: 100%;
 }
 
-/* Layout-transparent wrapper around the app/auth tree. It only exists so the
-   BootSplash overlay can mark the whole background subtree `inert` during the
-   startup/loading window, removing hidden controls from the tab order and
-   accessibility tree until the splash exits. */
+.app-frame {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: var(--window-titlebar-height) minmax(0, 1fr);
+  background: var(--topbar-gradient);
+}
+
+/* Root wrapper around the app/auth tree. It exists so the BootSplash overlay
+   can mark the whole background subtree `inert` during the startup/loading
+   window, removing hidden controls from the tab order and accessibility tree
+   until the splash exits. */
 .app-root {
-  display: contents;
+  min-height: 0;
+  display: block;
+  background: var(--bg);
 }
 
 body {
@@ -62,12 +71,299 @@ h3 {
 }
 
 .app-shell {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0;
   padding: 0;
   width: 100%;
+}
+
+.window-titlebar {
+  position: relative;
+  z-index: var(--layer-header);
+  isolation: isolate;
+  height: var(--window-titlebar-height);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 var(--space-2);
+  background: var(--topbar-gradient);
+  border-bottom: 1px solid var(--titlebar-divider-border);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* Titlebar actions are portalled outside the content panel. Raise their owning
+   stacking context while the fixed chat drawer is present so search and inbox
+   overlays remain usable above that drawer. */
+.app-frame:has(.chat-drawer) > .window-titlebar {
+  z-index: var(--layer-dropdown);
+}
+
+.window-titlebar__actions {
+  --titlebar-action-border: var(--titlebar-control-border);
+  --titlebar-action-ink: var(--titlebar-control-ink);
+  --titlebar-action-muted-ink: var(--titlebar-control-ink);
+  --titlebar-action-surface: var(--titlebar-control-surface);
+
+  position: fixed;
+  top: 0;
+  right: var(--space-2);
+  left: calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4));
+  z-index: calc(var(--layer-header) + 1);
+  height: var(--window-titlebar-height);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions {
+  --titlebar-action-border: var(--titlebar-control-border);
+  --titlebar-action-ink: var(--titlebar-control-ink);
+  --titlebar-action-muted-ink: var(--titlebar-control-ink);
+  --titlebar-action-surface: var(--titlebar-control-surface);
+}
+
+.window-titlebar__actions .top-bar {
+  position: static;
+  inset: auto;
+  height: var(--window-titlebar-height);
+  width: 100%;
+  z-index: auto;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: auto;
+  -webkit-app-region: drag;
+}
+
+.window-titlebar__actions .header-left {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.window-titlebar__actions .header-utilities {
+  flex: 0 0 auto;
+}
+
+.window-titlebar__actions .global-search {
+  --global-search-expanded: clamp(160px, 20vw, 280px);
+  --global-search-expanded-min: 0;
+  flex: 0 1 var(--global-search-expanded);
+  width: var(--global-search-expanded);
+  min-width: 0;
+  max-width: min(var(--global-search-expanded), 100%);
+  margin-right: 0;
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__actions .global-search:focus-within,
+.window-titlebar__actions .global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: 0;
+}
+
+.window-titlebar__actions .search-input {
+  height: 30px;
+  min-height: 30px;
+  padding-left: 34px;
+  border-color: var(--titlebar-action-border);
+  background: var(--titlebar-action-surface);
+  color: var(--titlebar-action-ink);
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08);
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__actions .global-search::before {
+  inset: 0 auto 0 11px;
+  place-items: center;
+  color: var(--titlebar-action-ink);
+  font-size: var(--font-size-lg);
+}
+
+.window-titlebar__actions .search-input::placeholder {
+  color: var(--titlebar-action-muted-ink);
+  opacity: 1;
+}
+
+.window-titlebar__actions .search-input:focus {
+  border-color: rgba(var(--focus-rgb), 0.85);
+  box-shadow:
+    0 0 0 2px rgba(var(--focus-rgb), 0.2),
+    0 6px 14px rgba(var(--overlay-rgb), 0.1);
+}
+
+.window-titlebar__actions .global-search-results {
+  top: calc(100% + var(--space-1));
+  right: 0;
+  width: min(720px, calc(100vw - var(--space-4)));
+}
+
+.window-titlebar__actions .notification-bell {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: var(--titlebar-action-border);
+  background: var(--titlebar-action-surface);
+  box-shadow:
+    0 0 0 1px rgba(17, 24, 39, 0.08),
+    0 6px 14px rgba(var(--overlay-rgb), 0.1);
+}
+
+.window-titlebar__actions .notification-bell svg {
+  width: 16px;
+  height: 16px;
+  color: var(--titlebar-action-ink);
+}
+
+.window-titlebar__actions .notification-bell:hover {
+  border-color: rgba(var(--accent-rgb), 0.64);
+  background: var(--surface-hover);
+}
+
+.window-titlebar__actions .notification-bell:hover svg,
+.window-titlebar__actions .notification-bell:focus-visible svg {
+  color: var(--text);
+}
+
+.window-titlebar__controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-1);
+  min-width: calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2));
+  -webkit-app-region: no-drag;
+}
+
+.window-control-button {
+  position: relative;
+  width: var(--window-titlebar-control-size);
+  min-width: var(--window-titlebar-control-size);
+  height: var(--window-titlebar-control-size);
+  min-height: var(--window-titlebar-control-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  -webkit-app-region: no-drag;
+}
+
+.window-control-button:hover:enabled {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.window-control-button:focus-visible {
+  border-color: rgba(var(--focus-rgb), 0.6);
+  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.24);
+}
+
+.window-control-icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  color: currentColor;
+}
+
+.window-control-icon--minimize::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 3px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.window-control-icon--toggleMaximize::before,
+.window-control-icon--toggleMaximize::after {
+  content: '';
+  position: absolute;
+  border: 1.5px solid currentColor;
+}
+
+.window-control-icon--toggleMaximize::before {
+  inset: 1px;
+}
+
+.window-control-icon--restore::before {
+  inset: 4px 1px 1px 4px;
+}
+
+.window-control-icon--restore::after {
+  inset: 1px 4px 4px 1px;
+}
+
+.window-control-icon--close::before,
+.window-control-icon--close::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: 1px;
+  width: 10px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.window-control-icon--close::before {
+  transform: rotate(45deg);
+}
+
+.window-control-icon--close::after {
+  transform: rotate(-45deg);
+}
+
+.window-titlebar--platform-mac .window-titlebar__controls {
+  gap: var(--space-1);
+  min-width: calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2));
+}
+
+.window-titlebar--platform-mac .window-titlebar__actions {
+  left: calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4));
+}
+
+.window-titlebar--platform-mac .window-control-button {
+  width: var(--window-titlebar-mac-control-size);
+  min-width: var(--window-titlebar-mac-control-size);
+  height: var(--window-titlebar-mac-control-size);
+  min-height: var(--window-titlebar-mac-control-size);
+  border-color: var(--window-control-mac-border);
+  border-radius: 999px;
+}
+
+.window-titlebar--platform-mac .window-control-button--close {
+  background: var(--window-control-mac-close);
+}
+
+.window-titlebar--platform-mac .window-control-button--minimize {
+  background: var(--window-control-mac-minimize);
+}
+
+.window-titlebar--platform-mac .window-control-button--toggleMaximize {
+  background: var(--window-control-mac-expand);
+}
+
+.window-titlebar--platform-mac .window-control-button:hover:enabled {
+  border-color: var(--window-control-mac-border);
+}
+
+.window-titlebar--platform-mac .window-control-icon {
+  opacity: 0;
+  transform: scale(0.72);
+  color: rgba(var(--overlay-rgb), 0.72);
+}
+
+.window-titlebar--platform-mac .window-titlebar__controls:hover .window-control-icon,
+.window-titlebar--platform-mac .window-control-button:focus-visible .window-control-icon {
+  opacity: 1;
 }
 
 .top-bar {
@@ -214,6 +510,7 @@ h3 {
 }
 
 .search-results-loading,
+.search-results-prompt,
 .search-results-empty {
   margin: 0;
   font-size: var(--font-size-sm);
@@ -427,6 +724,7 @@ h3 {
 .notification-bell-wrapper {
   position: relative;
   z-index: var(--layer-dropdown);
+  -webkit-app-region: no-drag;
 }
 
 .notification-bell.has-attention svg {
@@ -474,6 +772,11 @@ h3 {
   bottom: var(--space-4);
   width: var(--app-notification-drawer-width);
   max-height: none;
+}
+
+.notification-menu--app-drawer.notification-menu--embed-aligned {
+  left: var(--notification-drawer-left);
+  width: auto;
 }
 
 .notification-menu-title-row {
@@ -1054,12 +1357,12 @@ h3 {
   overflow: visible;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
 }
 
 .left-nav {
   --sidebar-flyout-layer: calc(var(--layer-dropdown) + 1000);
-  --sidebar-height: 100vh;
+  --sidebar-height: calc(100vh - var(--window-titlebar-height));
   --sidebar-logo-brand-gap: 4px;
   --sidebar-logo-pad-top: 8px;
   --sidebar-nav-parent-pad-x: var(--space-1);
@@ -2168,14 +2471,14 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
-  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-4));
   /* Chat drawer owns its own width, decoupled from the notification drawer.
      React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
      clamp is only the pre-mount / closed-state fallback. Floor 340px == the
      drawer's min-width (see useChatDrawerResize). */
   --chat-drawer-width: clamp(340px, 32vw, 420px);
 
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   min-height: 0;
   overflow: hidden;
   overflow-x: hidden;
@@ -2198,7 +2501,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-4) var(--space-4) 0;
   gap: 0;
 }
@@ -2216,7 +2519,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   /* Top pad clears the absolute top-bar: its space-2 top offset + the header's
      own height + a bit of gap below it. space-2 * 5 is the smallest step of the
      spacing scale that covers that stack; the other three sides are just space-2. */
@@ -2231,6 +2534,10 @@ h3 {
   right: var(--space-2);
 }
 
+.content-panel.content-panel--agent-chat.content-panel--titlebar-actions {
+  padding-top: var(--space-1);
+}
+
 .content-panel.content-panel--agent-chat > .agent-page {
   flex: 1 1 0;
   min-height: 0;
@@ -2243,7 +2550,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-4) var(--space-4) 0;
   gap: var(--space-2-5);
 }
@@ -9838,7 +10145,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .toast-stack {
   position: fixed;
-  top: 16px;
+  top: calc(var(--window-titlebar-height) + var(--space-2));
   right: 16px;
   z-index: 4000;
   display: grid;
@@ -9880,7 +10187,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .auth-page {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-5);
   display: grid;
   place-items: center;
@@ -9913,7 +10220,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   --boot-exit-duration: 240ms;
 
   position: fixed;
-  inset: 0;
+  inset: var(--window-titlebar-height) 0 0 0;
   z-index: 9999;
   display: grid;
   place-items: center;
@@ -12607,17 +12914,6 @@ pre {
   padding-right: 0;
 }
 
-/* The chat drawer occupies the right rail at --layer-chat-overlay, above the
-   header (`.top-bar` at --layer-header) within the shared content-panel stacking
-   context — so the header's transient dropdowns (the notification Inbox popover,
-   global search) would paint BEHIND the drawer and never surface. While the chat
-   drawer is open, lift the header to the dropdown layer so those overlays surface
-   over it, exactly as they do over chat content in full-screen. Toasts
-   (z-index: 4000) still sit above the header; the drawer's own z is unchanged. */
-.content-panel.content-panel--chat-drawer-open .top-bar {
-  z-index: var(--layer-dropdown);
-}
-
 .chat-drawer {
   position: fixed;
   /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
@@ -12875,18 +13171,6 @@ pre {
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
-  .content-panel {
-    --app-header-utilities-width: calc(
-      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
-    );
-  }
-
-  .content-panel.content-panel--app-notification-drawer-open {
-    --app-header-utilities-width: calc(
-      var(--app-notification-drawer-width) + var(--space-2) + 36px
-    );
-  }
-
   .global-search {
     --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
     --global-search-expanded-min: 160px;
@@ -12902,6 +13186,102 @@ pre {
   .sandbox-ui-mounted-header {
     padding-right: 0;
   }
+}
+
+.window-titlebar__actions .search-input {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  color: var(--titlebar-action-ink) !important;
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
+  -webkit-text-fill-color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .search-input--titlebar {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+  -webkit-text-fill-color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .global-search::before,
+.window-titlebar__actions .global-search--titlebar::before {
+  color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .global-search--titlebar::before {
+  content: none !important;
+}
+
+.window-titlebar__actions .global-search__titlebar-icon {
+  position: absolute;
+  inset: 0 auto 0 11px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: var(--titlebar-action-ink) !important;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.window-titlebar__actions .search-input__titlebar-placeholder {
+  position: absolute;
+  inset: 0 auto 0 34px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  color: var(--titlebar-action-ink) !important;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  pointer-events: none;
+}
+
+.window-titlebar__actions .search-input::placeholder,
+.window-titlebar__actions .search-input--titlebar::placeholder {
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+}
+
+.window-titlebar__actions .search-input--titlebar::placeholder {
+  color: transparent !important;
+}
+
+.window-titlebar__actions .notification-bell {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
+}
+
+.window-titlebar__actions .notification-bell--titlebar {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+}
+
+.window-titlebar__actions .notification-bell svg,
+.window-titlebar__actions .notification-bell--titlebar svg {
+  color: var(--titlebar-action-ink) !important;
+  stroke: var(--titlebar-action-ink) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input,
+:root[data-theme='dark'] .window-titlebar__actions .notification-bell {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input,
+:root[data-theme='dark'] .window-titlebar__actions .global-search::before,
+:root[data-theme='dark'] .window-titlebar__actions .notification-bell svg {
+  color: var(--titlebar-action-ink) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input::placeholder {
+  color: var(--titlebar-action-ink) !important;
 }
 
 /* Agent Files tab - read-only browser of attached SharedFileSystems */
