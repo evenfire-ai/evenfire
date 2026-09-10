@@ -105,6 +105,7 @@ if incremental_contains 'control-api/*) incremental_add_target control-api contr
    incremental_contains 'rpc-proxy/*) incremental_add_target rpc-proxy rpc-proxy rpc-proxy' &&
    incremental_contains 'host-context-controller/*) incremental_add_target host-context-controller control-plane host-context-controller' &&
    incremental_contains 'control-ui/*) incremental_add_target control-ui control-plane control-ui' &&
+   incremental_contains 'packages/gfs-interaction-policy/*) incremental_add_target control-ui control-plane control-ui' &&
    incremental_contains 'tests/e2e/fixtures/workflow-plugin-sdk-e2e/*)' &&
    incremental_contains 'incremental_add_target workflow-plugin-sdk-e2e sandbox-recipes workflow-plugin-sdk-e2e'; then
   pass "incremental sync maps known runtime paths to their own images and deployments"

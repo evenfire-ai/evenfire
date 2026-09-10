@@ -47,6 +47,7 @@ SERVICES := \
 	profile-ui \
 	mcp-servers \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/llm-provider-attempt-contract
@@ -70,6 +71,7 @@ TEST_SERVICES := \
 	mcp-servers \
 	mcp-servers/web-search \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \

@@ -185,7 +185,7 @@ assert_dockerignore_mutations_rejected() {
 assert_copy_before_every_ci control-api/Dockerfile \
   display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field frontend-components llm-providers workflow-recipe-capability-policy
+  display-field frontend-components gfs-interaction-policy llm-providers workflow-recipe-capability-policy
 assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
@@ -206,6 +206,7 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 
 assert_materialized control-ui/Dockerfile display-field
 assert_materialized control-ui/Dockerfile frontend-components
+assert_materialized control-ui/Dockerfile gfs-interaction-policy
 assert_materialized control-ui/Dockerfile llm-providers
 assert_materialized control-ui/Dockerfile workflow-recipe-capability-policy
 assert_materialized profile-ui/Dockerfile desktop-app-links
@@ -214,7 +215,10 @@ assert_materialized profile-ui/Dockerfile frontend-components
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
+assert_dockerignore_allows control-ui/Dockerfile.dockerignore gfs-interaction-policy
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
+assert_dockerignore_excludes_generated_dependencies \
+  control-ui/Dockerfile.dockerignore gfs-interaction-policy
 assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-components
 assert_dockerignore_excludes_generated_dependencies \
   control-ui/Dockerfile.dockerignore frontend-components

@@ -58,4 +58,46 @@ describe('DropdownSelect', () => {
     fireEvent.mouseDown(document.body)
     expect(screen.queryByRole('listbox')).toBeNull()
   })
+
+  it('can portal its menu outside an overflow ancestor', async () => {
+    const onChange = vi.fn()
+    render(
+      <div style={{ overflow: 'auto' }}>
+        <DropdownSelect
+          ariaLabel="Access role"
+          className="access-role"
+          onChange={onChange}
+          options={OPTIONS}
+          placeholder="Choose a role"
+          portal
+          value="alpha"
+        />
+      </div>
+    )
+    const trigger = screen.getByRole('button', { name: 'Access role' })
+    vi.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+      bottom: 140,
+      height: 32,
+      left: 200,
+      right: 312,
+      top: 108,
+      width: 112,
+      x: 200,
+      y: 108,
+      toJSON: () => undefined,
+    })
+    fireEvent.click(trigger)
+
+    const menu = await screen.findByRole('listbox', { name: 'Access role' })
+    expect(menu.parentElement).toBe(document.body)
+    expect(menu.classList.contains('ui-dropdown-select__menu--portal')).toBe(true)
+    expect(menu.style.left).toBe('200px')
+    expect(menu.style.width).toBe('112px')
+    expect(trigger.closest('.ui-dropdown-select')?.classList.contains('access-role')).toBe(true)
+
+    const beta = screen.getByRole('option', { name: 'Beta' })
+    fireEvent.mouseDown(beta)
+    fireEvent.click(beta)
+    expect(onChange).toHaveBeenCalledWith('beta')
+  })
 })

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconButton, MenuItem, TextInput } from '@components/Common'
-import { IconAgents, IconClose, IconTeams } from '@components/SidebarNav/icons'
+import { IconAgents, IconClose, IconTeams, IconUser } from '@components/SidebarNav/icons'
 import { useClickOutside } from '@hooks/useClickOutside'
 import type { GfsDelegationSubjectOption } from '@/gfs/delegation.types'
 import type { GfsSubjectPickerProps } from './types'
@@ -16,7 +16,7 @@ function subjectBadge(subject: GfsDelegationSubjectOption): string {
 function avatarContent(subject: GfsDelegationSubjectOption): React.ReactNode {
   if (subject.type === 'team') return <IconTeams />
   if (subject.type === 'host') return <IconAgents />
-  return subject.label.charAt(0).toUpperCase()
+  return <IconUser />
 }
 
 function matchesQuery(subject: GfsDelegationSubjectOption, query: string): boolean {
