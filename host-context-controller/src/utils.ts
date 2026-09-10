@@ -68,6 +68,8 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
   }
   // The existing retry may deliberately return void after a missing read.
   // Retain that policy while distinguishing it from completed preservation.
+  // This is invocation-local live-read state, not state of the cached snapshot.
+  // POST409 convergence never counts skipped, even when its fresh read succeeds.
   let latestReadSucceeded = true
   const readFresh = async (): Promise<T> => {
     try {

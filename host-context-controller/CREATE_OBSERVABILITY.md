@@ -98,6 +98,9 @@ dot-property `readNamespaced*`/`readCluster*` calls. Each must be observed or ma
 exclusion keyed by file, enclosing operation and SDK method, with an expected
 expression count and reason. It currently accounts for 26 observed expressions
 and 43 excluded ones. New unclassified reads and stale exclusions fail the test.
+The plan's forecast of 27 reads became 26: 21 original expressions plus six new
+ones minus the duplicate channel-reader Deployment expression. That retry now
+uses the helper's validated read callback; no retry path was removed.
 This is structural coverage, not execution evidence: changed purpose inside an
 excluded operation still needs review, and computed-property or indirect/aliased calls are outside this
 static-analysis guarantee. The behavioral tests and deployed validation
@@ -131,6 +134,11 @@ supersession retains its separate error path. Preserved existing resources gain
 no PUT or synthetic equality comparison. An unbound Host PVC retains its direct
 update policy.
 
+This RBAC propagation was explicitly approved on 2026-09-09 in the canonical
+plan's Addendum C.3, which supersedes the earlier pending decision in B.5.
+The bounded Role conflict retry was subsequently approved through the PR review
+correction; it does not turn exhausted conflicts into successful provisioning.
+
 Role convergence retries optimistic-lock conflicts through the shared bounded
 retry helper (three attempts, fresh reads and admission checks). Exhausted
 conflicts and unexpected RBAC errors still propagate; they are not successful
@@ -147,6 +155,30 @@ For stable, already-present resources, verify that POST is suppressed while
 convergence and business state still occur. Separate legitimate new resources,
 races and cold start. A lower create count alone does not establish causality;
 `absent` does not guarantee a POST if the mutation fence expires afterward.
+
+## Deployed acceptance and rollback
+
+Evaluate each converted resource-kind lane in a stable five-minute window,
+recording the exact image/producer identity, counter boundaries and audit window.
+For resources proven present throughout that window, require zero redundant
+create attempts and a positive witness that reconciliation and the intended
+convergence/preservation actually ran. Assess cold start in a separate window;
+classify legitimate new resources and races separately instead of treating all
+creates as redundant. Report each lane rather than only an aggregate decrease.
+
+Addendum C.4 supersedes B.7's blanket zero-create target and prefix exception.
+In the NetworkPolicy lane, an `ext-egress-` name alone never exempts a conflict:
+the shared helper and the safety-inventory exception can use that family. Explain
+every residual conflict using evidence of the actual path and race/inventory
+state. Counters alone cannot attribute a request to a resource name or call site.
+These are acceptance criteria for the post-deployment measurement, not a claim
+that this PR's local tests performed that measurement.
+
+The rollback unit is PR 2 as a whole: restore the previously deployed HCC image
+through the normal deployment/rollback process. Stages A–D are review order,
+not independent rollback units; do not mix partial stage reversions or kind flags.
+For a source revert, the accompanying regression tests revert with PR 2 as well.
+Rolling back does not itself validate the restored runtime or its request load.
 
 ## Historical evidence and attribution limits
 

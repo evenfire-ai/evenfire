@@ -57,11 +57,15 @@ function stored(value: string): string {
 }
 
 function createdDeployment(appsApi: ReturnType<typeof createMockAppsApi>): k8s.V1Deployment {
-  const call =
-    appsApi.replaceNamespacedDeployment.mock.calls.at(-1) ??
-    appsApi.createNamespacedDeployment.mock.calls.at(-1)
-  expect(call, 'the reconcile must write a real desired Deployment').toBeDefined()
-  return (call![0] as { body: k8s.V1Deployment }).body
+  expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+  expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
+  return (appsApi.createNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }).body
+}
+
+function replacedDeployment(appsApi: ReturnType<typeof createMockAppsApi>): k8s.V1Deployment {
+  expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+  expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+  return (appsApi.replaceNamespacedDeployment.mock.calls[0][0] as { body: k8s.V1Deployment }).body
 }
 
 function credentialsRevisionOf(deployment: k8s.V1Deployment): string | undefined {
@@ -167,29 +171,36 @@ describe('connector credentials revision (issue #223)', () => {
     })
     await reconciler.reconcile(makeServer())
     const first = credentialsRevisionOf(createdDeployment(appsApi))
+    expect(first).toMatch(/^[0-9a-f]{64}$/)
 
+    appsApi.readNamespacedDeployment.mockClear()
+    coreApi.readNamespacedSecret.mockClear()
+    appsApi.createNamespacedDeployment.mockClear()
     appsApi.replaceNamespacedDeployment.mockClear()
     coreApi.readNamespacedSecret.mockResolvedValue({
       data: { 'webhook-secret': stored('k2'), 'api-key': stored('k1') },
     })
     await reconciler.reconcile(makeServer())
-    const second = credentialsRevisionOf(createdDeployment(appsApi))
 
     // Key order is an artifact of how the API server answered, not a change in
     // credentials: it must never roll a pod.
-    expect(second).toBe(first)
+    expect(coreApi.readNamespacedSecret).toHaveBeenCalled()
+    expect(appsApi.readNamespacedDeployment).toHaveBeenCalled()
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(appsApi.replaceNamespacedDeployment).not.toHaveBeenCalled()
   })
 
   it('produces a different revision when a credential VALUE changes', async () => {
     await reconciler.reconcile(makeServer())
     const before = credentialsRevisionOf(createdDeployment(appsApi))
 
+    appsApi.createNamespacedDeployment.mockClear()
     appsApi.replaceNamespacedDeployment.mockClear()
     coreApi.readNamespacedSecret.mockResolvedValue({
       data: { 'api-key': stored('rotated-key') },
     })
     await reconciler.reconcile(makeServer())
-    const after = credentialsRevisionOf(createdDeployment(appsApi))
+    const after = credentialsRevisionOf(replacedDeployment(appsApi))
 
     // This difference IS the rollout: same pod template otherwise.
     expect(after).not.toBe(before)
@@ -203,13 +214,10 @@ describe('connector credentials revision (issue #223)', () => {
   })
 
   it('keeps the new revision when replacing over an existing Deployment', async () => {
-    // The update path: create answers 409, then read+replace runs the desired
+    // The update path: read finds the existing Deployment, then replace runs the desired
     // object through preserveDeploymentAnnotations. The stale revision on the
     // live object must not win — otherwise a rotation would write the OLD
     // digest back and the pod would never roll.
-    appsApi.createNamespacedDeployment.mockRejectedValueOnce(
-      Object.assign(new Error('already exists'), { code: 409 })
-    )
     appsApi.readNamespacedDeployment.mockResolvedValue({
       metadata: {
         name: 'linear',
@@ -236,10 +244,7 @@ describe('connector credentials revision (issue #223)', () => {
 
     await reconciler.reconcile(makeServer())
 
-    const replaced = appsApi.replaceNamespacedDeployment.mock.calls[0][0] as {
-      body: k8s.V1Deployment
-    }
-    const annotations = replaced.body.spec?.template?.metadata?.annotations
+    const annotations = replacedDeployment(appsApi).spec?.template?.metadata?.annotations
     expect(annotations?.[CREDENTIALS_REVISION_ANNOTATION]).toMatch(/^[0-9a-f]{64}$/)
     expect(annotations?.[CREDENTIALS_REVISION_ANNOTATION]).not.toBe('stale-revision')
     // Unrelated operator annotations still survive the replace.
