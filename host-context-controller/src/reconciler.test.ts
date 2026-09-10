@@ -14,6 +14,73 @@ import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './const
 import { McpServerReconciler } from './reconciler'
 import { McpServerCRD } from './types'
 
+describe.each(['Deployment', 'Service'] as const)('read-first %s contract', kind => {
+  function fixture() {
+    const appsApi = createMockAppsApi()
+    const coreApi = createMockCoreApi()
+    const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      appsApi: asAppsApi(appsApi),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(createMockCustomApi()),
+      assumeInventoryAuthorityWhenUnconfigured: true,
+    })
+    const server = makeServer()
+    const read =
+      kind === 'Deployment' ? appsApi.readNamespacedDeployment : coreApi.readNamespacedService
+    const create =
+      kind === 'Deployment' ? appsApi.createNamespacedDeployment : coreApi.createNamespacedService
+    const replace =
+      kind === 'Deployment' ? appsApi.replaceNamespacedDeployment : coreApi.replaceNamespacedService
+    const run = (isCurrent = () => true) =>
+      kind === 'Deployment'
+        ? (reconciler as any).ensureDeployment(server, '', isCurrent)
+        : (reconciler as any).ensureService(server, isCurrent)
+    return { read, create, replace, run, server }
+  }
+
+  it('propagates GET 403 without attempting a write', async () => {
+    const f = fixture()
+    const forbidden = { code: 403 }
+    f.read.mockRejectedValue(forbidden)
+    await expect(f.run()).rejects.toBe(forbidden)
+    expect(f.read).toHaveBeenCalledExactlyOnceWith({
+      name: f.server.name,
+      namespace: f.server.namespace,
+    })
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+
+  it('reads absence before its only create request', async () => {
+    const f = fixture()
+    const events: string[] = []
+    f.read.mockImplementation(async () => {
+      events.push('GET')
+      throw { code: 404 }
+    })
+    f.create.mockImplementation(async () => {
+      events.push('POST')
+      return {}
+    })
+    await f.run()
+    expect(events).toEqual(['GET', 'POST'])
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+
+  it('rechecks authority after an absent read', async () => {
+    const f = fixture()
+    let active = true
+    f.read.mockImplementation(async () => {
+      active = false
+      throw { code: 404 }
+    })
+    await f.run(() => active)
+    expect(f.read).toHaveBeenCalledTimes(1)
+    expect(f.create).not.toHaveBeenCalled()
+    expect(f.replace).not.toHaveBeenCalled()
+  })
+})
+
 function deferred<T = void>(): {
   promise: Promise<T>
   resolve: (value: T | PromiseLike<T>) => void
@@ -105,12 +172,18 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('should create Deployment when managed: true (no regression)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({ name: 'mongo-mcp', managed: true })
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 
   it('rejects managed ownership changes after the first reconcile snapshot', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const serverName = 'workflow-recipes'
 
@@ -134,6 +207,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('patches the network-ready annotation with merge-patch semantics', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       annotations: { 'clerum.io/pre-deploy': 'true' },
@@ -163,6 +239,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: stamps the observed generation alongside the network-ready ack', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       generation: 3,
@@ -189,6 +268,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: re-acks when the stamped generation is stale (spec changed since last ack)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = {
       ...makeServer({ name: 'stdio-mcp', managed: true }),
       generation: 3,
@@ -246,6 +328,9 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('Issue #408: re-acks when the ack predates the stamp (upgrade path: stamp absent)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     // A pre-#408 HCC set network-ready:'true' without an observed-generation stamp.
     // The re-ack guard's stale-generation branch (typeof gen === 'number' && stamp !==
     // String(gen), i.e. undefined !== '3') must fire so the ack gains a generation.
@@ -279,12 +364,20 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
   })
 
   it('should create Deployment when managed: undefined (default: true)', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({ name: 'mongo-mcp' })
     await reconciler.reconcile(server)
     expect(appsApi.createNamespacedDeployment).toHaveBeenCalled()
   })
 
   it('completes a remote proxy reconcile without rewriting the desired image', async () => {
+    // This case starts without the nginx ConfigMap.
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server = makeServer({
       name: 'remote-api',
       image: 'vendor/original-image:1',
@@ -1148,6 +1241,9 @@ describe('restart-safe discovery status', () => {
   })
 
   it('prefers fresh in-memory status over persisted status from the same generation', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const server: McpServerCRD = {
       ...makeServer({ name: 'live-status' }),
       generation: 3,
@@ -1181,6 +1277,8 @@ describe('restart-safe discovery status', () => {
     ['generation changes', 'stable-uid', 4],
     ['the same name is recreated', 'replacement-uid', 3],
   ])('does not reuse in-memory status when %s', async (_case, uid, generation) => {
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const original: McpServerCRD = {
       ...makeServer({ name: 'identity-fenced' }),
       uid: 'original-uid',
@@ -1525,6 +1623,9 @@ describe('full reconciliation inventory authority', () => {
   })
 
   it('retires a same-watch runtime revision superseded during Secret validation', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     let current: McpServerCRD
     const original: McpServerCRD = {
       ...makeServer({
@@ -1959,6 +2060,9 @@ describe('unconfigured inventory authority fails closed (G1)', () => {
   })
 
   it('T-G1c: the explicit opt-in restores assume-current', async () => {
+    // First materialization is absent; subsequent reads still use the live-state fixture.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     const reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),

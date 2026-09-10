@@ -39,6 +39,7 @@ import {
 import { hccLogger } from './logger'
 import { issueMcpHostRuntimeTokens } from './mcpHostRuntimeTokenIssuerClient'
 import {
+  createsTotal,
   hostCleanupDeferredTotal,
   hostDeleteCleanupTotal,
   hostFleetBenignSupersessionsTotal,
@@ -77,6 +78,7 @@ import {
   canonicalStringify,
   canonicalizeValue,
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   observeCreate,
   observeExistenceRead,
@@ -1021,22 +1023,38 @@ export class HostReconciler {
   /**
    * Ensure a per-Host ServiceAccount exists. Idempotent.
    */
-  private async ensureHostServiceAccount(host: HostCRD): Promise<void> {
+  private async ensureHostServiceAccount(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostSaName(host)
     const body: k8s.V1ServiceAccount = {
       apiVersion: 'v1',
       kind: 'ServiceAccount',
       metadata: { name, namespace: host.namespace, labels: this.rbacLabels(host) },
     }
-    try {
-      await observeCreate('ServiceAccount', () =>
-        this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created ServiceAccount "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) === 409) return // already exists; SA itself has no spec to update
-      console.error(`[HostReconciler] Failed to ensure ServiceAccount "${name}":`, err)
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('ServiceAccount', () =>
+          this.coreApi.readNamespacedServiceAccount({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('ServiceAccount', () =>
+          this.coreApi.createNamespacedServiceAccount({ namespace: host.namespace, body })
+        ),
+      // Existing ServiceAccounts have always been retained without an update.
+      converge: async read => {
+        try {
+          await read()
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'ServiceAccount', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1045,7 +1063,7 @@ export class HostReconciler {
    * On secretRef change the resourceNames are rewritten so Host A can never
    * read Host B's Secret.
    */
-  private async ensureHostRole(host: HostCRD): Promise<void> {
+  private async ensureHostRole(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostRoleName(host)
     const body: k8s.V1Role = {
       apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -1083,36 +1101,49 @@ export class HostReconciler {
         },
       ],
     }
-    try {
-      await observeCreate('Role', () =>
-        this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created Role "${name}"`)
-      return
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create Role "${name}":`, err)
-        return
-      }
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
-    // Already exists — replace to pick up rotated secretRef / new resourceNames.
-    try {
-      const existing = await observeExistenceRead('Role', () =>
-        this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
-      )
-      if (roleMatchesDesired(body, existing)) return
-      body.metadata!.resourceVersion = existing.metadata?.resourceVersion
-      await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
-      console.log(`[HostReconciler] Updated Role "${name}"`)
-    } catch (err) {
-      console.error(`[HostReconciler] Failed to update Role "${name}":`, err)
-    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Role', () =>
+          this.rbacApi.readNamespacedRole({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('Role', () =>
+          this.rbacApi.createNamespacedRole({ namespace: host.namespace, body })
+        ),
+      converge: async read => {
+        try {
+          // Retry optimistic-lock contention, but never continue provisioning
+          // with stale permissions after the bounded retry budget is exhausted.
+          await replaceWithConflictRetry({
+            description: `Role "${name}"`,
+            logPrefix: '[HostReconciler]',
+            body,
+            read,
+            mutationAllowed,
+            isUpToDate: roleMatchesDesired,
+            replace: next =>
+              this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body: next }),
+          })
+        } catch (error) {
+          // Preserve the existing disappearance policy, without swallowing
+          // authorization, transport, or terminal conflict failures.
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Role', outcome: 'skipped' }),
+    })
   }
 
   /**
    * Ensure a per-Host RoleBinding binding the per-Host Role to the per-Host SA.
    */
-  private async ensureHostRoleBinding(host: HostCRD): Promise<void> {
+  private async ensureHostRoleBinding(host: HostCRD, revalidate?: () => void): Promise<void> {
     const name = this.hostRoleName(host)
     const body: k8s.V1RoleBinding = {
       apiVersion: 'rbac.authorization.k8s.io/v1',
@@ -1131,15 +1162,31 @@ export class HostReconciler {
         name,
       },
     }
-    try {
-      await observeCreate('RoleBinding', () =>
-        this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
-      )
-      console.log(`[HostReconciler] Created RoleBinding "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) === 409) return
-      console.error(`[HostReconciler] Failed to ensure RoleBinding "${name}":`, err)
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
     }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('RoleBinding', () =>
+          this.rbacApi.readNamespacedRoleBinding({ name, namespace: host.namespace })
+        ),
+      create: () =>
+        observeCreate('RoleBinding', () =>
+          this.rbacApi.createNamespacedRoleBinding({ namespace: host.namespace, body })
+        ),
+      // Preserve the existing binding; this path does not update subjects/roleRef.
+      converge: async read => {
+        try {
+          await read()
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 404) return false
+          throw error
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'RoleBinding', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -2496,50 +2543,40 @@ export class HostReconciler {
     }
   }
 
-  private async reconcileChannelReaderService(host: HostCRD): Promise<void> {
+  private async reconcileChannelReaderService(
+    host: HostCRD,
+    revalidate?: () => void
+  ): Promise<void> {
     const name = `channel-reader-${host.name}`
     const ns = config.channelsNamespace
     const service = this.buildChannelReaderService(host)
-
-    try {
-      await observeCreate('Service', () =>
-        this.coreApi.createNamespacedService({
-          namespace: ns,
-          body: service,
-        })
-      )
-      console.log(`[HostReconciler] Created channel-reader Service "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create channel-reader Service "${name}":`, err)
-        throw err
-      }
-      try {
-        await replaceWithConflictRetry({
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ name, namespace: ns })
+        ),
+      create: () =>
+        observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({ namespace: ns, body: service })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `channel-reader Service "${name}"`,
           logPrefix: '[HostReconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
-          read: () =>
-            observeExistenceRead('Service', () =>
-              this.coreApi.readNamespacedService({ name, namespace: ns })
-            ),
-          replace: body =>
-            this.coreApi.replaceNamespacedService({
-              name,
-              namespace: ns,
-              body,
-            }),
-        })
-      } catch (replaceErr) {
-        console.error(
-          `[HostReconciler] Failed to update channel-reader Service "${name}":`,
-          replaceErr
-        )
-        throw replaceErr
-      }
-    }
+          mutationAllowed,
+          read,
+          replace: body => this.coreApi.replaceNamespacedService({ name, namespace: ns, body }),
+        }),
+    })
   }
 
   /**
@@ -2550,73 +2587,62 @@ export class HostReconciler {
    *   clerum.io/credentials-revision pod template annotation, so the initial
    *   pod boots with the right hash and doesn't get rolled twice when
    *   SecretInformer fires later.
-   * - On 409 from create, compares a fresh, server-normalized Deployment and
+   * - Reads before creation and compares a server-normalized Deployment; it
    *   replaces only meaningful drift. Conflict retries rebuild against the
    *   latest live replica count. A Deployment owned by a different host is
    *   never overwritten: the initial read skips, and a retry-time ownership
    *   change throws so write_skips_total does not count the refusal as a
    *   healthy no-op.
    */
-  private async reconcileChannelReaderDeployment(host: HostCRD): Promise<void> {
+  private async reconcileChannelReaderDeployment(
+    host: HostCRD,
+    revalidate?: () => void
+  ): Promise<void> {
     const name = `channel-reader-${host.name}`
     const ns = config.channelsNamespace
-
     const revision = await this.computeChannelReaderRevisionForHost(host.name)
     const desired = this.buildChannelReaderDeployment(host, revision)
-
-    try {
-      await observeCreate('Deployment', () =>
-        this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
-      )
-      console.log(`[HostReconciler] Created channel-reader Deployment "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        console.error(`[HostReconciler] Failed to create channel-reader "${name}":`, err)
-        throw err
-      }
-      let existing: k8s.V1Deployment
-      try {
-        existing = await observeExistenceRead('Deployment', () =>
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ name, namespace: ns })
-        )
-      } catch (readErr) {
-        if (getErrorCode(readErr) === 404) {
-          console.warn(
-            `[HostReconciler] channel-reader "${name}" disappeared after create conflict; treating the reconcile as a transient failure`
-          )
-          throw readErr
+        ),
+      create: () =>
+        observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace: ns, body: desired })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: async (read, observed) => {
+        // A post-create-conflict read still throws on 404. Later retry reads
+        // keep the existing benign-disappearance policy in the retry helper.
+        const existing = observed ?? (await read())
+        const ownerHost = existing.metadata?.labels?.[HOST_LABEL]
+        if (ownerHost && ownerHost !== host.name) {
+          log.warn('Channel-reader Deployment belongs to another Host; refusing update', { name })
+          return false
         }
-        console.error(`[HostReconciler] Failed to read channel-reader "${name}":`, readErr)
-        throw readErr
-      }
-      const ownerHost = existing.metadata?.labels?.[HOST_LABEL]
-      if (ownerHost && ownerHost !== host.name) {
-        console.warn(
-          `[HostReconciler] channel-reader "${name}" owned by host="${ownerHost}", skipping`
-        )
-        return
-      }
-      // The outer read above treats 404 as a transient throw so this Host
-      // reconcile requeues and recreates. The helper read below is the #472
-      // contract: 404 means gone, return, and the next Host reconcile
-      // recreates. Same object, two 404 policies — accepted, not a bug.
-      try {
+        // ensureResource already supplies a consume-once snapshot for the
+        // initial presence path. Only POST409 needs its owner-check read retained.
+        let snapshot: k8s.V1Deployment | undefined = observed === undefined ? existing : undefined
         await replaceWithConflictRetry({
           description: `channel-reader Deployment "${name}"`,
           logPrefix: '[HostReconciler]',
-          // B2: rebuild against each fresh read so an unsynced CC cache
-          // preserves the live replica count even after a 409 retry.
           body: this.buildChannelReaderDeployment(host, revision, existing.spec?.replicas),
-          read: () =>
-            observeExistenceRead('Deployment', () =>
-              this.appsApi.readNamespacedDeployment({ name, namespace: ns })
-            ),
-          replace: body =>
-            this.appsApi.replaceNamespacedDeployment({
-              name,
-              namespace: ns,
-              body,
-            }),
+          mutationAllowed,
+          read: () => {
+            if (snapshot !== undefined) {
+              const first = snapshot
+              snapshot = undefined
+              return Promise.resolve(first)
+            }
+            return read()
+          },
+          replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace: ns, body }),
           mergeExisting: (_body, fresh) => {
             const desiredWithLiveReplicas = this.buildChannelReaderDeployment(
               host,
@@ -2631,9 +2657,6 @@ export class HostReconciler {
           },
           validateExisting: fresh => {
             const freshOwnerHost = fresh.metadata?.labels?.[HOST_LABEL]
-            // Never replace an object whose ownership changed during a retry.
-            // Veto here — not via isUpToDate — so write_skips_total stays a
-            // genuine no-op count.
             if (freshOwnerHost && freshOwnerHost !== host.name) {
               throw new Error(
                 `channel-reader Deployment ownership changed to host "${freshOwnerHost}"; refusing replace`
@@ -2642,11 +2665,8 @@ export class HostReconciler {
           },
           isUpToDate: deploymentMatchesDesired,
         })
-      } catch (replaceErr) {
-        console.error(`[HostReconciler] Failed to update channel-reader "${name}":`, replaceErr)
-        throw replaceErr
-      }
-    }
+      },
+    })
   }
 
   /**
@@ -3336,57 +3356,81 @@ export class HostReconciler {
     this.readinessTimers.set(name, timer)
   }
 
-  private async ensurePvc(host: HostCRD): Promise<void> {
+  private async ensurePvc(host: HostCRD, revalidate?: () => void): Promise<void> {
     const pvc = this.buildPvc(host)
     const name = this.pvcName(host)
-    try {
-      await observeCreate('PersistentVolumeClaim', () =>
-        this.coreApi.createNamespacedPersistentVolumeClaim({
-          namespace: host.namespace,
-          body: pvc,
-        })
-      )
-      console.log(`[HostReconciler] Created PVC "${name}"`)
-    } catch (error) {
-      if (getErrorCode(error) === 409) {
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    // Initial GET errors must propagate; retain only the established
+    // non-throwing POST and convergence failures of this PVC writer.
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('PersistentVolumeClaim', () =>
+          this.coreApi.readNamespacedPersistentVolumeClaim({ namespace: host.namespace, name })
+        ),
+      create: async () => {
         try {
-          const existing = await observeExistenceRead('PersistentVolumeClaim', () =>
-            this.coreApi.readNamespacedPersistentVolumeClaim({
+          await observeCreate('PersistentVolumeClaim', () =>
+            this.coreApi.createNamespacedPersistentVolumeClaim({
               namespace: host.namespace,
-              name,
+              body: pvc,
             })
           )
-          if (existing.spec?.volumeName) {
-            return
-          }
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 409) throw error
+          log.error('Failed to create Host PVC', { host: host.name, err: error })
+        }
+      },
+      converge: async read => {
+        try {
+          const existing = await read()
+          revalidate?.()
+          if (existing.spec?.volumeName) return
           pvc.metadata!.resourceVersion = existing.metadata?.resourceVersion
           await this.coreApi.replaceNamespacedPersistentVolumeClaim({
             namespace: host.namespace,
             name,
             body: pvc,
           })
-          console.log(`[HostReconciler] Updated PVC "${name}"`)
-        } catch (updateError) {
-          console.error(`[HostReconciler] Failed to update PVC "${name}":`, updateError)
+        } catch (error) {
+          if (isBenignSupersessionError(error)) throw error
+          log.error('Failed to update Host PVC', { host: host.name, err: error })
+          return false
         }
-      } else {
-        console.error(`[HostReconciler] Failed to create PVC "${name}":`, error)
-      }
-    }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
+    })
   }
 
-  private async ensureService(host: HostCRD): Promise<void> {
+  private async ensureService(host: HostCRD, revalidate?: () => void): Promise<void> {
     const service = this.buildService(host)
-    try {
-      await observeCreate('Service', () =>
-        this.coreApi.createNamespacedService({
-          namespace: host.namespace,
-          body: service,
-        })
-      )
-      console.log(`[HostReconciler] Created Service "${host.name}"`)
-    } catch (error) {
-      if (getErrorCode(error) === 409) {
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    // Initial read errors propagate. Only the existing POST/convergence paths
+    // retain their historical non-throwing failures.
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ namespace: host.namespace, name: host.name })
+        ),
+      create: async () => {
+        try {
+          await observeCreate('Service', () =>
+            this.coreApi.createNamespacedService({ namespace: host.namespace, body: service })
+          )
+        } catch (error) {
+          if (error != null && getErrorCode(error) === 409) throw error
+          log.error('Failed to create Host Service', { host: host.name, err: error })
+        }
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      converge: async read => {
         try {
           await replaceWithConflictRetry({
             description: `Service "${host.name}"`,
@@ -3394,13 +3438,8 @@ export class HostReconciler {
             body: service,
             mergeExisting: preserveServiceAssignedFields,
             isUpToDate: serviceMatchesDesired,
-            read: () =>
-              observeExistenceRead('Service', () =>
-                this.coreApi.readNamespacedService({
-                  namespace: host.namespace,
-                  name: host.name,
-                })
-              ),
+            mutationAllowed,
+            read,
             replace: body =>
               this.coreApi.replaceNamespacedService({
                 namespace: host.namespace,
@@ -3408,13 +3447,13 @@ export class HostReconciler {
                 body,
               }),
           })
-        } catch (updateError) {
-          console.error(`[HostReconciler] Failed to update Service "${host.name}":`, updateError)
+        } catch (error) {
+          if (isBenignSupersessionError(error)) throw error
+          log.error('Failed to update Host Service', { host: host.name, err: error })
+          return false
         }
-      } else {
-        console.error(`[HostReconciler] Failed to create Service "${host.name}":`, error)
-      }
-    }
+      },
+    })
   }
 
   private async ensureDeployment(
@@ -3422,7 +3461,8 @@ export class HostReconciler {
     mounts: ResolvedSfsMount[],
     runtimeTokenRevision: string,
     lifecycle?: EffectiveHostLifecycle,
-    resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>
+    resolveStateBeforeMutation?: () => Promise<DeploymentMutationState>,
+    revalidate?: () => void
   ): Promise<void> {
     const buildDesiredDeployment = async (): Promise<k8s.V1Deployment> => {
       const state = resolveStateBeforeMutation ? await resolveStateBeforeMutation() : null
@@ -3433,47 +3473,42 @@ export class HostReconciler {
         state?.lifecycle ?? lifecycle
       )
     }
-    const deployment = await buildDesiredDeployment()
-    try {
-      await observeCreate('Deployment', () =>
-        this.appsApi.createNamespacedDeployment({
-          namespace: host.namespace,
-          body: deployment,
-        })
-      )
-      console.log(`[HostReconciler] Created Deployment "${host.name}"`)
-    } catch (error) {
-      if (getErrorCode(error) !== 409) {
-        console.error(`[HostReconciler] Failed to create Deployment "${host.name}":`, error)
-        throw error
-      }
-      try {
-        await replaceWithConflictRetry({
+    const mutationAllowed = () => {
+      revalidate?.()
+      return true
+    }
+    await ensureResource({
+      mutationAllowed,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ namespace: host.namespace, name: host.name })
+        ),
+      create: async () => {
+        // The initial GET may outlive the lifecycle or token-scope observation.
+        const deployment = await buildDesiredDeployment()
+        revalidate?.()
+        return observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace: host.namespace, body: deployment })
+        )
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `Deployment "${host.name}"`,
           logPrefix: '[HostReconciler]',
-          body: deployment,
           resolveBody: buildDesiredDeployment,
           mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,
-          read: () =>
-            observeExistenceRead('Deployment', () =>
-              this.appsApi.readNamespacedDeployment({
-                namespace: host.namespace,
-                name: host.name,
-              })
-            ),
+          mutationAllowed,
+          read,
           replace: body =>
             this.appsApi.replaceNamespacedDeployment({
               namespace: host.namespace,
               name: host.name,
               body,
             }),
-        })
-      } catch (updateError) {
-        console.error(`[HostReconciler] Failed to update Deployment "${host.name}":`, updateError)
-        throw updateError
-      }
-    }
+        }),
+    })
   }
 
   private async deleteRuntimeResources(name: string, namespace: string): Promise<void> {
@@ -4373,11 +4408,11 @@ export class HostReconciler {
     // otherwise the kubelet can't mount the SA token and the pod will
     // crash-loop until RBAC is created.
     revalidateHostMutationBoundary()
-    await this.ensureHostServiceAccount(host)
+    await this.ensureHostServiceAccount(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
-    await this.ensureHostRole(host)
+    await this.ensureHostRole(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
-    await this.ensureHostRoleBinding(host)
+    await this.ensureHostRoleBinding(host, revalidateHostMutationBoundary)
 
     let mounts: ResolvedSfsMount[] = []
     try {
@@ -4424,9 +4459,9 @@ export class HostReconciler {
     }
 
     revalidateHostMutationBoundary()
-    await this.ensurePvc(host)
+    await this.ensurePvc(host, revalidateHostMutationBoundary)
     revalidateHostMutationBoundary()
-    await this.ensureService(host)
+    await this.ensureService(host, revalidateHostMutationBoundary)
 
     // NetworkPolicies before Deployments. Calico/Cilium evaluate egress and
     // ingress against the policies that exist when the connection is opened,
@@ -4576,7 +4611,8 @@ export class HostReconciler {
       mounts,
       runtimeTokenProvision.revision,
       lifecycle.effective,
-      resolveDeploymentState
+      resolveDeploymentState,
+      revalidateHostMutationBoundary
     )
     revalidateHostMutationBoundary()
 
@@ -4619,8 +4655,8 @@ export class HostReconciler {
     // expected error path — not just defense in depth.
     const channelReaderFailures: unknown[] = []
     for (const reconcileResource of [
-      () => this.reconcileChannelReaderService(host),
-      () => this.reconcileChannelReaderDeployment(host),
+      () => this.reconcileChannelReaderService(host, revalidateHostMutationBoundary),
+      () => this.reconcileChannelReaderDeployment(host, revalidateHostMutationBoundary),
     ]) {
       try {
         revalidateHostMutationBoundary()
