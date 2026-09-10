@@ -127,7 +127,6 @@ h3 {
   justify-content: flex-end;
   min-width: 0;
   pointer-events: none;
-  -webkit-app-region: no-drag;
 }
 
 :root[data-theme='dark'] .window-titlebar__actions {
@@ -146,7 +145,6 @@ h3 {
   align-items: center;
   gap: var(--space-2);
   pointer-events: auto;
-  -webkit-app-region: drag;
 }
 
 .window-titlebar__actions .header-left {
@@ -400,14 +398,16 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   height: var(--window-titlebar-height);
-  /* This slot overlaps .window-titlebar__actions' full-width, draggable .top-bar.
-     A no-drag element in a SEPARATE stacking context does not reliably carve a
-     hole out of that overlapping drag band (the OS then swallows the buttons'
-     clicks as a window drag). Instead mirror the .top-bar + search/bell pattern
-     that works: make this slot its OWN `drag` region and let the action buttons
-     carve out as no-drag DESCENDANTS. */
+  /* Chromium unions all `-webkit-app-region` rects in DOCUMENT ORDER and, where
+     they overlap, the LAST one wins (z-index, position and pointer-events do not
+     enter into it). The only `drag` region is the root `.window-titlebar`; every
+     control that must stay clickable carves itself out as `no-drag`. This slot
+     sits over that root drag band, so it declares `no-drag` to lift the whole
+     leading area (and its descendant buttons) out of it. It must NOT declare
+     `drag` here: a later-in-document `drag` box covering another control would
+     re-union over it and make that control draggable again. */
   pointer-events: auto;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 /* mac: never overlap the traffic-light semaphore, even when the sidebar is
@@ -435,10 +435,6 @@ h3 {
   align-items: center;
   gap: var(--space-1);
   pointer-events: auto;
-  /* This is the interactive element: without no-drag it inherits the title
-     bar's `drag` region and the OS swallows its clicks/hover as a window drag.
-     no-drag propagates to the descendant buttons. */
-  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__leading .titlebar-leading-action {
@@ -457,8 +453,9 @@ h3 {
   background: transparent;
   box-shadow: none;
   color: var(--titlebar-control-ink);
-  /* Carve the clickable button out of the slot's drag region (like the window
-     controls each carry their own no-drag). */
+  /* Restate no-drag on the clickable button itself. The leading slot is already
+     no-drag and propagates, so this is idempotent — kept for clarity next to the
+     interactive control, and harmless because it never widens a drag region. */
   -webkit-app-region: no-drag;
 }
 
