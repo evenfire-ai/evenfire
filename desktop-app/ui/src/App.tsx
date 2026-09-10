@@ -772,7 +772,6 @@ export function App() {
 
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
     setSandboxUiMounted(false)
-    setNotificationTrayLeft(null)
     setActiveSandboxUiApp(app)
   }, [])
 
@@ -783,7 +782,6 @@ export function App() {
   const handleSandboxUiClosed = React.useCallback(() => {
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
-    setNotificationTrayLeft(null)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
@@ -792,7 +790,6 @@ export function App() {
   const handleSandboxUiRemoved = React.useCallback(() => {
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
-    setNotificationTrayLeft(null)
     setSandboxUiConversationOrigin(null)
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)

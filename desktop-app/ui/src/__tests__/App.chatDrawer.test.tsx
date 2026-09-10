@@ -446,6 +446,42 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
   })
 
+  it('keeps the notification rail boundary through a same-edge app reopen', () => {
+    currentController = makeController({ navItem: DESKTOP_ROUTES.apps } as Partial<AppController>)
+    render(<App />)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app-a',
+        label: 'App A',
+        defaultPath: '/',
+      })
+      sandboxUiPageHarness.props?.onEmbedSlotRightChange?.(716)
+    })
+    expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
+
+    act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
+    expect(appHeaderHarness.props?.notificationTrayLeft).toBeNull()
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app-b',
+        label: 'App B',
+        defaultPath: '/',
+      })
+    })
+
+    // The real SandboxUiPage producer dedupes its unchanged 716px slot edge
+    // until its next lifecycle. The titlebar must retain the existing boundary
+    // while the refreshed embedded app reaches readiness.
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+    expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
+
+    act(() => sandboxUiPageHarness.props?.onEmbedSlotRightChange?.(744))
+    expect(appHeaderHarness.props?.notificationTrayLeft).toBe(744)
+  })
+
   // #2 — reconciler covers the drawer (minispec 04 approach A). The ChatThread
   // session list moves `vm.activeChatId` via switchToChat WITHOUT touching
   // chatViewTabs. Simulate that (mutate activeChatId as the vm would) and assert
