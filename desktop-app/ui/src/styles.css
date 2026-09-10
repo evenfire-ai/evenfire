@@ -1614,6 +1614,18 @@ h3 {
   user-select: none;
 }
 
+/* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
+   outranks .sidebar-logo-link's background: none by specificity and paints the
+   wordmark accent on hover. The logo has no hover affordance by design; keep it flat.
+   Same leak already guarded on .nav-latest-session__main. */
+.sidebar-logo-link:hover:enabled,
+.sidebar-logo-link:active {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: inherit;
+}
+
 .sidebar-logo-link:focus-visible {
   outline: 2px solid rgba(var(--focus-rgb), 0.5);
   outline-offset: 2px;
@@ -11244,6 +11256,14 @@ pre {
     border-radius: 0;
     background: rgba(var(--overlay-rgb), 0.72);
     z-index: 1;
+  }
+
+  /* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
+     outranks the overlay background above by specificity and would flash the whole
+     backdrop accent-blue on hover. It is a dismiss target, not an affordance; hold
+     the overlay tint. Same leak class already guarded on .nav-latest-session__main. */
+  .sidebar-mobile-backdrop:hover:enabled {
+    background: rgba(var(--overlay-rgb), 0.72);
   }
 
   .left-nav.mobile-open .sidebar-mobile-backdrop {
