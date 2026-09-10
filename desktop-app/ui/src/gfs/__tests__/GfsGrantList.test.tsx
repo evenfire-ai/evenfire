@@ -56,6 +56,10 @@ describe('GfsGrantList', () => {
             permissions: ['read'],
           }),
           grantItem({ id: 'grant-3', subject: { type: 'host', id: '1st:mcp-host/unknown' } }),
+          grantItem({
+            id: 'grant-4',
+            subject: { type: 'host', id: '3rd:sandbox-recipes/monthly-report' },
+          }),
         ]}
         onRevoke={vi.fn()}
         subjects={subjects}
@@ -63,6 +67,8 @@ describe('GfsGrantList', () => {
     )
 
     const agentRow = screen.getByText('Chat LLM').closest('li')!
+    expect(agentRow.querySelector('[data-subject-kind="agent"] svg')).not.toBeNull()
+    expect(within(agentRow).queryByText(/direct grant|\bhost\b/i)).toBeNull()
     expect(
       within(agentRow).getByRole('button', { name: 'Access role for Chat LLM' }).textContent
     ).toContain('Editor')
@@ -73,6 +79,8 @@ describe('GfsGrantList', () => {
     ).toContain('da-gfs-grant-list__revoke')
 
     const userRow = screen.getByText('Test Two').closest('li')!
+    expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
+    expect(within(userRow).queryByText(/direct grant|\buser\b/i)).toBeNull()
     expect(
       within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
     ).toContain('Read')
@@ -80,6 +88,8 @@ describe('GfsGrantList', () => {
 
     // Unresolvable subject ids stay visible as raw ids — never hidden.
     expect(screen.getByText('1st:mcp-host/unknown')).toBeTruthy()
+    const workflowRow = screen.getByText('monthly-report').closest('li')!
+    expect(workflowRow.querySelector('[data-subject-kind="workflow"] svg')).not.toBeNull()
   })
 
   it('labels a host subject by its displayName, falling back to the identifier when blank', () => {
@@ -148,7 +158,8 @@ describe('GfsGrantList', () => {
     )
 
     const shareRow = screen.getByTestId('gfs-access-row-share-share-1')
-    expect(within(shareRow).getByText('Share · team')).toBeTruthy()
+    expect(shareRow.querySelector('[data-subject-kind="team"] svg')).not.toBeNull()
+    expect(within(shareRow).queryByText('Share · team')).toBeNull()
     expect(within(shareRow).queryByText('Includes contents')).toBeNull()
     fireEvent.click(
       within(shareRow).getByRole('button', { name: 'Revoke shared access for Core Team' })
@@ -197,7 +208,7 @@ describe('GfsGrantList', () => {
   it('renders an empty notice when nothing has been granted', () => {
     render(<GfsGrantList agents={agents} items={[]} onRevoke={vi.fn()} subjects={subjects} />)
 
-    expect(screen.getByText('No direct grants or shares yet.')).toBeTruthy()
+    expect(screen.getByText('No one has access yet.')).toBeTruthy()
   })
 
   // R4 spec §2 — grants and shares fail independently: a share-list error

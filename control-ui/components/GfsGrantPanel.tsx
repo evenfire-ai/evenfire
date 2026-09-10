@@ -6,6 +6,14 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
+import {
+  IconFolder,
+  IconRobot,
+  IconShield,
+  IconUser,
+  IconUsers,
+  IconWorkflow,
+} from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
@@ -42,6 +50,16 @@ import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSu
 const OPERATOR_VALUE = 'operator'
 const DRIVE = 'main'
 type AccessRole = 'read' | 'editor'
+type AccessSubjectKind = 'agent' | 'context' | 'operator' | 'team' | 'user' | 'workflow'
+
+function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }): React.JSX.Element {
+  if (kind === 'agent') return <IconRobot />
+  if (kind === 'context') return <IconFolder />
+  if (kind === 'operator') return <IconShield />
+  if (kind === 'team') return <IconUsers />
+  if (kind === 'workflow') return <IconWorkflow />
+  return <IconUser />
+}
 
 function rolePermissions(role: AccessRole, hostOnly: boolean): string[] {
   if (hostOnly) return role === 'editor' ? ['read', 'write'] : ['read']
@@ -312,11 +330,25 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           candidate.subject.type === item.subject.type && candidate.subject.id === item.subject.id
       )
       if (option) return option.label
-      const typeLabel =
-        item.subject.type === 'host'
-          ? 'Agent or workflow'
-          : item.subject.type.charAt(0).toUpperCase() + item.subject.type.slice(1)
+      if (item.subject.type === 'host') {
+        return item.subject.id?.split('/').at(-1) || 'Agent or workflow'
+      }
+      const typeLabel = item.subject.type.charAt(0).toUpperCase() + item.subject.type.slice(1)
       return item.subject.id ? `${typeLabel} · ${item.subject.id}` : typeLabel
+    },
+    [bulkSubjectOptions]
+  )
+
+  const subjectKind = useCallback(
+    (item: GfsExistingAccessItem): AccessSubjectKind => {
+      if (item.subject.type !== 'host') return item.subject.type
+      const option = bulkSubjectOptions.find(
+        candidate =>
+          candidate.subject.type === item.subject.type && candidate.subject.id === item.subject.id
+      )
+      return option?.badge.toLowerCase() === 'workflow' || item.subject.id?.startsWith('3rd:')
+        ? 'workflow'
+        : 'agent'
     },
     [bulkSubjectOptions]
   )
@@ -487,12 +519,12 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
               </Button>
             </div>
           ) : existingAccess.length === 0 ? (
-            <p className="cu-gfs-existing-access__empty">No direct grants or shares yet.</p>
+            <p className="cu-gfs-existing-access__empty">No one has access yet.</p>
           ) : (
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
               {sortedExistingAccess.map(item => {
                 const label = subjectLabel(item)
-                const kindLabel = item.grantId ? 'direct grant' : 'direct share'
+                const kind = subjectKind(item)
                 return (
                   <RecordListRow
                     className="cu-gfs-existing-access__item"
@@ -500,11 +532,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                     data-access-id={item.grantId ?? item.shareIds[0]}
                     key={`${item.subject.type}:${item.grantId ?? item.shareIds[0]}`}
                   >
+                    <span
+                      aria-hidden="true"
+                      className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
                     <span className="cu-gfs-existing-access__identity">
                       <span className="cu-gfs-existing-access__subject">{label}</span>
-                      <span className="cu-gfs-existing-access__detail">
-                        {item.grantId ? 'Direct grant' : 'Direct share'} · {item.subject.type}
-                      </span>
                     </span>
                     <span className="cu-gfs-existing-access__meta">
                       <SelectionDropdown
@@ -532,7 +568,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                           onSelect: () => void revokeAccess(item),
                         },
                       ]}
-                      ariaLabel={`Actions for ${kindLabel} to ${label}`}
+                      ariaLabel={`Actions for ${label}`}
                     />
                   </RecordListRow>
                 )

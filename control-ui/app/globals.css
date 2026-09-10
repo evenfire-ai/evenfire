@@ -13788,7 +13788,7 @@ button.cu-gfs-tree__button:focus-visible,
 
 .cu-gfs-existing-access__list {
   display: grid;
-  gap: var(--cu-space-1);
+  gap: var(--cu-space-2);
   max-height: calc((((var(--cu-space-5) * 2) + var(--cu-space-2)) * 3) + (var(--cu-space-1) * 2));
   margin: 0;
   overflow-y: auto;
@@ -13802,16 +13802,43 @@ button.cu-gfs-tree__button:focus-visible,
   align-items: center;
   gap: var(--cu-space-2);
   min-width: 0;
-  padding: var(--cu-space-2);
+  min-height: 3.25rem;
+  padding: var(--cu-space-2) var(--cu-space-3);
   border: 0;
   border-radius: var(--cu-radius-sm);
   background: transparent;
 }
 
+.cu-gfs-existing-access__avatar {
+  width: 1.875rem;
+  height: 1.875rem;
+  flex: 0 0 1.875rem;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(var(--cu-accent-rgb), 0.18);
+  color: var(--cu-accent);
+}
+
+.cu-gfs-existing-access__avatar--team {
+  background: rgba(var(--cu-warning-rgb), 0.15);
+  color: var(--cu-warning);
+}
+
+.cu-gfs-existing-access__avatar--agent,
+.cu-gfs-existing-access__avatar--workflow {
+  background: rgba(var(--cu-success-rgb), 0.15);
+  color: var(--cu-success);
+}
+
+.cu-gfs-existing-access__avatar svg {
+  width: 1rem;
+  height: 1rem;
+}
+
 .cu-gfs-existing-access__identity {
   min-width: 0;
   display: grid;
-  gap: calc(var(--cu-space-1) / 2);
   flex: 1 1 auto;
 }
 
@@ -13821,15 +13848,6 @@ button.cu-gfs-tree__button:focus-visible,
   font-size: 0.8125rem;
   font-weight: 500;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cu-gfs-existing-access__detail {
-  overflow: hidden;
-  color: var(--cu-text-soft);
-  font-size: 0.75rem;
-  text-overflow: ellipsis;
-  text-transform: capitalize;
   white-space: nowrap;
 }
 

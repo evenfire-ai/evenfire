@@ -145,13 +145,13 @@ describe('GfsGrantPanel bulk access', () => {
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
     expect(within(existing).getByText('Ada Lovelace')).toBeTruthy()
-    expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
+    const userRow = within(existing).getByTestId('gfs-access-row-user')
+    expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
+    expect(within(userRow).queryByText(/direct grant|\buser\b/i)).toBeNull()
     expect(
       within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' })
     ).toHaveTextContent('Editor')
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -159,11 +159,70 @@ describe('GfsGrantPanel bulk access', () => {
     await waitFor(() =>
       expect(mockDeleteGfsGrant).toHaveBeenCalledWith('33333333-3333-3333-3333-333333333333')
     )
-    await waitFor(() =>
-      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
-    )
+    await waitFor(() => expect(within(existing).getByText('No one has access yet.')).toBeTruthy())
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
     expect(mockGetGfsShares).toHaveBeenCalledTimes(2)
+  })
+
+  it('shows each existing principal with its entity icon and no access-source metadata', async () => {
+    mockGetGfsGrants.mockResolvedValue({
+      items: [
+        {
+          id: '10000000-0000-0000-0000-000000000001',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000002',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: teamSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000003',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: statefulHostSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000004',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: workflowHostSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+        {
+          id: '10000000-0000-0000-0000-000000000005',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: operatorSubject,
+          permissions: ['read'],
+          inherit: false,
+        },
+      ],
+    })
+    renderPanel()
+
+    const expectedKinds = [
+      ['Ada Lovelace', 'user'],
+      ['Research', 'team'],
+      ['chatllm (Stateful)', 'agent'],
+      ['sandbox-ui-hello', 'workflow'],
+      ['Operator', 'operator'],
+    ] as const
+    for (const [label, kind] of expectedKinds) {
+      const row = (await screen.findByText(label)).closest('[data-testid^="gfs-access-row-"]')
+      expect(row?.querySelector(`[data-subject-kind="${kind}"] svg`)).not.toBeNull()
+    }
+    expect(screen.queryByText(/direct grant|direct share/i)).toBeNull()
   })
 
   it('changes an existing member between Editor and Read', async () => {
@@ -234,13 +293,8 @@ describe('GfsGrantPanel bulk access', () => {
     const existing = await screen.findByRole('region', { name: 'People with access' })
     // ONE row for the principal — not one per backend row kind.
     expect(within(existing).getAllByText('Ada Lovelace')).toHaveLength(1)
-    expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
-    expect(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    ).toBeTruthy()
-    expect(
-      within(existing).queryByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
-    ).toBeNull()
+    expect(within(existing).queryByText(/direct grant|direct share|\buser\b/i)).toBeNull()
+    expect(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' })).toBeTruthy()
     // The descendant-coverage badge stays out of the row.
     expect(within(existing).queryByText('Includes contents')).toBeNull()
 
@@ -284,7 +338,7 @@ describe('GfsGrantPanel bulk access', () => {
       name: 'Access role for Ada Lovelace',
     })
     expect(role).toHaveTextContent('Read')
-    expect(within(existing).getByText('Direct share · user')).toBeTruthy()
+    expect(within(existing).queryByText(/direct share|\buser\b/i)).toBeNull()
 
     fireEvent.click(role)
     fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
@@ -392,17 +446,13 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
 
     expect(await screen.findByText('Access was already removed.')).toBeTruthy()
-    await waitFor(() =>
-      expect(within(existing).getByText('No direct grants or shares yet.')).toBeTruthy()
-    )
+    await waitFor(() => expect(within(existing).getByText('No one has access yet.')).toBeTruthy())
     expect(screen.queryByRole('alert')).toBeNull()
     expect(mockGetGfsGrants).toHaveBeenCalledTimes(2)
   })
@@ -428,9 +478,7 @@ describe('GfsGrantPanel bulk access', () => {
     )
     renderPanel()
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    fireEvent.click(
-      within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    )
+    fireEvent.click(within(existing).getByRole('button', { name: 'Actions for Ada Lovelace' }))
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
     const dialog = await screen.findByRole('alertdialog')
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove access' }))
@@ -467,12 +515,12 @@ describe('GfsGrantPanel bulk access', () => {
     await submit('Share')
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
-    expect(await within(existing).findByText('Direct grant · user')).toBeTruthy()
+    expect(await within(existing).findByTestId('gfs-access-row-user')).toBeTruthy()
     expect(initialSignal?.aborted).toBe(true)
     resolveInitialGrants({ items: [] })
 
-    await waitFor(() => expect(within(existing).getByText('Direct grant · user')).toBeTruthy())
-    expect(within(existing).queryByText('No direct grants or shares yet.')).toBeNull()
+    await waitFor(() => expect(within(existing).getByText('Ada Lovelace')).toBeTruthy())
+    expect(within(existing).queryByText('No one has access yet.')).toBeNull()
   })
 
   it('aborts the active access hydration when the panel unmounts', async () => {

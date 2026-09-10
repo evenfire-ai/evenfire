@@ -1,4 +1,11 @@
 import { DropdownSelect, IconButton, StatusBanner } from '@components/Common'
+import {
+  IconAgents,
+  IconContexts,
+  IconTeams,
+  IconUser,
+  IconWorkflows,
+} from '@components/SidebarNav/icons'
 import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
@@ -7,6 +14,25 @@ import type {
 } from '@/gfs/delegation.types'
 import type { GfsGrantListProps } from './types'
 import type { GfsAccessRole } from './types'
+
+type AccessSubjectKind = 'agent' | 'context' | 'team' | 'user' | 'workflow'
+
+function subjectKind(
+  subject: GfsGrantListItem['subject'] | GfsShareListItem['subject']
+): AccessSubjectKind {
+  if (subject.type === 'team') return 'team'
+  if (subject.type === 'host') return subject.id?.startsWith('3rd:') ? 'workflow' : 'agent'
+  if (subject.type === 'context') return 'context'
+  return 'user'
+}
+
+function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
+  if (kind === 'agent') return <IconAgents />
+  if (kind === 'context') return <IconContexts />
+  if (kind === 'team') return <IconTeams />
+  if (kind === 'workflow') return <IconWorkflows />
+  return <IconUser />
+}
 
 /**
  * "Who has access" — the resource's current grants, sourced from the user-plane
@@ -26,6 +52,7 @@ function subjectLabel(
     // Visible agent name (spec.displayName); fall back to the id-based `name`
     // when the displayName is absent or blank/whitespace-only.
     if (agent) return (agent.displayName ?? '').trim() || agent.name
+    if (subject.id.startsWith('3rd:')) return subject.id.split('/').at(-1) || subject.id
   }
   if ((subject.type === 'user' || subject.type === 'team') && subject.id) {
     const match = subjects.find(
@@ -93,17 +120,22 @@ export function GfsGrantList({
           {showGrantRows
             ? items.map(item => {
                 const label = subjectLabel(item.subject, agents, subjects)
+                const kind = subjectKind(item.subject)
                 return (
                   <li
                     className="da-gfs-grant-list__row"
                     data-testid={`gfs-access-row-grant-${item.id}`}
                     key={`grant:${item.id}`}
                   >
+                    <span
+                      aria-hidden="true"
+                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
-                      <span className="da-gfs-grant-list__subject-type">
-                        Direct grant · {item.subject.type}
-                      </span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       <DropdownSelect
@@ -134,17 +166,22 @@ export function GfsGrantList({
           {showShareRows
             ? shares.map(item => {
                 const label = subjectLabel(item.subject, agents, subjects)
+                const kind = subjectKind(item.subject)
                 return (
                   <li
                     className="da-gfs-grant-list__row"
                     data-testid={`gfs-access-row-share-${item.id}`}
                     key={`share:${item.id}`}
                   >
+                    <span
+                      aria-hidden="true"
+                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
                     <span className="da-gfs-grant-list__identity">
                       <span className="da-gfs-grant-list__label">{label}</span>
-                      <span className="da-gfs-grant-list__subject-type">
-                        Share · {item.subject.type}
-                      </span>
                     </span>
                     <span className="da-gfs-grant-list__meta">
                       <span className="da-gfs-grant-list__role-label">
@@ -171,7 +208,7 @@ export function GfsGrantList({
         loading ? (
           <p className="muted">Loading access…</p>
         ) : (
-          <p className="muted">No direct grants or shares yet.</p>
+          <p className="muted">No one has access yet.</p>
         )
       ) : null}
     </>
