@@ -127,6 +127,15 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm test
 
+      - name: Test web-search image with isolated DNS TLS and MCP
+        if: matrix.service == 'mcp-servers/web-search'
+        working-directory: mcp-servers/web-search
+        timeout-minutes: 10
+        run: |
+          docker build -t issue198-ci-image:test .
+          web_search_image_id="$(docker image inspect issue198-ci-image:test --format '{{.Id}}')"
+          node test/run-network.mjs --image "$web_search_image_id"
+
       # Typecheck against the base tsconfig (covers src + test dirs).
       # This catches errors in test files that tsconfig.build.json may exclude.
       #

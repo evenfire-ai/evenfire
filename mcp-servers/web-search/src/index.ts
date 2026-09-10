@@ -15,9 +15,12 @@ import express, { Request, Response } from 'express'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { randomUUID } from 'crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { z } from 'zod'
 import { fetchPage } from './fetchPage.js'
 import { FetchPageError } from './fetchPageError.js'
+
+const requestSignals = new AsyncLocalStorage<AbortSignal>()
 
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const SEARCH_API_KEY = process.env.SEARCH_API_KEY || ''
@@ -194,7 +197,9 @@ function createMcpServer(): McpServer {
     },
     async ({ url, maxChars }: { url: string; maxChars: number }, extra) => {
       try {
-        const result = await fetchPage(url, maxChars, extra.signal)
+        const httpSignal = requestSignals.getStore()
+        if (!httpSignal) throw new FetchPageError('cancelled')
+        const result = await fetchPage(url, maxChars, AbortSignal.any([extra.signal, httpSignal]))
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] }
       } catch (error) {
         const code = error instanceof FetchPageError ? error.code : 'upstream_failure'
@@ -267,6 +272,17 @@ function createMcpServer(): McpServer {
 // ---------------------------------------------------------------------------
 
 const app = express()
+// The SDK's SSE cancellation drops the response stream but does not cancel the
+// handler. Bind each HTTP request to its own signal, including shared sessions.
+app.use('/mcp', (_req, res, next) => {
+  const controller = new AbortController()
+  const onClose = () => {
+    if (!res.writableFinished) controller.abort()
+  }
+  res.once('close', onClose)
+  res.once('finish', () => res.removeListener('close', onClose))
+  requestSignals.run(controller.signal, next)
+})
 
 const transports = new Map<string, StreamableHTTPServerTransport>()
 

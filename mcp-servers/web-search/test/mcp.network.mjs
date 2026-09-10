@@ -13,6 +13,8 @@ import { StreamableHTTPClientTransport } from '/app/node_modules/@modelcontextpr
 const content = '<title>Network fixture</title><p>issue198-real-result</p>'
 let trapHits = 0
 let slowClosed = 0
+let slowActive = 0
+let onSlowStarted = () => {}
 const sockets = new Set()
 const dns = await startDnsFixture()
 let lastSni
@@ -53,22 +55,27 @@ const upstream = http.createServer((req, res) => {
   }
   if (req.url === '/slow') {
     res.writeHead(200)
+    slowActive++
     res.write('first')
+    onSlowStarted()
     // Intentionally active hostile upstream, not a test readiness sleep.
     const interval = setInterval(() => res.write('x'), 50)
     res.on('close', () => {
       clearInterval(interval)
       slowClosed++
+      slowActive--
     })
     return
   }
   res.end(content)
 })
+const ipv6 = http.createServer((_req, res) => res.end(content))
+await new Promise(r => ipv6.listen(8080, '2606:4700::198', r))
 const trap = http.createServer((_req, res) => {
   trapHits++
   res.end('must-not-be-read')
 })
-for (const server of [upstream, trap, tlsServer])
+for (const server of [upstream, trap, tlsServer, ipv6])
   server.on('connection', socket => {
     sockets.add(socket)
     socket.on('close', () => sockets.delete(socket))
@@ -85,6 +92,7 @@ after(async () => {
   for (const socket of sockets) socket.destroy()
   upstream.close()
   trap.close()
+  ipv6.close()
   tlsServer.close()
   dns.close()
 })
@@ -101,7 +109,8 @@ await new Promise((resolve, reject) => {
     }
   })
 })
-await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:3000/mcp')))
+const transport = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:3000/mcp'))
+await client.connect(transport)
 const call = url =>
   client.callTool({ name: 'fetch_page', arguments: { url } }, undefined, { timeout: 25000 })
 const errorCode = result => {
@@ -172,5 +181,110 @@ test(
       { timeout: 2000 }
     )
     assert.equal(errorCode(result), 'upstream_failure')
+  }
+)
+
+test(
+  'HTTP disconnect cancels upstream without an MCP cancellation notification',
+  { timeout: 4000 },
+  async () => {
+    const started = Promise.withResolvers()
+    onSlowStarted = () => started.resolve()
+    const prior = slowClosed
+    const controller = new AbortController()
+    const response = await fetch('http://127.0.0.1:3000/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        'mcp-session-id': transport.sessionId,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'disconnect',
+        method: 'tools/call',
+        params: { name: 'fetch_page', arguments: { url: 'http://11.198.0.2:8080/slow' } },
+      }),
+      signal: controller.signal,
+    })
+    assert.equal(response.status, 200)
+    await started.promise
+    controller.abort()
+    await new Promise((resolve, reject) => {
+      const limit = setTimeout(() => {
+        clearInterval(poll)
+        reject(new Error('upstream retained after disconnect'))
+      }, 1000)
+      const poll = setInterval(() => {
+        if (slowClosed > prior) {
+          clearInterval(poll)
+          clearTimeout(limit)
+          resolve()
+        }
+      }, 10)
+    })
+    onSlowStarted = () => {}
+  }
+)
+
+test('a public IPv6 literal reaches the real isolated server', async () => {
+  assert.notEqual((await call('http://[2606:4700::198]:8080/')).isError, true)
+})
+
+test(
+  'concurrency spans sessions and cancellation affects only its own request',
+  { timeout: 6000 },
+  async () => {
+    const peer = new Client({ name: 'issue198-peer', version: '1.0' })
+    await peer.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:3000/mcp')))
+    const started = Promise.withResolvers()
+    onSlowStarted = () => {
+      if (slowActive === 4) started.resolve()
+    }
+    const controllers = Array.from({ length: 4 }, () => new AbortController())
+    const pending = controllers.map(controller =>
+      client
+        .callTool(
+          { name: 'fetch_page', arguments: { url: 'http://11.198.0.2:8080/slow' } },
+          undefined,
+          { signal: controller.signal, timeout: 5000 }
+        )
+        .catch(error => error)
+    )
+    try {
+      await started.promise
+      assert.equal(
+        errorCode(
+          await peer.callTool({ name: 'fetch_page', arguments: { url: 'http://11.198.0.2:8080/' } })
+        ),
+        'busy'
+      )
+      controllers[0].abort()
+      await pending[0]
+      await new Promise((resolve, reject) => {
+        const limit = setTimeout(() => {
+          clearInterval(poll)
+          reject(new Error('cancelled request retained a slot'))
+        }, 1000)
+        const poll = setInterval(() => {
+          if (slowActive === 3) {
+            clearInterval(poll)
+            clearTimeout(limit)
+            resolve()
+          }
+        }, 10)
+      })
+      assert.notEqual(
+        (await peer.callTool({ name: 'fetch_page', arguments: { url: 'http://11.198.0.2:8080/' } }))
+          .isError,
+        true
+      )
+      assert.equal(slowActive, 3)
+    } finally {
+      onSlowStarted = () => {}
+      for (const controller of controllers) controller.abort()
+      await Promise.all(pending)
+      await peer.close()
+    }
   }
 )
