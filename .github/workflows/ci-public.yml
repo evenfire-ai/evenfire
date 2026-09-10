@@ -504,6 +504,12 @@ jobs:
           sed 's#__K8S_API_IP__#10.96.0.1#g' \
             deploy/overlays/minikube/patches/k8s-api-ip.yaml.template \
             > deploy/overlays/minikube/patches/k8s-api-ip.yaml
+          # The llm-egress-cluster-cidrs patch is the same kind of gitignored,
+          # rendered file and is now in the overlay's patchesStrategicMerge, so it
+          # must exist too or `kubectl kustomize` fails on the missing file.
+          sed 's#__CLUSTER_INTERNAL_CIDRS__#10.244.0.0/16,10.96.0.0/12#g' \
+            deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template \
+            > deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml
           SINGLE_WRITER_OVERLAYS="deploy/overlays/minikube" \
             bash deploy/scripts/validate-postgres-single-writer-strategy.sh
 
@@ -676,6 +682,12 @@ jobs:
           sed 's#__K8S_API_IP__#10.96.0.1#g' \
             deploy/overlays/minikube/patches/k8s-api-ip.yaml.template \
             > deploy/overlays/minikube/patches/k8s-api-ip.yaml
+          # Same story for the llm-egress-cluster-cidrs patch: gitignored, rendered
+          # from a template, and now listed in the overlay's patchesStrategicMerge,
+          # so `kubectl kustomize` needs it present (placeholder pod/Service CIDRs).
+          sed 's#__CLUSTER_INTERNAL_CIDRS__#10.244.0.0/16,10.96.0.0/12#g' \
+            deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template \
+            > deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml
           kubectl kustomize deploy/overlays/minikube > /tmp/clerum-minikube.yaml
           kubectl kustomize deploy/overlays/minikube-no-uis > /tmp/clerum-minikube-no-uis.yaml
 

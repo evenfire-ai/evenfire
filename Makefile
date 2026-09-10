@@ -1015,6 +1015,11 @@ minikube-db-reset-body:
 	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
 	 if [ "$(CONTROL_DB_RESET_RESUME)" = "true" ]; then reset_args="$$reset_args --resume"; fi; \
 	 CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reset-control-db-storage.sh $$reset_args
+	@# `apply -k` builds the whole minikube overlay before the label selector
+	@# narrows it, so it fails on any missing patchesStrategicMerge file. Render the
+	@# gitignored cluster-internal CIDR patch first (HCC's fail-closed egress guard),
+	@# same as make minikube-deploy-all does, or kustomize dies on the missing file.
+	@$(MAKE) --no-print-directory minikube-detect-cluster-cidrs
 	@$(KC) apply -k deploy/overlays/minikube -l app=control-postgres
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane

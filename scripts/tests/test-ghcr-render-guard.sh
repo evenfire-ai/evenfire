@@ -252,6 +252,12 @@ assert_both_committed_ghcr_overlays_render_clean() {
   sed 's#__K8S_API_IP__#10.96.0.1#g' \
     "$d/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
     > "$d/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+  # Both -ghcr overlays render `../minikube`, which now patches with the
+  # gitignored, rendered llm-egress-cluster-cidrs.yaml too; render it from its
+  # template (placeholder CIDRs) or kustomize dies on the missing file.
+  sed 's#__CLUSTER_INTERNAL_CIDRS__#10.244.0.0/16,10.96.0.0/12#g' \
+    "$d/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template" \
+    > "$d/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
   if ! kubectl kustomize "$d/deploy/overlays/minikube-ghcr" > "$d/a.yaml" 2>"$d/err-a"; then
     fail "minikube-ghcr did not render: $(cat "$d/err-a")"; rm -rf "$d"; return 0
   fi

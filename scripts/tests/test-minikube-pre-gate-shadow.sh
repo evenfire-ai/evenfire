@@ -147,6 +147,13 @@ STUB
   # deletes this file again.
   cp "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
     "$d/repo/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+  # The sibling llm-egress-cluster-cidrs patch is the same kind of generated,
+  # gitignored file image-mode.sh now guards on before handing out a copy;
+  # materialise it deterministically too. Its absence is its own case
+  # (assert_a_render_copy_without_the_generated_cidrs_patch_...), which deletes
+  # this file again.
+  cp "$d/repo/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template" \
+    "$d/repo/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
   cat > "$d/repo/scripts/minikube/build-images.sh" <<'STUB'
 #!/usr/bin/env bash
 printf 'build-images %s\n' "$*" >>"${TEST_LOG_FILE:?}"
@@ -919,6 +926,49 @@ assert_a_render_copy_without_the_generated_api_ip_patch_fails_with_a_remedy() {
   rm -rf "$d"
 }
 
+# The sibling generated patch (llm-egress-cluster-cidrs.yaml, HCC's egress-broker
+# guard) is also in ../minikube's patchesStrategicMerge, so the render copy must
+# carry it too or kustomize dies on it.
+assert_a_render_copy_carries_the_generated_cidrs_patch() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_manifest "$d" '{"generated":"g1","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  out="$(bash "$d/repo/scripts/minikube/image-mode.sh" --render-dir 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+     && [ -d "$out" ] \
+     && [ -f "${out}/../minikube/patches/llm-egress-cluster-cidrs.yaml" ]; then
+    pass "the tag-override render copy carries the generated llm-egress-cluster-cidrs.yaml"
+  else
+    fail "expected the copy to carry patches/llm-egress-cluster-cidrs.yaml; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
+# Same failure mode as the k8s-api-ip guard, one patch over: with k8s-api-ip
+# present but the cidrs patch missing, the copy would die inside kustomize on a
+# temp-dir path. Fail before handing it out, naming the file in the developer's
+# tree and the command that writes it.
+assert_a_render_copy_without_the_generated_cidrs_patch_fails_with_a_remedy() {
+  local d out rc
+  d="$(mktemp -d)"
+  prepare_repo "$d"
+  write_manifest "$d" '{"generated":"g1","imageSource":"ghcr","imageTag":"latest","images":{}}'
+  rm -f "$d/repo/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
+  out="$(bash "$d/repo/scripts/minikube/image-mode.sh" --render-dir 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ] \
+     && grep -Fq "$d/repo/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml" <<< "$out" \
+     && grep -Fq 'deploy/scripts/minikube-detect-cluster-cidrs.sh' <<< "$out" \
+     && ! grep -q 'evalsymlink' <<< "$out"; then
+    pass "a copy missing the generated cidrs patch fails naming the file and how to regenerate it"
+  else
+    fail "expected a named, actionable failure; rc=$rc out=$out"
+  fi
+  rm -rf "$d"
+}
+
 # The pinned path renders the committed overlay in place, so it must NOT be
 # gated on the generated patch: kustomize is what reports a missing patch there,
 # and only the copy can be silently built without one.
@@ -1082,6 +1132,8 @@ assert_the_render_dir_resolver_follows_the_recorded_mode
 assert_an_overridden_tag_renders_from_a_copy_carrying_that_tag
 assert_a_render_copy_carries_the_generated_api_ip_patch
 assert_a_render_copy_without_the_generated_api_ip_patch_fails_with_a_remedy
+assert_a_render_copy_carries_the_generated_cidrs_patch
+assert_a_render_copy_without_the_generated_cidrs_patch_fails_with_a_remedy
 assert_the_pinned_render_dir_is_not_gated_on_the_generated_patch
 assert_an_unknown_image_source_is_rejected
 assert_a_targeted_build_carries_the_recorded_coordinate_forward
