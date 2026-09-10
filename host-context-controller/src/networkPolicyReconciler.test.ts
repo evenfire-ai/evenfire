@@ -4,6 +4,13 @@ import type { RecordWithTtl } from 'node:dns'
 import * as dns from 'node:dns/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import {
+  asAppsApi,
+  asCoreApi,
+  asCustomApi,
+  createMockAppsApi,
+  createMockCoreApi,
+} from '../test/__fixtures__/testMocks'
 import { asApiserverNetworkPolicy } from './__tests__/asApiserverNetworkPolicy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL, POLICY_TYPE_LABEL } from './constants'
@@ -18,6 +25,7 @@ import {
   PUBLIC_EGRESS_EXCEPT_CIDRS,
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
+import { McpServerReconciler } from './reconciler'
 import { ContextCRD, McpServerCRD } from './types'
 import { getErrorCode } from './utils'
 
@@ -76,6 +84,7 @@ vi.mock('node:dns/promises', () => ({
 }))
 
 vi.mock('./metrics', () => ({
+  mcpserverMissingSecret: { set: vi.fn() },
   createsTotal: { inc: vi.fn() },
   existenceReadsTotal: { inc: vi.fn() },
   networkPolicySafetyPassDurationSeconds: { observe: vi.fn() },
@@ -6272,6 +6281,396 @@ describe('NetworkPolicyReconciler', () => {
         expect(store.has(item.key)).toBe(true)
       }
       expect(store.has(orphanKey)).toBe(false)
+    })
+  })
+  describe('published runtime policy lifecycle (#604)', () => {
+    function lifecycle() {
+      config.netPolOrphanDeleteCapPercent = 100
+      const store = new Map<string, k8s.V1NetworkPolicy>()
+      const events: string[] = []
+      let revision = 0
+      const missing = () => Object.assign(new Error('not found'), { code: 404 })
+      const save = (namespace: string, body: k8s.V1NetworkPolicy) => {
+        const key = `${namespace}/${body.metadata!.name}`
+        const previous = store.get(key)
+        const result = structuredClone({
+          ...body,
+          metadata: {
+            ...body.metadata,
+            namespace,
+            uid: previous?.metadata?.uid ?? `${key}-${++revision}`,
+            resourceVersion: String(++revision),
+          },
+        })
+        store.set(key, result)
+        return result
+      }
+      mockApi.createNamespacedNetworkPolicy.mockImplementation(async ({ namespace, body }) => {
+        const key = `${namespace}/${body.metadata.name}`
+        if (store.has(key)) throw Object.assign(new Error('exists'), { code: 409 })
+        events.push(`create:${key}`)
+        return save(namespace, body)
+      })
+      mockApi.replaceNamespacedNetworkPolicy.mockImplementation(async ({ namespace, body }) =>
+        save(namespace, body)
+      )
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ namespace, name }) => {
+        const found = store.get(`${namespace}/${name}`)
+        if (!found) throw missing()
+        return structuredClone(found)
+      })
+      mockApi.listNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, labelSelector }) => ({
+          items: [...store.values()]
+            .filter(
+              policy =>
+                policy.metadata?.namespace === namespace &&
+                (!labelSelector ||
+                  labelSelector.split(',').every((clause: string) => {
+                    const [key, value] = clause.split('=')
+                    return policy.metadata?.labels?.[key] === value
+                  }))
+            )
+            .map(policy => structuredClone(policy)),
+        })
+      )
+      mockApi.deleteNamespacedNetworkPolicy.mockImplementation(
+        async ({ namespace, name, body }) => {
+          const key = `${namespace}/${name}`
+          const found = store.get(key)
+          if (!found) throw missing()
+          expect(body?.preconditions).toEqual({
+            uid: found.metadata!.uid,
+            resourceVersion: found.metadata!.resourceVersion,
+          })
+          events.push(`delete:${key}`)
+          store.delete(key)
+          return {}
+        }
+      )
+      const initial: McpServerCRD = {
+        name: 'lifecycle',
+        namespace: 'mcp-server',
+        uid: 'server-lifecycle',
+        generation: 1,
+        spec: {
+          contextRef: 'ctx',
+          image: 'fixture:v1',
+          envSecret: { name: 'fixture-env', keys: [{ secretKey: 'required', envVar: 'VALUE' }] },
+          transport: { type: 'streamableHttp', port: 3000 },
+          egressBindings: [{ cidr: '1.2.3.4/32', port: 443 }],
+        },
+      }
+      const cache = new Map([[initial.name, initial]])
+      mockCustomApi.getNamespacedCustomObject.mockImplementation(async ({ name }) => {
+        const server = cache.get(name)
+        if (!server) throw missing()
+        return {
+          metadata: {
+            name,
+            namespace: server.namespace,
+            uid: server.uid,
+            generation: server.generation,
+            resourceVersion: '1',
+          },
+          spec: server.spec,
+          status: server.status,
+        }
+      })
+      mockCustomApi.getNamespacedCustomObjectStatus.mockImplementation(
+        mockCustomApi.getNamespacedCustomObject.getMockImplementation()!
+      )
+      const rec = makeReconciler(mockApi, cache, mockCustomApi)
+      // Use the stateful API directly: the general fixture caches LIST snapshots,
+      // which would mask a deleted resource during this lifecycle reproduction.
+      ;(rec as any).networkingApi = mockApi
+      const context: ContextCRD = {
+        name: 'ctx',
+        namespace: 'mcp-server',
+        spec: { contextId: 'ctx', mcpServers: [initial.name] },
+      }
+      const run = async () => {
+        const server = cache.get(initial.name)!
+        await rec.fullReconcile([context], [server], {
+          ensureDefaults: false,
+          resolveCurrentServer: name => cache.get(name),
+        })
+        await rec.reconcileExternalEgress(server, {
+          isCurrent: () => cache.get(server.name) === server,
+        })
+      }
+      return { rec, initial, cache, context, store, events, run }
+    }
+
+    it.each(['Disabled', 'SecretNotFound', 'SecretMissingKey', 'SecretAccessDenied'])(
+      'revokes once and restores all four families after %s',
+      async reason => {
+        const f = lifecycle()
+        await f.run()
+        expect(f.store.size).toBe(4)
+        const policyKeys = [...f.store.keys()].sort()
+        const failed = structuredClone(f.initial)
+        if (reason === 'Disabled') failed.spec.enabled = false
+        else failed.status = { conditions: [{ type: 'SecretResolved', status: 'False', reason }] }
+        f.cache.set(failed.name, failed)
+        await f.run()
+        expect(f.store.size).toBe(0)
+        expect(f.events.filter(event => event.startsWith('delete:'))).toHaveLength(4)
+        const settled = f.events.length
+        for (let cycle = 0; cycle < 3; cycle++) await f.run()
+        expect(f.events).toHaveLength(settled)
+        f.cache.set(f.initial.name, structuredClone(f.initial))
+        await f.run()
+        expect([...f.store.keys()].sort()).toEqual(policyKeys)
+        expect(f.events.filter(event => event.startsWith('create:'))).toHaveLength(8)
+      }
+    )
+
+    it.each(['SecretNotFound', 'SecretMissingKey', 'SecretAccessDenied', 'ReadError'])(
+      'keeps WRC policies stable for %s but honors disable',
+      async reason => {
+        const f = lifecycle()
+        const server = structuredClone(f.initial)
+        server.spec.managed = false
+        f.cache.set(server.name, server)
+        await f.run()
+        expect(f.store.size).toBe(4)
+        f.cache.set(server.name, {
+          ...server,
+          status: { conditions: [{ type: 'SecretResolved', status: 'False', reason }] },
+        })
+        for (let cycle = 0; cycle < 3; cycle++) await f.run()
+        expect(f.store.size).toBe(4)
+        expect(f.events.filter(event => event.startsWith('delete:'))).toHaveLength(0)
+        f.cache.set(server.name, { ...server, spec: { ...server.spec, enabled: false } })
+        await f.run()
+        expect(f.store.size).toBe(0)
+      }
+    )
+
+    it('runs the real runtime owner between policy passes without recreating a revoked allow', async () => {
+      const f = lifecycle()
+      await f.run()
+      expect(f.store.size).toBe(4)
+      const apps = createMockAppsApi()
+      const core = createMockCoreApi()
+      core.readNamespacedSecret.mockRejectedValue(
+        Object.assign(new Error('missing fixture'), { code: 404 })
+      )
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
+        const patch = body.find(
+          (item: { path: string }) => item.path === '/status/conditions' || item.path === '/status'
+        )
+        if (patch)
+          f.cache.set(f.initial.name, {
+            ...f.cache.get(f.initial.name)!,
+            status: { conditions: patch.path === '/status' ? patch.value.conditions : patch.value },
+          })
+        return {}
+      })
+      const runtime = new McpServerReconciler({} as k8s.KubeConfig, {
+        assumeInventoryAuthorityWhenUnconfigured: true,
+        appsApi: asAppsApi(apps),
+        coreApi: asCoreApi(core),
+        customApi: asCustomApi(mockCustomApi as any),
+      })
+      await runtime.reconcile(f.initial)
+      expect(apps.deleteNamespacedDeployment).toHaveBeenCalledWith({
+        name: f.initial.name,
+        namespace: f.initial.namespace,
+      })
+      expect(f.cache.get(f.initial.name)?.status?.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'SecretResolved',
+            status: 'False',
+            reason: 'SecretNotFound',
+          }),
+        ])
+      )
+      expect(f.store.size).toBe(4) // Runtime owner has not deleted policies.
+      await f.run()
+      expect(f.store.size).toBe(0)
+      const stationary = [...f.events]
+      for (let cycle = 0; cycle < 3; cycle++) {
+        await runtime.reconcile(f.cache.get(f.initial.name)!)
+        await f.run()
+      }
+      expect(f.events).toEqual(stationary)
+    })
+
+    it('never deletes another owner policy selecting the same disabled server', async () => {
+      const f = lifecycle()
+      await f.run()
+      const ownedElsewhere: k8s.V1NetworkPolicy = {
+        metadata: {
+          name: 'recipe-owned-lifecycle',
+          namespace: 'mcp-server',
+          uid: 'wrc-policy',
+          resourceVersion: '1',
+          labels: { [MANAGED_BY_LABEL]: 'workflow-recipes', 'clerum.io/recipe': 'fixture-recipe' },
+        },
+        spec: {
+          podSelector: { matchLabels: { [MCPSERVER_LABEL]: f.initial.name } },
+          policyTypes: ['Ingress'],
+        },
+      }
+      f.store.set('mcp-server/recipe-owned-lifecycle', ownedElsewhere)
+      f.cache.set(f.initial.name, { ...f.initial, spec: { ...f.initial.spec, enabled: false } })
+      await f.run()
+      expect([...f.store.values()]).toEqual([ownedElsewhere])
+      expect(f.events.filter(event => event.startsWith('delete:'))).toHaveLength(4)
+    })
+
+    it('retries an external status publication failure without deleting healthy policies', async () => {
+      const f = lifecycle()
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockRejectedValueOnce(
+        Object.assign(new Error('temporary status failure'), { code: 503 })
+      )
+      await expect(f.run()).rejects.toThrow('temporary status failure')
+      expect(f.store.size).toBe(4)
+      await f.run()
+      expect(f.store.size).toBe(4)
+      expect(f.events.filter(event => event.startsWith('delete:'))).toHaveLength(0)
+    })
+
+    it('retires an in-flight Context effect when only the runtime verdict changes', async () => {
+      const f = lifecycle()
+      const entered = deferred()
+      const release = deferred()
+      const create = mockApi.createNamespacedNetworkPolicy.getMockImplementation()!
+      mockApi.createNamespacedNetworkPolicy.mockImplementationOnce(async args => {
+        entered.resolve()
+        await release.promise
+        return create(args)
+      })
+      const running = f.rec.reconcileContext(f.context, { isCurrent: () => true })
+      await entered.promise
+      f.cache.set(f.initial.name, {
+        ...f.initial,
+        status: {
+          conditions: [{ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' }],
+        },
+      })
+      release.resolve()
+      expect(await running).toBe(false)
+      expect(mockApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+      await f.run()
+      expect(f.store.size).toBe(0)
+    })
+
+    it('retires revocation when recovery arrives before delete admission', async () => {
+      const f = lifecycle()
+      await f.run()
+      expect(f.store.size).toBe(4)
+      f.cache.set(f.initial.name, {
+        ...f.initial,
+        status: {
+          conditions: [{ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' }],
+        },
+      })
+      const entered = deferred()
+      const release = deferred()
+      const list = mockApi.listNamespacedNetworkPolicy.getMockImplementation()!
+      mockApi.listNamespacedNetworkPolicy.mockImplementationOnce(async args => {
+        entered.resolve()
+        await release.promise
+        return list(args)
+      })
+      const pending = f.rec.reconcileContext(f.context, { isCurrent: () => true })
+      await entered.promise
+      f.cache.set(f.initial.name, structuredClone(f.initial))
+      release.resolve()
+      expect(await pending).toBe(false)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(f.store.size).toBe(4)
+      await f.run()
+      expect(f.store.size).toBe(4)
+    })
+
+    it('preserves HCC allows on a transient ReadError', async () => {
+      const f = lifecycle()
+      await f.run()
+      expect(f.store.size).toBe(4)
+      f.cache.set(f.initial.name, {
+        ...f.initial,
+        status: { conditions: [{ type: 'SecretResolved', status: 'False', reason: 'ReadError' }] },
+      })
+      await f.run()
+      expect(f.store.size).toBe(4)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('preserves WRC allows when HCC rejects an absent optional mapping', async () => {
+      const f = lifecycle()
+      const reference = {
+        name: 'fixture-env',
+        keys: [{ secretKey: 'optional', envVar: 'OPTIONAL_VALUE', optional: true }],
+      }
+      const server = {
+        ...f.initial,
+        spec: { ...f.initial.spec, managed: false, envSecret: reference },
+      }
+      f.cache.set(server.name, server)
+      await f.run()
+      expect(f.store.size).toBe(4)
+      const apps = createMockAppsApi()
+      const core = createMockCoreApi()
+      core.readNamespacedSecret.mockResolvedValue({ data: {} })
+      mockCustomApi.patchNamespacedCustomObjectStatus.mockImplementation(async ({ body }) => {
+        const patch = body.find(
+          (item: { path: string }) => item.path === '/status/conditions' || item.path === '/status'
+        )
+        if (patch)
+          f.cache.set(server.name, {
+            ...f.cache.get(server.name)!,
+            status: { conditions: patch.path === '/status' ? patch.value.conditions : patch.value },
+          })
+        return {}
+      })
+      const runtime = new McpServerReconciler({} as k8s.KubeConfig, {
+        assumeInventoryAuthorityWhenUnconfigured: true,
+        appsApi: asAppsApi(apps),
+        coreApi: asCoreApi(core),
+        customApi: asCustomApi(mockCustomApi as any),
+      })
+      await runtime.reconcile(server)
+      expect(f.cache.get(server.name)?.status?.conditions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'SecretResolved',
+            status: 'False',
+            reason: 'SecretMissingKey',
+          }),
+        ])
+      )
+      expect(runtime.getStatus(server.name)).toMatchObject({ deployed: true, ready: false })
+      expect(apps.deleteNamespacedDeployment).not.toHaveBeenCalled()
+      expect(core.deleteNamespacedService).not.toHaveBeenCalled()
+      await f.run()
+      expect(f.store.size).toBe(4)
+      expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it('restores allows when envSecret is removed with its failure condition unchanged', async () => {
+      const f = lifecycle()
+      await f.run()
+      const failed = {
+        ...f.initial,
+        status: {
+          conditions: [
+            { type: 'SecretResolved', status: 'False' as const, reason: 'SecretNotFound' },
+          ],
+        },
+      }
+      f.cache.set(failed.name, failed)
+      await f.run()
+      expect(f.store.size).toBe(0)
+      const recovered = structuredClone(failed)
+      delete recovered.spec.envSecret
+      f.cache.set(recovered.name, recovered)
+      await f.run()
+      expect(f.store.size).toBe(4)
     })
   })
 })

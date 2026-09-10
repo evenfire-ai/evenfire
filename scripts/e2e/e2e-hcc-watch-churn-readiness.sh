@@ -39,6 +39,16 @@ source "${SCRIPT_DIR}/_lib/hcc-watch-recovery-fixture.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_lib/hcc-watch-churn-fixture.sh"
 
+# #604 reuses the real TCP fault injection and provenance/restore contract.
+case "${E2E_HCC_POLICY_LIFECYCLE:-0}" in
+  0) ;;
+  1)
+    # shellcheck source=scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh
+    source "${SCRIPT_DIR}/_lib/hcc-networkpolicy-lifecycle.sh"
+    ;;
+  *) echo "E2E_HCC_POLICY_LIFECYCLE must be 0 or 1" >&2; exit 2 ;;
+esac
+
 # ── Fail-closed guards (identical contract to the sibling HCC gates) ──
 [ -n "$E2E_KUBECONTEXT" ] || {
   echo "KUBECONTEXT/E2E_K8S_CONTEXT must select a branch-scoped minikube context." >&2
@@ -123,6 +133,7 @@ PROXY_CREATED=0
 PROBE_CREATED=0
 FLEET_CREATED=0
 HCC_PATCHED=0
+HCC_SCALED_DOWN=0
 # Log-stream state consumed by hcc-watch-recovery-logs.sh (start/stop_hcc_recovery_log_stream).
 # Declared here so `set -u` never trips when the stream helper first touches them.
 HCC_LOG_BUFFER="$(mktemp "${TMPDIR:-/tmp}/hcc-watch-churn-stream.XXXXXX")"
@@ -275,6 +286,9 @@ cleanup() {
   trap - EXIT
   set +e
   stop_hcc_recovery_log_stream
+  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+    np604_cleanup || cleanup_failed=1
+  fi
   if [ "$HCC_PATCHED" = 1 ]; then
     kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null 2>&1
     wait_until 120 "HCC stop" hcc_pods_absent >/dev/null 2>&1 || restore_ok=0
@@ -282,7 +296,11 @@ cleanup() {
   [ "$FLEET_CREATED" = 1 ] && { delete_synthetic_fleet || cleanup_failed=1; }
   if [ "$HCC_PATCHED" = 1 ]; then
     restore_hcc_after_churn || restore_ok=0
-    kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas="${ORIGINAL_REPLICAS:-1}" >/dev/null 2>&1
+  fi
+  # Fleet creation can fail after scale-down but before the redirect patch.
+  # Restore replicas even then, without stripping untouched template env.
+  if [ "$HCC_SCALED_DOWN" = 1 ] || [ "$HCC_PATCHED" = 1 ]; then
+    kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas="${ORIGINAL_REPLICAS:-1}" >/dev/null 2>&1 || restore_ok=0
     kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" --timeout=180s >/dev/null 2>&1 || restore_ok=0
   fi
   [ "$PROXY_CREATED" = 1 ] && kctl delete deployment,service "$PROXY_NAME" -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1
@@ -292,6 +310,9 @@ cleanup() {
     print_repair_instructions
     cleanup_failed=1
   }
+  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ] && [ "$NP604_CREATED" = 1 ] && [ "$restore_ok" = 1 ]; then
+    wait_until 120 "NP604 fixture resources removed by owners" np604_resources_absent || cleanup_failed=1
+  fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   print_results || status=1
   [ "$cleanup_failed" = 0 ] || status=1
@@ -320,6 +341,7 @@ create_hcc_churn_proxy "$CHURN_PERIOD_MS" "$CHURN_MIN_AGE_MS"
 verify_hcc_proxy_network_policy
 proxy_ip="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')"
 [ -n "$proxy_ip" ] || die "proxy Service has no ClusterIP"
+HCC_SCALED_DOWN=1
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null
 wait_until 120 "HCC pods to stop" hcc_pods_absent || die "HCC did not stop before fleet creation"
 
@@ -327,6 +349,9 @@ wait_until 120 "HCC pods to stop" hcc_pods_absent || die "HCC did not stop befor
 log "Creating synthetic fleet: ${FLEET_CONTEXTS} Contexts / ${FLEET_MCPSERVERS} McpServers / ${FLEET_HOSTS} Hosts"
 create_synthetic_fleet "$FLEET_CONTEXTS" "$FLEET_MCPSERVERS" "$FLEET_HOSTS"
 ok "synthetic fleet created (${FLEET_MCPSERVERS} McpServers)"
+if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+  np604_setup
+fi
 
 # ── FASE D: start HCC under churn and poll /ready ──
 log "Redirecting HCC through the churn proxy and starting it under load"
@@ -336,8 +361,8 @@ patch="$(jq -cn --arg ip "$proxy_ip" --arg cidr "$K8S_API_CIDR" '{spec:{template
     {name:"KUBERNETES_SERVICE_HOST",value:"kubernetes.default.svc"},
     {name:"KUBERNETES_SERVICE_PORT",value:"443"},
     {name:"CONTEXT_MAPPER_K8S_API_CIDRS",value:$cidr}]}]}}}}')"
-kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$patch" >/dev/null
 HCC_PATCHED=1
+kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$patch" >/dev/null
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1 >/dev/null
 # Anchor the log stream to now so recovery-cycle assertions only see churn-era logs.
 START_TIME="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
@@ -398,8 +423,14 @@ write_evidence_artifact() {
 # watch drops /ready to 503 transiently while it re-syncs, so "no 503 after
 # first 200" failed the CORRECT regime and measured the wrong thing.
 if [ -n "$first_ready" ]; then
+  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+    np604_before_observation
+  fi
   log "Observing /ready at 1Hz for ${CHURN_OBSERVE_SEC}s under continuous churn"
   sample_ready_series "$CHURN_OBSERVE_SEC" churn 0
+  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+    np604_after_observation
+  fi
 fi
 
 # ── Pause the churn WITHOUT restarting the proxy or the HCC ──
@@ -494,6 +525,10 @@ if [ -n "$hcc_pod_at_stop" ] && [ "$hcc_pod_now" = "$hcc_pod_at_stop" ] &&
   ok "post-churn recovery was in-situ: pod ${hcc_pod_at_stop} unchanged, restartCount ${hcc_restarts_now}"
 else
   fail "HCC pod changed or restarted across the post-churn phase (${hcc_pod_at_stop:-none}/restarts=${hcc_restarts_at_stop:-?} -> ${hcc_pod_now:-none}/restarts=${hcc_restarts_now:-?}) — convergence could be a fresh boot, not in-situ recovery"
+fi
+if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
+  [ -n "$first_ready" ] || die 'NP604 cannot run without a ready controller'
+  np604_recover
 fi
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores HCC, deletes the fleet, and runs print_results.

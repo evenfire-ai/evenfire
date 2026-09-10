@@ -179,6 +179,8 @@ EOF
   done; } | kctl apply -f - >/dev/null
 
   # McpServers (one stream) — inventory + NetworkPolicies, no heavy pods.
+  # Lifecycle suites supply their own real MCP fixtures and need no filler.
+  if (( n_mcp > 0 )); then
   { for ((i = 1; i <= n_mcp; i++)); do
     ctx="$(printf '%s-ctx-%03d' "$FLEET_PREFIX" $(((i % n_ctx) + 1)))"
     cat <<EOF
@@ -194,6 +196,7 @@ spec:
   transport: {type: streamableHttp, url: "http://127.0.0.1:3000/mcp", port: 3000}
 EOF
   done; } | kctl apply -f - >/dev/null
+  fi
 
   # Hosts (one stream) — these materialize Deployments; keep the count modest.
   { for ((i = 1; i <= n_host; i++)); do

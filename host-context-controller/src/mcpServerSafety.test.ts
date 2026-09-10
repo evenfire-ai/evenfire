@@ -2,7 +2,9 @@ import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
+  runtimeDesired,
   sameMcpServerDesiredRevision,
+  sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import type { McpServerCRD } from './types'
 
@@ -310,5 +312,59 @@ describe('confirmAuthoritativeMcpServerAbsence', () => {
     ).resolves.toBe(true)
     expect(inventoryAuthoritative).toHaveBeenCalledTimes(2)
     expect(resolveCurrent).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('runtimeDesired policy contract (#604)', () => {
+  const reasons = ['SecretNotFound', 'SecretMissingKey', 'SecretAccessDenied', 'ReadError']
+  function withVerdict(reason: string, managed = true): McpServerCRD {
+    const server = makeServer()
+    server.spec = {
+      ...server.spec,
+      managed,
+      envSecret: { name: 'fixture-env', keys: [{ secretKey: 'required', envVar: 'VALUE' }] },
+    }
+    server.status = { conditions: [{ type: 'SecretResolved', status: 'False', reason }] }
+    return server
+  }
+
+  it.each(reasons)('preserves ownership semantics for %s', reason => {
+    const managed = withVerdict(reason)
+    const wrc = withVerdict(reason, false)
+    expect(runtimeDesired(managed)).toBe(reason === 'ReadError')
+    expect(runtimeDesired(wrc)).toBe(true)
+    for (const server of [managed, wrc]) {
+      server.spec.enabled = false
+      expect(runtimeDesired(server)).toBe(false)
+    }
+  })
+
+  it('recovers when the reference is removed despite a stale negative condition', () => {
+    const server = withVerdict('SecretNotFound')
+    expect(runtimeDesired(server)).toBe(false)
+    delete server.spec.envSecret
+    expect(runtimeDesired(server)).toBe(true)
+  })
+
+  it('retires policy effects, but not runtime effects, on a published verdict edge', () => {
+    const previous = withVerdict('SecretNotFound')
+    const current = withVerdict('SecretFound')
+    expect(sameMcpServerDesiredRevision(previous, current)).toBe(true)
+    expect(sameMcpServerPolicyRevision(previous, current)).toBe(false)
+    expect(sameMcpServerPolicyRevision(current, previous)).toBe(false)
+    expect(sameMcpServerPolicyRevision(previous, withVerdict('SecretMissingKey'))).toBe(true)
+    expect(
+      sameMcpServerPolicyRevision(
+        withVerdict('SecretNotFound', false),
+        withVerdict('SecretFound', false)
+      )
+    ).toBe(true)
+  })
+
+  it('does not require status for an otherwise desired server', () => {
+    expect(runtimeDesired(makeServer())).toBe(true)
+    const server = withVerdict('SecretNotFound')
+    server.status = undefined
+    expect(runtimeDesired(server)).toBe(true)
   })
 })
