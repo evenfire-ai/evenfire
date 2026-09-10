@@ -135,7 +135,7 @@ describe('requestJson — transient retry', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('parses the real External REST typed envelope without object stringification', async () => {
+  it('formats the real External REST typed envelope without object stringification', async () => {
     const produced = sanitizeControlApiPublicError(
       new ControlApiError('raw', 403, { error: 'escalation_rejected' }),
       new Set([403])
@@ -146,7 +146,7 @@ describe('requestJson — transient retry', () => {
     )
 
     await expect(requestJson('PUT', 'http://localhost/test')).rejects.toThrow(
-      /forbidden - escalation_rejected - The requested operation is not allowed\./
+      /403 Error: forbidden: The requested operation is not allowed\./
     )
     await expect(Promise.resolve(JSON.stringify(produced!.body))).resolves.not.toContain(
       '[object Object]'
