@@ -73,10 +73,10 @@ describe('GfsGrantList', () => {
       within(agentRow).getByRole('button', { name: 'Access role for Chat LLM' }).textContent
     ).toContain('Editor')
     expect(within(agentRow).queryByText('Includes contents')).toBeNull()
-    expect(within(agentRow).getByText('X')).toBeTruthy()
-    expect(
-      within(agentRow).getByRole('button', { name: 'Revoke access for Chat LLM' }).className
-    ).toContain('da-gfs-grant-list__revoke')
+    expect(within(agentRow).queryByText('X')).toBeNull()
+    const actions = within(agentRow).getByRole('button', { name: 'Actions for Chat LLM' })
+    expect(actions.className).toContain('da-gfs-resource-menu__trigger')
+    expect(actions.querySelectorAll('circle')).toHaveLength(3)
 
     const userRow = screen.getByText('Test Two').closest('li')!
     expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
@@ -114,12 +114,15 @@ describe('GfsGrantList', () => {
     expect(screen.getByText('blankdisplay')).toBeTruthy()
   })
 
-  it('fires the revoke callback from the row button with an accessible name', () => {
+  it('fires the revoke callback from the three-dot menu', () => {
     const onRevoke = vi.fn()
     const item = grantItem({ id: 'grant-1' })
     render(<GfsGrantList agents={agents} items={[item]} onRevoke={onRevoke} subjects={subjects} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke access for Chat LLM' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
+    const menu = screen.getByRole('menu', { name: 'Actions for Chat LLM' })
+    expect(menu.parentElement).toBe(document.body)
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Remove access' }))
 
     expect(onRevoke).toHaveBeenCalledWith(item, 'Chat LLM')
   })
@@ -162,9 +165,8 @@ describe('GfsGrantList', () => {
     expect(shareRow.querySelector('[data-subject-kind="team"] svg')).not.toBeNull()
     expect(within(shareRow).queryByText('Share · team')).toBeNull()
     expect(within(shareRow).queryByText('Includes contents')).toBeNull()
-    fireEvent.click(
-      within(shareRow).getByRole('button', { name: 'Revoke shared access for Core Team' })
-    )
+    fireEvent.click(within(shareRow).getByRole('button', { name: 'Actions for Core Team' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     expect(onRevokeShare).toHaveBeenCalledWith(share, 'Core Team')
     expect(onRevoke).not.toHaveBeenCalled()
@@ -188,7 +190,7 @@ describe('GfsGrantList', () => {
     const banner = screen.getByText('Only people with manage access can view who has access here.')
     expect(banner.closest('.status-banner')?.className).toContain('tone-info')
     expect(screen.queryByRole('list')).toBeNull()
-    expect(screen.queryByRole('button', { name: /Revoke access for/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Actions for/ })).toBeNull()
   })
 
   it('renders other list failures as an error banner', () => {
@@ -237,7 +239,8 @@ describe('GfsGrantList', () => {
     // …but the grant row and its revoke action stay available and work.
     const grantRow = screen.getByTestId('gfs-access-row-grant-grant-1')
     expect(within(grantRow).getByText('Chat LLM')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke access for Chat LLM' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
     expect(onRevoke).toHaveBeenCalledWith(grant, 'Chat LLM')
   })
 
@@ -259,7 +262,8 @@ describe('GfsGrantList', () => {
     expect(screen.getByText('listGrants exploded')).toBeTruthy()
     const shareRow = screen.getByTestId('gfs-access-row-share-share-1')
     expect(within(shareRow).getByText('Core Team')).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke shared access for Core Team' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Core Team' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
     expect(onRevokeShare).toHaveBeenCalledWith(share, 'Core Team')
   })
 })

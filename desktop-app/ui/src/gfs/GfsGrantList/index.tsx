@@ -1,4 +1,4 @@
-import { DropdownSelect, IconButton, StatusBanner } from '@components/Common'
+import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
   IconContexts,
@@ -12,6 +12,7 @@ import type {
   GfsGrantListItem,
   GfsShareListItem,
 } from '@/gfs/delegation.types'
+import { AccessRowMenu } from './AccessRowMenu'
 import type { GfsGrantListProps } from './types'
 import type { GfsAccessRole } from './types'
 
@@ -149,17 +150,11 @@ export function GfsGrantList({
                         value={roleForPermissions(item.permissions)}
                       />
                     </span>
-                    <IconButton
-                      className="da-gfs-grant-list__revoke"
-                      data-testid={`gfs-revoke-grant-${item.id}`}
+                    <AccessRowMenu
                       disabled={revoking}
-                      label={`Revoke access for ${label}`}
-                      onClick={() => void onRevoke(item, label)}
-                      size="xs"
-                      variant="ghost"
-                    >
-                      X
-                    </IconButton>
+                      label={label}
+                      onRemove={() => onRevoke(item, label)}
+                    />
                   </li>
                 )
               })
@@ -189,17 +184,11 @@ export function GfsGrantList({
                         {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
                       </span>
                     </span>
-                    <IconButton
-                      className="da-gfs-grant-list__revoke"
-                      data-testid={`gfs-revoke-share-${item.id}`}
+                    <AccessRowMenu
                       disabled={revokingShare || !onRevokeShare}
-                      label={`Revoke shared access for ${label}`}
-                      onClick={() => void onRevokeShare?.(item, label)}
-                      size="xs"
-                      variant="ghost"
-                    >
-                      X
-                    </IconButton>
+                      label={label}
+                      onRemove={() => onRevokeShare?.(item, label)}
+                    />
                   </li>
                 )
               })

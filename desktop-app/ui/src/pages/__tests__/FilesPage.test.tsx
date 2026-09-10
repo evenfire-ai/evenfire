@@ -1842,7 +1842,8 @@ describe('FilesPage', () => {
     renderFilesPage(pushToast)
     await openManageDialog('Team folder')
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Revoke access for chatllm' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for chatllm' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('grant-1'))
     await waitFor(() =>
@@ -1953,7 +1954,8 @@ describe('FilesPage', () => {
 
     const shareRow = await screen.findByTestId('gfs-access-row-share-share-1')
     expect(shareRow.textContent).not.toContain('Includes contents')
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke shared access for user-9' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for user-9' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
 
     await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-1'))
     await waitFor(() =>

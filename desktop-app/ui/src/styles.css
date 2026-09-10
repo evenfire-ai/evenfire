@@ -16165,19 +16165,13 @@ pre {
   gap: var(--space-1);
 }
 
-.da-gfs-grant-list__revoke.ui-icon-button {
-  color: var(--text);
-  border-color: transparent;
-  background: transparent;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+.da-gfs-access-row-menu {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
-.da-gfs-grant-list__revoke.ui-icon-button:hover:enabled,
-.da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
-  border-color: transparent;
-  background: transparent;
-  color: var(--text);
+.da-gfs-access-row-menu__panel.da-gfs-resource-menu__panel {
+  width: min(184px, calc(100vw - (var(--space-4) * 2)));
 }
 
 @media (max-width: 940px) {
