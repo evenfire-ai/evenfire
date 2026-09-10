@@ -189,3 +189,26 @@ for (const [html, expectedTitle] of [
     assert.equal((await fetchPage('http://8.8.8.8', 100)).title, expectedTitle)
   })
 }
+
+for (const prefix of ['<titleish></titleish>', '<titlex>'.repeat(10000)]) {
+  test(`title scanning continues past invalid prefixes (${prefix.length} characters)`, async t => {
+    upstream(t, [{ body: `${prefix}<TITLE>Actual</TITLE>` }])
+    assert.equal((await fetchPage('http://8.8.8.8', 100)).title, 'Actual')
+  })
+}
+
+test('invalid maxChars has its own safe error and never connects', async t => {
+  const requests = upstream(t, [])
+  for (const maxChars of [99, 100001, 100.5, NaN, Infinity]) {
+    await assert.rejects(fetchPage('http://8.8.8.8', maxChars), {
+      code: 'invalid_max_chars',
+      message: 'invalid_max_chars',
+    })
+  }
+  assert.equal(requests.length, 0)
+})
+
+test('comment-like text in an attribute does not hide the real title', async t => {
+  upstream(t, [{ body: '<meta name="description" content="<!--"><title>Actual</title>' }])
+  assert.equal((await fetchPage('http://8.8.8.8', 100)).title, 'Actual')
+})

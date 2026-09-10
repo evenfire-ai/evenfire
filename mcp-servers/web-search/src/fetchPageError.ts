@@ -1,5 +1,6 @@
 export type FetchPageErrorCode =
   | 'invalid_url'
+  | 'invalid_max_chars'
   | 'destination_blocked'
   | 'redirect_limit'
   | 'deadline_exceeded'

@@ -42,8 +42,11 @@ function titleText(html: string): string {
   // HTML tag names are ASCII-case-insensitive. Unicode lowercasing can expand
   // characters and invalidate offsets subsequently applied to the original HTML.
   const lower = html.replace(/[A-Z]/g, character => character.toLowerCase())
-  const start = lower.indexOf('<title')
-  if (start === -1 || !/[\s>]/.test(lower[start + 6] ?? '')) return ''
+  let start = lower.indexOf('<title')
+  while (start !== -1 && !/[\s>]/.test(lower[start + 6] ?? '')) {
+    start = lower.indexOf('<title', start + 6)
+  }
+  if (start === -1) return ''
   const body = lower.indexOf('>', start + 6)
   const end = lower.indexOf('</title>', body + 1)
   return body < 0 || end < 0 ? '' : pageText(html.slice(body + 1, end))
@@ -145,7 +148,7 @@ export async function fetchPage(
   callerSignal?: AbortSignal
 ): Promise<{ title: string; content: string }> {
   if (!Number.isInteger(maxChars) || maxChars < 100 || maxChars > 100000)
-    throw new FetchPageError('invalid_url')
+    throw new FetchPageError('invalid_max_chars')
   if (active >= FETCH_PAGE_LIMITS.maxConcurrent) throw new FetchPageError('busy')
   active++
   const controller = new AbortController()
