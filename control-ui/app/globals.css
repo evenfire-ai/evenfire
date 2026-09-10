@@ -6792,6 +6792,11 @@ td.cu-registry-description {
   box-shadow: var(--cu-shadow);
 }
 
+.cu-selection-dropdown__menu--portal {
+  position: fixed;
+  z-index: 1000;
+}
+
 .cu-image-reference-combobox .cu-selection-dropdown__option {
   grid-template-columns: minmax(0, 1fr);
 }
@@ -13476,12 +13481,14 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-role-select .cu-selection-dropdown__option,
-.cu-gfs-existing-access__role .cu-selection-dropdown__option {
+.cu-gfs-existing-access__role .cu-selection-dropdown__option,
+.cu-gfs-existing-access__role-menu .cu-selection-dropdown__option {
   grid-template-columns: minmax(0, 1fr);
 }
 
 .cu-gfs-role-select .cu-selection-dropdown__option-leading,
-.cu-gfs-existing-access__role .cu-selection-dropdown__option-leading {
+.cu-gfs-existing-access__role .cu-selection-dropdown__option-leading,
+.cu-gfs-existing-access__role-menu .cu-selection-dropdown__option-leading {
   display: none;
 }
 

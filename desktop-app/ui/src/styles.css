@@ -9193,6 +9193,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   scrollbar-width: thin;
 }
 
+.ui-dropdown-select__menu--portal {
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 40);
+}
+
 .ui-dropdown-select__option.ui-menu-item {
   min-height: 38px;
   padding-inline: var(--space-2);

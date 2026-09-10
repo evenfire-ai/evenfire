@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { IconCheck, IconX } from '@components/icons'
 import { cn } from '@lib/cn'
 import type { SelectionDropdownOption, SelectionDropdownProps } from './types'
@@ -21,11 +22,13 @@ export function SelectionDropdown({
   id,
   inline = false,
   invalid = false,
+  menuClassName,
   multiple = true,
   onChange,
   onSearchQueryChange,
   options,
   placeholder,
+  portal = false,
   searchable = true,
   searchPlaceholder = 'Search...',
   selectionLabel = 'Selected',
@@ -34,7 +37,14 @@ export function SelectionDropdown({
 }: SelectionDropdownProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const [portalPosition, setPortalPosition] = useState<{
+    left: number
+    top: number
+    width: number
+  } | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
 
   const selectedSet = useMemo(() => new Set(value), [value])
@@ -52,7 +62,8 @@ export function SelectionDropdown({
     if (!open || inline) return
 
     function handlePointerDown(event: MouseEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node
+      if (!rootRef.current?.contains(target) && !menuRef.current?.contains(target)) {
         setOpen(false)
       }
     }
@@ -70,6 +81,42 @@ export function SelectionDropdown({
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [inline, open])
+
+  const updatePortalPosition = useCallback(() => {
+    const trigger = buttonRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const gap = 4
+    const viewportPadding = 8
+    const estimatedHeight = Math.min(220, 8 + options.length * 43 + (searchable ? 48 : 0))
+    const menuHeight = menuRef.current?.offsetHeight || estimatedHeight
+    const roomBelow = window.innerHeight - rect.bottom - viewportPadding
+    const roomAbove = rect.top - viewportPadding
+    const opensAbove = menuHeight > roomBelow && roomAbove > roomBelow
+    const top = opensAbove
+      ? Math.max(viewportPadding, rect.top - menuHeight - gap)
+      : Math.max(
+          viewportPadding,
+          Math.min(rect.bottom + gap, window.innerHeight - menuHeight - viewportPadding)
+        )
+    const width = rect.width
+    const left = Math.min(
+      Math.max(viewportPadding, rect.left),
+      Math.max(viewportPadding, window.innerWidth - width - viewportPadding)
+    )
+    setPortalPosition({ left, top, width })
+  }, [options.length, searchable])
+
+  useLayoutEffect(() => {
+    if (!portal || !menuVisible) return
+    updatePortalPosition()
+    window.addEventListener('resize', updatePortalPosition)
+    window.addEventListener('scroll', updatePortalPosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePortalPosition)
+      window.removeEventListener('scroll', updatePortalPosition, true)
+    }
+  }, [menuVisible, portal, updatePortalPosition])
 
   useEffect(() => {
     if (menuVisible && searchable) {
@@ -104,6 +151,84 @@ export function SelectionDropdown({
         ? `${selectedOptions.length} ${selectionLabel.toLowerCase()}`
         : selectedOptions[0]?.label
 
+  const menu = menuVisible ? (
+    <div
+      className={cn(
+        'cu-selection-dropdown__menu',
+        portal && 'cu-selection-dropdown__menu--portal',
+        menuClassName
+      )}
+      ref={menuRef}
+      style={
+        portal
+          ? portalPosition
+            ? {
+                left: portalPosition.left,
+                top: portalPosition.top,
+                width: portalPosition.width,
+              }
+            : { left: 0, top: 0, visibility: 'hidden' }
+          : undefined
+      }
+    >
+      {searchable ? (
+        <input
+          id={inline ? id : undefined}
+          ref={searchRef}
+          className="cu-selection-dropdown__search"
+          value={query}
+          onChange={event => {
+            const nextQuery = event.target.value
+            setQuery(nextQuery)
+            onSearchQueryChange?.(nextQuery)
+          }}
+          placeholder={searchPlaceholder}
+          aria-label={searchPlaceholder}
+          disabled={disabled}
+        />
+      ) : null}
+      <div className="cu-selection-dropdown__list" role="listbox" aria-multiselectable={multiple}>
+        {filteredOptions.length === 0 ? (
+          <span className="cu-selection-dropdown__empty">{emptyLabel}</span>
+        ) : (
+          filteredOptions.map(option => {
+            const selected = selectedSet.has(option.value)
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className="cu-selection-dropdown__option"
+                role="option"
+                aria-label={option.label}
+                aria-selected={selected}
+                data-selected={selected ? 'true' : undefined}
+                onClick={() => toggleOption(option.value)}
+              >
+                <span className="cu-selection-dropdown__option-leading" aria-hidden="true">
+                  <span className="cu-selection-dropdown__check">
+                    {selected ? <IconCheck width={14} height={14} /> : null}
+                  </span>
+                  {option.icon}
+                </span>
+                <span className="cu-selection-dropdown__option-copy">
+                  <span className="cu-selection-dropdown__option-label">{option.label}</span>
+                  {option.description ? (
+                    <span className="cu-selection-dropdown__option-description">
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
+                {option.badge ? (
+                  <span className="cu-selection-dropdown__badge">{option.badge}</span>
+                ) : null}
+              </button>
+            )
+          })
+        )}
+      </div>
+    </div>
+  ) : null
+
   return (
     <div
       className={cn('cu-selection-dropdown', inline && 'cu-selection-dropdown--inline', className)}
@@ -111,6 +236,7 @@ export function SelectionDropdown({
     >
       {inline ? null : (
         <button
+          ref={buttonRef}
           id={id}
           type="button"
           className={cn(
@@ -152,69 +278,7 @@ export function SelectionDropdown({
         </div>
       ) : null}
 
-      {menuVisible ? (
-        <div className="cu-selection-dropdown__menu">
-          {searchable ? (
-            <input
-              id={inline ? id : undefined}
-              ref={searchRef}
-              className="cu-selection-dropdown__search"
-              value={query}
-              onChange={event => {
-                const nextQuery = event.target.value
-                setQuery(nextQuery)
-                onSearchQueryChange?.(nextQuery)
-              }}
-              placeholder={searchPlaceholder}
-              aria-label={searchPlaceholder}
-              disabled={disabled}
-            />
-          ) : null}
-          <div
-            className="cu-selection-dropdown__list"
-            role="listbox"
-            aria-multiselectable={multiple}
-          >
-            {filteredOptions.length === 0 ? (
-              <span className="cu-selection-dropdown__empty">{emptyLabel}</span>
-            ) : (
-              filteredOptions.map(option => {
-                const selected = selectedSet.has(option.value)
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    className="cu-selection-dropdown__option"
-                    role="option"
-                    aria-label={option.label}
-                    aria-selected={selected}
-                    data-selected={selected ? 'true' : undefined}
-                    onClick={() => toggleOption(option.value)}
-                  >
-                    <span className="cu-selection-dropdown__option-leading" aria-hidden="true">
-                      <span className="cu-selection-dropdown__check">
-                        {selected ? <IconCheck width={14} height={14} /> : null}
-                      </span>
-                      {option.icon}
-                    </span>
-                    <span className="cu-selection-dropdown__option-copy">
-                      <span className="cu-selection-dropdown__option-label">{option.label}</span>
-                      {option.description ? (
-                        <span className="cu-selection-dropdown__option-description">
-                          {option.description}
-                        </span>
-                      ) : null}
-                    </span>
-                    {option.badge ? (
-                      <span className="cu-selection-dropdown__badge">{option.badge}</span>
-                    ) : null}
-                  </button>
-                )
-              })
-            )}
-          </div>
-        </div>
-      ) : null}
+      {portal && menu ? createPortal(menu, document.body) : menu}
     </div>
   )
 }

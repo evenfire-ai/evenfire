@@ -243,6 +243,7 @@ describe('GfsGrantPanel bulk access', () => {
     const role = await screen.findByRole('button', { name: 'Access role for Ada Lovelace' })
     expect(role).toHaveTextContent('Editor')
     fireEvent.click(role)
+    expect(screen.getByRole('listbox').parentElement?.parentElement).toBe(document.body)
     fireEvent.click(screen.getByRole('option', { name: 'Read' }))
 
     await waitFor(() =>

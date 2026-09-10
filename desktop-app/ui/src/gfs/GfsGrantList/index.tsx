@@ -145,6 +145,7 @@ export function GfsGrantList({
                         onChange={value => void onChangeRole?.(item, label, value as GfsAccessRole)}
                         options={ROLE_OPTIONS}
                         placeholder="Role"
+                        portal
                         value={roleForPermissions(item.permissions)}
                       />
                     </span>

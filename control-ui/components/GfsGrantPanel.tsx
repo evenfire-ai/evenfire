@@ -551,8 +551,10 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                         onChange={next =>
                           void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
                         }
+                        menuClassName="cu-gfs-existing-access__role-menu"
                         options={ROLE_OPTIONS}
                         placeholder="Role"
+                        portal
                         searchable={false}
                         showSelectedChips={false}
                         value={[roleForPermissions(item.permissions)]}

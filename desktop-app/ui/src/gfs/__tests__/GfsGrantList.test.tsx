@@ -138,6 +138,7 @@ describe('GfsGrantList', () => {
     )
 
     fireEvent.click(screen.getByRole('button', { name: 'Access role for Test Two' }))
+    expect(screen.getByRole('listbox').parentElement).toBe(document.body)
     fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
     expect(onChangeRole).toHaveBeenCalledWith(item, 'Test Two', 'editor')
   })
