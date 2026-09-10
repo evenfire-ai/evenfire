@@ -10,7 +10,7 @@ type HeaderGeometry = {
   appsPaddingRight: number
   mountedPaddingRight: number
   pagePaddingRight: number
-  searchWidth: number
+  searchInsideContentPanel: boolean
 }
 
 let browser: Browser | undefined
@@ -22,20 +22,26 @@ function launchOptions() {
   return { headless: true }
 }
 
-async function headerGeometry(
-  width: number,
-  drawerOpen = false,
-  searchOpen = false
-): Promise<HeaderGeometry> {
+async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
   if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
   await page.setContent(`
-    <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
-      <div class="top-bar"><div class="header-left"><div class="global-search${searchOpen ? ' is-open' : ''}"></div></div></div>
-      <section class="page">
-        <header class="apps-page-header">Apps</header>
-        <header class="sandbox-ui-mounted-header"><button>Back</button></header>
-      </section>
+    <div class="app-frame">
+      <header class="window-titlebar">
+        <div class="window-titlebar__actions">
+          <div class="top-bar top-bar--titlebar">
+            <div class="header-left"><div class="global-search global-search--titlebar is-open"></div></div>
+          </div>
+        </div>
+      </header>
+      <div class="app-root">
+        <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
+          <section class="page">
+            <header class="apps-page-header">Apps</header>
+            <header class="sandbox-ui-mounted-header"><button>Back</button></header>
+          </section>
+        </div>
+      </div>
     </div>
   `)
   await page.addStyleTag({ path: path.join(UI_ROOT, 'styles/tokens.css') })
@@ -47,7 +53,7 @@ async function headerGeometry(
       appsPaddingRight: number('.apps-page-header', 'paddingRight'),
       mountedPaddingRight: number('.sandbox-ui-mounted-header', 'paddingRight'),
       pagePaddingRight: number('.page', 'paddingRight'),
-      searchWidth: number('.global-search', 'width'),
+      searchInsideContentPanel: Boolean(document.querySelector('.content-panel .global-search')),
     }
   })
   await page.close()
@@ -63,21 +69,16 @@ describe('responsive utility gutter', () => {
     await browser?.close()
   })
 
-  it('uses the compact closed-header reservation at tablet widths and retains drawer-open space', async () => {
+  it('keeps the mounted-app notification rail stable at tablet widths', async () => {
     const closed = await headerGeometry(1100)
     const open = await headerGeometry(1100, true)
-    const searchExpanded = await headerGeometry(1100, false, true)
 
-    // Idle, the global-search collapses to the 40px magnifier; it grows to its
-    // tablet expanded width (clamp(160px, 32vw, …) = 352px at 1100) only on
-    // focus/open. The utility gutter still reserves for the *expanded* search
-    // (352 + space-2 + 36 = 398) so expansion never collides with page content.
-    expect(closed.searchWidth).toBe(40)
-    expect(searchExpanded.searchWidth).toBe(352)
-    expect(closed.mountedPaddingRight).toBe(398)
-    expect(closed.mountedPaddingRight).toBeLessThan(open.pagePaddingRight)
+    // Search is now portalled into the titlebar. The embedded app therefore
+    // reserves the notification drawer rail, not the removed in-panel search.
+    expect(closed.searchInsideContentPanel).toBe(false)
+    expect(closed.mountedPaddingRight).toBe(438)
     expect(open.mountedPaddingRight).toBe(0)
-    expect(open.pagePaddingRight).toBe(466)
+    expect(open.pagePaddingRight).toBe(438)
   })
 
   it('retains mobile zero-reservation and the wide desktop utility budget', async () => {

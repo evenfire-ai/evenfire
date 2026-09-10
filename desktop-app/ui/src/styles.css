@@ -13161,18 +13161,6 @@ pre {
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
-  .content-panel {
-    --app-header-utilities-width: calc(
-      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
-    );
-  }
-
-  .content-panel.content-panel--app-notification-drawer-open {
-    --app-header-utilities-width: calc(
-      var(--app-notification-drawer-width) + var(--space-2) + 36px
-    );
-  }
-
   .global-search {
     --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
     --global-search-expanded-min: 160px;
