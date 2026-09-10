@@ -26,14 +26,23 @@ private predicate isCanonicalEvenfireRateLimitImport(ImportSpecifier spec) {
 
 private class EvenfireRateLimitingMiddleware extends RateLimitingMiddleware, DataFlow::CallNode {
   EvenfireRateLimitingMiddleware() {
-    exists(ImportSpecifier spec |
+    exists(ImportSpecifier spec, VarAccess callee |
       isCanonicalEvenfireRateLimitImport(spec) and
-      DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(this.getCalleeNode())
+      callee = spec.getLocal().getVariable().getAnAccess() and
+      this.getCalleeNode() = DataFlow::valueNode(callee)
     )
   }
 
   override Routing::Node getRoutingNode() {
-    exists(DataFlow::Node ref | this.flowsTo(ref) and result = Routing::getNode(ref))
+    result = Routing::getNode(this)
+    or
+    exists(VariableDeclarator declaration, VarDecl binding, VarAccess installed |
+      declaration.getInit() = this.asExpr() and
+      declaration.getBindingPattern() = binding and
+      declaration.getDeclStmt() instanceof ConstDeclStmt and
+      installed = binding.getVariable().getAnAccess() and
+      result = Routing::getNode(DataFlow::valueNode(installed))
+    )
   }
 }
 
@@ -54,10 +63,10 @@ private predicate isCanonicalExternalLimiterIdentityImport(ImportSpecifier spec)
 }
 
 private predicate isCanonicalExternalLimiterIdentityHandler(Routing::Node useSite) {
-  exists(ImportSpecifier spec, DataFlow::Node installedNode |
+  exists(ImportSpecifier spec, VarAccess installed |
     isCanonicalExternalLimiterIdentityImport(spec) and
-    useSite = Routing::getNode(installedNode) and
-    DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(installedNode)
+    installed = spec.getLocal().getVariable().getAnAccess() and
+    useSite = Routing::getNode(DataFlow::valueNode(installed))
   )
 }
 
@@ -86,10 +95,11 @@ private predicate hasEvenfireRateLimitingGuard(Routing::Node useSite) {
 }
 
 private predicate isImportedValue(Expr value, string path, string importedName) {
-  exists(ImportSpecifier spec |
+  exists(ImportSpecifier spec, VarAccess access |
     spec.getImportedName() = importedName and
     spec.getImportDeclaration().getImportedFile().getRelativePath() = path and
-    DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(DataFlow::valueNode(value))
+    access = spec.getLocal().getVariable().getAnAccess() and
+    value = access
   )
 }
 
@@ -471,26 +481,32 @@ private predicate hasWorkspaceFilesystemConsumer(Routing::Node useSite, DataFlow
   )
 }
 
-private predicate hasPr2DistributedAdmissionGuard(Routing::Node useSite, DataFlow::Node reference) {
+private predicate hasPr2DistributedAdmissionGuard(Routing::Node useSite) {
   hasCanonicalExternalRpcDelegationIssuer() and
   (
     hasRpcProxyDelegationConsumer(useSite) or
     hasControlApiCheckpointConsumer(useSite) or
+    hasMcpRuntimeEdgeConsumer(useSite)
+  )
+}
+
+private predicate hasReferenceBoundPr2DistributedAdmissionGuard(
+  Routing::Node useSite, DataFlow::Node reference
+) {
+  hasCanonicalExternalRpcDelegationIssuer() and
+  (
     hasControlApiRpcProxyOauthConsumer(useSite, reference) or
-    hasMcpRuntimeEdgeConsumer(useSite) or
     hasWorkspaceFilesystemConsumer(useSite, reference)
   )
 }
 
-private predicate hasRateLimitingGuard(Routing::Node useSite, DataFlow::Node reference) {
+private predicate hasLocalRateLimitingGuard(Routing::Node useSite) {
   exists(RateLimitingMiddleware middleware |
     useSite.isGuardedByNode(middleware.getRoutingNode()) and
     not middleware instanceof EvenfireRateLimitingMiddleware
   )
   or
   hasEvenfireRateLimitingGuard(useSite)
-  or
-  hasPr2DistributedAdmissionGuard(useSite, reference)
 }
 
 from
@@ -499,6 +515,8 @@ from
 where
   useSite = Routing::getNode(r).getRouteInstallation() and
   r.explain(explanation, reference, referenceLabel) and
-  not hasRateLimitingGuard(useSite, reference)
+  not hasLocalRateLimitingGuard(useSite) and
+  not hasPr2DistributedAdmissionGuard(useSite) and
+  not hasReferenceBoundPr2DistributedAdmissionGuard(useSite, reference)
 select useSite, "This route handler " + explanation + ", but is not rate-limited.", reference,
   referenceLabel
