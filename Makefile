@@ -292,6 +292,10 @@ minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
 minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml with current node IP
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-k8s-api-ip.sh
 
+.PHONY: minikube-detect-cluster-cidrs
+minikube-detect-cluster-cidrs: ## Render overlays/minikube/patches/llm-egress-cluster-cidrs.yaml (opt-in: HCC strong egress-broker guard; then add it to the overlay's patchesStrategicMerge)
+	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-cluster-cidrs.sh
+
 .PHONY: minikube-deploy-all minikube-deploy-all-body
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \

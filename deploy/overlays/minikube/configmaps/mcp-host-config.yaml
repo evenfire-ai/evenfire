@@ -10,6 +10,15 @@ data:
   CLERUM_SERVER_PORT: '8080'
   CLERUM_CONTEXT_MAPPER_URL: 'http://host-context-controller-api-gateway.control-plane.svc.cluster.local:8081'
   CLERUM_CONTEXT_MAPPER_POLL_INTERVAL: '30000'
+  # OpenAI-compatible local-model egress broker (spec v2 §6.10). mcp-host dials
+  # the broker at <brokerName>.<namespace>.svc.cluster.local:<port>, never the
+  # LAN endpoint directly. These MUST match HCC's CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE
+  # / CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT (deploy/base/control-plane/host-context-controller.yaml),
+  # which is what provisions the broker under this name. Pinned explicitly on
+  # both sides — the values equal the config.ts defaults, but the parity is a
+  # contract, not a coincidence, so it must stay visible.
+  CLERUM_LLM_EGRESS_NAMESPACE: 'llm-egress'
+  CLERUM_OAI_EGRESS_BROKER_PORT: '3000'
   MCP_PROXY_ENABLED: 'false'
   MCP_HOST_CODEX_SUBSCRIPTION_ENABLED: 'true'
   # e2e lane pin: 60s keeps the revoke-on-staleness scenario fast and

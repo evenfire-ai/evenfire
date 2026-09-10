@@ -1,0 +1,54 @@
+# TEMPLATE — do not edit the rendered patches/llm-egress-cluster-cidrs.yaml (gitignored).
+# deploy/scripts/minikube-detect-cluster-cidrs.sh renders this file, replacing
+# __K8S_API_CIDRS__ and __CLUSTER_INTERNAL_CIDRS__ with the live cluster values.
+# Committing real CIDRs here would dirty every contributor's tree and bake one
+# environment's pod/service CIDRs into a shared manifest — they differ between a
+# dev minikube and prod (distinct pod/Service CIDRs, apiserver reachability).
+#
+# WHAT THIS ENABLES — the "strong" cluster-internal guard on the egress broker.
+# HCC's openaiEgressBrokerReconciler rejects an operator baseURL that points at a
+# cluster-internal address so a local-model Host cannot be turned into an SSRF
+# pivot into the control plane. That guard has two tiers:
+#
+#   * ALWAYS ON (no config): the baseURL must be a private, non-reserved RFC1918
+#     address, and the runtime `/32` egress NetworkPolicy HCC emits already pins
+#     the one LAN destination — a broker can reach nothing else outbound.
+#   * STRONG (needs these envs): when CONTEXT_MAPPER_K8S_API_CIDRS and/or
+#     CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS are set, HCC additionally rejects a
+#     baseURL whose IP falls inside the apiserver / pod / Service CIDRs, which CEL
+#     in the CRD cannot compute (no CIDR arithmetic). Without them HCC does NOT
+#     fail closed at boot — it simply runs the always-on tier.
+#
+# This patch is OPT-IN. It is intentionally NOT listed in the overlay's
+# patchesStrategicMerge by default, because the placeholders below are not valid
+# CIDRs and an invalid value WOULD make HCC fail at boot. To turn the strong
+# guard on for an environment:
+#   1. Render real values:  make minikube-detect-cluster-cidrs
+#      (or: deploy/scripts/minikube-detect-cluster-cidrs.sh)
+#   2. Add the rendered file to `patchesStrategicMerge` in this overlay's
+#      kustomization.yaml:  - patches/llm-egress-cluster-cidrs.yaml
+# The rendered file is gitignored; only this template is tracked.
+#
+# CIDR FORMAT — comma-separated. CONTEXT_MAPPER_K8S_API_CIDRS is the kube-apiserver
+# reachable ranges (on minikube the node /32 that fronts the apiserver, like the
+# k8s-api-ip patch); it is validated by host-context-controller/src/k8sApiCidrs.ts,
+# which rejects over-broad ranges at boot (an invalid placeholder here fails the
+# pod — that is what keeps this patch opt-in). CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS
+# is the pod + Service CIDRs; it is passed as-is to the runtime LAN classifier
+# (no over-broad rejection), so set it tightly — an over-broad range like
+# 10.0.0.0/8 would swallow legitimate RFC1918 LAN targets as cluster-internal.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_K8S_API_CIDRS
+              value: "__K8S_API_CIDRS__"
+            - name: CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS
+              value: "__CLUSTER_INTERNAL_CIDRS__"

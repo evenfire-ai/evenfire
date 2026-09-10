@@ -134,6 +134,21 @@ spec:
           value: CLERUM_AUTH_JWT_PUBLIC_KEY
         - name: HCC_TARGET_NAMESPACE
           value: mcp-host
+        # OpenAI-compatible local-model egress broker (spec v2 §6.10). HCC
+        # provisions one broker per (Host, local openai-compatible slot) in this
+        # namespace, and mcp-host dials it at
+        # <brokerName>.<namespace>.svc.cluster.local:<port>. The binding only
+        # works if HCC and mcp-host AGREE on both the namespace and the port, so
+        # both are pinned explicitly here (and on mcp-host via the mcp-host-config
+        # ConfigMap) even though both default to the same values in config.ts —
+        # the parity is a hard contract, not a coincidence of defaults, and must
+        # stay visible on both sides. Override either and you MUST override the
+        # matching mcp-host env (CLERUM_LLM_EGRESS_NAMESPACE /
+        # CLERUM_OAI_EGRESS_BROKER_PORT) in lockstep.
+        - name: CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE
+          value: llm-egress
+        - name: CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT
+          value: "3000"
         # Existing Control API RS256 public key used to verify the first-party
         # mcp-host access-token family on HCC v2 Host routes. The audience is a
         # fixed HCC code contract; the issuer is read from the same ConfigMap

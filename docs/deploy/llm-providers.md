@@ -5,15 +5,16 @@ credentials (including the multi-slot providers **Google Vertex AI** and
 **Amazon Bedrock**), how to manage the operator-declared model allowlist, and how
 the per-session model selector behaves in the desktop app.
 
-The canonical provider set — **23 providers**, from `openai`, `claude`
-(Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock` to the
-OpenAI-compatible additions and `azure` — and their credential slots live in the
-shared `@clerum/llm-providers` package, which the Control UI, control-api,
-mcp-host, and the workflow runtime all consume. See the
+The canonical provider set — **24 providers**, from `openai`, `claude`
+(Anthropic), `zai` and `bailian` through the own-SDK `vertex` / `bedrock`, the
+OpenAI-compatible additions and `azure`, to `openai-compatible` (a model you run
+yourself on the LAN, reached through an egress broker — see §8) — and their
+credential slots live in the shared `@clerum/llm-providers` package, which the
+Control UI, control-api, mcp-host, and the workflow runtime all consume. See the
 [providers overview](../llm-providers/README.md) for the full list and the
-per-surface support matrix (`bedrock` and `azure` are host-only). A Host is bound
-to **one** provider (`spec.model.provider`); the allowlist and selector operate
-within that provider.
+per-surface support matrix (`bedrock` and `azure` are host-only; `openai-compatible`
+is host-only too). A Host is bound to **one** provider (`spec.model.provider`);
+the allowlist and selector operate within that provider.
 
 ## 1. Where credentials and non-secret config live
 
@@ -36,6 +37,7 @@ secrets form only shows a hint linking there; it does not duplicate the editor.
 | Google Vertex AI (`vertex`) | `vertex-service-account-json`                 | `VERTEX_PROJECT_ID` (required), `VERTEX_LOCATION` |
 | Amazon Bedrock (`bedrock`)  | `aws-access-key-id` + `aws-secret-access-key` | `AWS_REGION` (required)                           |
 | Azure OpenAI (`azure`)      | `azure-openai-api-key`                        | `AZURE_OPENAI_ENDPOINT` (required), `AZURE_OPENAI_API_VERSION` |
+| OpenAI-compatible (`openai-compatible`) | `openai-compatible-api-key` _(may be empty)_ | `spec.model.baseURL` (required — a **Host CRD** field, not a Host-env var) — see §8 |
 
 Every other provider (the OpenAI-compatible additions — `openrouter`, `gemini`,
 `deepseek`, `groq`, `together`, `fireworks`, `mistral`, `xai`, `cerebras`,
@@ -81,12 +83,14 @@ returns key names only). To rotate a key, re-enter it.
 
 ### Bedrock and Azure in workflows
 
-`bedrock` and `azure` are **not admissible in WorkflowRecipe steps**: they are
-deliberately absent from the recipe CRD's provider enum, so a recipe pinning
-either is rejected at admission. The workflow `configure` transport carries a
-single credential string, which can deliver neither Bedrock's key pair nor
-Azure's required endpoint. Both remain fully supported for interactive Hosts;
-the other 20 providers are admissible in recipes — see the
+`bedrock`, `azure` and `openai-compatible` are **not admissible in WorkflowRecipe
+steps**: all three are deliberately absent from the recipe CRD's provider enum,
+so a recipe pinning any of them is rejected at admission. The workflow `configure`
+transport carries a single credential string, which can deliver neither Bedrock's
+key pair nor Azure's required endpoint; `openai-compatible` is excluded on top of
+that (D-7) because it needs a per-Host `baseURL` and a provisioned egress broker,
+and a bare workflow step carries neither. All three remain fully supported for
+interactive Hosts; the other 20 providers are admissible in recipes — see the
 [providers overview](../llm-providers/README.md) for the per-surface matrix and
 the `clerum-model-secret-mapping` caveat.
 
@@ -184,3 +188,68 @@ restricted to the provider's allowlist:
    tool-call, and confirm the calls appear in `usage_events`.
 5. Disable a model in **LLM Models** and confirm the wizard and the runtime
    selector stop offering it without a redeploy.
+
+## 8. Local OpenAI-compatible models via the egress broker
+
+The `openai-compatible` provider points a Host at a model an operator runs
+**themselves** on the private LAN (vLLM, Ollama, LM Studio, TGI, …). Unlike every
+other provider, the endpoint is not a fixed vendor URL — the operator supplies it
+as `spec.model.baseURL`, a field that lives on the **Host CRD**, not in the LLM
+Secret and not in Host-env. The API key slot (`openai-compatible-api-key`) is
+optional: leave it empty when the local server needs no auth, but `spec.secretRef`
+must still point at a Secret that exists.
+
+**The mcp-host agent never dials the LAN address directly.** Doing so would let a
+model endpoint be turned into an SSRF pivot from inside the cluster. Instead HCC
+provisions a small **egress broker** per `(Host, endpoint)` — a mirrored
+Deployment + Service + ConfigMap + Secret in the `llm-egress` namespace — and the
+agent talks only to that broker over the cluster-internal Service. The broker is
+the single hop permitted out to the LAN, and only to the one operator address,
+pinned by a `/32` egress NetworkPolicy HCC emits alongside it.
+
+```mermaid
+sequenceDiagram
+  participant Op as Operator
+  participant CA as control-api (admission)
+  participant HCC as host-context-controller
+  participant MH as mcp-host (agent)
+  participant BR as egress broker (llm-egress ns)
+  participant LAN as LAN model (192.168.x.y)
+
+  Op->>CA: Host spec.model.baseURL = private LAN IP
+  Note over CA: validate — private RFC1918 only;<br/>reject .svc / metadata / CGNAT
+  CA->>HCC: admitted Host
+  Note over HCC: provision broker per (Host, endpoint):<br/>Deployment+Service+CM+Secret mirror<br/>+ /32 broker→LAN egress NP<br/>+ mcp-host→broker ingress NP
+  MH->>BR: chat completion (cluster-internal Service)
+  BR->>LAN: proxied request (only /32 allowed out)
+  LAN-->>BR: response
+  BR-->>MH: response
+```
+
+Three things to know as an operator:
+
+- **Rollout order is CRD → control-api → control-ui.** Adding `openai-compatible`
+  is a **structural** CRD change (new enum value + additive `baseURL` field).
+  `apiextensions/v1` silently prunes unknown fields, so the `hosts.clerum.io` CRD
+  must be applied **before** any Host that sets `baseURL` — a Host written against
+  the old CRD loses the field on admission with a 200. Apply
+  `charts/clerum-crds/crds/host.yaml`, then roll control-api, then control-ui.
+- **The address must be a private LAN IP.** The CRD rejects cluster-internal
+  `.svc` / `.svc.cluster.local` targets by shape; metadata (169.254/16) and CGNAT
+  (100.64/10) ranges are rejected downstream by control-api / HCC, because CEL
+  cannot do CIDR arithmetic. The always-on guard requires a private, non-reserved
+  RFC1918 address; the runtime `/32` NetworkPolicy then constrains the broker to
+  exactly that destination.
+- **Optionally turn on the strong cluster-internal guard.** Set
+  `CONTEXT_MAPPER_K8S_API_CIDRS` and `CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS` on the
+  host-context-controller Deployment so HCC also rejects a `baseURL` that lands
+  inside the apiserver / pod / Service CIDRs. These are environment-specific, so
+  the minikube overlay ships them as an opt-in per-operator patch — render it with
+  `make minikube-detect-cluster-cidrs` and add
+  `patches/llm-egress-cluster-cidrs.yaml` to the overlay's `patchesStrategicMerge`
+  (see `deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template`).
+  HCC does **not** fail closed without them — it runs the always-on tier — so a
+  cluster missing these envs still deploys, just with the weaker guard.
+
+A ready-to-adapt example (primary + fallback, both local) lives at
+[`charts/clerum-crds/examples/host-openai-compatible-lan.yaml`](../../charts/clerum-crds/examples/host-openai-compatible-lan.yaml).
