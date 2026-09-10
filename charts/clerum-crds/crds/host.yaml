@@ -57,6 +57,13 @@ spec:
                 model:
                   type: object
                   description: LLM model configuration.
+                  x-kubernetes-validations:
+                    - rule: "!has(self.provider) || self.provider != 'openai-compatible' || has(self.baseURL)"
+                      message: "spec.model.baseURL is required when spec.model.provider is 'openai-compatible'"
+                    - rule: "!has(self.baseURL) || (has(self.provider) && self.provider == 'openai-compatible')"
+                      message: "spec.model.baseURL is only valid when spec.model.provider is 'openai-compatible'"
+                    - rule: "!has(self.baseURL) || !self.baseURL.lowerAscii().contains('.svc')"
+                      message: "spec.model.baseURL must not target a cluster-internal service address (.svc, .svc.cluster.local)"
                   properties:
                     provider:
                       type: string
@@ -83,6 +90,7 @@ spec:
                         - novita
                         - minimax
                         - azure
+                        - openai-compatible
                         - codex-subscription
                       description: LLM provider to use.
                     name:
@@ -99,6 +107,13 @@ spec:
                         ROLLOUT ORDER — CRD FIRST: apiextensions/v1 prunes unknown
                         fields, so this property must be applied before control-api
                         or Control UI persist spec.model.connectionRef.
+                    baseURL:
+                      type: string
+                      maxLength: 2048
+                      description: >-
+                        Operator LAN endpoint for provider 'openai-compatible' (e.g. http://192.168.1.50:8000/v1). Private LAN
+                        only; must NOT target cluster-internal, metadata, or CGNAT. Egress is brokered — the mcp-host never dials
+                        this directly. ROLLOUT ORDER — CRD FIRST.
                 allowedModels:
                   # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
                   # ADDITIVE: when absent or empty, the host offers the FULL global
@@ -211,6 +226,7 @@ spec:
                               - novita
                               - minimax
                               - azure
+                              - openai-compatible
                               - codex-subscription
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.
@@ -235,6 +251,20 @@ spec:
                               normal slots. Existence of the key in the Secret is resolved
                               by mcp-host at runtime; control-api validates only its format
                               on write.
+                          baseURL:
+                            type: string
+                            maxLength: 2048
+                            description: >-
+                              Operator LAN endpoint for provider 'openai-compatible' (e.g. http://192.168.1.50:8000/v1). Private LAN
+                              only; must NOT target cluster-internal, metadata, or CGNAT. Egress is brokered — the mcp-host never dials
+                              this directly. ROLLOUT ORDER — CRD FIRST.
+                        x-kubernetes-validations:
+                          - rule: "self.provider != 'openai-compatible' || has(self.baseURL)"
+                            message: "fallbacks[].baseURL is required when the fallback provider is 'openai-compatible'"
+                          - rule: "!has(self.baseURL) || self.provider == 'openai-compatible'"
+                            message: "fallbacks[].baseURL is only valid when the fallback provider is 'openai-compatible'"
+                          - rule: "!has(self.baseURL) || !self.baseURL.lowerAscii().contains('.svc')"
+                            message: "fallbacks[].baseURL must not target a cluster-internal service address (.svc, .svc.cluster.local)"
                 approval:
                   type: object
                   description: Tool approval configuration. Controls who can approve tool executions.

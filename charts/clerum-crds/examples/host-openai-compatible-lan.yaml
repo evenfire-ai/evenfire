@@ -1,0 +1,56 @@
+# Example: a Host whose primary model AND fallback both run on operator-local
+# OpenAI-compatible endpoints on the private LAN (spec v2 §6.10).
+#
+# ROLLOUT ORDER — apply the hosts.clerum.io CRD BEFORE this resource. This is a
+# STRUCTURAL change (new `openai-compatible` enum value + additive `baseURL`
+# field). apiextensions/v1 silently prunes unknown fields, so a Host written
+# against the OLD CRD would lose `spec.model.baseURL` / the fallback baseURL on
+# admission with no error, and reject the new provider value outright. CRD first,
+# then control-api, then this.
+#
+# `baseURL` is only valid — and required — when `provider: openai-compatible`
+# (enforced by CRD CEL). It must be a private LAN endpoint: the CRD rejects
+# cluster-internal `.svc` / `.svc.cluster.local` targets by shape; metadata and
+# CGNAT ranges are rejected downstream (control-api/HCC), since CEL cannot do
+# CIDR arithmetic. Egress is brokered — the mcp-host never dials baseURL directly.
+apiVersion: clerum.io/v1alpha1
+kind: Host
+metadata:
+  name: lan-llm
+spec:
+  host: lanLLM
+  contextRef: context1
+  # secretRef is required for any non-Codex target (CRD CEL). For an
+  # openai-compatible endpoint the API key is OPTIONAL — the Secret may hold an
+  # empty/placeholder key when the local server needs no auth — but the ref must
+  # exist so a static-credentials target has a Secret to resolve.
+  secretRef: lan-llm-api-keys
+  model:
+    provider: openai-compatible
+    name: qwen2.5-32b-instruct
+    # Operator LAN endpoint. Private LAN only — never cluster-internal, metadata,
+    # or CGNAT.
+    baseURL: http://192.168.1.50:8000/v1
+  llmPolicy:
+    cooldownSeconds: 300
+    fallbacks:
+      # A SECOND operator-local OpenAI-compatible endpoint on another LAN host —
+      # exercises the fallback baseURL slot with a DIFFERENT address.
+      - provider: openai-compatible
+        model: llama-3.3-70b-instruct
+        baseURL: http://192.168.1.51:8001/v1
+  channels:
+    - all-channels
+---
+# The referenced Secret. The api-key slot for openai-compatible is
+# `openai-compatible-api-key`; leave it empty/placeholder when the local server
+# needs no authentication.
+#   kubectl create secret generic lan-llm-api-keys \
+#     --from-literal=openai-compatible-api-key=''
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lan-llm-api-keys
+type: Opaque
+stringData:
+  openai-compatible-api-key: ""
