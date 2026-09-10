@@ -13,9 +13,11 @@ import {
   type MockNetworkingApi,
   asAppsApi,
   asCoreApi,
+  asCustomApi,
   asNetworkingApi,
   createMockAppsApi,
   createMockCoreApi,
+  createMockCustomApi,
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { config } from './config'
@@ -71,6 +73,7 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(networkingApi),
+      customApi: asCustomApi(createMockCustomApi()),
       hostInventoryAuthoritative: () => true,
     })
   })

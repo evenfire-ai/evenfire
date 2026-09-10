@@ -35,7 +35,13 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
-import { brokerNameFor, classifyLanBaseURL, ipv4ToInt } from '@clerum/egress-policy'
+import {
+  type LanBaseUrlReason,
+  OAI_EGRESS_BROKERS_CONDITION_TYPE,
+  brokerNameFor,
+  classifyLanBaseURL,
+  ipv4ToInt,
+} from '@clerum/egress-policy'
 import { config } from './config'
 import {
   HOST_LABEL,
@@ -46,6 +52,11 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { hccLogger } from './logger'
+import {
+  type SlotOutcome,
+  buildBrokersCondition,
+  writeBrokersCondition,
+} from './openaiEgressBrokerStatus'
 import { HostCRD } from './types'
 import {
   configMapMatchesDesired,
@@ -88,6 +99,7 @@ type OpenAiEgressBrokerReconcilerDeps = {
   appsApi?: k8s.AppsV1Api
   coreApi?: k8s.CoreV1Api
   networkingApi?: k8s.NetworkingV1Api
+  customApi?: k8s.CustomObjectsApi
   /**
    * Authority fence for the Host-cache-fed full reconcile + orphan sweep. When
    * it returns false the cache may be empty or stale, so the sweep would delete
@@ -98,6 +110,16 @@ type OpenAiEgressBrokerReconcilerDeps = {
    */
   hostInventoryAuthoritative?: () => boolean
 }
+
+/** Machine reason a slot was NOT provisioned (validateSlot drops + provision failure). */
+type SlotDropReason =
+  | 'cluster_internal_guard_unconfigured'
+  | LanBaseUrlReason
+  | 'url_unparseable'
+  | 'scheme_unsupported'
+  | 'port_invalid'
+  | 'path_unsafe'
+  | 'provision_failed'
 
 /** A validated local slot that must have a broker. */
 type DesiredBroker = {
@@ -162,6 +184,7 @@ export class OpenAiEgressBrokerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
   private readonly networkingApi: k8s.NetworkingV1Api
+  private readonly customApi: k8s.CustomObjectsApi
 
   /** Cache of Host CRs by name (owned by the watcher). */
   private readonly hosts: Map<string, HostCRD>
@@ -179,6 +202,7 @@ export class OpenAiEgressBrokerReconciler {
     this.appsApi = deps?.appsApi ?? kc.makeApiClient(k8s.AppsV1Api)
     this.coreApi = deps?.coreApi ?? kc.makeApiClient(k8s.CoreV1Api)
     this.networkingApi = deps?.networkingApi ?? kc.makeApiClient(k8s.NetworkingV1Api)
+    this.customApi = deps?.customApi ?? kc.makeApiClient(k8s.CustomObjectsApi)
     this.hosts = hostCache
     this.hostInventoryAuthoritative = deps?.hostInventoryAuthoritative ?? (() => false)
   }
@@ -239,8 +263,9 @@ export class OpenAiEgressBrokerReconciler {
    * guarantees the shape; this is defense-in-depth against a direct cluster
    * write that bypassed control-api.
    */
-  private buildDesiredBrokers(host: HostCRD): DesiredBroker[] {
-    const out: DesiredBroker[] = []
+  private buildDesiredBrokers(host: HostCRD): { desired: DesiredBroker[]; dropped: SlotOutcome[] } {
+    const desired: DesiredBroker[] = []
+    const dropped: SlotOutcome[] = []
     const seenSlotIds = new Set<string>()
 
     const consider = (
@@ -251,10 +276,13 @@ export class OpenAiEgressBrokerReconciler {
     ): void => {
       if (provider?.trim() !== OPENAI_COMPATIBLE_PROVIDER) return
       if (!baseURL) return
-      const broker = this.validateSlot(host.name, slotId, baseURL, credentialDataKey)
-      if (broker && !seenSlotIds.has(slotId)) {
-        seenSlotIds.add(slotId)
-        out.push(broker)
+      if (seenSlotIds.has(slotId)) return
+      seenSlotIds.add(slotId)
+      const result = this.validateSlot(host.name, slotId, baseURL, credentialDataKey)
+      if ('reason' in result) {
+        dropped.push({ slotId, reason: result.reason })
+      } else {
+        desired.push(result)
       }
     }
 
@@ -274,7 +302,7 @@ export class OpenAiEgressBrokerReconciler {
       consider(`fallback-${i}`, fb.provider, fb.baseURL, dataKey)
     })
 
-    return out
+    return { desired, dropped }
   }
 
   private validateSlot(
@@ -282,7 +310,7 @@ export class OpenAiEgressBrokerReconciler {
     slotId: string,
     baseURL: string,
     credentialDataKey: string
-  ): DesiredBroker | null {
+  ): DesiredBroker | { reason: SlotDropReason } {
     // Cluster-internal ranges HCC rejects a baseURL against (see
     // resolveClusterInternalCidrs). The floor pins the apiserver ClusterIP even
     // with zero config, but the floor alone is NOT a configured guard.
@@ -298,7 +326,7 @@ export class OpenAiEgressBrokerReconciler {
         'cluster-internal CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
         { host: hostName, slotId }
       )
-      return null
+      return { reason: 'cluster_internal_guard_unconfigured' }
     }
     const decision = classifyLanBaseURL(
       baseURL,
@@ -310,14 +338,14 @@ export class OpenAiEgressBrokerReconciler {
         slotId,
         reason: decision.reason,
       })
-      return null
+      return { reason: decision.reason }
     }
     let parsed: URL
     try {
       parsed = new URL(baseURL)
     } catch {
       log.warn('baseURL is not a parseable URL — slot not provisioned', { host: hostName, slotId })
-      return null
+      return { reason: 'url_unparseable' }
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       log.warn('baseURL scheme unsupported — slot not provisioned', {
@@ -325,7 +353,7 @@ export class OpenAiEgressBrokerReconciler {
         slotId,
         scheme: parsed.protocol,
       })
-      return null
+      return { reason: 'scheme_unsupported' }
     }
     // Take the LAN address from the classifier (validated RFC1918 IPv4 literal),
     // never from the raw string. Port + path come from the parsed URL components,
@@ -333,7 +361,7 @@ export class OpenAiEgressBrokerReconciler {
     const lanPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80
     if (!Number.isInteger(lanPort) || lanPort < 1 || lanPort > 65535) {
       log.warn('baseURL port invalid — slot not provisioned', { host: hostName, slotId })
-      return null
+      return { reason: 'port_invalid' }
     }
     const path = parsed.pathname || '/'
     // Reject anything that could break the nginx quoted/directive context. URL
@@ -344,7 +372,7 @@ export class OpenAiEgressBrokerReconciler {
     // rewrite the upstream), `#` (starts a comment), and backtick.
     if (/[\r\n\t "'\\;{}$#`\0]/.test(path) || path.length > 1024) {
       log.warn('baseURL path unsafe — slot not provisioned', { host: hostName, slotId })
-      return null
+      return { reason: 'path_unsafe' }
     }
     return {
       slotId,
@@ -360,9 +388,14 @@ export class OpenAiEgressBrokerReconciler {
   // ─── Per-host reconcile ─────────────────────────────────────────────
 
   private async reconcileHostBrokers(host: HostCRD): Promise<void> {
-    const desired = this.buildDesiredBrokers(host)
+    const { desired, dropped } = this.buildDesiredBrokers(host)
     const desiredNames = new Set(desired.map(d => d.brokerName))
 
+    // Every slot NOT reflected as a live broker, so the Host status condition
+    // below reports the full outcome: slots dropped by validateSlot plus any that
+    // fail mid-provision.
+    const outcomes: SlotOutcome[] = [...dropped]
+    let provisioned = 0
     for (const broker of desired) {
       try {
         const credentialB64 = await this.readHostCredential(host, broker.credentialDataKey)
@@ -374,6 +407,7 @@ export class OpenAiEgressBrokerReconciler {
         await this.ensureBrokerIngressPolicy(host, broker)
         await this.ensureBrokerLanEgressPolicy(host, broker)
         await this.ensureHostToBrokerPolicy(host, broker)
+        provisioned += 1
       } catch (err) {
         log.error('Failed to provision broker', {
           host: host.name,
@@ -381,12 +415,37 @@ export class OpenAiEgressBrokerReconciler {
           broker: broker.brokerName,
           err,
         })
+        outcomes.push({ slotId: broker.slotId, reason: 'provision_failed' })
       }
     }
 
     // Remove brokers this Host no longer wants (e.g. a fallback removed, or the
     // provider flipped away from openai-compatible).
     await this.gcHostBrokers(host.name, desiredNames)
+
+    // Reflect the outcome on Host status so control-api/control-ui — which run the
+    // CIDR-blind classifier and never learn what HCC did — can surface a drop.
+    await this.writeHostBrokersCondition(host, provisioned, outcomes)
+  }
+
+  /**
+   * Best-effort Host status write of the egress-broker condition. Skips the fresh
+   * GET entirely for the common case of a Host that neither declares an
+   * openai-compatible slot nor already carries the condition — no write, no GET.
+   */
+  private async writeHostBrokersCondition(
+    host: HostCRD,
+    provisioned: number,
+    dropped: SlotOutcome[]
+  ): Promise<void> {
+    const declaresOpenAiCompatible = hostDeclaresOpenAiCompatible(host)
+    const hasCondition = host.status?.conditions?.some(
+      c => c.type === OAI_EGRESS_BROKERS_CONDITION_TYPE
+    )
+    if (!declaresOpenAiCompatible && !hasCondition) return
+    await writeBrokersCondition(this.customApi, host, fresh =>
+      buildBrokersCondition(fresh, { declaresOpenAiCompatible, provisioned, dropped })
+    )
   }
 
   /** Read one credential slot (base64, as stored) from the Host's own Secret. */
@@ -1047,7 +1106,7 @@ server {
   private async sweepOrphans(): Promise<void> {
     const desired = new Set<string>()
     for (const host of this.hosts.values()) {
-      for (const broker of this.buildDesiredBrokers(host)) desired.add(broker.brokerName)
+      for (const broker of this.buildDesiredBrokers(host).desired) desired.add(broker.brokerName)
     }
     const egressOrphans = await this.listBrokerDeploymentNames(
       `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${COMPONENT_LABEL}=${OAI_EGRESS_COMPONENT_VALUE}`

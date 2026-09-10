@@ -25,6 +25,7 @@ export declare function classifyLanBaseURL(
 ): LanBaseUrlDecision
 
 export declare const PRIMARY_SLOT_ID: string
+export declare const OAI_EGRESS_BROKERS_CONDITION_TYPE: string
 export declare function fallbackSlotId(index: number): string
 export declare function brokerNameFor(hostName: string, slotId: string): string
 export declare function brokerServiceHost(brokerName: string, namespace: string): string

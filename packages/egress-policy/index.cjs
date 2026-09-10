@@ -134,6 +134,12 @@ function classifyLanBaseURL(baseURL, options) {
 // The slotId of the PRIMARY model's broker. Fallbacks use fallbackSlotId(i).
 const PRIMARY_SLOT_ID = 'primary'
 
+// Host `status.conditions[].type` HCC stamps to report the egress-broker
+// provisioning outcome for a Host's local openai-compatible slots. Shared here so
+// control-ui reads the SAME type it filters the Host status conditions by, without
+// a second string literal drifting between the writer (HCC) and the reader (UI).
+const OAI_EGRESS_BROKERS_CONDITION_TYPE = 'OpenAiEgressBrokersReady'
+
 /**
  * The slotId of the fallback at index `i` in `spec.llmPolicy.fallbacks` (the
  * RAW array index, the same one HCC iterates). The broker hash is derived from
@@ -188,6 +194,7 @@ module.exports = {
   cidrOverlaps,
   classifyLanBaseURL,
   PRIMARY_SLOT_ID,
+  OAI_EGRESS_BROKERS_CONDITION_TYPE,
   fallbackSlotId,
   brokerNameFor,
   brokerServiceHost,

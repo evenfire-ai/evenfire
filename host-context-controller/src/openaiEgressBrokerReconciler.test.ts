@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { OAI_EGRESS_BROKERS_CONDITION_TYPE } from '@clerum/egress-policy'
 import {
   type MockAppsApi,
   type MockCoreApi,
+  type MockCustomApi,
   type MockNetworkingApi,
   asAppsApi,
   asCoreApi,
+  asCustomApi,
   asNetworkingApi,
   createMockAppsApi,
   createMockCoreApi,
+  createMockCustomApi,
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { HOST_LABEL, MANAGED_BY_LABEL, OAI_EGRESS_BROKER_LABEL } from './constants'
@@ -17,7 +21,7 @@ import {
   brokerNameFor,
   hostDeclaresOpenAiCompatible,
 } from './openaiEgressBrokerReconciler'
-import { HostCRD, HostSpec } from './types'
+import { HostCRD, HostCondition, HostSpec } from './types'
 
 vi.mock('./config', () => ({
   config: {
@@ -84,6 +88,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
   let appsApi: MockAppsApi
   let coreApi: MockCoreApi
   let networkingApi: MockNetworkingApi
+  let customApi: MockCustomApi
   let hosts: Map<string, HostCRD>
   let reconciler: OpenAiEgressBrokerReconciler
   // Host-inventory authority the reconciler's fullReconcile fence reads. Default
@@ -95,6 +100,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(networkingApi),
+      customApi: asCustomApi(customApi),
       hostInventoryAuthoritative: () => authoritative,
     })
   }
@@ -104,10 +110,35 @@ describe('OpenAiEgressBrokerReconciler', () => {
     appsApi = createMockAppsApi()
     coreApi = createMockCoreApi()
     networkingApi = createMockNetworkingApi()
+    customApi = createMockCustomApi()
+    // Fresh Host reads return no conditions by default (so a first write happens).
+    customApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string } = {}) =>
+      Promise.resolve({
+        metadata: { name: name ?? 'h', namespace: 'mcp-host', uid: 'u', resourceVersion: '42' },
+        spec: { host: name ?? 'h', contextRef: 'ctx', secretRef: 'host-secret' },
+        status: {},
+      })
+    )
     hosts = new Map()
     authoritative = true
     reconciler = build()
   })
+
+  /** The conditions[] value written by the last status patch, if any. */
+  function lastWrittenConditions(): HostCondition[] | undefined {
+    const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
+    if (calls.length === 0) return undefined
+    const body = (calls[calls.length - 1][0] as { body: Array<{ path: string; value: unknown }> })
+      .body
+    const op = body.find(o => o.path === '/status/conditions' || o.path === '/status')
+    if (!op) return undefined
+    return op.path === '/status'
+      ? (op.value as { conditions?: HostCondition[] }).conditions
+      : (op.value as HostCondition[])
+  }
+  function brokersCondition(): HostCondition | undefined {
+    return lastWrittenConditions()?.find(c => c.type === OAI_EGRESS_BROKERS_CONDITION_TYPE)
+  }
 
   it('T1: primary local endpoint provisions the full broker with deterministic names + HOST_LABEL', async () => {
     const host = makeHost({
@@ -493,5 +524,78 @@ describe('OpenAiEgressBrokerReconciler', () => {
     expect(coreApi.deleteNamespacedConfigMap).toHaveBeenCalledTimes(brokers.length)
     // src (host ns) + ingress + egress (egress ns) = 3 NetworkPolicies per broker.
     expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(brokers.length * 3)
+  })
+
+  it('T12: a dropped slot writes a False OpenAiEgressBrokersReady condition to Host status', async () => {
+    const host = makeHost({
+      name: 'h12',
+      // 10.96.0.1 is inside the mocked clusterInternalEgressCidrs (10.96.0.0/12).
+      spec: { model: { provider: 'openai-compatible', baseURL: 'http://10.96.0.1:6443/v1' } },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    // Observable: exactly one status patch reporting the drop.
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    const cond = brokersCondition()
+    expect(cond).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'ClusterInternal',
+    })
+    expect(cond?.message).toContain('primary')
+  })
+
+  it('T13: a fully provisioned slot writes a True AllSlotsProvisioned condition', async () => {
+    const host = makeHost({
+      name: 'h13',
+      spec: { model: { provider: 'openai-compatible', baseURL: LOCAL_URL } },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(brokersCondition()).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'True',
+      reason: 'AllSlotsProvisioned',
+    })
+  })
+
+  it('T14: anti-oscillation — a second reconcile against the same status does not re-patch', async () => {
+    // Fresh GET reflects the last written condition, so the dirty check on the
+    // second reconcile sees an equivalent condition and skips the write.
+    let currentConditions: HostCondition[] = []
+    customApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string } = {}) =>
+      Promise.resolve({
+        metadata: { name: name ?? 'h14', namespace: 'mcp-host', uid: 'u', resourceVersion: '1' },
+        spec: { host: name ?? 'h14', contextRef: 'ctx', secretRef: 'host-secret' },
+        status: { conditions: currentConditions },
+      })
+    )
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(
+      ({ body }: { body?: Array<{ path: string; value: unknown }> } = {}) => {
+        const op = (body ?? []).find(o => o.path === '/status/conditions' || o.path === '/status')
+        if (op) {
+          currentConditions =
+            op.path === '/status'
+              ? ((op.value as { conditions?: HostCondition[] }).conditions ?? [])
+              : (op.value as HostCondition[])
+        }
+        return Promise.resolve({})
+      }
+    )
+
+    const host = makeHost({
+      name: 'h14',
+      spec: { model: { provider: 'openai-compatible', baseURL: LOCAL_URL } },
+    })
+    hosts.set(host.name, host)
+
+    await reconciler.reconcileForHost(host)
+    await reconciler.reconcileForHost(host)
+
+    // Only the first reconcile writes; the second is a no-op (equivalent condition).
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
   })
 })
