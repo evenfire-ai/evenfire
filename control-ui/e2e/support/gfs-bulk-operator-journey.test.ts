@@ -16,7 +16,6 @@ import {
   uniqueGfsFixtureName,
 } from '../../../tests/e2e/gfsUiFixtures'
 import { E2E_TEST_EMAIL, E2E_TEST_NAME } from '../../../tests/e2e/testUser'
-import { exerciseGfsBulkShareJourney } from './gfs-bulk-share-journey.test'
 import {
   CONTROL_UI_BASE_URL,
   loginControlUi,
@@ -39,15 +38,12 @@ async function chooseGrantSubject(
   await option.click()
 }
 
-async function choosePermission(
+async function chooseRole(
   panel: ReturnType<Page['getByRole']>,
-  permissionName: string
+  roleName: 'Read' | 'Editor'
 ): Promise<void> {
-  const menu = panel.getByRole('menu', { name: 'Permissions' })
-  if (!(await menu.isVisible().catch(() => false))) {
-    await panel.getByRole('button', { name: 'Permissions', exact: true }).click()
-  }
-  await menu.getByRole('menuitemcheckbox', { name: permissionName, exact: true }).click()
+  await panel.getByRole('button', { name: 'Access role for selected recipients' }).click()
+  await panel.getByRole('option', { name: roleName, exact: true }).click()
 }
 
 export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> {
@@ -61,7 +57,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
     const targetTeam = seedE2EUserTeam(E2E_TEST_EMAIL, teamName)
     const workflowRecipe = seedGfsWorkflowRecipeFixture(workflowName)
     const grantPanel = () =>
-      page.getByRole('dialog', { name: `Manage folder ${fixture.name}`, exact: true })
+      page.getByRole('dialog', { name: `Share folder ${fixture.name}`, exact: true })
     const folderRow = (name: string) =>
       page
         .getByRole('list', { name: 'Current folder resources' })
@@ -88,7 +84,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       await expect(panel.getByLabel('Subject ID')).toHaveCount(0)
       await expect(
         panel.getByRole('checkbox', { name: 'Include contents of this folder' })
-      ).toBeChecked()
+      ).toHaveCount(0)
 
       await chooseGrantSubject(panel, E2E_TEST_EMAIL, E2E_TEST_NAME)
       await chooseGrantSubject(panel, targetTeam.name, targetTeam.name)
@@ -96,44 +92,31 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       await expect(selectedSubjects).toContainText(E2E_TEST_NAME)
       await expect(selectedSubjects).toContainText(targetTeam.name)
 
-      await choosePermission(panel, 'Manage access')
-      await choosePermission(panel, 'Share')
+      await chooseRole(panel, 'Editor')
       await chooseGrantSubject(panel, 'chatllm', 'chatllm (Stateful)')
       await chooseGrantSubject(panel, 'chatllm-stateless', 'chatllm-stateless (Stateless)')
       await expect(selectedSubjects).toContainText('chatllm (Stateful)')
       await expect(selectedSubjects).toContainText('chatllm-stateless (Stateless)')
-      await expect(panel.getByText(/host selections are limited to read and write/i)).toBeVisible()
-
-      await panel.getByRole('button', { name: 'Permissions', exact: true }).click()
-      const permissionMenu = panel.getByRole('menu', { name: 'Permissions' })
-      await expect(
-        permissionMenu.getByRole('menuitemcheckbox', { name: 'Manage access' })
-      ).toHaveCount(0)
-      await expect(permissionMenu.getByRole('menuitemcheckbox', { name: 'Share' })).toHaveCount(0)
-      await expect(permissionMenu.getByRole('menuitemcheckbox', { name: 'Delete' })).toHaveCount(0)
-      await expect(panel.getByRole('button', { name: 'Create share', exact: true })).toBeDisabled()
-
+      await expect(panel.getByText(/use read\/write access only/i)).toBeVisible()
       await chooseGrantSubject(panel, workflowRecipe.name, workflowRecipe.name)
       await expect(selectedSubjects).toContainText(workflowRecipe.name)
       await expect(selectedSubjects.getByRole('button', { name: /^Remove / })).toHaveCount(5)
-      await choosePermission(panel, 'Read')
-      await choosePermission(panel, 'Write')
+      await expect(
+        panel.getByRole('checkbox', { name: 'Include contents of this folder' })
+      ).toBeChecked()
+      await expect(
+        panel.getByRole('button', { name: 'Access role for selected recipients' })
+      ).toContainText('Editor')
     })
 
-    await test.step('operator confirms one atomic bulk grant and sees persisted access', async () => {
+    await test.step('operator shares one atomic bulk grant and sees persisted access', async () => {
       const panel = grantPanel()
       const grantResponsePromise = page.waitForResponse(
         response =>
           response.request().method() === 'PUT' &&
           response.url().includes('/control-api/api/v1/gfs/grants')
       )
-      await panel.getByRole('button', { name: 'Grant access', exact: true }).click()
-      const dialog = page.getByRole('alertdialog')
-      await expect(dialog).toContainText('Grant access?')
-      await expect(dialog).toContainText(fixture.name)
-      await expect(dialog).toContainText(/5 subjects/i)
-      await expect(dialog).toContainText(/read, write/)
-      await dialog.getByRole('button', { name: 'Grant' }).click()
+      await panel.getByRole('button', { name: 'Share', exact: true }).click()
       const grantResponse = await grantResponsePromise
       expect(grantResponse.status(), `${grantResponse.url()} ${await grantResponse.text()}`).toBe(
         200
@@ -154,7 +137,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       expect(submittedBody.subject).toBeUndefined()
       expect(submittedBody.subjects).toEqual(expectedSubjects)
       expect(submittedBody.permissions).toEqual(['read', 'write'])
-      await expect(page.getByText('Grant saved.').last()).toBeVisible({ timeout: 15_000 })
+      await expect(page.getByText('Access shared.').last()).toBeVisible({ timeout: 15_000 })
 
       for (const subject of expectedSubjects) {
         await expect
@@ -184,7 +167,7 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
 
     await test.step('closing and reopening the modal rehydrates persisted access and allows revocation', async () => {
       const panel = grantPanel()
-      await panel.getByRole('button', { name: 'Close manage dialog' }).click()
+      await panel.getByRole('button', { name: 'Close share dialog' }).click()
       await expect(panel).toHaveCount(0)
 
       await page.reload()
@@ -193,10 +176,14 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       const row = folderRow(fixture.name)
       await expect(row).toBeVisible({ timeout: 20_000 })
       await row.getByRole('button', { name: `Actions for ${fixture.name}` }).click()
-      await page.getByRole('menuitem', { name: 'Manage access' }).click()
+      await page.getByRole('menuitem', { name: 'Share' }).hover()
+      await page
+        .getByRole('menu', { name: `Share options for ${fixture.name}` })
+        .getByRole('menuitem', { name: 'Share' })
+        .click()
       const reopenedPanel = grantPanel()
       await expect(reopenedPanel).toBeVisible()
-      const existingAccess = reopenedPanel.getByRole('region', { name: 'Who has access' })
+      const existingAccess = reopenedPanel.getByRole('region', { name: 'People with access' })
       await expect(existingAccess.getByText(E2E_TEST_NAME, { exact: true })).toBeVisible()
       await expect(existingAccess.getByText(targetTeam.name, { exact: true })).toBeVisible()
       await expect(existingAccess.getByText('chatllm (Stateful)', { exact: true })).toBeVisible()
@@ -204,14 +191,18 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
         existingAccess.getByText('chatllm-stateless (Stateless)', { exact: true })
       ).toBeVisible()
       await expect(existingAccess.getByText(workflowRecipe.name, { exact: true })).toBeVisible()
-      await expect(existingAccess.getByText('Direct grant · host')).toHaveCount(5)
+      await expect(existingAccess.getByText('Direct grant · user')).toHaveCount(1)
+      await expect(existingAccess.getByText('Direct grant · team')).toHaveCount(1)
+      await expect(existingAccess.getByText('Direct grant · host')).toHaveCount(3)
 
       const revokeResponsePromise = page.waitForResponse(
         response =>
           response.request().method() === 'DELETE' &&
           response.url().includes('/control-api/api/v1/gfs/grants/')
       )
-      await existingAccess.getByRole('button', { name: `Actions for ${E2E_TEST_NAME}` }).click()
+      await existingAccess
+        .getByRole('button', { name: `Actions for direct grant to ${E2E_TEST_NAME}` })
+        .click()
       await page.getByRole('menuitem', { name: 'Remove access' }).click()
       const confirmation = page.getByRole('alertdialog')
       await expect(confirmation).toContainText('Remove access?')
@@ -241,25 +232,13 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
       page,
       unchangedHostSubjectIds: ['1st:mcp-host/chatllm-stateless', workflowRecipe.subjectId],
     })
-    await exerciseGfsBulkShareJourney({
-      fixture,
-      page,
-      targetTeam,
-      targetUserEmail: E2E_TEST_EMAIL,
-      targetUserId,
-    })
-
     await test.step('operator remains a distinct singular grant target', async () => {
       const panel = grantPanel()
       await chooseGrantSubject(panel, 'Operator', 'Operator')
       await expect(panel.getByRole('button', { name: 'Remove Operator' })).toBeVisible()
-      await choosePermission(panel, 'Read')
-      await panel.getByRole('button', { name: 'Grant access', exact: true }).click()
-      const dialog = page.getByRole('alertdialog')
-      await expect(dialog).toContainText('Grant access?')
-      await expect(dialog).toContainText(/operator/i)
-      await dialog.getByRole('button', { name: 'Grant' }).click()
-      await expect(page.getByText('Grant saved.').last()).toBeVisible({ timeout: 15_000 })
+      await chooseRole(panel, 'Read')
+      await panel.getByRole('button', { name: 'Share', exact: true }).click()
+      await expect(page.getByText('Access shared.').last()).toBeVisible({ timeout: 15_000 })
       await expect
         .poll(
           () =>
@@ -269,16 +248,16 @@ export async function exerciseGfsBulkOperatorJourney(page: Page): Promise<void> 
             }),
           { timeout: 15_000, intervals: [250, 500, 1_000] }
         )
-        .toMatchObject({ permissions: ['read'], inherit: true, grantedBy: 'operator:' })
+        .toMatchObject({ permissions: ['read', 'share'], inherit: true, grantedBy: 'operator:' })
     })
 
     await test.step('operator cannot submit without visible subject and permissions', async () => {
       const panel = grantPanel()
       await expect(panel.getByLabel('Subject ID')).toHaveCount(0)
-      await expect(panel.getByRole('button', { name: 'Grant access', exact: true })).toBeDisabled()
+      await expect(panel.getByRole('button', { name: 'Share', exact: true })).toHaveCount(0)
       await panel.getByRole('combobox', { name: SUBJECT_PICKER_LABEL }).fill('not-a-uuid')
       await expect(panel.getByText('No subjects found.')).toBeVisible()
-      await expect(panel.getByRole('button', { name: 'Grant access', exact: true })).toBeDisabled()
+      await expect(panel.getByRole('button', { name: 'Share', exact: true })).toHaveCount(0)
     })
   } finally {
     try {

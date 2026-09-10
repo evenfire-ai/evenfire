@@ -28,6 +28,7 @@ import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
 import { useChatDrawerResize } from '@hooks/useChatDrawerResize'
+import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
 import {
@@ -243,6 +244,9 @@ function DesktopUpdateRequiredDialog({
 
 export function App() {
   const vm = useAppController()
+  // Electron never fires `visibilitychange` on OS-window switching; bridge
+  // DOM focus/blur so focus-aware query revalidation actually runs.
+  useWindowFocusBridge()
   const [themeMode, setThemeMode] = React.useState<ThemeMode>(getInitialThemeMode)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState<boolean>(
     getInitialSidebarCollapsed

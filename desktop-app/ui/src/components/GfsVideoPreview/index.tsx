@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconButton, StatusBanner } from '@components/Common'
+import { Button, StatusBanner } from '@components/Common'
 import { IconClose } from '@components/SidebarNav/icons'
+import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
 import type { GfsVideoPreviewProps } from './types'
 
@@ -17,6 +18,7 @@ export function GfsVideoPreview({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const backdropStyle = useWorkspaceModalStyle()
   const onDownloadErrorRef = useRef(onDownloadError)
 
   useEffect(() => {
@@ -62,6 +64,7 @@ export function GfsVideoPreview({
     <div
       className="da-gfs-video-preview-modal"
       role="presentation"
+      style={backdropStyle}
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose()
       }}
@@ -74,15 +77,17 @@ export function GfsVideoPreview({
       >
         <header className="da-gfs-video-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
-          <IconButton
+          <Button
+            className="da-gfs-video-preview-dialog__close"
+            data-preview-close
             ref={closeButtonRef}
-            label="Close video preview"
+            aria-label="Close video preview"
+            color="neutral"
             onClick={onClose}
-            size="sm"
             variant="ghost"
           >
-            <IconClose />
-          </IconButton>
+            <IconClose width={18} height={18} />
+          </Button>
         </header>
         <div className="da-gfs-video-preview-dialog__body">
           {previewError ? <StatusBanner tone="error" text={previewError} /> : null}

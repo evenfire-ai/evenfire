@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@clerum/desktop-app-links": "file:../packages/desktop-app-links",
+    "@clerum/gfs-interaction-policy": "file:../packages/gfs-interaction-policy",
     "@tanstack/react-query": "5.100.10",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "js-yaml": "^4.1.1",
