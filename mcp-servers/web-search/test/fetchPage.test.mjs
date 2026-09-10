@@ -179,3 +179,13 @@ test('DNS host connects only to the validated address and preserves Host', async
   assert.equal(requests[0].hostname, '8.8.8.8')
   assert.equal(requests[0].headers.Host, 'fixture.test:8080')
 })
+
+for (const [html, expectedTitle] of [
+  ['<title>İstanbul</title><p>Hello</p>', 'İstanbul'],
+  ['<!--İ--><title>Hello</title>', 'Hello'],
+]) {
+  test(`title offsets remain valid for Unicode: ${expectedTitle}`, async t => {
+    upstream(t, [{ body: html }])
+    assert.equal((await fetchPage('http://8.8.8.8', 100)).title, expectedTitle)
+  })
+}

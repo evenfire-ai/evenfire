@@ -39,7 +39,9 @@ export function pageText(html: string): string {
 }
 
 function titleText(html: string): string {
-  const lower = html.toLowerCase()
+  // HTML tag names are ASCII-case-insensitive. Unicode lowercasing can expand
+  // characters and invalidate offsets subsequently applied to the original HTML.
+  const lower = html.replace(/[A-Z]/g, character => character.toLowerCase())
   const start = lower.indexOf('<title')
   if (start === -1 || !/[\s>]/.test(lower[start + 6] ?? '')) return ''
   const body = lower.indexOf('>', start + 6)

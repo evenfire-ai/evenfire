@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 // Development-only: no external network, published ports, or credential mounts.
 if (process.versions.node.split('.')[0] !== '24') throw new Error('Use Node 24 for network tests')
 const root = realpathSync(fileURLToPath(new URL('..', import.meta.url)))
+const deadlineRunner = path.resolve(root, '../../scripts/minikube/run-with-deadline.mjs')
 const image =
   process.argv[2] === '--image' && process.argv.length === 4 ? process.argv[3] : undefined
 if (process.argv.length > 2 && !image)
@@ -17,6 +18,7 @@ const endpoint =
   execFileSync('docker', ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], {
     encoding: 'utf8',
     timeout: 10000,
+    killSignal: 'SIGKILL',
   }).trim()
 if (
   !endpoint.startsWith('unix:///') &&
@@ -45,7 +47,7 @@ try {
       '-addext',
       'subjectAltName=DNS:fixture.test,DNS:rebind.test,IP:11.198.0.2',
     ],
-    { stdio: 'ignore', timeout: 10000 }
+    { stdio: 'ignore', timeout: 10000, killSignal: 'SIGKILL' }
   )
   // Linux bind mounts retain the runner UID. Container root with ALL caps
   // dropped cannot read its 0700 directory. Grant only the host group access
@@ -89,7 +91,6 @@ try {
     'ip addr add 11.198.0.2/32 dev lo; ip -6 addr add 2606:4700::198/128 dev lo; test -z "$(ip -6 route show default)"; test -z "$(ip route show default)"; printf "nameserver 127.0.0.1\\n" > /etc/resolv.conf; node --test /app/test/mcp.network.mjs'
   )
   let child
-  let timeout
   let interrupted = false
   const stop = () => {
     interrupted = true
@@ -98,27 +99,46 @@ try {
   process.once('SIGINT', stop)
   process.once('SIGTERM', stop)
   try {
-    child = spawn('docker', args, { stdio: 'inherit' })
-    timeout = setTimeout(stop, 60000)
+    // Docker can proxy SIGTERM without exiting. Reuse the canonical process
+    // deadline/escalation before exact-name cleanup instead of waiting forever.
+    child = spawn(
+      process.execPath,
+      [
+        deadlineRunner,
+        '--timeout-seconds',
+        '60',
+        '--kill-grace-seconds',
+        '5',
+        '--label',
+        'web-search-network',
+        '--',
+        'docker',
+        ...args,
+      ],
+      { stdio: 'inherit' }
+    )
     const status = await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('exit', resolve)
     })
     process.exitCode = interrupted || status !== 0 ? 1 : 0
   } finally {
-    clearTimeout(timeout)
     process.removeListener('SIGINT', stop)
     process.removeListener('SIGTERM', stop)
     // Random name belongs exclusively to this invocation, including on timeout.
     try {
-      execFileSync('docker', [...docker, 'rm', '-f', name], { stdio: 'ignore', timeout: 10000 })
+      execFileSync('docker', [...docker, 'rm', '-f', name], {
+        stdio: 'ignore',
+        timeout: 10000,
+        killSignal: 'SIGKILL',
+      })
     } catch {
       // --rm may already have removed it. Prove absence; a Docker failure is not cleanup.
       try {
         const remaining = execFileSync(
           'docker',
           [...docker, 'ps', '-aq', '--filter', `name=^/${name}$`],
-          { encoding: 'utf8', timeout: 10000 }
+          { encoding: 'utf8', timeout: 10000, killSignal: 'SIGKILL' }
         ).trim()
         if (remaining) throw new Error('The test container remains after cleanup')
       } catch {

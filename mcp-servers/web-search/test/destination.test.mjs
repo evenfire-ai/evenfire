@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { Resolver } from 'node:dns/promises'
-import { mock, test } from 'node:test'
+import { test } from 'node:test'
 import { isPublicAddress, parsePageUrl, resolvePageAddress } from '../dist/fetchPageDestination.js'
 
 const blocked = [
