@@ -237,19 +237,31 @@ Three things to know as an operator:
 - **The address must be a private LAN IP.** The CRD rejects cluster-internal
   `.svc` / `.svc.cluster.local` targets by shape; metadata (169.254/16) and CGNAT
   (100.64/10) ranges are rejected downstream by control-api / HCC, because CEL
-  cannot do CIDR arithmetic. The always-on guard requires a private, non-reserved
-  RFC1918 address; the runtime `/32` NetworkPolicy then constrains the broker to
-  exactly that destination.
-- **Optionally turn on the strong cluster-internal guard.** Set
-  `CONTEXT_MAPPER_K8S_API_CIDRS` and `CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS` on the
-  host-context-controller Deployment so HCC also rejects a `baseURL` that lands
-  inside the apiserver / pod / Service CIDRs. These are environment-specific, so
-  the minikube overlay ships them as an opt-in per-operator patch — render it with
-  `make minikube-detect-cluster-cidrs` and add
-  `patches/llm-egress-cluster-cidrs.yaml` to the overlay's `patchesStrategicMerge`
-  (see `deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template`).
-  HCC does **not** fail closed without them — it runs the always-on tier — so a
-  cluster missing these envs still deploys, just with the weaker guard.
+  cannot do CIDR arithmetic. The address must be a private, non-reserved RFC1918
+  address; the runtime `/32` NetworkPolicy then constrains the broker to exactly
+  that destination.
+- **The cluster-internal guard is required, not optional.** HCC needs
+  `CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS` (the pod + Service ranges) to reject a
+  `baseURL` that lands inside cluster space — an apiserver/pod ClusterIP — which
+  CEL cannot compute. HCC is **fail-closed** on it: with
+  `CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=true` (the base default) it
+  refuses to provision **any** broker until the ranges are set. Even so, HCC
+  always pins the apiserver ClusterIP via a zero-config floor derived from
+  `KUBERNETES_SERVICE_HOST`, so that one address is rejected before the guard is
+  even configured. The ranges are environment-specific and gitignored, so the
+  minikube overlay **renders and applies the patch by default** — `make
+  minikube-deploy-all` runs `make minikube-detect-cluster-cidrs`, and
+  `patches/llm-egress-cluster-cidrs.yaml` is already in the overlay's
+  `patchesStrategicMerge` (see
+  `deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template`). A
+  deploy that deliberately runs without the guard sets
+  `CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false`; then the feature falls
+  back to the always-on RFC1918 + `/32` NetworkPolicy tier only.
+- **The apiserver-reachable ranges stay opt-in.**
+  `CONTEXT_MAPPER_K8S_API_CIDRS` also drives the `allow-k8s-api-egress-*`
+  NetworkPolicies and the watch-recovery E2E fixtures, so it is **not** set by the
+  default patch. Turn it on deliberately when you want HCC to also reject a
+  `baseURL` inside the apiserver CIDRs beyond the ClusterIP floor.
 
 A ready-to-adapt example (primary + fallback, both local) lives at
 [`charts/clerum-crds/examples/host-openai-compatible-lan.yaml`](../../charts/clerum-crds/examples/host-openai-compatible-lan.yaml).

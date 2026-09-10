@@ -293,7 +293,7 @@ minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml w
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-k8s-api-ip.sh
 
 .PHONY: minikube-detect-cluster-cidrs
-minikube-detect-cluster-cidrs: ## Render overlays/minikube/patches/llm-egress-cluster-cidrs.yaml (opt-in: HCC strong egress-broker guard; then add it to the overlay's patchesStrategicMerge)
+minikube-detect-cluster-cidrs: ## Render overlays/minikube/patches/llm-egress-cluster-cidrs.yaml (HCC egress-broker cluster-internal guard; applied by default)
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-cluster-cidrs.sh
 
 .PHONY: minikube-deploy-all minikube-deploy-all-body
@@ -309,6 +309,11 @@ minikube-deploy-all-body:
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
+	@# Render the cluster-internal CIDR patch the egress-broker guard requires.
+	@# HCC is fail-closed on CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS, so this patch is
+	@# default-on; it renders here (before image-mode.sh --render-dir below) so the
+	@# rendered file exists in the copy of deploy/ the overlay is built from.
+	@$(MAKE) --no-print-directory minikube-detect-cluster-cidrs
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
 	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \

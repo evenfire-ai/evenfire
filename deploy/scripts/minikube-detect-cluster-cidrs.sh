@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 #
 # Renders deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml from its
-# .template, filling in the cluster-internal CIDRs that turn on HCC's STRONG
-# egress-broker guard (CONTEXT_MAPPER_K8S_API_CIDRS +
-# CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS). See the template header for what this
-# enables and why it is opt-in.
+# .template, filling in the cluster-internal CIDRs that HCC's egress-broker guard
+# requires (CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS). HCC is fail-closed on this
+# value, so this patch is applied BY DEFAULT — see the template header.
 #
 # These values are environment-specific and the rendered file is gitignored, so
 # only the template is tracked — mirrors deploy/scripts/minikube-detect-k8s-api-ip.sh.
 #
 # Detection (minikube / kubeadm):
-#   * K8S_API_CIDRS         = the kubernetes endpoint IP as a /32 (same source as
-#                             minikube-detect-k8s-api-ip.sh — the node IP the
-#                             apiserver is reachable on after DNAT).
 #   * CLUSTER_INTERNAL_CIDRS = pod CIDR (--cluster-cidr) + Service CIDR
 #                             (--service-cluster-ip-range), read from the
 #                             kube-apiserver / kube-controller-manager command line.
+#
+# The apiserver-reachable ranges (CONTEXT_MAPPER_K8S_API_CIDRS) stay OPT-IN and
+# are NOT rendered here — they also drive the allow-k8s-api-egress NetworkPolicies
+# and watch-recovery fixtures. Use deploy/scripts/minikube-detect-k8s-api-ip.sh /
+# a dedicated patch to turn them on deliberately.
 #
 # Usage:
 #   deploy/scripts/minikube-detect-cluster-cidrs.sh
 #   CONTEXT=clerum-test deploy/scripts/minikube-detect-cluster-cidrs.sh
 #
 # Override detection explicitly (e.g. for a non-minikube cluster):
-#   K8S_API_CIDRS=10.0.0.1/32 CLUSTER_INTERNAL_CIDRS=10.244.0.0/16,10.96.0.0/12 \
+#   CLUSTER_INTERNAL_CIDRS=10.244.0.0/16,10.96.0.0/12 \
 #     deploy/scripts/minikube-detect-cluster-cidrs.sh
 set -euo pipefail
 
@@ -34,19 +35,6 @@ TEMPLATE_FILE="$PATCH_FILE.template"
 if [ ! -f "$TEMPLATE_FILE" ]; then
   echo "ERROR: template $TEMPLATE_FILE not found." >&2
   exit 1
-fi
-
-# kube-apiserver endpoint IP → /32 (same source as minikube-detect-k8s-api-ip.sh).
-if [ -z "${K8S_API_CIDRS:-}" ]; then
-  IP="$(kubectl --context="$CONTEXT" get endpoints kubernetes -n default \
-    -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
-  if [ -z "$IP" ]; then
-    echo "ERROR: could not read kubernetes endpoint IP from context '$CONTEXT'." >&2
-    echo "       Is the cluster running? Try: make minikube-status" >&2
-    echo "       Or set K8S_API_CIDRS / CLUSTER_INTERNAL_CIDRS explicitly." >&2
-    exit 1
-  fi
-  K8S_API_CIDRS="$IP/32"
 fi
 
 # Pod + Service CIDRs from the apiserver pod's command line (kubeadm/minikube).
@@ -73,15 +61,12 @@ if [ -z "${CLUSTER_INTERNAL_CIDRS:-}" ]; then
 fi
 
 echo "[detect-cluster-cidrs] context=$CONTEXT"
-echo "[detect-cluster-cidrs]   K8S_API_CIDRS=$K8S_API_CIDRS"
 echo "[detect-cluster-cidrs]   CLUSTER_INTERNAL_CIDRS=$CLUSTER_INTERNAL_CIDRS"
 
 tmp="$(mktemp)"
-sed -e "s#__K8S_API_CIDRS__#${K8S_API_CIDRS}#g" \
-    -e "s#__CLUSTER_INTERNAL_CIDRS__#${CLUSTER_INTERNAL_CIDRS}#g" \
+sed -e "s#__CLUSTER_INTERNAL_CIDRS__#${CLUSTER_INTERNAL_CIDRS}#g" \
     "$TEMPLATE_FILE" > "$tmp"
 mv "$tmp" "$PATCH_FILE"
 
 echo "[detect-cluster-cidrs] rendered: $PATCH_FILE"
-echo "[detect-cluster-cidrs] NOTE: add '- patches/llm-egress-cluster-cidrs.yaml' to"
-echo "[detect-cluster-cidrs]       $OVERLAY_DIR/kustomization.yaml (patchesStrategicMerge) to enable the strong guard."
+echo "[detect-cluster-cidrs] applied by default via $OVERLAY_DIR/kustomization.yaml (patchesStrategicMerge)."

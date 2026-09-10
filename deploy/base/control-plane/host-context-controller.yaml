@@ -149,6 +149,15 @@ spec:
           value: llm-egress
         - name: CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT
           value: "3000"
+        # Fail-closed guard. HCC refuses to provision a broker unless
+        # CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS is set, so a deploy that forgot the
+        # cluster-internal ranges cannot silently accept a cluster-internal baseURL
+        # (SSRF pivot into the control plane). BASE IS FAIL-CLOSED: it ships no
+        # CIDRs, so an overlay MUST supply CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS
+        # (the minikube overlay renders it by default) or the feature stays inert.
+        # Set to "false" only for a deploy that deliberately runs without the guard.
+        - name: CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS
+          value: "true"
         # Existing Control API RS256 public key used to verify the first-party
         # mcp-host access-token family on HCC v2 Host routes. The audience is a
         # fixed HCC code contract; the issuer is read from the same ConfigMap
