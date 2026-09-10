@@ -186,6 +186,27 @@ describe('applyNetworkPolicy no-op gate', () => {
     }
   )
 
+  it('GATE-NP-0: mutation denied at entry skips GET and all writes', async () => {
+    const api = fakeNetworkingApi()
+    const mutationAllowed = vi.fn(() => false)
+
+    await expect(
+      applyNetworkPolicy(
+        api as unknown as k8s.NetworkingV1Api,
+        'np',
+        'ns',
+        desiredPolicy(),
+        '[NetPol]',
+        mutationAllowed
+      )
+    ).resolves.toBeUndefined()
+
+    expect(mutationAllowed).toHaveBeenCalledOnce()
+    expect(api.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
   it('GATE-NP-1: expiry during existence GET suppresses POST and drift PUT', async () => {
     const desired = desiredPolicy()
     const drifted = asApiserverNetworkPolicy(desired, { port: 9090 })

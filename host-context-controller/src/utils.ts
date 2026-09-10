@@ -133,35 +133,36 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
  */
 export async function replaceWithConflictRetry<
   T extends { metadata?: { resourceVersion?: string }; kind?: string },
->(opts: {
-  description: string
-  logPrefix: string
-  body: T
-  /** Rebuild mutable desired state immediately before each replace attempt. */
-  resolveBody?: () => T | Promise<T>
-  read: () => Promise<T>
-  replace: (body: T) => Promise<unknown>
-  mergeExisting?: (body: T, existing: T) => T
-  /**
-   * Called after the desired object has been merged with server-owned fields.
-   * Returning true avoids a no-op replace (and therefore avoids a needless
-   * resourceVersion/generation bump) while retaining the conflict-retry path
-   * when a meaningful change is still required.
-   */
-  isUpToDate?: (body: T, existing: T) => boolean
-  /** Reject an object whose identity or ownership is unsafe to replace. */
-  validateExisting?: (existing: T) => void
-  /** Rechecked immediately before every Kubernetes write attempt. */
-  mutationAllowed?: () => boolean
-  /** Admission-sensitive callers must not treat an absent object as applied. */
-  missingIsError?: boolean
-  maxAttempts?: number
-}): Promise<void> {
+>(
+  opts: {
+    description: string
+    logPrefix: string
+    read: () => Promise<T>
+    replace: (body: T) => Promise<unknown>
+    mergeExisting?: (body: T, existing: T) => T
+    /**
+     * Called after the desired object has been merged with server-owned fields.
+     * Returning true avoids a no-op replace (and therefore avoids a needless
+     * resourceVersion/generation bump) while retaining the conflict-retry path
+     * when a meaningful change is still required.
+     */
+    isUpToDate?: (body: T, existing: T) => boolean
+    /** Reject an object whose identity or ownership is unsafe to replace. */
+    validateExisting?: (existing: T) => void
+    /** Rechecked immediately before every Kubernetes write attempt. */
+    mutationAllowed?: () => boolean
+    /** Admission-sensitive callers must not treat an absent object as applied. */
+    missingIsError?: boolean
+    maxAttempts?: number
+  } & (
+    | { body: T; resolveBody?: () => T | Promise<T> }
+    /** Rebuild desired state before each attempt without an unused eager body. */
+    | { body?: never; resolveBody: () => T | Promise<T> }
+  )
+): Promise<void> {
   const {
     description,
     logPrefix,
-    body,
-    resolveBody,
     read,
     replace,
     mergeExisting,
@@ -187,7 +188,8 @@ export async function replaceWithConflictRetry<
       throw err
     }
     validateExisting?.(existing)
-    const desired = resolveBody ? await resolveBody() : body
+    // The options union requires body whenever resolveBody is absent.
+    const desired: T = opts.resolveBody ? await opts.resolveBody() : opts.body!
     const base: T = {
       ...desired,
       metadata: { ...desired.metadata, resourceVersion: existing.metadata?.resourceVersion },

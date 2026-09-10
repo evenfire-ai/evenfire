@@ -37,8 +37,16 @@ function updatedRoleLogs(log: ReturnType<typeof vi.spyOn>) {
   return log.mock.calls.flatMap(([line]: unknown[]) => {
     if (typeof line !== 'string' || !line.startsWith('{')) return []
     const entry = JSON.parse(line)
-    return entry.msg === 'Updated Host Role'
-      ? [{ msg: entry.msg, host: entry.host, level: entry.level }]
+    return entry.msg === 'Kubernetes resource updated' && entry.description?.startsWith('Role ')
+      ? [
+          {
+            msg: entry.msg,
+            description: entry.description,
+            scope: entry.scope,
+            attempt: entry.attempt,
+            level: entry.level,
+          },
+        ]
       : []
   })
 }
@@ -132,7 +140,13 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(existing?.rules?.length).toBeGreaterThan(0)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -154,7 +168,13 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(existing?.rules?.length).toBe((desired.rules?.length ?? 0) + 1)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -177,7 +197,13 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(existing?.rules?.some(rule => rule.verbs?.includes('update'))).toBe(true)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -209,14 +235,26 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(secretGetRule(existing!).verbs).toEqual(['watch', 'get', 'list'])
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
 
       await (reconciler as any).ensureHostRole(host)
       expect(secretGetRule(existing!).verbs).toEqual(['get', 'watch', 'list'])
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -237,7 +275,13 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(existing?.metadata?.labels?.[HOST_LABEL]).toBe('other-host')
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -259,7 +303,13 @@ describe('Host ensureHostRole no-op gate', () => {
       expect(existing?.rules?.some(rule => rule.resources?.[0] === 'configmaps')).toBe(false)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -284,7 +334,13 @@ describe('Host ensureHostRole no-op gate', () => {
       )
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
       expect(updatedRoleLogs(log)).toEqual([
-        { msg: 'Updated Host Role', host: 'chatllm', level: 'info' },
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()

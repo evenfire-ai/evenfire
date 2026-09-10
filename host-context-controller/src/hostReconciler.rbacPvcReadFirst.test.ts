@@ -223,12 +223,75 @@ describe('Host read-first RBAC and PVC contracts', () => {
     expect(await count('Role', 'skipped')).toBe(0)
   })
 
-  it.each([403, 409, 500])('propagates Role PUT%d without introducing a retry', async code => {
+  it.each([403, 500])('propagates Role PUT%d without retrying', async code => {
     const f = fixture()
     const failure = { code }
     f.rbac.replaceNamespacedRole.mockRejectedValueOnce(failure)
     await expect((f.reconciler as any).ensureHostRole(host)).rejects.toBe(failure)
     expect(f.rbac.readNamespacedRole).toHaveBeenCalledOnce()
+    expect(f.rbac.replaceNamespacedRole).toHaveBeenCalledOnce()
+    expect(f.rbac.createNamespacedRole).not.toHaveBeenCalled()
+    expect(await count('Role', 'skipped')).toBe(0)
+  })
+
+  it('rereads a conflicted Role and replaces using the fresh resourceVersion', async () => {
+    const f = fixture()
+    f.rbac.readNamespacedRole
+      .mockResolvedValueOnce({ metadata: { name: 'host-rbac-host', resourceVersion: '17' } })
+      .mockResolvedValueOnce({ metadata: { name: 'host-rbac-host', resourceVersion: '18' } })
+    f.rbac.replaceNamespacedRole.mockRejectedValueOnce({ code: 409 })
+    await expect((f.reconciler as any).ensureHostRole(host)).resolves.toBeUndefined()
+    expect(f.rbac.readNamespacedRole).toHaveBeenCalledTimes(2)
+    expect(f.rbac.replaceNamespacedRole).toHaveBeenCalledTimes(2)
+    expect(
+      f.rbac.replaceNamespacedRole.mock.calls.map(
+        ([request]) => request.body.metadata.resourceVersion
+      )
+    ).toEqual(['17', '18'])
+    expect(f.rbac.createNamespacedRole).not.toHaveBeenCalled()
+    expect(await count('Role', 'skipped')).toBe(1)
+  })
+
+  it('accepts a Role already converged by the competing writer after a conflict', async () => {
+    const f = fixture()
+    f.rbac.replaceNamespacedRole.mockImplementationOnce(async ({ body }) => {
+      f.rbac.readNamespacedRole.mockResolvedValue({
+        ...structuredClone(body),
+        metadata: { ...body.metadata, resourceVersion: '18' },
+      })
+      throw { code: 409 }
+    })
+    await expect((f.reconciler as any).ensureHostRole(host)).resolves.toBeUndefined()
+    expect(f.rbac.readNamespacedRole).toHaveBeenCalledTimes(2)
+    expect(f.rbac.replaceNamespacedRole).toHaveBeenCalledOnce()
+    expect(f.rbac.createNamespacedRole).not.toHaveBeenCalled()
+    expect(await count('Role', 'skipped')).toBe(1)
+  })
+
+  it('propagates the final Role conflict after three attempts', async () => {
+    const f = fixture()
+    const failure = { code: 409 }
+    f.rbac.replaceNamespacedRole.mockRejectedValue(failure)
+    await expect((f.reconciler as any).ensureHostRole(host)).rejects.toBe(failure)
+    expect(f.rbac.readNamespacedRole).toHaveBeenCalledTimes(3)
+    expect(f.rbac.replaceNamespacedRole).toHaveBeenCalledTimes(3)
+    expect(f.rbac.createNamespacedRole).not.toHaveBeenCalled()
+    expect(await count('Role', 'skipped')).toBe(0)
+  })
+
+  it('rechecks admission before retrying a conflicted Role write', async () => {
+    const f = fixture()
+    let current = true
+    const retired = new Error('Host spec changed while the Role write was in flight')
+    retired.name = 'HostMutationSpecRevisionChangedError'
+    const revalidate = () => {
+      if (!current) throw retired
+    }
+    f.rbac.replaceNamespacedRole.mockImplementationOnce(async () => {
+      current = false
+      throw { code: 409 }
+    })
+    await expect((f.reconciler as any).ensureHostRole(host, revalidate)).rejects.toBe(retired)
     expect(f.rbac.replaceNamespacedRole).toHaveBeenCalledOnce()
     expect(f.rbac.createNamespacedRole).not.toHaveBeenCalled()
     expect(await count('Role', 'skipped')).toBe(0)

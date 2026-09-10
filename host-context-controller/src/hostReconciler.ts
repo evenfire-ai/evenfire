@@ -1117,12 +1117,18 @@ export class HostReconciler {
         ),
       converge: async read => {
         try {
-          const existing = await read()
-          revalidate?.()
-          if (roleMatchesDesired(body, existing)) return
-          body.metadata!.resourceVersion = existing.metadata?.resourceVersion
-          await this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body })
-          log.info('Updated Host Role', { host: host.name })
+          // Retry optimistic-lock contention, but never continue provisioning
+          // with stale permissions after the bounded retry budget is exhausted.
+          await replaceWithConflictRetry({
+            description: `Role "${name}"`,
+            logPrefix: '[HostReconciler]',
+            body,
+            read,
+            mutationAllowed,
+            isUpToDate: roleMatchesDesired,
+            replace: next =>
+              this.rbacApi.replaceNamespacedRole({ name, namespace: host.namespace, body: next }),
+          })
         } catch (error) {
           // Preserve the existing disappearance policy, without swallowing
           // authorization, transport, or terminal conflict failures.
@@ -3374,8 +3380,7 @@ export class HostReconciler {
             })
           )
         } catch (error) {
-          if (isBenignSupersessionError(error) || (error != null && getErrorCode(error) === 409))
-            throw error
+          if (error != null && getErrorCode(error) === 409) throw error
           log.error('Failed to create Host PVC', { host: host.name, err: error })
         }
       },
@@ -3420,8 +3425,7 @@ export class HostReconciler {
             this.coreApi.createNamespacedService({ namespace: host.namespace, body: service })
           )
         } catch (error) {
-          if (isBenignSupersessionError(error) || (error != null && getErrorCode(error) === 409))
-            throw error
+          if (error != null && getErrorCode(error) === 409) throw error
           log.error('Failed to create Host Service', { host: host.name, err: error })
         }
       },
@@ -3492,7 +3496,6 @@ export class HostReconciler {
         replaceWithConflictRetry({
           description: `Deployment "${host.name}"`,
           logPrefix: '[HostReconciler]',
-          body: this.buildDeployment(host, mounts, runtimeTokenRevision, lifecycle),
           resolveBody: buildDesiredDeployment,
           mergeExisting: preserveHostDeploymentAnnotations,
           isUpToDate: deploymentMatchesDesired,

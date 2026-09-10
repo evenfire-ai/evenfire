@@ -168,6 +168,48 @@ describe('Host read-first Service and Deployment contracts', () => {
     expect(await count('Deployment', 'skipped')).toBe(0)
   })
 
+  it.each([0, 1])(
+    'builds a present Host Deployment once per attempt with fresh state (%i conflicts)',
+    async conflicts => {
+      const { apps, reconciler } = fixture()
+      const existing = reconciler.buildDeployment(host, [], 'old-revision')
+      apps.readNamespacedDeployment.mockImplementation(async () => ({
+        ...existing,
+        metadata: {
+          ...existing.metadata,
+          resourceVersion: String(apps.readNamespacedDeployment.mock.calls.length),
+        },
+      }))
+      if (conflicts) apps.replaceNamespacedDeployment.mockRejectedValueOnce({ code: 409 })
+      const build = vi.spyOn(reconciler, 'buildDeployment')
+      const resolveState = vi.fn(async () => {
+        const attempt = apps.readNamespacedDeployment.mock.calls.length
+        return {
+          runtimeTokenRevision: `fresh-revision-${attempt}`,
+          lifecycle: { stateless: true, state: attempt === 1 ? 'active' : 'suspended' },
+        }
+      })
+
+      await (reconciler as any).ensureDeployment(host, [], 'old-revision', undefined, resolveState)
+
+      const attempts = conflicts + 1
+      expect(apps.readNamespacedDeployment).toHaveBeenCalledTimes(attempts)
+      expect(resolveState).toHaveBeenCalledTimes(attempts)
+      expect(build).toHaveBeenCalledTimes(attempts)
+      expect(apps.createNamespacedDeployment).not.toHaveBeenCalled()
+      expect(apps.replaceNamespacedDeployment).toHaveBeenCalledTimes(attempts)
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const body = apps.replaceNamespacedDeployment.mock.calls[attempt - 1][0]
+          .body as k8s.V1Deployment
+        expect(body.metadata?.resourceVersion).toBe(String(attempt))
+        expect(
+          body.spec?.template.metadata?.annotations?.['clerum.io/runtime-token-revision']
+        ).toBe(`fresh-revision-${attempt}`)
+        expect(body.spec?.replicas).toBe(attempt === 1 ? 1 : 0)
+      }
+    }
+  )
+
   it('retains a Host Service POST failure without recording presence suppression', async () => {
     const { core, reconciler } = fixture()
     core.readNamespacedService.mockRejectedValueOnce({ code: 404 })

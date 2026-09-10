@@ -119,6 +119,10 @@ convergence/preservation. Failed or cancelled paths do not count as skipped;
 neither do retries or a POST409 already emitted. A caller preserving an existing
 non-throwing convergence failure returns `false` to avoid reporting a skip.
 
+`skipped` means a create was suppressed because the resource was present, not
+that reconciliation was a no-op: convergence may still issue a separately
+instrumented replace. A POST409 race counts as `conflict`, never another `skipped`.
+
 Host ServiceAccount, Role and RoleBinding propagate unexpected read, create and
 convergence failures to the existing reconciliation error handler. The new GET
 never turns 403/transport failures into absence. Historical Host PVC/Service
@@ -126,6 +130,13 @@ create/update catches stay inside those callbacks, outside the initial GET;
 supersession retains its separate error path. Preserved existing resources gain
 no PUT or synthetic equality comparison. An unbound Host PVC retains its direct
 update policy.
+
+Role convergence retries optimistic-lock conflicts through the shared bounded
+retry helper (three attempts, fresh reads and admission checks). Exhausted
+conflicts and unexpected RBAC errors still propagate; they are not successful
+provisioning. Role replaces and no-op decisions now use the helper's write
+metrics. Operators should expect previously silent RBAC failures to surface in
+reconciliation error telemetry.
 
 External-egress passes its fresh object separately from the expected UID/RV
 snapshot constraint. A conflict invalidates the consumed snapshot, not the
