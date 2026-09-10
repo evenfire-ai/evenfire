@@ -908,7 +908,9 @@ describe('SandboxUiPage', () => {
     render(<SandboxUiPage onEmbedSlotRightChange={onEmbedSlotRightChange} />)
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    await screen.findByRole('button', { name: 'Back to apps' })
+    // This branch removed the in-view "Back to apps" button (the sidebar owns the
+    // return to apps), so wait on the mounted-page marker as the ready signal.
+    await screen.findByTestId('sandbox-ui-mounted')
 
     // The real slot rect is x=16 and width=400 in this producer-backed fixture.
     await waitFor(() => {
