@@ -455,8 +455,10 @@ export const HeaderActions = React.memo(function HeaderActions({
     void ensurePluginsAppsLoaded()
   }, [ensurePluginsAppsLoaded, hasSearch, searchOpen])
 
+  const Container = titlebarPlacement ? 'div' : 'header'
+
   return (
-    <header className={`top-bar${titlebarPlacement ? ' top-bar--titlebar' : ''}`}>
+    <Container className={`top-bar${titlebarPlacement ? ' top-bar--titlebar' : ''}`}>
       <div className="header-left">
         <div
           className={`global-search${titlebarPlacement ? ' global-search--titlebar' : ''}${
@@ -946,6 +948,6 @@ export const HeaderActions = React.memo(function HeaderActions({
           )}
         </div>
       </div>
-    </header>
+    </Container>
   )
 })
