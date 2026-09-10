@@ -947,8 +947,13 @@ export class McpServerWatcher implements McpServerProvider {
     // pod-key member sets and the Host→LlmHook reverse index on every reconcile.
     this.llmHookReconciler = new LlmHookReconciler(kc, this.llmHooks, this.hosts)
     // Per-slot openai-compatible egress brokers share the live host cache so the
-    // orphan sweep can recompute the desired broker set for every Host.
-    this.openaiEgressBrokerReconciler = new OpenAiEgressBrokerReconciler(kc, this.hosts)
+    // orphan sweep can recompute the desired broker set for every Host. The
+    // authority predicate fences fullReconcile: a full pass (and its sweep) runs
+    // only when the Host LIST->WATCH is synced, so a cold-start LIST failure or a
+    // recovering watch cannot present an empty cache and delete the live fleet.
+    this.openaiEgressBrokerReconciler = new OpenAiEgressBrokerReconciler(kc, this.hosts, {
+      hostInventoryAuthoritative: () => this.isHostInventoryAuthoritative(),
+    })
     this.bindingReconciler = new BindingPolicyReconciler(kc, config.namespace)
     this.sharedFileSystemReconciler = new SharedFileSystemReconciler(kc)
     // gfs (Global File System) — DISTINCT from SharedFileSystem. The reconcile
@@ -2852,7 +2857,9 @@ export class McpServerWatcher implements McpServerProvider {
 
     // Initial openai-compatible egress broker convergence (over the already-
     // populated Host cache): provisions brokers for local baseURL slots and
-    // sweeps any orphaned from a prior process.
+    // sweeps any orphaned from a prior process. fullReconcile self-fences on
+    // isHostInventoryAuthoritative(), so if the LIST above failed and the cache
+    // is empty it no-ops (warn) instead of sweeping every live broker.
     try {
       console.log('[K8s] Running initial openai-compatible egress broker reconciliation...')
       await this.openaiEgressBrokerReconciler.fullReconcile([...this.hosts.values()])

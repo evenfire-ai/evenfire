@@ -74,10 +74,29 @@ const OPENAI_COMPATIBLE_PROVIDER = 'openai-compatible'
 const OPENAI_COMPATIBLE_API_KEY_SLOT = 'openai-compatible-api-key'
 const OPENAI_COMPATIBLE_API_KEY_ENV = 'OPENAI_COMPATIBLE_API_KEY'
 
+/**
+ * Emitted (warn) when `fullReconcile` refuses to run because the Host inventory
+ * is not authoritative. The full pass derives `desired` from the in-memory Host
+ * cache and its orphan sweep deletes every broker not in that set — so an empty
+ * or stale cache (cold-start LIST failed, or a watch is recovering) would wipe
+ * the live broker fleet. Mirrors NETWORKPOLICY_ORPHAN_SWEEP_CAPPED_MESSAGE.
+ */
+export const OAI_EGRESS_FULL_RECONCILE_SKIPPED_MESSAGE =
+  'openai-compatible egress full reconcile skipped: Host inventory not authoritative'
+
 type OpenAiEgressBrokerReconcilerDeps = {
   appsApi?: k8s.AppsV1Api
   coreApi?: k8s.CoreV1Api
   networkingApi?: k8s.NetworkingV1Api
+  /**
+   * Authority fence for the Host-cache-fed full reconcile + orphan sweep. When
+   * it returns false the cache may be empty or stale, so the sweep would delete
+   * every live broker; `fullReconcile` no-ops instead. ABSENT ⇒ fail-closed
+   * (`() => false`): no full pass runs until a caller wires the predicate. Per-
+   * Host event paths (reconcileForHost/reconcileDelete) are NOT gated — they act
+   * on the Host carried by the watch event, not on the cache.
+   */
+  hostInventoryAuthoritative?: () => boolean
 }
 
 /** A validated local slot that must have a broker. */
@@ -122,6 +141,9 @@ export class OpenAiEgressBrokerReconciler {
   /** Cache of Host CRs by name (owned by the watcher). */
   private readonly hosts: Map<string, HostCRD>
 
+  /** Authority fence for the cache-fed full reconcile; fail-closed when absent. */
+  private readonly hostInventoryAuthoritative: () => boolean
+
   private readonly inFlight: Map<string, Promise<void>> = new Map()
 
   constructor(
@@ -133,6 +155,7 @@ export class OpenAiEgressBrokerReconciler {
     this.coreApi = deps?.coreApi ?? kc.makeApiClient(k8s.CoreV1Api)
     this.networkingApi = deps?.networkingApi ?? kc.makeApiClient(k8s.NetworkingV1Api)
     this.hosts = hostCache
+    this.hostInventoryAuthoritative = deps?.hostInventoryAuthoritative ?? (() => false)
   }
 
   // ─── Serialization ──────────────────────────────────────────────────
@@ -164,6 +187,15 @@ export class OpenAiEgressBrokerReconciler {
 
   /** Full pass (startup + periodic resync): reconcile every Host, then sweep. */
   async fullReconcile(hosts: HostCRD[]): Promise<void> {
+    // Authority fence: the sweep below deletes every broker not derived from the
+    // Host cache, so an empty/stale cache would wipe the live fleet. Refuse the
+    // whole pass — the per-Host event paths keep converging in the meantime, and
+    // the next authoritative resync tick catches up. Same guard the other cache-
+    // fed consumers use (performHostFleetReconcileOnce, hostReconciler authority).
+    if (!this.hostInventoryAuthoritative()) {
+      log.warn(OAI_EGRESS_FULL_RECONCILE_SKIPPED_MESSAGE, { hosts: hosts.length })
+      return
+    }
     log.info('Running full reconciliation', { hosts: hosts.length })
     for (const host of hosts) {
       await this.runSerialized(`host:${host.name}`, () => this.reconcileHostBrokers(host))

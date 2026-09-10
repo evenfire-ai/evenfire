@@ -86,12 +86,16 @@ describe('OpenAiEgressBrokerReconciler', () => {
   let networkingApi: MockNetworkingApi
   let hosts: Map<string, HostCRD>
   let reconciler: OpenAiEgressBrokerReconciler
+  // Host-inventory authority the reconciler's fullReconcile fence reads. Default
+  // authoritative; T11 flips it to exercise the empty-cache guard.
+  let authoritative: boolean
 
   function build(): OpenAiEgressBrokerReconciler {
     return new OpenAiEgressBrokerReconciler({} as k8s.KubeConfig, hosts, {
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(networkingApi),
+      hostInventoryAuthoritative: () => authoritative,
     })
   }
 
@@ -101,6 +105,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
     coreApi = createMockCoreApi()
     networkingApi = createMockNetworkingApi()
     hosts = new Map()
+    authoritative = true
     reconciler = build()
   })
 
@@ -430,5 +435,63 @@ describe('OpenAiEgressBrokerReconciler', () => {
     await reconciler.reconcileForHost(host)
 
     expect(coreApi.replaceNamespacedSecret).not.toHaveBeenCalled()
+  })
+
+  // Two live brokers exist in the cluster, but the Host cache is empty (a
+  // cold-start LIST failed or a watch is recovering). Wiring the sweep listings
+  // so the fullReconcile orphan pass, if it ran, would delete both.
+  function seedTwoLiveBrokers(): string[] {
+    const brokers = ['oai-egress-1111111111111111', 'oai-egress-2222222222222222']
+    appsApi.listNamespacedDeployment.mockResolvedValue({
+      items: brokers.map(b => ({
+        metadata: { name: b, labels: { [OAI_EGRESS_BROKER_LABEL]: b } },
+      })),
+    })
+    coreApi.listNamespacedSecret.mockResolvedValue({
+      items: brokers.map(b => ({
+        metadata: { name: `${b}-key`, labels: { [OAI_EGRESS_BROKER_LABEL]: b } },
+      })),
+    })
+    networkingApi.listNamespacedNetworkPolicy.mockResolvedValue({
+      items: brokers.map(b => ({
+        metadata: { name: `${b}-src`, labels: { [OAI_EGRESS_BROKER_LABEL]: b } },
+      })),
+    })
+    return brokers
+  }
+
+  it('T11: fullReconcile with a non-authoritative Host inventory deletes NOTHING (no cache-wipe sweep)', async () => {
+    seedTwoLiveBrokers()
+    hosts.clear() // empty cache — the sweep would compute an empty desired set
+    authoritative = false
+
+    await reconciler.fullReconcile([])
+
+    // Observable: the live brokers survive — not one delete is issued.
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(0)
+    expect(coreApi.deleteNamespacedService).toHaveBeenCalledTimes(0)
+    expect(coreApi.deleteNamespacedConfigMap).toHaveBeenCalledTimes(0)
+    expect(coreApi.deleteNamespacedSecret).toHaveBeenCalledTimes(0)
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(0)
+  })
+
+  it('T11b: positive control — an AUTHORITATIVE fullReconcile still sweeps brokers no Host desires', async () => {
+    const brokers = seedTwoLiveBrokers()
+    // ConfigMap read must report HCC ownership for the ownership-verified delete.
+    coreApi.readNamespacedConfigMap.mockResolvedValue({
+      metadata: { resourceVersion: '1', labels: { [MANAGED_BY_LABEL]: 'host-context-controller' } },
+      data: {},
+    })
+    hosts.clear()
+    authoritative = true
+
+    await reconciler.fullReconcile([])
+
+    // Both orphans are torn down (one delete per broker for each kind).
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledTimes(brokers.length)
+    expect(coreApi.deleteNamespacedSecret).toHaveBeenCalledTimes(brokers.length)
+    expect(coreApi.deleteNamespacedConfigMap).toHaveBeenCalledTimes(brokers.length)
+    // src (host ns) + ingress + egress (egress ns) = 3 NetworkPolicies per broker.
+    expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(brokers.length * 3)
   })
 })
