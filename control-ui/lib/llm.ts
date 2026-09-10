@@ -1,3 +1,4 @@
+import { type LanBaseUrlReason, classifyLanBaseURL } from '@clerum/egress-policy'
 import {
   type LlmProviderId,
   PROVIDER_AUTH_MODE,
@@ -62,6 +63,54 @@ export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: strin
 
 export function catalogGroupKey(provider: string): string {
   return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
+}
+
+// The generic OpenAI-compatible provider for local/self-hosted models on the
+// LAN. Unlike every other provider it carries a per-target `baseURL` — the LAN
+// endpoint the operator declares — on `spec.model` and on each
+// `spec.llmPolicy.fallbacks[i]` (the CRD/CEL requires it).
+export const LLM_LOCAL_PROVIDER: LlmProvider = 'openai-compatible'
+
+// True when the provider needs an operator-supplied LAN `baseURL`. Only the
+// local openai-compatible provider does today.
+export function providerRequiresBaseUrl(provider: string | undefined | null): boolean {
+  return provider === LLM_LOCAL_PROVIDER
+}
+
+// Example endpoint shown as the baseURL placeholder: a private-LAN IPv4 literal
+// (never a DNS name), matching the only shape the classifier accepts.
+export const LLM_LAN_BASE_URL_PLACEHOLDER = 'http://192.168.1.50:8000/v1'
+
+// Human-facing message per rejection reason, mirroring control-api's
+// LAN_BASE_URL_REASON_MESSAGE (routes/admin/hostSpecValidation.ts). Control-api
+// admission is the AUTHORITATIVE gate (fase 3); this client check is UX only, so
+// it reuses the SAME classifier as control-api, HCC and mcp-host —
+// @clerum/egress-policy.classifyLanBaseURL — instead of re-deriving the LAN rule
+// a fourth time (spec R-4/D4).
+const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
+  invalid_url: 'baseURL must be a valid absolute URL.',
+  not_ip:
+    'baseURL host must be a private-LAN IPv4 literal; DNS names (including *.svc, *.cluster.local, localhost, and metadata endpoints) are not allowed.',
+  not_private_lan:
+    'baseURL host must be an RFC1918 private-LAN IPv4 address (10/8, 172.16/12, or 192.168/16).',
+  link_local: 'baseURL host must not be a link-local address (169.254.0.0/16).',
+  cgnat: 'baseURL host must not be a carrier-grade NAT address (100.64.0.0/10).',
+  cluster_internal: 'baseURL host must not target a cluster-internal address.',
+  reserved: 'baseURL host must not be a reserved IPv4 address.',
+}
+
+// Validate a candidate openai-compatible `baseURL` for LAN admission. Returns a
+// human-readable message when it would be rejected (empty is reported as
+// required — the CRD/CEL demands it), or null when acceptable. Purely for inline
+// UX: the control-api admission gate is the source of truth.
+export function validateLlmLanBaseUrl(baseURL: string | undefined | null): string | null {
+  const trimmed = (baseURL ?? '').trim()
+  if (!trimmed) return 'Enter the LAN endpoint URL for this local model.'
+  const decision = classifyLanBaseURL(trimmed)
+  // Narrow via `'reason' in` rather than the `ok` discriminant: this project
+  // builds with strictNullChecks off, under which a boolean-literal discriminant
+  // does not narrow the union (a string/property discriminant still does).
+  return 'reason' in decision ? LAN_BASE_URL_REASON_MESSAGE[decision.reason] : null
 }
 
 export type OpenAiCredentialSource = 'api-key' | 'subscription'
@@ -725,6 +774,9 @@ export type LlmFallbackEntry = {
   provider: LlmProvider
   model: string
   credentialSlot?: string
+  // LAN endpoint for a local `openai-compatible` fallback. Required for that
+  // provider (the CRD/CEL enforces it), absent for every other provider.
+  baseURL?: string
 }
 
 export type LlmPolicy = {
@@ -851,6 +903,13 @@ export function validateLlmPolicy(policy: LlmPolicy, catalog: LlmModelCatalogEnt
       errors.push(`${label}: choose a provider.`)
       return
     }
+    // A local openai-compatible fallback must carry a valid private-LAN baseURL
+    // (mirrors the control-api admission gate). Checked before the model gate so
+    // a missing endpoint is reported even while the model is still empty.
+    if (entry.provider === LLM_LOCAL_PROVIDER) {
+      const baseUrlError = validateLlmLanBaseUrl(entry.baseURL)
+      if (baseUrlError) errors.push(`${label}: ${baseUrlError}`)
+    }
     const model = (entry.model || '').trim()
     if (!model) {
       errors.push(`${label}: choose a model.`)
@@ -892,7 +951,19 @@ export function normalizeLlmPolicy(raw: unknown): LlmPolicy | undefined {
       typeof entry.credentialSlot === 'string' && entry.credentialSlot.trim().length > 0
         ? entry.credentialSlot
         : undefined
-    fallbacks.push({ provider, model, ...(credentialSlot ? { credentialSlot } : {}) })
+    // Preserve a local fallback's LAN endpoint verbatim (mirrors the model
+    // string). An empty/whitespace value is treated as absent so the editor
+    // surfaces it as "required" rather than silently persisting blank.
+    const baseURL =
+      typeof entry.baseURL === 'string' && entry.baseURL.trim().length > 0
+        ? entry.baseURL
+        : undefined
+    fallbacks.push({
+      provider,
+      model,
+      ...(credentialSlot ? { credentialSlot } : {}),
+      ...(baseURL ? { baseURL } : {}),
+    })
   }
   if (fallbacks.length === 0) return undefined
 

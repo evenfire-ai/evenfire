@@ -1,7 +1,5 @@
 'use strict'
 
-const { createHash } = require('crypto')
-
 // Single source of truth for the non-public/reserved IPv4 CIDR set and the
 // LAN-baseURL classifier. The CIDR list below is the SAME data that ships in
 // deploy/base/public-egress-exceptions.yaml (spec.ranges) and that the
@@ -154,6 +152,11 @@ function fallbackSlotId(index) {
  * cannot collide by string concatenation.
  */
 function brokerNameFor(hostName, slotId) {
+  // `crypto` is required lazily (not at module load) so control-ui, which bundles
+  // this module into its client build to reuse classifyLanBaseURL, never drags
+  // Node's crypto polyfill into a bundle where brokerNameFor is never invoked.
+  // Server callers (control-api/HCC/mcp-host) resolve it here with no behavior change.
+  const { createHash } = require('crypto')
   const digest = createHash('sha256').update(`${hostName}\x1f${slotId}`).digest('hex').slice(0, 16)
   return `oai-egress-${digest}`
 }

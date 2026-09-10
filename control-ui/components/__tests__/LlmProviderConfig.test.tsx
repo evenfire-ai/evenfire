@@ -10,6 +10,7 @@ const CATALOG: LlmModelCatalogEntry[] = [
   { provider: 'openai', model: 'gpt-5.4-mini', enabled: true },
   { provider: 'openai', model: 'gpt-5.4', enabled: true },
   { provider: 'claude', model: 'claude-sonnet-4-6', enabled: true },
+  { provider: 'openai-compatible', model: 'local-llama', enabled: true },
 ]
 
 // Controlled host mirroring how the wizard/edit page wire the surface.
@@ -34,6 +35,7 @@ function Harness({
 }) {
   const [provider, setProvider] = useState<LlmProvider>(initialProvider)
   const [model, setModel] = useState(initialModel)
+  const [baseURL, setBaseURL] = useState('')
   const [policy, setPolicy] = useState<LlmPolicy | undefined>(initialPolicy)
   const [allowedModels, setAllowedModels] = useState<HostAllowedModel[]>(initialAllowed)
   const [draft, setDraft] = useState<Record<string, string>>({})
@@ -41,9 +43,11 @@ function Harness({
     <LlmProviderConfig
       provider={provider}
       model={model}
+      baseURL={baseURL}
       onPrimaryChange={next => {
         setProvider(next.provider)
         setModel(next.model)
+        setBaseURL(next.baseURL ?? '')
       }}
       policy={policy}
       onPolicyChange={setPolicy}
@@ -251,5 +255,76 @@ describe('LlmProviderConfig (spec Topic 3a — per-host allowed-models subset)',
     // The fallback-providers allowed-models section appears with a Claude control.
     expect(screen.getByText('Allowed models · fallback providers')).toBeInTheDocument()
     expect(screen.getByText(/this host offers every enabled Anthropic model/i)).toBeInTheDocument()
+  })
+})
+
+describe('LlmProviderConfig (openai-compatible LAN baseURL)', () => {
+  it('shows the baseURL field ONLY for the local openai-compatible provider', () => {
+    // Not shown for a normal provider.
+    render(<Harness />)
+    expect(screen.queryByLabelText(/LAN endpoint/i)).not.toBeInTheDocument()
+    cleanup()
+    // Shown for the local provider.
+    render(<Harness initialProvider="openai-compatible" initialModel="local-llama" />)
+    expect(screen.getByLabelText(/LAN endpoint/i)).toBeInTheDocument()
+  })
+
+  it('rejects cluster-internal and metadata endpoints, accepts a private-LAN IP', () => {
+    render(<Harness initialProvider="openai-compatible" initialModel="local-llama" />)
+    const input = screen.getByLabelText(/LAN endpoint/i)
+
+    // Empty is required.
+    expect(screen.getByText(/Enter the LAN endpoint/i)).toBeInTheDocument()
+
+    // A cluster-internal DNS name is rejected (SSRF-by-name closed).
+    fireEvent.change(input, { target: { value: 'http://model.default.svc.cluster.local/v1' } })
+    expect(screen.getByText(/must be a private-LAN IPv4 literal/i)).toBeInTheDocument()
+
+    // The cloud metadata endpoint is rejected.
+    fireEvent.change(input, { target: { value: 'http://169.254.169.254/latest/meta-data' } })
+    expect(screen.getByText(/link-local address/i)).toBeInTheDocument()
+
+    // A private-LAN IPv4 literal is accepted (no error).
+    fireEvent.change(input, { target: { value: 'http://192.168.1.50:8000/v1' } })
+    expect(screen.queryByText(/baseURL host must/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Enter the LAN endpoint/i)).not.toBeInTheDocument()
+  })
+
+  it('drops the baseURL when the provider changes away from openai-compatible', () => {
+    render(<Harness initialProvider="openai-compatible" initialModel="local-llama" />)
+    fireEvent.change(screen.getByLabelText(/LAN endpoint/i), {
+      target: { value: 'http://192.168.1.50:8000/v1' },
+    })
+    // Switch the primary provider to a cloud one: the LAN field disappears and no
+    // stale baseURL can survive under a non-openai-compatible provider.
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    fireEvent.click(screen.getByRole('option', { name: /^OpenAI$/i }))
+    expect(screen.queryByLabelText(/LAN endpoint/i)).not.toBeInTheDocument()
+    // Switching back shows an empty field, not the previously typed value.
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI-compatible/i }))
+    expect(screen.getByLabelText(/LAN endpoint/i)).toHaveValue('')
+  })
+
+  it('preserves the baseURL when only the model changes', () => {
+    // Two local models so switching the model is a real change, not a no-op.
+    const twoLocalModels: LlmModelCatalogEntry[] = [
+      ...CATALOG,
+      { provider: 'openai-compatible', model: 'local-mixtral', enabled: true },
+    ]
+    render(
+      <Harness
+        initialProvider="openai-compatible"
+        initialModel="local-llama"
+        catalog={twoLocalModels}
+      />
+    )
+    fireEvent.change(screen.getByLabelText(/LAN endpoint/i), {
+      target: { value: 'http://10.0.0.7:11434/v1' },
+    })
+    // Change only the model; the LAN endpoint must not be reset.
+    fireEvent.click(screen.getByLabelText('Model', { selector: '#llm-primary-model' }))
+    fireEvent.click(screen.getByRole('option', { name: 'local-mixtral' }))
+    expect(screen.getByLabelText(/LAN endpoint/i)).toHaveValue('http://10.0.0.7:11434/v1')
   })
 })

@@ -60,6 +60,7 @@ import {
   providerRequiresLlmSecret,
   resolveCodexGrantModel,
   resolveDefaultModel,
+  validateLlmLanBaseUrl,
   validateLlmPolicy,
 } from '../../../lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
@@ -210,6 +211,9 @@ export default function HostDetailsPage() {
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
+  // LAN endpoint for a local `openai-compatible` primary (spec.model.baseURL).
+  // Empty for every other provider.
+  const [baseURLDraft, setBaseURLDraft] = useState('')
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
@@ -493,6 +497,9 @@ export default function HostDetailsPage() {
           currentModel ||
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
         )
+        // Hydrate the local provider's LAN endpoint verbatim (kept for any
+        // provider on load; the editor only surfaces it for openai-compatible).
+        setBaseURLDraft(String((spec.model as { baseURL?: string } | undefined)?.baseURL || ''))
         setSecretRefDraft(String(spec.secretRef || ''))
         setConnectionRefDraft(
           String(
@@ -820,6 +827,13 @@ export default function HostDetailsPage() {
       setError(modelNameProblem)
       return false
     }
+    if (providerDraft === 'openai-compatible') {
+      const baseUrlProblem = validateLlmLanBaseUrl(baseURLDraft)
+      if (baseUrlProblem) {
+        setError(`Primary model: ${baseUrlProblem}`)
+        return false
+      }
+    }
     if (providerDraft === 'codex-subscription') {
       if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
         setError('Choose a ChatGPT subscription before saving.')
@@ -893,6 +907,9 @@ export default function HostDetailsPage() {
                 connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
               }
             : {}),
+          // Local OpenAI-compatible primary carries its LAN endpoint; every other
+          // provider omits it (a stale baseURL is never persisted).
+          ...(providerDraft === 'openai-compatible' ? { baseURL: baseURLDraft.trim() } : {}),
         },
       }
       // Host identity is metadata.name / the route slug. Never persist
@@ -1222,9 +1239,11 @@ export default function HostDetailsPage() {
                   <LlmProviderConfig
                     provider={providerDraft}
                     model={modelNameDraft}
+                    baseURL={baseURLDraft}
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
+                      setBaseURLDraft(next.baseURL ?? '')
                       if (next.provider !== 'codex-subscription') {
                         setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
@@ -1258,6 +1277,8 @@ export default function HostDetailsPage() {
                       disabled={
                         busy ||
                         Boolean(hostModelNameError(modelNameDraft)) ||
+                        (providerDraft === 'openai-compatible' &&
+                          Boolean(validateLlmLanBaseUrl(baseURLDraft))) ||
                         (providerDraft === 'codex-subscription' &&
                           (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
                             Boolean(grantCatalogError) ||
@@ -1272,6 +1293,7 @@ export default function HostDetailsPage() {
                 <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
+                  baseURL={baseURLDraft}
                   allowedModels={effectiveAllowedModelsSpec}
                   policy={llmPolicyDraft}
                 />

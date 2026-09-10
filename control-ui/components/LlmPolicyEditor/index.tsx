@@ -1,10 +1,12 @@
 'use client'
 
 import React, { useEffect, useMemo } from 'react'
+import { LanBaseUrlField } from '@/components/LanBaseUrlField'
 import { IconTrash } from '@/components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@/components/ui'
 import {
   LLM_DEFAULT_COOLDOWN_SECONDS,
+  LLM_LOCAL_PROVIDER,
   LLM_TRIGGER_CLASSES,
   LLM_TRIGGER_LABELS,
   type LlmFallbackEntry,
@@ -300,7 +302,8 @@ function FallbackRow({
             onChange={e => {
               const nextProvider = normalizeProvider(e.target.value)
               // Re-default the model to the new provider's allowlist and drop a
-              // credentialSlot that no longer applies to the new provider.
+              // credentialSlot / baseURL that no longer applies to the new
+              // provider (baseURL is only meaningful for openai-compatible).
               onChange({
                 provider: nextProvider,
                 model: resolveDefaultModel(
@@ -308,6 +311,7 @@ function FallbackRow({
                   constrainModelOptions(catalog, allowedModels, nextProvider)
                 ),
                 credentialSlot: undefined,
+                baseURL: undefined,
               })
             }}
           >
@@ -351,6 +355,15 @@ function FallbackRow({
             </span>
           ) : null}
         </Field>
+
+        {entry.provider === LLM_LOCAL_PROVIDER ? (
+          <LanBaseUrlField
+            id={`${rowId}-baseurl`}
+            value={entry.baseURL ?? ''}
+            onChange={next => onChange({ baseURL: next })}
+            disabled={disabled}
+          />
+        ) : null}
 
         {supportsCredentialSlot ? (
           <Field
