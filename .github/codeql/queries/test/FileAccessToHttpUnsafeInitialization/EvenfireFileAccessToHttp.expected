@@ -1,0 +1,14 @@
+edges
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:16:43:16:61 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:33:16:63 | `Bearer ... ntial}` | mcp-host/src/runtime/pr2ReadinessReporter.ts:16:16:16:65 | { autho ... ial}` } | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:43:16:61 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:16:33:16:63 | `Bearer ... ntial}` | provenance |  |
+nodes
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | semmle.label | fs.read ... f-8",\\n) |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:16:16:65 | { autho ... ial}` } | semmle.label | { autho ... ial}` } |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:33:16:63 | `Bearer ... ntial}` | semmle.label | `Bearer ... ntial}` |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:43:16:61 | persistedCredential | semmle.label | persistedCredential |
+subpaths
+#select
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:16:16:16:65 | { autho ... ial}` } | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:16:16:16:65 | { autho ... ial}` } | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | file data |

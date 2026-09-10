@@ -62,7 +62,7 @@ for stock_path in "${stock_queries[@]}"; do
   resolved_query_contains_exact_path "$stock_path" && continue
   stock_id=$("$codeql" resolve metadata "$stock_path" | jq -r '.id // empty')
   case "$stock_id" in
-    js/missing-rate-limiting | js/user-controlled-bypass)
+    js/file-access-to-http | js/missing-rate-limiting | js/user-controlled-bypass)
       ;;
     *)
       echo "stock security query is missing without an approved replacement: $stock_path ($stock_id)" >&2
@@ -79,6 +79,9 @@ while IFS= read -r excluded_id; do
     js/user-controlled-bypass)
       single_query_with_id "/.github/codeql/queries/EvenfireUserControlledBypass.ql" "$excluded_id"
       ;;
+    js/file-access-to-http)
+      single_query_with_id "/.github/codeql/queries/EvenfireFileAccessToHttp.ql" "$excluded_id"
+      ;;
     *)
       echo "stock security query exclusion lacks an approved repository replacement: $excluded_id" >&2
       exit 1
@@ -92,3 +95,4 @@ done < <(awk '
 single_query_with_id "/Security/CWE-1427/SystemPromptInjection.ql" "js/system-prompt-injection"
 single_query_with_id "/.github/codeql/queries/EvenfireMissingRateLimiting.ql" "js/missing-rate-limiting"
 single_query_with_id "/.github/codeql/queries/EvenfireUserControlledBypass.ql" "js/user-controlled-bypass"
+single_query_with_id "/.github/codeql/queries/EvenfireFileAccessToHttp.ql" "js/file-access-to-http"
