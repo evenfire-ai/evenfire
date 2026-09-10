@@ -108,6 +108,10 @@ WATCH_CUT_MIN_LINES="${WATCH_CUT_MIN_LINES:-6}"
 # Minimum distinct 503->200 transitions under churn: one recovery could be a
 # fluke; repeated recovery refutes the livelock.
 MIN_CHURN_RECOVERIES="${MIN_CHURN_RECOVERIES:-2}"
+[[ "$MIN_CHURN_RECOVERIES" =~ ^[0-9]+$ ]] || {
+  echo 'MIN_CHURN_RECOVERIES must be a non-negative integer' >&2
+  exit 2
+}
 FLEET_CONTEXTS="${FLEET_CONTEXTS:-24}"
 FLEET_MCPSERVERS="${FLEET_MCPSERVERS:-115}"
 FLEET_HOSTS="${FLEET_HOSTS:-8}"
@@ -279,6 +283,19 @@ Restore the HCC deployment (remove redirect env + hostAliases, restore replicas)
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} scale deployment/${HCC_DEPLOY} --replicas=${ORIGINAL_REPLICAS:-1}
   kubectl --context=${E2E_KUBECONTEXT} -n ${HCC_NS} rollout status deployment/${HCC_DEPLOY} --timeout=180s
 EOF
+}
+
+assert_hcc_sampled_recoveries() {
+  if [ "$MIN_CHURN_RECOVERIES" -eq 0 ]; then
+    printf 'NOT_APPLICABLE: minimum sampled outage count; actual watch cuts and final convergence remain required\n'
+    return 0
+  fi
+  [ "$churn_503" -ge 1 ] &&
+    ok "churn bit the readiness path: ${churn_503} sample(s) at 503 (transient fail-closed is the contract)" ||
+    fail "zero 503 samples under churn — the proxy never bit the watches; bounded-recovery evidence is VACUOUS"
+  [ "$churn_transitions" -ge "$MIN_CHURN_RECOVERIES" ] &&
+    ok "repeated in-churn recovery: ${churn_transitions} distinct 503->200 transitions (>= ${MIN_CHURN_RECOVERIES})" ||
+    fail "only ${churn_transitions} 503->200 transition(s) under churn — a livelock is not refuted by fewer than ${MIN_CHURN_RECOVERIES} recoveries"
 }
 
 cleanup() {
@@ -494,12 +511,7 @@ fi
 # transient 503 under churn is the fail-closed CONTRACT working, not a bug;
 # an observation window with zero 503s means the cuts never reached the
 # watches and the bounded-recovery claim below would be vacuously true.
-[ "$churn_503" -ge 1 ] &&
-  ok "churn bit the readiness path: ${churn_503} sample(s) at 503 (transient fail-closed is the contract)" ||
-  fail "zero 503 samples under churn — the proxy never bit the watches; bounded-recovery evidence is VACUOUS"
-[ "$churn_transitions" -ge "$MIN_CHURN_RECOVERIES" ] &&
-  ok "repeated in-churn recovery: ${churn_transitions} distinct 503->200 transitions (>= ${MIN_CHURN_RECOVERIES})" ||
-  fail "only ${churn_transitions} 503->200 transition(s) under churn — a livelock is not refuted by fewer than ${MIN_CHURN_RECOVERIES} recoveries"
+assert_hcc_sampled_recoveries
 [ "$churn_maxstreak" -le "$RECOVERY_BUDGET_SEC" ] &&
   ok "every in-churn 503 outage closed within budget: max streak ${churn_maxstreak}s <= ${RECOVERY_BUDGET_SEC}s" ||
   fail "a 503 streak lasted ${churn_maxstreak}s (> ${RECOVERY_BUDGET_SEC}s recovery budget) — recovery is not bounded under churn"

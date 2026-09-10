@@ -17,4 +17,9 @@ export E2E_EXPECTED_PRE_GATE_GATE=minikube-t2
 # witness. Other synthetic McpServers would add unrelated crashing workloads.
 export FLEET_CONTEXTS=1 FLEET_MCPSERVERS=0 FLEET_HOSTS=1
 export CHURN_MIN_CUTS=3 CHURN_OBSERVE_SEC=45
+# A healthy small fleet can recover between 1 Hz probes. This lane proves
+# three real watch reconnections, stable policies and business recovery; it
+# does not claim a minimum number of sampled outages. The stress gate's
+# default sampled-recovery requirement remains unchanged for its own callers.
+export MIN_CHURN_RECOVERIES=0
 exec bash "$SCRIPT_DIR/e2e-hcc-watch-churn-readiness.sh"

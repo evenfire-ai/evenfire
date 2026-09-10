@@ -183,7 +183,11 @@ np604_cleanup() {
   NP604_WATCH_PID=''
   [ "$NP604_CREATED" = 1 ] || return 0
   np604_kctl delete mcpserver,secret -n "$MCP_NS" \
-    -l "e2e.clerum.io/suite=hcc-np604,e2e.clerum.io/run=${RUN_ID}" --ignore-not-found >/dev/null
+    -l "e2e.clerum.io/suite=hcc-np604,e2e.clerum.io/run=${RUN_ID}" --ignore-not-found >/dev/null || return 1
+  # Consume the deletion events while the owning controller is still running.
+  # Removing the Context only after stopping HCC would leave its allows to a
+  # namespace-wide orphan sweep, whose safety cap correctly refuses this fleet.
+  wait_until 120 'NP604 owner-driven cleanup before HCC stop' np604_resources_absent
 }
 
 np604_resources_absent() {
