@@ -58,6 +58,11 @@ function hostOnlySubject(subject: { type: string }): boolean {
   return subject.type === 'host'
 }
 
+/** Stable per-subject merge key. The operator variant carries no id. */
+function subjectKey(subject: GfsSubjectInput): string {
+  return `${subject.type}:${'id' in subject ? subject.id : ''}`
+}
+
 const OPERATOR_OPTION: SelectionDropdownOption = {
   value: OPERATOR_VALUE,
   label: 'Operator',
@@ -111,7 +116,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       // descendant coverage unioned, both row ids retained for revoke.
       const bySubject = new Map<string, GfsExistingAccessItem>()
       const entryFor = (subject: GfsSubjectInput): GfsExistingAccessItem => {
-        const key = `${subject.type}:${subject.id ?? ''}`
+        const key = subjectKey(subject)
         let entry = bySubject.get(key)
         if (!entry) {
           entry = { subject, permissions: [], inherit: false, grantId: null, shareIds: [] }
@@ -323,10 +328,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           subjectLabel(left).localeCompare(subjectLabel(right), undefined, {
             numeric: true,
             sensitivity: 'base',
-          }) ||
-          `${left.subject.type}:${left.subject.id ?? ''}`.localeCompare(
-            `${right.subject.type}:${right.subject.id ?? ''}`
-          )
+          }) || subjectKey(left.subject).localeCompare(subjectKey(right.subject))
       ),
     [existingAccess, subjectLabel]
   )
