@@ -618,6 +618,14 @@ export function SandboxUiPage({
   if (launch.kind === 'mounted' || launch.kind === 'minting') {
     const showRefreshBanner =
       refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
+    // Every leading control below is gated: the refresh/copy pair only exists
+    // while 'mounted', and the conversation/drawer control needs an origin. In
+    // the 'minting' state without an origin all of them are absent, so portaling
+    // the wrapper unconditionally would inject an empty <div> into the shared
+    // title bar. Only portal when at least one control will render.
+    const hasLeadingActions =
+      launch.kind === 'mounted' ||
+      Boolean(conversationOrigin && (onToggleChatDrawer || onBackToConversation))
     return (
       <section className="page" data-testid="sandbox-ui-mounted">
         {/* App actions live in the native title bar's leading slot (icon-only,
@@ -626,6 +634,7 @@ export function SandboxUiPage({
             mirroring how the header search/bell portal works. "Back to apps" is
             intentionally gone — the sidebar owns the return to the app picker. */}
         {titlebarLeadingContainer &&
+          hasLeadingActions &&
           createPortal(
             <div className="window-titlebar__leading-actions">
               {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (

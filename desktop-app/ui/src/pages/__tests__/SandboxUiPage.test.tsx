@@ -195,6 +195,37 @@ describe('SandboxUiPage', () => {
     expect(screen.getByRole('button', { name: 'Refresh app content' })).toBeTruthy()
   })
 
+  it('does not portal an empty leading-actions container while minting without a conversation origin', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    // Hold the open in-flight so the page stays in 'minting' (never reaches
+    // 'mounted'). With no conversationOrigin and no drawer/back handlers, every
+    // leading control is absent — the wrapper must not be portaled at all,
+    // otherwise an empty <div> is injected into the shared title bar.
+    sandboxUi.open.mockReturnValueOnce(new Promise<void>(() => {}))
+
+    render(<SandboxUiPage />)
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    // The mounted/minting section renders (shared testid) and the open request
+    // is in-flight, so we are firmly in 'minting'.
+    expect(await screen.findByTestId('sandbox-ui-mounted')).toBeTruthy()
+    await waitFor(() => expect(sandboxUi.open).toHaveBeenCalled())
+
+    // The leading slot (portaled into the container) must stay empty.
+    expect(document.body.querySelector('.window-titlebar__leading-actions')).toBeNull()
+  })
+
   it('exposes a chat-drawer toggle in the mounted header that reflects and drives drawer state', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
