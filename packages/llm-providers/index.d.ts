@@ -28,6 +28,7 @@ export declare const PROVIDER_IDS: readonly [
   'novita',
   'minimax',
   'azure',
+  'openai-compatible',
   'codex-subscription',
 ]
 

@@ -15,8 +15,11 @@ import {
 
 /** models.dev provider KEY for one of our provider ids (e.g. 'claude' → 'anthropic'). */
 export function providerKey(id: LlmProviderId): string {
-  if (id === 'codex-subscription') {
-    throw new Error('providerKey: codex-subscription is not a models.dev catalog source')
+  // Neither the Codex broker (dynamic catalog) nor openai-compatible (no
+  // models.dev catalog — operator hand-declares its models) is a models.dev
+  // source, so neither has a PROVIDER_KEY_MAP entry.
+  if (id === 'codex-subscription' || id === 'openai-compatible') {
+    throw new Error(`providerKey: ${id} is not a models.dev catalog source`)
   }
   return PROVIDER_KEY_MAP[id]
 }

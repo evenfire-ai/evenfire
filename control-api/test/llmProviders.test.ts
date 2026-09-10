@@ -17,7 +17,7 @@ import {
 // (same convention as @clerum/image-policy → control-api/test/imagePolicy.test.ts).
 
 describe('PROVIDER_IDS', () => {
-  it('is the canonical 22 static providers plus the Codex broker', () => {
+  it('is the canonical 23 static providers plus the Codex broker', () => {
     expect([...PROVIDER_IDS]).toEqual([
       'openai',
       'claude',
@@ -41,6 +41,7 @@ describe('PROVIDER_IDS', () => {
       'novita',
       'minimax',
       'azure',
+      'openai-compatible',
       'codex-subscription',
     ])
   })
@@ -188,5 +189,39 @@ describe('codex-subscription descriptor', () => {
     expect(() => requireStaticCredentialSlot(providerDescriptor('codex-subscription'))).toThrow(
       /static credential helper/
     )
+  })
+})
+
+describe('openai-compatible descriptor', () => {
+  it('is a static-credentials provider whose single credential slot is OPTIONAL', () => {
+    // The first (and so far only) provider with an optional credential slot:
+    // local/self-hosted OpenAI-compatible servers frequently need no auth.
+    const slots = PROVIDER_CREDENTIAL_SLOTS['openai-compatible']
+    expect(slots).toEqual([
+      {
+        dataKey: 'openai-compatible-api-key',
+        envName: 'OPENAI_COMPATIBLE_API_KEY',
+        required: false,
+      },
+    ])
+    expect(slots[0].required).toBe(false)
+  })
+
+  it('carries no non-secret env (baseURL is per-Host, consumed by HCC, not an env var)', () => {
+    expect(PROVIDER_NON_SECRET_ENV['openai-compatible']).toEqual([])
+  })
+
+  it('derives static-credentials auth with a static (hand-declared) catalog', () => {
+    expect(providerDescriptor('openai-compatible')).toMatchObject({
+      id: 'openai-compatible',
+      authMode: 'static-credentials',
+      modelCatalogMode: 'static',
+    })
+    expect(PROVIDER_AUTH_MODE['openai-compatible']).toBe('static-credentials')
+    expect(PROVIDER_MODEL_CATALOG_MODE['openai-compatible']).toBe('static')
+  })
+
+  it('has a non-empty display label', () => {
+    expect(PROVIDER_DISPLAY_LABELS['openai-compatible']).toBeTruthy()
   })
 })
