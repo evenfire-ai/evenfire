@@ -22,6 +22,7 @@ import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
 import { SidebarNav } from '@components/SidebarNav'
+import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
@@ -263,6 +264,7 @@ export function App() {
   const [headerShellOverlayOpen, setHeaderShellOverlayOpen] = React.useState(false)
   const [headerNotificationTrayOpen, setHeaderNotificationTrayOpen] = React.useState(false)
   const [notificationDrawerReady, setNotificationDrawerReady] = React.useState(false)
+  const [notificationTrayLeft, setNotificationTrayLeft] = React.useState<number | null>(null)
   const [chatDrawerOpen, setChatDrawerOpen] = React.useState(false)
   const [chatDrawerReady, setChatDrawerReady] = React.useState(false)
   // Measured top of the embed slot, published as `--chat-drawer-top` so the fixed
@@ -307,6 +309,7 @@ export function App() {
   const [globalSearchFocusRequestId, setGlobalSearchFocusRequestId] = React.useState(0)
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
   const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
+  const [titlebarActionsRoot, setTitlebarActionsRoot] = React.useState<HTMLDivElement | null>(null)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
     query: string
@@ -2009,231 +2012,249 @@ export function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-root" inert={bootSplashLoading || undefined}>
-        {vm.isAuthenticated ? (
-          <NavigationContext.Provider value={navValue}>
-            <NotificationsContext.Provider value={notifValue}>
-              <WorkspaceActionsProvider value={workspaceActionsValue}>
-                <AgentActivityProvider value={agentActivityValue}>
-                  <AgentChatProviders
-                    actions={agentChatActionsValue}
-                    chatList={chatListValue}
-                    composerState={chatComposerStateValue}
-                    threadState={chatThreadStateValue}
-                  >
-                    <McpRuntimeProvider value={mcpRuntimeValue}>
-                      <DesktopStateProvider value={desktopStateValue}>
-                        <main className="app-shell">
-                          <SidebarNav
-                            navItem={vm.navItem}
-                            activeSandboxUiApp={activeSandboxUiApp}
-                            availableSandboxUiApps={availableSandboxUiApps}
-                            collapsed={sidebarCollapsed}
-                            onCollapsedChange={handleSidebarCollapsedChange}
-                            onNewChat={handleNewChatViewTab}
-                            onOpenSandboxUiApp={handleOpenSandboxUiApp}
-                            onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
-                            onSelect={handleSidebarNavSelect}
-                            toggleRequestId={sidebarToggleRequestId}
-                          />
-                          <section className="workspace-layout">
-                            <section
-                              ref={contentPanelRef}
-                              className={`content-panel glass-card${
-                                isAgentChatView ? ' content-panel--agent-chat' : ''
-                              }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
-                                appNotificationDrawerOpen
-                                  ? ' content-panel--app-notification-drawer-open'
-                                  : ''
-                              }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
-                              style={
-                                chatDrawerVisible
-                                  ? {
-                                      '--chat-drawer-width': `${chatDrawerResize.width}px`,
-                                      // Only publish the measured top once we have one;
-                                      // when unmeasured (null, pre-measure/tests) the CSS
-                                      // fallback applies. Uses null — not 0 — so a legitimate
-                                      // rect.top of 0/negative still follows the embed.
-                                      ...(chatDrawerEmbedTop !== null
-                                        ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
-                                        : {}),
-                                    }
-                                  : undefined
-                              }
-                            >
-                              <AppHeader
-                                searchFocusRequestId={globalSearchFocusRequestId}
-                                notificationOpenRequestId={notificationOpenRequestId}
-                                notificationTrayMode={
-                                  notificationTrayUsesDrawer ? 'drawer' : 'overlay'
+      <div className="app-frame">
+        <WindowTitleBar actionsRef={setTitlebarActionsRoot} />
+        <div className="app-root" inert={bootSplashLoading || undefined}>
+          {vm.isAuthenticated ? (
+            <NavigationContext.Provider value={navValue}>
+              <NotificationsContext.Provider value={notifValue}>
+                <WorkspaceActionsProvider value={workspaceActionsValue}>
+                  <AgentActivityProvider value={agentActivityValue}>
+                    <AgentChatProviders
+                      actions={agentChatActionsValue}
+                      chatList={chatListValue}
+                      composerState={chatComposerStateValue}
+                      threadState={chatThreadStateValue}
+                    >
+                      <McpRuntimeProvider value={mcpRuntimeValue}>
+                        <DesktopStateProvider value={desktopStateValue}>
+                          <main className="app-shell">
+                            <SidebarNav
+                              navItem={vm.navItem}
+                              activeSandboxUiApp={activeSandboxUiApp}
+                              availableSandboxUiApps={availableSandboxUiApps}
+                              collapsed={sidebarCollapsed}
+                              onCollapsedChange={handleSidebarCollapsedChange}
+                              onNewChat={handleNewChatViewTab}
+                              onOpenSandboxUiApp={handleOpenSandboxUiApp}
+                              onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
+                              onSelect={handleSidebarNavSelect}
+                              toggleRequestId={sidebarToggleRequestId}
+                            />
+                            <section className="workspace-layout">
+                              <section
+                                ref={contentPanelRef}
+                                className={`content-panel glass-card${
+                                  isAgentChatView ? ' content-panel--agent-chat' : ''
+                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
+                                  vm.navItem === DESKTOP_ROUTES.chat
+                                    ? ' content-panel--titlebar-actions'
+                                    : ''
+                                }${
+                                  appNotificationDrawerOpen
+                                    ? ' content-panel--app-notification-drawer-open'
+                                    : ''
+                                }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
+                                style={
+                                  chatDrawerVisible
+                                    ? {
+                                        '--chat-drawer-width': `${chatDrawerResize.width}px`,
+                                        // Only publish the measured top once we have one;
+                                        // when unmeasured (null, pre-measure/tests) the CSS
+                                        // fallback applies. Uses null — not 0 — so a legitimate
+                                        // rect.top of 0/negative still follows the embed.
+                                        ...(chatDrawerEmbedTop !== null
+                                          ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
+                                          : {}),
+                                      }
+                                    : undefined
                                 }
-                                notificationTrayReady={notificationDrawerReady}
-                                onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
-                                onShellOverlayOpenChange={setHeaderShellOverlayOpen}
-                              />
-                              <ToastStack items={vm.toasts} />
-                              {vm.navItem === DESKTOP_ROUTES.chat && (
-                                <ChatViewWorkspace
-                                  activeTabId={chatViewTabs.activeTabId}
-                                  localSearch={
-                                    chatLocalSearchOpen ? (
-                                      <ChatLocalSearch
-                                        models={chatSemanticModels}
-                                        onClose={closeChatLocalSearch}
-                                        onSearchStateChange={handleChatLocalSearchStateChange}
-                                      />
-                                    ) : null
-                                  }
-                                  onClose={handleCloseChatViewTab}
-                                  onSelect={handleSelectChatViewTab}
-                                  surfaceId="chat-view-panel"
-                                  tabs={chatViewTabs.tabs}
-                                >
-                                  <ChatPage scrollContainerRef={contentPanelRef} />
-                                </ChatViewWorkspace>
-                              )}
-                              {vm.navItem === DESKTOP_ROUTES.agents && (
-                                <AgentsPage scrollContainerRef={contentPanelRef} />
-                              )}
-                              {vm.navItem === DESKTOP_ROUTES.files && (
-                                <FilesPage
-                                  pushToast={vm.pushToast}
-                                  pendingGfsUri={pendingGfsUri}
-                                  onPendingGfsUriHandled={() => setPendingGfsUri(null)}
-                                />
-                              )}
-                              {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
-                              {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
-                              {vm.navItem === DESKTOP_ROUTES.apps && (
-                                <>
-                                  <SandboxUiPage
-                                    boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                    actionRequest={sandboxActionRequest}
-                                    conversationOrigin={sandboxUiConversationOrigin}
-                                    currentTeamId={vm.currentTeamId}
-                                    headerShellOverlayOpen={
-                                      headerShellOverlayOpen || commandPaletteOpen
+                              >
+                                <TitlebarActionsPortal container={titlebarActionsRoot}>
+                                  <AppHeader
+                                    placement="titlebar"
+                                    searchFocusRequestId={globalSearchFocusRequestId}
+                                    notificationOpenRequestId={notificationOpenRequestId}
+                                    notificationTrayMode={
+                                      notificationTrayUsesDrawer ? 'drawer' : 'overlay'
                                     }
-                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                                    toastShellOverlayOpen={vm.toasts.length > 0}
-                                    deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
-                                    shortcutApp={activeSandboxUiApp}
-                                    shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                                    localSearchRequestId={sandboxLocalSearchRequestId}
-                                    chatDrawerOpen={chatDrawerVisible}
-                                    onToggleChatDrawer={toggleChatDrawer}
-                                    onBackToConversation={handleSandboxUiBackToConversation}
-                                    onEmbeddedAppOpening={handleSandboxUiOpening}
-                                    onEmbeddedAppMounted={handleSandboxUiMounted}
-                                    onEmbeddedAppBack={handleSandboxUiClosed}
-                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
-                                    onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                    onEmbedSlotTopChange={setChatDrawerEmbedTop}
-                                    onNotify={vm.pushToast}
-                                    onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
+                                    notificationTrayReady={notificationDrawerReady}
+                                    notificationTrayLeft={
+                                      notificationTrayUsesDrawer ? notificationTrayLeft : null
+                                    }
+                                    onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
+                                    onShellOverlayOpenChange={setHeaderShellOverlayOpen}
                                   />
-                                  {chatDrawerVisible && (
-                                    <ChatDrawer
-                                      header={
-                                        <ChatSwitcher
-                                          tabs={chatViewTabs.tabs}
-                                          activeTabId={chatViewTabs.activeTabId}
-                                          onSelect={handleSelectChatViewTab}
-                                          onNewChat={handleNewChatViewTab}
-                                          focusRequestId={chatSwitcherFocusRequestId}
+                                </TitlebarActionsPortal>
+                                <ToastStack items={vm.toasts} />
+                                {vm.navItem === DESKTOP_ROUTES.chat && (
+                                  <ChatViewWorkspace
+                                    activeTabId={chatViewTabs.activeTabId}
+                                    localSearch={
+                                      chatLocalSearchOpen ? (
+                                        <ChatLocalSearch
+                                          models={chatSemanticModels}
+                                          onClose={closeChatLocalSearch}
+                                          onSearchStateChange={handleChatLocalSearchStateChange}
                                         />
+                                      ) : null
+                                    }
+                                    onClose={handleCloseChatViewTab}
+                                    onSelect={handleSelectChatViewTab}
+                                    surfaceId="chat-view-panel"
+                                    tabs={chatViewTabs.tabs}
+                                  >
+                                    <ChatPage scrollContainerRef={contentPanelRef} />
+                                  </ChatViewWorkspace>
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.agents && (
+                                  <AgentsPage scrollContainerRef={contentPanelRef} />
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.files && (
+                                  <FilesPage
+                                    pushToast={vm.pushToast}
+                                    pendingGfsUri={pendingGfsUri}
+                                    onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                  />
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
+                                {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
+                                {vm.navItem === DESKTOP_ROUTES.apps && (
+                                  <>
+                                    <SandboxUiPage
+                                      boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                      actionRequest={sandboxActionRequest}
+                                      conversationOrigin={sandboxUiConversationOrigin}
+                                      currentTeamId={vm.currentTeamId}
+                                      headerShellOverlayOpen={
+                                        headerShellOverlayOpen || commandPaletteOpen
                                       }
-                                      onNewChat={handleNewChatViewTab}
-                                      onClose={closeChatDrawer}
-                                      containerRef={chatDrawerRef}
-                                      ready={chatDrawerReady}
-                                      onResizeHandleMouseDown={
-                                        chatDrawerResize.onResizeHandleMouseDown
-                                      }
-                                      onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
-                                      width={chatDrawerResize.width}
-                                      resizing={chatDrawerResize.isResizing}
-                                    >
-                                      <ChatPage scrollContainerRef={chatDrawerRef} />
-                                    </ChatDrawer>
-                                  )}
-                                </>
-                              )}
-                              {vm.navItem === DESKTOP_ROUTES.settings && (
-                                <SettingsPage
-                                  shortcutsFocusRequestId={settingsShortcutsRequestId}
-                                  notificationSettings={vm.notificationSettings}
-                                  desktopNotificationPermission={vm.desktopNotificationPermission}
-                                  themeMode={themeMode}
-                                  onNotify={vm.pushToast}
-                                  onThemeModeChange={setThemeMode}
-                                  onNotificationSoundVolumeChange={vm.setNotificationSoundVolume}
-                                  onPlayNotificationSoundPreview={vm.playNotificationSoundPreview}
-                                  onSaveNotificationSettings={vm.saveNotificationSettings}
-                                  channelNotificationPreferences={vm.channelNotificationPreferences}
-                                  channelNotificationPreferencesLoading={
-                                    vm.channelNotificationPreferencesLoading
-                                  }
-                                  channelNotificationPreferencesSaving={
-                                    vm.channelNotificationPreferencesSaving
-                                  }
-                                  onSaveChannelNotificationPreferences={
-                                    vm.saveChannelNotificationPreferences
-                                  }
-                                />
-                              )}
+                                      sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                      toastShellOverlayOpen={vm.toasts.length > 0}
+                                      deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
+                                      shortcutApp={activeSandboxUiApp}
+                                      shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                      localSearchRequestId={sandboxLocalSearchRequestId}
+                                      chatDrawerOpen={chatDrawerVisible}
+                                      onToggleChatDrawer={toggleChatDrawer}
+                                      onBackToConversation={handleSandboxUiBackToConversation}
+                                      onEmbeddedAppOpening={handleSandboxUiOpening}
+                                      onEmbeddedAppMounted={handleSandboxUiMounted}
+                                      onEmbeddedAppBack={handleSandboxUiClosed}
+                                      onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                      onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                      onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                      onEmbedSlotRightChange={setNotificationTrayLeft}
+                                      onNotify={vm.pushToast}
+                                      onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
+                                    />
+                                    {chatDrawerVisible && (
+                                      <ChatDrawer
+                                        header={
+                                          <ChatSwitcher
+                                            tabs={chatViewTabs.tabs}
+                                            activeTabId={chatViewTabs.activeTabId}
+                                            onSelect={handleSelectChatViewTab}
+                                            onNewChat={handleNewChatViewTab}
+                                            focusRequestId={chatSwitcherFocusRequestId}
+                                          />
+                                        }
+                                        onNewChat={handleNewChatViewTab}
+                                        onClose={closeChatDrawer}
+                                        containerRef={chatDrawerRef}
+                                        ready={chatDrawerReady}
+                                        onResizeHandleMouseDown={
+                                          chatDrawerResize.onResizeHandleMouseDown
+                                        }
+                                        onResizeHandleKeyDown={
+                                          chatDrawerResize.onResizeHandleKeyDown
+                                        }
+                                        width={chatDrawerResize.width}
+                                        resizing={chatDrawerResize.isResizing}
+                                      >
+                                        <ChatPage scrollContainerRef={chatDrawerRef} />
+                                      </ChatDrawer>
+                                    )}
+                                  </>
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.settings && (
+                                  <SettingsPage
+                                    shortcutsFocusRequestId={settingsShortcutsRequestId}
+                                    notificationSettings={vm.notificationSettings}
+                                    desktopNotificationPermission={vm.desktopNotificationPermission}
+                                    themeMode={themeMode}
+                                    onNotify={vm.pushToast}
+                                    onThemeModeChange={setThemeMode}
+                                    onNotificationSoundVolumeChange={vm.setNotificationSoundVolume}
+                                    onPlayNotificationSoundPreview={vm.playNotificationSoundPreview}
+                                    onSaveNotificationSettings={vm.saveNotificationSettings}
+                                    channelNotificationPreferences={
+                                      vm.channelNotificationPreferences
+                                    }
+                                    channelNotificationPreferencesLoading={
+                                      vm.channelNotificationPreferencesLoading
+                                    }
+                                    channelNotificationPreferencesSaving={
+                                      vm.channelNotificationPreferencesSaving
+                                    }
+                                    onSaveChannelNotificationPreferences={
+                                      vm.saveChannelNotificationPreferences
+                                    }
+                                  />
+                                )}
+                              </section>
                             </section>
-                          </section>
-                        </main>
-                        {commandPaletteOpen ? (
-                          <CommandPalette
-                            platform={platformFromNavigator(navigator.platform)}
-                            isEligible={isCommandEligible}
-                            onClose={closeCommandPalette}
-                            onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
-                            restorePreviousFocus={!commandPaletteReturnToSandbox}
-                          />
-                        ) : null}
-                        {desktopUpdateRequiredDialog}
-                        {environmentSetupConfirmationDialog}
-                        {environmentSetupSuccessDialog}
-                        {sandboxUiDeepLinkDialog}
-                        {pluginConsentPrompt ? (
-                          <PluginConsentModal
-                            request={pluginConsentPrompt}
-                            onResolve={resolvePluginConsent}
-                          />
-                        ) : null}
-                        {pluginGfsPreview ? (
-                          <GfsImagePreview
-                            byteLength={pluginGfsPreview.bytes}
-                            fileName={pluginGfsPreview.name}
-                            gfsUri={pluginGfsPreview.gfsUri}
-                            mimeType={pluginGfsPreview.mimeType}
-                            onClose={closePluginGfsPreview}
-                          />
-                        ) : null}
-                      </DesktopStateProvider>
-                    </McpRuntimeProvider>
-                  </AgentChatProviders>
-                </AgentActivityProvider>
-              </WorkspaceActionsProvider>
-            </NotificationsContext.Provider>
-          </NavigationContext.Provider>
-        ) : (
-          <>
-            {vm.unauthenticatedView === 'outage' ? (
-              <UnavailablePage />
-            ) : vm.unauthenticatedView === 'onboarding' ? (
-              <OnboardingPage onboarding={vm.onboarding} />
-            ) : (
-              <AuthPage />
-            )}
-            {environmentSetupConfirmationDialog}
-            {environmentSetupSuccessDialog}
-            <ToastStack items={vm.toasts} />
-          </>
-        )}
+                          </main>
+                          {commandPaletteOpen ? (
+                            <CommandPalette
+                              platform={platformFromNavigator(navigator.platform)}
+                              isEligible={isCommandEligible}
+                              onClose={closeCommandPalette}
+                              onExecute={commandId => executeDesktopCommand(commandId, 'palette')}
+                              restorePreviousFocus={!commandPaletteReturnToSandbox}
+                            />
+                          ) : null}
+                          {desktopUpdateRequiredDialog}
+                          {environmentSetupConfirmationDialog}
+                          {environmentSetupSuccessDialog}
+                          {sandboxUiDeepLinkDialog}
+                          {pluginConsentPrompt ? (
+                            <PluginConsentModal
+                              request={pluginConsentPrompt}
+                              onResolve={resolvePluginConsent}
+                            />
+                          ) : null}
+                          {pluginGfsPreview ? (
+                            <GfsImagePreview
+                              byteLength={pluginGfsPreview.bytes}
+                              fileName={pluginGfsPreview.name}
+                              gfsUri={pluginGfsPreview.gfsUri}
+                              mimeType={pluginGfsPreview.mimeType}
+                              onClose={closePluginGfsPreview}
+                            />
+                          ) : null}
+                        </DesktopStateProvider>
+                      </McpRuntimeProvider>
+                    </AgentChatProviders>
+                  </AgentActivityProvider>
+                </WorkspaceActionsProvider>
+              </NotificationsContext.Provider>
+            </NavigationContext.Provider>
+          ) : (
+            <>
+              {vm.unauthenticatedView === 'outage' ? (
+                <UnavailablePage />
+              ) : vm.unauthenticatedView === 'onboarding' ? (
+                <OnboardingPage onboarding={vm.onboarding} />
+              ) : (
+                <AuthPage />
+              )}
+              {environmentSetupConfirmationDialog}
+              {environmentSetupSuccessDialog}
+              <ToastStack items={vm.toasts} />
+            </>
+          )}
+        </div>
       </div>
       <BootSplash loading={bootSplashLoading} />
     </AuthContext.Provider>
