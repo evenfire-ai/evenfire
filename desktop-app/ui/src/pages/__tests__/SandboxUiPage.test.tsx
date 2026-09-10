@@ -216,16 +216,24 @@ describe('SandboxUiPage', () => {
     )
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
 
-    const toggle = await screen.findByRole('button', { name: 'Toggle chat drawer' })
+    // Drawer closed: the toggle invites opening, carries the same native title
+    // (the only tooltip that can render over the native app view), and shows the
+    // chat icon.
+    const toggle = await screen.findByRole('button', { name: 'Open chat drawer' })
     expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(toggle.getAttribute('title')).toBe('Open chat drawer')
+    expect(toggle.querySelector('svg path')?.getAttribute('d')).toBe(
+      'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'
+    )
 
     fireEvent.click(toggle)
     expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
 
+    // Drawer open: label flips to "Close chat drawer" and pressed state reflects it.
     view.rerender(<SandboxUiPage chatDrawerOpen={true} onToggleChatDrawer={onToggleChatDrawer} />)
-    expect(
-      screen.getByRole('button', { name: 'Toggle chat drawer' }).getAttribute('aria-pressed')
-    ).toBe('true')
+    const openToggle = screen.getByRole('button', { name: 'Close chat drawer' })
+    expect(openToggle.getAttribute('aria-pressed')).toBe('true')
+    expect(openToggle.getAttribute('title')).toBe('Close chat drawer')
   })
 
   it('omits the chat-drawer toggle when no toggle handler is provided', async () => {
@@ -246,7 +254,8 @@ describe('SandboxUiPage', () => {
     render(<SandboxUiPage />)
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
     await screen.findByTestId('sandbox-ui-mounted')
-    expect(screen.queryByRole('button', { name: 'Toggle chat drawer' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open chat drawer' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Close chat drawer' })).toBeNull()
   })
 
   it('routes controlled refresh and back requests through mounted-app owners', async () => {
@@ -621,7 +630,7 @@ describe('SandboxUiPage', () => {
     })
   })
 
-  it('keeps a long conversation return label available to assistive technology and hover text', async () => {
+  it('keeps a long conversation return label available to assistive technology and the native title tooltip', async () => {
     const title =
       'A deliberately long conversation title that must remain available to assistive technology'
     sandboxUi.listApps.mockResolvedValueOnce({
@@ -646,14 +655,66 @@ describe('SandboxUiPage', () => {
     )
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    // The control is icon-only now: the full label stays the accessible name and
-    // native title, and its visible copy lives in the hover-tooltip flyout
-    // (role="tooltip") rather than an inline text span.
+    // Icon-only control with no drawer toggle wired: it falls back to the
+    // back-to-conversation path (chevron icon, "Back to {title}" label). The full
+    // label is both the accessible name and the native `title` — the native title
+    // is the only tooltip that can render over the native app WebContentsView,
+    // which always paints above the renderer DOM. There is no DOM flyout.
     const button = await screen.findByRole('button', { name: `Back to ${title}` })
 
     expect(button.getAttribute('title')).toBe(`Back to ${title}`)
-    const tooltip = button.closest('.titlebar-leading-action')?.querySelector('[role="tooltip"]')
-    expect(tooltip?.textContent).toBe(`Back to ${title}`)
+    expect(button.closest('.titlebar-leading-action')?.querySelector('[role="tooltip"]')).toBeNull()
+    expect(button.querySelector('svg path')?.getAttribute('d')).toBe('m15 18-6-6 6-6')
+  })
+
+  it('shows a chat-drawer toggle (not a back button) when a conversation origin has a drawer toggle wired', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onToggleChatDrawer = vi.fn()
+    const onBackToConversation = vi.fn()
+
+    render(
+      <SandboxUiPage
+        conversationOrigin={{
+          agentName: 'sales-agent',
+          chatId: 'chat-123',
+          title: 'Quarterly planning',
+        }}
+        chatDrawerOpen={false}
+        onToggleChatDrawer={onToggleChatDrawer}
+        onBackToConversation={onBackToConversation}
+      />
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+
+    // With a drawer toggle wired the originating conversation lives in the drawer,
+    // so this control opens/closes the drawer — it must NOT be labeled "Back to
+    // {title}" (the bug) nor fall back to destroying the embed. Chat icon, native
+    // title = the open/close label, and it drives the toggle only.
+    const toggle = await screen.findByRole('button', { name: 'Open chat drawer' })
+    expect(screen.queryByRole('button', { name: 'Back to Quarterly planning' })).toBeNull()
+    expect(toggle.getAttribute('title')).toBe('Open chat drawer')
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    expect(toggle.querySelector('svg path')?.getAttribute('d')).toBe(
+      'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'
+    )
+
+    fireEvent.click(toggle)
+    expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
+    expect(onBackToConversation).not.toHaveBeenCalled()
+    expect(sandboxUi.close).not.toHaveBeenCalled()
   })
 
   it('keeps the app mounted when returning to the conversation fails', async () => {

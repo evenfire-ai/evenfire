@@ -438,7 +438,6 @@ h3 {
 }
 
 .window-titlebar__leading .titlebar-leading-action {
-  position: relative;
   display: inline-flex;
 }
 
@@ -469,19 +468,6 @@ h3 {
   border-color: rgba(var(--accent-rgb), 0.42);
   background: var(--surface-hover);
   color: var(--text);
-}
-
-/* Reuse the sidebar .nav-tooltip flyout for an instant hover label, reoriented
-   to drop below the action (this is a horizontal top bar, not a vertical rail). */
-.window-titlebar__leading .titlebar-leading-action__tooltip {
-  left: 50%;
-  top: calc(100% + var(--space-1));
-  transform: translateX(-50%);
-}
-
-.window-titlebar__leading .titlebar-leading-action:hover .titlebar-leading-action__tooltip,
-.window-titlebar__leading .titlebar-leading-action:focus-within .titlebar-leading-action__tooltip {
-  opacity: 1;
 }
 
 .top-bar {

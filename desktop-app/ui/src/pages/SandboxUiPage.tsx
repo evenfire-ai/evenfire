@@ -163,9 +163,12 @@ let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
 // Icon-only app action rendered into the native title bar's leading slot. The
-// visible label lives in an instant hover flyout (reusing the sidebar
-// `.nav-tooltip` treatment) so the collapsed control still announces itself;
-// `IconButton` keeps the accessible name and native title from `label`.
+// label is surfaced through IconButton's native `title` (from `label`) plus
+// `aria-label` for assistive tech. The native `title` is deliberate here: the
+// mounted app is a native WebContentsView that always paints above the renderer
+// DOM regardless of CSS, so a DOM tooltip would render BEHIND the app view and
+// be unreadable. The OS composes the native `title` tooltip over that native
+// view, so it is the only label affordance that can actually be seen.
 function TitlebarLeadingAction({
   className,
   label,
@@ -191,9 +194,6 @@ function TitlebarLeadingAction({
       >
         {children}
       </IconButton>
-      <span className="nav-tooltip titlebar-leading-action__tooltip" role="tooltip">
-        {label}
-      </span>
     </span>
   )
 }
@@ -619,27 +619,33 @@ export function SandboxUiPage({
             <div className="window-titlebar__leading-actions">
               {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
                 // The originating conversation lives in the drawer beside the
-                // live embed now, so this toggles the drawer instead of
-                // destroying the embed and reconstructing the chat full-screen.
-                // When no drawer toggle is wired it falls back to the destroy-
-                // and-reconstitute path (also reachable via the
-                // app.backToConversation command).
+                // live embed now, so when a drawer toggle is wired this control
+                // opens/closes that drawer (chat icon, open/close label). When
+                // no toggle is wired it falls back to the destroy-and-reconstitute
+                // "back to conversation" path (chevron, "Back to {title}"; also
+                // reachable via the app.backToConversation command).
                 <TitlebarLeadingAction
                   className="sandbox-ui-conversation-btn"
-                  label={`Back to ${conversationOrigin.title}`}
+                  label={
+                    onToggleChatDrawer
+                      ? chatDrawerOpen
+                        ? 'Close chat drawer'
+                        : 'Open chat drawer'
+                      : `Back to ${conversationOrigin.title}`
+                  }
                   pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
                   onClick={
                     onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
                   }
                 >
-                  <IconChevronLeft />
+                  {onToggleChatDrawer ? <IconChat /> : <IconChevronLeft />}
                 </TitlebarLeadingAction>
               ) : null}
               {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
                 // No originating conversation to return to — a plain drawer toggle.
                 <TitlebarLeadingAction
                   className="sandbox-ui-chat-drawer-btn"
-                  label="Toggle chat drawer"
+                  label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
                   pressed={chatDrawerOpen}
                   onClick={onToggleChatDrawer}
                 >
