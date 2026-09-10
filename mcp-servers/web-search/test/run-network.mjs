@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { chmodSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +47,13 @@ try {
     ],
     { stdio: 'ignore', timeout: 10000 }
   )
+  // Linux bind mounts retain the runner UID. Container root with ALL caps
+  // dropped cannot read its 0700 directory. Grant only the host group access
+  // to the synthetic ephemeral TLS fixture, without DAC override capability.
+  if (!process.getgid) throw new Error('Network tests require a Unix host')
+  chmodSync(config, 0o750)
+  chmodSync(path.join(config, 'fixture-key.pem'), 0o640)
+  chmodSync(path.join(config, 'fixture-cert.pem'), 0o640)
   const name = 'issue198-network-' + randomUUID()
   const docker = ['--host', endpoint, '--config', config]
   const args = [
@@ -58,6 +65,8 @@ try {
     name,
     '--network=none',
     '--cap-drop=ALL',
+    '--group-add',
+    String(process.getgid()),
     '--cap-add=NET_ADMIN',
     '--memory=256m',
     '--cpus=1',
