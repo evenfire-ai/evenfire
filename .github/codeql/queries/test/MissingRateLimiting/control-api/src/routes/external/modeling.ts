@@ -30,6 +30,11 @@ function specializedWork(_req: express.Request, res: express.Response) {
   res.sendStatus(204);
 }
 
+function reassignedAliasWork(_req: express.Request, res: express.Response) {
+  fs.writeFileSync("/tmp/evenfire-codeql-reassigned-alias", "value");
+  res.sendStatus(204);
+}
+
 router.post(
   "/protected",
   rateLimitMiddleware({ type: "external_member_mutation", max: 10 }),
@@ -58,5 +63,13 @@ const assignedRateLimit = rateLimitMiddleware({
 });
 
 router.get("/assigned", assignedRateLimit, specializedWork);
+
+let reassignedRateLimit = rateLimitMiddleware({
+  type: "external_member_read",
+  max: 60,
+});
+reassignedRateLimit = unrelatedMiddleware();
+
+router.get("/reassigned-alias", reassignedRateLimit, reassignedAliasWork);
 
 export default router;
