@@ -6,13 +6,13 @@ import { useConfirmDialog } from '@components/ConfirmDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
-import { IconFolder } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
 import { Button, CheckboxField } from '@components/ui'
 import { GFS_MAX_BULK_SUBJECTS } from '@constants/gfsGrantSubjects'
 import {
   type AdminUser,
   type GfsGrantError,
+  type GfsSubjectInput,
   type HostResource,
   type TeamListItem,
   type WorkflowRecipeResource,
@@ -105,10 +105,33 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         getGfsShares(resource.resourceId, DRIVE, controller.signal),
       ])
       if (requestId !== existingAccessRequest.current) return
-      setExistingAccess([
-        ...grantResult.items.map(item => ({ ...item, kind: 'grant' as const })),
-        ...shareResult.items.map(item => ({ ...item, kind: 'share' as const })),
-      ])
+      // Merge per subject: legacy flows could leave the same principal with
+      // BOTH a grant and a URI share (rendered as duplicate rows with
+      // different toggle semantics). One row per subject, permissions and
+      // descendant coverage unioned, both row ids retained for revoke.
+      const bySubject = new Map<string, GfsExistingAccessItem>()
+      const entryFor = (subject: GfsSubjectInput): GfsExistingAccessItem => {
+        const key = `${subject.type}:${subject.id ?? ''}`
+        let entry = bySubject.get(key)
+        if (!entry) {
+          entry = { subject, permissions: [], inherit: false, grantId: null, shareIds: [] }
+          bySubject.set(key, entry)
+        }
+        return entry
+      }
+      for (const grant of grantResult.items) {
+        const entry = entryFor(grant.subject)
+        entry.grantId = grant.id
+        entry.inherit = entry.inherit || grant.inherit
+        entry.permissions = [...new Set([...entry.permissions, ...grant.permissions])]
+      }
+      for (const share of shareResult.items) {
+        const entry = entryFor(share.subject)
+        entry.shareIds.push(share.id)
+        entry.inherit = entry.inherit || share.includeDescendants
+        entry.permissions = [...new Set([...entry.permissions, ...share.permissions])]
+      }
+      setExistingAccess([...bySubject.values()])
     } catch (caught) {
       if (requestId !== existingAccessRequest.current) return
       setExistingAccessError(
@@ -301,8 +324,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             numeric: true,
             sensitivity: 'base',
           }) ||
-          left.kind.localeCompare(right.kind) ||
-          left.id.localeCompare(right.id)
+          `${left.subject.type}:${left.subject.id ?? ''}`.localeCompare(
+            `${right.subject.type}:${right.subject.id ?? ''}`
+          )
       ),
     [existingAccess, subjectLabel]
   )
@@ -311,7 +335,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     const label = subjectLabel(item)
     const confirmed = await confirm({
       title: 'Remove access?',
-      message: `Remove ${item.kind} access for ${label} from "${resource.name}"?`,
+      message: `Remove access for ${label} from "${resource.name}"?`,
       confirmLabel: 'Remove access',
       tone: 'danger',
     })
@@ -319,8 +343,8 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     setBusy(true)
     setError('')
     try {
-      if (item.kind === 'grant') await deleteGfsGrant(item.id)
-      else await deleteGfsShare(item.id)
+      if (item.grantId) await deleteGfsGrant(item.grantId)
+      for (const shareId of item.shareIds) await deleteGfsShare(shareId)
       showToast('Access removed.', { tone: 'success' })
       await loadExistingAccess()
     } catch (caught) {
@@ -340,7 +364,6 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   }
 
   async function updateAccessRole(item: GfsExistingAccessItem, nextRole: AccessRole) {
-    if (item.kind !== 'grant') return
     const permissions = rolePermissions(nextRole, hostOnlySubject(item.subject))
     setBusy(true)
     setError('')
@@ -352,6 +375,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
         permissions,
         inherit: item.inherit,
       })
+      // The upserted grant supersedes any legacy URI share for this subject;
+      // the server has no share-update surface, so consolidation happens here.
+      for (const shareId of item.shareIds) await deleteGfsShare(shareId)
       showToast(
         `${subjectLabel(item)} is now ${nextRole === 'editor' ? 'an Editor' : 'Read-only'}.`,
         {
@@ -464,49 +490,35 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
               {sortedExistingAccess.map(item => {
                 const label = subjectLabel(item)
-                const coversDescendants =
-                  item.kind === 'grant' ? item.inherit : item.includeDescendants
+                const kindLabel = item.grantId ? 'direct grant' : 'direct share'
                 return (
                   <RecordListRow
                     className="cu-gfs-existing-access__item"
-                    data-testid={`gfs-access-row-${item.kind}-${item.id}`}
-                    data-access-id={item.id}
-                    key={`${item.kind}:${item.id}`}
+                    data-testid={`gfs-access-row-${item.subject.type}`}
+                    data-access-id={item.grantId ?? item.shareIds[0]}
+                    key={`${item.subject.type}:${item.grantId ?? item.shareIds[0]}`}
                   >
                     <span className="cu-gfs-existing-access__identity">
                       <span className="cu-gfs-existing-access__subject">{label}</span>
                       <span className="cu-gfs-existing-access__detail">
-                        {item.kind === 'grant' ? 'Direct grant' : 'Direct share'} ·{' '}
-                        {item.subject.type}
+                        {item.grantId ? 'Direct grant' : 'Direct share'} · {item.subject.type}
                       </span>
                     </span>
                     <span className="cu-gfs-existing-access__meta">
-                      {item.kind === 'grant' ? (
-                        <SelectionDropdown
-                          ariaLabel={`Access role for ${label}`}
-                          className="cu-gfs-existing-access__role"
-                          disabled={actionPending}
-                          multiple={false}
-                          onChange={next =>
-                            void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
-                          }
-                          options={ROLE_OPTIONS}
-                          placeholder="Role"
-                          searchable={false}
-                          showSelectedChips={false}
-                          value={[roleForPermissions(item.permissions)]}
-                        />
-                      ) : (
-                        <span className="cu-gfs-existing-access__role-label">
-                          {roleForPermissions(item.permissions) === 'editor' ? 'Editor' : 'Read'}
-                        </span>
-                      )}
-                      {coversDescendants ? (
-                        <span className="cu-gfs-existing-access__inherit">
-                          <IconFolder />
-                          Includes contents
-                        </span>
-                      ) : null}
+                      <SelectionDropdown
+                        ariaLabel={`Access role for ${label}`}
+                        className="cu-gfs-existing-access__role"
+                        disabled={actionPending}
+                        multiple={false}
+                        onChange={next =>
+                          void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
+                        }
+                        options={ROLE_OPTIONS}
+                        placeholder="Role"
+                        searchable={false}
+                        showSelectedChips={false}
+                        value={[roleForPermissions(item.permissions)]}
+                      />
                     </span>
                     <RowActionMenu
                       actions={[
@@ -518,7 +530,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                           onSelect: () => void revokeAccess(item),
                         },
                       ]}
-                      ariaLabel={`Actions for ${item.kind === 'grant' ? 'direct grant to' : 'direct share to'} ${label}`}
+                      ariaLabel={`Actions for ${kindLabel} to ${label}`}
                     />
                   </RecordListRow>
                 )

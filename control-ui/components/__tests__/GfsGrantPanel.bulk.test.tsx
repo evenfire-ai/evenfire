@@ -202,7 +202,7 @@ describe('GfsGrantPanel bulk access', () => {
     )
   })
 
-  it('distinguishes direct grant and share menus for the same principal', async () => {
+  it('merges a legacy grant and share for the same principal into one toggleable row', async () => {
     mockGetGfsGrants.mockResolvedValue({
       items: [
         {
@@ -223,20 +223,84 @@ describe('GfsGrantPanel bulk access', () => {
           resourceId: resource.resourceId,
           subject: userSubject,
           permissions: ['read'],
-          includeDescendants: false,
+          includeDescendants: true,
         },
       ],
     })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
 
     renderPanel()
 
     const existing = await screen.findByRole('region', { name: 'People with access' })
+    // ONE row for the principal — not one per backend row kind.
+    expect(within(existing).getAllByText('Ada Lovelace')).toHaveLength(1)
+    expect(within(existing).getByText('Direct grant · user')).toBeTruthy()
     expect(
       within(existing).getByRole('button', { name: 'Actions for direct grant to Ada Lovelace' })
-    ).toBeInTheDocument()
+    ).toBeTruthy()
     expect(
-      within(existing).getByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
-    ).toBeInTheDocument()
+      within(existing).queryByRole('button', { name: 'Actions for direct share to Ada Lovelace' })
+    ).toBeNull()
+    // The descendant-coverage badge stays out of the row.
+    expect(within(existing).queryByText('Includes contents')).toBeNull()
+
+    // Role change consolidates: the grant upsert supersedes the legacy share.
+    fireEvent.click(within(existing).getByRole('button', { name: 'Access role for Ada Lovelace' }))
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: true,
+      })
+    )
+    await waitFor(() =>
+      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
+    )
+  })
+
+  it('offers a toggleable role for a share-only principal and migrates it on change', async () => {
+    mockGetGfsShares.mockResolvedValue({
+      items: [
+        {
+          id: '44444444-4444-4444-4444-444444444444',
+          drive: 'main',
+          resourceId: resource.resourceId,
+          subject: userSubject,
+          permissions: ['read'],
+          includeDescendants: true,
+        },
+      ],
+    })
+    mockPutGfsGrant.mockResolvedValue(successfulMutation(userSubject))
+
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    const role = await within(existing).findByRole('button', {
+      name: 'Access role for Ada Lovelace',
+    })
+    expect(role).toHaveTextContent('Read')
+    expect(within(existing).getByText('Direct share · user')).toBeTruthy()
+
+    fireEvent.click(role)
+    fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+
+    await waitFor(() =>
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: resource.resourceId,
+        subject: userSubject,
+        permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+        inherit: true,
+      })
+    )
+    await waitFor(() =>
+      expect(mockDeleteGfsShare).toHaveBeenCalledWith('44444444-4444-4444-4444-444444444444')
+    )
   })
 
   it('sorts access records by visible principal identity', async () => {
