@@ -79,6 +79,13 @@ function connect(url: URL, address: string, signal: AbortSignal): Promise<Incomi
       resolve
     )
     req.once('error', reject)
+    // A protocol switch does not emit a normal response. Explicitly release
+    // its socket and settle the call; otherwise the concurrency slot can leak.
+    req.once('upgrade', (_response, socket) => {
+      socket.destroy()
+      reject(new FetchPageError('upstream_failure'))
+    })
+    req.once('close', () => reject(new FetchPageError('upstream_failure')))
     req.end()
   })
 }

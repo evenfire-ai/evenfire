@@ -31,6 +31,11 @@ const tlsServer = https.createServer(
 )
 await new Promise(resolve => tlsServer.listen(8443, '11.198.0.2', resolve))
 const upstream = http.createServer((req, res) => {
+  if (req.url === '/upgrade') {
+    res.writeHead(101, { Connection: 'Upgrade', Upgrade: 'fixture' })
+    res.end()
+    return
+  }
   if (req.url === '/redirect') {
     res.writeHead(302, { Location: 'http://127.0.0.1:8081/trap' })
     res.end()
@@ -154,5 +159,18 @@ test(
       }, 10)
     })
     assert.notEqual((await call('http://11.198.0.2:8080/')).isError, true)
+  }
+)
+
+test(
+  'an unsupported protocol switch settles without waiting for the deadline',
+  { timeout: 4000 },
+  async () => {
+    const result = await client.callTool(
+      { name: 'fetch_page', arguments: { url: 'http://11.198.0.2:8080/upgrade' } },
+      undefined,
+      { timeout: 2000 }
+    )
+    assert.equal(errorCode(result), 'upstream_failure')
   }
 )
