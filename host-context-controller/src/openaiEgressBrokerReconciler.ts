@@ -35,7 +35,7 @@
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
 import { createHash } from 'crypto'
-import { brokerNameFor, classifyLanBaseURL } from '@clerum/egress-policy'
+import { brokerNameFor, classifyLanBaseURL, ipv4ToInt } from '@clerum/egress-policy'
 import { config } from './config'
 import {
   HOST_LABEL,
@@ -131,6 +131,31 @@ export function hostDeclaresOpenAiCompatible(host: HostCRD | undefined): boolean
   return (host.spec.llmPolicy?.fallbacks ?? []).some(
     fb => fb.provider?.trim() === OPENAI_COMPATIBLE_PROVIDER
   )
+}
+
+/**
+ * The cluster-internal CIDR set the LAN classifier rejects a baseURL against,
+ * plus whether the operator actually configured the guard. `cidrs` unions every
+ * source HCC knows — the apiserver CIDRs, the nodelocal DNS CIDR, the
+ * operator-declared cluster-internal ranges — and a zero-config FLOOR: the
+ * apiserver ClusterIP as a /32 from KUBERNETES_SERVICE_HOST (the same expression
+ * the k8s-api egress NetworkPolicy uses). The floor is IPv4-only (an IPv6 or
+ * malformed value yields no floor entry rather than a CIDR the classifier would
+ * ignore). `guardConfigured` reflects ONLY the operator's explicit
+ * clusterInternalEgressCidrs — the floor is a safety net, not evidence the guard
+ * was set — so the fail-closed check still trips when only the floor is present.
+ */
+export function resolveClusterInternalCidrs(): { cidrs: string[]; guardConfigured: boolean } {
+  const floor: string[] = []
+  const apiHost = process.env.KUBERNETES_SERVICE_HOST
+  if (apiHost && ipv4ToInt(apiHost) !== null) floor.push(`${apiHost}/32`)
+  const cidrs = [
+    ...config.k8sApiCidrs,
+    ...(config.nodeLocalDnsCidr ? [config.nodeLocalDnsCidr] : []),
+    ...config.clusterInternalEgressCidrs,
+    ...floor,
+  ]
+  return { cidrs, guardConfigured: config.clusterInternalEgressCidrs.length > 0 }
 }
 
 export class OpenAiEgressBrokerReconciler {
@@ -258,16 +283,23 @@ export class OpenAiEgressBrokerReconciler {
     baseURL: string,
     credentialDataKey: string
   ): DesiredBroker | null {
-    // Pass the cluster-internal ranges HCC knows (apiserver + nodelocal DNS +
-    // configured pod/Service CIDRs) so a cluster-internal RFC1918 literal — the
-    // apiserver ClusterIP, another pod's IP — is rejected as `cluster_internal`,
-    // not accepted as a private-LAN endpoint. Empty when deploy has not set the
-    // envs, in which case only the non-cluster-internal RFC1918 guard applies.
-    const clusterInternalCidrs = [
-      ...config.k8sApiCidrs,
-      ...(config.nodeLocalDnsCidr ? [config.nodeLocalDnsCidr] : []),
-      ...config.clusterInternalEgressCidrs,
-    ]
+    // Cluster-internal ranges HCC rejects a baseURL against (see
+    // resolveClusterInternalCidrs). The floor pins the apiserver ClusterIP even
+    // with zero config, but the floor alone is NOT a configured guard.
+    const { cidrs: clusterInternalCidrs, guardConfigured } = resolveClusterInternalCidrs()
+    // Fail-closed: without operator-declared cluster-internal ranges the
+    // classifier cannot distinguish cluster space (apiserver/pod ClusterIPs) from
+    // a real private LAN, so it would accept a cluster-internal baseURL. Refuse to
+    // provision any slot until the guard is configured. The escape hatch is
+    // CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false, for a deploy that
+    // deliberately runs without it.
+    if (!guardConfigured && config.oaiEgressRequireClusterCidrs) {
+      log.error(
+        'cluster-internal CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
+        { host: hostName, slotId }
+      )
+      return null
+    }
     const decision = classifyLanBaseURL(
       baseURL,
       clusterInternalCidrs.length ? { clusterInternalCidrs } : undefined

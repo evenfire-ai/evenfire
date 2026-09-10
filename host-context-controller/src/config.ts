@@ -57,6 +57,15 @@ export interface Config {
   // when control-api admission was bypassed by a direct cluster write.
   clusterInternalEgressCidrs: string[]
 
+  // Fail-closed switch for the openai-compatible egress broker. When true
+  // (default), HCC refuses to provision ANY broker unless
+  // clusterInternalEgressCidrs is non-empty: without operator-declared
+  // cluster-internal ranges the LAN classifier cannot tell cluster space
+  // (apiserver/pod ClusterIPs) from a real private LAN, so a cluster-internal
+  // baseURL would be accepted. Set CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS
+  // to false only for a deploy that deliberately runs without the guard.
+  oaiEgressRequireClusterCidrs: boolean
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -613,6 +622,7 @@ export const config: Config = {
     .split(',')
     .map(s => s.trim())
     .filter(Boolean),
+  oaiEgressRequireClusterCidrs: getEnvBool('CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS', true),
 
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
