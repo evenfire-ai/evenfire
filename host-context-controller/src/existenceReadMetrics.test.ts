@@ -182,11 +182,11 @@ function readProductionSources(): Record<string, string> {
 function assertReadInventory(sources: Record<string, string>): void {
   const expectedWrapped: Record<string, number> = {
     'utils.ts': 1,
-    'hostReconciler.ts': 8,
+    'hostReconciler.ts': 9,
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
-    'sharedFileSystemReconciler.ts': 1,
-    'k8s/gfsK8sApi.ts': 3,
+    'sharedFileSystemReconciler.ts': 3,
+    'k8s/gfsK8sApi.ts': 5,
     'networkPolicyReconciler.ts': 2,
   }
   const wrapped: Record<string, number> = {}
@@ -250,7 +250,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(reason.length, id).toBeGreaterThan(0)
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
-  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(21)
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
   expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
 }
 
@@ -357,10 +357,10 @@ describe('Kubernetes existence-read instrumentation', () => {
     spec: { podSelector: {}, policyTypes: ['Ingress'], ingress: [] },
   }
 
-  it('preserves POST-first success without adding an existence request', async () => {
+  it('observes GET404 before POST for an absent policy', async () => {
     const api = {
       createNamespacedNetworkPolicy: vi.fn().mockResolvedValue(policy),
-      readNamespacedNetworkPolicy: vi.fn(),
+      readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
     }
     await applyNetworkPolicy(
       api as unknown as k8s.NetworkingV1Api,
@@ -372,7 +372,11 @@ describe('Kubernetes existence-read instrumentation', () => {
       namespace: 'test',
       body: policy,
     })
-    expect(api.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+      name: 'read-metrics-policy',
+      namespace: 'test',
+    })
+    expect(await count('NetworkPolicy', 'absent')).toBe(1)
     expect(await count('NetworkPolicy', 'found')).toBe(0)
   })
 
@@ -391,7 +395,7 @@ describe('Kubernetes existence-read instrumentation', () => {
         policy
       )
     ).rejects.toBe(error)
-    expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
       name: 'read-metrics-policy',
       namespace: 'test',
@@ -403,7 +407,7 @@ describe('Kubernetes existence-read instrumentation', () => {
     )
     expect(samples.map(sample => [sample.labels.outcome, sample.value])).toEqual([
       ['created', 0],
-      ['conflict', 1],
+      ['conflict', 0],
       ['error', 0],
       ['skipped', 0],
     ])
@@ -437,7 +441,7 @@ describe('Kubernetes existence-read instrumentation', () => {
       'test',
       policy
     )
-    expect(events).toEqual(['POST', 'GET', 'PUT:1', 'GET', 'PUT:2'])
+    expect(events).toEqual(['GET', 'PUT:1', 'GET', 'PUT:2'])
     expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
     expect(api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
     expect(await count('NetworkPolicy', 'found')).toBe(2)
@@ -445,7 +449,12 @@ describe('Kubernetes existence-read instrumentation', () => {
     const conflicts = (await createsTotal.get()).values.find(
       sample => sample.labels.kind === 'NetworkPolicy' && sample.labels.outcome === 'conflict'
     )
-    expect(conflicts?.value).toBe(1)
+    expect(conflicts?.value).toBe(0)
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    const skipped = (await createsTotal.get()).values.find(
+      sample => sample.labels.kind === 'NetworkPolicy' && sample.labels.outcome === 'skipped'
+    )
+    expect(skipped?.value).toBe(1)
   })
 
   it('observes a read that expires the existing fence and prevents replace', async () => {
@@ -468,7 +477,7 @@ describe('Kubernetes existence-read instrumentation', () => {
       allowed
     )
     expect(allowed.mock.results.map(result => result.value)).toEqual([true, false])
-    expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     expect(await count('NetworkPolicy', 'found')).toBe(1)
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
