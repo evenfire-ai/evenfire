@@ -9,6 +9,7 @@ ENV NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_TEMPLATES=${NEXT_PUBLIC_CLERUM_ENABLE_LOCAL_
 COPY packages/workflow-recipe-capability-policy ./packages/workflow-recipe-capability-policy
 COPY packages/display-field ./packages/display-field
 COPY packages/frontend-components ./packages/frontend-components
+COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
 COPY packages/llm-providers ./packages/llm-providers
 COPY control-ui/package*.json ./control-ui/
 WORKDIR /app/control-ui
@@ -24,7 +25,9 @@ RUN npm ci \
   && rm -rf node_modules/@clerum/display-field \
   && cp -R ../packages/display-field node_modules/@clerum/display-field \
   && rm -rf node_modules/@clerum/frontend-components \
-  && cp -R ../packages/frontend-components node_modules/@clerum/frontend-components
+  && cp -R ../packages/frontend-components node_modules/@clerum/frontend-components \
+  && rm -rf node_modules/@clerum/gfs-interaction-policy \
+  && cp -R ../packages/gfs-interaction-policy node_modules/@clerum/gfs-interaction-policy
 
 # Next type-checks the Playwright config, which imports this shared loader.
 COPY scripts/qa-recorder /app/scripts/qa-recorder

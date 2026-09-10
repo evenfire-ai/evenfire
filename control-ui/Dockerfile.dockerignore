@@ -10,6 +10,9 @@
 !packages/frontend-components/src/index.tsx
 !packages/frontend-components/styles.css
 packages/frontend-components/node_modules/
+!packages/gfs-interaction-policy/
+!packages/gfs-interaction-policy/**
+packages/gfs-interaction-policy/node_modules/
 !packages/llm-providers/
 !packages/llm-providers/**
 !scripts/

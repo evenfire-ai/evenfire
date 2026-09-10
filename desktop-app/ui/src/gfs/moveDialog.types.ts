@@ -1,8 +1,15 @@
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 
 export type GfsMoveDialogProps = {
-  /** The resource being moved (kind powers the dialog title + cycle guard). */
-  target: { resourceId: string; name: string; kind: 'file' | 'directory' }
+  /** The resource being moved (kind powers the dialog title + cycle guard).
+   * `parentResourceId`, when known (list rows carry it), lets the dialog
+   * disable a no-op move into the folder that already contains the target. */
+  target: {
+    resourceId: string
+    name: string
+    kind: 'file' | 'directory'
+    parentResourceId?: string | null
+  }
   /** Cache scope from useGfsBrowserController — shares the page's gfs queries. */
   sessionScope?: string
   /** Dialog-local starting path (typically the page crumbs, minus the target). */
