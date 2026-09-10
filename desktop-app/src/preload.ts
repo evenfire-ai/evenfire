@@ -514,6 +514,10 @@ const clerum = Object.freeze({
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
+    getControlsState: () => ipcRenderer.invoke('window:getControlsState'),
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+    close: () => ipcRenderer.invoke('window:close'),
     onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
@@ -521,6 +525,16 @@ const clerum = Object.freeze({
       ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
+    },
+    onControlsStateChange: (
+      callback: (state: { fullscreen: boolean; maximized: boolean }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { fullscreen: boolean; maximized: boolean }
+      ) => callback(state)
+      ipcRenderer.on('window:controlsState', listener)
+      return () => ipcRenderer.off('window:controlsState', listener)
     },
   },
   system: {

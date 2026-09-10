@@ -76,6 +76,8 @@ vi.mock('node:dns/promises', () => ({
 }))
 
 vi.mock('./metrics', () => ({
+  createsTotal: { inc: vi.fn() },
+  existenceReadsTotal: { inc: vi.fn() },
   networkPolicySafetyPassDurationSeconds: { observe: vi.fn() },
   networkPolicySafetyPassPoliciesTotal: { inc: vi.fn() },
   netPolOrphansDeletedTotal: { inc: vi.fn() },
@@ -476,6 +478,8 @@ describe('NetworkPolicyReconciler', () => {
 
   describe('L0 — ensureDefaultDeny', () => {
     it('creates deny-all policies in every runtime namespace', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const denyPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.filter(
@@ -488,6 +492,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('includes both Ingress and Egress in policyTypes', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const denyPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls.find(
@@ -502,6 +508,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('uses empty podSelector (selects all pods)', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const denyPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls.find(
@@ -526,21 +534,8 @@ describe('NetworkPolicyReconciler', () => {
     ])(
       'refuses to adopt a foreign policy that collides with %s',
       async (targetName, policyType) => {
-        mockApi.createNamespacedNetworkPolicy.mockImplementation(
-          async ({ body }: { body: k8s.V1NetworkPolicy }) => {
-            if (body.metadata?.name === targetName) {
-              throw Object.assign(new Error('already exists'), { code: 409 })
-            }
-            return {}
-          }
-        )
         mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
-          if (
-            name === 'allow-desktop-egress-rpc-proxy' ||
-            name === 'allow-rpc-proxy-to-managed-mcp-servers'
-          ) {
-            throw Object.assign(new Error('not found'), { code: 404 })
-          }
+          if (name !== targetName) throw { code: 404 }
           return {
             metadata: {
               name,
@@ -556,6 +551,9 @@ describe('NetworkPolicyReconciler', () => {
         })
 
         await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
+        expect(mockApi.readNamespacedNetworkPolicy).toHaveBeenCalledWith(
+          expect.objectContaining({ name: targetName })
+        )
         expect(mockApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalledWith(
           expect.objectContaining({ name: targetName })
         )
@@ -563,6 +561,8 @@ describe('NetworkPolicyReconciler', () => {
     )
 
     it('creates DNS egress policies in every runtime namespace', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const dnsPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.filter(
@@ -575,6 +575,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('DNS egress targets kube-system on port 53 UDP+TCP', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const dnsPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls.find((call: unknown[]) => {
@@ -593,6 +595,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates HCC API egress policies', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const hccPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.filter(
@@ -629,6 +633,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates K8s API egress policies', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const k8sPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.filter(
@@ -641,6 +647,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('scopes HCC API egress to the platform pods that need it', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const policyByName = new Map(
@@ -664,6 +672,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('routes HCC API egress policies to the control-plane gateway', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const hccPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls
@@ -684,6 +694,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('does not grant Kubernetes API egress to runtime workload namespaces by default', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const policyByName = new Map(
@@ -707,6 +719,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('infrastructure policies have correct policy-type label', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const infraPolicies = mockApi.createNamespacedNetworkPolicy.mock.calls.filter(
@@ -720,17 +734,25 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('removes legacy static policies now replaced by generated scoped policies', async () => {
-      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => ({
-        metadata: {
-          name,
-          namespace,
-          uid: `${name}-uid`,
-          resourceVersion: '7',
-          labels: {
-            'clerum.io/managed-by': 'host-context-controller',
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+        if (
+          !['allow-desktop-egress-rpc-proxy', 'allow-rpc-proxy-to-managed-mcp-servers'].includes(
+            name
+          )
+        )
+          throw { code: 404 }
+        return {
+          metadata: {
+            name,
+            namespace,
+            uid: `${name}-uid`,
+            resourceVersion: '7',
+            labels: {
+              'clerum.io/managed-by': 'host-context-controller',
+            },
           },
-        },
-      }))
+        }
+      })
 
       await reconciler.ensureDefaultPolicies()
 
@@ -828,18 +850,21 @@ describe('NetworkPolicyReconciler', () => {
           return {}
         }
       )
-      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => ({
-        metadata: {
-          name,
-          namespace,
-          uid: 'existing-default-policy-uid',
-          resourceVersion: '7',
-          labels: {
-            'clerum.io/managed-by': 'host-context-controller',
-            'clerum.io/policy-type': 'allow-api',
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name, namespace }) => {
+        if (name !== 'allow-host-context-controller-api') throw { code: 404 }
+        return {
+          metadata: {
+            name,
+            namespace,
+            uid: 'existing-default-policy-uid',
+            resourceVersion: '7',
+            labels: {
+              'clerum.io/managed-by': 'host-context-controller',
+              'clerum.io/policy-type': 'allow-api',
+            },
           },
-        },
-      }))
+        }
+      })
 
       await expect(reconciler.ensureDefaultPolicies()).resolves.toBeUndefined()
       expect(mockApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledWith(
@@ -859,17 +884,20 @@ describe('NetworkPolicyReconciler', () => {
           return {}
         }
       )
-      mockApi.readNamespacedNetworkPolicy.mockResolvedValue({
-        metadata: {
-          name: 'allow-host-context-controller-api',
-          namespace: 'mcp-server',
-          uid: 'foreign-default-policy-uid',
-          resourceVersion: '7',
-          labels: {
-            'clerum.io/managed-by': 'foreign-controller',
-            'clerum.io/policy-type': 'allow-api',
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+        if (name !== 'allow-host-context-controller-api') throw { code: 404 }
+        return {
+          metadata: {
+            name: 'allow-host-context-controller-api',
+            namespace: 'mcp-server',
+            uid: 'foreign-default-policy-uid',
+            resourceVersion: '7',
+            labels: {
+              'clerum.io/managed-by': 'foreign-controller',
+              'clerum.io/policy-type': 'allow-api',
+            },
           },
-        },
+        }
       })
 
       await expect(reconciler.ensureDefaultPolicies()).rejects.toThrow(/ownership/i)
@@ -885,7 +913,8 @@ describe('NetworkPolicyReconciler', () => {
           return {}
         }
       )
-      mockApi.readNamespacedNetworkPolicy
+      const readAllowApi = vi
+        .fn()
         .mockResolvedValueOnce({
           metadata: {
             name: 'allow-host-context-controller-api',
@@ -910,6 +939,10 @@ describe('NetworkPolicyReconciler', () => {
             },
           },
         })
+      mockApi.readNamespacedNetworkPolicy.mockImplementation(async ({ name }) => {
+        if (name !== 'allow-host-context-controller-api') throw { code: 404 }
+        return readAllowApi()
+      })
       mockApi.replaceNamespacedNetworkPolicy.mockRejectedValueOnce(
         Object.assign(new Error('conflict'), { code: 409 })
       )
@@ -919,6 +952,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates allow-api ingress policy using _from (K8s client convention)', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       await reconciler.ensureDefaultPolicies()
 
       const apiPolicy = mockApi.createNamespacedNetworkPolicy.mock.calls.find((call: unknown[]) => {
@@ -1018,6 +1053,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates context-allow ingress policy per server in mcp-server namespace', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -1079,6 +1116,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('retains the ingress policy it just replaced when the authoritative server port changes', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const oldServer: McpServerCRD = {
         name: 'mongo',
         namespace: 'mcp-server',
@@ -1154,6 +1193,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('stops remaining policy mutations after its combined authority lease is retired', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -1200,6 +1241,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('does not mutate a Context policy from a mixed McpServer cache revision', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -1248,6 +1291,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('continues a Context policy pass across a status-only McpServer replacement', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       const selected: McpServerCRD = {
         name: 'mongo',
@@ -1325,6 +1370,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates L2 egress counterpart in mcp-host namespace (bidirectional)', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -1382,6 +1429,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('scopes L2 mcp-host egress by Context CRD name, not namespace-wide selector', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -1416,6 +1465,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('creates L2 rpc-proxy egress to one MCP server instead of relying on static namespace egress', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const cache = new Map<string, McpServerCRD>()
       cache.set('mongo', {
         name: 'mongo',
@@ -3203,6 +3254,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('repairs one-marker live widened policies in every lane before certification', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const server: McpServerCRD = {
         name: 'live-server',
         namespace: 'mcp-server',
@@ -4028,6 +4081,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('replaces same-name Context allow policies in every lane before certification', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const oldServer: McpServerCRD = {
         name: 'live-server',
         namespace: 'mcp-server',
@@ -4106,6 +4161,8 @@ describe('NetworkPolicyReconciler', () => {
     ])(
       'refuses a same-name %s safety replacement owned by another server',
       async (_lane, targetNamespace) => {
+        // Create the original owned policies before replacing the listed owner.
+        mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
         const oldServer: McpServerCRD = {
           name: 'live-server',
           namespace: 'mcp-server',
@@ -4175,6 +4232,8 @@ describe('NetworkPolicyReconciler', () => {
     )
 
     it('fails the safety pass without certifying when a same-name Context replacement fails', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const oldServer: McpServerCRD = {
         name: 'live-server',
         namespace: 'mcp-server',
@@ -4240,6 +4299,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('retains authoritative same-name policies when only API object key order differs', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const server: McpServerCRD = {
         name: 'live-server',
         namespace: 'mcp-server',
@@ -5167,6 +5228,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('leaves startup external egress creation to its dedicated coordinator', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       const server: McpServerCRD = {
         name: 'airtable-mcp',
         namespace: 'mcp-server',
@@ -5191,6 +5254,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('deletes orphaned external egress policies for servers no longer present', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ labelSelector }: { labelSelector?: string }) => {
           if (labelSelector?.includes('context-allow')) return { items: [] }
@@ -5222,6 +5287,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('fails closed by deleting HCC-managed policies with missing owner labels', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ namespace, labelSelector }: { namespace?: string; labelSelector?: string }) => {
           const managedLabels = { 'clerum.io/managed-by': 'host-context-controller' }
@@ -5301,6 +5368,8 @@ describe('NetworkPolicyReconciler', () => {
     })
 
     it('skips external egress orphan cleanup when startup server discovery is incomplete', async () => {
+      // Bootstrap this scenario without policies; later LIST fixtures supply existing objects.
+      mockApi.readNamespacedNetworkPolicy.mockRejectedValue({ code: 404 })
       mockApi.listNamespacedNetworkPolicy.mockImplementation(
         async ({ labelSelector }: { labelSelector?: string }) => {
           if (labelSelector?.includes('context-allow')) return { items: [] }

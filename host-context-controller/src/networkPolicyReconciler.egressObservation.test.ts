@@ -19,6 +19,8 @@ vi.mock('./config', () => ({
 }))
 vi.mock('node:dns/promises', () => ({ resolve4: vi.fn() }))
 vi.mock('./metrics', () => ({
+  createsTotal: { inc: vi.fn() },
+  existenceReadsTotal: { inc: vi.fn() },
   writesTotal: { inc: vi.fn() },
   writeSkipsTotal: { inc: vi.fn() },
   externalEgressRetriesAtCap: { set: vi.fn() },
@@ -314,7 +316,7 @@ describe('external egress observation failures do not decide authorization', () 
     expect(f.status()).toEqual(statusBefore)
   })
 
-  it('does not copy a newer resourceVersion onto a policy calculated before an apply conflict', async () => {
+  it('does not copy a newer resourceVersion onto a policy calculated before a replace conflict', async () => {
     const f = fixture([currentDns])
     await f.run()
     const policy = f.policies.get(currentName)!
@@ -323,8 +325,8 @@ describe('external egress observation failures do not decide authorization', () 
       ports: [{ port: 443, protocol: 'TCP' }],
     })
     f.clearCalls()
-    f.api.createNamespacedNetworkPolicy.mockImplementationOnce(async () => {
-      // The conflict retry reads this newer object after the final plan check.
+    f.api.replaceNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+      // The first PUT races with a newer resourceVersion after the final plan check.
       // A matching owner alone cannot authorize reuse of the older DNS state.
       policy.metadata!.resourceVersion = 'changed-before-replace'
       throw apiError(409)
@@ -332,20 +334,21 @@ describe('external egress observation failures do not decide authorization', () 
 
     await expect(f.run()).rejects.toThrow(/changed after the external-egress observation/)
 
-    expect(f.api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(f.api.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(f.api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(f.condition()?.status).toBe('False')
     await f.run()
     expect(f.condition()?.status).toBe('True')
     expect(f.policies.get(currentName)?.spec?.egress).toHaveLength(1)
   })
 
-  it('does not certify a policy deleted after create conflict and before replacement read, then recovers', async () => {
+  it('does not certify a policy deleted during PUT409 and before the retry read, then recovers', async () => {
     const f = fixture([currentDns])
     await f.run()
     vi.mocked(dns.resolve4).mockResolvedValue([{ address: '8.8.8.8', ttl: 300 }] as never)
-    f.api.createNamespacedNetworkPolicy.mockImplementationOnce(async () => {
-      // POST sees the existing policy and conflicts. A concurrent deletion then
-      // wins before the helper's replacement GET, which observes real absence.
+    f.api.replaceNamespacedNetworkPolicy.mockImplementationOnce(async () => {
+      // A concurrent deletion wins during the first PUT. The retry GET must
+      // observe absence and fail admission, rather than report success.
       f.policies.delete(currentName)
       throw apiError(409)
     })
