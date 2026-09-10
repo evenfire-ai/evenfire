@@ -774,6 +774,75 @@ describe('GfsBrowser', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   })
 
+  it('retries a conflicting move with numbered names until the destination accepts it', async () => {
+    const actualApi = await vi.importActual<typeof import('@lib/api')>('@lib/api')
+    const folder = child('archive', 'directory', 1)
+    const file = child('report.md', 'file', 2)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (
+        path === '/api/v1/gfs/tree' ||
+        path === '/api/v1/gfs/resources/11111111-1111-1111-1111-111111111111/children'
+      ) {
+        return {
+          rootResourceId: '11111111-1111-1111-1111-111111111111',
+          items: [folder, file],
+          nextCursor: null,
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    const conflict = () => {
+      const text = JSON.stringify({
+        error: { code: 'already_exists', message: 'a resource with this name already exists' },
+      })
+      return actualApi.formatApiError(
+        new Response(text, { status: 409, statusText: 'Conflict' }),
+        text
+      )
+    }
+    mockApiSend
+      .mockRejectedValueOnce(conflict())
+      .mockRejectedValueOnce(conflict())
+      .mockResolvedValueOnce({
+        version: 1,
+      })
+    renderBrowser()
+
+    await waitFor(() => expect(screen.queryByRole('status', { name: 'Loading files' })).toBeNull())
+    await openResourceMenu('report.md')
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Move to…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move file report.md' })
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'archive' }))
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move here (archive)' }))
+
+    await waitFor(() => expect(mockApiSend).toHaveBeenCalledTimes(3))
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      1,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0 },
+      { drive: 'main' }
+    )
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      2,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0, newName: 'report (1).md' },
+      { drive: 'main' }
+    )
+    expect(mockApiSend).toHaveBeenNthCalledWith(
+      3,
+      'PATCH',
+      '/api/v1/gfs/resources/id-2',
+      { drive: 'main', newParentId: 'id-1', ifMatch: 0, newName: 'report (2).md' },
+      { drive: 'main' }
+    )
+    expect(
+      await screen.findByText('Moved "report.md" to "archive" as "report (2).md".')
+    ).toBeTruthy()
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  })
+
   it('keeps a persisted drag-and-drop session when resumable capabilities are unavailable', async () => {
     const rootId = '11111111-1111-1111-1111-111111111111'
     const rootRid = '11111111111111111111111111111111'

@@ -6,6 +6,8 @@ import {
   GFS_UPLOAD_NAME_RETRY_LIMIT,
   createGfsUploadNameReservationBook,
   gfsUploadNameRetryDecision,
+  isGfsNameConflict,
+  nextAvailableGfsResourceName,
   normalizeGfsResourceName,
 } from '@clerum/gfs-interaction-policy'
 import { FileUploadModal } from '@components/FileUploadModal'
@@ -80,6 +82,8 @@ interface Crumb {
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+const GFS_MOVE_NAME_EXHAUSTED_MESSAGE =
+  'Could not move this resource because all numbered names are already in use.'
 
 interface PendingGfsUpload {
   uploadId?: string
@@ -596,23 +600,44 @@ export function GfsBrowser(): React.JSX.Element {
     movingResourceRef.current = source.resourceId
     setMovingResourceId(source.resourceId)
     try {
-      await apiSend(
-        'PATCH',
-        `/api/v1/gfs/resources/${encodeURIComponent(source.resourceId)}`,
-        {
-          drive: DRIVE,
-          newParentId: destination.resourceId,
-          ifMatch: source.version,
-        },
-        { drive: DRIVE }
-      )
+      const occupiedNames = new Set<string>()
+      let moveName = source.name
+      let moved = false
+      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+        try {
+          await apiSend(
+            'PATCH',
+            `/api/v1/gfs/resources/${encodeURIComponent(source.resourceId)}`,
+            {
+              drive: DRIVE,
+              newParentId: destination.resourceId,
+              ifMatch: source.version,
+              ...(moveName === source.name ? {} : { newName: moveName }),
+            },
+            { drive: DRIVE }
+          )
+          moved = true
+          break
+        } catch (error) {
+          if (!isGfsNameConflict(error)) throw error
+          occupiedNames.add(moveName)
+          if (attempt + 1 >= GFS_UPLOAD_NAME_RETRY_LIMIT) {
+            throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+          }
+          moveName = nextAvailableGfsResourceName(source.name, occupiedNames)
+        }
+      }
+      if (!moved) throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
       // The destination may have been prefetched while it was visible. Its
       // cached listing is stale after a move and must be revalidated before it
       // is opened.
       childCacheRef.current.delete(destination.resourceId)
-      showToast(`Moved "${source.name}" to "${destination.name}".`, {
-        tone: 'success',
-      })
+      showToast(
+        moveName === source.name
+          ? `Moved "${source.name}" to "${destination.name}".`
+          : `Moved "${source.name}" to "${destination.name}" as "${moveName}".`,
+        { tone: 'success' }
+      )
       await refreshCurrent()
     } catch (err) {
       if (bubbleError) throw err
