@@ -160,7 +160,7 @@ function validateCodexBrokerAdmission(
  * roles can declare a local endpoint (a per-host `allowedModels` entry is a
  * catalog pair, not a routing target with its own baseURL).
  */
-function collectOpenAiCompatibleBaseUrlTargets(
+export function collectOpenAiCompatibleBaseUrlTargets(
   spec: Record<string, unknown>
 ): Array<{ field: string; baseURL: unknown }> {
   const targets: Array<{ field: string; baseURL: unknown }> = []
