@@ -116,7 +116,7 @@ export function WindowTitleBar({ actions, actionsRef }: WindowTitleBarProps) {
       data-platform={platform}
       onDoubleClick={handleTitlebarDoubleClick}
     >
-      <div className="window-titlebar__controls" aria-label="Window controls">
+      <div className="window-titlebar__controls" role="group" aria-label="Window controls">
         {controlOrder.map(action => (
           <button
             key={action}
