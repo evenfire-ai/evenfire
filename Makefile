@@ -68,6 +68,7 @@ TEST_SERVICES := \
 	profile-ui \
 	desktop-app \
 	mcp-servers \
+	mcp-servers/web-search \
 	packages/desktop-app-links \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
@@ -1417,3 +1418,7 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: test-web-search-image
+test-web-search-image: ## Build and test the fetch_page image locally under its branch lease
+	@bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/tests/test-web-search-image.sh

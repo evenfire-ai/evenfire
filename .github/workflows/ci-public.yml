@@ -63,6 +63,7 @@ jobs:
           - profile-ui
           - desktop-app
           - mcp-servers
+          - mcp-servers/web-search
           - packages/desktop-app-links
           - packages/workflow-runtime-core
           - packages/workflow-sdk
