@@ -41,6 +41,22 @@ export interface Config {
   // a watch drops events. 0 disables.
   llmHookResyncIntervalSec: number
 
+  // Namespace where per-slot openai-compatible egress brokers (Deployment +
+  // Service + ConfigMap + mirror Secret + NetworkPolicies) are provisioned. This
+  // namespace is the only pod population with a route to the operator LAN.
+  llmEgressNamespace: string
+
+  // listen/Service port for the egress broker. Must match the port the
+  // nginx-egress-proxy image EXPOSEs (3000).
+  openaiEgressBrokerPort: number
+
+  // Cluster-internal CIDRs (pod + Service ranges) the egress broker must NOT be
+  // pointed at. Combined with k8sApiCidrs + nodeLocalDnsCidr, these are passed to
+  // classifyLanBaseURL so a baseURL that resolves to a cluster-internal RFC1918
+  // literal (apiserver ClusterIP, another pod's IP) is rejected fail-closed even
+  // when control-api admission was bypassed by a direct cluster write.
+  clusterInternalEgressCidrs: string[]
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -589,6 +605,14 @@ export const config: Config = {
 
   // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
   llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
+  // openai-compatible egress broker namespace + port (local-LLM provider).
+  llmEgressNamespace: getEnv('CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE', 'llm-egress')!,
+  openaiEgressBrokerPort: getEnvInt('CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT', 3000),
+  clusterInternalEgressCidrs: (getEnv('CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS') ?? '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
 
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,

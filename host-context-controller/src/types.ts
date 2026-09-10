@@ -402,6 +402,14 @@ export interface HostModelSpec {
   provider?: LlmProviderId
   name?: string
   connectionRef?: string
+  /**
+   * Operator LAN endpoint for provider 'openai-compatible' (e.g.
+   * http://192.168.1.50:8000/v1). Egress is brokered: HCC provisions a
+   * dedicated per-slot egress broker for this endpoint and the mcp-host dials
+   * the broker, never this address directly. Guaranteed to be an RFC1918
+   * IP-literal by control-api admission (phase 3); HCC re-validates fail-closed.
+   */
+  baseURL?: string
 }
 
 export interface HostAllowedModel {
@@ -413,6 +421,12 @@ export interface HostLlmPolicyFallback {
   provider?: string
   model?: string
   credentialSlot?: string
+  /**
+   * Operator LAN endpoint for a fallback whose provider is 'openai-compatible'
+   * (see HostModelSpec.baseURL). Each local fallback slot gets its own egress
+   * broker.
+   */
+  baseURL?: string
 }
 
 export interface HostLlmPolicySpec {

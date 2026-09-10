@@ -123,6 +123,30 @@ const readExclusions: Record<string, readonly [number, string]> = {
     1,
     'Readiness observation',
   ],
+  'openaiEgressBrokerReconciler.ts::readHostCredential::readNamespacedSecret': [
+    1,
+    'Input credential for the mirror Secret',
+  ],
+  'openaiEgressBrokerReconciler.ts::gcBroker::readNamespacedDeployment': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'openaiEgressBrokerReconciler.ts::gcBroker::readNamespacedService': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'openaiEgressBrokerReconciler.ts::gcBroker::readNamespacedConfigMap': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'openaiEgressBrokerReconciler.ts::gcBroker::readNamespacedSecret': [
+    1,
+    'Ownership before garbage collection',
+  ],
+  'openaiEgressBrokerReconciler.ts::gcBroker::readNamespacedNetworkPolicy': [
+    3,
+    'Ownership before garbage collection',
+  ],
   'networkPolicyReconciler.ts::judgeLiveExactHostEgress::readNamespacedNetworkPolicy': [
     1,
     'Retain or revoke verdict after failure',
@@ -185,6 +209,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     'hostReconciler.ts': 8,
     'reconciler.ts': 3,
     'llmHookReconciler.ts': 3,
+    'openaiEgressBrokerReconciler.ts': 5,
     'sharedFileSystemReconciler.ts': 1,
     'k8s/gfsK8sApi.ts': 3,
     'networkPolicyReconciler.ts': 2,
@@ -250,8 +275,8 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(reason.length, id).toBeGreaterThan(0)
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
-  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(21)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
+  expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(51)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {

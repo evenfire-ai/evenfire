@@ -11,6 +11,13 @@ export const LLMHOOK_LABEL = 'clerum.io/llmhook'
 // and are reference-counted by it for label-owned GC (guardrails phase-4 §3).
 export const HOOK_PODKEY_LABEL = 'clerum.io/hook-pod-key'
 export const POLICY_TYPE_LABEL = 'clerum.io/policy-type'
+// Per-broker label stamped on every object of an openai-compatible egress
+// broker (Deployment/Service/ConfigMap/Secret/NetworkPolicies). Value is the
+// deterministic broker name; drives reference-counted, label-owned GC and the
+// orphan sweep (mirrors HOOK_PODKEY_LABEL for the LlmHook shared workload).
+export const OAI_EGRESS_BROKER_LABEL = 'clerum.io/oai-egress-broker'
+// Component marker used to list/sweep egress-broker objects by kind.
+export const OAI_EGRESS_COMPONENT_VALUE = 'oai-egress'
 export const RECIPE_LABEL = 'clerum.io/recipe'
 export const HOST_LABEL = 'clerum.io/host'
 export const INFRA_POLICY_TYPE = 'infrastructure'

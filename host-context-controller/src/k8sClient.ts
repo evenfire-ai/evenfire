@@ -75,6 +75,10 @@ import {
   NetworkPolicyReconciler,
   sameContextDesiredRevision,
 } from './networkPolicyReconciler'
+import {
+  OpenAiEgressBrokerReconciler,
+  hostDeclaresOpenAiCompatible,
+} from './openaiEgressBrokerReconciler'
 import type { ReadinessInventoryDetail } from './readinessGate'
 import { McpServerReconciler } from './reconciler'
 import { SharedFileSystemReconciler } from './sharedFileSystemReconciler'
@@ -836,6 +840,7 @@ export class McpServerWatcher implements McpServerProvider {
   private hostReconciler: HostReconciler
   private netPolReconciler: NetworkPolicyReconciler
   private llmHookReconciler: LlmHookReconciler
+  private openaiEgressBrokerReconciler: OpenAiEgressBrokerReconciler
   private bindingReconciler: BindingPolicyReconciler
   private sharedFileSystemReconciler: SharedFileSystemReconciler
   private gfsReconciler: GfsReconciler
@@ -941,6 +946,9 @@ export class McpServerWatcher implements McpServerProvider {
     // LlmHook reconciler shares the live hook + host caches so it can recompute
     // pod-key member sets and the Host→LlmHook reverse index on every reconcile.
     this.llmHookReconciler = new LlmHookReconciler(kc, this.llmHooks, this.hosts)
+    // Per-slot openai-compatible egress brokers share the live host cache so the
+    // orphan sweep can recompute the desired broker set for every Host.
+    this.openaiEgressBrokerReconciler = new OpenAiEgressBrokerReconciler(kc, this.hosts)
     this.bindingReconciler = new BindingPolicyReconciler(kc, config.namespace)
     this.sharedFileSystemReconciler = new SharedFileSystemReconciler(kc)
     // gfs (Global File System) — DISTINCT from SharedFileSystem. The reconcile
@@ -2841,6 +2849,16 @@ export class McpServerWatcher implements McpServerProvider {
         error
       )
     }
+
+    // Initial openai-compatible egress broker convergence (over the already-
+    // populated Host cache): provisions brokers for local baseURL slots and
+    // sweeps any orphaned from a prior process.
+    try {
+      console.log('[K8s] Running initial openai-compatible egress broker reconciliation...')
+      await this.openaiEgressBrokerReconciler.fullReconcile([...this.hosts.values()])
+    } catch (error) {
+      console.error('[K8s] Initial openai-compatible egress broker reconciliation failed:', error)
+    }
     await this.startLlmHookWatch()
 
     const resyncSec = config.hostResyncIntervalSec
@@ -4281,6 +4299,12 @@ export class McpServerWatcher implements McpServerProvider {
     } catch (error) {
       console.error('[K8s] LlmHook periodic resync failed:', error)
     }
+    // Same periodic tick drives the egress-broker orphan sweep + convergence.
+    try {
+      await this.openaiEgressBrokerReconciler.fullReconcile([...this.hosts.values()])
+    } catch (error) {
+      console.error('[K8s] openai-compatible egress broker periodic resync failed:', error)
+    }
   }
 
   /**
@@ -4629,6 +4653,29 @@ export class McpServerWatcher implements McpServerProvider {
           await this.llmHookReconciler.reconcileHostEgress(host)
         } catch (error) {
           console.error(`[K8s] Host egress-to-hooks reconcile for "${host.name}" failed:`, error)
+        }
+      }
+
+      // Provision/teardown the per-slot openai-compatible egress brokers this
+      // Host's spec.model.baseURL / llmPolicy.fallbacks[].baseURL declare. Gated
+      // like the LlmHook fan-out: skip the reconcile (and its list calls) for a
+      // Host that neither declares nor previously declared a local endpoint. The
+      // OR over the pre-event snapshot still runs teardown when a Host FLIPS AWAY
+      // from openai-compatible, so a broker's LAN egress lane is not left open.
+      const touchesBroker =
+        hostDeclaresOpenAiCompatible(host) || hostDeclaresOpenAiCompatible(previousHostForHooks)
+      if (touchesBroker) {
+        try {
+          if (eventType === 'DELETED') {
+            await this.openaiEgressBrokerReconciler.reconcileDelete(host.name)
+          } else {
+            await this.openaiEgressBrokerReconciler.reconcileForHost(host)
+          }
+        } catch (error) {
+          console.error(
+            `[K8s] openai-compatible egress broker reconcile for "${host.name}" failed:`,
+            error
+          )
         }
       }
     }
