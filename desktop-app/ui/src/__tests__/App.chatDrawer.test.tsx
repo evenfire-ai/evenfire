@@ -22,10 +22,14 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     onEmbeddedAppMounted?: () => void
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
+    onEmbedSlotRightChange?: (rightPx: number) => void
   },
 }))
 const appHeaderHarness = vi.hoisted(() => ({
-  props: null as null | { notificationTrayMode?: 'drawer' | 'overlay' },
+  props: null as null | {
+    notificationTrayMode?: 'drawer' | 'overlay'
+    notificationTrayLeft?: number | null
+  },
   // Captured from context so tests can drive the "open conversation" gesture the
   // notification tray fires.
   openNotification: null as null | ((notification: AppNotification) => Promise<void>),
@@ -423,6 +427,23 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
     expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+  })
+
+  it('passes the measured embed edge to the notification drawer while chat is closed', () => {
+    currentController = makeController({ navItem: DESKTOP_ROUTES.apps } as Partial<AppController>)
+    render(<App />)
+
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+      sandboxUiPageHarness.props?.onEmbedSlotRightChange?.(716)
+    })
+
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
+    expect(appHeaderHarness.props?.notificationTrayLeft).toBe(716)
   })
 
   // #2 — reconciler covers the drawer (minispec 04 approach A). The ChatThread

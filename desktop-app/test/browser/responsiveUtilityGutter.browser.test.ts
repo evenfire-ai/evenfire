@@ -60,6 +60,32 @@ async function headerGeometry(width: number, drawerOpen = false): Promise<Header
   return geometry
 }
 
+async function notificationDrawerGeometry() {
+  if (!browser) throw new Error('Browser must launch before measuring notification drawer geometry')
+  const page = await browser.newPage({ viewport: { width: 1200, height: 800 } })
+  await page.setContent(`
+    <div class="app-frame">
+      <div class="content-panel">
+        <div class="sandbox-ui-embed-slot" style="position: fixed; left: 16px; top: 80px; width: 650px; height: 600px"></div>
+      </div>
+      <div
+        class="notification-menu notification-menu--app-drawer notification-menu--embed-aligned"
+        style="--notification-drawer-left: 666px"
+      ></div>
+    </div>
+  `)
+  await page.addStyleTag({ path: path.join(UI_ROOT, 'styles/tokens.css') })
+  await page.addStyleTag({ path: path.join(UI_ROOT, 'styles.css') })
+  const geometry = await page.evaluate(() => {
+    const rect = (selector: string) => document.querySelector(selector)!.getBoundingClientRect()
+    const embed = rect('.sandbox-ui-embed-slot')
+    const drawer = rect('.notification-menu--app-drawer')
+    return { drawerLeft: drawer.left, drawerRight: drawer.right, embedRight: embed.right }
+  })
+  await page.close()
+  return geometry
+}
+
 describe('responsive utility gutter', () => {
   beforeAll(async () => {
     browser = await chromium.launch(launchOptions())
@@ -91,5 +117,12 @@ describe('responsive utility gutter', () => {
     // the 420px notification rail plus its 18px outer inset.
     expect(desktop.appsPaddingRight).toBe(438)
     expect(desktop.mountedPaddingRight).toBe(438)
+  })
+
+  it('fills the measured embedded-app rail when the chat drawer is closed', async () => {
+    const geometry = await notificationDrawerGeometry()
+
+    expect(geometry.drawerLeft).toBe(geometry.embedRight)
+    expect(geometry.drawerRight).toBe(1182)
   })
 })

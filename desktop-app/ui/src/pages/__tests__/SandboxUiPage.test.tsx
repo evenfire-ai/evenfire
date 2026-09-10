@@ -813,6 +813,33 @@ describe('SandboxUiPage', () => {
     expect(onEmbedSlotTopChange.mock.calls.length).toBe(calls)
   })
 
+  it('publishes the measured embed slot right edge for the notification drawer rail', async () => {
+    sandboxUi.listApps.mockResolvedValueOnce({
+      apps: [
+        {
+          appRef: 'sandbox-recipes/sales-crm',
+          title: "Andy's Sales CRM",
+          defaultPath: '/',
+          ready: true,
+          phase: 'active',
+          updatedAt: null,
+        },
+      ],
+    })
+    sandboxUi.open.mockResolvedValueOnce(undefined)
+    const onEmbedSlotRightChange = vi.fn()
+
+    render(<SandboxUiPage onEmbedSlotRightChange={onEmbedSlotRightChange} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
+    await screen.findByRole('button', { name: 'Back to apps' })
+
+    // The real slot rect is x=16 and width=400 in this producer-backed fixture.
+    await waitFor(() => {
+      expect(onEmbedSlotRightChange).toHaveBeenCalledWith(416)
+    })
+  })
+
   it('reloads the embed in place when the Refresh button is clicked (no navigate-away needed)', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [

@@ -774,6 +774,11 @@ h3 {
   max-height: none;
 }
 
+.notification-menu--app-drawer.notification-menu--embed-aligned {
+  left: var(--notification-drawer-left);
+  width: auto;
+}
+
 .notification-menu-title-row {
   display: inline-flex;
   align-items: center;

@@ -27,7 +27,7 @@ afterEach(() => {
 
 describe('preload window controls contract', () => {
   it('exposes the titlebar controls through clerum with matching IPC channels and cleanup', async () => {
-    await import('../preload')
+    await import('../preload.js')
 
     const exposed = electron.exposeInMainWorld.mock.calls.find(
       ([name]) => name === 'clerum'

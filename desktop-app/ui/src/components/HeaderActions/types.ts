@@ -4,6 +4,7 @@ export type HeaderActionsProps = {
   notificationOpenRequestId?: number
   notificationTrayMode?: 'overlay' | 'drawer'
   notificationTrayReady?: boolean
+  notificationTrayLeft?: number | null
   onNotificationTrayOpenChange?: (open: boolean) => void
   onShellOverlayOpenChange?: (open: boolean) => void
 }

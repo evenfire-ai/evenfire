@@ -87,6 +87,7 @@ export const HeaderActions = React.memo(function HeaderActions({
   notificationOpenRequestId = 0,
   notificationTrayMode = 'overlay',
   notificationTrayReady = true,
+  notificationTrayLeft = null,
   onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
 }: HeaderActionsProps) {
@@ -671,7 +672,18 @@ export const HeaderActions = React.memo(function HeaderActions({
             <div
               className={`notification-menu${
                 notificationTrayUsesDrawer ? ' notification-menu--app-drawer' : ''
+              }${
+                notificationTrayUsesDrawer && notificationTrayLeft !== null
+                  ? ' notification-menu--embed-aligned'
+                  : ''
               }`}
+              style={
+                notificationTrayUsesDrawer && notificationTrayLeft !== null
+                  ? ({
+                      '--notification-drawer-left': `${notificationTrayLeft}px`,
+                    } as React.CSSProperties)
+                  : undefined
+              }
               role="dialog"
               aria-label="Notifications and approvals"
             >
