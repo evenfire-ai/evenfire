@@ -9,6 +9,7 @@ export const projectRoots = [
   'mcp-proxy',
   'mcp-servers',
   'packages/desktop-app-links',
+  'packages/gfs-interaction-policy',
   'packages/workflow-sdk',
   'profile-ui',
   'rpc-proxy',

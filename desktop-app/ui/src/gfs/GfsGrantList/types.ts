@@ -6,6 +6,8 @@ import type {
   GfsShareListItem,
 } from '@/gfs/delegation.types'
 
+export type GfsAccessRole = 'read' | 'editor'
+
 export interface GfsGrantListProps {
   items: GfsGrantListItem[]
   shares?: GfsShareListItem[]
@@ -21,7 +23,13 @@ export interface GfsGrantListProps {
   /** Label source for `user`/`team` subjects (the visible team directory). */
   subjects: GfsDelegationSubjectOption[]
   onRevoke: (item: GfsGrantListItem, label: string) => void | Promise<void>
+  onChangeRole?: (
+    item: GfsGrantListItem,
+    label: string,
+    role: GfsAccessRole
+  ) => void | Promise<void>
   onRevokeShare?: (item: GfsShareListItem, label: string) => void | Promise<void>
   revoking?: boolean
   revokingShare?: boolean
+  updatingRole?: boolean
 }

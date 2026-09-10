@@ -1,9 +1,19 @@
 'use client'
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE,
+  GFS_UPLOAD_NAME_RETRY_LIMIT,
+  createGfsUploadNameReservationBook,
+  gfsUploadNameRetryDecision,
+  isGfsNameConflict,
+  nextAvailableGfsResourceName,
+  normalizeGfsResourceName,
+} from '@clerum/gfs-interaction-policy'
 import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
+import { GfsMoveDialog } from '@components/GfsMoveDialog'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconDocumentText,
@@ -13,8 +23,16 @@ import {
   IconVideo,
 } from '@components/Sidebar/icons'
 import { useToast } from '@components/Toast'
-import { IconChevronRight, IconDownload, IconPaperclip, IconUpload, IconX } from '@components/icons'
-import { Button, TextInput } from '@components/ui'
+import {
+  IconChevronRight,
+  IconDownload,
+  IconPaperclip,
+  IconPencil,
+  IconShare,
+  IconUpload,
+  IconX,
+} from '@components/icons'
+import { Button } from '@components/ui'
 import { apiGet, apiSend, gfsDownload, isSilentApiError } from '@lib/api'
 import { isGfsDocumentFile } from '@lib/gfsDocumentFile'
 import {
@@ -28,11 +46,10 @@ import {
 } from '@lib/gfsFileUpload'
 import { gfsImagePreviewMimeType } from '@lib/gfsImagePreview'
 import { isGfsMarkdownPreviewFile } from '@lib/gfsMarkdownPreview'
-import { normalizeGfsResourceName } from '@lib/gfsResourceName'
 import { isGfsVideoFile } from '@lib/gfsVideoFile'
 import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { GfsGrantPanel } from './GfsGrantPanel'
-import type { GfsCreateShareActionChange } from './GfsGrantPanel.types'
+import { GfsInlineRename } from './GfsInlineRename'
 import { GfsResourceMenu } from './GfsResourceMenu'
 import { NewFolderModal } from './NewFolderModal'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -64,6 +81,9 @@ interface Crumb {
 
 const DRIVE = 'main'
 const PENDING_GFS_UPLOAD_KEY = 'evenfire:gfs-upload-v2:pending'
+const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+const GFS_MOVE_NAME_EXHAUSTED_MESSAGE =
+  'Could not move this resource because all numbered names are already in use.'
 
 interface PendingGfsUpload {
   uploadId?: string
@@ -162,6 +182,10 @@ function hasDraggedFiles(event: React.DragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
+function hasDraggedGfsResource(event: React.DragEvent<HTMLElement>): boolean {
+  return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
+}
+
 function isGfsPreviewFile(fileName: string): boolean {
   return (
     gfsImagePreviewMimeType(fileName) !== null ||
@@ -189,20 +213,13 @@ export function GfsBrowser(): React.JSX.Element {
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState('')
-  // Operator selects a resource to delegate access on (grant/share panel).
+  // Operator selects a resource to delegate access on (grant panel).
   const [selected, setSelected] = useState<GfsChild | null>(null)
+  const [renameTarget, setRenameTarget] = useState<GfsChild | null>(null)
   const [renameOpen, setRenameOpen] = useState(false)
   const [renameName, setRenameName] = useState('')
+  const [renaming, setRenaming] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
-  const createShareActionRef = useRef<(() => void) | null>(null)
-  const [createShareDisabled, setCreateShareDisabled] = useState(true)
-  const handleCreateShareActionChange = useCallback<GfsCreateShareActionChange>(
-    (action, disabled) => {
-      createShareActionRef.current = action
-      setCreateShareDisabled(disabled)
-    },
-    []
-  )
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -211,9 +228,16 @@ export function GfsBrowser(): React.JSX.Element {
   const [uploadCandidate, setUploadCandidate] = useState<File | null>(null)
   const [uploading, setUploading] = useState(false)
   const uploadJobRef = useRef<GfsUploadJob | null>(null)
+  const uploadNameReservationsRef = useRef(createGfsUploadNameReservationBook())
   const [uploadSnapshot, setUploadSnapshot] = useState<GfsUploadJobSnapshot | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
+  const [draggingResourceId, setDraggingResourceId] = useState<string | null>(null)
+  const [dragOverFolderId, setDragOverFolderId] = useState<string | null>(null)
+  const [movingResourceId, setMovingResourceId] = useState<string | null>(null)
+  const [moveTarget, setMoveTarget] = useState<GfsChild | null>(null)
+  const draggingResourceRef = useRef<GfsChild | null>(null)
+  const movingResourceRef = useRef<string | null>(null)
   const [imagePreview, setImagePreview] = useState<{
     byteLength: number
     fileName: string
@@ -439,16 +463,20 @@ export function GfsBrowser(): React.JSX.Element {
   }, [current, load])
 
   useEffect(() => {
-    if (!selected || imagePreview || markdownPreview || videoPreview) return
+    if ((!selected && !renameTarget) || imagePreview || markdownPreview || videoPreview) return
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') setSelected(null)
+      if (event.key !== 'Escape') return
+      setSelected(null)
+      setRenameOpen(false)
+      setRenameTarget(null)
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [imagePreview, markdownPreview, videoPreview, selected])
+  }, [imagePreview, markdownPreview, renameTarget, selected, videoPreview])
 
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
+    setRenameTarget(null)
     setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
@@ -496,6 +524,7 @@ export function GfsBrowser(): React.JSX.Element {
 
   function goToCrumb(index: number): void {
     if (index === crumbs.length - 1) return
+    setRenameTarget(null)
     setLoading(true)
     setCrumbs(crumbs.slice(0, index + 1))
   }
@@ -512,6 +541,126 @@ export function GfsBrowser(): React.JSX.Element {
   async function refreshCurrent(): Promise<void> {
     if (!current) return
     await load(current)
+  }
+
+  function handleResourceDragStart(event: React.DragEvent<HTMLLIElement>, child: GfsChild): void {
+    if (child.kind === 'directory' || movingResourceRef.current) {
+      event.preventDefault()
+      return
+    }
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData(GFS_RESOURCE_DRAG_TYPE, child.resourceId)
+    event.dataTransfer.setData('text/plain', child.name)
+    draggingResourceRef.current = child
+    setDraggingResourceId(child.resourceId)
+  }
+
+  function handleResourceDragEnd(): void {
+    draggingResourceRef.current = null
+    setDraggingResourceId(null)
+    setDragOverFolderId(null)
+  }
+
+  function handleFolderDragOver(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
+    if (!hasDraggedGfsResource(event)) return
+    const source = draggingResourceRef.current
+    if (!source || source.resourceId === folder.resourceId || folder.kind !== 'directory') return
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = 'move'
+    setDragOverFolderId(folder.resourceId)
+  }
+
+  function handleFolderDragEnter(event: React.DragEvent<HTMLLIElement>, folder: GfsChild): void {
+    handleFolderDragOver(event, folder)
+  }
+
+  function handleFolderDragLeave(event: React.DragEvent<HTMLLIElement>): void {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setDragOverFolderId(null)
+    }
+  }
+
+  async function moveResource(
+    source: GfsChild,
+    destination: Pick<GfsChild, 'resourceId' | 'name' | 'kind'>,
+    bubbleError = false
+  ): Promise<void> {
+    if (
+      destination.kind !== 'directory' ||
+      source.resourceId === destination.resourceId ||
+      movingResourceRef.current
+    ) {
+      return
+    }
+
+    movingResourceRef.current = source.resourceId
+    setMovingResourceId(source.resourceId)
+    try {
+      const occupiedNames = new Set<string>()
+      let moveName = source.name
+      let moved = false
+      for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+        try {
+          await apiSend(
+            'PATCH',
+            `/api/v1/gfs/resources/${encodeURIComponent(source.resourceId)}`,
+            {
+              drive: DRIVE,
+              newParentId: destination.resourceId,
+              ifMatch: source.version,
+              ...(moveName === source.name ? {} : { newName: moveName }),
+            },
+            { drive: DRIVE }
+          )
+          moved = true
+          break
+        } catch (error) {
+          if (!isGfsNameConflict(error)) throw error
+          occupiedNames.add(moveName)
+          if (attempt + 1 >= GFS_UPLOAD_NAME_RETRY_LIMIT) {
+            throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+          }
+          moveName = nextAvailableGfsResourceName(source.name, occupiedNames)
+        }
+      }
+      if (!moved) throw new Error(GFS_MOVE_NAME_EXHAUSTED_MESSAGE)
+      // The destination may have been prefetched while it was visible. Its
+      // cached listing is stale after a move and must be revalidated before it
+      // is opened.
+      childCacheRef.current.delete(destination.resourceId)
+      showToast(
+        moveName === source.name
+          ? `Moved "${source.name}" to "${destination.name}".`
+          : `Moved "${source.name}" to "${destination.name}" as "${moveName}".`,
+        { tone: 'success' }
+      )
+      await refreshCurrent()
+    } catch (err) {
+      if (bubbleError) throw err
+      showToast(err instanceof Error ? err.message : 'Could not move resource.', {
+        tone: 'error',
+      })
+    } finally {
+      movingResourceRef.current = null
+      setMovingResourceId(null)
+    }
+  }
+
+  async function handleFolderDrop(
+    event: React.DragEvent<HTMLLIElement>,
+    folder: GfsChild
+  ): Promise<void> {
+    if (!hasDraggedGfsResource(event)) return
+    event.preventDefault()
+    event.stopPropagation()
+    setDragOverFolderId(null)
+    const source = draggingResourceRef.current
+    if (!source) return
+    await moveResource(source, folder)
   }
 
   async function uploadWithCompatibility(
@@ -620,88 +769,119 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  async function uploadFile(file: File | null | undefined): Promise<void> {
+  async function uploadFile(
+    file: File | null | undefined,
+    occupiedNames = new Set(items.map(item => item.name))
+  ): Promise<void> {
     const rid = current?.rid ?? (current?.id ? ridOfResourceId(current.id) : null)
     if (!rid || !file) return
     setUploading(true)
     let resumeUploadId: string | undefined
+    let legacyFallbackAnnounced = false
     try {
       assertGfsFileUploadSize(file.size)
-      const name = await normalizeGfsResourceName(file.name)
+      const normalizedName = await normalizeGfsResourceName(file.name)
       const target = { operation: 'create' as const, parentRid: rid }
-      resumeUploadId = matchingPendingResumeUploadId(file, target, name)
-      const job = createGfsUploadJob({
-        file,
-        name,
-        target,
-        resumeUploadId,
-        onPersistPending: record => {
-          persistPendingGfsUpload({
-            idempotencyKey: record.idempotencyKey,
-            fileName: record.fileName,
-            fileSize: record.fileSize,
-            lastModified: record.lastModified,
-            target: record.target,
-            name: record.name,
-          })
-        },
-        onProgress: progress => mergeUploadProgress(progress.uploadedBytes),
-        onState: snapshot => mergeUploadSnapshot(snapshot),
-        onPersist: record => {
-          persistPendingGfsUpload({
-            uploadId: record.uploadId,
-            fileName: record.fileName,
-            fileSize: record.fileSize,
-            lastModified: record.lastModified,
-            target: record.target,
-            name: record.name,
-          })
-        },
-        onClearPersisted: uploadId => clearPendingGfsUpload(uploadId),
-      })
-      uploadJobRef.current = job
-      const receipt = await job.start()
-      if (receipt.state === 'paused') {
-        setUploading(false)
-        return
+      resumeUploadId = matchingPendingResumeUploadId(file, target, normalizedName)
+      const nameReservation = uploadNameReservationsRef.current.begin(
+        rid,
+        normalizedName,
+        occupiedNames
+      )
+      try {
+        for (let attempt = 0; attempt < GFS_UPLOAD_NAME_RETRY_LIMIT; attempt += 1) {
+          const resumeUploadIdForAttempt = attempt === 0 ? resumeUploadId : undefined
+          const name = nameReservation.reserveNext({ exact: Boolean(resumeUploadIdForAttempt) })
+
+          try {
+            try {
+              const job = createGfsUploadJob({
+                file,
+                name,
+                target,
+                resumeUploadId: resumeUploadIdForAttempt,
+                onPersistPending: record => {
+                  persistPendingGfsUpload({
+                    idempotencyKey: record.idempotencyKey,
+                    fileName: record.fileName,
+                    fileSize: record.fileSize,
+                    lastModified: record.lastModified,
+                    target: record.target,
+                    name: record.name,
+                  })
+                },
+                onProgress: progress => mergeUploadProgress(progress.uploadedBytes),
+                onState: snapshot => mergeUploadSnapshot(snapshot),
+                onPersist: record => {
+                  persistPendingGfsUpload({
+                    uploadId: record.uploadId,
+                    fileName: record.fileName,
+                    fileSize: record.fileSize,
+                    lastModified: record.lastModified,
+                    target: record.target,
+                    name: record.name,
+                  })
+                },
+                onClearPersisted: uploadId => clearPendingGfsUpload(uploadId),
+              })
+              uploadJobRef.current = job
+              const receipt = await job.start()
+              if (receipt.state === 'paused') {
+                setUploading(false)
+                return
+              }
+            } catch (err) {
+              if (!(err instanceof GfsUploadCapabilityError) || !err.allowLegacyFallback) throw err
+              if (resumeUploadIdForAttempt) {
+                throw new GfsUploadCapabilityError(
+                  'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+                  { cause: err }
+                )
+              }
+              if (!legacyFallbackAnnounced) {
+                showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
+                  tone: 'info',
+                })
+                legacyFallbackAnnounced = true
+              }
+              await uploadGfsFileLegacy({ file, name, target })
+              clearPendingGfsUpload()
+              setUploadCandidate(null)
+              setUploadOpen(false)
+              setUploadSnapshot(null)
+              uploadJobRef.current = null
+            }
+
+            nameReservation.markSuccess(name)
+            showToast('File uploaded.', { tone: 'success' })
+            setUploadCandidate(null)
+            setUploadOpen(false)
+            setUploadSnapshot(null)
+            uploadJobRef.current = null
+            await refreshCurrent()
+            return
+          } catch (err) {
+            if (uploadJobRef.current?.snapshot().state === 'aborted') return
+            const decision = gfsUploadNameRetryDecision(err, {
+              attempt,
+              resuming: Boolean(resumeUploadIdForAttempt),
+            })
+            if (decision === 'terminal') throw err
+
+            nameReservation.markConflict(name)
+            clearPendingGfsUpload()
+            uploadJobRef.current = null
+            setUploadSnapshot(null)
+            if (decision === 'exhausted') throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+          }
+        }
+
+        throw new Error(GFS_UPLOAD_NAME_EXHAUSTED_MESSAGE)
+      } finally {
+        nameReservation.release()
       }
-      showToast('File uploaded.', { tone: 'success' })
-      setUploadCandidate(null)
-      setUploadOpen(false)
-      setUploadSnapshot(null)
-      uploadJobRef.current = null
-      await refreshCurrent()
     } catch (err) {
       if (uploadJobRef.current?.snapshot().state === 'aborted') return
-      if (err instanceof GfsUploadCapabilityError && err.allowLegacyFallback) {
-        if (resumeUploadId) {
-          showToast(
-            'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
-            { tone: 'error' }
-          )
-          return
-        }
-        showToast('Resumable upload is unavailable; using the legacy 16 MiB path.', {
-          tone: 'info',
-        })
-        try {
-          const name = await normalizeGfsResourceName(file.name)
-          await uploadGfsFileLegacy({ file, name, target: { operation: 'create', parentRid: rid } })
-          clearPendingGfsUpload()
-          showToast('File uploaded.', { tone: 'success' })
-          setUploadCandidate(null)
-          setUploadOpen(false)
-          setUploadSnapshot(null)
-          uploadJobRef.current = null
-          await refreshCurrent()
-          return
-        } catch (legacyError) {
-          showToast(legacyError instanceof Error ? legacyError.message : 'Could not upload file.', {
-            tone: 'error',
-          })
-          return
-        }
-      }
       showToast(err instanceof Error ? err.message : 'Could not upload file.', { tone: 'error' })
     } finally {
       setUploading(false)
@@ -709,12 +889,21 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function handleGfsDragEnter(event: React.DragEvent<HTMLElement>): void {
+    if (hasDraggedGfsResource(event)) {
+      event.preventDefault()
+      return
+    }
     if (!hasDraggedFiles(event)) return
     event.preventDefault()
     setDragActive(true)
   }
 
   function handleGfsDragOver(event: React.DragEvent<HTMLElement>): void {
+    if (hasDraggedGfsResource(event)) {
+      event.preventDefault()
+      event.dataTransfer.dropEffect = 'none'
+      return
+    }
     if (!hasDraggedFiles(event)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = current?.id ? 'copy' : 'none'
@@ -722,11 +911,16 @@ export function GfsBrowser(): React.JSX.Element {
   }
 
   function handleGfsDragLeave(event: React.DragEvent<HTMLElement>): void {
+    if (hasDraggedGfsResource(event)) return
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
     setDragActive(false)
   }
 
   async function handleGfsDrop(event: React.DragEvent<HTMLElement>): Promise<void> {
+    if (hasDraggedGfsResource(event)) {
+      event.preventDefault()
+      return
+    }
     if (!hasDraggedFiles(event)) return
     event.preventDefault()
     setDragActive(false)
@@ -745,9 +939,10 @@ export function GfsBrowser(): React.JSX.Element {
     }
 
     setDroppedUploadCount(droppedFiles.length)
+    const occupiedNames = new Set(items.map(item => item.name))
     try {
       for (const file of droppedFiles) {
-        await uploadFile(file)
+        await uploadFile(file, occupiedNames)
       }
     } finally {
       setDroppedUploadCount(0)
@@ -764,18 +959,38 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
-  function openManage(child: GfsChild, mode?: 'rename' | 'delete'): void {
+  function openManage(child: GfsChild, mode?: 'delete'): void {
+    setRenameTarget(null)
     setSelected(child)
     setRenameName(child.name)
-    setRenameOpen(mode === 'rename')
+    setRenameOpen(false)
     setDeleteOpen(mode === 'delete')
   }
 
+  function openMove(child: GfsChild): void {
+    setSelected(null)
+    setDeleteOpen(false)
+    setMoveTarget(child)
+  }
+
+  function openRowRename(child: GfsChild): void {
+    setSelected(null)
+    setRenameOpen(false)
+    setDeleteOpen(false)
+    setRenameTarget(child)
+    setRenameName(child.name)
+  }
+
   async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
-    if (!requestedName.trim()) return
+    if (!requestedName.trim() || renaming) return
+    setRenaming(true)
     try {
       const name = await normalizeGfsResourceName(requestedName.trim())
-      if (name === child.name) return
+      if (name === child.name) {
+        setRenameOpen(false)
+        setRenameTarget(null)
+        return
+      }
       await apiSend(
         'PATCH',
         `/api/v1/gfs/resources/${encodeURIComponent(child.resourceId)}`,
@@ -783,12 +998,16 @@ export function GfsBrowser(): React.JSX.Element {
         { drive: DRIVE }
       )
       showToast('Resource renamed.', { tone: 'success' })
+      setRenameOpen(false)
+      setRenameTarget(null)
       setSelected(null)
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not rename resource.', {
         tone: 'error',
       })
+    } finally {
+      setRenaming(false)
     }
   }
 
@@ -906,7 +1125,7 @@ export function GfsBrowser(): React.JSX.Element {
     <section
       className="cu-gfs"
       aria-label="Global File System browser"
-      aria-busy={loading || droppedUploadCount > 0}
+      aria-busy={loading || droppedUploadCount > 0 || movingResourceId !== null}
     >
       <div
         className="cu-card cu-card--viewport-fill cu-gfs-card"
@@ -971,9 +1190,10 @@ export function GfsBrowser(): React.JSX.Element {
             <div className="cu-gfs-panel__actions">
               <Button
                 className="cu-gfs-create-action"
-                variant="primary"
                 disabled={!current?.id}
                 onClick={openNewFolder}
+                size="sm"
+                variant="primary"
               >
                 <IconFolder />
                 New folder
@@ -985,8 +1205,9 @@ export function GfsBrowser(): React.JSX.Element {
                   setUploadCandidate(null)
                   setUploadOpen(true)
                 }}
+                size="sm"
               >
-                <IconUpload width={18} height={18} />
+                <IconUpload width={16} height={16} />
                 Upload file
               </Button>
             </div>
@@ -1017,6 +1238,10 @@ export function GfsBrowser(): React.JSX.Element {
               <ul className="cu-gfs-list" aria-label="Current folder resources">
                 {items.map(child => {
                   const rowOpenable = child.kind === 'directory' || isGfsPreviewFile(child.name)
+                  const isRenaming = renameTarget?.resourceId === child.resourceId
+                  const isDragging = draggingResourceId === child.resourceId
+                  const isDropTarget = dragOverFolderId === child.resourceId
+                  const canDragResource = child.kind !== 'directory' && movingResourceId === null
                   const openRow = () => {
                     if (child.kind === 'directory') openDirectory(child)
                     else openFilePreview(child)
@@ -1025,6 +1250,32 @@ export function GfsBrowser(): React.JSX.Element {
                     <li
                       className={`cu-gfs-list__row${rowOpenable ? ' cu-gfs-list__row--clickable' : ''}`}
                       key={child.resourceId}
+                      draggable={canDragResource}
+                      title={
+                        canDragResource ? `Drag ${child.name} into a folder to move it` : undefined
+                      }
+                      onDragStart={
+                        canDragResource ? event => handleResourceDragStart(event, child) : undefined
+                      }
+                      onDragEnd={canDragResource ? handleResourceDragEnd : undefined}
+                      onDragEnter={
+                        child.kind === 'directory'
+                          ? event => handleFolderDragEnter(event, child)
+                          : undefined
+                      }
+                      onDragOver={
+                        child.kind === 'directory'
+                          ? event => handleFolderDragOver(event, child)
+                          : undefined
+                      }
+                      onDragLeave={child.kind === 'directory' ? handleFolderDragLeave : undefined}
+                      onDrop={
+                        child.kind === 'directory'
+                          ? event => void handleFolderDrop(event, child)
+                          : undefined
+                      }
+                      data-dragging={isDragging ? 'true' : undefined}
+                      data-drop-target={isDropTarget ? 'true' : undefined}
                       role={rowOpenable ? 'button' : undefined}
                       tabIndex={rowOpenable ? 0 : undefined}
                       aria-label={rowOpenable ? `Open ${child.name}` : undefined}
@@ -1062,7 +1313,15 @@ export function GfsBrowser(): React.JSX.Element {
                       </span>
                       <span className="cu-gfs-list__identity">
                         <span className="cu-gfs-list__name">
-                          {child.kind === 'directory' ? (
+                          {isRenaming ? (
+                            <GfsInlineRename
+                              onCancel={() => setRenameTarget(null)}
+                              onChange={setRenameName}
+                              onSubmit={() => void renameResource(child, renameName)}
+                              value={renameName}
+                              busy={renaming}
+                            />
+                          ) : child.kind === 'directory' ? (
                             <button
                               className="cu-gfs-list__name-button"
                               type="button"
@@ -1091,9 +1350,21 @@ export function GfsBrowser(): React.JSX.Element {
                         {child.kind === 'directory' ? '—' : formatBytes(child.bytes)}
                       </span>
                       <span className="cu-gfs-list__actions">
+                        <Button
+                          className="cu-gfs-list__row-action"
+                          icon
+                          size="sm"
+                          variant="ghost"
+                          title={`Share ${child.name}`}
+                          aria-label={`Share ${child.name}`}
+                          onClick={() => openManage(child)}
+                        >
+                          <IconShare width={16} height={16} />
+                        </Button>
                         {child.kind !== 'directory' ? (
                           <Button
-                            className="cu-gfs-list__download"
+                            className="cu-gfs-list__download cu-gfs-list__row-action"
+                            icon
                             size="sm"
                             variant="ghost"
                             title={`Download ${child.name}`}
@@ -1104,6 +1375,17 @@ export function GfsBrowser(): React.JSX.Element {
                             <IconDownload width={18} height={18} />
                           </Button>
                         ) : null}
+                        <Button
+                          className="cu-gfs-list__row-action"
+                          icon
+                          size="sm"
+                          variant="ghost"
+                          title={`Rename ${child.name}`}
+                          aria-label={`Rename ${child.name}`}
+                          onClick={() => openRowRename(child)}
+                        >
+                          <IconPencil width={16} height={16} />
+                        </Button>
                         <GfsResourceMenu
                           resourceName={child.name}
                           resourceUri={child.gfsUri}
@@ -1121,7 +1403,8 @@ export function GfsBrowser(): React.JSX.Element {
                               : undefined
                           }
                           onCopyLink={() => void copyGfsUri(child.gfsUri)}
-                          onRename={() => openManage(child, 'rename')}
+                          onRename={() => openRowRename(child)}
+                          onMove={() => openMove(child)}
                           onDelete={() => openManage(child, 'delete')}
                         />
                       </span>
@@ -1161,7 +1444,7 @@ export function GfsBrowser(): React.JSX.Element {
             className="cu-gfs-manage-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label={`Manage ${selected.kind === 'directory' ? 'folder' : 'file'} ${selected.name}`}
+            aria-label={`Share ${selected.kind === 'directory' ? 'folder' : 'file'} ${selected.name}`}
           >
             <header className="cu-gfs-manage-dialog__header">
               <span
@@ -1184,63 +1467,15 @@ export function GfsBrowser(): React.JSX.Element {
               </span>
               <span className="cu-gfs-manage-dialog__heading">
                 {renameOpen ? (
-                  <form
-                    className="cu-gfs-manage-dialog__title-edit"
-                    aria-label="Rename resource"
-                    onSubmit={event => {
-                      event.preventDefault()
-                      void renameResource(selected, renameName)
-                    }}
-                  >
-                    <TextInput
-                      aria-label="New name"
-                      autoFocus
-                      value={renameName}
-                      onChange={event => setRenameName(event.currentTarget.value)}
-                    />
-                    <Button variant="primary" size="sm" type="submit" disabled={!renameName.trim()}>
-                      Save
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setRenameOpen(false)}>
-                      Cancel
-                    </Button>
-                  </form>
+                  <GfsInlineRename
+                    onCancel={() => setRenameOpen(false)}
+                    onChange={setRenameName}
+                    onSubmit={() => void renameResource(selected, renameName)}
+                    value={renameName}
+                    busy={renaming}
+                  />
                 ) : (
-                  <span className="cu-gfs-manage-dialog__title-row">
-                    <h3>{selected.name}</h3>
-                    <GfsResourceMenu
-                      createShareDisabled={createShareDisabled}
-                      resourceName={selected.name}
-                      resourceUri={selected.gfsUri}
-                      downloading={downloadingIds.has(selected.resourceId)}
-                      onPreview={
-                        selected.kind !== 'directory' && isGfsPreviewFile(selected.name)
-                          ? () => openFilePreview(selected)
-                          : undefined
-                      }
-                      onDownload={
-                        selected.kind !== 'directory'
-                          ? () => void downloadFile(selected)
-                          : undefined
-                      }
-                      onCopyLink={() => void copyGfsUri(selected.gfsUri)}
-                      onCreateShare={() => createShareActionRef.current?.()}
-                      onRename={() => {
-                        setRenameName(selected.name)
-                        setRenameOpen(true)
-                        setDeleteOpen(false)
-                      }}
-                      onReplace={
-                        selected.kind !== 'directory'
-                          ? file => void replaceFile(selected, file)
-                          : undefined
-                      }
-                      onDelete={() => {
-                        setDeleteOpen(true)
-                        setRenameOpen(false)
-                      }}
-                    />
-                  </span>
+                  <h3>Share “{selected.name}”</h3>
                 )}
               </span>
               <span className="cu-gfs-manage-dialog__top-actions">
@@ -1248,7 +1483,7 @@ export function GfsBrowser(): React.JSX.Element {
                   autoFocus
                   className="cu-gfs-manage-dialog__close"
                   variant="ghost"
-                  aria-label="Close manage dialog"
+                  aria-label="Close share dialog"
                   onClick={() => setSelected(null)}
                 >
                   <IconX width={18} height={18} />
@@ -1259,8 +1494,7 @@ export function GfsBrowser(): React.JSX.Element {
             <div className="cu-gfs-manage-dialog__body">
               <section className="cu-gfs-manage-section cu-gfs-manage-section--access">
                 <div className="cu-gfs-manage-section__header">
-                  <h4>Access</h4>
-                  <p>Control who can use this resource and what they can do.</p>
+                  <h4>Add people, teams, agents, or workflows</h4>
                 </div>
                 <GfsGrantPanel
                   resource={{
@@ -1269,7 +1503,6 @@ export function GfsBrowser(): React.JSX.Element {
                     gfsUri: selected.gfsUri,
                     kind: selected.kind,
                   }}
-                  onCreateShareActionChange={handleCreateShareActionChange}
                 />
               </section>
             </div>
@@ -1324,6 +1557,23 @@ export function GfsBrowser(): React.JSX.Element {
         />
       ) : null}
 
+      {moveTarget ? (
+        <GfsMoveDialog
+          busy={movingResourceId === moveTarget.resourceId}
+          initialCrumbs={crumbs}
+          onClose={() => setMoveTarget(null)}
+          onMove={async (destinationId, destinationName) => {
+            await moveResource(
+              moveTarget,
+              { resourceId: destinationId, name: destinationName, kind: 'directory' },
+              true
+            )
+            setMoveTarget(null)
+          }}
+          target={moveTarget}
+        />
+      ) : null}
+
       {uploadOpen ? (
         <FileUploadModal
           busy={uploading}
@@ -1331,7 +1581,6 @@ export function GfsBrowser(): React.JSX.Element {
           fileSummary={
             uploadCandidate ? `${formatBytes(uploadCandidate.size)} selected` : undefined
           }
-          guidance="Before upload starts, the 1 GiB Upload v2 protocol ceiling is the local safety bound. When upload begins, the writer resolves and enforces the actual product file limit. Each request is streamed in 8 MiB parts (16 MiB hard maximum)."
           progress={
             uploadSnapshot
               ? {
