@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { type LanBaseUrlReason, classifyLanBaseURL } from '@clerum/egress-policy'
 import {
   type LlmProviderId,
   PROVIDER_AUTH_MODE,
@@ -151,6 +152,75 @@ function validateCodexBrokerAdmission(
     }
   }
   return null
+}
+
+/**
+ * Enumerate the `openai-compatible` LLM targets carrying a `baseURL`: the
+ * primary `spec.model` and each `spec.llmPolicy.fallbacks[i]`. Only these two
+ * roles can declare a local endpoint (a per-host `allowedModels` entry is a
+ * catalog pair, not a routing target with its own baseURL).
+ */
+function collectOpenAiCompatibleBaseUrlTargets(
+  spec: Record<string, unknown>
+): Array<{ field: string; baseURL: unknown }> {
+  const targets: Array<{ field: string; baseURL: unknown }> = []
+  // Match the provider after .trim(), exactly as collectHostLlmTargets and the
+  // allowlist gate do: a value like 'openai-compatible ' routes as the local
+  // provider at runtime, so it must not slip past this baseURL gate.
+  if (
+    isPlainObject(spec.model) &&
+    typeof spec.model.provider === 'string' &&
+    spec.model.provider.trim() === 'openai-compatible'
+  ) {
+    targets.push({ field: 'spec.model.baseURL', baseURL: spec.model.baseURL })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (
+        isPlainObject(entry) &&
+        typeof entry.provider === 'string' &&
+        entry.provider.trim() === 'openai-compatible'
+      ) {
+        targets.push({ field: `spec.llmPolicy.fallbacks[${i}].baseURL`, baseURL: entry.baseURL })
+      }
+    })
+  }
+  return targets
+}
+
+const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
+  invalid_url: 'baseURL must be a valid absolute URL',
+  not_ip:
+    'baseURL host must be a private-LAN IPv4 literal; DNS names (including *.svc, *.cluster.local, localhost, and metadata endpoints) are not allowed',
+  not_private_lan:
+    'baseURL host must be an RFC1918 private-LAN IPv4 address (10/8, 172.16/12, or 192.168/16)',
+  link_local: 'baseURL host must not be a link-local address (169.254.0.0/16)',
+  cgnat: 'baseURL host must not be a carrier-grade NAT address (100.64.0.0/10)',
+  cluster_internal: 'baseURL host must not target a cluster-internal address',
+  reserved: 'baseURL host must not be a reserved IPv4 address',
+}
+
+/**
+ * Admission pre-gate for local `openai-compatible` endpoints. A local provider
+ * may only point at a private-LAN IPv4 literal — the classifier rejects DNS
+ * names outright (SSRF-by-name and DNS-rebinding are closed at admission; the
+ * authoritative per-IP block is the broker's runtime NetworkPolicy /32).
+ *
+ * clusterInternalCidrs is intentionally NOT wired here: control-api does not
+ * know the pod/service CIDR. The classifier keeps the option so the runtime
+ * layer can supply it later without a surface change.
+ */
+function validateOpenAiCompatibleBaseUrls(
+  spec: Record<string, unknown>
+): Array<{ field: string; message: string }> {
+  const errors: Array<{ field: string; message: string }> = []
+  for (const target of collectOpenAiCompatibleBaseUrlTargets(spec)) {
+    const decision = classifyLanBaseURL(target.baseURL)
+    if (!decision.ok) {
+      errors.push({ field: target.field, message: LAN_BASE_URL_REASON_MESSAGE[decision.reason] })
+    }
+  }
+  return errors
 }
 
 const HostApprovalSchema = z
@@ -316,6 +386,9 @@ export async function validateHostSpec(
 
   const brokerErrors = validateCodexBrokerAdmission(spec)
   if (brokerErrors) return brokerErrors
+
+  const baseUrlErrors = validateOpenAiCompatibleBaseUrls(spec)
+  if (baseUrlErrors.length > 0) return { errors: baseUrlErrors }
 
   // No-worsening tolerance context (Pieza D), computed once and shared by the 3
   // global-allowlist gates below. On create `context.stored` is absent, so

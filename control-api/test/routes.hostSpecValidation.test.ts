@@ -837,4 +837,140 @@ describe('validateHostSpec', () => {
       expect(getModelAllowlistState).not.toHaveBeenCalled()
     })
   })
+
+  describe('openai-compatible baseURL admission', () => {
+    it('accepts a private-LAN IPv4 baseURL on the primary model', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible', baseURL: 'http://192.168.1.50:8000/v1' } },
+        { isModelAllowed }
+      )
+      expect(res).toBeNull()
+    })
+
+    it('accepts a private-LAN IPv4 baseURL on a fallback', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const res = await validateHostSpec(
+        {
+          llmPolicy: {
+            fallbacks: [
+              {
+                provider: 'openai-compatible',
+                model: 'local-llama',
+                baseURL: 'http://10.0.0.7:11434/v1',
+              },
+            ],
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).toBeNull()
+    })
+
+    it('rejects a metadata / link-local baseURL (169.254.169.254) with the primary field path', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible', baseURL: 'http://169.254.169.254/latest' } },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toContain('link-local')
+      // baseURL gate runs before the allowlist gate → no DB lookup.
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
+
+    it('gates a whitespace-padded provider ("openai-compatible ") — it routes as local at runtime', async () => {
+      // Regression: the gate must .trim() the provider like the rest of the
+      // file; a trailing space must not let a blocked baseURL slip through.
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible ', baseURL: 'http://169.254.169.254/latest' } },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toContain('link-local')
+    })
+
+    it('rejects a CGNAT baseURL', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible', baseURL: 'http://100.64.3.4:8000/v1' } },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toContain('carrier-grade NAT')
+    })
+
+    it('rejects a reserved / public baseURL (not private LAN)', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible', baseURL: 'http://8.8.8.8/v1' } },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toContain('RFC1918')
+    })
+
+    it('rejects a DNS hostname baseURL (SSRF-by-name / rebinding closed)', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        { model: { provider: 'openai-compatible', baseURL: 'http://metadata.goog/v1' } },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toContain('DNS names')
+    })
+
+    it('rejects an in-cluster .svc baseURL as a DNS name (not_ip)', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        {
+          model: {
+            provider: 'openai-compatible',
+            baseURL: 'http://ollama.mcp-host.svc.cluster.local:11434/v1',
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+    })
+
+    it('rejects a bad fallback baseURL with the indexed fallback field path', async () => {
+      const isModelAllowed = vi.fn()
+      const res = await validateHostSpec(
+        {
+          llmPolicy: {
+            fallbacks: [
+              { provider: 'claude', model: 'claude-haiku-4-5' },
+              {
+                provider: 'openai-compatible',
+                model: 'local',
+                baseURL: 'http://127.0.0.1:8000/v1',
+              },
+            ],
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[1].baseURL')
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
+
+    it('does not touch baseURL for non-openai-compatible providers', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      // A stray baseURL on a claude target is ignored by this gate.
+      const res = await validateHostSpec(
+        { model: { provider: 'claude', name: 'claude-haiku-4-5', baseURL: 'http://8.8.8.8/v1' } },
+        { isModelAllowed }
+      )
+      expect(res).toBeNull()
+    })
+  })
 })

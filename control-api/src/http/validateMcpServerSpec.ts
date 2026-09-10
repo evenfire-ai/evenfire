@@ -11,6 +11,7 @@
  * possible layer.
  */
 import { lookup } from 'node:dns/promises'
+import { NON_PUBLIC_EGRESS_CIDRS as BLOCKED_EGRESS_CIDRS } from '@clerum/egress-policy'
 import { classifyPluginImage } from '@clerum/image-policy'
 import {
   WORKFLOW_RECIPE_DEFAULT_ALLOWED_CAPABILITIES,
@@ -64,26 +65,6 @@ const FORBIDDEN_ENV = new Set([
 const MAX_CPU_MILLICORES = 4000
 const MAX_MEM_MIB = 8192
 const MAX_EGRESS_BINDINGS = 20
-const BLOCKED_EGRESS_CIDRS = [
-  '0.0.0.0/8',
-  '10.0.0.0/8',
-  '100.64.0.0/10',
-  '127.0.0.0/8',
-  '169.254.0.0/16',
-  '172.16.0.0/12',
-  '192.0.0.0/24',
-  '192.0.2.0/24',
-  '192.31.196.0/24',
-  '192.52.193.0/24',
-  '192.88.99.0/24',
-  '192.168.0.0/16',
-  '192.175.48.0/24',
-  '198.18.0.0/15',
-  '198.51.100.0/24',
-  '203.0.113.0/24',
-  '224.0.0.0/4',
-  '240.0.0.0/4',
-]
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
