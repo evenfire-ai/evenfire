@@ -9,3 +9,6 @@
 - exclude:
     id: js/file-access-to-http
 - query: EvenfireFileAccessToHttp.ql
+- exclude:
+    id: js/insecure-temporary-file
+- query: EvenfireInsecureTemporaryFile.ql
