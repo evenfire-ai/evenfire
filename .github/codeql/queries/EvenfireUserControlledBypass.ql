@@ -227,11 +227,324 @@ private predicate isEvenfireFailClosedGuardNode(
   )
 }
 
+private predicate isImportedValue(Expr value, string path, string importedName) {
+  exists(ImportSpecifier spec |
+    spec.getImportedName() = importedName and
+    spec.getImportDeclaration().getImportedFile().getRelativePath() = path and
+    DataFlow::valueNode(spec).(DataFlow::SourceNode).flowsTo(DataFlow::valueNode(value))
+  )
+}
+
+private predicate isImportedCall(CallExpr call, string path, string importedName) {
+  isImportedValue(call.getCallee(), path, importedName)
+}
+
+private predicate isDirectNamedImportCall(CallExpr call, string path, string importedName) {
+  exists(ImportSpecifier spec, VarAccess callee |
+    spec.getImportedName() = importedName and
+    spec.getImportDeclaration().getImportedFile().getRelativePath() = path and
+    callee = call.getCallee() and
+    callee.getName() = spec.getLocal().getName()
+  )
+}
+
+private predicate isFixedJsonHelperFailureBranch(Stmt branch) {
+  exists(BlockStmt block, ExprStmt response, CallExpr helper, ReturnStmt ret |
+    branch = block and
+    block.getNumStmt() = 2 and
+    response = block.getStmt(0) and
+    helper = response.getExpr() and
+    isImportedCall(helper, "mcp-host/src/server/httpUtils.ts", "json") and
+    isLiteral4xx(helper.getArgument(1)) and
+    ret = block.getStmt(1) and
+    not exists(ret.getExpr())
+  )
+}
+
+private predicate declaredByCall(VarAccess access, CallExpr call) {
+  exists(VariableDeclarator declaration, VarDecl binding |
+    declaration.getInit() = call and
+    declaration.getBindingPattern() = binding and
+    binding.getVariable() = access.getVariable()
+  )
+}
+
+private predicate propertyOfVariable(PropAccess access, Variable variable, string property) {
+  access.getPropertyName() = property and
+  access.getBase().(VarAccess).getVariable() = variable
+}
+
+private predicate nestedPropertyOfVariable(
+  PropAccess access, Variable variable, string intermediate, string property
+) {
+  exists(PropAccess qualifier |
+    access.getPropertyName() = property and
+    access.getBase() = qualifier and
+    propertyOfVariable(qualifier, variable, intermediate)
+  )
+}
+
+private predicate exactStrictPropertyMismatch(
+  StrictNEqExpr mismatch, Variable trusted, string trustedProperty, Variable presented,
+  string presentedProperty
+) {
+  exists(PropAccess trustedAccess, PropAccess presentedAccess |
+    (
+      mismatch.getLeftOperand() = trustedAccess and
+      mismatch.getRightOperand() = presentedAccess
+      or
+      mismatch.getRightOperand() = trustedAccess and
+      mismatch.getLeftOperand() = presentedAccess
+    ) and
+    propertyOfVariable(trustedAccess, trusted, trustedProperty) and
+    propertyOfVariable(presentedAccess, presented, presentedProperty)
+  )
+}
+
+private predicate isExactMcpMismatchDisjunction(
+  Expr condition, StrictNEqExpr operationMismatch, Variable target, Variable message
+) {
+  exists(
+    LogOrExpr allMismatches, LogOrExpr throughChannelType, LogOrExpr throughMessage,
+    LogOrExpr operationOrMissingTarget, LogNotExpr missingTarget, VarAccess missingTargetUse,
+    StrictNEqExpr messageMismatch, StrictNEqExpr channelTypeMismatch,
+    StrictNEqExpr channelIdMismatch
+  |
+    condition = allMismatches and
+    allMismatches.getLeftOperand() = throughChannelType and
+    allMismatches.getRightOperand() = channelIdMismatch and
+    throughChannelType.getLeftOperand() = throughMessage and
+    throughChannelType.getRightOperand() = channelTypeMismatch and
+    throughMessage.getLeftOperand() = operationOrMissingTarget and
+    throughMessage.getRightOperand() = messageMismatch and
+    operationOrMissingTarget.getLeftOperand() = operationMismatch and
+    operationOrMissingTarget.getRightOperand() = missingTarget and
+    missingTarget.getOperand() = missingTargetUse and
+    missingTargetUse.getVariable() = target and
+    exactStrictPropertyMismatch(messageMismatch, target, "messageId", message, "messageId") and
+    exactStrictPropertyMismatch(channelTypeMismatch, target, "channelType", message, "channelType") and
+    exactStrictPropertyMismatch(channelIdMismatch, target, "channelId", message, "channelId")
+  )
+}
+
+private predicate isTrustedMcpRuntimeEdgeAction(SensitiveAction action) {
+  exists(
+    CallExpr authorityBinding, CallExpr callerContext, Function handler, Variable caller,
+    Variable message, Variable target, VarAccess callerDeclaration,
+    VariableDeclarator targetDeclaration, VarDecl targetBinding, PropAccess targetInitializer,
+    AssignExpr trustedSender, PropAccess sender, PropAccess callerUser, IfStmt rpcBranch,
+    IfStmt callerBranch, StrictEqExpr rpcChannel, StrictEqExpr callerIdentity,
+    PropAccess channelType, PropAccess callerName, PropAccess callerPresence, IfStmt mismatch,
+    StrictNEqExpr operationMismatch, PropAccess operation, PropAccess actionContext,
+    LogAndExpr exactCallerCondition
+  |
+    authorityBinding = action.asExpr() and
+    isImportedCall(authorityBinding, "mcp-host/src/runtime/actionAuthority.ts",
+      "authorityBindingFromTrustedEdge") and
+    handler = authorityBinding.getEnclosingFunction() and
+    callerContext.getEnclosingFunction() = handler and
+    isImportedCall(callerContext, "mcp-host/src/server/edgeRuntimeAuth.ts",
+      "getRuntimeCallerContext") and
+    declaredByCall(callerDeclaration, callerContext) and
+    caller = callerDeclaration.getVariable() and
+    rpcChannel.getParentExpr*() = rpcBranch.getCondition() and
+    channelType = rpcChannel.getAnOperand() and
+    propertyOfVariable(channelType, message, "channelType") and
+    rpcChannel.getAnOperand().getStringValue() = "rpc" and
+    authorityBinding.getEnclosingStmt().nestedIn(rpcBranch.getThen()) and
+    callerBranch.getCondition() = exactCallerCondition and
+    exactCallerCondition.getLeftOperand() = callerIdentity and
+    exactCallerCondition.getRightOperand() = callerPresence and
+    callerName = callerIdentity.getAnOperand() and
+    propertyOfVariable(callerName, caller, "caller") and
+    callerIdentity.getAnOperand().getStringValue() = "rpc-proxy" and
+    propertyOfVariable(callerPresence, caller, "userId") and
+    authorityBinding.getEnclosingStmt().nestedIn(callerBranch.getThen()) and
+    trustedSender.getEnclosingFunction() = handler and
+    trustedSender.getLhs() = sender and
+    propertyOfVariable(sender, message, "sender") and
+    trustedSender.getRhs() = callerUser and
+    propertyOfVariable(callerUser, caller, "userId") and
+    trustedSender.getLocation().getEndLine() <= mismatch.getLocation().getStartLine() and
+    targetDeclaration.getBindingPattern() = targetBinding and
+    target = targetBinding.getVariable() and
+    targetDeclaration.getInit() = targetInitializer and
+    nestedPropertyOfVariable(targetInitializer, caller, "actionContextV2", "target") and
+    operation = operationMismatch.getAnOperand() and
+    nestedPropertyOfVariable(operation, caller, "actionContextV2", "operationId") and
+    operationMismatch.getAnOperand().getStringValue() = "chat.message.invoke" and
+    isExactMcpMismatchDisjunction(mismatch.getCondition(), operationMismatch, target, message) and
+    isFixedJsonHelperFailureBranch(mismatch.getThen()) and
+    mismatch.getLocation().getEndLine() < authorityBinding.getLocation().getStartLine() and
+    actionContext = authorityBinding.getArgument(0) and
+    propertyOfVariable(actionContext, caller, "actionContextV2")
+  )
+}
+
+private predicate exactV2ViewAuthority(Function authority) {
+  exists(
+    CallExpr declaresV2, CallExpr extractToken, CallExpr rpcAuth, CallExpr scopedDispatch,
+    CallExpr scopeFactory, Function success, IfStmt legacyDispatch, ExprStmt nextStatement,
+    ReturnStmt returnStatement, VarAccess rpcReq, VarAccess rpcRes, VarAccess scopedReq,
+    VarAccess scopedRes, VarAccess scopedNext, Parameter authorityReq, Parameter authorityRes,
+    Parameter authorityNext
+  |
+    isDirectNamedImportCall(declaresV2, "rpc-proxy/src/userDelegationV2.ts", "tokenDeclaresV2") and
+    declaresV2.getEnclosingFunction() = authority and
+    isDirectNamedImportCall(extractToken, "rpc-proxy/src/middleware/auth.ts", "extractAuthToken") and
+    extractToken = declaresV2.getArgument(0) and
+    legacyDispatch.getCondition() = any(LogNotExpr negated | negated.getOperand() = declaresV2) and
+    nextStatement.nestedIn(legacyDispatch.getThen()) and
+    nextStatement.getExpr().(CallExpr).getCalleeName() = "next" and
+    returnStatement.nestedIn(legacyDispatch.getThen()) and
+    not exists(returnStatement.getExpr()) and
+    isDirectNamedImportCall(rpcAuth, "rpc-proxy/src/middleware/auth.ts", "requireRpcAuth") and
+    rpcAuth.getEnclosingFunction() = authority and
+    authorityReq = authority.getParameter(0) and
+    authorityRes = authority.getParameter(1) and
+    authorityNext = authority.getParameter(2) and
+    rpcReq = rpcAuth.getArgument(0) and
+    rpcRes = rpcAuth.getArgument(1) and
+    rpcReq.getVariable() = authorityReq.getVariable() and
+    rpcRes.getVariable() = authorityRes.getVariable() and
+    rpcAuth.getArgument(2) = success and
+    success.getFile() = authority.getFile() and
+    authority.getLocation().getStartLine() <= success.getLocation().getStartLine() and
+    success.getLocation().getEndLine() <= authority.getLocation().getEndLine() and
+    scopedDispatch.getEnclosingFunction() = success and
+    scopedDispatch.getCallee() = scopeFactory and
+    isDirectNamedImportCall(scopeFactory, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
+    scopeFactory.getArgument(0).getStringValue() = "sandbox:ui:view" and
+    scopedReq = scopedDispatch.getArgument(0) and
+    scopedRes = scopedDispatch.getArgument(1) and
+    scopedNext = scopedDispatch.getArgument(2) and
+    scopedReq.getVariable() = authorityReq.getVariable() and
+    scopedRes.getVariable() = authorityRes.getVariable() and
+    scopedNext.getVariable() = authorityNext.getVariable() and
+    legacyDispatch.getLocation().getEndLine() < rpcAuth.getLocation().getStartLine() and
+    not exists(CallExpr earlyDispatch |
+      earlyDispatch.getEnclosingFunction() = authority and
+      earlyDispatch.getCalleeName() = "next" and
+      earlyDispatch.getLocation().getStartLine() < rpcAuth.getLocation().getStartLine() and
+      not earlyDispatch.getEnclosingStmt().nestedIn(legacyDispatch.getThen())
+    ) and
+    not exists(CallExpr bypassDispatch |
+      bypassDispatch.getEnclosingFunction() = authority and
+      bypassDispatch.getCalleeName() = "next" and
+      not bypassDispatch.getEnclosingStmt().nestedIn(legacyDispatch.getThen()) and
+      not bypassDispatch.getEnclosingStmt().nestedIn(success.getBody())
+    )
+  )
+}
+
+private predicate isNegatedVariable(Expr expression, Variable variable) {
+  exists(LogNotExpr negation, VarAccess access |
+    expression = negation and
+    negation.getOperand() = access and
+    access.getVariable() = variable
+  )
+}
+
+private predicate isExactV2NoLegacyChooser(
+  ConditionalExpr chooser, Variable v2Request, Variable legacyCookie
+) {
+  exists(LogOrExpr condition, VarAccess v2Access |
+    chooser.getCondition() = condition and
+    condition.getLeftOperand() = v2Access and
+    v2Access.getVariable() = v2Request and
+    isNegatedVariable(condition.getRightOperand(), legacyCookie)
+  )
+}
+
+private predicate hasExactLegacyFailure(Function handler, Variable v2Request, Variable legacyClaims) {
+  exists(IfStmt failure, LogAndExpr condition |
+    failure.getCondition() = condition and
+    isNegatedVariable(condition.getLeftOperand(), v2Request) and
+    isNegatedVariable(condition.getRightOperand(), legacyClaims) and
+    isFixedFailureBranch(failure.getThen()) and
+    failure.getCondition().getEnclosingFunction() = handler
+  )
+}
+
+private predicate isExactV2RequestDerivation(Function handler, Variable v2Request) {
+  exists(
+    VariableDeclarator declaration, VarDecl binding, CallExpr classifierCall, Function classifier,
+    ReturnStmt classifierReturn, CallExpr booleanCall, LogAndExpr exactAuthorityState,
+    PropAccess delegation, PropAccess authorizedAction, VarAccess delegationBase,
+    VarAccess actionBase, Parameter classifierParameter
+  |
+    declaration.getBindingPattern() = binding and
+    binding.getVariable() = v2Request and
+    declaration.getInit() = classifierCall and
+    classifier.getName() = "isV2ViewRequest" and
+    classifier.getFile() = handler.getFile() and
+    classifierCall.getCallee().(VarAccess).getVariable() = classifier.getVariable() and
+    classifierReturn.nestedIn(classifier.getBody()) and
+    classifierReturn.getExpr() = booleanCall and
+    booleanCall.getCalleeName() = "Boolean" and
+    booleanCall.getArgument(0) = exactAuthorityState and
+    exactAuthorityState.getLeftOperand() = delegation and
+    exactAuthorityState.getRightOperand() = authorizedAction and
+    classifierParameter = classifier.getParameter(0) and
+    delegation.getPropertyName() = "userDelegationV2" and
+    delegation.getBase() = delegationBase and
+    delegationBase.getVariable() = classifierParameter.getVariable() and
+    authorizedAction.getPropertyName() = "authorizedActionV2" and
+    authorizedAction.getBase() = actionBase and
+    actionBase.getVariable() = classifierParameter.getVariable() and
+    DataFlow::valueNode(handler.getParameter(0))
+        .(DataFlow::SourceNode)
+        .flowsTo(DataFlow::valueNode(classifierCall.getArgument(0))) and
+    not exists(ReturnStmt otherReturn |
+      otherReturn.nestedIn(classifier.getBody()) and otherReturn != classifierReturn
+    )
+  )
+}
+
+private predicate isTrustedSandboxV2Action(SensitiveAction action) {
+  exists(
+    CallExpr legacyAction, MethodCallExpr route, Function handler, VarAccess authorityMiddleware,
+    ConditionalExpr chooser, Function authority, int authorityIndex, int handlerIndex,
+    Variable v2Request, Variable legacyCookie, Variable legacyClaims, VarAccess legacyArgument,
+    VariableDeclarator chooserDeclaration, VarDecl legacyBinding, VarAccess chooserV2,
+    VarAccess chooserCookie
+  |
+    legacyAction = action.asExpr() and
+    isDirectNamedImportCall(legacyAction, "rpc-proxy/src/services/sandboxUiSession.ts",
+      "verifySandboxUiSession") and
+    handler = legacyAction.getEnclosingFunction() and
+    route.getMethodName() = "all" and
+    handler = route.getArgument(handlerIndex) and
+    authorityMiddleware = route.getArgument(authorityIndex) and
+    authorityIndex < handlerIndex and
+    authorityMiddleware.getVariable() = authority.getVariable() and
+    exactV2ViewAuthority(authority) and
+    chooserDeclaration.getInit() = chooser and
+    chooserDeclaration.getBindingPattern() = legacyBinding and
+    legacyClaims = legacyBinding.getVariable() and
+    isExactV2RequestDerivation(handler, v2Request) and
+    isExactV2NoLegacyChooser(chooser, v2Request, legacyCookie) and
+    chooserV2 = chooser.getCondition().(LogOrExpr).getLeftOperand() and
+    chooserV2.getVariable() = v2Request and
+    chooserCookie = chooser.getCondition().(LogOrExpr).getRightOperand().(LogNotExpr).getOperand() and
+    chooserCookie.getVariable() = legacyCookie and
+    legacyAction.getParentExpr*() = chooser.getAlternate() and
+    legacyArgument = legacyAction.getArgument(0) and
+    legacyArgument.getVariable() = legacyCookie and
+    hasExactLegacyFailure(handler, v2Request, legacyClaims)
+  )
+}
+
+private predicate isTrustedPr2AuthorityComposition(SensitiveAction action) {
+  isTrustedMcpRuntimeEdgeAction(action) or isTrustedSandboxV2Action(action)
+}
+
 from
   ConditionalBypassFlow::PathNode source, ConditionalBypassFlow::PathNode sink,
   SensitiveAction action
 where
   isTaintedGuardNodeForSensitiveAction(sink, source, action) and
+  not isTrustedPr2AuthorityComposition(action) and
   (
     not isEarlyAbortGuardNode(sink, action) and
     not isEvenfireFailClosedGuardNode(sink, action)

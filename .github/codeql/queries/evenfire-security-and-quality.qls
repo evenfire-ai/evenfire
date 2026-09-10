@@ -6,3 +6,6 @@
 - exclude:
     id: js/user-controlled-bypass
 - query: EvenfireUserControlledBypass.ql
+- exclude:
+    id: js/file-access-to-http
+- query: EvenfireFileAccessToHttp.ql
