@@ -6468,7 +6468,9 @@ describe('NetworkPolicyReconciler', () => {
           })
         return {}
       })
-      const runtime = new McpServerReconciler({} as k8s.KubeConfig, {
+      const runtimeConfig = new k8s.KubeConfig()
+      vi.spyOn(runtimeConfig, 'makeApiClient').mockReturnValue(mockApi)
+      const runtime = new McpServerReconciler(runtimeConfig, {
         assumeInventoryAuthorityWhenUnconfigured: true,
         appsApi: asAppsApi(apps),
         coreApi: asCoreApi(core),
@@ -6650,6 +6652,76 @@ describe('NetworkPolicyReconciler', () => {
       await f.run()
       expect(f.store.size).toBe(4)
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      { limit: 'absolute', cap: 1, percent: 100, lane: 'external-egress' },
+      { limit: 'percentage', cap: 10, percent: 30, lane: 'external-egress' },
+      { limit: 'absolute', cap: 1, percent: 100, lane: 'context-allow' },
+      { limit: 'percentage', cap: 10, percent: 30, lane: 'context-allow' },
+    ])(
+      'excludes present ineligible owners from the $limit cap in $lane',
+      async ({ cap, percent, lane }) => {
+        const f = lifecycle()
+        await f.run()
+        expect(f.store.size).toBe(4)
+        config.netPolOrphanDeleteCap = cap
+        config.netPolOrphanDeleteCapPercent = percent
+        const source = [...f.store.values()].find(
+          policy =>
+            policy.metadata?.namespace === 'mcp-server' &&
+            policy.metadata.labels?.[POLICY_TYPE_LABEL] === lane
+        )!
+        const orphan = structuredClone(source)
+        orphan.metadata = {
+          ...orphan.metadata,
+          name:
+            lane === 'external-egress' ? 'ext-egress-gone-1-2-3-4-32-443' : 'ctx-gone-lifecycle',
+          uid: 'orphan-policy',
+          resourceVersion: '1',
+          labels: { ...orphan.metadata!.labels },
+        }
+        if (lane === 'external-egress') {
+          orphan.metadata.labels![MCPSERVER_LABEL] = 'gone'
+          orphan.spec!.podSelector = { matchLabels: { [MCPSERVER_LABEL]: 'gone' } }
+        } else orphan.metadata.labels!['clerum.io/context'] = 'gone'
+        const key = 'mcp-server/' + orphan.metadata.name
+        f.store.set(key, orphan)
+        f.cache.set(f.initial.name, { ...f.initial, spec: { ...f.initial.spec, enabled: false } })
+        await f.run()
+        expect(f.store.has(key)).toBe(false)
+        expect(f.store.size).toBe(0)
+      }
+    )
+
+    it('keeps the real orphan cap while revoking a present ineligible owner', async () => {
+      const f = lifecycle()
+      await f.run()
+      config.netPolOrphanDeleteCap = 1
+      config.netPolOrphanDeleteCapPercent = 100
+      const source = [...f.store.values()].find(
+        policy => policy.metadata?.labels?.[POLICY_TYPE_LABEL] === 'external-egress'
+      )!
+      for (const name of ['gone-one', 'gone-two']) {
+        const orphan = structuredClone(source)
+        orphan.metadata = {
+          ...orphan.metadata,
+          name: `ext-egress-${name}-1-2-3-4-32-443`,
+          uid: name,
+          resourceVersion: '1',
+          labels: { ...orphan.metadata!.labels, [MCPSERVER_LABEL]: name },
+        }
+        orphan.spec!.podSelector = { matchLabels: { [MCPSERVER_LABEL]: name } }
+        f.store.set('mcp-server/' + orphan.metadata.name, orphan)
+      }
+      f.cache.set(f.initial.name, { ...f.initial, spec: { ...f.initial.spec, enabled: false } })
+      await f.run()
+      expect(f.store.size).toBe(2)
+      expect(
+        [...f.store.values()].every(policy =>
+          policy.metadata?.labels?.[MCPSERVER_LABEL]?.startsWith('gone-')
+        )
+      ).toBe(true)
     })
 
     it('restores allows when envSecret is removed with its failure condition unchanged', async () => {

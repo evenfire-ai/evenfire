@@ -450,6 +450,11 @@ jobs:
       - name: Test HCC watch-churn readiness gate contract
         run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
 
+      - name: HCC policy lifecycle and restoration contracts
+        run: |
+          bash scripts/tests/test-hcc-watch-churn-empty-fleet.sh
+          bash scripts/tests/test-hcc-lifecycle-cleanup.sh
+
       - name: Test HCC rollout readiness gate contract
         run: bash scripts/tests/test-hcc-rollout-readiness-gate.sh
 

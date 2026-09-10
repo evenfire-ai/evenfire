@@ -4,6 +4,7 @@ import {
   asAppsApi,
   asCoreApi,
   asCustomApi,
+  asNetworkingApi,
   createMockAppsApi,
   createMockCoreApi,
   createMockCustomApi,
@@ -492,7 +493,11 @@ describe('PR-B B1 — validateSecret result shape', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+    const kubeConfig = new k8s.KubeConfig()
+    // Keep the forbidden API reachable: reintroducing the old optional
+    // NetworkingApi client must not pass by observing an unrelated mock.
+    vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(asNetworkingApi(networkingApi))
+    reconciler = new McpServerReconciler(kubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),

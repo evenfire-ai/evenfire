@@ -105,27 +105,5 @@ assert_hcc_sampled_recoveries
 [[ ! -s "$tmp/sample-results" ]] # Disabled sampling must not produce vacuous PASS.
 echo 'PASS: stress sampling remains required; focused mode makes no sampled-outage claim'
 
-(
-  HCC_PATCHED=1 HCC_SCALED_DOWN=1 ORIGINAL_REPLICAS=1
-  HCC_DEPLOY=host-context-controller HCC_NS=control-plane
-  FLEET_CREATED=0 PROXY_CREATED=0 PROBE_CREATED=0
-  E2E_HCC_POLICY_LIFECYCLE=1 NP604_CREATED=1 NP604_WATCH_PID=''
-  NP604_SERVER=fixture-affected NP604_CONTROL=fixture-control
-  PROXY_EGRESS_NP=fixture-egress HCC_PROXY_NP=fixture-hcc PROBE_EGRESS_NP=fixture-probe
-  HCC_LOG_BUFFER="$tmp/buffer" READY_SERIES="$tmp/series"
-  kctl() { printf '%s\n' "$*" >> "$tmp/order"; }
-  stop_hcc_recovery_log_stream() { :; }
-  hcc_pods_absent() { :; }
-  wait_until() { shift 2; "$@"; }
-  restore_hcc_after_churn() { :; }
-  finalize_hcc_watch_gate_lock() { :; }
-  print_results() { :; }
-  eval "$cleanup_source"
-  cleanup
-)
-awk '
-  /get deployment,service,networkpolicy/ && !owner_check {owner_check=NR}
-  /scale deployment host-context-controller.*--replicas=0/ && !stop {stop=NR}
-  END {exit !(owner_check && stop && owner_check < stop)}
-' "$tmp/order"
-echo 'PASS: actual cleanup checks owner-driven fixture removal before stopping HCC'
+# Lifecycle timeout, restore-first ordering and retained-lock cases execute the
+# real cleanup and supervisor in test-hcc-lifecycle-cleanup.sh.

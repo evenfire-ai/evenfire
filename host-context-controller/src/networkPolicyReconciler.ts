@@ -1440,7 +1440,10 @@ export class NetworkPolicyReconciler {
     }
 
     const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
-    const desiredServerNames = new Set(servers.filter(runtimeDesired).map(s => s.name))
+    // Orphan limits protect against missing inventory, not explicit policy
+    // revocation for a present owner. Eligibility is handled by the safety
+    // pass below and must not consume another owner's orphan budget.
+    const presentServerNames = new Set(servers.map(server => server.name))
     const recordOrphanDelete = (lane: SafetyInventoryLane, deleted: boolean): void => {
       if (!deleted) return
       recordSafetyPassRevocation()
@@ -1556,7 +1559,7 @@ export class NetworkPolicyReconciler {
     }
     const isExternalLaneOrphan = (policy: k8s.V1NetworkPolicy): boolean => {
       const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
-      return !serverName || !desiredServerNames.has(serverName)
+      return !serverName || !presentServerNames.has(serverName)
     }
     const countExternalLane =
       options.serverInventoryComplete !== false && serverCleanupAuthoritative()
@@ -1683,7 +1686,7 @@ export class NetworkPolicyReconciler {
           )
           continue
         }
-        if (!desiredServerNames.has(serverName)) {
+        if (!presentServerNames.has(serverName)) {
           const name = policy.metadata?.name || ''
           await runServerEffect(serverName, async () => {
             if (

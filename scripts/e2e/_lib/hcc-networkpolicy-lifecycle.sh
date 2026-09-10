@@ -187,12 +187,13 @@ np604_cleanup() {
   # Consume the deletion events while the owning controller is still running.
   # Removing the Context only after stopping HCC would leave its allows to a
   # namespace-wide orphan sweep, whose safety cap correctly refuses this fleet.
+  [ "${HCC_CLEANUP_NONBLOCKING:-false}" = true ] && return 0
   wait_until 120 'NP604 owner-driven cleanup before HCC stop' np604_resources_absent
 }
 
 np604_resources_absent() {
   local remaining
-  remaining="$(np604_kctl get deployment,service,networkpolicy -A \
+  remaining="$(np604_kctl get pod,deployment,service,networkpolicy -A \
     -l "clerum.io/mcpserver in (${NP604_SERVER},${NP604_CONTROL})" -o name)" || return 1
   [ -z "$remaining" ]
 }

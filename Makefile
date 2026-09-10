@@ -676,7 +676,7 @@ minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including th
 .PHONY: minikube-t2-hcc-networkpolicy-lifecycle
 minikube-t2-hcc-networkpolicy-lifecycle:
 	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
-		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 $(MAKE) minikube-t2
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
 
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile

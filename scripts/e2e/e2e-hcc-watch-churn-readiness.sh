@@ -45,6 +45,7 @@ case "${E2E_HCC_POLICY_LIFECYCLE:-0}" in
   1)
     # shellcheck source=scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh
     source "${SCRIPT_DIR}/_lib/hcc-networkpolicy-lifecycle.sh"
+    source "${SCRIPT_DIR}/_lib/hcc-watch-lifecycle-cleanup.sh"
     ;;
   *) echo "E2E_HCC_POLICY_LIFECYCLE must be 0 or 1" >&2; exit 2 ;;
 esac
@@ -302,10 +303,11 @@ cleanup() {
   local status=$? cleanup_failed=0 restore_ok=1
   trap - EXIT
   set +e
-  stop_hcc_recovery_log_stream
   if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
-    np604_cleanup || cleanup_failed=1
+    cleanup_hcc_lifecycle "$status"
+    exit $?
   fi
+  stop_hcc_recovery_log_stream
   if [ "$HCC_PATCHED" = 1 ]; then
     kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=0 >/dev/null 2>&1
     wait_until 120 "HCC stop" hcc_pods_absent >/dev/null 2>&1 || restore_ok=0
@@ -327,9 +329,6 @@ cleanup() {
     print_repair_instructions
     cleanup_failed=1
   }
-  if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ] && [ "$NP604_CREATED" = 1 ] && [ "$restore_ok" = 1 ]; then
-    wait_until 120 "NP604 fixture resources removed by owners" np604_resources_absent || cleanup_failed=1
-  fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   print_results || status=1
   [ "$cleanup_failed" = 0 ] || status=1
@@ -337,6 +336,11 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+# An explicit signal exit enters the same restore path and preserves failure.
+trap 'exit 143' TERM
+trap 'exit 130' INT
+trap 'exit 129' HUP
+trap 'exit 131' QUIT
 
 # ── FASE A: guards + snapshot ──
 require_branch_owned_hcc_gate "$HCC_NS"
