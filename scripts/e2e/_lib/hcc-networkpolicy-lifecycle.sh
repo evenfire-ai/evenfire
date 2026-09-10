@@ -108,6 +108,11 @@ np604_observer_alive() {
   [ -n "$NP604_WATCH_PID" ] && jobs -pr | awk -v pid="$NP604_WATCH_PID" '$1==pid {found=1} END {exit !found}'
 }
 
+np604_observer_initial_witness() {
+  awk -v name="${MCP_NS}/ctx-${NP604_CONTEXT}-${NP604_CONTROL}" \
+    '$1=="ADDED" && $2==name {found=1} END {exit !found}' "$NP604_EVIDENCE/policy-events.txt"
+}
+
 np604_observer_witness() {
   awk -v name="${MCP_NS}/ctx-${NP604_CONTEXT}-${NP604_CONTROL}" \
     '$1=="MODIFIED" && $2==name {found=1} END {exit !found}' "$NP604_EVIDENCE/policy-events.txt"
@@ -124,15 +129,16 @@ np604_before_observation() {
   np604_kctl patch secret "$NP604_ENV" -n "$MCP_NS" --type=merge -p '{"data":null}' >/dev/null
   wait_until 120 'NP604 published failure and policy revocation' np604_failed SecretMissingKey || die 'NP604 did not revoke after failure'
   np604_invoke "$NP604_CONTROL" || die 'NP604 failure affected healthy control'
-  local snapshot rv
-  snapshot="$(np604_kctl get networkpolicy -A -l "clerum.io/mcpserver in (${NP604_SERVER},${NP604_CONTROL})" -o json)" || die 'NP604 observer inventory failed'
-  rv="$(jq -er '.metadata.resourceVersion' <<<"$snapshot")" || die 'NP604 observer missing version'
+  # kubectl owns the initial LIST resourceVersion and resumes WATCH from it.
+  # Wait for a listed control policy before annotating it, so the subsequent
+  # MODIFIED witness cannot precede that LIST and disappear into its snapshot.
   "$KUBECTL_BIN" --context="$E2E_KUBECONTEXT" --request-timeout=180s get networkpolicy -A \
     -l "clerum.io/mcpserver in (${NP604_SERVER},${NP604_CONTROL})" \
-    --watch-only --resource-version="$rv" --output-watch-events \
+    --watch --output-watch-events \
     -o 'jsonpath={.type}{" "}{.object.metadata.namespace}{"/"}{.object.metadata.name}{"\n"}' \
     > "$NP604_EVIDENCE/policy-events.txt" 2> "$NP604_EVIDENCE/observer-errors.txt" &
   NP604_WATCH_PID=$!
+  wait_until 15 'NP604 observer initial inventory' np604_observer_initial_witness || die 'NP604 observer did not list the control policy'
   # Metadata-only witness on our healthy fixture: proves the watch is live
   # without creating a final policy or replacing HCC's desired policy spec.
   np604_kctl annotate networkpolicy "ctx-${NP604_CONTEXT}-${NP604_CONTROL}" -n "$MCP_NS" \

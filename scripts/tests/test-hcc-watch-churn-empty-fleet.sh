@@ -71,3 +71,18 @@ if grep -q restore-template "$tmp/cleanup-0"; then
 fi
 grep -q restore-template "$tmp/cleanup-1"
 echo 'PASS: cleanup restores replicas before/after redirect and preserves an untouched template'
+
+# The initial LIST is a liveness signal, but cannot substitute for proof that
+# a subsequent mutation reached the streaming observer.
+# shellcheck source=scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh
+source "$ROOT/scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh"
+NP604_EVIDENCE="$tmp" NP604_CONTEXT=fixture-context NP604_CONTROL=fixture-control
+printf '%s\n' 'ADDED mcp-server/ctx-fixture-context-fixture-control' > "$tmp/policy-events.txt"
+np604_observer_initial_witness
+if np604_observer_witness; then
+  echo 'FAIL: initial inventory alone satisfied the streaming witness' >&2
+  exit 1
+fi
+printf '%s\n' 'MODIFIED mcp-server/ctx-fixture-context-fixture-control' >> "$tmp/policy-events.txt"
+np604_observer_witness
+echo 'PASS: observer requires initial LIST and a distinct streaming MODIFIED witness'
