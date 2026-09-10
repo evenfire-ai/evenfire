@@ -18,7 +18,7 @@ import {
 import { HOST_LABEL } from '../constants'
 import { HostReconciler } from '../hostReconciler'
 import type { HostCRD } from '../types'
-import { asApiserverPolicyRule, asApiserverRole, updatedRoleLogs } from './asApiserverRole'
+import { asApiserverPolicyRule, asApiserverRole } from './asApiserverRole'
 
 function makeHost(secretRef = 'secret'): HostCRD {
   return {
@@ -33,8 +33,22 @@ function makeHost(secretRef = 'secret'): HostCRD {
   }
 }
 
-function desiredFromCreate(rbacApi: MockRbacApi): k8s.V1Role {
-  return rbacApi.createNamespacedRole.mock.calls[0][0].body as k8s.V1Role
+function updatedRoleLogs(log: ReturnType<typeof vi.spyOn>) {
+  return log.mock.calls.flatMap(([line]: unknown[]) => {
+    if (typeof line !== 'string' || !line.startsWith('{')) return []
+    const entry = JSON.parse(line)
+    return entry.msg === 'Kubernetes resource updated' && entry.description?.startsWith('Role ')
+      ? [
+          {
+            msg: entry.msg,
+            description: entry.description,
+            scope: entry.scope,
+            attempt: entry.attempt,
+            level: entry.level,
+          },
+        ]
+      : []
+  })
 }
 
 function secretGetRule(role: k8s.V1Role): k8s.V1PolicyRule {
@@ -49,8 +63,9 @@ describe('Host ensureHostRole no-op gate', () => {
   let rbacApi: MockRbacApi
   let reconciler: HostReconciler
   const host = makeHost()
+  let desired: k8s.V1Role
 
-  beforeEach(() => {
+  beforeEach(async () => {
     rbacApi = createMockRbacApi()
     reconciler = new HostReconciler(makeStubKc(), {
       coreApi: asCoreApi(createMockCoreApi()),
@@ -59,12 +74,21 @@ describe('Host ensureHostRole no-op gate', () => {
       rbacApi: asRbacApi(rbacApi),
       customApi: asCustomApi(createMockCustomApi()),
     })
-  })
-
-  it('CREATE-ROLE-1: successful create never reads or replaces', async () => {
+    // Capture the real authored Role once through an explicit absent-resource
+    // setup. The measured reconcile below must operate on a present snapshot.
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureHostRole(host)
     expect(rbacApi.createNamespacedRole).toHaveBeenCalledOnce()
-    expect(rbacApi.readNamespacedRole).not.toHaveBeenCalled()
+    desired = structuredClone(rbacApi.createNamespacedRole.mock.calls[0][0].body)
+    rbacApi.createNamespacedRole.mockClear()
+    rbacApi.readNamespacedRole.mockClear()
+  })
+
+  it('CREATE-ROLE-1: absent Role is read then created without replacement', async () => {
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 404 })
+    await (reconciler as any).ensureHostRole(host)
+    expect(rbacApi.createNamespacedRole).toHaveBeenCalledOnce()
+    expect(rbacApi.readNamespacedRole).toHaveBeenCalledOnce()
     expect(rbacApi.replaceNamespacedRole).not.toHaveBeenCalled()
   })
 
@@ -72,7 +96,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      existing = asApiserverRole(desiredFromCreate(rbacApi))
+      existing = asApiserverRole(desired)
       return Promise.resolve(existing)
     })
     const log = vi.spyOn(console, 'log')
@@ -80,18 +104,18 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(rbacApi.readNamespacedRole).toHaveBeenCalledOnce()
       expect(existing?.rules?.length).toBeGreaterThan(0)
-      const authoredKeys = Object.keys(desiredFromCreate(rbacApi).rules![0] ?? {})
+      const authoredKeys = Object.keys(desired.rules![0] ?? {})
       const liveKeys = Object.keys(existing!.rules![0] ?? {})
       // Author order vs client-node attributeTypeMap — canonicalize must run.
       expect(authoredKeys).toEqual(['apiGroups', 'resources', 'resourceNames', 'verbs'])
       expect(liveKeys).toEqual(['apiGroups', 'resourceNames', 'resources', 'verbs'])
       expect(authoredKeys).not.toEqual(liveKeys)
-      const authoredLabelKeys = Object.keys(desiredFromCreate(rbacApi).metadata?.labels ?? {})
+      const authoredLabelKeys = Object.keys(desired.metadata?.labels ?? {})
       const liveLabelKeys = Object.keys(existing!.metadata?.labels ?? {})
       expect(authoredLabelKeys).not.toEqual(liveLabelKeys)
-      expect(desiredFromCreate(rbacApi).rules?.length).toBeGreaterThan(0)
+      expect(desired.rules?.length).toBeGreaterThan(0)
       expect(rbacApi.replaceNamespacedRole).not.toHaveBeenCalled()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([])
+      expect(updatedRoleLogs(log)).toEqual([])
     } finally {
       log.mockRestore()
     }
@@ -101,7 +125,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
+      const live = structuredClone(desired)
       const currentSecretRef = host.spec.secretRef
       if (!currentSecretRef) {
         throw new Error('test host is missing secretRef')
@@ -115,8 +139,14 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(makeHost('rotated-secret'))
       expect(existing?.rules?.length).toBeGreaterThan(0)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -127,7 +157,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
+      const live = structuredClone(desired)
       live.rules = [...(live.rules ?? []), { apiGroups: [''], resources: ['pods'], verbs: ['get'] }]
       existing = asApiserverRole(live)
       return Promise.resolve(existing)
@@ -135,10 +165,16 @@ describe('Host ensureHostRole no-op gate', () => {
     const log = vi.spyOn(console, 'log')
     try {
       await (reconciler as any).ensureHostRole(host)
-      expect(existing?.rules?.length).toBe((desiredFromCreate(rbacApi).rules?.length ?? 0) + 1)
+      expect(existing?.rules?.length).toBe((desired.rules?.length ?? 0) + 1)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -149,7 +185,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
+      const live = structuredClone(desired)
       const secretRule = secretGetRule(live)
       secretRule.verbs = [...(secretRule.verbs ?? []), 'update']
       existing = asApiserverRole(live)
@@ -160,8 +196,14 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(existing?.rules?.some(rule => rule.verbs?.includes('update'))).toBe(true)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -175,7 +217,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.readNamespacedRole.mockImplementation(() => {
       readPass += 1
       if (readPass === 1) {
-        const live = structuredClone(desiredFromCreate(rbacApi))
+        const live = structuredClone(desired)
         secretGetRule(live).verbs = ['watch', 'get', 'list']
         existing = asApiserverRole(live)
         return Promise.resolve(existing)
@@ -192,15 +234,27 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(secretGetRule(existing!).verbs).toEqual(['watch', 'get', 'list'])
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
 
       await (reconciler as any).ensureHostRole(host)
       expect(secretGetRule(existing!).verbs).toEqual(['get', 'watch', 'list'])
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -211,7 +265,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      existing = asApiserverRole(desiredFromCreate(rbacApi))
+      existing = asApiserverRole(desired)
       existing.metadata!.labels![HOST_LABEL] = 'other-host'
       return Promise.resolve(existing)
     })
@@ -220,8 +274,14 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(existing?.metadata?.labels?.[HOST_LABEL]).toBe('other-host')
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -232,7 +292,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
+      const live = structuredClone(desired)
       live.rules = (live.rules ?? []).filter(rule => rule.resources?.[0] !== 'configmaps')
       existing = asApiserverRole(live)
       return Promise.resolve(existing)
@@ -242,8 +302,14 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(existing?.rules?.some(rule => rule.resources?.[0] === 'configmaps')).toBe(false)
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -254,7 +320,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      const live = structuredClone(desiredFromCreate(rbacApi))
+      const live = structuredClone(desired)
       const secretRule = secretGetRule(live)
       secretRule.resourceNames = (secretRule.resourceNames ?? []).filter((_, index) => index !== 1)
       existing = asApiserverRole(live)
@@ -264,11 +330,17 @@ describe('Host ensureHostRole no-op gate', () => {
     try {
       await (reconciler as any).ensureHostRole(host)
       expect(secretGetRule(existing!).resourceNames).toHaveLength(
-        (secretGetRule(desiredFromCreate(rbacApi)).resourceNames?.length ?? 0) - 1
+        (secretGetRule(desired).resourceNames?.length ?? 0) - 1
       )
       expect(rbacApi.replaceNamespacedRole).toHaveBeenCalledOnce()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([
-        '[HostReconciler] Updated Role "host-chatllm-config-reader"',
+      expect(updatedRoleLogs(log)).toEqual([
+        {
+          msg: 'Kubernetes resource updated',
+          description: `Role "${desired.metadata!.name}"`,
+          scope: '[HostReconciler]',
+          attempt: 1,
+          level: 'info',
+        },
       ])
     } finally {
       log.mockRestore()
@@ -279,7 +351,7 @@ describe('Host ensureHostRole no-op gate', () => {
     rbacApi.createNamespacedRole.mockRejectedValue({ code: 409 })
     let existing: k8s.V1Role | undefined
     rbacApi.readNamespacedRole.mockImplementation(() => {
-      existing = asApiserverRole(desiredFromCreate(rbacApi))
+      existing = asApiserverRole(desired)
       existing.metadata!.labels!['argocd.argoproj.io/instance'] = 'clerum-dev'
       return Promise.resolve(existing)
     })
@@ -288,7 +360,7 @@ describe('Host ensureHostRole no-op gate', () => {
       await (reconciler as any).ensureHostRole(host)
       expect(existing?.metadata?.labels?.['argocd.argoproj.io/instance']).toBe('clerum-dev')
       expect(rbacApi.replaceNamespacedRole).not.toHaveBeenCalled()
-      expect(updatedRoleLogs(log, '"host-chatllm-config-reader"')).toEqual([])
+      expect(updatedRoleLogs(log)).toEqual([])
     } finally {
       log.mockRestore()
     }

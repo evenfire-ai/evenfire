@@ -21,16 +21,18 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
   sameMcpServerDesiredRevision,
 } from './mcpServerSafety'
-import { mcpserverMissingSecret } from './metrics'
+import { createsTotal, mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
   configMapMatchesDesired,
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
   observeCreate,
   observeExistenceRead,
@@ -949,35 +951,37 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean = () => true
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
-    if (!isCurrent()) return
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
-    try {
-      await observeCreate('ConfigMap', () =>
-        this.coreApi.createNamespacedConfigMap({
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('ConfigMap', () =>
+          this.coreApi.readNamespacedConfigMap({ name, namespace })
+        ),
+      create: async () => {
+        await observeCreate('ConfigMap', () =>
+          this.coreApi.createNamespacedConfigMap({ namespace, body: cm })
+        )
+        hccLogger.info('nginx ConfigMap created', {
+          scope: '[Reconciler]',
+          configMap: name,
           namespace,
-          body: cm,
         })
-      )
-      console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        throw error
-      }
-      await replaceWithConflictRetry({
-        description: `nginx ConfigMap "${name}"`,
-        logPrefix: '[Reconciler]',
-        body: cm,
-        mergeExisting: preserveObjectAnnotations,
-        isUpToDate: configMapMatchesDesired,
-        mutationAllowed: isCurrent,
-        read: () =>
-          observeExistenceRead('ConfigMap', () =>
-            this.coreApi.readNamespacedConfigMap({ name, namespace })
-          ),
-        replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
-      })
-    }
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `nginx ConfigMap "${name}"`,
+          logPrefix: '[Reconciler]',
+          body: cm,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: configMapMatchesDesired,
+          mutationAllowed: isCurrent,
+          read,
+          replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1483,49 +1487,46 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const deployment = this.buildDeployment(server, credentialsRevision)
 
-    if (!isCurrent()) return
-    try {
-      await observeCreate('Deployment', () =>
-        this.appsApi.createNamespacedDeployment({
-          namespace: server.namespace,
-          body: deployment,
-        })
-      )
-      console.log(`[Reconciler] Created Deployment "${server.name}"`)
-      return
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        throw error
-      }
-      // Already exists — read+replace with conflict retry. Races with the
-      // K8s Deployment controller (which bumps resourceVersion as pods +
-      // status conditions evolve) and with concurrent reconciles for the
-      // same server (CRD watch + SecretInformer) routinely produce stale
-      // resourceVersion errors. Helper does jittered backoff up to its
-      // attempt cap then re-throws — silently swallowing would hide
-      // immutable-field changes, quota exhaustion, etc.
-      await replaceWithConflictRetry({
-        description: `Deployment "${server.name}"`,
-        logPrefix: '[Reconciler]',
-        body: deployment,
-        mergeExisting: preserveDeploymentAnnotations,
-        isUpToDate: deploymentMatchesDesired,
-        read: () =>
-          observeExistenceRead('Deployment', () =>
-            this.appsApi.readNamespacedDeployment({
-              name: server.name,
-              namespace: server.namespace,
-            })
-          ),
-        replace: body =>
-          this.appsApi.replaceNamespacedDeployment({
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({
             name: server.name,
             namespace: server.namespace,
-            body,
-          }),
-        mutationAllowed: isCurrent,
-      })
-    }
+          })
+        ),
+      create: async () => {
+        await observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({
+            namespace: server.namespace,
+            body: deployment,
+          })
+        )
+        hccLogger.info('Deployment created', {
+          scope: '[Reconciler]',
+          deployment: server.name,
+          namespace: server.namespace,
+        })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `Deployment "${server.name}"`,
+          logPrefix: '[Reconciler]',
+          body: deployment,
+          mergeExisting: preserveDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
+          read,
+          replace: body =>
+            this.appsApi.replaceNamespacedDeployment({
+              name: server.name,
+              namespace: server.namespace,
+              body,
+            }),
+          mutationAllowed: isCurrent,
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1537,29 +1538,30 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const service = this.buildService(server)
 
-    if (!isCurrent()) return
-    try {
-      await observeCreate('Service', () =>
-        this.coreApi.createNamespacedService({
-          namespace: server.namespace,
-          body: service,
-        })
-      )
-    } catch (error: unknown) {
-      if (getErrorCode(error) === 409) {
-        await replaceWithConflictRetry({
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({
+            name: server.name,
+            namespace: server.namespace,
+          })
+        ),
+      create: () =>
+        observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({
+            namespace: server.namespace,
+            body: service,
+          })
+        ),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `Service "${server.name}"`,
           logPrefix: '[Reconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
-          read: () =>
-            observeExistenceRead('Service', () =>
-              this.coreApi.readNamespacedService({
-                name: server.name,
-                namespace: server.namespace,
-              })
-            ),
+          read,
           replace: body =>
             this.coreApi.replaceNamespacedService({
               name: server.name,
@@ -1567,11 +1569,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
               body,
             }),
           mutationAllowed: isCurrent,
-        })
-      } else {
-        throw error
-      }
-    }
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+    })
   }
 
   /**

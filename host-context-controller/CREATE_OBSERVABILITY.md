@@ -1,8 +1,10 @@
 # HCC create and existence-read metrics
 
-This instrumentation supports [issue #598](https://github.com/evenfire-ai/evenfire/issues/598). It observes the existing reconciliation
-paths; it does not introduce read-before-create, extra Kubernetes requests,
-ownership rules, retries, or updates to resources currently left unchanged.
+The read-first stage of [issue #598](https://github.com/evenfire-ai/evenfire/issues/598)
+uses `ensureResource` at 22 create expressions. Existing resources retain their
+convergence or preservation policies. The runtime Secret and safety-inventory
+NetworkPolicy writer remain exempt; all 24 create expressions are instrumented.
+Only an observed absence permits a new POST.
 
 ## Counters
 
@@ -17,7 +19,7 @@ request bodies, or exception messages become metric labels.
 | `clerum_hcc_creates_total`         | `created`  | The create callback resolved successfully.                                                                            |
 |                                    | `conflict` | The create callback rejected with HTTP 409.                                                                           |
 |                                    | `error`    | The create callback rejected for any other reason, including 403, 5xx, network errors, or synchronous client failure. |
-|                                    | `skipped`  | Reserved for presence-based suppression in the read-first stage; remains zero in this PR.                             |
+|                                    | `skipped`  | One successful presence-based suppression of POST; excludes errors, cancellation, retries and attempted POST409.      |
 | `clerum_hcc_existence_reads_total` | `found`    | An instrumented existence read resolved successfully; its result is not validated or altered.                         |
 |                                    | `absent`   | An instrumented read rejected with HTTP 404; the original error still reaches the caller.                             |
 |                                    | `error`    | An instrumented read rejected for any other reason, including HTTP 409.                                               |
@@ -67,19 +69,19 @@ count as `error` when the wrapper catches them; the original rejection is retain
 
 All 24 production `createNamespaced*` expressions are observed, including the
 already-read-first Secret and the safety-inventory NetworkPolicy writer. Their
-exemption from future conversion does not exempt them from measurement.
+exemption from conversion does not exempt them from measurement.
 
-The 21 instrumented existence-read expressions are:
+The 26 instrumented existence-read expressions are:
 
-| File                                | Read paths                                                                                                                     | Expressions |
-| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------: |
-| `src/utils.ts`                      | Shared NetworkPolicy conflict convergence                                                                                      |           1 |
-| `src/hostReconciler.ts`             | Role; runtime Secret; channel-reader Service; channel-reader Deployment outer read and retry; PVC; Host Service and Deployment |           8 |
-| `src/reconciler.ts`                 | ConfigMap, Deployment, Service conflict convergence                                                                            |           3 |
-| `src/llmHookReconciler.ts`          | Deployment, Service, NetworkPolicy conflict convergence                                                                        |           3 |
-| `src/sharedFileSystemReconciler.ts` | Deployment conflict convergence                                                                                                |           1 |
-| `src/k8s/gfsK8sApi.ts`              | Deployment update check and conflict convergence; PDB conflict convergence                                                     |           3 |
-| `src/networkPolicyReconciler.ts`    | Fresh external-egress observation; safety-create conflict convergence                                                          |           2 |
+| File                                | Read paths                                                                                                             | Expressions |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------: |
+| `src/utils.ts`                      | Shared NetworkPolicy conflict convergence                                                                              |           1 |
+| `src/hostReconciler.ts`             | ServiceAccount, Role, RoleBinding; runtime Secret; channel-reader Service/Deployment; PVC; Host Service and Deployment |           9 |
+| `src/reconciler.ts`                 | ConfigMap, Deployment, Service conflict convergence                                                                    |           3 |
+| `src/llmHookReconciler.ts`          | Deployment, Service, NetworkPolicy conflict convergence                                                                |           3 |
+| `src/sharedFileSystemReconciler.ts` | PVC, Deployment and Service presence/convergence                                                                       |           3 |
+| `src/k8s/gfsK8sApi.ts`              | PVC/Service presence; Deployment update check/convergence; PDB convergence                                             |           5 |
+| `src/networkPolicyReconciler.ts`    | Fresh external-egress observation; safety-create conflict convergence                                                  |           2 |
 
 Counts refer to source expressions, not requests per reconciliation. Retry paths
 can execute more than once. The fresh external-egress helper has several callers;
@@ -94,12 +96,89 @@ or its read path changes; do not instrument both the API call and its retry wrap
 The read-inventory test scans all production TypeScript under `src` for direct
 dot-property `readNamespaced*`/`readCluster*` calls. Each must be observed or match an explicit
 exclusion keyed by file, enclosing operation and SDK method, with an expected
-expression count and reason. It currently accounts for 21 observed expressions
+expression count and reason. It currently accounts for 26 observed expressions
 and 43 excluded ones. New unclassified reads and stale exclusions fail the test.
+The plan's forecast of 27 reads became 26: 21 original expressions plus six new
+ones minus the duplicate channel-reader Deployment expression. That retry now
+uses the helper's validated read callback; no retry path was removed.
 This is structural coverage, not execution evidence: changed purpose inside an
 excluded operation still needs review, and computed-property or indirect/aliased calls are outside this
 static-analysis guarantee. The behavioral tests and deployed validation
 remain separate; an AST pass does not prove all those paths ran.
+
+## Read-first contract
+
+`existing === undefined` requires an instrumented GET; `existing === null` is a
+caller-observed absence. A present snapshot is consumed once and is not another
+GET. A read resolving without `metadata.name` is a contract error, never absence.
+POST409 discards the absence and converges through real reads. The existing
+replace loop owns validation, desired-body resolution, merge, no-op, mutation
+fences and the original retry budget. Its 404 disappearance policy is distinct
+from the initial GET404 that permits creation.
+
+SDK callbacks remain instrumented at their sites. `onSkipped` retains the
+literal kind there and increments once only after successful presence-based
+convergence/preservation. Failed or cancelled paths do not count as skipped;
+neither do retries or a POST409 already emitted. A caller preserving an existing
+non-throwing convergence failure returns `false` to avoid reporting a skip.
+
+`skipped` means a create was suppressed because the resource was present, not
+that reconciliation was a no-op: convergence may still issue a separately
+instrumented replace. A POST409 race counts as `conflict`, never another `skipped`.
+
+Host ServiceAccount, Role and RoleBinding propagate unexpected read, create and
+convergence failures to the existing reconciliation error handler. The new GET
+never turns 403/transport failures into absence. Historical Host PVC/Service
+create/update catches stay inside those callbacks, outside the initial GET;
+supersession retains its separate error path. Preserved existing resources gain
+no PUT or synthetic equality comparison. An unbound Host PVC retains its direct
+update policy.
+
+This RBAC propagation was explicitly approved on 2026-09-09 in the canonical
+plan's Addendum C.3, which supersedes the earlier pending decision in B.5.
+The bounded Role conflict retry was subsequently approved through the PR review
+correction; it does not turn exhausted conflicts into successful provisioning.
+
+Role convergence retries optimistic-lock conflicts through the shared bounded
+retry helper (three attempts, fresh reads and admission checks). Exhausted
+conflicts and unexpected RBAC errors still propagate; they are not successful
+provisioning. Role replaces and no-op decisions now use the helper's write
+metrics. Operators should expect previously silent RBAC failures to surface in
+reconciliation error telemetry.
+
+External-egress passes its fresh object separately from the expected UID/RV
+snapshot constraint. A conflict invalidates the consumed snapshot, not the
+constraint. The safety exception retains its existing inventory-based behavior;
+an `ext-egress-` name alone cannot attribute or excuse a residual conflict.
+
+For stable, already-present resources, verify that POST is suppressed while
+convergence and business state still occur. Separate legitimate new resources,
+races and cold start. A lower create count alone does not establish causality;
+`absent` does not guarantee a POST if the mutation fence expires afterward.
+
+## Deployed acceptance and rollback
+
+Evaluate each converted resource-kind lane in a stable five-minute window,
+recording the exact image/producer identity, counter boundaries and audit window.
+For resources proven present throughout that window, require zero redundant
+create attempts and a positive witness that reconciliation and the intended
+convergence/preservation actually ran. Assess cold start in a separate window;
+classify legitimate new resources and races separately instead of treating all
+creates as redundant. Report each lane rather than only an aggregate decrease.
+
+Addendum C.4 supersedes B.7's blanket zero-create target and prefix exception.
+In the NetworkPolicy lane, an `ext-egress-` name alone never exempts a conflict:
+the shared helper and the safety-inventory exception can use that family. Explain
+every residual conflict using evidence of the actual path and race/inventory
+state. Counters alone cannot attribute a request to a resource name or call site.
+These are acceptance criteria for the post-deployment measurement, not a claim
+that this PR's local tests performed that measurement.
+
+The rollback unit is PR 2 as a whole: restore the previously deployed HCC image
+through the normal deployment/rollback process. Stages A–D are review order,
+not independent rollback units; do not mix partial stage reversions or kind flags.
+For a source revert, the accompanying regression tests revert with PR 2 as well.
+Rolling back does not itself validate the restored runtime or its request load.
 
 ## Historical evidence and attribution limits
 
@@ -154,10 +233,11 @@ data did not contain GET records; no API-server read rate is inferred from that
 absence. The read counter only covers the explicit inventory above.
 
 No fixed GET-to-POST ratio is required: an existing POST409→GET path already
-reads, whereas a create-and-ignore-conflict path does not. Future read-first
-work must preserve that distinction. This change does not demonstrate savings
+reads, whereas a create-and-ignore-conflict path does not. Read-first preserves
+that distinction. This change does not demonstrate savings
 in CPU, latency, admission cost, APF, or request volume.
 
-The next read-first PR remains dependent on deployment and validated measurement
-of this instrumentation. T0, T1, T2, CI, and browser E2E are separate evidence
-lanes; see [the local runtime runbook](../docs/testing/minikube-t2-runbook.md).
+The instrumentation prerequisite was delivered in [PR #599](https://github.com/evenfire-ai/evenfire/pull/599).
+Its deployed observation is a baseline, not validation of the read-first
+candidate. T0, T1, T2, CI, browser E2E and deployed measurements are separate
+evidence lanes; see [the local runtime runbook](../docs/testing/minikube-t2-runbook.md).

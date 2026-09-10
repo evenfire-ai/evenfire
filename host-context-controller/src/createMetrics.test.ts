@@ -214,7 +214,7 @@ describe('Kubernetes create instrumentation', () => {
     expect(await count('Deployment', 'skipped')).toBe(0)
   })
 
-  it('observes the POST-first conflict path without replacing an unchanged policy', async () => {
+  it('counts a presence skip without POST or replacing an unchanged policy', async () => {
     const policy: k8s.V1NetworkPolicy = {
       kind: 'NetworkPolicy',
       metadata: { name: 'metrics-policy' },
@@ -231,13 +231,13 @@ describe('Kubernetes create instrumentation', () => {
       'test',
       policy
     )
-    expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(api.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     expect(api.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
     expect(await count('NetworkPolicy', 'created')).toBe(0)
     expect(await count('NetworkPolicy', 'error')).toBe(0)
-    expect(await count('NetworkPolicy', 'conflict')).toBe(1)
-    expect(await count('NetworkPolicy', 'skipped')).toBe(0)
+    expect(await count('NetworkPolicy', 'conflict')).toBe(0)
+    expect(await count('NetworkPolicy', 'skipped')).toBe(1)
   })
 
   it('does not count a create when its mutation fence has already expired', async () => {
