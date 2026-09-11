@@ -21,6 +21,7 @@
 import type { Pool, PoolClient } from 'pg'
 import { type Logger, createLogger } from '../observability/logger.js'
 import type { WorkflowRecipeCRD } from '../types.js'
+import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -152,6 +153,15 @@ const CLAIM_PENDING = `
    WHERE run_id = $4
      AND phase = 'Pending'
      AND (owner_instance_id IS NULL OR owner_instance_id = $1)`
+
+const FAIL_PENDING_AUTHORITY = `
+  UPDATE workflow_runs
+     SET phase = 'Failed',
+         completed_at = now(),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase = 'Pending'`
 
 const UPDATE_RUN_TERMINAL = `
   UPDATE workflow_runs
@@ -483,7 +493,22 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         if (!opts.checkpointAuthority) {
           throw new Error('workflow_authority_checkpointer_unavailable')
         }
-        await opts.checkpointAuthority(run)
+        try {
+          await opts.checkpointAuthority(run)
+        } catch (error) {
+          if (error instanceof WorkflowAuthorityCheckpointError && !error.retryable) {
+            await client.query(FAIL_PENDING_AUTHORITY, [run.run_id])
+            await client.query('COMMIT')
+            committed = true
+            log.warn('pending run failed after permanent authority rejection', {
+              run_id: run.run_id,
+              authority_failure: error.failure,
+            })
+            notifyRunTerminal(run.run_id, 'Failed')
+            return
+          }
+          throw error
+        }
       }
       const child = await opts.createChildRecipe(run)
       const claimRes = await client.query(CLAIM_PENDING, [
