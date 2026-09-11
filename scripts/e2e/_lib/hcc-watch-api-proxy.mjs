@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import https from 'node:https'
 import { pathToFileURL } from 'node:url'
+import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
 export function validateCommand(command, allowedPaths) {
   if (!command || typeof command.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.id))
@@ -22,7 +23,7 @@ export function validateCommand(command, allowedPaths) {
   } else if (command.action === 'release') {
     if (typeof command.pauseId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.pauseId))
       throw new Error('invalid_pause_id')
-  } else throw new Error('invalid_control_action')
+  } else if (command.action !== 'observe-bookmarks') throw new Error('invalid_control_action')
   return command
 }
 
@@ -38,6 +39,7 @@ export function createProxy({
   minAgeMs,
 }) {
   const streams = new Set()
+  const bookmarks = createBookmarkObservation()
   let pause = null
   let commandId = null
   const writeRecord = (name, fields) => {
@@ -101,6 +103,12 @@ export function createProxy({
         },
         incoming => {
           response.writeHead(incoming.statusCode, incoming.headers)
+          if (watch && request.method === 'GET') {
+            const observer = bookmarks.open(kind, incoming.headers, incoming.statusCode)
+            incoming.on('data', chunk => observer.write(chunk))
+            incoming.once('end', () => observer.end())
+            incoming.once('close', () => observer.close())
+          }
           incoming.pipe(response)
         }
       )
@@ -143,6 +151,9 @@ export function createProxy({
           throw new Error('pause_not_held')
         finishPause('released')
         acknowledge({ id: command.id, state: 'released' })
+      } else if (command.action === 'observe-bookmarks') {
+        writeRecord('bookmarks', bookmarks.finish())
+        acknowledge({ id: command.id, state: 'observed' })
       } else {
         let count = 0
         for (const stream of streams) {

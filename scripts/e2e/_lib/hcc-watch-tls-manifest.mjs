@@ -3,6 +3,7 @@
 import { spawnSync } from 'node:child_process'
 import { generateKeyPairSync } from 'node:crypto'
 import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 const [name, namespace, run, proxySource] = process.argv.slice(2)
 for (const value of [name, namespace, run])
@@ -87,6 +88,10 @@ process.stdout.write(
         data: {
           'config.json': JSON.stringify(config),
           'proxy.mjs': readFileSync(proxySource, 'utf8'),
+          'hcc-watch-bookmarks.mjs': readFileSync(
+            join(dirname(proxySource), 'hcc-watch-bookmarks.mjs'),
+            'utf8'
+          ),
         },
       },
     ],

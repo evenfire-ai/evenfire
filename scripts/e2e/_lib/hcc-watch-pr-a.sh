@@ -152,6 +152,63 @@ hcc_pr_a_run() {
   [ "$(np604_snapshot "$NP604_CONTROL")" = "$control_policy" ] || die 'PR A control policies changed'
   printf 'PR_A_PROTECTED_API_RECOVERY=PASS\n'
   hcc_pr_a_logs > "$NP604_EVIDENCE/pr-a-observations.jsonl"
+  # Receipt is a separate finite observation, never an automatic D2-b gate.
+  hcc_pr_a_bookmark_report || printf 'PR_A_BOOKMARK_RECEIPT=NO_DEMOSTRADO (artifact unavailable)\n'
+}
+
+hcc_pr_a_bookmark_pod_witness() {
+  kctl get pod "$1" -n "$HCC_NS" -o json | jq -ce --arg container "$2" '
+    . as $pod | [.status.containerStatuses[]? | select(.name==$container)][0] as $status |
+    {uid:.metadata.uid,name:.metadata.name,
+     image:([.spec.containers[] | select(.name==$container)][0].image),
+     imageID:$status.imageID,restarts:$status.restartCount,startedAt:$status.state.running.startedAt} |
+    select(.uid!=null and .image!=null and .imageID!=null and .restarts!=null and .startedAt!=null)'
+}
+
+hcc_pr_a_bookmark_unknown() {
+  jq -n '{boundary:"verified-upstream-watch-response",window:null,receiptStatus:"NO_DEMOSTRADO",
+    disconnectBenefit:"NO_DEMOSTRADO",reason:"observation-or-identity-unavailable",
+    byWatch:{McpServer:{bookmarks:null,coverage:"unknown"},Context:{bookmarks:null,coverage:"unknown"}}}' \
+    > "$NP604_EVIDENCE/bookmark-receipt.json"
+  printf 'PR_A_BOOKMARK_RECEIPT=NO_DEMOSTRADO\n'
+}
+
+hcc_pr_a_bookmark_report() {
+  local proxy_pod hcc_pod proxy_before proxy_after hcc_before hcc_after observed
+  proxy_pod="$(hcc_pr_a_proxy_pod)" && hcc_pod="$(running_hcc_pod)" &&
+    proxy_before="$(hcc_pr_a_bookmark_pod_witness "$proxy_pod" proxy)" &&
+    hcc_before="$(hcc_pr_a_bookmark_pod_witness "$hcc_pod" host-context-controller)" || {
+      hcc_pr_a_bookmark_unknown; return;
+    }
+  hcc_pr_a_command observe-bookmarks &&
+    wait_until 5 'finite upstream bookmark observation' hcc_pr_a_ack observed &&
+    observed="$(kctl exec "pod/$proxy_pod" -n "$HCC_NS" -c proxy -- node -e \
+      'process.stdout.write(require("fs").readFileSync("/churn-ctl/bookmarks.json"))')" &&
+    proxy_after="$(hcc_pr_a_bookmark_pod_witness "$proxy_pod" proxy)" &&
+    hcc_after="$(hcc_pr_a_bookmark_pod_witness "$hcc_pod" host-context-controller)" || {
+      hcc_pr_a_bookmark_unknown; return;
+    }
+  jq -n --arg image "$HCC_IMAGE" --argjson observation "$observed" \
+    --argjson hccBefore "$hcc_before" --argjson hccAfter "$hcc_after" \
+    --argjson proxyBefore "$proxy_before" --argjson proxyAfter "$proxy_after" '
+    def epoch: sub("\\.[0-9]+Z$";"Z") | fromdateiso8601 * 1000;
+    ($hccBefore==$hccAfter and $proxyBefore==$proxyAfter and
+     $hccAfter.image==$image and $proxyAfter.image==$image and
+     $hccAfter.imageID==$proxyAfter.imageID and
+     ($proxyAfter.startedAt|epoch)<=$observation.startedAtMs) as $sameIdentity |
+    $observation | .window={startedAtMs:.startedAtMs,endedAtMs:.endedAtMs} |
+    .configuredImage=$image | .hcc=$hccAfter | .proxy=$proxyAfter |
+    .byWatch |= with_entries(
+      if $sameIdentity and .value.firstWatchAtMs!=null and
+         ($hccAfter.startedAt|epoch)<=.value.firstWatchAtMs then .
+      else .value.coverage="unknown" | .value.bookmarks=null | .value.receipt="unknown" |
+        .value.reasons += ["identity-unknown"] end) |
+    .receiptStatus=(if any(.byWatch[]; .receipt=="observed") then "OBSERVED_UPSTREAM" else "NO_DEMOSTRADO" end) |
+    .disconnectBenefit="NO_DEMOSTRADO"' > "$NP604_EVIDENCE/bookmark-receipt.json" || {
+      hcc_pr_a_bookmark_unknown; return;
+    }
+  jq -r '"PR_A_BOOKMARK_RECEIPT="+.receiptStatus+" (callback processing and benefit not demonstrated)"' \
+    "$NP604_EVIDENCE/bookmark-receipt.json"
 }
 
 hcc_pr_a_service_absent() {
