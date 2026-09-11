@@ -24,13 +24,14 @@
  * global orphan sweep. Serialization is per `host:<name>` (a Host's slots are
  * reconciled together).
  *
- * NAMING SCHEME (phase 5 must derive the broker FQDN identically):
- *   slotId(primary)    = "primary"
- *   slotId(fallback i) = "fallback-" + i          (index into spec.llmPolicy.fallbacks)
- *   brokerName         = "oai-egress-" + sha256(host.name + "\x1f" + slotId).hex.slice(0,16)
- *   Service FQDN       = http://<brokerName>.<llmEgressNamespace>.svc.cluster.local:<BROKER_PORT>
- *                        + the pathname of the original baseURL.
- * The human `(host, slotId)` pair lives in labels/annotations for observability.
+ * NAMING SCHEME: the slotId, the broker-name hash and the in-cluster FQDN all
+ * live in `@clerum/egress-policy` — `PRIMARY_SLOT_ID`, `fallbackSlotId(i)` (i =
+ * the RAW index into spec.llmPolicy.fallbacks), `brokerNameFor(host, slotId)`
+ * and `brokerInternalUrl`. HCC reimplements NONE of them: it imports the
+ * constants/helpers so mcp-host (phase 5) derives the IDENTICAL Service without
+ * a handshake, and a future schema change in the shared package is followed by
+ * both sides at once instead of drifting. The human `(host, slotId)` pair lives
+ * in labels/annotations for observability.
  */
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
@@ -38,8 +39,10 @@ import { createHash } from 'crypto'
 import {
   type LanBaseUrlReason,
   OAI_EGRESS_BROKERS_CONDITION_TYPE,
+  PRIMARY_SLOT_ID,
   brokerNameFor,
   classifyLanBaseURL,
+  fallbackSlotId,
   ipv4ToInt,
 } from '@clerum/egress-policy'
 import { config } from './config'
@@ -133,11 +136,12 @@ type DesiredBroker = {
   credentialDataKey: string
 }
 
-// The deterministic broker name + in-cluster FQDN now live in
-// @clerum/egress-policy (brokerNameFor / brokerServiceHost / brokerInternalUrl)
-// so mcp-host (phase 5) derives the IDENTICAL Service without a handshake — the
-// drift-critical hash cannot be duplicated. Re-exported here so existing
-// importers of this module keep working.
+// The slotId constants, the deterministic broker name and the in-cluster FQDN
+// all live in @clerum/egress-policy (PRIMARY_SLOT_ID / fallbackSlotId /
+// brokerNameFor / brokerServiceHost / brokerInternalUrl) so mcp-host (phase 5)
+// derives the IDENTICAL Service without a handshake — neither the slotId scheme
+// nor the drift-critical hash is duplicated here. brokerNameFor is re-exported
+// so existing importers of this module keep working.
 export { brokerNameFor }
 
 /**
@@ -287,7 +291,7 @@ export class OpenAiEgressBrokerReconciler {
     }
 
     consider(
-      'primary',
+      PRIMARY_SLOT_ID,
       host.spec.model?.provider,
       host.spec.model?.baseURL,
       OPENAI_COMPATIBLE_API_KEY_SLOT
@@ -299,7 +303,7 @@ export class OpenAiEgressBrokerReconciler {
       // fallback's key — mirroring mcp-host's fallback resolution. Absent ⇒ the
       // provider's canonical slot key.
       const dataKey = fb.credentialSlot?.trim() || OPENAI_COMPATIBLE_API_KEY_SLOT
-      consider(`fallback-${i}`, fb.provider, fb.baseURL, dataKey)
+      consider(fallbackSlotId(i), fb.provider, fb.baseURL, dataKey)
     })
 
     return { desired, dropped }
