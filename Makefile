@@ -84,6 +84,7 @@ TEST_SERVICES := \
 	packages/network-policy-core \
 	packages/codex-catalog-projection \
 	packages/llm-provider-attempt-contract \
+	packages/action-context-contracts \
 	packages/llm-providers \
 	packages/grok-provider-attempt-contract
 
