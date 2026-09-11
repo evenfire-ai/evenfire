@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { controlApiRequest, controlApiStreamRequest } from '../controlApiClient.js'
 import { publicCorrelationId, sanitizeControlApiPublicError } from '../http/publicApiError.js'
 import { type AuthedRequest, extractAuthToken, requireAuth } from '../middleware/auth.js'
+import { workflowActionDelegationHeaders } from '../workflowActionDelegation.js'
 
 /**
  * Read-only end-user access to SharedFileSystems referenced by a Context.
@@ -95,6 +96,7 @@ export function createContextSharedFilesystemsRouter(): Router {
             `/shared-filesystems/${encodeURIComponent(req.params.sfsName)}/proxy${subPath}${queryString}`,
           {
             userSessionToken: sessionToken,
+            extraHeaders: workflowActionDelegationHeaders(req),
             throwOnHttpError: false,
           }
         )

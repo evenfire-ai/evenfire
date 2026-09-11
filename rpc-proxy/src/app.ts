@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response } from 'express'
 import cors from 'cors'
 import { config } from './config.js'
+import { stripInboundTrustedEdgeHeaders } from './middleware/auth.js'
 import { createDesktopRouter } from './routes/desktopProxy.js'
 import { createHealthRouter } from './routes/health.js'
 import { createMcpOauthRouter } from './routes/mcpOauth.js'
@@ -13,6 +14,8 @@ import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 
 export function createApp() {
   const app = express()
+
+  app.use(stripInboundTrustedEdgeHeaders)
 
   app.use(
     cors({

@@ -15,7 +15,31 @@ const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
 const URL = '/api/v1/internal/sandbox-ui/oauth/grant'
 
 function authed() {
-  const app = createApp(new MockGateway() as never)
+  const gateway = new MockGateway()
+  void gateway.createResource(
+    'workflowrecipes',
+    {
+      metadata: { name: 'crm' },
+      spec: {
+        oauthClients: [
+          {
+            id: 'salesforce-prod',
+            provider: 'salesforce',
+            clientIdRef: { name: 'salesforce-prod', key: 'client-id' },
+            clientSecretRef: { name: 'salesforce-prod', key: 'client-secret' },
+          },
+          {
+            id: 'never-connected',
+            provider: 'salesforce',
+            clientIdRef: { name: 'never-connected', key: 'client-id' },
+            clientSecretRef: { name: 'never-connected', key: 'client-secret' },
+          },
+        ],
+      },
+    },
+    config.sandboxNamespace
+  )
+  const app = createApp(gateway as never)
   return request(app)
     .delete(URL)
     .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)

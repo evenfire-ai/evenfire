@@ -2,8 +2,15 @@ import { Request, Response, Router } from 'express'
 import httpProxy from 'http-proxy'
 import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
 import { config } from '../config.js'
-import { AuthedRequest, requireRpcAuth, requireScope } from '../middleware/auth.js'
+import {
+  AuthedRequest,
+  extractAuthToken,
+  requireRpcAuth,
+  requireScope,
+} from '../middleware/auth.js'
 import { emitSessionMint, emitViewRequest } from '../observability/sandboxUiAudit.js'
+import { trustedEdgeActionContextHeader } from '../routeActionBindingV2.js'
+import { startActiveViewLease } from '../services/activeViewLease.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
 import {
@@ -11,6 +18,7 @@ import {
   createSandboxUiSession,
   verifySandboxUiSession,
 } from '../services/sandboxUiSession.js'
+import { tokenDeclaresV2 } from '../userDelegationV2.js'
 import { recipeGoneHtml, recipeUpdatingHtml } from '../views/sandboxUiStatus.js'
 import { parseCookies } from './desktopProxy.js'
 
@@ -81,6 +89,52 @@ function respondUpdating(
 function teamIdForSandboxUiRegistry(req: AuthedRequest): string | undefined {
   const auth = req.auth
   return auth?.accessScope === 'team' && auth.teamId ? auth.teamId : undefined
+}
+
+function isV2ViewRequest(req: AuthedRequest): boolean {
+  return Boolean(req.userDelegationV2 && req.authorizedActionV2)
+}
+
+function requireV2Delegation(req: AuthedRequest, res: Response, next: () => void): void {
+  if (!isV2ViewRequest(req)) {
+    res.status(401).json({ error: 'v2_delegation_required' })
+    return
+  }
+  next()
+}
+
+function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): void {
+  if (!tokenDeclaresV2(extractAuthToken(req))) {
+    next()
+    return
+  }
+  requireRpcAuth(req, res, () => requireScope('sandbox:ui:view')(req, res, next))
+}
+
+function controlApiOAuthHeaders(req: AuthedRequest): Record<string, string> {
+  const actionContext = trustedEdgeActionContextHeader(req)
+  return {
+    authorization: `Bearer ${config.controlApiServiceToken}`,
+    'x-service-token': config.controlApiServiceName,
+    'content-type': 'application/json',
+    ...(actionContext ? { 'x-clerum-edge-action-context': actionContext } : {}),
+  }
+}
+
+function sandboxOAuthUser(req: AuthedRequest, res: Response): string | null {
+  if (isV2ViewRequest(req)) return req.auth!.sub
+  const cookies = parseCookies(req.headers.cookie ?? '')
+  const cookieValue = cookies[config.sandboxUiCookieName]
+  if (!cookieValue) {
+    res.status(401).json({ error: 'sandbox_ui_session_required' })
+    return null
+  }
+  const claims = verifySandboxUiSession(cookieValue, req.params.recipeNs, req.params.recipeName)
+  if (!claims) {
+    res.status(401).json({ error: 'sandbox_ui_session_invalid' })
+    return null
+  }
+  return claims.sub
 }
 
 // Response security headers. CSP is the hard floor; no per-recipe relax.
@@ -200,6 +254,33 @@ sandboxUiProxy.on('error', (err, _req, res) => {
 export function createSandboxUiSessionRouter(): Router {
   const router = Router()
 
+  const handleV2OpenOrReconnect = async (req: AuthedRequest, res: Response): Promise<void> => {
+    const { recipeNs, recipeName } = req.params
+    // Control API already validated the exact v2 selected-path authority.
+    // This lookup is readiness/routing only and must not reintroduce the
+    // legacy user/team ACL as a second authorization rule.
+    const result = await lookupSandboxUiRegistry(recipeNs, recipeName)
+    switch (result.kind) {
+      case 'not_found':
+        res.status(404).json({ error: 'recipe_not_found' })
+        return
+      case 'not_ready':
+        res.status(409).json({ error: 'recipe_not_ready', reason: result.reason })
+        return
+      case 'misconfigured':
+        res.status(502).json({ error: result.reason, port: result.port })
+        return
+      case 'error':
+      case 'forbidden':
+        res.status(503).json({ error: 'authority_unavailable' })
+        return
+      case 'ok':
+        res.status(204).end()
+        emitSessionMint({ outcome: 'ok', userId: req.auth!.sub, recipeNs, recipeName })
+        return
+    }
+  }
+
   // GET /api/v1/sandbox-ui/apps
   // List of UI-bearing recipes the requesting user has ACL access to.
   // The Desktop App's app picker hits this on tab open / focus.
@@ -224,6 +305,10 @@ export function createSandboxUiSessionRouter(): Router {
     requireRpcAuth,
     requireScope('sandbox:ui:view'),
     async (req: AuthedRequest, res: Response) => {
+      if (isV2ViewRequest(req)) {
+        await handleV2OpenOrReconnect(req, res)
+        return
+      }
       const { recipeNs, recipeName } = req.params
       const userId = req.auth!.sub
       const teamId = teamIdForSandboxUiRegistry(req)
@@ -280,6 +365,16 @@ export function createSandboxUiSessionRouter(): Router {
     }
   )
 
+  router.post(
+    '/sandbox-ui/:recipeNs/:recipeName/reconnect',
+    requireRpcAuth,
+    requireScope('sandbox:ui:view'),
+    requireV2Delegation,
+    async (req: AuthedRequest, res: Response) => {
+      await handleV2OpenOrReconnect(req, res)
+    }
+  )
+
   // POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url
   //
   // Desktop main process calls this when the embed clicks
@@ -312,13 +407,20 @@ export function createSandboxUiSessionRouter(): Router {
       }
       const background = req.body?.background === true
 
-      const acl = await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
+      // For v2, Control API already performed the live selected-path check.
+      // This lookup is only current recipe readiness; the legacy path keeps
+      // its historical user/team ACL check.
+      const acl = isV2ViewRequest(req)
+        ? await lookupSandboxUiRegistry(recipeNs, recipeName)
+        : await lookupSandboxUiRegistry(recipeNs, recipeName, userId, teamId)
       switch (acl.kind) {
         case 'not_found':
           res.status(404).json({ error: 'recipe_not_found' })
           return
         case 'forbidden':
-          res.status(403).json({ error: 'recipe_acl_denied' })
+          res
+            .status(isV2ViewRequest(req) ? 503 : 403)
+            .json({ error: isV2ViewRequest(req) ? 'authority_unavailable' : 'recipe_acl_denied' })
           return
         case 'not_ready':
           res.status(409).json({ error: 'recipe_not_ready', reason: acl.reason })
@@ -350,16 +452,12 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
             oauthClientId,
-            userId,           // from req.auth.sub — never the body
+            userId, // from req.auth.sub — never the body
             redirectUri,
             background,
           }),
@@ -425,20 +523,11 @@ export function createSandboxUiSessionRouter(): Router {
   // the user's session is bad).
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
-    async (req: Request, res: Response) => {
+    v2ViewAuthority,
+    async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const userId = sandboxOAuthUser(req, res)
+      if (!userId) return
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''
@@ -452,16 +541,12 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'POST',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
             oauthClientId,
-            userId: claims.sub,
+            userId,
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
@@ -523,20 +608,11 @@ export function createSandboxUiSessionRouter(): Router {
   // a best-effort buildRevokeRequest adapter call before delete.
   router.delete(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
-    async (req: Request, res: Response) => {
+    v2ViewAuthority,
+    async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const userId = sandboxOAuthUser(req, res)
+      if (!userId) return
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''
@@ -550,16 +626,12 @@ export function createSandboxUiSessionRouter(): Router {
       try {
         upstream = await fetch(upstreamUrl, {
           method: 'DELETE',
-          headers: {
-            authorization: `Bearer ${config.controlApiServiceToken}`,
-            'x-service-token': config.controlApiServiceName,
-            'content-type': 'application/json',
-          },
+          headers: controlApiOAuthHeaders(req),
           body: JSON.stringify({
             recipeNs,
             recipeName,
             oauthClientId,
-            userId: claims.sub,
+            userId,
           }),
           signal: AbortSignal.timeout(config.upstreamTimeoutMs),
         })
@@ -587,187 +659,199 @@ export function createSandboxUiSessionRouter(): Router {
   )
 
   // ANY /api/v1/sandbox-ui/:recipeNs/:recipeName/view/*
-  router.all('/sandbox-ui/:recipeNs/:recipeName/view/*', async (req: Request, res: Response) => {
-    const { recipeNs, recipeName } = req.params
+  router.all(
+    '/sandbox-ui/:recipeNs/:recipeName/view/*',
+    v2ViewAuthority,
+    async (req: Request, res: Response) => {
+      const { recipeNs, recipeName } = req.params
 
-    // WebSocket upgrades are rejected outright in v1. The Express layer
-    // hits this BEFORE any proxy work, so the upstream never sees the
-    // upgrade attempt.
-    const upgrade = String(req.headers.upgrade ?? '').toLowerCase()
-    if (upgrade === 'websocket') {
-      res.status(426).json({
-        code: 'websocket_not_supported',
-        message: 'WebSockets are not supported in v1.',
-      })
-      return
-    }
+      // WebSocket upgrades are rejected outright in v1. The Express layer
+      // hits this BEFORE any proxy work, so the upstream never sees the
+      // upgrade attempt.
+      const upgrade = String(req.headers.upgrade ?? '').toLowerCase()
+      if (upgrade === 'websocket') {
+        res.status(426).json({
+          code: 'websocket_not_supported',
+          message: 'WebSockets are not supported in v1.',
+        })
+        return
+      }
 
-    // Cookie auth ONLY: RPC JWT is ignored if present. The cookie's
-    // recipeNs/recipeName claim must match the URL path —
-    // verifySandboxUiSession enforces that.
-    const cookies = parseCookies(req.headers.cookie ?? '')
-    const cookieValue = cookies[config.sandboxUiCookieName]
-    if (!cookieValue) {
-      res.status(401).json({ error: 'sandbox_ui_session_required' })
-      return
-    }
-    const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-    if (!claims) {
-      res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-      return
-    }
+      const authed = req as AuthedRequest
+      const v2Request = isV2ViewRequest(authed)
+      // Legacy cookies remain compatibility-only. A v2 credential is validated
+      // above and never falls back to this branch after a failed checkpoint.
+      const legacyCookie = parseCookies(req.headers.cookie ?? '')[config.sandboxUiCookieName]
+      const legacyClaims =
+        v2Request || !legacyCookie
+          ? null
+          : verifySandboxUiSession(legacyCookie, recipeNs, recipeName)
+      if (!v2Request && !legacyCookie) {
+        res.status(401).json({ error: 'sandbox_ui_session_required' })
+        return
+      }
+      if (!v2Request && !legacyClaims) {
+        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
+        return
+      }
+      const userId = v2Request ? authed.auth!.sub : legacyClaims!.sub
 
-    // Path normalisation BEFORE the registry lookup, so a malicious path
-    // can't reach the upstream even when the registry cache is warm.
-    const tail = (req.params as Record<string, unknown>)[0]
-    const tailString = typeof tail === 'string' ? tail : ''
-    const normalised = normalizeViewPath(tailString)
-    if (normalised === null) {
-      res.status(400).json({ error: 'invalid_path' })
-      return
-    }
+      // Path normalisation BEFORE the registry lookup, so a malicious path
+      // can't reach the upstream even when the registry cache is warm.
+      const tail = (req.params as Record<string, unknown>)[0]
+      const tailString = typeof tail === 'string' ? tail : ''
+      const normalised = normalizeViewPath(tailString)
+      if (normalised === null) {
+        res.status(400).json({ error: 'invalid_path' })
+        return
+      }
 
-    // Registry lookup is user-agnostic here — the cookie already proves
-    // the user is allowed (it was minted only after control-api's ACL
-    // check at session-mint time). Cookie has a 5min TTL; in that
-    // window an admin removing the user from the recipe ACL won't
-    // immediately revoke an existing view session, by design — a 5 min
-    // revocation lag is acceptable.
-    const lookup = await lookupSandboxUiRegistry(recipeNs, recipeName)
-    if (lookup.kind === 'not_found') {
-      // Registry says "no such app" → 410 Gone. Browser-y clients (the
-      // WebContentsView) get a styled HTML page; explicit JSON callers
-      // (programmatic deep-links / debugging tools) still get the JSON
-      // shape.
-      respondGone(req, res, recipeNs, recipeName)
-      return
-    }
-    if (lookup.kind === 'not_ready') {
-      // Styled "updating" page that auto-refreshes every 5s. Future work
-      // holds the response open under SSE for up to 10s before falling
-      // through so a quick rolling deploy doesn't bounce the user through
-      // a status page.
-      respondUpdating(req, res, recipeNs, recipeName, lookup.reason)
-      return
-    }
-    if (lookup.kind === 'forbidden') {
-      // Should not happen here (we passed no forUser), but guard for the
-      // type checker and a future refactor.
-      res.status(403).json({ error: 'recipe_acl_denied' })
-      return
-    }
-    if (lookup.kind === 'misconfigured') {
-      // Recipe declares a `ui.port` outside the platform allow-list. The
-      // CRD lets `1-65535` through; rpc-proxy is the choke point. Surface
-      // a distinct error code so a recipe author who sees this gets a
-      // pointer to the actual cause instead of a generic
-      // "registry_lookup_failed".
-      res.status(502).json({ error: lookup.reason, port: lookup.port })
-      return
-    }
-    if (lookup.kind === 'error') {
-      res.status(502).json({ error: 'registry_lookup_failed' })
-      return
-    }
+      // Registry lookup is user-agnostic here. For v2, the preceding live
+      // checkpoint is the sole authority decision; for legacy, the cookie
+      // records the historical session-mint ACL decision. Neither lookup may
+      // become a second source of user authorization.
+      const lookup = await lookupSandboxUiRegistry(recipeNs, recipeName)
+      if (lookup.kind === 'not_found') {
+        // Registry says "no such app" → 410 Gone. Browser-y clients (the
+        // WebContentsView) get a styled HTML page; explicit JSON callers
+        // (programmatic deep-links / debugging tools) still get the JSON
+        // shape.
+        respondGone(req, res, recipeNs, recipeName)
+        return
+      }
+      if (lookup.kind === 'not_ready') {
+        // Styled "updating" page that auto-refreshes every 5s. Future work
+        // holds the response open under SSE for up to 10s before falling
+        // through so a quick rolling deploy doesn't bounce the user through
+        // a status page.
+        respondUpdating(req, res, recipeNs, recipeName, lookup.reason)
+        return
+      }
+      if (lookup.kind === 'forbidden') {
+        // Should not happen here (we passed no forUser), but guard for the
+        // type checker and a future refactor.
+        res.status(403).json({ error: 'recipe_acl_denied' })
+        return
+      }
+      if (lookup.kind === 'misconfigured') {
+        // Recipe declares a `ui.port` outside the platform allow-list. The
+        // CRD lets `1-65535` through; rpc-proxy is the choke point. Surface
+        // a distinct error code so a recipe author who sees this gets a
+        // pointer to the actual cause instead of a generic
+        // "registry_lookup_failed".
+        res.status(502).json({ error: lookup.reason, port: lookup.port })
+        return
+      }
+      if (lookup.kind === 'error') {
+        res.status(502).json({ error: 'registry_lookup_failed' })
+        return
+      }
 
-    const svc = lookup.entry.service
-    const upstreamHost = `${svc.name}.${svc.namespace}.svc.cluster.local:${svc.port}`
-    const target = `http://${upstreamHost}`
+      const svc = lookup.entry.service
+      const upstreamHost = `${svc.name}.${svc.namespace}.svc.cluster.local:${svc.port}`
+      const target = `http://${upstreamHost}`
 
-    // Splice the normalised path back into the request URL so http-proxy
-    // forwards exactly the path we vetted, plus the original query string.
-    const queryIndex = req.originalUrl.indexOf('?')
-    const query = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : ''
-    req.url = `${normalised}${query}`
+      // Splice the normalised path back into the request URL so http-proxy
+      // forwards exactly the path we vetted, plus the original query string.
+      const queryIndex = req.originalUrl.indexOf('?')
+      const query = queryIndex >= 0 ? req.originalUrl.slice(queryIndex) : ''
+      req.url = `${normalised}${query}`
 
-    // Per-request hook to inject identity headers and strip client-supplied
-    // shadow headers. http-proxy fires onProxyReq once with the
-    // ClientRequest. We layer a one-shot listener via the proxy's `proxyReq`
-    // event scoped to this request via res.on('finish') cleanup.
-    const onProxyReq = (
-      proxyReq: ClientRequest,
-      innerReq: IncomingMessage,
-      _innerRes: ServerResponse
-    ): void => {
-      if (innerReq !== req) return
-      // The headers map http-proxy hands to the upstream comes from req.headers;
-      // mutate proxyReq directly to strip and inject.
-      for (const headerName of proxyReq.getHeaderNames()) {
-        const lower = headerName.toLowerCase()
-        if (REQUEST_HEADER_BLOCKLIST.has(lower) || lower.startsWith('x-clerum-')) {
-          try {
-            proxyReq.removeHeader(headerName)
-          } catch {
-            // Same defensive note as setProxyReqHeader.
+      // Per-request hook to inject identity headers and strip client-supplied
+      // shadow headers. http-proxy fires onProxyReq once with the
+      // ClientRequest. We layer a one-shot listener via the proxy's `proxyReq`
+      // event scoped to this request via res.on('finish') cleanup.
+      const onProxyReq = (
+        proxyReq: ClientRequest,
+        innerReq: IncomingMessage,
+        _innerRes: ServerResponse
+      ): void => {
+        if (innerReq !== req) return
+        // The headers map http-proxy hands to the upstream comes from req.headers;
+        // mutate proxyReq directly to strip and inject.
+        for (const headerName of proxyReq.getHeaderNames()) {
+          const lower = headerName.toLowerCase()
+          if (REQUEST_HEADER_BLOCKLIST.has(lower) || lower.startsWith('x-clerum-')) {
+            try {
+              proxyReq.removeHeader(headerName)
+            } catch {
+              // Same defensive note as setProxyReqHeader.
+            }
           }
         }
+        setProxyReqHeader(proxyReq, 'x-clerum-user', userId)
+        setProxyReqHeader(proxyReq, 'x-clerum-recipe', `${recipeNs}/${recipeName}`)
       }
-      setProxyReqHeader(proxyReq, 'x-clerum-user', claims.sub)
-      setProxyReqHeader(proxyReq, 'x-clerum-recipe', `${recipeNs}/${recipeName}`)
-    }
 
-    const onProxyRes = (
-      proxyRes: IncomingMessage,
-      innerReq: IncomingMessage,
-      _innerRes: ServerResponse
-    ): void => {
-      if (innerReq !== req) return
-      // 3xx Location rewriting.
-      const status = proxyRes.statusCode ?? 0
-      if (status >= 300 && status < 400 && proxyRes.headers.location) {
-        const raw = String(proxyRes.headers.location)
-        const rewritten = rewriteLocationHeader(raw, recipeNs, recipeName, upstreamHost)
-        if (rewritten === null) {
-          // Off-origin redirect is dropped — for v1 we strip the Location
-          // and let the upstream's 3xx body render (typically empty). A
-          // follow-up may swap in a styled "external link" page.
-          delete proxyRes.headers.location
-          // Coerce to 200 so the desktop view doesn't honour the dangling
-          // 3xx — the cookie's path scope would not have matched the
-          // off-origin host anyway, but a 3xx without Location is broken.
-          proxyRes.statusCode = 200
-        } else {
-          proxyRes.headers.location = rewritten
+      const onProxyRes = (
+        proxyRes: IncomingMessage,
+        innerReq: IncomingMessage,
+        _innerRes: ServerResponse
+      ): void => {
+        if (innerReq !== req) return
+        // 3xx Location rewriting.
+        const status = proxyRes.statusCode ?? 0
+        if (status >= 300 && status < 400 && proxyRes.headers.location) {
+          const raw = String(proxyRes.headers.location)
+          const rewritten = rewriteLocationHeader(raw, recipeNs, recipeName, upstreamHost)
+          if (rewritten === null) {
+            // Off-origin redirect is dropped — for v1 we strip the Location
+            // and let the upstream's 3xx body render (typically empty). A
+            // follow-up may swap in a styled "external link" page.
+            delete proxyRes.headers.location
+            // Coerce to 200 so the desktop view doesn't honour the dangling
+            // 3xx — the cookie's path scope would not have matched the
+            // off-origin host anyway, but a 3xx without Location is broken.
+            proxyRes.statusCode = 200
+          } else {
+            proxyRes.headers.location = rewritten
+          }
+        }
+        // Response security headers (CSP / Permissions-Policy / X-CTO /
+        // Referrer-Policy / X-Frame-Options). Set unconditionally; the
+        // upstream's own values are overridden — this is the "hard floor"
+        // applied to every sandbox UI regardless of recipe author intent.
+        for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+          proxyRes.headers[name] = value
         }
       }
-      // Response security headers (CSP / Permissions-Policy / X-CTO /
-      // Referrer-Policy / X-Frame-Options). Set unconditionally; the
-      // upstream's own values are overridden — this is the "hard floor"
-      // applied to every sandbox UI regardless of recipe author intent.
-      for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-        proxyRes.headers[name] = value
+
+      sandboxUiProxy.once('proxyReq', onProxyReq)
+      sandboxUiProxy.once('proxyRes', onProxyRes)
+      // If the request ends without firing (e.g. an early proxy error), make
+      // sure the listeners are detached AND the view-request emit fires
+      // exactly once with the final status code.
+      let auditEmitted = false
+      const cleanup = (): void => {
+        sandboxUiProxy.off('proxyReq', onProxyReq)
+        sandboxUiProxy.off('proxyRes', onProxyRes)
+        if (auditEmitted) return
+        auditEmitted = true
+        emitViewRequest({
+          userId,
+          recipeNs,
+          recipeName,
+          status: res.statusCode,
+          path: normalised,
+          method: req.method,
+        })
       }
+      res.on('close', cleanup)
+      res.on('finish', cleanup)
+
+      const lease = v2Request
+        ? startActiveViewLease(authed.authorizedActionV2!, { onDenied: () => res.destroy() })
+        : null
+      res.once('close', () => lease?.close())
+      res.once('finish', () => lease?.close())
+
+      // Strip the cookie/authorization/x-clerum-* headers from the inbound
+      // request map BEFORE http-proxy clones them onto the outbound request.
+      stripClientHeaders(req.headers as NodeJS.Dict<string | string[]>)
+
+      sandboxUiProxy.web(req, res, { target })
     }
-
-    sandboxUiProxy.once('proxyReq', onProxyReq)
-    sandboxUiProxy.once('proxyRes', onProxyRes)
-    // If the request ends without firing (e.g. an early proxy error), make
-    // sure the listeners are detached AND the view-request emit fires
-    // exactly once with the final status code.
-    let auditEmitted = false
-    const cleanup = (): void => {
-      sandboxUiProxy.off('proxyReq', onProxyReq)
-      sandboxUiProxy.off('proxyRes', onProxyRes)
-      if (auditEmitted) return
-      auditEmitted = true
-      emitViewRequest({
-        userId: claims.sub,
-        recipeNs,
-        recipeName,
-        status: res.statusCode,
-        path: normalised,
-        method: req.method,
-      })
-    }
-    res.on('close', cleanup)
-    res.on('finish', cleanup)
-
-    // Strip the cookie/authorization/x-clerum-* headers from the inbound
-    // request map BEFORE http-proxy clones them onto the outbound request.
-    stripClientHeaders(req.headers as NodeJS.Dict<string | string[]>)
-
-    sandboxUiProxy.web(req, res, { target })
-  })
+  )
 
   return router
 }

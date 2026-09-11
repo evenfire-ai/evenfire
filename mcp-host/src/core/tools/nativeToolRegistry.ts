@@ -254,10 +254,11 @@ export class NativeToolRegistry implements ToolRegistry {
         workflowEnvGetter('MCP_HOST_WORKFLOW_CONTROL_TOKEN'))
     ) {
       const targetUserId = sourceMessage?.channelType === 'rpc' ? sourceMessage.sender.trim() : ''
-      const targetTeamId =
-        sourceMessage?.channelType === 'rpc' && typeof sourceMessage.metadata?.teamId === 'string'
-          ? sourceMessage.metadata.teamId.trim()
-          : ''
+      const rawTeamId =
+        sourceMessage?.channelType === 'rpc'
+          ? (sourceMessage.authorityV2?.effectiveTeamId ?? sourceMessage.metadata?.teamId)
+          : undefined
+      const targetTeamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
       const sourceConversationId =
         sourceMessage?.channelType === 'rpc' && typeof sourceMessage.threadId === 'string'
           ? sourceMessage.threadId.trim()

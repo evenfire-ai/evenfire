@@ -1,4 +1,5 @@
 import { controlApiRequest } from '../controlApiClient.js'
+import { WORKFLOW_ACTION_DELEGATION_HEADER } from '../workflowActionDelegation.js'
 
 export type PendingUserApprovalDecision = {
   id: string
@@ -36,7 +37,8 @@ export async function decideUserApprovalDecision(
   sessionToken: string,
   approvalId: string,
   decision: 'approve' | 'deny',
-  note?: string
+  note?: string,
+  actionDelegation?: string
 ): Promise<{ ok: boolean }> {
   return controlApiRequest(
     'POST',
@@ -44,6 +46,9 @@ export async function decideUserApprovalDecision(
     {
       userSessionToken: sessionToken,
       body: note ? { decision, note } : { decision },
+      extraHeaders: actionDelegation
+        ? { [WORKFLOW_ACTION_DELEGATION_HEADER]: actionDelegation }
+        : undefined,
     }
   )
 }

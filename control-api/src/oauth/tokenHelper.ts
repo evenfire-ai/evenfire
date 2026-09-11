@@ -11,6 +11,7 @@ import {
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
 } from './providers.js'
+import { resolveExactRecipeOAuthClient } from './recipeOAuthClient.js'
 import { type OAuthGrantKey, getOAuthGrant, refreshOAuthGrantTokens } from './store.js'
 
 /**
@@ -58,8 +59,23 @@ export async function getAccessToken(
   input: GetAccessTokenInput,
   deps: GetAccessTokenDeps
 ): Promise<GetAccessTokenResult> {
+  // Resolve the CURRENT declaration before reading or returning any grant.
+  // A cached provider token must not outlive removal or ambiguity of its
+  // recipe-client identity.
+  let recipe: RecipeWithOAuthClients | null
+  try {
+    recipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
+  } catch (err) {
+    if (err instanceof RecipeNotFoundError) return { kind: 'recipe_not_found' }
+    throw err
+  }
+  if (!recipe) return { kind: 'recipe_not_found' }
+
+  const decl = resolveExactRecipeOAuthClient(recipe, input.oauthClientId)
+  if (!decl) return { kind: 'unknown_oauth_client' }
+
   const grant = await getOAuthGrant(deps.db, deps.encryptionKey, input)
-  if (!grant) return { kind: 'no_grant' }
+  if (!grant || grant.provider !== decl.provider) return { kind: 'no_grant' }
 
   const refreshBufferMs = deps.refreshBufferMs ?? 60_000
   const stillValid =
@@ -73,18 +89,6 @@ export async function getAccessToken(
   // caller treats it as "needs reauth"; the user re-clicks Connect.
   if (!grant.refreshToken) return { kind: 'no_grant' }
 
-  // Resolve recipe + secrets + provider for the refresh exchange.
-  let recipe: RecipeWithOAuthClients | null
-  try {
-    recipe = await deps.recipeReader.read(input.recipeName, input.recipeNamespace)
-  } catch (err) {
-    if (err instanceof RecipeNotFoundError) return { kind: 'recipe_not_found' }
-    throw err
-  }
-  if (!recipe) return { kind: 'recipe_not_found' }
-
-  const decl = recipe.spec?.oauthClients?.find(c => c.id === input.oauthClientId)
-  if (!decl) return { kind: 'unknown_oauth_client' }
   if (!isKnownOAuthProvider(decl.provider)) {
     return { kind: 'unsupported_provider', provider: decl.provider }
   }

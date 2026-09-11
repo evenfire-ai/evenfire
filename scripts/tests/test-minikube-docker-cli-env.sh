@@ -2,10 +2,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+source "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
 TMP_DIR="$(mktemp -d)"
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup_test_tmp() {
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged
+  fi
   if [[ "${KEEP_MINIKUBE_DOCKER_TEST_TMP:-false}" == true ]]; then
     printf 'Kept test fixtures at %s\n' "$TMP_DIR" >&2
   else
@@ -236,7 +240,11 @@ docker_log_has_ambient_runtime_operation() {
 }
 
 prepare_fixture_repo() {
-  local fixture="$1"
+  local fixture_root="$1" fixture
+  MINIKUBE_TEST_PROFILE=fixture-profile \
+    MINIKUBE_TEST_CONTEXT=fixture-profile \
+    minikube_test_fixture_repo_init "$ROOT" "$fixture_root"
+  fixture="$MINIKUBE_TEST_PROJECT_DIR"
   mkdir -p "$fixture/scripts/minikube" "$fixture/scripts/release" \
     "$fixture/control-api" "$fixture/deploy/minikube"
   cp "$ROOT/scripts/minikube/build-images.sh" \
@@ -255,10 +263,33 @@ STUB
     "$fixture/scripts/minikube/docker-cli-env.sh" \
     "$fixture/scripts/minikube/run-with-deadline.mjs" \
     "$fixture/scripts/minikube/require-t2-mutation-lock.sh"
+  git -C "$fixture" add .
+  git -C "$fixture" commit -qm 'fixture: install build inputs'
   export T2_PROJECT_DIR="$fixture"
   export T2_PROFILE=fixture-profile
   export T2_CONTEXT=fixture-profile
   export MINIKUBE_PROFILE=fixture-profile
+  PREPARED_FIXTURE_REPO="$fixture"
+}
+
+assert_dirty_source_tree_is_non_authoritative() {
+  local fixture="$TMP_DIR/dirty-repo" output="$TMP_DIR/dirty-build.out" status=0
+  prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
+  printf '# uncommitted source\n' >>"$fixture/control-api/Dockerfile"
+  : >"$DOCKER_LOG"
+
+  DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
+    bash "$fixture/scripts/minikube/build-images.sh" --only=control-api \
+      >"$output" 2>&1 || status=$?
+
+  if [[ "$status" -eq 0 ]] \
+    && grep -Fq 'cannot emit PR2 runtime readiness evidence' "$output" \
+    && grep -Fq -- '--build-arg EVENFIRE_SOURCE_REVISION=uncommitted' "$DOCKER_LOG"; then
+    pass "dirty local builds remain usable without claiming a committed source revision"
+  else
+    fail "dirty local source either failed or masqueraded as the committed revision (status=$status)"
+  fi
 }
 
 assert_endpoint_resolution_and_context_precedence() {
@@ -394,13 +425,17 @@ assert_all_original_docker_env_is_restored() {
 }
 
 assert_real_build_script_isolated() {
-  local fixture="$TMP_DIR/repo" output="$TMP_DIR/build.out"
+  local fixture="$TMP_DIR/repo" output="$TMP_DIR/build.out" source_revision
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
+  source_revision="$(git -C "$fixture" rev-parse HEAD)"
   : >"$DOCKER_LOG"
   if DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
     bash "$fixture/scripts/minikube/build-images.sh" --only=control-api \
       >"$output" 2>&1; then
     if grep -Fq '|build -t clerum/control-api:test' "$DOCKER_LOG" \
+      && grep -Fq -- "--build-arg EVENFIRE_SOURCE_REVISION=$source_revision" "$DOCKER_LOG" \
+      && grep -Fq -- '--build-arg EVENFIRE_SERVICE_VERSION=unknown' "$DOCKER_LOG" \
       && ! docker_log_has_ambient_runtime_operation \
       && [[ ! -e "$HELPER_SENTINEL" && ! -e "$UNSAFE_SENTINEL" ]] \
       && [[ -s "$PLUGIN_LOG" ]]; then
@@ -424,6 +459,7 @@ assert_real_build_script_isolated() {
 assert_public_pulls_are_isolated() {
   local fixture="$TMP_DIR/public-repo" output="$TMP_DIR/public.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
   if DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
     bash "$fixture/scripts/minikube/build-images.sh" --public-only \
@@ -446,6 +482,7 @@ assert_local_image_operations_preserve_status() {
   fixture="$TMP_DIR/base-inspect-failure-repo"
   output="$TMP_DIR/base-inspect-failure.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" \
@@ -465,6 +502,7 @@ assert_local_image_operations_preserve_status() {
   fixture="$TMP_DIR/public-query-failure-repo"
   output="$TMP_DIR/public-query-failure.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
@@ -484,6 +522,7 @@ assert_local_image_operations_preserve_status() {
   fixture="$TMP_DIR/post-build-inspect-failure-repo"
   output="$TMP_DIR/post-build-inspect-failure.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
     FAKE_DOCKER_MODE=exit \
@@ -502,6 +541,7 @@ assert_local_image_operations_preserve_status() {
   fixture="$TMP_DIR/manifest-inspect-failure-repo"
   output="$TMP_DIR/manifest-inspect-failure.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
     FAKE_DOCKER_MODE=exit \
@@ -521,6 +561,7 @@ assert_local_image_operations_preserve_status() {
   fixture="$TMP_DIR/tag-failure-repo"
   output="$TMP_DIR/tag-failure.out"
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   status=0
   DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
     MINIKUBE_DOCKER_AUTH_CONFIG="$EXPLICIT_CONFIG" \
@@ -541,6 +582,7 @@ assert_local_minikube_load_timeout_kills_descendants() {
   local fixture="$TMP_DIR/load-timeout-repo" output="$TMP_DIR/load-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   : >"$MINIKUBE_LOG"
   rm -f -- "$DESCENDANT_PID_FILE"
 
@@ -620,6 +662,7 @@ assert_verify_inventory_is_read_only_and_bounded() {
   local fixture="$TMP_DIR/verify-repo" output="$TMP_DIR/verify-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   rm -f -- "$DESCENDANT_PID_FILE"
   : >"$DOCKER_LOG"
 
@@ -682,6 +725,7 @@ assert_invalid_deadline_and_explicit_buildx_fail_closed() {
 assert_private_registry_requires_explicit_config() {
   local fixture="$TMP_DIR/private-repo" output="$TMP_DIR/private-missing.out" status=0
   prepare_fixture_repo "$fixture"
+  fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
   unset MINIKUBE_DOCKER_AUTH_CONFIG FAKE_EXPECT_AUTH_CONFIG
   DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
@@ -965,6 +1009,7 @@ assert_endpoint_resolution_and_context_precedence
 assert_config_only_rootless_context
 assert_all_original_docker_env_is_restored
 assert_real_build_script_isolated
+assert_dirty_source_tree_is_non_authoritative
 assert_public_pulls_are_isolated
 assert_local_image_operations_preserve_status
 assert_local_minikube_load_timeout_kills_descendants

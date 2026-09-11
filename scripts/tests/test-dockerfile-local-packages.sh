@@ -180,6 +180,42 @@ assert_dockerignore_mutations_rejected() {
   rm -rf -- "$fixture_dir"
 }
 
+declared_local_packages() {
+  local service="$1"
+  node -e '
+    const manifest = require(process.argv[1]);
+    const dependencies = manifest.dependencies ?? {};
+    for (const [name, value] of Object.entries(dependencies)) {
+      const match = /^@clerum\/(.+)$/.exec(name);
+      if (match && typeof value === "string" && value.startsWith("file:../packages/")) {
+        console.log(match[1]);
+      }
+    }
+  ' "$REPO_ROOT/$service/package.json"
+}
+
+assert_declared_local_packages() {
+  local service="$1"
+  shift
+  local packages=()
+  local package file
+  while IFS= read -r package; do
+    [[ -n "$package" ]] && packages+=("$package")
+  done < <(declared_local_packages "$service")
+  for file in "$@"; do
+    assert_copy_before_every_ci "$file" "${packages[@]}"
+  done
+}
+
+assert_root_build_context() {
+  local selector="$1"
+  local block
+  block="$(grep -A4 -F "build_image \"$selector\"" "$REPO_ROOT/scripts/minikube/build-images.sh")"
+  if [[ "$block" != *'"${PROJECT_DIR}"'* || "$block" != *"/$selector/Dockerfile"* ]]; then
+    fail "$selector must build from the repository root with its explicit Dockerfile"
+  fi
+}
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
@@ -193,6 +229,14 @@ assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.desktop llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.full llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.slim llm-providers
+
+# Derive PR2 local-package coverage from each production manifest so adding a
+# new file: dependency cannot leave this guard green without Docker coverage.
+assert_declared_local_packages control-api control-api/Dockerfile
+assert_declared_local_packages rpc-proxy rpc-proxy/Dockerfile
+assert_declared_local_packages mcp-host \
+  mcp-host/Dockerfile mcp-host/Dockerfile.desktop mcp-host/Dockerfile.full mcp-host/Dockerfile.slim
+assert_root_build_context rpc-proxy
 
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install

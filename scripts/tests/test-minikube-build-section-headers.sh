@@ -24,9 +24,26 @@ FAIL=0
 # condition fails one direction or the other.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$REPO_ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+HOST_CHECKOUT_ROOT="$REPO_ROOT"
+HOST_CHECKOUT_HEAD="$(git -C "$HOST_CHECKOUT_ROOT" rev-parse --verify HEAD)"
+HOST_CHECKOUT_BRANCH="$(git -C "$HOST_CHECKOUT_ROOT" branch --show-current)"
+HOST_CHECKOUT_STATUS_HASH="$({ git -C "$HOST_CHECKOUT_ROOT" status --porcelain=v1 || true; } |
+  shasum -a 256 | awk '{print $1}')"
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
+
+host_checkout_matches_snapshot() {
+  local expected_head="$1" expected_branch="$2" expected_status_hash="$3"
+  local current_status_hash
+  current_status_hash="$({ git -C "$HOST_CHECKOUT_ROOT" status --porcelain=v1 || true; } |
+    shasum -a 256 | awk '{print $1}')"
+  [[ "$(git -C "$HOST_CHECKOUT_ROOT" rev-parse --verify HEAD)" == "$expected_head" ]] \
+    && [[ "$(git -C "$HOST_CHECKOUT_ROOT" branch --show-current)" == "$expected_branch" ]] \
+    && [[ "$current_status_hash" == "$expected_status_hash" ]]
+}
 
 # The build phases under test, named exactly as the script names them. Kept as
 # one list so a new phase added without a build_section() wrapper is caught by
@@ -99,11 +116,15 @@ STUB
 prepare_repo() {
   local d=$1
   make_stubs "$d"
-  mkdir -p "$d/repo"
+  MINIKUBE_TEST_PROFILE=clerum-test \
+    MINIKUBE_TEST_CONTEXT=clerum-test \
+    minikube_test_fixture_repo_init "$REPO_ROOT" "$d"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
   write_fixture_mutation_lock_stub "$d"
+  git -C "$d/repo" add -A
+  git -C "$d/repo" commit -qm 'fixture: install build inputs'
   # An empty daemon inventory. Every base/public image then takes the "pull it"
   # branch, which is the slower path through the script and therefore the one
   # most likely to print something unexpected.
@@ -310,6 +331,16 @@ assert_every_defined_case_is_invoked() {
   fi
 }
 
+assert_the_host_snapshot_guard_rejects_a_stale_snapshot() {
+  if host_checkout_matches_snapshot \
+    "0000000000000000000000000000000000000000" \
+    "$HOST_CHECKOUT_BRANCH" "$HOST_CHECKOUT_STATUS_HASH"; then
+    fail "host snapshot guard accepted a stale HEAD"
+  else
+    pass "host snapshot guard rejects stale state before later fixtures can mask it"
+  fi
+}
+
 assert_the_public_only_run_prints_no_build_banner
 assert_the_public_only_run_really_builds_nothing
 assert_the_public_only_run_still_loads_the_public_images
@@ -319,5 +350,11 @@ assert_a_real_build_run_really_builds
 assert_a_real_build_run_still_reports_a_build_summary
 assert_the_phase_list_is_not_empty
 assert_every_defined_case_is_invoked
+assert_the_host_snapshot_guard_rejects_a_stale_snapshot
+
+if ! host_checkout_matches_snapshot \
+  "$HOST_CHECKOUT_HEAD" "$HOST_CHECKOUT_BRANCH" "$HOST_CHECKOUT_STATUS_HASH"; then
+  fail "fixture mutated the host checkout"
+fi
 
 exit $FAIL

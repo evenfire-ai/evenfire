@@ -6,6 +6,7 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
+import { runtimeHostEdgeContext } from '../routeActionBindingV2.js'
 import { resolveHostConnectionForUser } from '../services/mcpProxyService.js'
 
 const activeStreamCountsByUser = new Map<string, number>()
@@ -85,9 +86,12 @@ export function createRpcHostActivityStreamRouter(): Router {
           return
         }
 
-        const host = await resolveHostConnectionForUser(auth.sub, hostRef, rpcAccessToken, {
-          teamId: auth.teamId,
-        })
+        const host = await resolveHostConnectionForUser(
+          auth.sub,
+          hostRef,
+          rpcAccessToken,
+          runtimeHostEdgeContext(req)
+        )
         if (!host) {
           res.status(403).json({ error: 'Forbidden: user cannot access this host' })
           return

@@ -8,6 +8,7 @@ import {
   type OperationalSourceFamily,
   canonicalEnvironmentId,
 } from './operationalAccessProjection.js'
+import { type Pr2ReadinessHop, assemblePr2Readiness } from './pr2ReadinessEvidence.js'
 import {
   CATALOG_FAMILIES,
   type CatalogFamily,
@@ -38,6 +39,7 @@ type RuntimePolicyOptions = Readonly<{
   now?: Date
   catalogActivationRecord?: string
   catalogReadiness?: boolean
+  servingSourceRevision?: string
 }>
 
 type CatalogComparisonEvidence = Readonly<{
@@ -80,6 +82,10 @@ const REQUIRED_SOURCES: Readonly<
 
 function needsOperationalReadiness(intent: ConfiguredUserAccessIntent): boolean {
   return intent.catalogMode !== 'off'
+}
+
+function needsPr2Readiness(intent: ConfiguredUserAccessIntent): boolean {
+  return intent.actionContextV2 || intent.rpcDelegationV2
 }
 
 function unavailableReadiness(): DeploymentReadiness {
@@ -225,7 +231,8 @@ function runtimeReadiness(
   now: Date,
   maxAgeMs: number,
   intent: ConfiguredUserAccessIntent,
-  activationValue: string
+  activationValue: string,
+  pr2RuntimeHops: Readonly<Record<Pr2ReadinessHop, 'ready' | 'unavailable'>>
 ): DeploymentReadiness {
   const currentSources = new Set<OperationalSourceFamily>()
   for (const state of states) {
@@ -242,6 +249,7 @@ function runtimeReadiness(
   const parityAccepted = catalogParityAccepted(intent, activationValue)
   return Object.freeze({
     ...reconstructionReadiness,
+    pr2RuntimeHops,
     revision: revisionOfValues([
       reconstructionReadiness.revision,
       maxAgeMs,
@@ -268,23 +276,54 @@ export async function resolveEffectiveUserAccessPolicy(
   const intent = options.catalogReadiness
     ? configuredIntent
     : Object.freeze({ ...configuredIntent, catalogMode: 'off' as const })
-  if (!needsOperationalReadiness(intent)) {
-    return compileUserAccessPolicy(intent, reconstructionReadiness)
-  }
-
-  const indexerEnabled = options.indexerEnabled ?? config.operationalAccessIndexerEnabled
-  const maxAgeMs =
-    options.readinessMaxAgeMs === undefined
-      ? config.operationalAccessReadinessMaxAgeMs
-      : options.readinessMaxAgeMs
-  if (!indexerEnabled || !Number.isSafeInteger(maxAgeMs) || Number(maxAgeMs) < 1) {
-    return compileUserAccessPolicy(intent, unavailableReadiness())
-  }
-  const validatedMaxAgeMs = Number(maxAgeMs)
-
   const ownedBudget = options.budget ? null : AccessExecutionBudget.create('action')
   const budget = options.budget ?? ownedBudget!
   try {
+    const servingSourceRevision =
+      options.servingSourceRevision ?? process.env.EVENFIRE_SOURCE_REVISION?.trim() ?? ''
+    const pr2RuntimeHops = needsPr2Readiness(intent)
+      ? options.db
+        ? await assemblePr2Readiness(
+            options.db,
+            canonicalEnvironmentId(),
+            options.now,
+            servingSourceRevision
+          )
+        : await withAccessDatabaseTransaction(
+            budget,
+            db =>
+              assemblePr2Readiness(
+                db,
+                canonicalEnvironmentId(),
+                options.now,
+                servingSourceRevision
+              ),
+            { mode: 'read_only' }
+          )
+      : reconstructionReadiness.pr2RuntimeHops
+    if (!needsOperationalReadiness(intent)) {
+      return compileUserAccessPolicy(
+        intent,
+        Object.freeze({
+          ...reconstructionReadiness,
+          revision: revisionOfValues([reconstructionReadiness.revision, pr2RuntimeHops]),
+          pr2RuntimeHops,
+        })
+      )
+    }
+
+    const indexerEnabled = options.indexerEnabled ?? config.operationalAccessIndexerEnabled
+    const maxAgeMs =
+      options.readinessMaxAgeMs === undefined
+        ? config.operationalAccessReadinessMaxAgeMs
+        : options.readinessMaxAgeMs
+    if (!indexerEnabled || !Number.isSafeInteger(maxAgeMs) || Number(maxAgeMs) < 1) {
+      return compileUserAccessPolicy(
+        intent,
+        Object.freeze({ ...unavailableReadiness(), pr2RuntimeHops })
+      )
+    }
+    const validatedMaxAgeMs = Number(maxAgeMs)
     const query = (db: Pick<DbClient, 'query'>) =>
       runAccessDatabaseQuery(
         db,
@@ -319,11 +358,15 @@ export async function resolveEffectiveUserAccessPolicy(
         options.now ?? new Date(),
         validatedMaxAgeMs,
         intent,
-        options.catalogActivationRecord ?? config.userAccessCatalogActivationRecord
+        options.catalogActivationRecord ?? config.userAccessCatalogActivationRecord,
+        pr2RuntimeHops
       )
     )
   } catch (error) {
     if (error instanceof UserAccessPolicyConfigurationError) throw error
+    if (!needsOperationalReadiness(intent)) {
+      return compileUserAccessPolicy(intent, reconstructionReadiness)
+    }
     return compileUserAccessPolicy(intent, unavailableReadiness())
   } finally {
     ownedBudget?.close()

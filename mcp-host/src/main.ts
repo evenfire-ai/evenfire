@@ -114,10 +114,16 @@ import { sanitizeError } from './progress/intentExtraction'
 import { progressReporterRegistry } from './progress/sseProgressReporter'
 import { MessageQueue, Task } from './queue'
 import { ResultStore } from './resultStore'
+import {
+  checkpointMcpHostActionAuthority,
+  runtimeActionCheckpointDecision,
+} from './runtime/actionAuthorityCheckpointClient'
 import { markFileAttachmentsDelivered } from './runtime/fileAttachmentDelivery'
+import { startPr2ReadinessReporter } from './runtime/pr2ReadinessReporter'
 import { isUndeliveredResult, markResultDelivered } from './runtime/resultDelivery'
 import { dispatchMcpHostRuntime } from './runtimeDispatch'
 import {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
@@ -238,6 +244,7 @@ let statelessHeartbeat: StatelessHeartbeat | null = null
 // consumer (UsageReporter, WorkflowService) so refresh-on-401 propagates.
 // Null when env is absent (dev mode without HCC/WRC).
 let runtimeAuth: McpHostRuntimeAuth | null = null
+let stopPr2ReadinessReporter: (() => void) | null = null
 setCodexPlatformJwtReader(() =>
   (runtimeAuth?.accessToken || config.mcpHostRuntimeAccessToken || '').trim()
 )
@@ -318,6 +325,7 @@ function publishActivity(input: {
     title: input.title,
     severity: input.severity || 'info',
     meta: input.meta,
+    authorityV2: input.task?.sourceMessage?.authorityV2,
   })
 }
 
@@ -1678,6 +1686,12 @@ async function initializeAgent(): Promise<void> {
   // print the value gets it redacted before it leaves mcp-host.
   agent.setDynamicEnvProvider(() => agentToolEnvProvider(configStore))
   agent.setSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
+  agent.setActionAuthorityCheckpoint(async binding => {
+    const auth = runtimeAuth
+    if (!auth) return 'unavailable'
+    const result = await checkpointMcpHostActionAuthority(binding, auth)
+    return runtimeActionCheckpointDecision(result)
+  })
 
   // Phase 7–8: Create WorkspaceService when memory is enabled
   const memoryCfg = currentHost?.spec.memory || config.memory
@@ -2529,13 +2543,14 @@ function computeDegradedReason(): StatusResponse['degraded'] {
 
 async function getActivitySnapshot(
   limit: number,
-  sinceEventId?: string
+  sinceEventId?: string,
+  visibility?: ActivitySnapshotVisibility
 ): Promise<HostActivitySnapshotResponse> {
   const hostRef = resolveHostRef()
   if (!activityHub) {
     return { hostRef, version: '1.0', items: [], nextCursor: null }
   }
-  return activityHub.snapshot(hostRef, limit, sinceEventId)
+  return activityHub.snapshot(hostRef, limit, sinceEventId, visibility)
 }
 
 function subscribeActivity(onEvent: (event: HostActivityEvent) => void): {
@@ -2931,6 +2946,7 @@ async function shutdown(signal: string): Promise<void> {
 
   // Stop components in order
   stopRuntimeAuthProactiveRefresh()
+  stopPr2ReadinessReporter?.()
   hostWatcher?.stop()
   llmHookWatcher?.stop()
   configStore?.stop()
@@ -3482,6 +3498,7 @@ async function main(): Promise<void> {
       }
     },
   })
+  if (runtimeAuth) stopPr2ReadinessReporter = startPr2ReadinessReporter(runtimeAuth)
 }
 
 // Run main only when this module is the executable entry point. Keeping imports

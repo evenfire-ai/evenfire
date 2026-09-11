@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken'
 import { randomUUID } from 'node:crypto'
+import type { AuthorityBindingV2 } from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
 
 export const WFC_BROWSING_READ_SCOPE = 'files:read'
@@ -27,6 +28,13 @@ export interface WfcBrowsingClaims extends jwt.JwtPayload {
   sharedFileSystemNamespace: string
   scopes: WfcBrowsingScope[]
   jti: string
+  actionAuthority?: WfcActionAuthorityV2
+}
+
+export interface WfcActionAuthorityV2 {
+  binding: AuthorityBindingV2
+  sourceIssuedAt: number
+  sourceExpiresAt: number
 }
 
 export function signWfcBrowsingToken(input: {
@@ -34,6 +42,7 @@ export function signWfcBrowsingToken(input: {
   sharedFileSystem: string
   sharedFileSystemNamespace: string
   scopes?: readonly WfcBrowsingScope[]
+  actionAuthority?: WfcActionAuthorityV2
 }): { token: string; expiresInSeconds: number } {
   const claims: Omit<WfcBrowsingClaims, 'iat' | 'exp'> = {
     sub: input.subject,
@@ -41,6 +50,15 @@ export function signWfcBrowsingToken(input: {
     sharedFileSystemNamespace: input.sharedFileSystemNamespace,
     scopes: [...(input.scopes ?? WFC_BROWSING_SCOPES)],
     jti: randomUUID(),
+    ...(input.actionAuthority
+      ? {
+          actionAuthority: {
+            binding: input.actionAuthority.binding,
+            sourceIssuedAt: input.actionAuthority.sourceIssuedAt,
+            sourceExpiresAt: input.actionAuthority.sourceExpiresAt,
+          },
+        }
+      : {}),
   }
   const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
     algorithm: 'RS256',

@@ -14,7 +14,11 @@ import type { RuntimeLifecycleGate } from './lifecycle/statelessHeartbeat'
 import './mcp/statusHeartbeatMetrics'
 import './observability/processMetrics'
 import { requireScope } from './server/authMiddleware'
-import { getRuntimeCallerContext, runtimeEdgeGuard } from './server/edgeRuntimeAuth'
+import {
+  getRuntimeCallerContext,
+  runtimeActionTargetMatches,
+  runtimeEdgeGuard,
+} from './server/edgeRuntimeAuth'
 import { getAllowedOrigins, json } from './server/httpUtils'
 import {
   handleActivityRoute,
@@ -83,6 +87,7 @@ import { createWorkflowRouter } from './workflow/workflowRouter'
 import { WorkflowService } from './workflow/workflowService'
 
 export type {
+  ActivitySnapshotVisibility,
   HostActivityEvent,
   HostActivitySnapshotResponse,
   IncomingMessage,
@@ -218,15 +223,23 @@ export class RPCServer {
       res.send(await register.metrics())
     })
 
-    this.app.get('/v1/runtime/status', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
-      await handleStatusRoute(req, res, this.routeDeps())
-    })
-    this.app.get('/v1/runtime/activity', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
-      await handleActivityRoute(req, res, this.routeDeps())
-    })
+    this.app.get(
+      '/v1/runtime/status',
+      runtimeEdgeGuard(['rpc-proxy'], ['host.status.read']),
+      async (req, res) => {
+        await handleStatusRoute(req, res, this.routeDeps())
+      }
+    )
+    this.app.get(
+      '/v1/runtime/activity',
+      runtimeEdgeGuard(['rpc-proxy'], ['host.activity.read', 'host.activity.read_all']),
+      async (req, res) => {
+        await handleActivityRoute(req, res, this.routeDeps())
+      }
+    )
     this.app.get(
       '/v1/runtime/activity/stream',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(['rpc-proxy'], ['host.activity.read', 'host.activity.read_all']),
       async (req, res) => {
         await handleActivityStreamRoute(req, res, this.routeDeps())
       }
@@ -234,7 +247,10 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/messages',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      runtimeEdgeGuard(
+        ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
+        ['chat.message.invoke']
+      ),
       async (req, res) => {
         // Stage 3 (stateless-agents) — reversible DRAINING fence. While the
         // host is draining/drained, new intake is rejected with the exact
@@ -257,7 +273,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/approve',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader']),
+      runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], ['task.manage']),
       async (req, res) => {
         await handleApprovalRoute(req, res, true, this.routeDeps())
       }
@@ -265,7 +281,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/approvals/deny',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader']),
+      runtimeEdgeGuard(['rpc-proxy', 'channel-reader'], ['task.manage']),
       async (req, res) => {
         await handleApprovalRoute(req, res, false, this.routeDeps())
       }
@@ -346,16 +362,20 @@ export class RPCServer {
       }
     )
 
-    this.app.get('/v1/runtime/sessions', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
-      await handleSessionsListRoute(req, res, this.routeDeps())
-    })
+    this.app.get(
+      '/v1/runtime/sessions',
+      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
+      async (req, res) => {
+        await handleSessionsListRoute(req, res, this.routeDeps())
+      }
+    )
 
     // T3.1 — registered BEFORE `/sessions/:agent/:chatId/messages` so that
     // `search` is not eaten by the parameterized route (`agent=search` would
     // otherwise match and 404 at the second segment lookup).
     this.app.get(
       '/v1/runtime/sessions/search',
-      requireScope('host:session:read'),
+      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
       async (req, res) => {
         await handleSessionSearchRoute(req, res, this.routeDeps())
       }
@@ -363,7 +383,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/messages',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
       async (req, res) => {
         await handleSessionMessagesRoute(req, res, this.routeDeps())
       }
@@ -371,7 +391,7 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/sessions/:agent/:chatId/context-breakdown',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(['rpc-proxy'], ['session.read']),
       async (req, res) => {
         await handleContextBreakdownRoute(req, res, this.routeDeps())
       }
@@ -379,7 +399,10 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/tasks/:taskId/result',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      runtimeEdgeGuard(
+        ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
+        ['task.read']
+      ),
       async (req, res) => {
         await handleTaskResultRoute(req, res, req.params.taskId as string, this.routeDeps())
       }
@@ -387,7 +410,7 @@ export class RPCServer {
 
     this.app.post(
       '/v1/runtime/tasks/:taskId/cancel',
-      runtimeEdgeGuard(['rpc-proxy']),
+      runtimeEdgeGuard(['rpc-proxy'], ['task.manage']),
       async (req, res) => {
         const taskId = String(req.params.taskId || '').trim()
         if (!taskId) {
@@ -401,6 +424,16 @@ export class RPCServer {
         }
 
         const caller = getRuntimeCallerContext(req)
+        if (
+          !runtimeActionTargetMatches(req, {
+            hostRef: caller?.actionContextV2?.target?.hostRef,
+            taskId,
+            action: 'cancel',
+          })
+        ) {
+          res.status(403).json({ error: 'Runtime edge action mismatch' })
+          return
+        }
         const requesterUserId = caller?.caller === 'rpc-proxy' ? caller.userId : undefined
 
         const result = await this.cancelHandler(taskId, requesterUserId)
@@ -431,12 +464,20 @@ export class RPCServer {
     // write (set-model). Both behind the edge guard: rpc-proxy has already
     // enforced host:session:read / host:model:write scopes, and it injects the
     // verified edge user + hostRef the handlers scope the session lookup to.
-    this.app.get('/v1/runtime/models', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
-      await handleModelsListRoute(req, res, this.routeDeps())
-    })
-    this.app.post('/v1/runtime/model', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
-      await handleSetModelRoute(req, res, this.routeDeps())
-    })
+    this.app.get(
+      '/v1/runtime/models',
+      runtimeEdgeGuard(['rpc-proxy'], ['model.read']),
+      async (req, res) => {
+        await handleModelsListRoute(req, res, this.routeDeps())
+      }
+    )
+    this.app.post(
+      '/v1/runtime/model',
+      runtimeEdgeGuard(['rpc-proxy'], ['model.select']),
+      async (req, res) => {
+        await handleSetModelRoute(req, res, this.routeDeps())
+      }
+    )
 
     this.app.get('/v1/runtime/cron/results', runtimeEdgeGuard(['channel-reader']), (req, res) => {
       handleCronResultsRoute(req, res, this.routeDeps())
@@ -452,7 +493,10 @@ export class RPCServer {
 
     this.app.get(
       '/v1/runtime/tasks/:taskId/progress/stream',
-      runtimeEdgeGuard(['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader']),
+      runtimeEdgeGuard(
+        ['rpc-proxy', 'channel-reader', 'workflow-approval-request-reader'],
+        ['task.read']
+      ),
       async (req, res) => {
         await handleProgressStreamRoute(req, res, req.params.taskId as string, this.routeDeps())
       }

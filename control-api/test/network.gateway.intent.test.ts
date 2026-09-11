@@ -640,8 +640,14 @@ describe('network/gateway intent (manifest-level)', () => {
       workflowGatewayIngress,
       'kubernetes.io/metadata.name: mcp-host'
     )
+    const wfcCheckpointPeer = fromPeerBlock(
+      controlApiIngress,
+      'kubernetes.io/metadata.name: mcp-host'
+    )
 
-    expect(controlApiIngress).not.toContain('kubernetes.io/metadata.name: mcp-host')
+    expect(wfcCheckpointPeer).toContain('app: workspace-files-controller')
+    expect(wfcCheckpointPeer).not.toContain('app: mcp-host')
+    expect(wfcCheckpointPeer).not.toContain('clerum.io/managed-by: host-context-controller')
     expect(controlApiIngress).not.toContain('app: channel-reader')
     expect(sharedHostGatewayPeer).toContain('namespaceSelector:')
     expect(sharedHostGatewayPeer).toContain('podSelector:')

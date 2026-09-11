@@ -14,6 +14,7 @@ WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -30,6 +31,11 @@ RUN npm run build
 
 # Production image — full Debian (git, python3, gcc, make, curl, perl included)
 FROM node:24.16.0@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 
 WORKDIR /app
 
@@ -47,6 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --only=production

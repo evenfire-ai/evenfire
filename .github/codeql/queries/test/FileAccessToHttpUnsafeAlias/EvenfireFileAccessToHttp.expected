@@ -1,0 +1,14 @@
+edges
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:14:45:14:63 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:33:14:63 | "Bearer ... dential | mcp-host/src/runtime/pr2ReadinessReporter.ts:14:16:14:65 | { autho ... ntial } | provenance |  |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:45:14:63 | persistedCredential | mcp-host/src/runtime/pr2ReadinessReporter.ts:14:33:14:63 | "Bearer ... dential | provenance |  |
+nodes
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:7:3:25 | persistedCredential | semmle.label | persistedCredential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | semmle.label | fs.read ... f-8",\\n) |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:16:14:65 | { autho ... ntial } | semmle.label | { autho ... ntial } |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:33:14:63 | "Bearer ... dential | semmle.label | "Bearer ... dential |
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:45:14:63 | persistedCredential | semmle.label | persistedCredential |
+subpaths
+#select
+| mcp-host/src/runtime/pr2ReadinessReporter.ts:14:16:14:65 | { autho ... ntial } | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | mcp-host/src/runtime/pr2ReadinessReporter.ts:14:16:14:65 | { autho ... ntial } | Outbound network request depends on $@. | mcp-host/src/runtime/pr2ReadinessReporter.ts:3:29:6:1 | fs.read ... f-8",\\n) | file data |

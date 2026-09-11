@@ -43,6 +43,7 @@ import { McpManager } from '../mcp'
 import { ensureReporter } from '../progress/sseProgressReporter'
 import { MessageQueue, Task } from '../queue'
 import type { TaskError } from '../queue/types'
+import type { RuntimeActionCheckpoint } from '../runtime/actionAuthority'
 import { SessionProcessor, serializeSessionKey } from '../session'
 import { parseSessionKey } from '../session/types'
 import { ApprovalPromptHistoryClient } from '../usage/approvalPromptHistoryClient.js'
@@ -224,6 +225,7 @@ export class AgentStateMachine extends EventEmitter {
   // feature flag `CLERUM_SESSION_SEARCH_ENABLED` is false; populated from
   // main.ts and forwarded into each TaskExecutor.
   private sessionSearchService: SessionSearchService | undefined
+  private actionAuthorityCheckpoint: RuntimeActionCheckpoint | undefined
 
   // ConfigStore snapshot getter, merged into shell-tool spawn env
   private dynamicEnvProvider: (() => Record<string, string>) | undefined
@@ -418,6 +420,11 @@ export class AgentStateMachine extends EventEmitter {
   setSessionSearchService(service: SessionSearchService | undefined): void {
     this.sessionSearchService = service
     console.log(`[Agent] Session search service ${service ? 'set' : 'cleared'}`)
+  }
+
+  setActionAuthorityCheckpoint(checkpoint: RuntimeActionCheckpoint): void {
+    this.actionAuthorityCheckpoint = checkpoint
+    console.log('[Agent] Runtime action authority checkpoint set')
   }
 
   /**
@@ -1405,6 +1412,7 @@ export class AgentStateMachine extends EventEmitter {
       spilloverStorage: this.spilloverStorage,
       promptCache: this.promptCache,
       sessionSearchService: this.sessionSearchService,
+      actionAuthorityCheckpoint: this.actionAuthorityCheckpoint,
       // R5 — resolved per task (reads live policy/engine from main.ts). Absent →
       // no failover.
       failover: this.failoverSupportProvider?.() ?? undefined,
