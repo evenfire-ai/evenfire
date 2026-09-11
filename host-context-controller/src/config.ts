@@ -2,7 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
-import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { parseClusterCidrList, parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
@@ -618,10 +618,14 @@ export const config: Config = {
   // openai-compatible egress broker namespace + port (local-LLM provider).
   llmEgressNamespace: getEnv('CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE', 'llm-egress')!,
   openaiEgressBrokerPort: getEnvInt('CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT', 3000),
-  clusterInternalEgressCidrs: (getEnv('CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS') ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean),
+  // Validated at module load — a malformed/IPv6/non-canonical entry crashes
+  // startup rather than counting toward the fail-closed guard while the LAN
+  // classifier silently ignores it (cidrOverlaps treats an unparseable CIDR as
+  // "no overlap").
+  clusterInternalEgressCidrs: parseClusterCidrList(
+    'CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS',
+    getEnv('CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS')
+  ),
   oaiEgressRequireClusterCidrs: getEnvBool('CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS', true),
 
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)

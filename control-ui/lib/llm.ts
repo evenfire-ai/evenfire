@@ -98,6 +98,8 @@ const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
   link_local: 'baseURL host must not be a link-local address (169.254.0.0/16).',
   cgnat: 'baseURL host must not be a carrier-grade NAT address (100.64.0.0/10).',
   cluster_internal: 'baseURL host must not target a cluster-internal address.',
+  cluster_cidr_invalid:
+    'baseURL could not be validated because a cluster-internal CIDR is malformed; contact the operator.',
   reserved: 'baseURL host must not be a reserved IPv4 address.',
 }
 

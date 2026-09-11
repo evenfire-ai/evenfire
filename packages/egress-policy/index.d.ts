@@ -14,6 +14,7 @@ export type LanBaseUrlReason =
   | 'link_local'
   | 'cgnat'
   | 'cluster_internal'
+  | 'cluster_cidr_invalid'
   | 'reserved'
 export type LanBaseUrlDecision = { ok: true; ip: string } | { ok: false; reason: LanBaseUrlReason }
 export interface ClassifyLanOptions {

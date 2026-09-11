@@ -110,8 +110,19 @@ function classifyLanBaseURL(baseURL, options) {
   if (ipInCidr(ip, CGNAT_CIDR)) return { ok: false, reason: 'cgnat' }
 
   const clusterInternal = options?.clusterInternalCidrs
-  if (Array.isArray(clusterInternal) && clusterInternal.some(cidr => ipInCidr(ip, cidr))) {
-    return { ok: false, reason: 'cluster_internal' }
+  if (Array.isArray(clusterInternal)) {
+    // Fail-closed: a malformed cluster-internal CIDR cannot be checked for
+    // overlap (ipInCidr/cidrOverlaps treat an unparseable CIDR as "no overlap"),
+    // so an invalid entry would silently stop denying cluster space. Reject the
+    // baseURL outright rather than let the gap through. HCC parses this list at
+    // startup (parseClusterCidrList throws), so this is the belt for any other
+    // caller that passes the list unvalidated.
+    if (clusterInternal.some(cidr => parseCidr(cidr) === null)) {
+      return { ok: false, reason: 'cluster_cidr_invalid' }
+    }
+    if (clusterInternal.some(cidr => ipInCidr(ip, cidr))) {
+      return { ok: false, reason: 'cluster_internal' }
+    }
   }
 
   if (!PRIVATE_LAN_CIDRS.some(cidr => ipInCidr(ip, cidr))) {

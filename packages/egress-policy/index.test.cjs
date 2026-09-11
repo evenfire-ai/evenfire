@@ -103,6 +103,15 @@ test('classifyLanBaseURL: clusterInternalCidrs shadows a LAN IP when provided', 
   )
 })
 
+test('classifyLanBaseURL: a malformed clusterInternalCidrs entry fails closed (cluster_cidr_invalid)', () => {
+  // A CIDR missing its prefix cannot be checked for overlap; without the guard
+  // this baseURL would slip through as a plain RFC1918 address (ok:true).
+  assert.deepEqual(
+    policy.classifyLanBaseURL('http://10.96.0.1/', { clusterInternalCidrs: ['10.96.0.0'] }),
+    { ok: false, reason: 'cluster_cidr_invalid' }
+  )
+})
+
 test('brokerNameFor: deterministic, DNS-safe, per-(host,slot)', () => {
   const name = policy.brokerNameFor('h1', 'primary')
   // Stable across calls (deterministic hash).

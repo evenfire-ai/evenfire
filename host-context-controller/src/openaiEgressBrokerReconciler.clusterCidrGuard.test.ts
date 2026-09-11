@@ -7,9 +7,11 @@
 // floor, and expose an explicit opt-out.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
+import { OAI_EGRESS_BROKERS_CONDITION_TYPE } from '@clerum/egress-policy'
 import {
   type MockAppsApi,
   type MockCoreApi,
+  type MockCustomApi,
   type MockNetworkingApi,
   asAppsApi,
   asCoreApi,
@@ -25,7 +27,7 @@ import {
   OpenAiEgressBrokerReconciler,
   resolveClusterInternalCidrs,
 } from './openaiEgressBrokerReconciler'
-import { HostCRD, HostSpec } from './types'
+import { HostCRD, HostCondition, HostSpec } from './types'
 
 vi.mock('./config', () => ({
   config: {
@@ -55,6 +57,7 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
   let appsApi: MockAppsApi
   let coreApi: MockCoreApi
   let networkingApi: MockNetworkingApi
+  let customApi: MockCustomApi
   let hosts: Map<string, HostCRD>
   let reconciler: OpenAiEgressBrokerReconciler
 
@@ -63,6 +66,15 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     appsApi = createMockAppsApi()
     coreApi = createMockCoreApi()
     networkingApi = createMockNetworkingApi()
+    customApi = createMockCustomApi()
+    // Fresh Host reads return no conditions (so a first status write happens).
+    customApi.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string } = {}) =>
+      Promise.resolve({
+        metadata: { name: name ?? 'h', namespace: 'mcp-host', uid: 'u', resourceVersion: '42' },
+        spec: { host: name ?? 'h', contextRef: 'ctx', secretRef: 'host-secret' },
+        status: {},
+      })
+    )
     hosts = new Map()
     // Reset the mocked config to the fail-closed default with no CIDRs.
     config.k8sApiCidrs = []
@@ -73,7 +85,7 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       networkingApi: asNetworkingApi(networkingApi),
-      customApi: asCustomApi(createMockCustomApi()),
+      customApi: asCustomApi(customApi),
       hostInventoryAuthoritative: () => true,
     })
   })
@@ -87,6 +99,20 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
   }
   function npCreated(): boolean {
     return networkingApi.createNamespacedNetworkPolicy.mock.calls.length > 0
+  }
+  /** The OpenAiEgressBrokersReady condition from the last status patch, if any. */
+  function brokersCondition(): HostCondition | undefined {
+    const calls = customApi.patchNamespacedCustomObjectStatus.mock.calls
+    if (calls.length === 0) return undefined
+    const body = (calls[calls.length - 1][0] as { body: Array<{ path: string; value: unknown }> })
+      .body
+    const op = body.find(o => o.path === '/status/conditions' || o.path === '/status')
+    if (!op) return undefined
+    const conditions =
+      op.path === '/status'
+        ? (op.value as { conditions?: HostCondition[] }).conditions
+        : (op.value as HostCondition[])
+    return conditions?.find(c => c.type === OAI_EGRESS_BROKERS_CONDITION_TYPE)
   }
 
   it('G1: cluster-internal baseURL with the guard unconfigured provisions NOTHING (fail-closed)', async () => {
@@ -150,6 +176,24 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     hosts.set(lan.name, lan)
     await reconciler.reconcileForHost(lan)
     expect(provisioned()).toBe(true)
+  })
+
+  it('G8: a malformed configured CIDR fails closed — no provision, condition ClusterCidrInvalid (R4-M7)', async () => {
+    // Simulate a caller that set the deny-set directly, bypassing the startup
+    // parser (which would have thrown). The classifier cannot check overlap
+    // against a prefix-less CIDR, so the baseURL must be refused fail-closed
+    // rather than slip through as a plain RFC1918 address.
+    config.clusterInternalEgressCidrs = ['10.96.0.0']
+    const host = makeHost('g8', 'http://10.96.0.1/v1')
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+    expect(provisioned()).toBe(false)
+    expect(npCreated()).toBe(false)
+    expect(brokersCondition()).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'ClusterCidrInvalid',
+    })
   })
 
   describe('resolveClusterInternalCidrs (pure)', () => {
