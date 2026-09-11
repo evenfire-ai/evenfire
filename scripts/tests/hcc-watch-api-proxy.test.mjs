@@ -33,6 +33,65 @@ let front
 let upstreamTls
 let publicConfig
 
+test(
+  'quiet upstream WATCH headers reach the client before its first body event',
+  { timeout: 5000 },
+  async () => {
+    const controlDir = mkdtempSync(join(tmpdir(), 'hcc-quiet-watch-'))
+    let upstreamResponse
+    const upstream = https.createServer(upstreamTls, (_request, response) => {
+      upstreamResponse = response
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.flushHeaders()
+    })
+    let proxy
+    let client
+    try {
+      await new Promise(resolveListen => upstream.listen(0, '127.0.0.1', resolveListen))
+      proxy = createProxy({
+        ...front,
+        upstreamCa: upstreamTls.cert,
+        upstreamHost: '127.0.0.1',
+        upstreamPort: upstream.address().port,
+        allowedPaths: [],
+        controlDir,
+        periodMs: 60000,
+        minAgeMs: 60000,
+      })
+      await new Promise(resolveListen => proxy.server.listen(0, '127.0.0.1', resolveListen))
+      const headers = new Promise((resolveHeaders, rejectHeaders) => {
+        client = https.get(
+          {
+            hostname: '127.0.0.1',
+            port: proxy.server.address().port,
+            path: mcpPath,
+            servername: 'proxy-fixture.test-fixture.svc',
+            ca: front.cert,
+            rejectUnauthorized: true,
+          },
+          resolveHeaders
+        )
+        client.once('error', rejectHeaders)
+      })
+      // No upstream body is emitted until this assertion succeeds. A buffered
+      // header block therefore cannot pass by riding along with an initial event.
+      const response = await bounded(headers, 'quiet WATCH headers were not forwarded', 1000)
+      assert.equal(response.statusCode, 200)
+      assert.equal(response.headers['content-type'], 'application/json')
+      const firstEvent = once(response, 'data')
+      upstreamResponse.write('first-watch-event\n')
+      const [bytes] = await bounded(firstEvent, 'first WATCH event was not forwarded')
+      assert.equal(bytes.toString(), 'first-watch-event\n')
+    } finally {
+      client?.destroy()
+      proxy?.close()
+      upstream.closeAllConnections()
+      await new Promise(resolveClose => upstream.close(resolveClose))
+      rmSync(controlDir, { recursive: true, force: true })
+    }
+  }
+)
+
 test('upstream error records discard messages, headers, bodies and unrecognised codes', () => {
   const marker = 'synthetic-sensitive-material-must-not-appear'
   for (const code of ['ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', marker, undefined]) {

@@ -125,6 +125,9 @@ export function createProxy({
         },
         incoming => {
           response.writeHead(incoming.statusCode, incoming.headers)
+          // A quiet watch must establish before its first event, or the
+          // client's LIST-to-WATCH pairing remains blocked until a churn cut.
+          response.flushHeaders()
           if (watch && request.method === 'GET') {
             const observer = bookmarks.open(kind, incoming.headers, incoming.statusCode)
             incoming.on('data', chunk => observer.write(chunk))
