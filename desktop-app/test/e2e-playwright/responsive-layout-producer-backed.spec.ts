@@ -179,20 +179,17 @@ test('Desktop app tray layout is exercised with producer-backed notification and
       expect(Math.round(mobileSearch.width)).toBe(Math.round(mobileHeader.width))
     })
 
-    await test.step('long return label stays accessible via tooltip while title-bar actions never overlap', async () => {
+    await test.step('long return label stays accessible via the native title while title-bar actions never overlap', async () => {
       await resizeDesktop(app!, 1100)
+      // Icon-only now: the full conversation name is no longer a visible text
+      // span (the truncation/ellipsis invariant was retired with the max-width).
+      // The complete label lives in the native `title` attribute and the
+      // accessible button name — the DOM hover flyout was dropped because the
+      // mounted WebContentsView composites above renderer DOM and would occlude
+      // it. Resolving this button by its accessible name and asserting its title
+      // is what proves the full name stays accessible; there is no [role=tooltip].
       const returnButton = page.getByRole('button', { name: `Back to ${LONG_CONVERSATION}` })
       await expect(returnButton).toHaveAttribute('title', `Back to ${LONG_CONVERSATION}`)
-      // Icon-only now: the full conversation name is no longer a visible text
-      // span (the truncation/ellipsis invariant was retired with the max-width),
-      // it lives in the hover-tooltip flyout, which still carries the complete
-      // label for sighted users. Same intent: the full name stays accessible.
-      const returnTooltip = page
-        .locator('.titlebar-leading-action', {
-          has: page.getByRole('button', { name: `Back to ${LONG_CONVERSATION}` }),
-        })
-        .getByRole('tooltip')
-      await expect(returnTooltip).toHaveText(`Back to ${LONG_CONVERSATION}`)
 
       // The app actions moved into the title bar's leading slot — a single row
       // now, not a wrapped header, so the old multi-row "uniqueness" check is
