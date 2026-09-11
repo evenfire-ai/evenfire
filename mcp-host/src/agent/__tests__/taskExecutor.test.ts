@@ -16,6 +16,8 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { LlmPolicy } from '../../llm/failover/types'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { authorityBindingFromTrustedEdge } from '../../runtime/actionAuthority'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
@@ -303,6 +305,76 @@ describe('TaskExecutor', () => {
         code: 'access_path_stale',
         retryable: false,
         provider: 'unknown',
+      })
+    )
+  })
+
+  it('checkpoints again before a fallback provider attempt', async () => {
+    const primaryCall = vi
+      .fn()
+      .mockRejectedValue(new LlmError('rate limited', 'openai', LlmErrorCode.RateLimited, true))
+    const fallbackCall = vi.fn().mockResolvedValue({
+      content: 'must not be returned',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config =>
+      config.reasoning.respondWithTools({ messages: [], available_tools: [] })
+    )
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'claude', model: 'fallback-model' }],
+    }
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: primaryCall,
+        getProviderType: () => 'openai' as const,
+        classifyError: () => ({
+          code: LlmErrorCode.RateLimited,
+          retryable: true,
+          message: 'rate limited',
+        }),
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+      failover: {
+        engine: new FailoverEngine(policy, { metricInc: () => {} }),
+        policy,
+        buildProvider: () =>
+          ({
+            completeSingleTurn: vi.fn(),
+            completeSingleTurnWithTools: fallbackCall,
+            getProviderType: () => 'claude' as const,
+            classifyError: () => ({
+              code: LlmErrorCode.ApiCallFailed,
+              retryable: true,
+              message: 'fallback failed',
+            }),
+          }) as any,
+      },
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(primaryCall).toHaveBeenCalledTimes(1)
+    expect(fallbackCall).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        message: expect.stringContaining('access_path_stale'),
+        retryable: false,
       })
     )
   })
