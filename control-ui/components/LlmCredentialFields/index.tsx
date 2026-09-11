@@ -71,6 +71,12 @@ function seedExistingExtraSlots(existingKeys: string[] | undefined): ExtraSlot[]
 
 function completenessChip(group: LlmCredentialGroup, present: (dataKey: string) => boolean) {
   const { present: filled, total, usable } = getLlmGroupCompleteness(group, present)
+  // A provider with ZERO required slots (openai-compatible: its only slot is
+  // optional) is usable without a key, but "present" would mislead — read it as
+  // "optional" so the chip never claims a credential that isn't there.
+  if (total === 0) {
+    return { symbol: '○', text: 'optional', state: 'optional' } as const
+  }
   // Single-slot providers read as present/absent; multi-slot providers show the
   // filled/required ratio (spec R4.5.5 mockup: "● present / ○ absent", "● 2/2").
   if (total <= 1) {

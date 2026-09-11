@@ -273,9 +273,14 @@ export const BEDROCK_CREDENTIAL_KEYS: string[] = PROVIDER_CREDENTIAL_SLOTS.bedro
 )
 
 // Completeness follows `authMode`, not "are there required slots?". A
-// zero-slot oauth-broker provider is usable without a Kubernetes Secret.
-// Static-credentials providers stay usable only when every required slot is
-// present. `present`/`total` count required slots (always 0 for brokers).
+// zero-slot oauth-broker provider is usable without a Kubernetes Secret, and a
+// static-credentials provider whose only slot is OPTIONAL (openai-compatible,
+// the local LAN provider — self-hosted servers often need no auth) is likewise
+// usable with no key. Otherwise a static-credentials provider is usable only
+// when every required slot is present. "every required slot present" is
+// trivially true with zero required slots, so the condition below covers both.
+// `present`/`total` count required slots (0 for brokers and for the
+// optional-only local provider).
 export function getLlmGroupCompleteness(
   group: LlmCredentialGroup,
   isPresent: (dataKey: string) => boolean
@@ -288,7 +293,7 @@ export function getLlmGroupCompleteness(
   return {
     present,
     total: required.length,
-    usable: required.length > 0 && present === required.length,
+    usable: present === required.length,
   }
 }
 
