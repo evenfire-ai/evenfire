@@ -95,7 +95,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
   })
 
   async function authority(input?: {
-    operationId?: 'workflow.trigger' | 'workflow.approval.decide'
+    operationId?: 'workflow.trigger' | 'workflow.read' | 'workflow.approval.decide'
     resourceType?: 'workflow_recipe' | 'workflow_approval'
     resourceLogicalId?: string
     target?: CanonicalActionTarget
@@ -191,6 +191,41 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
       databasePool
     )
     expect(legacy.row.initiating_authority_binding_id).toBeNull()
+  })
+
+  it('persists authorized workflow reads with the closed workflow-recipe vocabulary', async () => {
+    const recipeAuthority = await authority({ operationId: 'workflow.read' })
+    const entityId = `sandbox-recipes/read-${randomUUID()}`
+
+    const id = await persistWorkflowAuthorityBinding(databasePool, {
+      authority: recipeAuthority,
+      kind: 'workflow_read',
+      entityType: 'workflow_recipe',
+      entityId,
+    })
+
+    const persisted = await databasePool.query(
+      `SELECT binding_kind, entity_type, entity_id, operation_id
+         FROM workflow_authority_bindings
+        WHERE id = $1`,
+      [id]
+    )
+    expect(persisted.rows).toEqual([
+      {
+        binding_kind: 'workflow_read',
+        entity_type: 'workflow_recipe',
+        entity_id: entityId,
+        operation_id: 'workflow.read',
+      },
+    ])
+    await expect(
+      persistWorkflowAuthorityBinding(databasePool, {
+        authority: recipeAuthority,
+        kind: 'workflow_read',
+        entityType: 'unregistered_workflow_entity',
+        entityId,
+      })
+    ).rejects.toMatchObject({ code: '23514' })
   })
 
   it('rejects legacy/v2 approval idempotency reuse in both directions', async () => {
