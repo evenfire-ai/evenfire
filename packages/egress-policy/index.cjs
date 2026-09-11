@@ -158,10 +158,12 @@ function fallbackSlotId(index) {
  * cannot collide by string concatenation.
  *
  * `hostName` is the Host's `metadata.name` verbatim (DNS-1123). Neither side
- * canonicalizes it; HCC injects it into CLERUM_HOST_NAME untransformed and
- * mcp-host reads it back the same way. Do not add normalization (case-folding,
- * trimming) here or in callers — a transform on one side only would make the two
- * names diverge for the same Host.
+ * canonicalizes it: HCC injects it into CLERUM_HOST_NAME untransformed and
+ * mcp-host reads it back the same way. Do not add canonicalization (case-folding,
+ * trimming as normalization) here — a transform on one side only would make the
+ * two names diverge for the same Host. (mcp-host's `deriveOpenAiCompatibleBrokerURL`
+ * calls `.trim()` solely as its empty/whitespace fail-closed guard — a no-op on a
+ * DNS-1123 name, not canonicalization; keep it.)
  */
 function brokerNameFor(hostName, slotId) {
   // `crypto` is required lazily (not at module load) so control-ui, which bundles
