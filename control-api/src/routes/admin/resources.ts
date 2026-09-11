@@ -253,8 +253,8 @@ async function rollbackPrunedContextCreate(
  * first pruned `baseURL`, or null. Provider matching reuses
  * `collectOpenAiCompatibleBaseUrlTargets` — the SAME trimmed `openai-compatible`
  * predicate the admission gate uses — so a provider carrying surrounding
- * whitespace (`'openai-compatible '`) that routes as the local provider at
- * runtime cannot slip past this guard, and there is a single definition of "which
+ * whitespace (`'openai-compatible '`) cannot slip a pruned baseURL past this
+ * guard, and there is a single definition of "which
  * spec locations carry a local baseURL" (regla D4).
  *
  * STRICTLY SCOPED to `hosts` + the `baseURL` fields — the only additive fields at

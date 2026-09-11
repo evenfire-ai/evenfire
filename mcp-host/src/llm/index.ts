@@ -103,7 +103,11 @@ export function createLLMProvider(
   modelConfig?: ModelConfig,
   options?: CreateLlmProviderOptions
 ): SingleTurnProvider | null {
-  const provider = modelConfig?.provider || 'openai'
+  // Canonicalize with .trim() like control-api's admission gate and HCC's broker
+  // matcher, so a padded value (e.g. 'openai-compatible ') resolves to the same
+  // provider on every side of the seam instead of falling through to a null
+  // provider here while HCC provisioned a broker for the trimmed form.
+  const provider = (modelConfig?.provider || 'openai').trim()
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {

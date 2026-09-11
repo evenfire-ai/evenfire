@@ -8,6 +8,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { brokerInternalUrl, fallbackSlotId } from '@clerum/egress-policy'
 import { config } from '../../config'
+import type { ModelConfig } from '../../types'
 import { apiKeysFromEnv, createLLMProvider } from '../index'
 import { makeProvider } from '../registry'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider, primarySlot } from '../registryCore'
@@ -241,6 +242,18 @@ describe('openai-compatible — dials the per-Host egress broker (never the LAN 
     // Never the raw LAN endpoint.
     expect(effectiveBaseURL(provider)).not.toContain('10.0.0.5')
     expect(expected).toContain('.svc.cluster.local:')
+  })
+
+  it('canonicalizes a provider carrying surrounding whitespace and still routes to the broker', () => {
+    // Defense-in-depth: a padded 'openai-compatible ' used to fail isLlmProvider
+    // and return null, while HCC (which trims) had already provisioned a broker
+    // for the trimmed form — the two sides disagreed. .trim() aligns them.
+    const provider = createLLMProvider(
+      { 'openai-compatible': { 'openai-compatible-api-key': 'k' } },
+      { provider: 'openai-compatible ' as ModelConfig['provider'], name: 'm', baseURL: LAN_BASEURL }
+    )
+    expect(provider).not.toBeNull()
+    expect(provider?.getProviderType()).toBe('openai-compatible')
   })
 
   it('a fallback uses its OWN broker (distinct slotId → distinct hash)', () => {

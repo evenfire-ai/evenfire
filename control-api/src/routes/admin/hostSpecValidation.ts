@@ -165,8 +165,10 @@ export function collectOpenAiCompatibleBaseUrlTargets(
 ): Array<{ field: string; baseURL: unknown }> {
   const targets: Array<{ field: string; baseURL: unknown }> = []
   // Match the provider after .trim(), exactly as collectHostLlmTargets and the
-  // allowlist gate do: a value like 'openai-compatible ' routes as the local
-  // provider at runtime, so it must not slip past this baseURL gate.
+  // allowlist gate do, so a padded value like 'openai-compatible ' cannot slip a
+  // baseURL past this gate. (The CRD enum rejects the padded literal and mcp-host
+  // fails closed on it — it does NOT route as local — but this layer canonicalizes
+  // the same way the rest of the stack does rather than leaning on those backstops.)
   if (
     isPlainObject(spec.model) &&
     typeof spec.model.provider === 'string' &&

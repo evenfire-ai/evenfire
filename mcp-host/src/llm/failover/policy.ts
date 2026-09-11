@@ -51,12 +51,21 @@ export function parseCooldownAndTriggers(rec: Record<string, unknown>): Cooldown
 function parseFallbackEntry(raw: unknown, rawIndex: number): FallbackEntry | null {
   if (!raw || typeof raw !== 'object') return null
   const rec = raw as Record<string, unknown>
-  if (typeof rec.provider !== 'string' || rec.provider.length === 0) return null
+  if (typeof rec.provider !== 'string' || rec.provider.trim().length === 0) return null
   if (typeof rec.model !== 'string' || rec.model.length === 0) return null
+  // Canonicalize the provider with .trim() at the source, matching control-api's
+  // admission gate and HCC's broker matcher: without it a padded
+  // 'openai-compatible ' would skip the null-slotIndex fail-closed guard in
+  // buildFallbackProvider (which compares the exact string) yet still route,
+  // dialing the PRIMARY broker instead of the fallback's own — a wrong-Service dial.
   // `slotIndex` is the RAW position in `spec.llmPolicy.fallbacks` (before any
   // malformed entries are dropped) so it aligns with HCC's `fallback-<i>` broker
   // hash — see FallbackEntry.slotIndex.
-  const entry: FallbackEntry = { provider: rec.provider, model: rec.model, slotIndex: rawIndex }
+  const entry: FallbackEntry = {
+    provider: rec.provider.trim(),
+    model: rec.model,
+    slotIndex: rawIndex,
+  }
   if (typeof rec.credentialSlot === 'string' && rec.credentialSlot.length > 0) {
     entry.credentialSlot = rec.credentialSlot
   }

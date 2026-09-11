@@ -51,6 +51,33 @@ describe('parseLlmPolicy', () => {
     ])
   })
 
+  it('trims a padded provider at the source so the fallback matches the fail-closed guard', () => {
+    const p = parseLlmPolicy({
+      fallbacks: [
+        {
+          provider: '  openai-compatible ',
+          model: 'llama-3.3-70b',
+          baseURL: 'http://10.0.0.5:8000/v1',
+        },
+      ],
+    })
+    // Canonical provider (not the padded literal), RAW slotIndex preserved. A
+    // padded value here would slip past buildFallbackProvider's null-slotIndex
+    // guard and dial the PRIMARY broker instead of the fallback's own.
+    expect(p?.fallbacks).toEqual([
+      {
+        provider: 'openai-compatible',
+        model: 'llama-3.3-70b',
+        baseURL: 'http://10.0.0.5:8000/v1',
+        slotIndex: 0,
+      },
+    ])
+  })
+
+  it('drops a whitespace-only provider fallback', () => {
+    expect(parseLlmPolicy({ fallbacks: [{ provider: '   ', model: 'm' }] })).toBeNull()
+  })
+
   it('honours an explicit cooldown + triggerOn subset, dropping unknown classes', () => {
     const p = parseLlmPolicy({
       cooldownSeconds: 60,
