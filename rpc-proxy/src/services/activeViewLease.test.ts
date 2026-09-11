@@ -5,6 +5,27 @@ import { startActiveViewLease } from './activeViewLease.js'
 const authorized = {} as AuthorizedActionV2
 
 describe('active derived-view lease', () => {
+  it('re-arms the hard backstop after each allowed checkpoint', async () => {
+    vi.useFakeTimers()
+    try {
+      let now = 0
+      const onDenied = vi.fn()
+      const authorize = vi.fn(async () => authorized)
+      const lease = startActiveViewLease(authorized, { onDenied, authorize, now: () => now })
+
+      now = 10_000
+      await vi.advanceTimersByTimeAsync(10_000)
+      now = 39_999
+      await vi.advanceTimersByTimeAsync(29_999)
+
+      expect(authorize).toHaveBeenCalledTimes(3)
+      expect(onDenied).not.toHaveBeenCalled()
+      lease.close()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('fails closed at the first denied live checkpoint', async () => {
     vi.useFakeTimers()
     try {
