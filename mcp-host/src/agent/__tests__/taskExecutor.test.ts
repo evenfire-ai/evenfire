@@ -319,9 +319,15 @@ describe('TaskExecutor', () => {
       usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
       finish_reason: 'stop',
     })
-    vi.mocked(runToolUseLoop).mockImplementationOnce(async config =>
-      config.reasoning.respondWithTools({ messages: [], available_tools: [] })
-    )
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      const result = await config.reasoning.respondWithTools({ messages: [], available_tools: [] })
+      if (result.type === 'error') return result
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
+    })
     const checkpoint = vi
       .fn()
       .mockResolvedValueOnce('allowed' as const)
