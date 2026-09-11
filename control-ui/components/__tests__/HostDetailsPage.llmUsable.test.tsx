@@ -1,7 +1,7 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { cleanup, render as rtlRender, screen } from '@testing-library/react'
 import HostDetailsPage from '../../app/hosts/[name]/page'
 import * as api from '../../lib/api'
 import { materializeHostResource } from '../../test/fixtures/contextResource'
