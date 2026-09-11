@@ -231,7 +231,7 @@ hcc_pr_a_run() {
   printf 'PR_A_PROTECTED_API_RECOVERY=PASS\n'
   hcc_pr_a_logs > "$NP604_EVIDENCE/pr-a-observations.jsonl"
   # Receipt is a separate finite observation, never an automatic D2-b gate.
-  hcc_pr_a_bookmark_report || printf 'PR_A_BOOKMARK_RECEIPT=NO_DEMOSTRADO (artifact unavailable)\n'
+  hcc_pr_a_bookmark_report || printf 'PR_A_BOOKMARK_RECEIPT=NOT_DEMONSTRATED (artifact unavailable)\n'
 }
 
 hcc_pr_a_bookmark_pod_witness() {
@@ -244,11 +244,11 @@ hcc_pr_a_bookmark_pod_witness() {
 }
 
 hcc_pr_a_bookmark_unknown() {
-  jq -n '{boundary:"verified-upstream-watch-response",window:null,receiptStatus:"NO_DEMOSTRADO",
-    disconnectBenefit:"NO_DEMOSTRADO",reason:"observation-or-identity-unavailable",
+  jq -n '{boundary:"verified-upstream-watch-response",window:null,receiptStatus:"NOT_DEMONSTRATED",
+    disconnectBenefit:"NOT_DEMONSTRATED",reason:"observation-or-identity-unavailable",
     byWatch:{McpServer:{bookmarks:null,coverage:"unknown"},Context:{bookmarks:null,coverage:"unknown"}}}' \
     > "$NP604_EVIDENCE/bookmark-receipt.json"
-  printf 'PR_A_BOOKMARK_RECEIPT=NO_DEMOSTRADO\n'
+  printf 'PR_A_BOOKMARK_RECEIPT=NOT_DEMONSTRATED\n'
 }
 
 hcc_pr_a_bookmark_report() {
@@ -281,8 +281,8 @@ hcc_pr_a_bookmark_report() {
          ($hccAfter.startedAt|epoch)<=.value.firstWatchAtMs then .
       else .value.coverage="unknown" | .value.bookmarks=null | .value.receipt="unknown" |
         .value.reasons += ["identity-unknown"] end) |
-    .receiptStatus=(if any(.byWatch[]; .receipt=="observed") then "OBSERVED_UPSTREAM" else "NO_DEMOSTRADO" end) |
-    .disconnectBenefit="NO_DEMOSTRADO"' > "$NP604_EVIDENCE/bookmark-receipt.json" || {
+    .receiptStatus=(if any(.byWatch[]; .receipt=="observed") then "OBSERVED_UPSTREAM" else "NOT_DEMONSTRATED" end) |
+    .disconnectBenefit="NOT_DEMONSTRATED"' > "$NP604_EVIDENCE/bookmark-receipt.json" || {
       hcc_pr_a_bookmark_unknown; return;
     }
   jq -r '"PR_A_BOOKMARK_RECEIPT="+.receiptStatus+" (callback processing and benefit not demonstrated)"' \

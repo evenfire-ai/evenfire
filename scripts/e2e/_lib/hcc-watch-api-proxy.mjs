@@ -67,6 +67,7 @@ export function createProxy({
   const bookmarks = createBookmarkObservation()
   let pause = null
   let commandId = null
+  let commandContent = null
   const writeRecord = (name, fields) => {
     fs.writeFileSync(`${controlDir}/${name}.next`, JSON.stringify(fields), { mode: 0o600 })
     fs.renameSync(`${controlDir}/${name}.next`, `${controlDir}/${name}.json`)
@@ -160,14 +161,19 @@ export function createProxy({
     } else forward()
   })
   const poll = setInterval(() => {
+    let observedId = null
     try {
       if (!fs.existsSync(`${controlDir}/command.json`)) return
-      const command = validateCommand(
-        JSON.parse(fs.readFileSync(`${controlDir}/command.json`, 'utf8')),
-        allowedPaths
-      )
-      if (command.id === commandId) return
-      commandId = command.id
+      const content = fs.readFileSync(`${controlDir}/command.json`, 'utf8')
+      if (content === commandContent) return
+      // Remember rejected input too: one file publication produces one verdict.
+      commandContent = content
+      const candidate = JSON.parse(content)
+      observedId = typeof candidate?.id === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(candidate.id)
+        ? candidate.id : null
+      if (observedId !== null && observedId === commandId) return
+      if (observedId !== null) commandId = observedId
+      const command = validateCommand(candidate, allowedPaths)
       if (command.action === 'arm') {
         if (pause) throw new Error('pause_already_active')
         pause = {
@@ -201,7 +207,7 @@ export function createProxy({
         acknowledge({ id: command.id, state: 'cut', count })
       }
     } catch {
-      acknowledge({ id: commandId, state: 'rejected' })
+      acknowledge({ id: observedId, state: 'rejected' })
     }
   }, 100)
   const churn = setInterval(() => {

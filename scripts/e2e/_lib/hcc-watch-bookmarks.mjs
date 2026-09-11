@@ -138,7 +138,7 @@ export function createBookmarkObservation({
               reasons: state.watchResponses ? [...state.reasons].sort() : ['no-watch-response'],
               receipt:
                 state.observedBookmarks > 0 ? 'observed' : complete ? 'not-observed' : 'unknown',
-              disconnectBenefit: 'NO_DEMOSTRADO',
+              disconnectBenefit: 'NOT_DEMONSTRATED',
             },
           ]
         })

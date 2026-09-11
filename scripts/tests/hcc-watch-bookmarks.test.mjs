@@ -32,7 +32,7 @@ test('counts only top-level BOOKMARK by watch across arbitrary UTF8/frame splits
   assert.equal(result.byWatch.McpServer.bookmarks, 2)
   assert.equal(result.byWatch.Context.bookmarks, 0)
   assert.equal(result.byWatch.Context.receipt, 'not-observed')
-  assert.equal(result.byWatch.McpServer.disconnectBenefit, 'NO_DEMOSTRADO')
+  assert.equal(result.byWatch.McpServer.disconnectBenefit, 'NOT_DEMONSTRATED')
   assert.equal(result.startedAtMs, 10)
   assert.equal(result.endedAtMs, 20)
 })
@@ -237,10 +237,10 @@ hcc_pr_a_bookmark_report
       const report = JSON.parse(readFileSync(join(directory, 'bookmark-receipt.json')))
       assert.equal(
         report.receiptStatus,
-        image === 'fixture-image' ? 'OBSERVED_UPSTREAM' : 'NO_DEMOSTRADO'
+        image === 'fixture-image' ? 'OBSERVED_UPSTREAM' : 'NOT_DEMONSTRATED'
       )
       assert.equal(report.byWatch.McpServer.bookmarks, image === 'fixture-image' ? 1 : null)
-      assert.equal(report.disconnectBenefit, 'NO_DEMOSTRADO')
+      assert.equal(report.disconnectBenefit, 'NOT_DEMONSTRATED')
     }
     writeFileSync(join(directory, 'observation.json'), 'unavailable')
     const run = spawnSync('/bin/bash', ['-c', script], {
