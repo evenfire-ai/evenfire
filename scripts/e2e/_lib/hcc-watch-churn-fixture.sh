@@ -179,6 +179,8 @@ EOF
   done; } | kctl apply -f - >/dev/null
 
   # McpServers (one stream) — inventory + NetworkPolicies, no heavy pods.
+  # Lifecycle suites supply their own real MCP fixtures and need no filler.
+  if (( n_mcp > 0 )); then
   { for ((i = 1; i <= n_mcp; i++)); do
     ctx="$(printf '%s-ctx-%03d' "$FLEET_PREFIX" $(((i % n_ctx) + 1)))"
     cat <<EOF
@@ -194,6 +196,7 @@ spec:
   transport: {type: streamableHttp, url: "http://127.0.0.1:3000/mcp", port: 3000}
 EOF
   done; } | kctl apply -f - >/dev/null
+  fi
 
   # Hosts (one stream) — these materialize Deployments; keep the count modest.
   { for ((i = 1; i <= n_host; i++)); do
@@ -242,9 +245,13 @@ delete_synthetic_fleet() {
 
 # Non-destructive restore: undo the env overrides and hostAliases redirect.
 restore_hcc_after_churn() {
+  local failed=0
   kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
-    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS- >/dev/null || return 1
+    KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS- >/dev/null || failed=1
   kctl patch deployment/"$HCC_DEPLOY" -n "$HCC_NS" --type=merge \
-    -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}' >/dev/null || return 1
-  [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" ] || return 1
+    -p '{"spec":{"template":{"spec":{"hostAliases":null}}}}' >/dev/null || failed=1
+  local aliases
+  aliases="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" || failed=1
+  [ -z "$aliases" ] || failed=1
+  return "$failed"
 }

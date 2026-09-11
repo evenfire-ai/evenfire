@@ -91,3 +91,39 @@ export async function confirmAuthoritativeMcpServerAbsence({
 
   return inventoryAuthoritative() && !resolveCurrent()
 }
+
+/** The runtime owner is the only source of credential validation. */
+export function shouldFailClosedForSecretFailure(reason: string | undefined): boolean {
+  return (
+    reason === 'SecretNotFound' || reason === 'SecretMissingKey' || reason === 'SecretAccessDenied'
+  )
+}
+
+/**
+ * HCC owns policies for both runtime owners, but its Secret verdict only
+ * controls HCC-managed runtime. WRC permits optional keys HCC cannot judge.
+ * A removed reference makes an old SecretResolved condition irrelevant.
+ * Before the first published verdict, policy intent is optimistic: allows may
+ * exist while the runtime owner validates the Secret before creating runtime
+ * resources. A published failure then revokes those allows through convergence.
+ */
+export function runtimeDesired(server: McpServerCRD): boolean {
+  if (server.spec.enabled === false) return false
+  if (server.spec.managed === false || !server.spec.envSecret) return true
+  const condition = server.status?.conditions?.find(item => item.type === 'SecretResolved')
+  // The runtime owner publishes False with a validation failure reason and
+  // True with SecretFound. Share its reason-based fail-closed predicate: a
+  // contradictory status must not override a known validation failure.
+  return !shouldFailClosedForSecretFailure(condition?.reason)
+}
+
+/** Policy effects also depend on the effective published runtime verdict. */
+export function sameMcpServerPolicyRevision(
+  expected: McpServerCRD,
+  current: McpServerCRD
+): boolean {
+  return (
+    sameMcpServerDesiredRevision(expected, current) &&
+    runtimeDesired(expected) === runtimeDesired(current)
+  )
+}

@@ -25,6 +25,7 @@ import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
   sameMcpServerDesiredRevision,
+  shouldFailClosedForSecretFailure,
 } from './mcpServerSafety'
 import { createsTotal, mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
@@ -85,7 +86,6 @@ type McpServerReconcilerDeps = {
   appsApi?: k8s.AppsV1Api
   coreApi?: k8s.CoreV1Api
   customApi?: k8s.CustomObjectsApi
-  networkingApi?: k8s.NetworkingV1Api
   /**
    * TEST-ONLY escape hatch. When the inventory-authority fence is not wired
    * (setInventoryAuthority / setResolveCurrentServer never called), mutation
@@ -259,7 +259,6 @@ export class McpServerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
   private readonly customApi: k8s.CustomObjectsApi
-  private readonly networkingApi?: k8s.NetworkingV1Api
 
   /**
    * Snapshot the McpServer LIST→WATCH authority owned by McpServerWatcher.
@@ -312,9 +311,6 @@ export class McpServerReconciler {
     this.appsApi = deps?.appsApi ?? kc.makeApiClient(k8s.AppsV1Api)
     this.coreApi = deps?.coreApi ?? kc.makeApiClient(k8s.CoreV1Api)
     this.customApi = deps?.customApi ?? kc.makeApiClient(k8s.CustomObjectsApi)
-    this.networkingApi =
-      deps?.networkingApi ??
-      (typeof kc.makeApiClient === 'function' ? kc.makeApiClient(k8s.NetworkingV1Api) : undefined)
     this.assumeInventoryAuthorityWhenUnconfigured =
       deps?.assumeInventoryAuthorityWhenUnconfigured ?? false
   }
@@ -1722,73 +1718,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private async deleteNetworkPoliciesForServer(
-    name: string,
-    namespace: string,
-    deleteAllowed?: () => Promise<boolean>
-  ): Promise<void> {
-    if (!this.networkingApi) return
-    const failures: unknown[] = []
-    const namespaces = [...new Set([namespace, config.hostNamespace, config.rpcProxyNamespace])]
-    for (const policyNamespace of namespaces) {
-      try {
-        const policies = await this.networkingApi.listNamespacedNetworkPolicy({
-          namespace: policyNamespace,
-        })
-        for (const policy of policies.items ?? []) {
-          if (policy.metadata?.labels?.[MCPSERVER_LABEL] !== name) continue
-          const policyName = policy.metadata.name
-          if (!policyName) continue
-          try {
-            if (deleteAllowed && !(await deleteAllowed())) return
-            await this.networkingApi.deleteNamespacedNetworkPolicy({
-              name: policyName,
-              namespace: policyNamespace,
-            })
-            console.log(
-              `[Reconciler] Deleted NetworkPolicy "${policyName}" in "${policyNamespace}"`
-            )
-          } catch (error: unknown) {
-            if (getErrorCode(error) !== 404) {
-              console.error(
-                `[Reconciler] Failed to delete NetworkPolicy "${policyName}" in "${policyNamespace}":`,
-                error
-              )
-              failures.push(error)
-            }
-          }
-        }
-      } catch (error: unknown) {
-        if (getErrorCode(error) !== 404) {
-          console.error(
-            `[Reconciler] Failed to list NetworkPolicies in "${policyNamespace}" for "${name}":`,
-            error
-          )
-          failures.push(error)
-        }
-      }
-    }
-
-    throwCleanupFailures(failures, `Failed to delete NetworkPolicies for McpServer "${name}"`)
-  }
-
   private async deleteRuntimeResources(
     name: string,
     namespace: string,
     deleteAllowed?: () => Promise<boolean>
   ): Promise<void> {
-    const failures: unknown[] = []
-    try {
-      await this.deleteResources(name, namespace, deleteAllowed)
-    } catch (error) {
-      failures.push(error)
-    }
-    try {
-      await this.deleteNetworkPoliciesForServer(name, namespace, deleteAllowed)
-    } catch (error) {
-      failures.push(error)
-    }
-    throwCleanupFailures(failures, `Failed to delete runtime resources for McpServer "${name}"`)
+    // Policy owners reconcile their own desired sets with ownership and
+    // resource-version preconditions; runtime cleanup must not race them.
+    await this.deleteResources(name, namespace, deleteAllowed)
   }
 
   // ─── CRD Status & Annotation Patching ──────────────────────────────
@@ -2183,7 +2120,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       console.error(
         `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
       )
-      if (this.shouldFailClosedForSecretFailure(secretResult)) {
+      if (shouldFailClosedForSecretFailure(secretResult.reason)) {
         await this.deleteRuntimeResources(server.name, server.namespace, async () => isCurrent())
       } else {
         console.warn(
@@ -2372,16 +2309,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (!ready && isCurrent()) {
       this.pollReadiness(server, 5000, 24, isCurrent)
     }
-  }
-
-  private shouldFailClosedForSecretFailure(
-    result: Exclude<SecretValidationResult, { ok: true }>
-  ): boolean {
-    return (
-      result.reason === 'SecretNotFound' ||
-      result.reason === 'SecretMissingKey' ||
-      result.reason === 'SecretAccessDenied'
-    )
   }
 
   private async reconcileWrcOwnedServer(

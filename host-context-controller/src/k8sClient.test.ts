@@ -14,7 +14,10 @@ import {
   listAllSharedFileSystems,
 } from './k8sClient'
 import { registry } from './metrics'
-import { DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE } from './networkPolicyReconciler'
+import {
+  DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
+  type NetworkPolicyReconciler,
+} from './networkPolicyReconciler'
 import { ContextMapperServer } from './server'
 import type { HostCRD, McpServerCRD } from './types'
 
@@ -3587,6 +3590,7 @@ describe('McpServerWatcher startup', () => {
       }
     )
     await (watcher as any).startContextWatch('context-policy-rv')
+    ;(watcher as any).contextCacheSynced = true
 
     const serverEvent = (watcher as any).getMcpServerWatchCallback()('MODIFIED', server)
     await oldStarted.promise
@@ -6118,7 +6122,11 @@ describe('McpServerWatcher external egress retries', () => {
 
   it('retries failed external egress reconciliation from an ADDED event', async () => {
     const watcher = new McpServerWatcher()
+    // This test isolates the per-server retry; fleet convergence is covered
+    // separately and would independently retry the same failed egress.
+    vi.spyOn(watcher as any, 'runInitialNetworkPolicyConvergence').mockResolvedValue(undefined)
     markMcpServerInventoryAuthoritative(watcher)
+    ;(watcher as any).contextCacheSynced = true
     const netPol = (watcher as any).netPolReconciler
     const reconciler = (watcher as any).reconciler
     const bindingReconciler = (watcher as any).bindingReconciler
@@ -10933,6 +10941,175 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
     ;(watcher as any).installMcpServerSnapshot({ servers: [], resourceVersion: 'rv4' })
     expect((watcher as any).mcpServerDesiredRevision).toBe(base + 2)
   })
+
+  it('recovers policy verdict edges from re-LIST without invalidating on unrelated status (#604)', () => {
+    const watcher = new McpServerWatcher()
+    const state = watcher as any
+    const server = {
+      name: 'policy-server',
+      namespace: 'mcp-server',
+      uid: 'uid-policy',
+      generation: 1,
+      spec: {
+        image: 'fixture:v1',
+        contextRef: 'ctx',
+        transport: { type: 'streamableHttp', port: 3000 },
+        envSecret: { name: 'fixture-env', keys: [] },
+      },
+      status: {
+        conditions: [{ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' }],
+      },
+    }
+    state.installMcpServerSnapshot({ servers: [server], resourceVersion: '1' })
+    const initialRevision = state.mcpServerDesiredRevision
+    const recovered = {
+      ...server,
+      status: { conditions: [{ type: 'SecretResolved', status: 'True', reason: 'SecretFound' }] },
+    }
+    state.installMcpServerSnapshot({ servers: [recovered], resourceVersion: '2' })
+    expect(state.mcpServerDesiredRevision).toBe(initialRevision + 1)
+    state.installMcpServerSnapshot({ servers: [recovered], resourceVersion: '3' })
+    expect(state.mcpServerDesiredRevision).toBe(initialRevision + 1)
+    state.installMcpServerSnapshot({ servers: [server], resourceVersion: '4' })
+    expect(state.mcpServerDesiredRevision).toBe(initialRevision + 2)
+  })
+
+  it('propagates only an effective WATCH verdict edge into policy work (#604)', async () => {
+    const watcher = new McpServerWatcher()
+    const state = watcher as any
+    state.mcpServerCacheSynced = true
+    state.contextCacheSynced = true
+    const server = {
+      name: 'policy-server',
+      namespace: 'mcp-server',
+      uid: 'uid-policy',
+      generation: 1,
+      spec: {
+        image: 'fixture:v1',
+        contextRef: 'ctx',
+        transport: { type: 'streamableHttp', port: 3000 },
+        envSecret: { name: 'fixture-env', keys: [] },
+      },
+      status: {
+        conditions: [{ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' }],
+      },
+    }
+    state.servers.set(server.name, server)
+    const full = vi.spyOn(state, 'runInitialNetworkPolicyConvergence').mockResolvedValue(undefined)
+    const retry = vi
+      .spyOn(state.externalEgressCoordinator, 'scheduleRetry')
+      .mockImplementation(() => {})
+    const scoped = vi.spyOn(state, 'reconcileContextsForMcpServer').mockResolvedValue(undefined)
+    const callback = state.getMcpServerWatchCallback()
+    const event = (status: typeof server.status) => ({
+      metadata: {
+        name: server.name,
+        namespace: server.namespace,
+        uid: server.uid,
+        generation: server.generation,
+      },
+      spec: server.spec,
+      status,
+    })
+    await callback(
+      'MODIFIED',
+      event({ conditions: [{ type: 'SecretResolved', status: 'True', reason: 'SecretFound' }] })
+    )
+    expect(full).toHaveBeenCalledTimes(1)
+    expect(scoped).toHaveBeenCalledTimes(1)
+    expect(retry).toHaveBeenCalledTimes(1)
+    expect(scoped).toHaveBeenLastCalledWith(
+      state.servers.get(server.name),
+      state.mcpWatchGeneration
+    )
+    expect(retry).toHaveBeenLastCalledWith('MODIFIED', state.servers.get(server.name))
+    for (let repeat = 0; repeat < 3; repeat++) {
+      await callback(
+        'MODIFIED',
+        event({ conditions: [{ type: 'SecretResolved', status: 'True', reason: 'SecretFound' }] })
+      )
+    }
+    expect(scoped).toHaveBeenCalledTimes(1)
+    expect(retry).toHaveBeenCalledTimes(1)
+    await callback('MODIFIED', event(server.status))
+    expect(full).toHaveBeenCalledTimes(2)
+    expect(scoped).toHaveBeenCalledTimes(2)
+    expect(retry).toHaveBeenCalledTimes(2)
+    expect(scoped).toHaveBeenLastCalledWith(
+      state.servers.get(server.name),
+      state.mcpWatchGeneration
+    )
+    expect(retry).toHaveBeenLastCalledWith('MODIFIED', state.servers.get(server.name))
+    await watcher.stop()
+  })
+
+  it.each(['current', 'verdict changed', 'watch retired'])(
+    'retries incomplete Context work only while its server effect remains %s (#604)',
+    async disposition => {
+      const watcher = new McpServerWatcher()
+      const state = watcher as any
+      markMcpServerInventoryAuthoritative(watcher)
+      state.contextCacheSynced = true
+      const server: McpServerCRD = {
+        name: 'incomplete-policy-server',
+        namespace: 'mcp-server',
+        uid: 'incomplete-policy-uid',
+        generation: 1,
+        spec: {
+          image: 'fixture:v1',
+          contextRef: 'ctx',
+          transport: { type: 'streamableHttp', port: 3000 },
+          envSecret: { name: 'fixture-env', keys: [] },
+        },
+      }
+      const context = {
+        name: 'linked-context',
+        namespace: 'mcp-server',
+        spec: { contextId: 'ctx', mcpServers: [server.name] },
+      }
+      state.servers.set(server.name, server)
+      state.contexts.set(context.name, context)
+      const entered = deferred()
+      const release = deferred<boolean>()
+      let admittedIsCurrent: (() => boolean) | undefined
+      const reconcile = vi
+        .spyOn(state.netPolReconciler as NetworkPolicyReconciler, 'reconcileContext')
+        .mockImplementation(async (_context, options) => {
+          admittedIsCurrent = options?.isCurrent
+          entered.resolve()
+          return release.promise
+        })
+      const retry = vi.spyOn(state, 'scheduleExternalEgressRetry').mockImplementation(() => {})
+      try {
+        // Keep the actual Context queue and helper; pause only at the policy API.
+        const pending = state.reconcileContextsForMcpServer(server, state.mcpWatchGeneration)
+        await entered.promise
+        expect(reconcile).toHaveBeenCalledWith(context, { isCurrent: expect.any(Function) })
+        expect(admittedIsCurrent?.()).toBe(true)
+        if (disposition === 'verdict changed') {
+          state.servers.set(server.name, {
+            ...server,
+            status: {
+              conditions: [{ type: 'SecretResolved', status: 'False', reason: 'SecretNotFound' }],
+            },
+          })
+        } else if (disposition === 'watch retired') {
+          state.mcpWatchGeneration += 1
+        }
+        expect(admittedIsCurrent?.()).toBe(disposition === 'current')
+        release.resolve(false)
+        await pending
+        if (disposition === 'current') {
+          expect(retry).toHaveBeenCalledExactlyOnceWith('MODIFIED', server)
+        } else {
+          expect(retry).not.toHaveBeenCalled()
+        }
+      } finally {
+        release.resolve(false)
+        await watcher.stop()
+      }
+    }
+  )
 
   it('installHostSnapshot bumps the desired revision only when re-listed content changed', () => {
     const watcher = new McpServerWatcher()
