@@ -155,7 +155,11 @@ describe('HostDetailsPage egress-broker condition notice', () => {
             type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
             status: 'True',
             reason: 'AllSlotsProvisioned',
-            message: '1 broker(s)',
+            // Verbatim the shape HCC's buildBrokersCondition emits for the True
+            // case (`${n} broker(s) provisioned`), so this fixture cannot drift
+            // into a form the producer never sends. (control-ui and HCC are
+            // separate services, so the string is mirrored, not imported.)
+            message: '1 broker(s) provisioned',
             lastTransitionTime: '2026-09-10T00:00:00Z',
           },
         ])
