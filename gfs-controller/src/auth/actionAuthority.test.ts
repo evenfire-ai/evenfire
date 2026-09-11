@@ -41,6 +41,26 @@ function authority() {
   )!
 }
 
+function allowedResponse(overrides: Record<string, unknown> = {}) {
+  const binding = authority().binding
+  return {
+    version: 2,
+    status: 'allowed',
+    authorizationRevision: binding.authorizationRevision,
+    behaviorBindingHash: binding.behaviorBindingHash,
+    validUntil: null,
+    attribution: {
+      userId: USER,
+      sid: SID,
+      sessionVersion: 3,
+      accessPathId: binding.accessPathId,
+      pathKind: 'direct',
+      effectiveTeamId: null,
+    },
+    ...overrides,
+  }
+}
+
 afterEach(() => vi.unstubAllGlobals())
 
 describe('gfs v2 live authority', () => {
@@ -134,6 +154,36 @@ describe('gfs v2 live authority', () => {
       ).rejects.toMatchObject({ code: 'forbidden' })
     }
   })
+
+  it.each([
+    ['authorization revision', { authorizationRevision: `ar1_${'b'.repeat(43)}` }],
+    ['behavior binding', { behaviorBindingHash: `bh2_${'b'.repeat(43)}` }],
+    ['user', { attribution: { ...allowedResponse().attribution, userId: SID } }],
+    ['session', { attribution: { ...allowedResponse().attribution, sid: USER } }],
+    ['session version', { attribution: { ...allowedResponse().attribution, sessionVersion: 4 } }],
+    [
+      'access path',
+      { attribution: { ...allowedResponse().attribution, accessPathId: `ap1_${'b'.repeat(43)}` } },
+    ],
+    ['path kind', { attribution: { ...allowedResponse().attribution, pathKind: 'team' } }],
+    ['effective team', { attribution: { ...allowedResponse().attribution, effectiveTeamId: JTI } }],
+    ['validity', { validUntil: '1970-01-01T00:00:00.000Z' }],
+  ] as const)(
+    'rejects an independent %s mismatch before filesystem I/O',
+    async (_name, mutation) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(JSON.stringify(allowedResponse(mutation)), { status: 200 }))
+      )
+      await expect(
+        createGfsAuthorityCheckpointer({
+          baseUrl: 'http://control-api:8090',
+          serviceToken: 'gfsc-service-token',
+          timeoutMs: 1000,
+        })(authority())
+      ).rejects.toMatchObject({ code: 'forbidden' })
+    }
+  )
 
   it('fails closed when Control API is unavailable', async () => {
     vi.stubGlobal(
