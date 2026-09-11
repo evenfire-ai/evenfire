@@ -38,7 +38,8 @@ import { accumulateHostExactHostEgress } from './externalEgressAccumulator'
 import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
-  sameMcpServerDesiredRevision,
+  runtimeDesired,
+  sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import {
   netPolOrphanSweepCappedTotal,
@@ -996,7 +997,7 @@ export class NetworkPolicyReconciler {
         const selected = selectedServers.get(serverName)
         const current = this.serverCache.get(serverName)
         if (!selected || !current) return selected === current
-        return sameMcpServerDesiredRevision(selected, current)
+        return sameMcpServerPolicyRevision(selected, current)
       })
     if (!isCurrent()) return false
 
@@ -1008,6 +1009,14 @@ export class NetworkPolicyReconciler {
       const server = this.serverCache.get(serverName)
       if (!server) {
         hccLogger.warn('McpServer absent from cache; context policy skipped', {
+          serverName,
+          contextId,
+        })
+        continue
+      }
+
+      if (!runtimeDesired(server)) {
+        hccLogger.debug('McpServer runtime not desired; context policy skipped', {
           serverName,
           contextId,
         })
@@ -1123,7 +1132,7 @@ export class NetworkPolicyReconciler {
     const desiredRpcProxyEgress = new Map<string, k8s.V1NetworkPolicy>()
     for (const serverName of allowedServers) {
       const server = this.serverCache.get(serverName)
-      if (!server) continue
+      if (!server || !runtimeDesired(server)) continue
       const desired = this.buildContextAllowPolicies(context, server)
       desiredIngress.set(desired.ingress.metadata!.name!, desired.ingress)
       desiredHostEgress.set(desired.hostEgress.metadata!.name!, desired.hostEgress)
@@ -1418,7 +1427,10 @@ export class NetworkPolicyReconciler {
     }
 
     const desiredContextIds = new Set(contexts.map(c => c.spec.contextId))
-    const desiredServerNames = new Set(servers.map(s => s.name))
+    // Orphan limits protect against missing inventory, not explicit policy
+    // revocation for a present owner. Eligibility is handled by the safety
+    // pass below and must not consume another owner's orphan budget.
+    const presentServerNames = new Set(servers.map(server => server.name))
     const recordOrphanDelete = (lane: SafetyInventoryLane, deleted: boolean): void => {
       if (!deleted) return
       recordSafetyPassRevocation()
@@ -1534,7 +1546,7 @@ export class NetworkPolicyReconciler {
     }
     const isExternalLaneOrphan = (policy: k8s.V1NetworkPolicy): boolean => {
       const serverName = policy.metadata?.labels?.[MCPSERVER_LABEL]
-      return !serverName || !desiredServerNames.has(serverName)
+      return !serverName || !presentServerNames.has(serverName)
     }
     const countExternalLane =
       options.serverInventoryComplete !== false && serverCleanupAuthoritative()
@@ -1661,7 +1673,7 @@ export class NetworkPolicyReconciler {
           )
           continue
         }
-        if (!desiredServerNames.has(serverName)) {
+        if (!presentServerNames.has(serverName)) {
           const name = policy.metadata?.name || ''
           await runServerEffect(serverName, async () => {
             if (
@@ -1712,7 +1724,7 @@ export class NetworkPolicyReconciler {
             if (!serverCleanupAuthoritative()) return false
             if (!options.resolveCurrentServer) return true
             const latest = options.resolveCurrentServer(current.name)
-            return latest !== undefined && sameMcpServerDesiredRevision(current, latest)
+            return latest !== undefined && sameMcpServerPolicyRevision(current, latest)
           }
           const completed = await this.reconcileExternalEgressSafety(
             current,
@@ -2164,7 +2176,7 @@ export class NetworkPolicyReconciler {
   ): Promise<boolean> {
     if (!isCurrent()) return false
     const desired = new Map<string, { binding: EgressBinding; policy?: k8s.V1NetworkPolicy }>()
-    for (const binding of server.spec.egressBindings ?? []) {
+    for (const binding of runtimeDesired(server) ? (server.spec.egressBindings ?? []) : []) {
       const name = this.externalEgressPolicyName(server.name, binding)
       if (!name) continue
       const egressClass = binding.egressClass ?? 'exact-host'
@@ -2335,8 +2347,9 @@ export class NetworkPolicyReconciler {
     }
     if (!isCurrent()) return
 
+    const desired = runtimeDesired(server)
     const bindings = server.spec.egressBindings
-    if (!bindings || bindings.length === 0) {
+    if (!desired || !bindings || bindings.length === 0) {
       try {
         await this.cleanupExternalEgress(
           server.name,
@@ -2360,9 +2373,11 @@ export class NetworkPolicyReconciler {
       await this.writeExternalEgressStatus(
         server,
         [],
-        'True',
-        'NoEgressBindings',
-        'No external egress bindings declared',
+        desired ? 'True' : 'False',
+        desired ? 'NoEgressBindings' : 'RuntimeNotDesired',
+        desired
+          ? 'No external egress bindings declared'
+          : 'Runtime is not eligible for external egress',
         isCurrent
       )
       return

@@ -41,6 +41,7 @@ import { K8sGfsApi } from './k8s/gfsK8sApi'
 import { makeHostK8sApiClient } from './k8s/hostK8sApiClient'
 import { pvcName as sfsPvcName } from './k8s/sharedFileSystemFactory'
 import { LlmHookReconciler, computePodKey, referencedHookIds } from './llmHookReconciler'
+import { hccLogger } from './logger'
 import type {
   AuthorityContext,
   AuthorityHost,
@@ -52,7 +53,9 @@ import type {
 import {
   confirmAuthoritativeMcpServerAbsence,
   isMcpServerStatusOnlyUpdate,
+  runtimeDesired,
   sameMcpServerDesiredRevision,
+  sameMcpServerPolicyRevision,
 } from './mcpServerSafety'
 import {
   contextMetadataOnlyEventsTotal,
@@ -850,7 +853,7 @@ export class McpServerWatcher implements McpServerProvider {
     listServers: () => [...this.servers.values()],
     getCurrentServer: name => this.servers.get(name),
     inventoryAuthoritative: () => !this.stopped && this.mcpServerCacheSynced,
-    sameDesiredRevision: sameMcpServerDesiredRevision,
+    sameDesiredRevision: sameMcpServerPolicyRevision,
     enqueue: (server, work) => this.enqueueMcpServerReconciliation(server, work),
     mutate: (type, server, options) => this.performExternalEgressMutation(type, server, options),
     replay: (type, server, retry) =>
@@ -1419,7 +1422,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (snapshot.servers.length !== this.servers.size) return true
     for (const server of snapshot.servers) {
       const previous = this.servers.get(server.name)
-      if (previous === undefined || !sameMcpServerDesiredRevision(previous, server)) {
+      if (previous === undefined || !sameMcpServerPolicyRevision(previous, server)) {
         return true
       }
     }
@@ -3944,7 +3947,7 @@ export class McpServerWatcher implements McpServerProvider {
       let desiredStateChanged = false
       if (type === 'ADDED' || type === 'MODIFIED') {
         desiredStateChanged =
-          previous === undefined || !sameMcpServerDesiredRevision(previous, server)
+          previous === undefined || !sameMcpServerPolicyRevision(previous, server)
         this.servers.set(server.name, server)
       } else if (type === 'DELETED') {
         if (!previous?.uid || !server.uid || previous.uid === server.uid) {
@@ -3956,11 +3959,26 @@ export class McpServerWatcher implements McpServerProvider {
         void this.runInitialNetworkPolicyConvergence()
       }
 
-      // HCC writes McpServer status during reconciliation. Those writes emit
-      // MODIFIED events but do not change the desired runtime or policy state.
-      // Suppress that self-induced work while still publishing the fresh status
-      // through discovery. Any UID/spec/annotation/label change remains live.
+      // Most status writes do not change desired state. A runtime eligibility
+      // edge does change policy intent: propagate it without re-entering the
+      // runtime owner inline. The scheduled replay also retries runtime
+      // reconciliation. Discovery receives every update; UID/spec/annotation/
+      // label changes remain live.
       if (type === 'MODIFIED' && previous && isMcpServerStatusOnlyUpdate(previous, server)) {
+        if (runtimeDesired(previous) !== runtimeDesired(server)) {
+          // The revision bump above retires old policy work and requests a
+          // certified safety pass; replay also retries per-server additions.
+          this.externalEgressCoordinator.scheduleRetry('MODIFIED', server)
+          try {
+            await this.reconcileContextsForMcpServer(server, watchGeneration)
+          } catch (err) {
+            // The certified fleet pass and the server replay remain scheduled.
+            hccLogger.error('Runtime verdict policy propagation failed', {
+              serverName: server.name,
+              err,
+            })
+          }
+        }
         this.changeCallback?.()
         return
       }
@@ -3972,6 +3990,47 @@ export class McpServerWatcher implements McpServerProvider {
           watchGeneration
         )
       )
+    }
+  }
+
+  private async reconcileContextsForMcpServer(
+    server: McpServerCRD,
+    watchGeneration: number
+  ): Promise<void> {
+    const contextGeneration = this.contextWatchGeneration
+    const isCurrent = (): boolean => {
+      const current = this.servers.get(server.name)
+      return (
+        this.mcpServerWatchEffectIsCurrent(server, watchGeneration) &&
+        current !== undefined &&
+        sameMcpServerPolicyRevision(server, current) &&
+        this.hasContextInventoryAuthority(contextGeneration)
+      )
+    }
+    for (const selected of this.contexts.values()) {
+      if (!isCurrent()) return
+      if (!selected.spec.mcpServers?.includes(server.name)) continue
+      const contextId = selected.spec.contextId
+      await this.enqueueContextReconciliation(contextId, async () => {
+        if (!isCurrent()) return
+        const current = this.contexts.get(selected.name)
+        if (
+          current?.spec.contextId !== contextId ||
+          !current.spec.mcpServers?.includes(server.name)
+        )
+          return
+        hccLogger.debug('Reconciling Context policies after McpServer change', {
+          serverName: server.name,
+          contextName: current.name,
+          contextId,
+        })
+        const completed = await this.netPolReconciler.reconcileContext(current, {
+          isCurrent: () => isCurrent() && this.contexts.get(current.name) === current,
+        })
+        if (completed === false && isCurrent()) {
+          this.scheduleExternalEgressRetry('MODIFIED', server)
+        }
+      })
     }
   }
 
@@ -3998,11 +4057,6 @@ export class McpServerWatcher implements McpServerProvider {
     }
     const deleteAllowed = () =>
       this.mcpServerAbsentForDelete(server.name, server.namespace, watchGeneration)
-    const contextInventoryGeneration = this.contextWatchGeneration
-    const contextPolicyInventoryIsCurrent = (): boolean =>
-      this.mcpServerWatchEffectIsCurrent(server, watchGeneration) &&
-      this.hasContextInventoryAuthority(contextInventoryGeneration)
-
     // External egress is part of the workload's pre-start contract. Reconcile
     // it before HCC creates or updates any managed runtime Deployment so a
     // stdio MCP with egressBindings cannot start before ExternalEgressReady.
@@ -4102,30 +4156,7 @@ export class McpServerWatcher implements McpServerProvider {
           if (!this.mcpServerWatchEffectIsCurrent(server, watchGeneration)) return
           server = this.servers.get(server.name)!
         }
-        // Re-reconcile cached Contexts after the server cache is populated.
-        for (const selectedContext of this.contexts.values()) {
-          if (!this.mcpServerWatchEffectIsCurrent(server, watchGeneration)) return
-          if (!selectedContext.spec.mcpServers?.includes(server.name)) continue
-          const selectedContextId = selectedContext.spec.contextId
-          console.log(
-            `[K8s] Re-reconciling context "${selectedContext.name}" after McpServer "${server.name}" cached`
-          )
-          await this.enqueueContextReconciliation(selectedContextId, async () => {
-            if (!this.mcpServerWatchEffectIsCurrent(server, watchGeneration)) return
-            const currentContext = this.contexts.get(selectedContext.name)
-            if (
-              currentContext?.spec.contextId !== selectedContextId ||
-              !currentContext.spec.mcpServers?.includes(server.name)
-            ) {
-              return
-            }
-            await this.netPolReconciler.reconcileContext(currentContext, {
-              isCurrent: () =>
-                contextPolicyInventoryIsCurrent() &&
-                this.contexts.get(currentContext.name) === currentContext,
-            })
-          })
-        }
+        await this.reconcileContextsForMcpServer(server, watchGeneration)
       } else if (type === 'DELETED') {
         const recipeName = server.labels?.['clerum.io/recipe'] ?? server.name
         await this.bindingReconciler.cleanupBindings(recipeName, { deleteAllowed })
