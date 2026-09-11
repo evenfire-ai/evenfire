@@ -13,6 +13,14 @@
 #                             (--service-cluster-ip-range), read from the
 #                             kube-apiserver / kube-controller-manager command line.
 #
+# FAIL-CLOSED RENDER. HCC treats the rendered CIDRs as a security allow/deny
+# input, so a partial render is worse than none: a patch carrying only the
+# Service CIDR would make HCC believe the guard is configured while pod space
+# stays unprotected. This script therefore aborts (exit 1, no patch written)
+# if EITHER the pod CIDR or the Service CIDR is missing, and validates the
+# shape of every CIDR it emits — a malformed entry is inert in the runtime LAN
+# classifier (it denies nothing), so it must never reach the manifest.
+#
 # The apiserver-reachable ranges (CONTEXT_MAPPER_K8S_API_CIDRS) stay OPT-IN and
 # are NOT rendered here — they also drive the allow-k8s-api-egress NetworkPolicies
 # and watch-recovery fixtures. Use deploy/scripts/minikube-detect-k8s-api-ip.sh /
@@ -37,7 +45,78 @@ if [ ! -f "$TEMPLATE_FILE" ]; then
   exit 1
 fi
 
-# Pod + Service CIDRs from the apiserver pod's command line (kubeadm/minikube).
+# IPv4 dotted-quad CIDR: four octets (each 0..255) and a prefix 1..32. The
+# runtime LAN classifier is IPv4-only and treats an unparseable entry as "no
+# overlap" (denies nothing), so anything this script cannot validate must abort
+# the render rather than ship a silently-inert range.
+is_ipv4_cidr() {
+  local cidr="$1" ip prefix o
+  case "$cidr" in
+    */*) ip="${cidr%/*}"; prefix="${cidr#*/}" ;;
+    *) return 1 ;;
+  esac
+  [ -n "$ip" ] && [ -n "$prefix" ] || return 1
+  # Prefix: digits only, 1..32.
+  case "$prefix" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$prefix" -ge 1 ] && [ "$prefix" -le 32 ] || return 1
+  # Exactly four dotted octets, each 0..255.
+  local IFS=.
+  # shellcheck disable=SC2086
+  set -- $ip
+  [ "$#" -eq 4 ] || return 1
+  for o in "$@"; do
+    case "$o" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$o" -ge 0 ] && [ "$o" -le 255 ] || return 1
+  done
+  return 0
+}
+
+# Validates a comma-separated CIDR list (from an explicit override). Empty list
+# or any empty/malformed item is a hard error — an override is a deliberate
+# security input, so a typo must fail loud, not slip through.
+validate_cidr_list() {
+  local label="$1" list="$2" item had=0
+  local IFS=,
+  for item in $list; do
+    had=1
+    if [ -z "$item" ]; then
+      echo "ERROR: $label contains an empty entry: '$list'." >&2
+      exit 1
+    fi
+    if ! is_ipv4_cidr "$item"; then
+      echo "ERROR: $label entry '$item' is not a valid IPv4 CIDR (e.g. 10.96.0.0/12)." >&2
+      exit 1
+    fi
+  done
+  if [ "$had" -eq 0 ]; then
+    echo "ERROR: $label is empty." >&2
+    exit 1
+  fi
+}
+
+# Literal splice of a placeholder into a template. Unlike sed/awk sub/gsub, the
+# replacement is inserted verbatim (index()/substr() — no interpretation of &,
+# \, or a delimiter), matching deploy/scripts/minikube-detect-k8s-api-ip.sh.
+splice_placeholder() {
+  awk -v ph="$1" -v val="$2" '
+    {
+      line = $0
+      out = ""
+      while ((p = index(line, ph)) > 0) {
+        out = out substr(line, 1, p - 1) val
+        line = substr(line, p + length(ph))
+      }
+      print out line
+    }
+  '
+}
+
+# Pod + Service CIDRs from the apiserver / controller-manager command line
+# (kubeadm/minikube), unless overridden.
 if [ -z "${CLUSTER_INTERNAL_CIDRS:-}" ]; then
   APISERVER_CMD="$(kubectl --context="$CONTEXT" -n kube-system get pods \
     -l component=kube-apiserver -o jsonpath='{.items[0].spec.containers[0].command}' 2>/dev/null || true)"
@@ -49,23 +128,35 @@ if [ -z "${CLUSTER_INTERNAL_CIDRS:-}" ]; then
     -l component=kube-controller-manager -o jsonpath='{.items[0].spec.containers[0].command}' 2>/dev/null || true)"
   POD_CIDR="$(printf '%s' "$KCM_CMD" | grep -oE 'cluster-cidr=[^" ,]+' | head -1 | cut -d= -f2 || true)"
 
-  parts=""
-  [ -n "$POD_CIDR" ] && parts="$POD_CIDR"
-  [ -n "$SERVICE_CIDR" ] && parts="${parts:+$parts,}$SERVICE_CIDR"
-  if [ -z "$parts" ]; then
-    echo "ERROR: could not detect pod/Service CIDRs from context '$CONTEXT'." >&2
-    echo "       Set CLUSTER_INTERNAL_CIDRS explicitly (comma-separated)." >&2
+  if [ -z "$POD_CIDR" ]; then
+    echo "ERROR: could not detect the pod CIDR (--cluster-cidr on kube-controller-manager) from context '$CONTEXT'." >&2
+    echo "       Set CLUSTER_INTERNAL_CIDRS explicitly (comma-separated pod,Service CIDRs)." >&2
     exit 1
   fi
-  CLUSTER_INTERNAL_CIDRS="$parts"
+  if [ -z "$SERVICE_CIDR" ]; then
+    echo "ERROR: could not detect the Service CIDR (--service-cluster-ip-range on kube-apiserver) from context '$CONTEXT'." >&2
+    echo "       Set CLUSTER_INTERNAL_CIDRS explicitly (comma-separated pod,Service CIDRs)." >&2
+    exit 1
+  fi
+  if ! is_ipv4_cidr "$POD_CIDR"; then
+    echo "ERROR: detected pod CIDR '$POD_CIDR' is not a valid IPv4 CIDR." >&2
+    exit 1
+  fi
+  if ! is_ipv4_cidr "$SERVICE_CIDR"; then
+    echo "ERROR: detected Service CIDR '$SERVICE_CIDR' is not a valid IPv4 CIDR." >&2
+    exit 1
+  fi
+  CLUSTER_INTERNAL_CIDRS="$POD_CIDR,$SERVICE_CIDR"
+else
+  validate_cidr_list "CLUSTER_INTERNAL_CIDRS" "$CLUSTER_INTERNAL_CIDRS"
 fi
 
 echo "[detect-cluster-cidrs] context=$CONTEXT"
 echo "[detect-cluster-cidrs]   CLUSTER_INTERNAL_CIDRS=$CLUSTER_INTERNAL_CIDRS"
 
 tmp="$(mktemp)"
-sed -e "s#__CLUSTER_INTERNAL_CIDRS__#${CLUSTER_INTERNAL_CIDRS}#g" \
-    "$TEMPLATE_FILE" > "$tmp"
+splice_placeholder "__CLUSTER_INTERNAL_CIDRS__" "$CLUSTER_INTERNAL_CIDRS" \
+  < "$TEMPLATE_FILE" > "$tmp"
 mv "$tmp" "$PATCH_FILE"
 
 echo "[detect-cluster-cidrs] rendered: $PATCH_FILE"

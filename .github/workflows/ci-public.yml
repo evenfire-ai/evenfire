@@ -498,6 +498,9 @@ jobs:
       - name: Test minikube detect-k8s-api-ip template rendering
         run: bash scripts/tests/test-minikube-detect-k8s-api-ip.sh
 
+      - name: Test minikube detect-cluster-cidrs fail-closed rendering
+        run: bash scripts/tests/test-minikube-detect-cluster-cidrs.sh
+
       - name: Validate single-writer rollout invariant on rendered overlays
         run: |
           # The k8s-api-ip patch is rendered from a gitignored template at setup
