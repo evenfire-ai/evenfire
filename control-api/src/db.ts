@@ -3162,6 +3162,19 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
   `)
 }
 
+async function applyPr2RuntimePrivilegesSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_api_runtime') THEN
+        GRANT SELECT, INSERT ON TABLE workflow_authority_bindings TO control_api_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE pr2_readiness_activations TO control_api_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE pr2_readiness_evidence TO control_api_runtime;
+      END IF;
+    END $$;
+  `)
+}
+
 async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<void> {
   await db.query(`
     ALTER TABLE workflow_authority_bindings
@@ -6207,6 +6220,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0111_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
+  },
+  {
+    version: '0112_pr2_runtime_privileges',
+    apply: applyPr2RuntimePrivilegesSchema,
   },
   {
     version: '0113_workflow_recipe_authority_entity',

@@ -15,6 +15,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '010f_workflow_authority_bindings',
   '0110_gfs_upload_authority_bindings',
   '0111_pr2_readiness_evidence',
+  '0112_pr2_runtime_privileges',
   '0113_workflow_recipe_authority_entity',
 ] as const)
 
