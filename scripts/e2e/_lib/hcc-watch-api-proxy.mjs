@@ -1,7 +1,6 @@
 // Development-only transport fixture. No fabricated upstream success responses.
 import fs from 'node:fs'
 import https from 'node:https'
-import { pathToFileURL } from 'node:url'
 import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
 export function validateCommand(command, allowedPaths) {
@@ -188,7 +187,8 @@ export function createProxy({
   return { server, close }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node 24's native entry marker also handles Kubernetes projected symlinks.
+if (import.meta.main) {
   const proxy = createProxy({
     key: fs.readFileSync('/fixture-tls/tls.key'),
     cert: fs.readFileSync('/fixture-tls/tls.crt'),

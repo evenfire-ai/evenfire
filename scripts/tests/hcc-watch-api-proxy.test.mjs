@@ -2,7 +2,15 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { X509Certificate, generateKeyPairSync } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  watch,
+  writeFileSync,
+} from 'node:fs'
 import https from 'node:https'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -19,6 +27,34 @@ const otherPath = '/api/v1/namespaces/mcp-server/pods?watch=true'
 let front
 let upstreamTls
 let publicConfig
+
+test('projected-file symlink CLI enters startup and fails loud without fixture mounts', () => {
+  // ConfigMap projection resolves import.meta.url to a timestamped real path,
+  // while argv[1] retains the projected symlink. Never create root mounts or
+  // open the proxy listener in this entry-point regression.
+  assert.equal(existsSync('/fixture-tls'), false, 'test requires no root fixture mount')
+  const directory = mkdtempSync(join(tmpdir(), 'hcc-proxy-entry-'))
+  try {
+    const entry = join(directory, 'projected-proxy.mjs')
+    symlinkSync(join(root, 'scripts/e2e/_lib/hcc-watch-api-proxy.mjs'), entry)
+    const result = spawnSync(process.execPath, [entry], {
+      encoding: 'utf8',
+      timeout: 5000,
+      maxBuffer: 65536,
+    })
+    assert.equal(result.error, undefined, 'CLI terminated without a runner error')
+    assert.notEqual(result.status, 0, 'projected CLI must not silently exit successfully')
+    assert.equal(result.stdout, '')
+    assert.equal(result.stderr.includes('ENOENT'), true, 'startup attempted its required mount')
+    assert.equal(
+      result.stderr.includes('/fixture-tls/tls.key'),
+      true,
+      'failure is the expected missing fixture mount'
+    )
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 function certificate() {
   const { privateKey } = generateKeyPairSync('rsa', {
