@@ -12,6 +12,17 @@
 #   * CLUSTER_INTERNAL_CIDRS = pod CIDR (--cluster-cidr) + Service CIDR
 #                             (--service-cluster-ip-range), read from the
 #                             kube-apiserver / kube-controller-manager command line.
+#   * CLUSTER_NODE_CIDRS     = node InternalIPs + the kubernetes apiserver
+#                             endpoint IPs (each as /32), plus the minikube
+#                             docker network subnet when docker is reachable.
+#                             Covers the node IP / control-plane endpoint, which
+#                             HCC's pod+Service guard does NOT (a minikube node at
+#                             192.168.49.2 is RFC1918, so it reads as a legitimate
+#                             LAN target). Consumed by HCC via
+#                             CONTEXT_MAPPER_CLUSTER_NODE_CIDRS, on which HCC is
+#                             also fail-closed. In a non-minikube cluster (GKE,
+#                             ...) declare it explicitly (node-pool subnet +
+#                             masterIpv4CidrBlock) — see docs/deploy/llm-providers.md.
 #
 # FAIL-CLOSED RENDER. HCC treats the rendered CIDRs as a security allow/deny
 # input, so a partial render is worse than none: a patch carrying only the
@@ -32,6 +43,7 @@
 #
 # Override detection explicitly (e.g. for a non-minikube cluster):
 #   CLUSTER_INTERNAL_CIDRS=10.244.0.0/16,10.96.0.0/12 \
+#   CLUSTER_NODE_CIDRS=10.128.0.0/20,172.16.0.0/28 \
 #     deploy/scripts/minikube-detect-cluster-cidrs.sh
 set -euo pipefail
 
@@ -151,12 +163,63 @@ else
   validate_cidr_list "CLUSTER_INTERNAL_CIDRS" "$CLUSTER_INTERNAL_CIDRS"
 fi
 
+# Node + control-plane CIDRs, unless overridden. Node InternalIPs and the
+# apiserver endpoint IP(s) become /32; the minikube docker network subnet (if
+# docker answers) is added as-is so a node re-IP after `minikube delete` stays
+# covered. Fail-closed: abort if no node InternalIP is found or the apiserver
+# endpoint cannot be read — a missing node category would let HCC treat the node
+# IP as a safe LAN target (SSRF pivot into the kubelet / control plane).
+if [ -z "${CLUSTER_NODE_CIDRS:-}" ]; then
+  NODE_IPS="$(kubectl --context="$CONTEXT" get nodes \
+    -o jsonpath='{range .items[*]}{range .status.addresses[?(@.type=="InternalIP")]}{.address}{"\n"}{end}{end}' 2>/dev/null || true)"
+  if [ -z "$(printf '%s' "$NODE_IPS" | tr -d '[:space:]')" ]; then
+    echo "ERROR: could not detect any node InternalIP from context '$CONTEXT'." >&2
+    echo "       Set CLUSTER_NODE_CIDRS explicitly (comma-separated)." >&2
+    exit 1
+  fi
+  ENDPOINT_IPS="$(kubectl --context="$CONTEXT" -n default get endpoints kubernetes \
+    -o jsonpath='{range .subsets[*].addresses[*]}{.ip}{"\n"}{end}' 2>/dev/null || true)"
+  if [ -z "$(printf '%s' "$ENDPOINT_IPS" | tr -d '[:space:]')" ]; then
+    echo "ERROR: could not read the kubernetes apiserver endpoint from context '$CONTEXT'." >&2
+    echo "       Set CLUSTER_NODE_CIDRS explicitly (comma-separated)." >&2
+    exit 1
+  fi
+  DOCKER_SUBNETS=""
+  if command -v docker >/dev/null 2>&1; then
+    DOCKER_SUBNETS="$(docker network inspect "$CONTEXT" \
+      --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' 2>/dev/null || true)"
+  fi
+
+  node_parts=""
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      */*) cidr="$entry" ;;   # docker subnet — already a CIDR
+      *) cidr="$entry/32" ;;  # bare node/endpoint IP — pin as /32
+    esac
+    if ! is_ipv4_cidr "$cidr"; then
+      echo "ERROR: detected node CIDR '$cidr' is not a valid IPv4 CIDR." >&2
+      exit 1
+    fi
+    case ",$node_parts," in
+      *",$cidr,"*) : ;;  # already collected
+      *) node_parts="${node_parts:+$node_parts,}$cidr" ;;
+    esac
+  done <<EOF
+$(printf '%s\n%s\n%s\n' "$NODE_IPS" "$ENDPOINT_IPS" "$DOCKER_SUBNETS")
+EOF
+  CLUSTER_NODE_CIDRS="$node_parts"
+else
+  validate_cidr_list "CLUSTER_NODE_CIDRS" "$CLUSTER_NODE_CIDRS"
+fi
+
 echo "[detect-cluster-cidrs] context=$CONTEXT"
 echo "[detect-cluster-cidrs]   CLUSTER_INTERNAL_CIDRS=$CLUSTER_INTERNAL_CIDRS"
+echo "[detect-cluster-cidrs]   CLUSTER_NODE_CIDRS=$CLUSTER_NODE_CIDRS"
 
 tmp="$(mktemp)"
-splice_placeholder "__CLUSTER_INTERNAL_CIDRS__" "$CLUSTER_INTERNAL_CIDRS" \
-  < "$TEMPLATE_FILE" > "$tmp"
+splice_placeholder "__CLUSTER_INTERNAL_CIDRS__" "$CLUSTER_INTERNAL_CIDRS" < "$TEMPLATE_FILE" \
+  | splice_placeholder "__CLUSTER_NODE_CIDRS__" "$CLUSTER_NODE_CIDRS" > "$tmp"
 mv "$tmp" "$PATCH_FILE"
 
 echo "[detect-cluster-cidrs] rendered: $PATCH_FILE"

@@ -1,6 +1,7 @@
 # TEMPLATE — do not edit the rendered patches/llm-egress-cluster-cidrs.yaml (gitignored).
 # deploy/scripts/minikube-detect-cluster-cidrs.sh renders this file, replacing
-# __CLUSTER_INTERNAL_CIDRS__ with the live cluster's pod + Service CIDRs.
+# __CLUSTER_INTERNAL_CIDRS__ with the live cluster's pod + Service CIDRs and
+# __CLUSTER_NODE_CIDRS__ with the node InternalIPs + apiserver endpoint (/32).
 # Committing real CIDRs here would dirty every contributor's tree and bake one
 # environment's pod/service CIDRs into a shared manifest — they differ between a
 # dev minikube and prod (distinct pod/Service CIDRs, apiserver reachability).
@@ -21,6 +22,14 @@
 #     HCC is FAIL-CLOSED on this value: without it, it refuses to provision any
 #     broker at all (CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=true, the
 #     base default). That is why this patch is rendered and applied BY DEFAULT.
+#   * CONTEXT_MAPPER_CLUSTER_NODE_CIDRS (node + control-plane ranges) closes the
+#     gap the pod+Service ranges leave open: the node IP and the apiserver
+#     endpoint. A minikube node (e.g. 192.168.49.2) is RFC1918, so without this
+#     HCC would read https://192.168.49.2:10250/ (kubelet) as a legitimate LAN
+#     target. HCC is FAIL-CLOSED on this value too (same opt-out knob exempts
+#     both categories). In minikube the script fills it from the node
+#     InternalIPs + apiserver endpoint; in a managed cluster (GKE, ...) declare
+#     it explicitly — the node-pool subnet plus masterIpv4CidrBlock.
 #
 # This patch is listed in the overlay's patchesStrategicMerge and rendered on
 # every `make minikube-deploy-all`; the rendered file is gitignored, only this
@@ -34,9 +43,11 @@
 # deliberate step (see docs/deploy/llm-providers.md).
 #
 # CIDR FORMAT — comma-separated. CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS is the
-# pod + Service CIDRs; it is passed as-is to the runtime LAN classifier (no
-# over-broad rejection), so set it tightly — an over-broad range like 10.0.0.0/8
-# would swallow legitimate RFC1918 LAN targets as cluster-internal.
+# pod + Service CIDRs; CONTEXT_MAPPER_CLUSTER_NODE_CIDRS is the node + apiserver
+# ranges (node IPs / endpoint as /32, plus node-pool subnets). Both are passed
+# as-is to the runtime LAN classifier (no over-broad rejection), so set them
+# tightly — an over-broad range like 10.0.0.0/8 would swallow legitimate RFC1918
+# LAN targets as cluster-internal.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,3 +61,5 @@ spec:
           env:
             - name: CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS
               value: "__CLUSTER_INTERNAL_CIDRS__"
+            - name: CONTEXT_MAPPER_CLUSTER_NODE_CIDRS
+              value: "__CLUSTER_NODE_CIDRS__"

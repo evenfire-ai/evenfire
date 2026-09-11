@@ -21,10 +21,15 @@ SCRIPT="$REPO_ROOT/deploy/scripts/minikube-detect-cluster-cidrs.sh"
 TEMPLATE="$REPO_ROOT/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template"
 
 # Builds a throwaway overlay dir carrying the tracked template and a kubectl stub
-# whose apiserver / controller-manager answers are supplied by the caller. Echoes
-# the dir path.
+# whose apiserver / controller-manager / nodes / endpoints answers are supplied
+# by the caller (nodes + endpoint default to a single minikube node). Also stubs
+# `docker` as absent-but-present-on-PATH returning nothing, so the optional
+# docker-subnet read is exercised without depending on the host's docker.
+# Echoes the dir path.
 make_case_dir() {
-  local apiserver_cmd="$1" kcm_cmd="$2"
+  # Use ${3-...} / ${4-...} (no colon) so an explicitly empty arg stays empty —
+  # case (v) passes "" to assert the no-node abort.
+  local apiserver_cmd="$1" kcm_cmd="$2" nodes="${3-192.168.49.2}" endpoints="${4-192.168.49.2}"
   local d; d="$(mktemp -d)"
   mkdir -p "$d/bin" "$d/overlay/patches"
   cp "$TEMPLATE" "$d/overlay/patches/llm-egress-cluster-cidrs.yaml.template"
@@ -33,12 +38,18 @@ make_case_dir() {
 case "\$*" in
   *"component=kube-apiserver"*) printf '%s\n' "$apiserver_cmd" ;;
   *"component=kube-controller-manager"*) printf '%s\n' "$kcm_cmd" ;;
-  *"get nodes"*) printf '192.168.49.2\n' ;;
-  *"get endpoints kubernetes"*) printf '192.168.49.2\n' ;;
+  *"get nodes"*) printf '%s' "$nodes" ;;
+  *"get endpoints kubernetes"*) printf '%s' "$endpoints" ;;
 esac
 exit 0
 STUB
   chmod +x "$d/bin/kubectl"
+  # docker stub: answers no subnets, proving the node CIDRs come from kubectl.
+  cat > "$d/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+  chmod +x "$d/bin/docker"
   printf '%s\n' "$d"
 }
 
@@ -121,9 +132,52 @@ assert_override_metachar_aborts_and_valid_renders_literal() {
   rm -rf "$d"
 }
 
+# (v) No node InternalIP → abort (the node category is fail-closed too: a
+#     missing node range would let HCC accept the node IP as a LAN target).
+assert_aborts_without_node_ip() {
+  local d rc
+  d="$(make_case_dir \
+    "kube-apiserver --service-cluster-ip-range=10.96.0.0/12" \
+    "kube-controller-manager --cluster-cidr=10.244.0.0/16" \
+    "" "192.168.49.2")"
+  run_script "$d"; rc=$?
+  if [ "$rc" -ne 0 ] && [ ! -f "$d/overlay/patches/llm-egress-cluster-cidrs.yaml" ]; then
+    pass "aborts (exit 1) and writes no patch when no node InternalIP is found"
+  else
+    fail "expected abort + no patch when node InternalIPs are empty (rc=$rc)"
+  fi
+  rm -rf "$d"
+}
+
+# (vi) Node InternalIP and apiserver endpoint are the same address → rendered as
+#      a single /32 (dedup), and the node placeholder is fully substituted.
+assert_node_cidrs_deduped_as_slash32() {
+  local d rc patch node_value
+  d="$(make_case_dir \
+    "kube-apiserver --service-cluster-ip-range=10.96.0.0/12" \
+    "kube-controller-manager --cluster-cidr=10.244.0.0/16" \
+    "192.168.49.2" "192.168.49.2")"
+  run_script "$d"; rc=$?
+  patch="$d/overlay/patches/llm-egress-cluster-cidrs.yaml"
+  # The node env value line must be the single deduped /32 — a non-deduped render
+  # would be value: "192.168.49.2/32,192.168.49.2/32". (grep over the whole file
+  # would also hit the template's doc comment, which is irrelevant here.)
+  node_value="$(grep -E 'value: "192.168.49.2/32"' "$patch" 2>/dev/null)"
+  if [ "$rc" -eq 0 ] \
+     && [ -n "$node_value" ] \
+     && ! grep -q '192.168.49.2/32,192.168.49.2/32' "$patch"; then
+    pass "renders node + endpoint IP as a single deduped /32"
+  else
+    fail "expected one 192.168.49.2/32 in the node env (rc=$rc)"
+  fi
+  rm -rf "$d"
+}
+
 assert_aborts_without_pod_cidr
 assert_renders_both_cidrs
 assert_override_without_prefix_aborts
 assert_override_metachar_aborts_and_valid_renders_literal
+assert_aborts_without_node_ip
+assert_node_cidrs_deduped_as_slash32
 
 exit $FAIL

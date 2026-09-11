@@ -240,23 +240,36 @@ Three things to know as an operator:
   cannot do CIDR arithmetic. The address must be a private, non-reserved RFC1918
   address; the runtime `/32` NetworkPolicy then constrains the broker to exactly
   that destination.
-- **The cluster-internal guard is required, not optional.** HCC needs
-  `CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS` (the pod + Service ranges) to reject a
-  `baseURL` that lands inside cluster space — an apiserver/pod ClusterIP — which
-  CEL cannot compute. HCC is **fail-closed** on it: with
+- **The cluster-internal guard is required, not optional.** HCC needs two
+  categories of ranges to reject a `baseURL` that lands inside cluster space —
+  which CEL cannot compute — and is **fail-closed** on both: with
   `CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=true` (the base default) it
-  refuses to provision **any** broker until the ranges are set. Even so, HCC
-  always pins the apiserver ClusterIP via a zero-config floor derived from
-  `KUBERNETES_SERVICE_HOST`, so that one address is rejected before the guard is
-  even configured. The ranges are environment-specific and gitignored, so the
-  minikube overlay **renders and applies the patch by default** — `make
-  minikube-deploy-all` runs `make minikube-detect-cluster-cidrs`, and
+  refuses to provision **any** broker until they are set.
+  - `CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS` — the **pod + Service** ranges, to
+    reject an apiserver/pod ClusterIP.
+  - `CONTEXT_MAPPER_CLUSTER_NODE_CIDRS` — the **node + control-plane** ranges
+    (node InternalIPs and the apiserver endpoint, each as `/32`, plus node-pool
+    subnets). Without this a node IP — which is RFC1918 (e.g. a minikube node at
+    `192.168.49.2`) — would read as a legitimate LAN target, so
+    `https://192.168.49.2:10250/` (the kubelet) would be accepted. The same
+    opt-out knob exempts **both** categories.
+
+  Even so, HCC always pins the apiserver ClusterIP via a zero-config floor
+  derived from `KUBERNETES_SERVICE_HOST`, so that one address is rejected before
+  the guard is even configured. The ranges are environment-specific and
+  gitignored, so the minikube overlay **renders and applies the patch by
+  default** — `make minikube-deploy-all` runs `make
+  minikube-detect-cluster-cidrs`, which fills in both categories from the live
+  cluster (node InternalIPs + apiserver endpoint for the node ranges), and
   `patches/llm-egress-cluster-cidrs.yaml` is already in the overlay's
   `patchesStrategicMerge` (see
-  `deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template`). A
-  deploy that deliberately runs without the guard sets
-  `CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false`; then the feature falls
-  back to the always-on RFC1918 + `/32` NetworkPolicy tier only.
+  `deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template`). On
+  a managed cluster (GKE, ...) the node ranges are not discoverable the same way:
+  declare `CONTEXT_MAPPER_CLUSTER_NODE_CIDRS` explicitly as the node-pool subnet
+  plus the control-plane `masterIpv4CidrBlock` (e.g.
+  `10.128.0.0/20,172.16.0.0/28`). A deploy that deliberately runs without the
+  guard sets `CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false`; then the
+  feature falls back to the always-on RFC1918 + `/32` NetworkPolicy tier only.
 - **The apiserver-reachable ranges stay opt-in.**
   `CONTEXT_MAPPER_K8S_API_CIDRS` also drives the `allow-k8s-api-egress-*`
   NetworkPolicies and the watch-recovery E2E fixtures, so it is **not** set by the

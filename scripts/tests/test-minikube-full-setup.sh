@@ -1245,6 +1245,7 @@ prepare_k8s_api_ip_repo() {
 printf 'kubectl %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "$*" in
   *"get endpoints kubernetes"*) echo "10.11.12.13"; exit 0 ;;
+  *"get nodes"*) echo "192.168.49.2"; exit 0 ;;
   *"component=kube-apiserver"*) echo "kube-apiserver --service-cluster-ip-range=10.96.0.0/12"; exit 0 ;;
   *"component=kube-controller-manager"*) echo "kube-controller-manager --cluster-cidr=10.244.0.0/16"; exit 0 ;;
 esac
@@ -1286,7 +1287,10 @@ assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree() {
   prepare_k8s_api_ip_override_copy "$d"
   out="$(run_k8s_api_ip_block "$d" "$d/override/deploy/overlays/minikube")"
   rc=$?
-  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  # Count only the k8s-api-ip detector's endpoint read by its unique jsonpath
+  # ({.subsets[0]...}); the sibling cluster-cidrs detector also reads the
+  # endpoint now (for node CIDRs) but with a {range .subsets[*]...} jsonpath.
+  calls="$(grep -cF 'subsets[0]' "$d/ops.log")"
   [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
   grep -q '10.11.12.13/32' "$d/override/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
     || problems+="the render copy did not get the generated patch; "
@@ -1317,7 +1321,10 @@ assert_the_unoverridden_path_generates_the_api_ip_patch_once() {
   prepare_k8s_api_ip_repo "$d"
   out="$(run_k8s_api_ip_block "$d" "$d/project/deploy/overlays/minikube")"
   rc=$?
-  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  # Count only the k8s-api-ip detector's endpoint read by its unique jsonpath
+  # ({.subsets[0]...}); the sibling cluster-cidrs detector also reads the
+  # endpoint now (for node CIDRs) but with a {range .subsets[*]...} jsonpath.
+  calls="$(grep -cF 'subsets[0]' "$d/ops.log")"
   [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
   grep -q '10.11.12.13/32' "$d/project/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
     || problems+="the working tree did not get the generated patch; "

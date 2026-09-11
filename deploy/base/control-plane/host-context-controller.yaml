@@ -149,12 +149,15 @@ spec:
           value: llm-egress
         - name: CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT
           value: "3000"
-        # Fail-closed guard. HCC refuses to provision a broker unless
-        # CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS is set, so a deploy that forgot the
-        # cluster-internal ranges cannot silently accept a cluster-internal baseURL
-        # (SSRF pivot into the control plane). BASE IS FAIL-CLOSED: it ships no
-        # CIDRs, so an overlay MUST supply CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS
-        # (the minikube overlay renders it by default) or the feature stays inert.
+        # Fail-closed guard. HCC refuses to provision a broker unless BOTH
+        # CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (pod + Service ranges) and
+        # CONTEXT_MAPPER_CLUSTER_NODE_CIDRS (node IPs + apiserver endpoint) are
+        # set, so a deploy that forgot either cannot silently accept a
+        # cluster-internal baseURL (SSRF pivot into the control plane) — the node
+        # ranges close the gap the pod+Service ranges leave open, since a node IP
+        # is RFC1918 and would otherwise read as a legitimate LAN target. BASE IS
+        # FAIL-CLOSED: it ships no CIDRs, so an overlay MUST supply both (the
+        # minikube overlay renders them by default) or the feature stays inert.
         # Set to "false" only for a deploy that deliberately runs without the guard.
         - name: CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS
           value: "true"
