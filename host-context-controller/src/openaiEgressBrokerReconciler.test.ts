@@ -335,9 +335,16 @@ describe('OpenAiEgressBrokerReconciler', () => {
     expect(rev1).not.toBe(rev2)
   })
 
-  it('T7: fail-closed — a baseURL that does not pass classifyLanBaseURL provisions nothing', async () => {
-    // public IP (not RFC1918) and a DNS hostname both must be rejected.
-    for (const bad of ['http://8.8.8.8/v1', 'http://example.com/v1', 'http://169.254.1.1/v1']) {
+  it('T7: fail-closed — a baseURL that does not pass classifyLanBaseURL provisions nothing, with the right reason', async () => {
+    // Each rejected baseURL must both provision nothing AND write the condition
+    // naming WHY (per-test liveness witness: "nothing created" alone cannot tell a
+    // correct rejection from a test that never ran).
+    const cases: Array<[url: string, reason: string]> = [
+      ['http://8.8.8.8/v1', 'NotPrivateLan'],
+      ['http://example.com/v1', 'NotIp'],
+      ['http://169.254.1.1/v1', 'LinkLocal'],
+    ]
+    for (const [bad, reason] of cases) {
       vi.clearAllMocks()
       const host = makeHost({
         name: `bad-${bad}`,
@@ -348,6 +355,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
       await reconciler.reconcileForHost(host)
       expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
       expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(brokersCondition()).toMatchObject({ status: 'False', reason })
     }
   })
 
@@ -367,6 +375,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
     await reconciler.reconcileForHost(host)
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(brokersCondition()).toMatchObject({ status: 'False', reason: 'PathUnsafe' })
   })
 
   it('T7c: fail-closed — a cluster-internal RFC1918 target (apiserver ClusterIP) provisions nothing', async () => {
@@ -378,6 +387,7 @@ describe('OpenAiEgressBrokerReconciler', () => {
     await reconciler.reconcileForHost(host)
     expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
     expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(brokersCondition()).toMatchObject({ status: 'False', reason: 'ClusterInternal' })
   })
 
   it('T8: broker→LAN NetworkPolicy pins an exact /32 on the dial port with NO DNS egress', async () => {

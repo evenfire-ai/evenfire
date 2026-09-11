@@ -124,6 +124,12 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     // Observable: no broker Deployment and no NetworkPolicy is created.
     expect(provisioned()).toBe(false)
     expect(npCreated()).toBe(false)
+    // Per-test liveness witness: the refusal names WHY (the guard, not the target).
+    expect(brokersCondition()).toMatchObject({
+      status: 'False',
+      reason: 'ClusterInternalGuardUnconfigured',
+    })
+    expect(brokersCondition()?.message).toContain('primary: cluster_internal_guard_unconfigured')
   })
 
   it('G2: even a clean private-LAN baseURL provisions NOTHING while the guard is unconfigured', async () => {
@@ -132,6 +138,11 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     await reconciler.reconcileForHost(host)
     expect(provisioned()).toBe(false)
     expect(npCreated()).toBe(false)
+    expect(brokersCondition()).toMatchObject({
+      status: 'False',
+      reason: 'ClusterInternalGuardUnconfigured',
+    })
+    expect(brokersCondition()?.message).toContain('primary: cluster_internal_guard_unconfigured')
   })
 
   it('G3: with the guard configured, the zero-config floor still rejects the apiserver ClusterIP', async () => {
