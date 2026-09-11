@@ -180,19 +180,63 @@ assert_dockerignore_mutations_rejected() {
   rm -rf -- "$fixture_dir"
 }
 
+# Every `file:../packages/<name>` dependency declared in a service's
+# package.json, as a sorted unique list of package directory names.
+file_deps_of() {
+  local svc="$1"
+  grep -oE 'file:\.\./packages/[A-Za-z0-9_.-]+' "$REPO_ROOT/$svc/package.json" \
+    | sed 's#.*/##' | sort -u || true
+}
+
+# Derived guard.  The per-Dockerfile lists below pin the packages we already
+# know about; this one DERIVES the list from the service's package.json so a
+# newly added `file:` package that no Dockerfile COPYs fails the contract
+# instead of silently shipping absent (the @clerum/egress-policy gap, R4-B1).
+# It asserts a COPY before the *last* npm ci (the app's own install), not before
+# every npm ci: multi-stage builds legitimately copy some packages only before
+# the final install (e.g. workflow-recipes builds workflow-runtime-core in an
+# earlier stage with its own npm ci), and a before-every-ci rule would raise
+# false failures on those correct Dockerfiles.  --materialized additionally
+# requires each package be copied into node_modules for Next.js bundlers.
+assert_file_deps_copied() {
+  local svc="$1"
+  local dockerfile="$2"
+  local materialized=""
+  [[ "${3:-}" == "--materialized" ]] && materialized=1
+  local pkg
+  while IFS= read -r pkg; do
+    [[ -z "$pkg" ]] && continue
+    assert_copy_before_last_ci "$dockerfile" "$pkg"
+    if [[ -n "$materialized" ]]; then
+      assert_materialized "$dockerfile" "$pkg"
+    fi
+  done < <(file_deps_of "$svc")
+}
+
+assert_file_deps_copied control-api control-api/Dockerfile
+assert_file_deps_copied control-ui control-ui/Dockerfile --materialized
+assert_file_deps_copied profile-ui profile-ui/Dockerfile --materialized
+assert_file_deps_copied host-context-controller host-context-controller/Dockerfile
+assert_file_deps_copied mcp-host mcp-host/Dockerfile
+assert_file_deps_copied mcp-host mcp-host/Dockerfile.slim
+assert_file_deps_copied mcp-host mcp-host/Dockerfile.full
+assert_file_deps_copied mcp-host mcp-host/Dockerfile.desktop
+assert_file_deps_copied workflow-recipes workflow-recipes/Dockerfile
+assert_file_deps_copied workflow-recipes workflow-recipes/Dockerfile.coordinator
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
-  display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
+  display-field egress-policy image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
-  display-field frontend-components gfs-interaction-policy llm-providers workflow-recipe-capability-policy
+  display-field egress-policy frontend-components gfs-interaction-policy llm-providers workflow-recipe-capability-policy
 assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
-  image-policy llm-providers network-policy-core workflow-recipe-capability-policy
-assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.desktop llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.full llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.slim llm-providers
+  egress-policy image-policy llm-providers network-policy-core workflow-recipe-capability-policy
+assert_copy_before_every_ci mcp-host/Dockerfile egress-policy llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.desktop egress-policy llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.full egress-policy llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.slim egress-policy llm-providers
 
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install
@@ -205,6 +249,7 @@ assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator workflow-reci
 assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator image-policy
 
 assert_materialized control-ui/Dockerfile display-field
+assert_materialized control-ui/Dockerfile egress-policy
 assert_materialized control-ui/Dockerfile frontend-components
 assert_materialized control-ui/Dockerfile gfs-interaction-policy
 assert_materialized control-ui/Dockerfile llm-providers
@@ -214,9 +259,12 @@ assert_materialized profile-ui/Dockerfile frontend-components
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
+assert_dockerignore_allows control-api/Dockerfile.dockerignore egress-policy
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore gfs-interaction-policy
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers
+assert_dockerignore_allows control-ui/Dockerfile.dockerignore egress-policy
+assert_dockerignore_allows host-context-controller/Dockerfile.dockerignore egress-policy
 assert_dockerignore_excludes_generated_dependencies \
   control-ui/Dockerfile.dockerignore gfs-interaction-policy
 assert_dockerignore_narrow_package control-ui/Dockerfile.dockerignore frontend-components

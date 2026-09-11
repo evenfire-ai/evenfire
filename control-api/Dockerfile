@@ -7,6 +7,9 @@ COPY packages/image-policy ./packages/image-policy
 # both the workflow-runtime-core build (it depends on it) and control-api's
 # npm ci (control-api validates the provider set from it, R4).
 COPY packages/llm-providers ./packages/llm-providers
+# Shared prebuilt egress-policy package (no build step). control-api's npm ci
+# resolves this file: dependency; the LAN baseURL classifier lives here.
+COPY packages/egress-policy ./packages/egress-policy
 # Shared prebuilt display-field validation package (no build step). Copied
 # before control-api's npm ci so its file: dependency resolves; resourceFieldValidation
 # imports validateDisplayField from it.

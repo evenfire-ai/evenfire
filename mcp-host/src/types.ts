@@ -12,6 +12,13 @@ export interface ModelConfig {
   provider: LlmProvider
   name: string
   connectionRef?: string
+  /**
+   * LAN endpoint of a local `openai-compatible` provider (e.g.
+   * `http://<lan-ip>:8000/v1`). mcp-host NEVER dials this directly — it uses it
+   * only to (a) detect a hot-reload change and (b) extract the pathname that is
+   * appended to the derived egress-broker URL. Ignored for every other provider.
+   */
+  baseURL?: string
 }
 
 /** Phase 7–8: Workspace memory configuration. */
@@ -100,7 +107,13 @@ export interface HostAllowedModel {
 export interface RawLlmPolicy {
   cooldownSeconds?: number
   triggerOn?: string[]
-  fallbacks?: Array<{ provider?: string; model?: string; credentialSlot?: string }>
+  fallbacks?: Array<{
+    provider?: string
+    model?: string
+    credentialSlot?: string
+    /** LAN endpoint of a local `openai-compatible` fallback (see ModelConfig.baseURL). */
+    baseURL?: string
+  }>
 }
 
 /**

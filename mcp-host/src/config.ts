@@ -51,6 +51,13 @@ export interface Config {
   // guardrail hook resolver derives in-cluster endpoints against this namespace.
   llmHooksNamespace: string
 
+  // Platform constants for the per-slot openai-compatible egress broker. mcp-host
+  // dials the broker Service (never the LAN endpoint directly); these MUST match
+  // the namespace/port HCC provisions the broker under (its
+  // CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE / CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT).
+  llmEgressNamespace: string
+  brokerPort: number
+
   // Name of the operator-managed LLM allowlist ConfigMap watched by the
   // ConfigStore (R3). Configurable so canary/test namespaces can point at a
   // differently-named artifact; default matches the control-api writer.
@@ -639,6 +646,12 @@ export const config: Config = {
 
   // Namespace where installed LlmHook workloads/Services live (spec §8.2).
   llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
+  // openai-compatible egress broker location. Defaults match HCC's defaults
+  // (llm-egress / 3000); overridable only for canary/test topologies. A mismatch
+  // with HCC would make mcp-host dial a broker Service that does not exist.
+  llmEgressNamespace: getEnv('CLERUM_LLM_EGRESS_NAMESPACE', 'llm-egress')!,
+  brokerPort: getEnvNumber('CLERUM_OAI_EGRESS_BROKER_PORT', 3000),
 
   // LLM allowlist ConfigMap name (R3). CROSS-SERVICE CONTRACT: the default
   // (`clerum-llm-allowed-models`) is the CM produced by control-api

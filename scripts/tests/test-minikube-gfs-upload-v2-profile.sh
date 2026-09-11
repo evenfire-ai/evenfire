@@ -21,6 +21,12 @@ cp -R "$ROOT/deploy" "$TMP/deploy"
 sed 's#__K8S_API_IP__#10.96.0.1#g' \
   "$TMP/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
   >"$TMP/deploy/overlays/minikube/patches/k8s-api-ip.yaml"
+# The sibling llm-egress-cluster-cidrs patch is also a gitignored, rendered file
+# in the overlay's patchesStrategicMerge, so render it too or kustomize aborts on
+# the missing file (placeholder pod/Service CIDRs — this test only reads HCC env).
+sed 's#__CLUSTER_INTERNAL_CIDRS__#10.244.0.0/16,10.96.0.0/12#g' \
+  "$TMP/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template" \
+  >"$TMP/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
 
 if ! kubectl kustomize "$TMP/deploy/overlays/minikube" \
   >"$TMP/render.yaml" 2>"$TMP/render.err"; then

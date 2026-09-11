@@ -11,11 +11,21 @@ TMP_DIR="$(mktemp -d)"
 MINIKUBE_API_IP_PATCH=""
 MINIKUBE_API_IP_PATCH_BACKUP=""
 MINIKUBE_API_IP_PATCH_PREEXISTING=0
+# The sibling llm-egress-cluster-cidrs patch is the same kind of gitignored,
+# rendered file; shadow and restore it the same way.
+MINIKUBE_CIDRS_PATCH=""
+MINIKUBE_CIDRS_PATCH_BACKUP=""
+MINIKUBE_CIDRS_PATCH_PREEXISTING=0
 cleanup() {
   if [[ "${MINIKUBE_API_IP_PATCH_PREEXISTING}" -eq 1 ]]; then
     cp "${MINIKUBE_API_IP_PATCH_BACKUP}" "${MINIKUBE_API_IP_PATCH}"
   elif [[ -n "${MINIKUBE_API_IP_PATCH:-}" && -f "${MINIKUBE_API_IP_PATCH}" ]]; then
     rm -f "${MINIKUBE_API_IP_PATCH}"
+  fi
+  if [[ "${MINIKUBE_CIDRS_PATCH_PREEXISTING}" -eq 1 ]]; then
+    cp "${MINIKUBE_CIDRS_PATCH_BACKUP}" "${MINIKUBE_CIDRS_PATCH}"
+  elif [[ -n "${MINIKUBE_CIDRS_PATCH:-}" && -f "${MINIKUBE_CIDRS_PATCH}" ]]; then
+    rm -f "${MINIKUBE_CIDRS_PATCH}"
   fi
   rm -rf "${TMP_DIR}"
 }
@@ -172,6 +182,22 @@ if [[ -f "${MINIKUBE_API_IP_PATCH}" ]]; then
   MINIKUBE_API_IP_PATCH_PREEXISTING=1
 fi
 sed 's#__K8S_API_IP__#10.96.0.1#g' "${MINIKUBE_API_IP_TEMPLATE}" >"${MINIKUBE_API_IP_PATCH}"
+
+# The overlay also lists patches/llm-egress-cluster-cidrs.yaml (HCC's fail-closed
+# egress-broker guard), the same gitignored/rendered kind. Render it here too or
+# `kubectl kustomize` aborts before reaching a lint verdict.
+MINIKUBE_CIDRS_TEMPLATE="${ROOT}/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template"
+MINIKUBE_CIDRS_PATCH="${ROOT}/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
+if [[ ! -f "${MINIKUBE_CIDRS_TEMPLATE}" ]]; then
+  echo "FAIL: missing ${MINIKUBE_CIDRS_TEMPLATE}; cannot render the minikube cluster-internal CIDR patch" >&2
+  exit 1
+fi
+if [[ -f "${MINIKUBE_CIDRS_PATCH}" ]]; then
+  MINIKUBE_CIDRS_PATCH_BACKUP="${TMP_DIR}/llm-egress-cluster-cidrs.yaml.orig"
+  cp "${MINIKUBE_CIDRS_PATCH}" "${MINIKUBE_CIDRS_PATCH_BACKUP}"
+  MINIKUBE_CIDRS_PATCH_PREEXISTING=1
+fi
+sed 's#__CLUSTER_INTERNAL_CIDRS__#10.244.0.0/16,10.96.0.0/12#g' "${MINIKUBE_CIDRS_TEMPLATE}" >"${MINIKUBE_CIDRS_PATCH}"
 
 MINIKUBE_RENDERED="${TMP_DIR}/minikube-rendered.yaml"
 kubectl kustomize "${ROOT}/deploy/overlays/minikube" >"${MINIKUBE_RENDERED}"

@@ -14,10 +14,18 @@ import { PROVIDER_CREDENTIAL_SLOTS, PROVIDER_IDS } from '@clerum/llm-providers'
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const read = (rel: string): string => readFileSync(resolve(repoRoot, rel), 'utf8')
 
+// Providers deliberately NOT mirrored into the platform-seeding shell scripts.
+// `openai-compatible`'s credential is OPTIONAL and per-Host: HCC injects it into
+// the broker from the Host's own Secret. It is not a platform-wide secret that
+// minikube/e2e seeds, so it must be excluded from the mirror expectation rather
+// than added to the scripts (the scripts seed platform LLM credentials only).
+const NOT_PLATFORM_SEEDED = new Set(['openai-compatible'])
+const seededProviders = PROVIDER_IDS.filter(id => !NOT_PLATFORM_SEEDED.has(id))
+
 describe('hand-maintained provider mirrors (shell scripts)', () => {
   it('apply-llm-secret.sh SLOTS carries every credential slot dataKey', () => {
     const script = read('scripts/minikube/apply-llm-secret.sh')
-    for (const id of PROVIDER_IDS) {
+    for (const id of seededProviders) {
       for (const slot of PROVIDER_CREDENTIAL_SLOTS[id]) {
         expect(script, `missing slot ${slot.dataKey} (${id})`).toContain(
           `${slot.dataKey}|${slot.envName}|`
@@ -28,7 +36,7 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
 
   it('check-prereqs.sh PROVIDER_KEYS maps every provider to its primary env', () => {
     const script = read('scripts/check-prereqs.sh')
-    for (const id of PROVIDER_IDS) {
+    for (const id of seededProviders) {
       const slots = PROVIDER_CREDENTIAL_SLOTS[id]
       if (slots.length === 0) continue
       const primaryEnv = slots[0].envName
@@ -45,7 +53,7 @@ describe('hand-maintained provider mirrors (shell scripts)', () => {
       // That catches an absent arm and a mis-wired one, while tolerating the
       // multiple case blocks.
       const lines = read(rel).split('\n')
-      for (const id of PROVIDER_IDS) {
+      for (const id of seededProviders) {
         const slots = PROVIDER_CREDENTIAL_SLOTS[id]
         if (slots.length === 0) continue
         const primarySlot = slots[0].dataKey

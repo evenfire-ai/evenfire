@@ -22,7 +22,7 @@ by (potentially) three different people.
 ```mermaid
 flowchart LR
   subgraph P["1. PROVIDER — who serves the model"]
-    P1["Host CRD spec.model.provider<br/>one of 22 ids<br/>chosen by the operator"]
+    P1["Host CRD spec.model.provider<br/>one of 23 ids<br/>chosen by the operator"]
   end
   subgraph M["2. MODEL — which model of that provider"]
     M1["allowlist llm_allowed_models<br/>operator-declared in Control UI<br/>user picks within it, per chat"]
@@ -51,7 +51,7 @@ A few rules that follow from this split, and that surprise people:
 
 ## 2. Which providers are supported
 
-**23 providers**, defined once in
+**24 providers**, defined once in
 [`packages/llm-providers/index.cjs`](../../packages/llm-providers/index.cjs) —
 the single source of truth consumed by mcp-host, control-api, the workflow
 runtime, the host controller and the Control UI.
@@ -111,17 +111,49 @@ Azure is OpenAI-shaped but has no fixed base URL (per-resource endpoint), it
 authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 **its "model" is your Azure deployment name**, not a catalog id.
 
+### Group D — local OpenAI-compatible model via egress broker (1)
+
+| Provider                     | id                  | Credential slot              | Non-secret env (per Host)                          |
+| ---------------------------- | ------------------- | ---------------------------- | -------------------------------------------------- |
+| OpenAI-compatible (local)    | `openai-compatible` | `openai-compatible-api-key`  | `spec.model.baseURL` (required, on the Host spec)  |
+
+This is the escape hatch for a model an operator runs **themselves** on the
+private LAN — vLLM, Ollama, LM Studio, TGI, or any server that speaks the
+OpenAI `/chat/completions` API. It reuses the same `OpenAICompatibleProvider`
+driver as Group A, but two things make it its own category:
+
+- **The operator supplies the endpoint.** `spec.model.baseURL` is a field on the
+  Host CRD, required only for this provider and rejected for every other one
+  (CRD CEL). It must be a **private LAN** address — the CRD rejects
+  cluster-internal `.svc` / `.svc.cluster.local` targets by shape, and metadata
+  / CGNAT ranges are rejected downstream (control-api / HCC), since CEL cannot do
+  CIDR arithmetic.
+- **mcp-host never dials the LAN directly — egress is brokered.** The agent talks
+  only to an in-cluster broker HCC provisions per `(Host, endpoint)`; the broker
+  is the single hop allowed out to the LAN, pinned by a `/32` NetworkPolicy. See
+  [the egress broker, in the operator guide](../deploy/llm-providers.md#8-local-openai-compatible-models-via-the-egress-broker).
+
+The API key is **optional**: a local server that needs no auth takes an empty
+`openai-compatible-api-key`, but the `secretRef` must still exist (CRD CEL) so a
+static-credentials target has a Secret to resolve. Fallbacks may also be
+`openai-compatible`, each with its **own** `baseURL` (a second LAN host) — each
+gets its own broker.
+
 ### Important: not every provider works everywhere
 
-| Surface                       | Providers supported                     |
-| ----------------------------- | --------------------------------------- |
-| Interactive Host (chat agent) | all **22**                              |
-| WorkflowRecipe LLM steps      | **20** — `bedrock` and `azure` excluded |
+| Surface                       | Providers supported                                        |
+| ----------------------------- | ---------------------------------------------------------- |
+| Interactive Host (chat agent) | all **23**                                                 |
+| WorkflowRecipe LLM steps      | **20** — `bedrock`, `azure` and `openai-compatible` excluded |
 
 `bedrock` and `azure` are deliberately absent from the WorkflowRecipe CRD enum:
 the workflow `configure` transport carries a **single** credential string, so it
-cannot deliver Bedrock's key pair nor Azure's required endpoint. Excluding them
-makes the recipe fail at admission rather than mid-run.
+cannot deliver Bedrock's key pair nor Azure's required endpoint. `openai-compatible`
+is excluded for a different reason (D-7): it needs a per-Host `baseURL` and a
+provisioned egress broker, neither of which the recipe `configure` transport
+models — a recipe cannot carry an endpoint, and no broker exists for a bare
+workflow step. Excluding all three makes the recipe fail at admission rather than
+mid-run. (Interactive Hosts remain the 23 — this only narrows the recipe surface.)
 
 ---
 

@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { CONTROL_ROUTES } from '@constants/routes'
+import { LanBaseUrlField } from '@/components/LanBaseUrlField'
 import { LlmPolicyEditor } from '@/components/LlmPolicyEditor'
 import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import { SelectionDropdown } from '@/components/SelectionDropdown'
@@ -11,6 +12,8 @@ import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
+  LLM_LAN_BASE_URL_PLACEHOLDER,
+  LLM_LOCAL_PROVIDER,
   type LlmCredentialField,
   type LlmCredentialGroup,
   type LlmProvider,
@@ -27,8 +30,10 @@ import {
   isProviderAllowUnrestricted,
   mintFallbackSlot,
   normalizeProvider,
+  providerRequiresBaseUrl,
   providerSupportsFallbackCredentialSlot,
   resolveDefaultModel,
+  validateLlmLanBaseUrl,
   validateLlmSecretData,
 } from '@/lib/llm'
 import type { LlmCredentialWiring, LlmProviderConfigProps } from './types'
@@ -88,6 +93,7 @@ function fallbackEffectiveSlots(
 export function LlmProviderConfig({
   provider,
   model,
+  baseURL = '',
   onPrimaryChange,
   policy,
   onPolicyChange,
@@ -166,7 +172,11 @@ export function LlmProviderConfig({
       models.length > 0 &&
       !models.includes(model)
     ) {
-      onPrimaryChange({ provider, model: models[0] })
+      onPrimaryChange({
+        provider,
+        model: models[0],
+        baseURL: providerRequiresBaseUrl(provider) ? baseURL : undefined,
+      })
     }
   }
 
@@ -260,6 +270,10 @@ export function LlmProviderConfig({
                     nextProvider,
                     constrainModelOptions(catalog, allowedModels, nextProvider)
                   ),
+                  // A provider switch resets the LAN endpoint: it is only ever
+                  // set for openai-compatible, and the operator declares a fresh
+                  // one each time they pick the local provider.
+                  baseURL: nextProvider === LLM_LOCAL_PROVIDER ? '' : undefined,
                 })
               }}
             />
@@ -291,12 +305,25 @@ export function LlmProviderConfig({
                 onChange={next => {
                   const nextModel = next[0]
                   if (!nextModel) return
-                  onPrimaryChange({ provider, model: nextModel })
+                  onPrimaryChange({
+                    provider,
+                    model: nextModel,
+                    baseURL: providerRequiresBaseUrl(provider) ? baseURL : undefined,
+                  })
                 }}
               />
             </Field>
           )}
         </div>
+
+        {provider === LLM_LOCAL_PROVIDER ? (
+          <LanBaseUrlField
+            id="llm-primary-baseurl"
+            value={baseURL}
+            onChange={next => onPrimaryChange({ provider, model, baseURL: next })}
+            disabled={disabled}
+          />
+        ) : null}
 
         {catalogError ? (
           <p className="cu-field__error">Couldn&apos;t load the model allowlist: {catalogError}</p>

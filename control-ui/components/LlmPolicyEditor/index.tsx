@@ -1,10 +1,12 @@
 'use client'
 
 import React, { useEffect, useMemo } from 'react'
+import { LanBaseUrlField } from '@/components/LanBaseUrlField'
 import { IconTrash } from '@/components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@/components/ui'
 import {
   LLM_DEFAULT_COOLDOWN_SECONDS,
+  LLM_LOCAL_PROVIDER,
   LLM_TRIGGER_CLASSES,
   LLM_TRIGGER_LABELS,
   type LlmFallbackEntry,
@@ -20,6 +22,7 @@ import {
   providerSupportsFallbackCredentialSlot,
   resolveDefaultModel,
 } from '@/lib/llm'
+import { MAX_LLM_FALLBACKS } from '@clerum/llm-providers'
 import type { LlmPolicyEditorProps } from './types'
 
 // Empty triggerOn on a fresh policy means "all four" (the CRD default); we seed
@@ -69,7 +72,12 @@ export function LlmPolicyEditor({
     onChange(merged.fallbacks.length === 0 ? undefined : merged)
   }
 
+  const atFallbackLimit = fallbacks.length >= MAX_LLM_FALLBACKS
+
   const addFallback = () => {
+    // Server-side (control-api) and the CRD both cap the list at this bound; the
+    // button is disabled here, but guard the handler too so nothing can exceed it.
+    if (atFallbackLimit) return
     const model = resolveDefaultModel(
       defaultProvider,
       constrainModelOptions(catalog, allowedModels, defaultProvider)
@@ -189,9 +197,20 @@ export function LlmPolicyEditor({
       )}
 
       <div className="cu-llm-policy__actions">
-        <Button type="button" variant="ghost" size="sm" onClick={addFallback} disabled={disabled}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={addFallback}
+          disabled={disabled || atFallbackLimit}
+        >
           Add fallback provider
         </Button>
+        {atFallbackLimit ? (
+          <span className="cu-field__hint">
+            Maximum of {MAX_LLM_FALLBACKS} fallback providers reached.
+          </span>
+        ) : null}
       </div>
     </section>
   )
@@ -300,7 +319,8 @@ function FallbackRow({
             onChange={e => {
               const nextProvider = normalizeProvider(e.target.value)
               // Re-default the model to the new provider's allowlist and drop a
-              // credentialSlot that no longer applies to the new provider.
+              // credentialSlot / baseURL that no longer applies to the new
+              // provider (baseURL is only meaningful for openai-compatible).
               onChange({
                 provider: nextProvider,
                 model: resolveDefaultModel(
@@ -308,6 +328,7 @@ function FallbackRow({
                   constrainModelOptions(catalog, allowedModels, nextProvider)
                 ),
                 credentialSlot: undefined,
+                baseURL: undefined,
               })
             }}
           >
@@ -351,6 +372,15 @@ function FallbackRow({
             </span>
           ) : null}
         </Field>
+
+        {entry.provider === LLM_LOCAL_PROVIDER ? (
+          <LanBaseUrlField
+            id={`${rowId}-baseurl`}
+            value={entry.baseURL ?? ''}
+            onChange={next => onChange({ baseURL: next })}
+            disabled={disabled}
+          />
+        ) : null}
 
         {supportsCredentialSlot ? (
           <Field

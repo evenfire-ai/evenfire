@@ -104,6 +104,15 @@ patchesStrategicMerge:
   # `kubectl apply -k` without that script will fail on the missing file —
   # run the script (or make target) first.
   - patches/k8s-api-ip.yaml
+  # Cluster-internal CIDRs for HCC's egress-broker guard. HCC is FAIL-CLOSED on
+  # CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (refuses to provision any broker without
+  # it), so this patch is applied by default — not opt-in.
+  # RENDERED FILE (gitignored): generated from
+  # patches/llm-egress-cluster-cidrs.yaml.template by
+  # deploy/scripts/minikube-detect-cluster-cidrs.sh on every
+  # `make minikube-deploy-all`. A bare `kubectl apply -k` without that script
+  # will fail on the missing file — run the script (or make target) first.
+  - patches/llm-egress-cluster-cidrs.yaml
 
 patches:
   # ConfigMap overrides: replace base values with minikube-specific config

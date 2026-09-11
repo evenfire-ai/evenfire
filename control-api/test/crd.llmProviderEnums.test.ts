@@ -62,7 +62,7 @@ describe('LLM provider CRD enums', () => {
     // spec.model.provider + spec.llmPolicy.fallbacks[].provider
     expect(enums).toHaveLength(2)
     for (const e of enums) {
-      for (const id of [...NEW_SINGLE_KEY, 'azure', 'codex-subscription']) {
+      for (const id of [...NEW_SINGLE_KEY, 'azure', 'openai-compatible', 'codex-subscription']) {
         expect(e).toContain(id)
       }
       // additive: original providers preserved

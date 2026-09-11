@@ -9,6 +9,7 @@ const GATED = new Set([
   'reconciler.ts',
   'sharedFileSystemReconciler.ts',
   'llmHookReconciler.ts',
+  'openaiEgressBrokerReconciler.ts',
 ])
 
 const EXEMPT = new Set(['k8s/gfsK8sApi.ts', 'statelessLifecycleExecutor.ts'])
@@ -136,7 +137,7 @@ describe('Deployment writer inventory', () => {
     }
 
     expect(hits.map(h => h.rel).sort()).toEqual([...GATED, ...EXEMPT].sort())
-    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(8)
+    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(9)
     expect(
       hits
         .filter(h => h.gated)
@@ -146,7 +147,7 @@ describe('Deployment writer inventory', () => {
   })
 
   it('every replaceNamespacedConfigMap call is gated per call-site', () => {
-    const CONFIGMAP_GATED = new Set(['reconciler.ts'])
+    const CONFIGMAP_GATED = new Set(['reconciler.ts', 'openaiEgressBrokerReconciler.ts'])
     const CONFIGMAP_CALL = /replaceNamespacedConfigMap\s*\(/g
     const hits: Array<{ rel: string; count: number }> = []
 
@@ -181,6 +182,6 @@ describe('Deployment writer inventory', () => {
     }
 
     expect(hits.map(h => h.rel).sort()).toEqual([...CONFIGMAP_GATED].sort())
-    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(1)
+    expect(hits.reduce((sum, h) => sum + h.count, 0)).toBe(2)
   })
 })

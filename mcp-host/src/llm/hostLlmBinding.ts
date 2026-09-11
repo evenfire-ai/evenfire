@@ -3,6 +3,12 @@ export type HostPrimaryLlmBinding = {
   name?: string | null
   connectionRef?: string | null
   secretRef?: string | null
+  /**
+   * LAN baseURL of a local `openai-compatible` primary. Part of the binding so a
+   * baseURL-only edit (e.g. the operator repoints the endpoint or changes its
+   * path) is detected and the provider is re-bound to the new derived broker URL.
+   */
+  baseURL?: string | null
 }
 
 /** Fail-closed Host sentinel. Empty/missing is not the reserved grant. */
@@ -21,6 +27,7 @@ export function hostPrimaryLlmBindingChanged(
   modelChanged: boolean
   secretRefChanged: boolean
   connectionRefChanged: boolean
+  baseURLChanged: boolean
 } {
   return {
     providerChanged: previous?.provider !== next.provider,
@@ -28,5 +35,6 @@ export function hostPrimaryLlmBindingChanged(
     secretRefChanged: previous?.secretRef !== next.secretRef,
     connectionRefChanged:
       assignedConnectionRef(previous?.connectionRef) !== assignedConnectionRef(next.connectionRef),
+    baseURLChanged: (previous?.baseURL ?? undefined) !== (next.baseURL ?? undefined),
   }
 }

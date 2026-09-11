@@ -104,6 +104,8 @@ function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
       return { minimax: { 'minimax-api-key': apiKey } }
     case 'azure':
       return { azure: { 'azure-openai-api-key': apiKey } }
+    case 'openai-compatible':
+      return { 'openai-compatible': { 'openai-compatible-api-key': apiKey } }
     case 'codex-subscription':
       return {}
     default: {

@@ -74,7 +74,8 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
-	packages/llm-provider-attempt-contract
+	packages/llm-provider-attempt-contract \
+	packages/egress-policy
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
@@ -294,6 +295,10 @@ minikube-deploy-instances: ## Apply CRD test instances (context, host, channel)
 minikube-detect-k8s-api-ip: ## Patch overlays/minikube/patches/k8s-api-ip.yaml with current node IP
 	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-k8s-api-ip.sh
 
+.PHONY: minikube-detect-cluster-cidrs
+minikube-detect-cluster-cidrs: ## Render overlays/minikube/patches/llm-egress-cluster-cidrs.yaml (HCC egress-broker cluster-internal guard; applied by default)
+	@CONTEXT=$(MINIKUBE_PROFILE) deploy/scripts/minikube-detect-cluster-cidrs.sh
+
 .PHONY: minikube-deploy-all minikube-deploy-all-body
 minikube-deploy-all: ## Deploy ALL services via Kustomize minikube overlay
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
@@ -307,6 +312,11 @@ minikube-deploy-all-body:
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
 	@$(MAKE) --no-print-directory minikube-detect-k8s-api-ip
+	@# Render the cluster-internal CIDR patch the egress-broker guard requires.
+	@# HCC is fail-closed on CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS, so this patch is
+	@# default-on; it renders here (before image-mode.sh --render-dir below) so the
+	@# rendered file exists in the copy of deploy/ the overlay is built from.
+	@$(MAKE) --no-print-directory minikube-detect-cluster-cidrs
 	@# Upgrade path: adopt/validate writer and stage reader before HCC cutover.
 	@if [ "$(MINIKUBE_GFS_MUTATION)" != "true" ]; then echo "[minikube-deploy-all] GFS mutation disabled for this non-T2 sync"; fi
 	@if [ "$(MINIKUBE_GFS_MUTATION)" = "true" ]; then \
@@ -1015,6 +1025,11 @@ minikube-db-reset-body:
 	 if [ "$(CONTROL_DB_RESET_PVC_UID)" = "none" ]; then reset_args="--expect-no-pvc"; fi; \
 	 if [ "$(CONTROL_DB_RESET_RESUME)" = "true" ]; then reset_args="$$reset_args --resume"; fi; \
 	 CONTEXT=$(MINIKUBE_PROFILE) bash deploy/scripts/reset-control-db-storage.sh $$reset_args
+	@# `apply -k` builds the whole minikube overlay before the label selector
+	@# narrows it, so it fails on any missing patchesStrategicMerge file. Render the
+	@# gitignored cluster-internal CIDR patch first (HCC's fail-closed egress guard),
+	@# same as make minikube-deploy-all does, or kustomize dies on the missing file.
+	@$(MAKE) --no-print-directory minikube-detect-cluster-cidrs
 	@$(KC) apply -k deploy/overlays/minikube -l app=control-postgres
 	@echo "Scaling up postgres..."
 	@$(KC) scale deploy/control-postgres --replicas=1 -n control-plane

@@ -1235,22 +1235,33 @@ prepare_k8s_api_ip_repo() {
   cp "$REPO_ROOT/deploy/scripts/minikube-detect-k8s-api-ip.sh" "$d/project/deploy/scripts/"
   cp "$REPO_ROOT/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
     "$d/project/deploy/overlays/minikube/patches/"
+  # Step 6b now also renders the sibling llm-egress-cluster-cidrs patch, so the
+  # repo copy needs that detector + template and the stub must answer its reads.
+  cp "$REPO_ROOT/deploy/scripts/minikube-detect-cluster-cidrs.sh" "$d/project/deploy/scripts/"
+  cp "$REPO_ROOT/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template" \
+    "$d/project/deploy/overlays/minikube/patches/"
   cat > "$d/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 printf 'kubectl %s\n' "$*" >>"${TEST_LOG_FILE:?}"
 case "$*" in
   *"get endpoints kubernetes"*) echo "10.11.12.13"; exit 0 ;;
+  *"get nodes"*) echo "192.168.49.2"; exit 0 ;;
+  *"component=kube-apiserver"*) echo "kube-apiserver --service-cluster-ip-range=10.96.0.0/12"; exit 0 ;;
+  *"component=kube-controller-manager"*) echo "kube-controller-manager --cluster-cidr=10.244.0.0/16"; exit 0 ;;
 esac
 exit 0
 STUB
   chmod +x "$d/bin/kubectl"
 }
 
-# The mktemp copy apply_image_tag_override would have produced.
+# The mktemp copy apply_image_tag_override would have produced. It carries both
+# gitignored patch templates, since Step 6b renders both into it.
 prepare_k8s_api_ip_override_copy() {
   local d=$1
   mkdir -p "$d/override/deploy/overlays/minikube/patches"
   cp "$REPO_ROOT/deploy/overlays/minikube/patches/k8s-api-ip.yaml.template" \
+    "$d/override/deploy/overlays/minikube/patches/"
+  cp "$REPO_ROOT/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml.template" \
     "$d/override/deploy/overlays/minikube/patches/"
 }
 
@@ -1276,7 +1287,10 @@ assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree() {
   prepare_k8s_api_ip_override_copy "$d"
   out="$(run_k8s_api_ip_block "$d" "$d/override/deploy/overlays/minikube")"
   rc=$?
-  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  # Count only the k8s-api-ip detector's endpoint read by its unique jsonpath
+  # ({.subsets[0]...}); the sibling cluster-cidrs detector also reads the
+  # endpoint now (for node CIDRs) but with a {range .subsets[*]...} jsonpath.
+  calls="$(grep -cF 'subsets[0]' "$d/ops.log")"
   [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
   grep -q '10.11.12.13/32' "$d/override/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
     || problems+="the render copy did not get the generated patch; "
@@ -1284,6 +1298,12 @@ assert_the_tag_override_also_generates_the_api_ip_patch_in_the_working_tree() {
   # the pre-gate migration render both find it.
   grep -q '10.11.12.13/32' "$d/project/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
     || problems+="the working tree did not get the generated patch; "
+  # Same guarantee for the sibling cidrs patch: absent, kustomize dies on the
+  # missing file in exactly the render paths this block feeds.
+  grep -q '10.244.0.0/16,10.96.0.0/12' "$d/override/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml" \
+    || problems+="the render copy did not get the generated cidrs patch; "
+  grep -q '10.244.0.0/16,10.96.0.0/12' "$d/project/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml" \
+    || problems+="the working tree did not get the generated cidrs patch; "
   [ "$calls" = "2" ] || problems+="detector ran ${calls} time(s), expected 2; "
   if [ -z "$problems" ]; then
     pass "a tag override generates k8s-api-ip.yaml in the render copy AND in the working tree"
@@ -1301,10 +1321,15 @@ assert_the_unoverridden_path_generates_the_api_ip_patch_once() {
   prepare_k8s_api_ip_repo "$d"
   out="$(run_k8s_api_ip_block "$d" "$d/project/deploy/overlays/minikube")"
   rc=$?
-  calls="$(grep -c 'get endpoints kubernetes' "$d/ops.log")"
+  # Count only the k8s-api-ip detector's endpoint read by its unique jsonpath
+  # ({.subsets[0]...}); the sibling cluster-cidrs detector also reads the
+  # endpoint now (for node CIDRs) but with a {range .subsets[*]...} jsonpath.
+  calls="$(grep -cF 'subsets[0]' "$d/ops.log")"
   [ "$rc" -eq 0 ] || problems+="step 6b block exited $rc; "
   grep -q '10.11.12.13/32' "$d/project/deploy/overlays/minikube/patches/k8s-api-ip.yaml" \
     || problems+="the working tree did not get the generated patch; "
+  grep -q '10.244.0.0/16,10.96.0.0/12' "$d/project/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml" \
+    || problems+="the working tree did not get the generated cidrs patch; "
   [ "$calls" = "1" ] || problems+="detector ran ${calls} time(s), expected 1; "
   if [ -z "$problems" ]; then
     pass "the unoverridden path generates k8s-api-ip.yaml exactly once, in the working tree"

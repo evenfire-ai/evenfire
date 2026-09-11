@@ -235,6 +235,19 @@ describe('getLlmGroupCompleteness (spec R4.5.5)', () => {
       usable: true,
     })
   })
+
+  // R4-H4: openai-compatible (local LAN) is the only static-credentials provider
+  // whose single slot is OPTIONAL (required:false) — self-hosted servers often
+  // need no auth. Its group must be usable with zero keys, or the wizard's
+  // primary-credential gate and the edit page's save gate both wrongly block it.
+  it('marks the optional-only local provider usable without any key', () => {
+    const local = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'openai-compatible')!
+    expect(getLlmGroupCompleteness(local, () => false)).toEqual({
+      present: 0,
+      total: 0,
+      usable: true,
+    })
+  })
 })
 
 describe('validateLlmSecretData (spec R4.5.3)', () => {

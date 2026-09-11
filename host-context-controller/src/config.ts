@@ -2,7 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import { DEFAULT_ALLOWED_PLUGIN_IMAGE_PREFIXES } from '@clerum/image-policy'
-import { parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
+import { parseClusterCidrList, parseK8sApiCidrs, parseNodeLocalDnsCidr } from './k8sApiCidrs'
 import { ContextCRD, McpServerCRD } from './types'
 
 export const DEFAULT_EGRESS_PROXY_IMAGE = 'clerum/nginx-egress-proxy:0.1.0'
@@ -40,6 +40,40 @@ export interface Config {
   // counted orphan sweep (guardrails phase-4 §3) and readiness convergence when
   // a watch drops events. 0 disables.
   llmHookResyncIntervalSec: number
+
+  // Namespace where per-slot openai-compatible egress brokers (Deployment +
+  // Service + ConfigMap + mirror Secret + NetworkPolicies) are provisioned. This
+  // namespace is the only pod population with a route to the operator LAN.
+  llmEgressNamespace: string
+
+  // listen/Service port for the egress broker. Must match the port the
+  // nginx-egress-proxy image EXPOSEs (3000).
+  openaiEgressBrokerPort: number
+
+  // Cluster-internal CIDRs (pod + Service ranges) the egress broker must NOT be
+  // pointed at. Combined with k8sApiCidrs + nodeLocalDnsCidr, these are passed to
+  // classifyLanBaseURL so a baseURL that resolves to a cluster-internal RFC1918
+  // literal (apiserver ClusterIP, another pod's IP) is rejected fail-closed even
+  // when control-api admission was bypassed by a direct cluster write.
+  clusterInternalEgressCidrs: string[]
+
+  // Node + control-plane CIDRs (node InternalIPs / node subnet, apiserver
+  // endpoint(s), GKE master CIDR) the egress broker must NOT be pointed at. The
+  // pod/Service range (clusterInternalEgressCidrs) does NOT cover a node IP (e.g.
+  // minikube 192.168.49.2 is RFC1918 and would classify as a plain LAN), so a
+  // broker could be pointed at kubelet/apiserver on a node. Declared separately
+  // because its source differs (node IPs, not pod/Service ranges) and it gates
+  // provisioning on its own (cluster_node_guard_unconfigured).
+  clusterNodeEgressCidrs: string[]
+
+  // Fail-closed switch for the openai-compatible egress broker. When true
+  // (default), HCC refuses to provision ANY broker unless
+  // clusterInternalEgressCidrs is non-empty: without operator-declared
+  // cluster-internal ranges the LAN classifier cannot tell cluster space
+  // (apiserver/pod ClusterIPs) from a real private LAN, so a cluster-internal
+  // baseURL would be accepted. Set CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS
+  // to false only for a deploy that deliberately runs without the guard.
+  oaiEgressRequireClusterCidrs: boolean
 
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
@@ -589,6 +623,24 @@ export const config: Config = {
 
   // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
   llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
+  // openai-compatible egress broker namespace + port (local-LLM provider).
+  llmEgressNamespace: getEnv('CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE', 'llm-egress')!,
+  openaiEgressBrokerPort: getEnvInt('CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT', 3000),
+  // Validated at module load — a malformed/IPv6/non-canonical entry crashes
+  // startup rather than counting toward the fail-closed guard while the LAN
+  // classifier silently ignores it (cidrOverlaps treats an unparseable CIDR as
+  // "no overlap").
+  clusterInternalEgressCidrs: parseClusterCidrList(
+    'CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS',
+    getEnv('CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS')
+  ),
+  // Validated at module load, same fail-closed contract as the internal list.
+  clusterNodeEgressCidrs: parseClusterCidrList(
+    'CONTEXT_MAPPER_CLUSTER_NODE_CIDRS',
+    getEnv('CONTEXT_MAPPER_CLUSTER_NODE_CIDRS')
+  ),
+  oaiEgressRequireClusterCidrs: getEnvBool('CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS', true),
 
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
