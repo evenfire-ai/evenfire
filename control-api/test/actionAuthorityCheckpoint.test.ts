@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canonicalActionTarget,
   hashActionTarget,
   validateActionAuthorityCheckpointResponse,
 } from '@clerum/action-context-contracts'
+import type { ActionCheckpointCallerIdentity } from '../src/middleware/actionCheckpointCaller.js'
 import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
 import { knownBehavior } from '../src/services/access/accessPath.js'
 import {
@@ -110,6 +112,115 @@ describe('action authority checkpoint wire parser', () => {
       'invalid_binding'
     )
   })
+
+  it.each([
+    [
+      'workflow-recipes',
+      {
+        service: 'workflow-recipes',
+        trustPlane: 'internal_control_jwt',
+        permittedResourceTypes: ['workflow_recipe'],
+        permittedOperations: ['workflow.trigger'],
+      },
+      'workflow_recipe',
+      'sandbox-recipes/demo',
+      'workflow.trigger',
+      { recipeNamespace: 'sandbox-recipes', recipeName: 'demo' },
+      'gfs_resource',
+      'gfs.read',
+    ],
+    [
+      'gfs-controller',
+      {
+        service: 'gfs-controller',
+        trustPlane: 'internal_service_token',
+        permittedResourceTypes: ['gfs_resource'],
+        permittedOperations: ['gfs.read', 'gfs.write', 'gfs.delete', 'gfs.manage_acl', 'gfs.share'],
+      },
+      'gfs_resource',
+      '40000000-0000-4000-8000-000000000004',
+      'gfs.read',
+      { drive: 'gfs', resourceId: '40000000-0000-4000-8000-000000000004' },
+      'shared_filesystem',
+      'shared_filesystem.read',
+    ],
+    [
+      'workspace-files-controller',
+      {
+        service: 'workspace-files-controller',
+        trustPlane: 'internal_service_token',
+        permittedResourceTypes: ['shared_filesystem'],
+        permittedOperations: ['shared_filesystem.read', 'shared_filesystem.write'],
+      },
+      'shared_filesystem',
+      'workspace-files/demo',
+      'shared_filesystem.read',
+      {
+        sharedFileSystemNamespace: 'workspace-files',
+        sharedFileSystemName: 'demo',
+        relationshipInstanceId: 'relationship-1',
+        canonicalRelativePath: 'docs/report.md',
+      },
+      'gfs_resource',
+      'gfs.read',
+    ],
+  ] as const)(
+    'confines %s to its registered resource and operation class',
+    (
+      _label,
+      identity,
+      resourceType,
+      logicalId,
+      operationId,
+      actionTarget,
+      siblingResourceType,
+      siblingOperation
+    ) => {
+      const exactResource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: resourceType,
+        logicalId,
+      })
+      const exactTarget = canonicalActionTarget(actionTarget)
+      const exactTargetHash = hashActionTarget(exactTarget)
+      const value = {
+        ...request(),
+        resource: exactResource,
+        operationId,
+        target: exactTarget,
+        targetHash: exactTargetHash,
+        domain: { service: identity.service, resource: exactResource, targetHash: exactTargetHash },
+      }
+      expect(() =>
+        parseActionAuthorityCheckpointRequest(value, identity as ActionCheckpointCallerIdentity)
+      ).not.toThrow()
+
+      const siblingResource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: siblingResourceType,
+        logicalId:
+          siblingResourceType === 'gfs_resource'
+            ? '50000000-0000-4000-8000-000000000005'
+            : 'workspace-files/sibling',
+      })
+      expect(() =>
+        parseActionAuthorityCheckpointRequest(
+          {
+            ...value,
+            resource: siblingResource,
+            domain: { ...value.domain, resource: siblingResource },
+          },
+          identity as ActionCheckpointCallerIdentity
+        )
+      ).toThrow('invalid_binding')
+      expect(() =>
+        parseActionAuthorityCheckpointRequest(
+          { ...value, operationId: siblingOperation },
+          identity as ActionCheckpointCallerIdentity
+        )
+      ).toThrow('invalid_binding')
+    }
+  )
 })
 
 describe('action authority checkpoint outcomes', () => {
