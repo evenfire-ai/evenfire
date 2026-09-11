@@ -11,11 +11,13 @@ import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   ApprovalConsumeError,
   ApprovalTriggerRunIdempotencyConflictError,
+  WorkflowApprovalAuthorityStaleError,
   listPendingApprovalsForUser,
   recordDecision,
 } from '../../services/userApprovalRequestService.js'
 import {
   WorkflowAuthorityError,
+  requireCurrentWorkflowApprovalAuthority,
   requireWorkflowActionAuthority,
 } from '../../services/workflows/workflowAuthorityBindingService.js'
 import { mapDbRun } from '../../services/workflows/workflowRunReadService.js'
@@ -160,7 +162,16 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
                 decisionAudit,
                 undefined,
                 authority,
-                () => requireWorkflowActionAuthority(authorityInput)
+                {
+                  authorizeBeforeLock: () => requireWorkflowActionAuthority(authorityInput),
+                  validateCurrentInTransaction: db =>
+                    requireCurrentWorkflowApprovalAuthority({
+                      db,
+                      authority,
+                      budget: extReq.accessExecutionBudget!,
+                      correlationId: extReq.correlationId,
+                    }),
+                }
               )
             : await recordDecision(approval.id, decision, decisionActor, note, decisionAudit)
 
@@ -176,6 +187,9 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
         } catch (err) {
           if (err instanceof WorkflowAuthorityError) {
             return res.status(err.status).json({ error: err.code })
+          }
+          if (err instanceof WorkflowApprovalAuthorityStaleError) {
+            return res.status(409).json({ error: 'access_path_stale' })
           }
           if (err instanceof ApprovalConsumeError) {
             const status =
