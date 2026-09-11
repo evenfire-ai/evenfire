@@ -96,7 +96,7 @@ export async function authorizeActionV2(
   dependencies: Readonly<{
     resolve?: Resolver
     messageId?: () => string
-    authorizationOptions?: Pick<LiveAuthorizationOptions, 'transaction'>
+    authorizationOptions?: Pick<LiveAuthorizationOptions, 'transaction' | 'configureTransaction'>
   }> = {}
 ): Promise<ActionAuthorizationV2Result> {
   if (input.session.contract !== 'v2') return { status: 'denied', code: 'session_not_live' }
@@ -144,6 +144,9 @@ export async function authorizeActionV2(
         budget,
         ...(dependencies.authorizationOptions?.transaction
           ? { transaction: dependencies.authorizationOptions.transaction }
+          : {}),
+        ...(dependencies.authorizationOptions?.configureTransaction === false
+          ? { configureTransaction: false }
           : {}),
         ...(input.gateway ? { gateway: input.gateway } : {}),
         ...(input.correlationId ? { correlationId: input.correlationId } : {}),

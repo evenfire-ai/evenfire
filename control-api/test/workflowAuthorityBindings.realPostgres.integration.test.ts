@@ -2,8 +2,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool } from 'pg'
 import type { CanonicalActionTarget } from '@clerum/action-context-contracts'
-import { initDb, pool } from '../src/db.js'
+import { initDb, pool, withTransaction } from '../src/db.js'
+import { AccessExecutionBudget } from '../src/services/access/accessExecutionBudget.js'
+import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { prepareActionOperationTarget } from '../src/services/access/actionMessageId.js'
+import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import { createUserSession, revokeUserSession } from '../src/services/auth/userSessionService.js'
 import { adminDeleteTeam } from '../src/services/directory/teams.js'
@@ -13,6 +16,7 @@ import { deriveApprovalConsumeAuthority } from '../src/services/workflows/workfl
 import {
   type WorkflowAuthorityBinding,
   persistWorkflowAuthorityBinding,
+  requireCurrentWorkflowApprovalAuthority,
   workflowAuthorityBindingFromClaims,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { createWorkflowTriggerApprovalRequest } from '../src/services/workflows/workflowTriggerApprovalService.js'
@@ -110,7 +114,7 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     const target =
       input?.target ?? Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName: 'demo' })
     const resource = canonicalResourceIdentity({
-      environmentId: 'local',
+      environmentId: canonicalEnvironmentId(),
       type: input?.resourceType ?? 'workflow_recipe',
       logicalId: input?.resourceLogicalId ?? 'sandbox-recipes/demo',
     })
@@ -138,6 +142,154 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     )
     if (!claims) throw new Error('real producer failed to verify its workflow delegation')
     return workflowAuthorityBindingFromClaims(claims)
+  }
+
+  async function liveDecisionAuthority(input: {
+    approvalRequestId: string
+    decision: 'approve' | 'deny'
+  }): Promise<WorkflowAuthorityBinding> {
+    const approval = await databasePool.query<{
+      recipe_namespace: string
+      recipe_name: string
+    }>(
+      `SELECT recipe_namespace, recipe_name
+         FROM workflow_approval_requests
+        WHERE id = $1`,
+      [input.approvalRequestId]
+    )
+    const recipeNamespace = approval.rows[0]?.recipe_namespace
+    const recipeName = approval.rows[0]?.recipe_name
+    if (!recipeNamespace || !recipeName) throw new Error('approval recipe was not found')
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, $2, $3)
+       ON CONFLICT DO NOTHING`,
+      [userId, recipeNamespace, recipeName]
+    )
+    const session = await createUserSession({
+      userId,
+      email: `${userId}@example.test`,
+      authenticationMethods: ['password'],
+    })
+    const resource = canonicalResourceIdentity({
+      environmentId: canonicalEnvironmentId(),
+      type: 'workflow_approval',
+      logicalId: input.approvalRequestId,
+    })
+    const target = Object.freeze({
+      approvalId: input.approvalRequestId,
+      decision: input.decision,
+    })
+    const authorized = await authorizeActionV2({
+      session: {
+        contract: 'v2',
+        userId,
+        sid: session.identity.sid,
+        jti: session.identity.jti,
+        sessionVersion: session.identity.sessionVersion,
+      },
+      requested: { version: 2 },
+      operationId: 'workflow.approval.decide',
+      resource,
+      operationTarget: target,
+      allocateChatMessageId: false,
+    })
+    expect(authorized.status).toBe('allowed')
+    if (authorized.status !== 'allowed') throw new Error('expected live approval authority')
+    const claims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: {
+          userId,
+          sid: session.identity.sid,
+          sessionVersion: session.identity.sessionVersion,
+        },
+        operationIds: ['workflow.approval.decide'],
+        resource,
+        preparedTargets: {
+          'workflow.approval.decide': {
+            target: authorized.context.target,
+            targetHash: authorized.context.targetHash,
+          },
+        },
+        accessPathId: authorized.context.accessPathId,
+        authorizationRevision: authorized.context.authorizationRevision,
+        behaviorBindingHash: authorized.context.behaviorBindingHash,
+        pathKind: authorized.context.pathKind,
+        effectiveTeamId: authorized.context.effectiveTeamId,
+      })
+    )
+    if (!claims) throw new Error('live approval delegation failed verification')
+    return workflowAuthorityBindingFromClaims(claims)
+  }
+
+  function decisionReauthorizer(
+    initial: WorkflowAuthorityBinding,
+    budget: AccessExecutionBudget,
+    hooks: {
+      afterPhaseOne?: () => Promise<void>
+      beforeFinalFence?: () => Promise<void>
+    } = {}
+  ) {
+    let phaseOne = true
+    let finalFencePending = true
+    return {
+      authorizeBeforeLock: async () => {
+        const current = await withTransaction(transaction =>
+          requireCurrentWorkflowApprovalAuthority({
+            db: transaction,
+            authority: initial,
+            budget,
+          })
+        )
+        if (hooks.afterPhaseOne && phaseOne) await hooks.afterPhaseOne()
+        phaseOne = false
+        return current
+      },
+      validateCurrentInTransaction: (
+        db: Parameters<typeof requireCurrentWorkflowApprovalAuthority>[0]['db']
+      ) =>
+        requireCurrentWorkflowApprovalAuthority({
+          db: hooks.beforeFinalFence
+            ? {
+                query: async (sql, values) => {
+                  if (finalFencePending && /^SELECT sid\s+FROM external_user_sessions/s.test(sql)) {
+                    finalFencePending = false
+                    await hooks.beforeFinalFence?.()
+                  }
+                  return db.query(sql, values)
+                },
+              }
+            : db,
+          authority: initial,
+          budget,
+        }),
+    }
+  }
+
+  async function createDecisionApproval(recipeName: string) {
+    const triggerAuthority = await authority({
+      resourceLogicalId: `sandbox-recipes/${recipeName}`,
+      target: Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName }),
+    })
+    const approval = await createWorkflowTriggerApprovalRequest({
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey: 'external-rest-api',
+      targetUserId: userId,
+      payload: { message: 'Approve the workflow trigger' },
+      idempotencyKey: `approval-${randomUUID()}`,
+      runIntent: {
+        actorType: 'user',
+        actorId: userId,
+        triggerSource: 'onDemand',
+        ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
+      },
+      authority: triggerAuthority,
+      reauthorize: async () => triggerAuthority,
+    })
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected approval request')
+    return approval.approvalRequestId
   }
 
   it('persists one immutable trigger binding and links an idempotent run transactionally', async () => {
@@ -362,6 +514,166 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     await expect(adminDeleteTeam(teamId)).resolves.toEqual({ ok: true, id: teamId })
   })
 
+  it('completes a live approval decision with one shared pool connection', async () => {
+    const approvalRequestId = await createDecisionApproval(`pool-one-${randomUUID()}`)
+    const decisionAuthority = await liveDecisionAuthority({
+      approvalRequestId,
+      decision: 'deny',
+    })
+    const singleConnectionPool = new Pool({ connectionString, max: 1 })
+    corePoolConnectSpy.mockImplementation((() =>
+      singleConnectionPool.connect()) as typeof pool.connect)
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          approvalRequestId,
+          'deny',
+          { userId },
+          undefined,
+          undefined,
+          undefined,
+          decisionAuthority,
+          decisionReauthorizer(decisionAuthority, budget)
+        )
+      ).resolves.toEqual({ ok: true })
+      expect(singleConnectionPool.waitingCount).toBe(0)
+      expect(singleConnectionPool.totalCount).toBe(1)
+    } finally {
+      budget.close()
+      corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
+      await singleConnectionPool.end()
+    }
+  })
+
+  it('rejects approval and authority races after phase-one authorization', async () => {
+    const snapshotRaceId = await createDecisionApproval(`snapshot-race-${randomUUID()}`)
+    const authorityRaceId = await createDecisionApproval(`authority-race-${randomUUID()}`)
+    const snapshotAuthority = await liveDecisionAuthority({
+      approvalRequestId: snapshotRaceId,
+      decision: 'deny',
+    })
+    const snapshotBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          snapshotRaceId,
+          'deny',
+          { userId },
+          undefined,
+          undefined,
+          undefined,
+          snapshotAuthority,
+          decisionReauthorizer(snapshotAuthority, snapshotBudget, {
+            afterPhaseOne: async () => {
+              await databasePool.query(
+                `UPDATE workflow_approval_requests
+                    SET payload = jsonb_set(payload, '{message}', '"changed"'::jsonb)
+                  WHERE id = $1`,
+                [snapshotRaceId]
+              )
+            },
+          })
+        )
+      ).rejects.toThrow('Workflow approval authority became stale')
+
+      const authority = await liveDecisionAuthority({
+        approvalRequestId: authorityRaceId,
+        decision: 'deny',
+      })
+      const authorityBudget = AccessExecutionBudget.create('action')
+      try {
+        await expect(
+          recordDecision(
+            authorityRaceId,
+            'deny',
+            { userId },
+            undefined,
+            undefined,
+            undefined,
+            authority,
+            decisionReauthorizer(authority, authorityBudget, {
+              beforeFinalFence: async () => {
+                await databasePool.query(
+                  `DELETE FROM user_workflow_triggers
+                    WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes'
+                      AND recipe_name = (SELECT recipe_name FROM workflow_approval_requests WHERE id = $2)`,
+                  [userId, authorityRaceId]
+                )
+              },
+            })
+          )
+        ).rejects.toMatchObject({ status: 409, code: 'access_path_stale' })
+      } finally {
+        authorityBudget.close()
+      }
+    } finally {
+      snapshotBudget.close()
+    }
+
+    const rows = await databasePool.query<{
+      id: string
+      status: string
+      decision_authority_binding_id: string | null
+    }>(
+      `SELECT id, status, decision_authority_binding_id
+         FROM workflow_approval_requests
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[snapshotRaceId, authorityRaceId]]
+    )
+    expect(rows.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: 'pending', decision_authority_binding_id: null }),
+        expect.objectContaining({ status: 'pending', decision_authority_binding_id: null }),
+      ])
+    )
+  })
+
+  it('uses final database time when approval expiry races authorization', async () => {
+    const approvalRequestId = await createDecisionApproval(`expiry-race-${randomUUID()}`)
+    const decisionAuthority = await liveDecisionAuthority({
+      approvalRequestId,
+      decision: 'deny',
+    })
+    const budget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        recordDecision(
+          approvalRequestId,
+          'deny',
+          { userId },
+          undefined,
+          undefined,
+          undefined,
+          decisionAuthority,
+          decisionReauthorizer(decisionAuthority, budget, {
+            afterPhaseOne: async () => {
+              await databasePool.query(
+                `UPDATE workflow_approval_requests
+                    SET expires_at = clock_timestamp() - INTERVAL '1 millisecond'
+                  WHERE id = $1`,
+                [approvalRequestId]
+              )
+            },
+          })
+        )
+      ).resolves.toEqual({ ok: false, error: 'expired' })
+    } finally {
+      budget.close()
+    }
+    await expect(
+      databasePool.query(
+        `SELECT status, decision_authority_binding_id
+           FROM workflow_approval_requests
+          WHERE id = $1`,
+        [approvalRequestId]
+      )
+    ).resolves.toMatchObject({
+      rows: [{ status: 'expired', decision_authority_binding_id: null }],
+    })
+  })
+
   it('serializes approval consumption and persists its one permitted child edge atomically', async () => {
     await databasePool.query(
       `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
@@ -395,13 +707,12 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
 
-    const decisionAuthority = await authority({
-      operationId: 'workflow.approval.decide',
-      resourceType: 'workflow_approval',
-      resourceLogicalId: approval.approvalRequestId,
-      target: Object.freeze({ approvalId: approval.approvalRequestId, decision: 'approve' }),
+    const decisionAuthority = await liveDecisionAuthority({
+      approvalRequestId: approval.approvalRequestId,
+      decision: 'approve',
     })
-    const decide = () =>
+    const budgets = Array.from({ length: 12 }, () => AccessExecutionBudget.create('action'))
+    const decide = (budget: AccessExecutionBudget) =>
       recordDecision(
         approval.approvalRequestId,
         'approve',
@@ -410,13 +721,20 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         undefined,
         undefined,
         decisionAuthority,
-        async () => decisionAuthority
+        decisionReauthorizer(decisionAuthority, budget)
       )
-    const results = await Promise.all([decide(), decide()])
+    const results = await Promise.all(budgets.map(decide)).finally(() => {
+      budgets.forEach(budget => budget.close())
+    })
     expect(results.filter(result => result.ok)).toHaveLength(1)
-    expect(results.filter(result => !result.ok)).toEqual([
-      expect.objectContaining({ ok: false, error: 'not_pending' }),
-    ])
+    expect(results.filter(result => !result.ok)).toHaveLength(11)
+    expect(results.filter(result => !result.ok)).toEqual(
+      expect.arrayContaining(
+        Array.from({ length: 11 }, () =>
+          expect.objectContaining({ ok: false, error: 'not_pending' })
+        )
+      )
+    )
 
     const durable = await databasePool.query<{
       status: string

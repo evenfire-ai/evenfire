@@ -112,6 +112,7 @@ export type LiveAuthorizationOptions = Readonly<{
   budget?: AccessExecutionBudget
   memo?: AuthorizationRequestMemo
   transaction?: ResolverTransaction
+  configureTransaction?: boolean
   correlationId?: string
 }>
 
@@ -178,8 +179,11 @@ async function resolveInTransaction(input: {
   db: DbClient
   gateway?: Pick<K8sGateway, 'getResourceExact'>
   budget: AccessExecutionBudget
+  configureTransaction: boolean
 }): Promise<LiveAuthorizationResult> {
-  await configureAccessAuthorityTransaction(input.db, input.budget)
+  if (input.configureTransaction) {
+    await configureAccessAuthorityTransaction(input.db, input.budget)
+  }
   const snapshot = await loadPrincipalAuthoritySnapshot({
     db: input.db,
     budget: input.budget,
@@ -414,6 +418,7 @@ async function resolveLiveAuthorizationUsing(
         db,
         gateway: options.gateway,
         budget,
+        configureTransaction: options.configureTransaction !== false,
       })
     const factory = () =>
       options.transaction

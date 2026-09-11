@@ -95,6 +95,13 @@ export class WorkflowApprovalAuthorityRequiredError extends Error {
   }
 }
 
+export class WorkflowApprovalAuthorityStaleError extends Error {
+  constructor(message = 'Workflow approval authority became stale before decision commit') {
+    super(message)
+    this.name = 'WorkflowApprovalAuthorityStaleError'
+  }
+}
+
 export type ApprovalPayload = { message: string; options?: string[]; metadata?: unknown }
 
 const WORKFLOW_RUN_ID_PREFIX =
@@ -638,6 +645,103 @@ export type RecordDecisionResult =
   | { ok: true; workflowRun?: { row: WorkflowRunRow; created: boolean } }
   | { ok: false; error?: string }
 
+export type ApprovalDecisionReauthorization = Readonly<{
+  authorizeBeforeLock: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction: (db: DbClient) => Promise<WorkflowAuthorityBinding | null>
+}>
+
+type ApprovalDecisionSnapshot = Readonly<{
+  id: string
+  status: ApprovalStatus
+  isExpired: boolean
+  expiresAt: string
+  requestedAt: string | null
+  recipeNamespace: string
+  recipeName: string
+  targetUserId: string | null
+  targetTeamId: string | null
+  triggerAuthorityBindingId: string | null
+  payload: unknown
+  payloadFingerprint: string
+}>
+
+function timestampIdentity(value: unknown): string | null {
+  if (value === null || value === undefined) return null
+  const parsed = value instanceof Date ? value : new Date(String(value))
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : String(value)
+}
+
+async function loadApprovalDecisionSnapshot(
+  db: DbClient,
+  id: string,
+  lock: boolean
+): Promise<ApprovalDecisionSnapshot | null> {
+  const result = await db.query(
+    `SELECT id,
+            status,
+            expires_at <= clock_timestamp() AS "isExpired",
+            expires_at AS "expiresAt",
+            requested_at AS "requestedAt",
+            recipe_namespace AS "recipeNamespace",
+            recipe_name AS "recipeName",
+            target_user_id AS "targetUserId",
+            target_team_id AS "targetTeamId",
+            trigger_authority_binding_id AS "triggerAuthorityBindingId",
+            payload
+       FROM workflow_approval_requests
+      WHERE id = $1
+      ${lock ? 'FOR UPDATE' : ''}`,
+    [id]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row) return null
+  const payload = row.payload ?? null
+  return Object.freeze({
+    id: String(row.id),
+    status: row.status as ApprovalStatus,
+    isExpired: row.isExpired === true,
+    expiresAt: timestampIdentity(row.expiresAt) ?? '',
+    requestedAt: timestampIdentity(row.requestedAt),
+    recipeNamespace: String(row.recipeNamespace ?? ''),
+    recipeName: String(row.recipeName ?? ''),
+    targetUserId: row.targetUserId ? String(row.targetUserId) : null,
+    targetTeamId: row.targetTeamId ? String(row.targetTeamId) : null,
+    triggerAuthorityBindingId: row.triggerAuthorityBindingId
+      ? String(row.triggerAuthorityBindingId)
+      : null,
+    payload,
+    payloadFingerprint: createHash('sha256').update(stableStringify(payload)).digest('hex'),
+  })
+}
+
+async function loadUnlockedApprovalDecisionSnapshot(
+  id: string
+): Promise<ApprovalDecisionSnapshot | null> {
+  const client = await pool.connect()
+  try {
+    return await loadApprovalDecisionSnapshot(client, id, false)
+  } finally {
+    client.release()
+  }
+}
+
+function approvalDecisionSnapshotMatches(
+  authorized: ApprovalDecisionSnapshot,
+  locked: ApprovalDecisionSnapshot
+): boolean {
+  return (
+    authorized.id === locked.id &&
+    authorized.expiresAt === locked.expiresAt &&
+    authorized.requestedAt === locked.requestedAt &&
+    authorized.recipeNamespace === locked.recipeNamespace &&
+    authorized.recipeName === locked.recipeName &&
+    authorized.targetUserId === locked.targetUserId &&
+    authorized.targetTeamId === locked.targetTeamId &&
+    authorized.triggerAuthorityBindingId === locked.triggerAuthorityBindingId &&
+    authorized.payloadFingerprint === locked.payloadFingerprint
+  )
+}
+
 async function createWorkflowRunForApprovedTriggerIntent(
   params: {
     approvalRequestId: string
@@ -777,44 +881,56 @@ export async function recordDecision(
   audit?: RecordDecisionAudit,
   dbTx?: DbClient,
   authority?: WorkflowAuthorityBinding | null,
-  reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  reauthorize?: ApprovalDecisionReauthorization
 ): Promise<RecordDecisionResult> {
+  if (dbTx && reauthorize) {
+    throw new Error('workflow_approval_reauthorization_requires_owned_transaction')
+  }
+
+  let authorizedSnapshot: ApprovalDecisionSnapshot | null = null
+  let currentAuthority = authority
+  if (reauthorize) {
+    authorizedSnapshot = await loadUnlockedApprovalDecisionSnapshot(id)
+    if (!authorizedSnapshot) return { ok: false, error: 'not_found' }
+    if (authorizedSnapshot.status !== 'pending') return { ok: false, error: 'not_pending' }
+    const requesterUserId = parseWorkflowTriggerIntent(authorizedSnapshot.payload)?.requesterUserId
+    if (
+      authorizedSnapshot.targetTeamId &&
+      requesterUserId &&
+      requesterUserId !== decidedBy.userId
+    ) {
+      return { ok: false, error: 'approval_requester_mismatch' }
+    }
+    if (authorizedSnapshot.triggerAuthorityBindingId && !authority) {
+      throw new WorkflowApprovalAuthorityRequiredError()
+    }
+    if (!authorizedSnapshot.isExpired) {
+      try {
+        currentAuthority = await reauthorize.authorizeBeforeLock()
+      } catch (error) {
+        const latest = await loadUnlockedApprovalDecisionSnapshot(id)
+        if (!latest) return { ok: false, error: 'not_found' }
+        if (latest.status !== 'pending') return { ok: false, error: 'not_pending' }
+        if (!latest.isExpired) throw error
+        authorizedSnapshot = latest
+      }
+      if (authorizedSnapshot.triggerAuthorityBindingId && !currentAuthority) {
+        throw new WorkflowApprovalAuthorityRequiredError()
+      }
+      if (authority && currentAuthority?.bindingHash !== authority.bindingHash) {
+        throw new WorkflowApprovalAuthorityStaleError()
+      }
+    }
+  }
+
   const work = async (db: DbClient): Promise<RecordDecisionResult> => {
+    if (reauthorize) {
+      await db.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ')
+    }
     // Fetch requested_at so we can compute decision latency for the histogram
     // (lifecycle duration from creation to terminal decision).
-    const current = await db.query(
-      `SELECT status,
-              expires_at <= NOW() AS "isExpired",
-              expires_at AS "expiresAt",
-              requested_at AS "requestedAt",
-              recipe_namespace AS "recipeNamespace",
-              recipe_name AS "recipeName",
-              target_user_id AS "targetUserId",
-              target_team_id AS "targetTeamId",
-              trigger_authority_binding_id AS "triggerAuthorityBindingId",
-              payload
-         FROM workflow_approval_requests
-        WHERE id = $1
-        FOR UPDATE`,
-      [id]
-    )
-
-    if ((current.rowCount ?? 0) === 0) {
-      return { ok: false, error: 'not_found' }
-    }
-
-    const row = current.rows[0] as {
-      status: ApprovalStatus
-      isExpired?: boolean
-      expiresAt: string | Date
-      requestedAt?: string | Date | null
-      recipeNamespace: string
-      recipeName: string
-      targetUserId?: string | null
-      targetTeamId?: string | null
-      triggerAuthorityBindingId?: string | null
-      payload?: unknown
-    }
+    const row = await loadApprovalDecisionSnapshot(db, id, true)
+    if (!row) return { ok: false, error: 'not_found' }
     if (row.status !== 'pending') {
       return { ok: false, error: 'not_pending' }
     }
@@ -850,6 +966,18 @@ export async function recordDecision(
       return { ok: false, error: 'expired' }
     }
 
+    if (authorizedSnapshot && !approvalDecisionSnapshotMatches(authorizedSnapshot, row)) {
+      throw new WorkflowApprovalAuthorityStaleError()
+    }
+
+    if (reauthorize && currentAuthority && authorizedSnapshot && !authorizedSnapshot.isExpired) {
+      const finalAuthority = await reauthorize.validateCurrentInTransaction(db)
+      if (!finalAuthority || finalAuthority.bindingHash !== currentAuthority.bindingHash) {
+        throw new WorkflowApprovalAuthorityStaleError()
+      }
+      currentAuthority = finalAuthority
+    }
+
     const requesterUserId = parseWorkflowTriggerIntent(row.payload)?.requesterUserId
     if (row.targetTeamId && requesterUserId && requesterUserId !== decidedBy.userId) {
       return { ok: false, error: 'approval_requester_mismatch' }
@@ -857,11 +985,6 @@ export async function recordDecision(
 
     if (row.triggerAuthorityBindingId && !authority) {
       throw new WorkflowApprovalAuthorityRequiredError()
-    }
-
-    const currentAuthority = reauthorize ? await reauthorize() : authority
-    if (authority && currentAuthority?.bindingHash !== authority.bindingHash) {
-      throw new Error('workflow_approval_authority_changed')
     }
 
     const decisionBindingId = currentAuthority
@@ -945,8 +1068,7 @@ export async function recordDecision(
 
     // Duration: from requested_at (row creation) to decided_at (now).
     if (row.requestedAt) {
-      const requestedAtMs =
-        row.requestedAt instanceof Date ? row.requestedAt.getTime() : Date.parse(row.requestedAt)
+      const requestedAtMs = Date.parse(row.requestedAt)
       if (Number.isFinite(requestedAtMs)) {
         const durationSec = Math.max(0, (decidedAt.getTime() - requestedAtMs) / 1000)
         approvalsDurationSeconds.observe(
@@ -972,7 +1094,22 @@ export async function recordDecision(
     return workflowRun ? { ok: true, workflowRun } : { ok: true }
   }
 
-  const result = dbTx ? await work(dbTx) : await withTransaction(work)
+  let result: RecordDecisionResult
+  try {
+    result = dbTx ? await work(dbTx) : await withTransaction(work)
+  } catch (error) {
+    const serializationFailure =
+      reauthorize &&
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: unknown }).code === '40001'
+    if (!serializationFailure) throw error
+    const latest = await loadUnlockedApprovalDecisionSnapshot(id)
+    if (!latest) return { ok: false, error: 'not_found' }
+    if (latest.status !== 'pending') return { ok: false, error: 'not_pending' }
+    throw new WorkflowApprovalAuthorityStaleError()
+  }
   if (!dbTx && result.ok) enqueueWorkflowApprovalTraceProjection(id)
   return result
 }
