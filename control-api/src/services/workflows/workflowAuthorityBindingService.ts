@@ -16,7 +16,10 @@ import {
   verifyUserDelegationV2,
 } from '../../utils/auth/userDelegationV2Token.js'
 import { stableStringify } from '../../utils/stableStringify.js'
+import type { AccessExecutionBudget } from '../access/accessExecutionBudget.js'
 import { checkpointActionAuthority } from '../access/actionAuthorityCheckpoint.js'
+import { authorizeActionV2 } from '../access/actionAuthorizer.js'
+import { requestedActionContextV2 } from '../access/actionContextV2.js'
 import { canonicalEnvironmentId } from '../access/operationalAccessProjection.js'
 import {
   type CanonicalResourceIdentity,
@@ -199,6 +202,144 @@ export async function requireWorkflowActionAuthority(input: {
   }
 
   return workflowAuthorityBindingFromClaims(claims)
+}
+
+/**
+ * Reuses the canonical action authorizer on the caller's repeatable-read write
+ * transaction, then fences every database-owned revision component it read.
+ * It performs no connection acquisition or external destination lookup while
+ * the caller holds the approval row lock.
+ */
+export async function requireCurrentWorkflowApprovalAuthority(input: {
+  db: DbClient
+  authority: WorkflowAuthorityBinding
+  budget: AccessExecutionBudget
+  correlationId?: string
+}): Promise<WorkflowAuthorityBinding> {
+  const binding = input.authority.binding
+  if (
+    binding.operationId !== 'workflow.approval.decide' ||
+    binding.resource.type !== 'workflow_approval'
+  ) {
+    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+  }
+
+  const result = await authorizeActionV2(
+    {
+      session: Object.freeze({
+        contract: 'v2',
+        authorityMode: 'logical_session_checkpoint',
+        userId: binding.userId,
+        sid: binding.sid,
+        sessionVersion: binding.sessionVersion,
+      }),
+      requested: requestedActionContextV2({
+        accessPathId: binding.accessPathId,
+        authorizationRevision: binding.authorizationRevision,
+      }),
+      operationId: binding.operationId,
+      resource: binding.resource as CanonicalResourceIdentity,
+      operationTarget: binding.target,
+      allocateChatMessageId: false,
+      budget: input.budget,
+      ...(input.correlationId ? { correlationId: input.correlationId } : {}),
+    },
+    {
+      authorizationOptions: {
+        transaction: work => work(input.db),
+        configureTransaction: false,
+      },
+    }
+  )
+  if (result.status === 'authority_unavailable') {
+    throw new WorkflowAuthorityError(503, 'authority_unavailable')
+  }
+  if (result.status === 'not_found') throw new WorkflowAuthorityError(404, 'not_found')
+  if (result.status === 'access_path_stale') {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  if (result.status === 'denied') throw new WorkflowAuthorityError(403, 'forbidden')
+  if (result.status !== 'allowed') {
+    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+  }
+  if (
+    result.context.authorizationRevision !== binding.authorizationRevision ||
+    result.context.behaviorBindingHash !== binding.behaviorBindingHash ||
+    result.context.accessPathId !== binding.accessPathId ||
+    result.context.principal.userId !== binding.userId ||
+    result.context.principal.sid !== binding.sid ||
+    result.context.principal.sessionVersion !== binding.sessionVersion ||
+    result.context.targetHash !== binding.targetHash ||
+    JSON.stringify(result.context.resource) !== JSON.stringify(binding.resource) ||
+    JSON.stringify(result.context.target) !== JSON.stringify(binding.target)
+  ) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  try {
+    const session = await input.db.query(
+      `SELECT sid
+         FROM external_user_sessions
+        WHERE sid = $1 AND user_id = $2 AND session_version = $3
+        FOR UPDATE`,
+      [binding.sid, binding.userId, binding.sessionVersion]
+    )
+    if ((session.rowCount ?? 0) !== 1) {
+      throw new WorkflowAuthorityError(401, 'invalid_session')
+    }
+    const userRevision = await input.db.query(
+      `SELECT user_id
+         FROM authorization_user_revisions
+        WHERE user_id = $1
+        FOR UPDATE`,
+      [binding.userId]
+    )
+    if ((userRevision.rowCount ?? 0) !== 1) {
+      throw new WorkflowAuthorityError(409, 'access_path_stale')
+    }
+    const memberships = await input.db.query(
+      `SELECT team_id
+         FROM team_members
+        WHERE user_id = $1 AND status = 'active'
+        ORDER BY team_id`,
+      [binding.userId]
+    )
+    const teamIds = memberships.rows.map(row => String((row as { team_id: unknown }).team_id))
+    if (teamIds.length > 0) {
+      const teamRevisions = await input.db.query(
+        `SELECT team_id
+           FROM authorization_team_revisions
+          WHERE team_id = ANY($1::uuid[])
+          ORDER BY team_id
+          FOR UPDATE`,
+        [teamIds]
+      )
+      if ((teamRevisions.rowCount ?? 0) !== teamIds.length) {
+        throw new WorkflowAuthorityError(409, 'access_path_stale')
+      }
+    }
+  } catch (error) {
+    if (
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: unknown }).code === '40001'
+    ) {
+      throw new WorkflowAuthorityError(409, 'access_path_stale')
+    }
+    throw error
+  }
+  const currentTime = await input.db.query(
+    `SELECT clock_timestamp() < to_timestamp($1) AS "delegationCurrent",
+            ($2::timestamptz IS NULL OR clock_timestamp() < $2::timestamptz) AS "pathCurrent"`,
+    [input.authority.sourceExpiresAt, result.context.validUntil]
+  )
+  const current = currentTime.rows[0] as
+    | { delegationCurrent?: unknown; pathCurrent?: unknown }
+    | undefined
+  if (current?.delegationCurrent !== true || current.pathCurrent !== true) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  return input.authority
 }
 
 export async function persistWorkflowAuthorityBinding(
