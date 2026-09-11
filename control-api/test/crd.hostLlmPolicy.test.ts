@@ -26,4 +26,14 @@ describe('Host CRD llmPolicy schema', () => {
     expect(fallbacks.maxItems).toBe(8)
     expect(fallbacks.maxItems).toBe(MAX_LLM_FALLBACKS)
   })
+
+  it('restricts an openai-compatible fallback credentialSlot to the provider-owned key (R4-H2)', () => {
+    const rules = celRules(hostSpecProperties().llmPolicy.properties.fallbacks.items)
+    const ownership = rules.find(
+      r => r.includes('credentialSlot') && r.includes('openai-compatible')
+    )
+    expect(ownership).toBeDefined()
+    expect(ownership).toContain("self.credentialSlot == 'openai-compatible-api-key'")
+    expect(ownership).toContain("self.credentialSlot.startsWith('openai-compatible-api-key-')")
+  })
 })

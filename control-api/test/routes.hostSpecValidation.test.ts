@@ -339,6 +339,51 @@ describe('validateHostSpec', () => {
       )
       expect(res).toBeNull()
     })
+
+    // ── Fallback credentialSlot ownership (R4-H2) ─────────────────────────────
+    it('rejects a fallback credentialSlot not owned by its provider (openai-compatible + claude-api-key)', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const res = await validateHostSpec(
+        {
+          llmPolicy: {
+            fallbacks: [
+              {
+                provider: 'openai-compatible',
+                model: 'local-model',
+                baseURL: 'http://192.168.1.50:8000/v1',
+                credentialSlot: 'claude-api-key',
+              },
+            ],
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[0].credentialSlot')
+      expect(res!.errors[0].message).toMatch(/must be a key owned by provider "openai-compatible"/)
+      // Ownership gate runs before the allowlist lookup.
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
+
+    it('accepts a fallback credentialSlot owned by openai-compatible (canonical-<suffix>)', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const res = await validateHostSpec(
+        {
+          llmPolicy: {
+            fallbacks: [
+              {
+                provider: 'openai-compatible',
+                model: 'local-model',
+                baseURL: 'http://192.168.1.50:8000/v1',
+                credentialSlot: 'openai-compatible-api-key-fb1',
+              },
+            ],
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).toBeNull()
+    })
   })
 
   // ── Topic 3a per-host allowlist (spec.allowedModels) ────────────────────────

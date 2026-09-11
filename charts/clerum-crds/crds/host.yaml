@@ -269,6 +269,13 @@ spec:
                             message: "fallbacks[].baseURL is only valid when the fallback provider is 'openai-compatible'"
                           - rule: "!has(self.baseURL) || !self.baseURL.lowerAscii().contains('.svc')"
                             message: "fallbacks[].baseURL must not target a cluster-internal service address (.svc, .svc.cluster.local)"
+                          # A local 'openai-compatible' fallback mirrors its credentialSlot
+                          # key verbatim to the admin-chosen LAN endpoint; an unowned slot
+                          # would exfiltrate another provider's key. Restrict it to the
+                          # provider's own slot (backstop for kubectl/GitOps; control-api
+                          # enforces the general rule for every provider).
+                          - rule: "!has(self.credentialSlot) || self.provider != 'openai-compatible' || self.credentialSlot == 'openai-compatible-api-key' || self.credentialSlot.startsWith('openai-compatible-api-key-')"
+                            message: "fallbacks[].credentialSlot for 'openai-compatible' must be openai-compatible-api-key or openai-compatible-api-key-<suffix>"
                 approval:
                   type: object
                   description: Tool approval configuration. Controls who can approve tool executions.

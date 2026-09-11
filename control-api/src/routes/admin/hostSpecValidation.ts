@@ -5,6 +5,7 @@ import {
   MAX_LLM_FALLBACKS,
   PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
+  isCredentialSlotOwnedByProvider,
   isLlmProviderId,
 } from '@clerum/llm-providers'
 import type { DbClient } from '../../db.js'
@@ -939,6 +940,24 @@ async function validateLlmPolicy(
             {
               field: `${base}.credentialSlot`,
               message: `${base}.credentialSlot is not supported for provider "${provider}": it uses multiple or JSON credentials and must reuse the primary's credentials (drop credentialSlot)`,
+            },
+          ],
+        }
+      }
+      // Ownership gate (R4-H2): a fallback credentialSlot names a key of the
+      // Host's Secret that mcp-host/HCC mirror verbatim to the provider's egress
+      // broker. For a local `openai-compatible` fallback, an UNOWNED slot
+      // (e.g. `claude-api-key`) would exfiltrate another provider's key to the
+      // admin-chosen LAN IP. Restrict every slot to one OWNED by its provider
+      // (its canonical slot or `<canonical>-<suffix>`) — the exact rule the SDK
+      // prompt-target path already enforces (pluginWorkloadSdk) and the broker
+      // applies at runtime.
+      if (!isCredentialSlotOwnedByProvider(provider, slot)) {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot "${slot}" must be a key owned by provider "${provider}" (its canonical slot or "<canonical>-<suffix>")`,
             },
           ],
         }
