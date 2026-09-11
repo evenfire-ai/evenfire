@@ -58,7 +58,7 @@ spec:
                   type: object
                   description: LLM model configuration.
                   x-kubernetes-validations:
-                    - rule: "!has(self.provider) || self.provider != 'openai-compatible' || has(self.baseURL)"
+                    - rule: "!has(self.provider) || self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)"
                       message: "spec.model.baseURL is required when spec.model.provider is 'openai-compatible'"
                     - rule: "!has(self.baseURL) || (has(self.provider) && self.provider == 'openai-compatible')"
                       message: "spec.model.baseURL is only valid when spec.model.provider is 'openai-compatible'"
@@ -263,7 +263,7 @@ spec:
                               only; must NOT target cluster-internal, metadata, or CGNAT. Egress is brokered — the mcp-host never dials
                               this directly. ROLLOUT ORDER — CRD FIRST.
                         x-kubernetes-validations:
-                          - rule: "self.provider != 'openai-compatible' || has(self.baseURL)"
+                          - rule: "self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)"
                             message: "fallbacks[].baseURL is required when the fallback provider is 'openai-compatible'"
                           - rule: "!has(self.baseURL) || self.provider == 'openai-compatible'"
                             message: "fallbacks[].baseURL is only valid when the fallback provider is 'openai-compatible'"

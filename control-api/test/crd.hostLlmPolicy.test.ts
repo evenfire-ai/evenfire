@@ -36,4 +36,19 @@ describe('Host CRD llmPolicy schema', () => {
     expect(ownership).toContain("self.credentialSlot == 'openai-compatible-api-key'")
     expect(ownership).toContain("self.credentialSlot.startsWith('openai-compatible-api-key-')")
   })
+
+  it('requires a non-empty baseURL for openai-compatible (size() > 0, not just has(), R4-M3)', () => {
+    const spec = hostSpecProperties()
+    const requiredModelRule = celRules(spec.model).find(
+      r => r.includes('has(self.baseURL)') && r.includes("self.provider != 'openai-compatible'")
+    )
+    const requiredFallbackRule = celRules(spec.llmPolicy.properties.fallbacks.items).find(
+      r => r.includes('has(self.baseURL)') && r.includes("self.provider != 'openai-compatible'")
+    )
+    // The "required when openai-compatible" rules must reject an empty string,
+    // not just an absent key (an empty baseURL otherwise passed CEL and HCC
+    // reported success with 0 brokers provisioned).
+    expect(requiredModelRule).toContain('size(self.baseURL) > 0')
+    expect(requiredFallbackRule).toContain('size(self.baseURL) > 0')
+  })
 })
