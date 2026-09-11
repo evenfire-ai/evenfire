@@ -35,6 +35,13 @@ export declare const PROVIDER_IDS: readonly [
 /** Union of the canonical provider ids. */
 export type LlmProviderId = (typeof PROVIDER_IDS)[number]
 
+/**
+ * Maximum number of `llmPolicy.fallbacks` entries. Canonical here so the
+ * control-api write gate, the Host CRD `maxItems` and the control-ui authoring
+ * cap all pin the same number.
+ */
+export declare const MAX_LLM_FALLBACKS: 8
+
 /** Maximum length accepted by all runnable provider/model selectors. */
 export declare const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH: 128
 

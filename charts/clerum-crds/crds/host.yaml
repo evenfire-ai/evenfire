@@ -192,6 +192,10 @@ spec:
                     fallbacks:
                       type: array
                       minItems: 1
+                      # Pinned to @clerum/llm-providers MAX_LLM_FALLBACKS. Caps the
+                      # per-Host broker blast radius (each local fallback provisions a
+                      # full egress broker); control-api enforces the same bound on write.
+                      maxItems: 8
                       description: >-
                         Ordered fallback list, tried in order. The engine advances
                         to the next entry when the current one also fails.

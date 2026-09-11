@@ -221,6 +221,30 @@ describe('validateHostSpec', () => {
       expect(isModelAllowed).not.toHaveBeenCalled()
     })
 
+    it('rejects more than MAX_LLM_FALLBACKS (8) fallback entries before any allowlist lookup', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const fallbacks = Array.from({ length: 9 }, (_, i) => ({
+        provider: 'groq',
+        model: `llama-${i}`,
+      }))
+      const res = await validateHostSpec({ llmPolicy: { fallbacks } }, { isModelAllowed })
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks')
+      expect(res!.errors[0].message).toMatch(/at most 8 entries/)
+      // Length cap runs before the per-entry allowlist gate → no DB lookup.
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
+
+    it('accepts exactly MAX_LLM_FALLBACKS (8) fallback entries', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const fallbacks = Array.from({ length: 8 }, (_, i) => ({
+        provider: 'groq',
+        model: `llama-${i}`,
+      }))
+      const res = await validateHostSpec({ llmPolicy: { fallbacks } }, { isModelAllowed })
+      expect(res).toBeNull()
+    })
+
     it('leaves llmPolicy with no fallbacks key to the CRD schema (write gate is a no-op)', async () => {
       // `fallbacks` presence/min-length is the CRD schema's authority (required +
       // minItems:1). The write gate only validates entries when present, so a

@@ -62,6 +62,16 @@ const PROVIDER_IDS = Object.freeze([
   'codex-subscription',
 ])
 
+// Upper bound on `llmPolicy.fallbacks` entries. Failover is sequential (each hop
+// adds cooldown + latency), so more than a handful of distinct providers has no
+// operational meaning; 8 leaves headroom for "same provider, another key"
+// chains. It also caps the blast radius of local (openai-compatible) fallbacks:
+// each one provisions a full broker (Deployment+Service+ConfigMap+Secret+NetPol),
+// so 1 primary + 8 fallbacks is the worst-case per-Host object/pod count. Canonical
+// here so control-api (write gate), the CRD (maxItems) and control-ui all pin the
+// same number.
+const MAX_LLM_FALLBACKS = 8
+
 // Model identifiers are transport selectors, not arbitrary user text. Keep
 // one executable grammar shared by authoring, WRC admission and mcp-host.
 const RUNNABLE_LLM_MODEL_ID_MAX_LENGTH = 128
@@ -283,6 +293,7 @@ function requireStaticCredentialSlot(descriptor) {
 
 module.exports = {
   PROVIDER_IDS,
+  MAX_LLM_FALLBACKS,
   RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
   RUNNABLE_LLM_MODEL_ID_PATTERN,
   PROVIDER_CREDENTIAL_SLOTS,

@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { type LanBaseUrlReason, classifyLanBaseURL } from '@clerum/egress-policy'
 import {
   type LlmProviderId,
+  MAX_LLM_FALLBACKS,
   PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   isLlmProviderId,
@@ -860,6 +861,19 @@ async function validateLlmPolicy(
     return {
       errors: [
         { field: 'spec.llmPolicy.fallbacks', message: 'spec.llmPolicy.fallbacks must be an array' },
+      ],
+    }
+  }
+  // Cap the list length (pinned to the shared MAX_LLM_FALLBACKS, mirrored by the
+  // CRD `maxItems`). Each local fallback provisions a full egress broker, so an
+  // unbounded list is a per-Host resource-amplification vector.
+  if (fallbacks.length > MAX_LLM_FALLBACKS) {
+    return {
+      errors: [
+        {
+          field: 'spec.llmPolicy.fallbacks',
+          message: `spec.llmPolicy.fallbacks must have at most ${MAX_LLM_FALLBACKS} entries`,
+        },
       ],
     }
   }
