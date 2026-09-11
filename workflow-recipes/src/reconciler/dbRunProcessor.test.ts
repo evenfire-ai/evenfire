@@ -10,7 +10,10 @@ import {
   mapStepPhase,
   mapWorkflowExecutionPhase,
 } from './dbRunProcessor.js'
-import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
+import {
+  WorkflowAuthorityCheckpointError,
+  createWorkflowRunAuthorityCheckpointer,
+} from './workflowActionCheckpointClient.js'
 
 /**
  * Tests for `createDbRunProcessor` — the DB-first replacement for
@@ -149,6 +152,7 @@ describe('createDbRunProcessor', () => {
     }
     vi.useRealTimers()
     vi.restoreAllMocks()
+    vi.unstubAllEnvs()
   })
 
   function spawn(opts: Parameters<typeof createDbRunProcessor>[0]): DbRunProcessor {
@@ -290,6 +294,61 @@ describe('createDbRunProcessor', () => {
     await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
     expect(checkpointAuthority).toHaveBeenCalledOnce()
     expect(phase).toBe('Failed')
+  })
+
+  it('mounts the real checkpoint client and retries authority outages before child creation', async () => {
+    vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')
+    const run = baseRun({
+      authority_binding: {
+        version: 2,
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { environmentId: 'local', type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: `ath2_${'a'.repeat(43)}`,
+        accessPathId: `ap1_${'b'.repeat(43)}`,
+        authorizationRevision: `ar1_${'c'.repeat(43)}`,
+        behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+        pathKind: 'direct',
+        effectiveTeamId: null,
+      },
+    })
+    const client = makeClient(async sql =>
+      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+        ? { rows: [run], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    )
+    const checkpointAuthority = createWorkflowRunAuthorityCheckpointer({
+      fetchImpl: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              version: 2,
+              status: 'authority_unavailable',
+              code: 'authority_unavailable',
+              retryable: true,
+            }),
+            { status: 503 }
+          )
+      ) as typeof fetch,
+    })
+    const createChildRecipe = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      checkpointAuthority,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_unavailable')
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(false)
   })
 
   it('retries an unavailable checkpoint without duplicating the protected effect', async () => {
