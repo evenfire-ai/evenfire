@@ -7,7 +7,6 @@ import { ProgressStepper } from '../ProgressStepper'
 
 // ── CSS import stub ───────────────────────────────────────────────────────────
 
-vi.mock('../ProgressStepper.css', () => ({}))
 vi.mock('../ArtifactsBadge.css', () => ({}))
 
 afterEach(() => {
