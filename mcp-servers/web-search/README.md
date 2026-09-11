@@ -40,4 +40,30 @@ This directory has no `mcpserver.yaml` or NetworkPolicy — unlike `airtable/` a
 
 ## Status
 
-Available; buildable and published to the container registry. No test suite yet (unlike `airtable/` and `mongodb/`). Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image; the registry installs it on demand.
+Available; buildable and published to the container registry. Unit and isolated HTTP/MCP suites are available; see Regression tests below. Referenced in `docs/deploy/minikube.md` (NetworkPolicy troubleshooting for a coordinator connecting to a `web-search` MCP server) and type-checked by `scripts/build-preflight.sh`. Minikube setup does not build or pull the image; the registry installs it on demand.
+
+## fetch_page security contract
+
+`fetch_page` accepts HTTP(S) URLs without userinfo. It rejects non-public and
+special-purpose IPv4/IPv6 destinations, validates both DNS record families, pins
+the connection to the validated address, and validates every redirect. HTTPS
+redirects to HTTP are rejected. No ambient proxy is used. NetworkPolicy remains
+a complementary deployment control.
+
+The operation has a 15-second absolute deadline, five redirects maximum, a 1 MiB
+body limit before and after decompression, and four active calls per process.
+Additional calls fail immediately. `maxChars` remains the output display limit;
+it is not the download limit. Redirect and error bodies are destroyed without
+reading them. Encodings supported: identity, gzip, deflate and br.
+
+Errors expose a stable code without upstream details. Private destinations and
+oversized documents previously accepted are intentionally rejected.
+
+### Regression tests
+
+Use Node 24. `npm test` builds and executes the unit suite. `npm run test:network`
+uses the real MCP server and an isolated HTTP fixture inside Docker, with no
+external network or published ports. It requires a locally available
+`node:24-alpine` image and never pulls implicitly. Run Docker tests on the host,
+outside the native Codex sandbox. Only compiled code, dependencies and test files
+are mounted read-only. These protocol tests do not replace the Desktop journey.
