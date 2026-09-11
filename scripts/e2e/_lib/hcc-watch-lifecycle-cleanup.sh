@@ -152,6 +152,14 @@ cleanup_hcc_lifecycle() (
   fi
 
   HCC_CLEANUP_PHASE_DEADLINE=$((started + 270))
+  if { [ "$status" != 0 ] || [ "$cleanup_failed" != 0 ]; } &&
+    [ "${E2E_HCC_PR_A:-0}" = 1 ] && [ "${NP604_CREATED:-0}" = 1 ] &&
+    [ -d "${NP604_EVIDENCE:-}" ] && [ -r "$HCC_LOG_BUFFER" ]; then
+    # Keep structured evidence for later phases too, before deleting the raw
+    # buffer. Diagnostics do not replace or change the existing failure verdict.
+    hcc_pr_a_recovery_checkpoint 0 "$NP604_EVIDENCE/failure-recovery-observation.jsonl" ||
+      printf 'PR_A_FAILURE_CHECKPOINT=UNAVAILABLE\n' >&2
+  fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   print_results || cleanup_failed=1
   if [ "$status" -eq 0 ] && [ "$cleanup_failed" != 0 ]; then status=1; fi

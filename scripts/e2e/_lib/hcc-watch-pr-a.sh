@@ -45,6 +45,80 @@ hcc_pr_a_logs() {
   jq -Rrc 'fromjson? | select(.event=="networkpolicy-recovery-decision" or .event=="networkpolicy-request" or .event=="networkpolicy-pass-start" or .event=="networkpolicy-pass-result")' "$HCC_LOG_BUFFER"
 }
 
+hcc_pr_a_recovery_checkpoint() {
+  # Defaults preserve the simultaneous-stress diagnostic checkpoint.
+  local line_base=${1:-$HCC_PR_A_OBSERVATION_LOG_LINE_BASE}
+  local destination=${2:-$NP604_EVIDENCE/recovery-observation.jsonl}
+  # Persist only structured observation fields before a failing assertion can
+  # enter cleanup and remove the original log buffer. Never persist payloads.
+  tail -n "+$((line_base + 1))" "$HCC_LOG_BUFFER" |
+    jq -Rrc 'fromjson? | select(.event=="networkpolicy-recovery-decision" or
+      .event=="networkpolicy-request" or .event=="networkpolicy-pass-start" or .event=="networkpolicy-pass-result") |
+      {ts,event,kind,decision,reason,contextRevision,serverRevision,passId,causes,trailing,result,cause,admission} |
+      with_entries(select(.value!=null))' > "$destination"
+  printf 'PR_A_RECOVERY_DECISION_COUNTS (observation window)\n'
+  jq -sc '[.[]|select(.event=="networkpolicy-recovery-decision")] |
+    group_by([.kind,.decision,.reason]) | map({kind:.[0].kind,decision:.[0].decision,reason:.[0].reason,count:length})' \
+    "$destination"
+}
+
+hcc_pr_a_identical_skip_after() {
+  local line_base=$1 kind=$2 revision=$3
+  require_hcc_recovery_log_stream || return 1
+  tail -n "+$((line_base + 1))" "$HCC_LOG_BUFFER" | jq -Rse --arg kind "$kind" --argjson revision "$revision" '
+    split("\n") | map(fromjson?) | any(.event=="networkpolicy-recovery-decision" and .kind==$kind and
+      .decision=="skip" and .reason=="identical-complete" and
+      .contextRevision==$revision.contextRevision and .serverRevision==$revision.serverRevision)' >/dev/null
+}
+
+hcc_pr_a_no_recovery_admission_after() {
+  tail -n "+$(($1 + 1))" "$HCC_LOG_BUFFER" | jq -Rse '
+    split("\n") | map(fromjson?) | all(.[];
+      ((.event=="networkpolicy-request" and (.cause=="mcp-recovery" or .cause=="context-recovery")) or
+       (.event=="networkpolicy-pass-start" and any(.causes[]?; .=="mcp-recovery" or .=="context-recovery"))) | not)' >/dev/null
+}
+
+hcc_pr_a_controlled_omissions_core() {
+  local line_base=$1 kind cycle before revision periodic affected control
+  require_hcc_recovery_log_stream || return 1
+  hcc_pr_a_gate 200 || return 1
+  revision="$(hcc_pr_a_logs | jq -sce '[.[]|select(.event=="networkpolicy-pass-result" and .result=="certified")][-1] |
+    {contextRevision,serverRevision} | select(.contextRevision!=null and .serverRevision!=null)')" || return 1
+  periodic="$(hcc_pr_a_periodic_started_count)" || return 1
+  affected="$(np604_snapshot "$NP604_SERVER")" || return 1
+  control="$(np604_snapshot "$NP604_CONTROL")" || return 1
+  [ "$(jq length <<< "$affected")" = 4 ] && [ "$(jq length <<< "$control")" = 4 ] || return 1
+  for kind in McpServer Context; do
+    for cycle in 1 2 3; do
+      before="$(wc -l < "$HCC_LOG_BUFFER" | tr -d ' ')" || return 1
+      hcc_pr_a_cut "$kind" || return 1
+      wait_until 8 "fresh identical-complete ${kind} omission ${cycle}" \
+        hcc_pr_a_identical_skip_after "$before" "$kind" "$revision" || return 1
+      wait_until 5 'protected API recovered after controlled cut' hcc_pr_a_gate 200 || return 1
+      hcc_pr_a_no_recovery_admission_after "$line_base" || return 1
+      [ "$(hcc_pr_a_periodic_started_count)" = "$periodic" ] || {
+        printf 'PR A controlled omission phase overlapped a periodic pass\n' >&2; return 1;
+      }
+    done
+  done
+  np604_invoke "$NP604_SERVER" || return 1
+  np604_invoke "$NP604_CONTROL" || return 1
+  [ "$(np604_snapshot "$NP604_SERVER")" = "$affected" ] || return 1
+  [ "$(np604_snapshot "$NP604_CONTROL")" = "$control" ] || return 1
+  [ "$(hcc_pr_a_periodic_started_count)" = "$periodic" ] || return 1
+  require_hcc_recovery_log_stream || return 1
+  hcc_pr_a_no_recovery_admission_after "$line_base"
+}
+
+hcc_pr_a_controlled_omissions() {
+  local line_base status=0
+  line_base="$(wc -l < "$HCC_LOG_BUFFER" | tr -d ' ')" || return 1
+  hcc_pr_a_controlled_omissions_core "$line_base" || status=$?
+  hcc_pr_a_recovery_checkpoint "$line_base" "$NP604_EVIDENCE/controlled-recovery-observation.jsonl"
+  [ "$status" = 0 ] || die 'PR A controlled identical recoveries failed; checkpoint retained'
+  printf 'PR_A_IDENTICAL_RECOVERIES=PASS (3 sequential cuts per watch; no recovery admission)\n'
+}
+
 hcc_pr_a_decision_after() {
   local baseline=$1 kind=$2 decision=$3
   require_hcc_recovery_log_stream || return 1
@@ -87,6 +161,10 @@ hcc_pr_a_run() {
   periodic="$(hcc_pr_a_periodic_count)"
   wait_until 75 'PR A real periodic completion' hcc_pr_a_periodic_after "$periodic" || die 'PR A periodic path inactive'
   wait_until 15 'PR A periodic runtime effects complete' hcc_pr_a_runtime_completed || die 'PR A runtime did not complete before drift'
+  # The B stress window may legitimately retain repair work. Test omission
+  # separately after healthy binding, periodic policy/runtime completion and
+  # the driver's acknowledged pause of automatic churn; never warm up on skips.
+  hcc_pr_a_controlled_omissions
   periodic="$(hcc_pr_a_periodic_count)"
   context_spec="$(np604_kctl get mcpserver "$NP604_SERVER" -n "$MCP_NS" -o json | jq -Sc '{uid:.metadata.uid,generation:.metadata.generation,spec}')"
   hcc_pr_a_remove_service

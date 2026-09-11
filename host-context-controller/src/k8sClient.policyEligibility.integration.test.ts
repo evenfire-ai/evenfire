@@ -880,4 +880,88 @@ describe('WATCH and recovered LIST policy effects', () => {
     await drain(state)
     expect(fixture.policies.get(desired[0])?.spec).toEqual(desired[1].spec)
   })
+  it('A-T6 recovery scheduling: simultaneous retirement defers MCP until Context restores authority', async () => {
+    const state = await settled()
+    const before = structuredClone([...fixture.policies.entries()])
+    expect(before).toHaveLength(17)
+    const log = vi.spyOn(hccLogger, 'info')
+    const originalList = fixture.list.getMockImplementation()!
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await vi.advanceTimersByTimeAsync(7000)
+      let release!: () => void, entered!: () => void
+      const hold = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const started = new Promise<void>(resolve => {
+        entered = resolve
+      })
+      fixture.list.mockImplementation(async args => {
+        if (args.plural === 'contexts') {
+          entered()
+          await hold
+        }
+        return originalList(args)
+      })
+      ;(state as any).retireContextWatch()
+      ;(state as any).retireMcpServerWatch()
+      const contextRecovery = state.recoverContextInventoryAndWatch()
+      await started
+      expect(await state.recoverMcpServerInventoryAndWatch()).toBe(true)
+      expect(state.contextCacheSynced).toBe(false)
+      release()
+      expect(await contextRecovery).toBe(true)
+      await drain(state)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+      expect([...fixture.policies.entries()]).toEqual(before)
+    }
+    const decisions = log.mock.calls
+      .map(([, data]) => data as any)
+      .filter(data => data?.event === 'networkpolicy-recovery-decision')
+    const mcps = decisions.filter(data => data.kind === 'McpServer')
+    const contexts = decisions.filter(data => data.kind === 'Context')
+    expect(mcps).toHaveLength(3)
+    expect(mcps.every(data => data.decision === 'defer' && data.reason === 'no-authority')).toBe(
+      true
+    )
+    expect(contexts).toHaveLength(3)
+    expect(
+      contexts.every(data => data.decision === 'skip' && data.reason === 'identical-complete')
+    ).toBe(true)
+  })
+
+  it('A-T6 recovery scheduling: independent recoveries skip while their peer stays authoritative', async () => {
+    const state = await settled()
+    const before = structuredClone([...fixture.policies.entries()])
+    expect(before).toHaveLength(17)
+    const log = vi.spyOn(hccLogger, 'info')
+    const admission = vi.spyOn(state, 'runInitialConvergence')
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await vi.advanceTimersByTimeAsync(7000)
+      expect(state.contextCacheSynced).toBe(true)
+      ;(state as any).retireMcpServerWatch()
+      expect(await state.recoverMcpServerInventoryAndWatch()).toBe(true)
+      await drain(state)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+      expect([...fixture.policies.entries()]).toEqual(before)
+      expect(state.mcpServerCacheSynced).toBe(true)
+      ;(state as any).retireContextWatch()
+      expect(await state.recoverContextInventoryAndWatch()).toBe(true)
+      await drain(state)
+      expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+      expect([...fixture.policies.entries()]).toEqual(before)
+    }
+    const decisions = log.mock.calls
+      .map(([, data]) => data as any)
+      .filter(data => data?.event === 'networkpolicy-recovery-decision')
+    const mcpSkips = decisions.filter(
+      data => data.kind === 'McpServer' && data.decision === 'skip'
+    ).length
+    const contextSkips = decisions.filter(
+      data => data.kind === 'Context' && data.decision === 'skip'
+    ).length
+    const npAdmissions = admission.mock.calls.filter(([lane]) => lane === 'NetworkPolicy').length
+    expect(mcpSkips).toBe(3)
+    expect(contextSkips).toBe(3)
+    expect(npAdmissions).toBe(0)
+  })
 })

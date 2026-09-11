@@ -18,6 +18,34 @@ if hcc_pr_a_decision_after 0 Context skip; then echo 'FAIL: deferral counted as 
 if hcc_pr_a_decision_after 0 McpServer skip; then echo 'FAIL: empty observations passed'; exit 1; fi
 printf 'PASS: recovery observation needs a new explicit omission of the exact kind\n'
 
+# The unchanged real-cut stress assertion fails after a safe checkpoint.
+# Deleting its raw buffer afterwards models the existing EXIT cleanup.
+mkdir -p "$tmp/checkpoint"
+printf '%s\n' 'before-observation' \
+  '{"event":"networkpolicy-recovery-decision","kind":"McpServer","decision":"request","reason":"work-pending","contextRevision":2,"serverRevision":3,"body":"synthetic-private-payload"}' \
+  '{"event":"networkpolicy-pass-start","passId":4,"causes":["mcp-recovery"],"contextRevision":2,"serverRevision":3,"headers":"synthetic-private-payload"}' > "$tmp/failed-runtime-buffer"
+if (
+  source "$ROOT/scripts/e2e/_lib/hcc-networkpolicy-lifecycle.sh"
+  E2E_HCC_PR_A=1 NP604_CUT_BASE=0
+  HCC_PR_A_OBSERVATION_LOG_LINE_BASE=1 HCC_LOG_BUFFER="$tmp/failed-runtime-buffer"
+  NP604_EVIDENCE="$tmp/checkpoint"
+  np604_observer_alive() { :; }
+  count_buffer() { printf 0; }
+  die() { printf '%s\n' "$*" >&2; exit 1; }
+  np604_after_observation
+) > "$tmp/checkpoint-result" 2>&1; then
+  echo 'FAIL: zero real stress cuts unexpectedly passed' >&2; exit 1
+fi
+rm "$tmp/failed-runtime-buffer"
+jq -se 'length==2 and .[0].reason=="work-pending" and .[1].passId==4 and
+  all(.[]; has("body")|not) and all(.[]; has("headers")|not)' "$tmp/checkpoint/recovery-observation.jsonl" >/dev/null
+grep -q 'NP604 needs three complete reconnect cycles' "$tmp/checkpoint-result"
+grep -q '"reason":"work-pending","count":1' "$tmp/checkpoint-result"
+if grep -q 'synthetic-private-payload' "$tmp/checkpoint-result" "$tmp/checkpoint/recovery-observation.jsonl"; then
+  echo 'FAIL: payload leaked into checkpoint' >&2; exit 1
+fi
+printf 'PASS: unchanged stress assertion retains a projected checkpoint and grouped reasons after raw-buffer cleanup\n'
+
 NP604_SERVER=fixture-affected MCP_NS=mcp-server HCC_PR_A_SERVICE_UID=old
 np604_kctl() { cat "$tmp/service"; }
 for variation in new old wrong-label wrong-port; do
@@ -43,6 +71,7 @@ printf 'PASS: actual absence and new correctly scoped Service are required\n'
 (
   NP604_CONTROL=fixture-control
   hcc_pr_a_gate() { :; }
+  hcc_pr_a_controlled_omissions() { :; }
   np604_snapshot() { printf '[]'; }
   hcc_pr_a_periodic_count() { printf 1; }
   hcc_pr_a_periodic_started_count() { printf 1; }
@@ -174,3 +203,57 @@ for mode in 0 1; do
   done
 done
 printf 'PASS: PR A retries within budget; legacy callers without wait_until remain strict and one-shot\n'
+
+# Controlled omission has its own positive denominator: six real cut entries,
+# then fresh same-kind/same-revision identical-complete decisions. Exercise
+# the real phase body and checkpoint against hostile boundary outcomes.
+for variant in success wrong-kind replay wrong-reason wrong-revision admission trailing mutation periodic; do
+  mkdir -p "$tmp/controlled-$variant"
+  printf '%s\n' '{"event":"networkpolicy-pass-result","result":"certified","contextRevision":2,"serverRevision":3,"causes":["startup"]}' > "$tmp/controlled-$variant/buffer"
+  status=0
+  (
+    HCC_LOG_BUFFER="$tmp/controlled-$variant/buffer" NP604_EVIDENCE="$tmp/controlled-$variant"
+    NP604_SERVER=fixture-affected NP604_CONTROL=fixture-control cuts=0
+    require_hcc_recovery_log_stream() { :; }
+    hcc_pr_a_gate() { :; }
+    np604_invoke() { :; }
+    np604_snapshot() {
+      if [[ "$variant" = mutation && "$cuts" -gt 0 ]]; then
+        printf '[{"name":"changed"},{},{},{}]'
+      else
+        printf '[{"name":"original"},{},{},{}]'
+      fi
+    }
+    wait_until() { shift 2; "$@"; }
+    hcc_pr_a_cut() {
+      cuts=$((cuts + 1))
+      local kind=$1 reason=identical-complete revision=2
+      [[ "$variant" != replay ]] || return 0
+      [[ "$variant" != wrong-kind ]] || kind=other
+      [[ "$variant" != wrong-reason ]] || reason=work-pending
+      [[ "$variant" != wrong-revision ]] || revision=99
+      jq -cn --arg kind "$kind" --arg reason "$reason" --argjson revision "$revision" \
+        '{event:"networkpolicy-recovery-decision",kind:$kind,decision:"skip",reason:$reason,contextRevision:$revision,serverRevision:3}' >> "$HCC_LOG_BUFFER"
+      if [[ "$variant" = admission ]]; then
+        printf '%s\n' '{"event":"networkpolicy-request","cause":"mcp-recovery","admission":"before-capture"}' >> "$HCC_LOG_BUFFER"
+      elif [[ "$variant" = trailing ]]; then
+        printf '%s\n' '{"event":"networkpolicy-pass-start","causes":["context-recovery"],"trailing":true}' >> "$HCC_LOG_BUFFER"
+      elif [[ "$variant" = periodic ]]; then
+        printf '%s\n' '{"event":"networkpolicy-pass-start","causes":["periodic-resync"]}' >> "$HCC_LOG_BUFFER"
+      fi
+    }
+    die() { printf '%s\n' "$*" >&2; exit 1; }
+    hcc_pr_a_controlled_omissions
+    [[ "$cuts" = 6 ]]
+  ) > "$tmp/controlled-$variant/output" 2>&1 || status=$?
+  [[ -f "$tmp/controlled-$variant/controlled-recovery-observation.jsonl" ]]
+  if [[ "$variant" = success ]]; then
+    [[ "$status" = 0 ]] || { cat "$tmp/controlled-$variant/output"; exit 1; }
+    jq -se '[.[]|select(.kind=="McpServer")]|length==3' "$tmp/controlled-$variant/controlled-recovery-observation.jsonl" >/dev/null
+    jq -se '[.[]|select(.kind=="Context")]|length==3' "$tmp/controlled-$variant/controlled-recovery-observation.jsonl" >/dev/null
+  else
+    [[ "$status" != 0 ]] || { echo "FAIL: controlled omission accepted $variant" >&2; exit 1; }
+    grep -q 'controlled identical recoveries failed' "$tmp/controlled-$variant/output"
+  fi
+done
+printf 'PASS: controlled omission requires 3 fresh skips per kind and rejects replay, wrong state, admissions, trailing, mutation and periodic overlap\n'
