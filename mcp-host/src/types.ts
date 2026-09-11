@@ -14,7 +14,7 @@ export interface ModelConfig {
   connectionRef?: string
   /**
    * LAN endpoint of a local `openai-compatible` provider (e.g.
-   * `http://10.0.0.5:8000/v1`). mcp-host NEVER dials this directly — it uses it
+   * `http://<lan-ip>:8000/v1`). mcp-host NEVER dials this directly — it uses it
    * only to (a) detect a hot-reload change and (b) extract the pathname that is
    * appended to the derived egress-broker URL. Ignored for every other provider.
    */

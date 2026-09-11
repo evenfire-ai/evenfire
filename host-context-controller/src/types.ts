@@ -404,7 +404,7 @@ export interface HostModelSpec {
   connectionRef?: string
   /**
    * Operator LAN endpoint for provider 'openai-compatible' (e.g.
-   * http://192.168.1.50:8000/v1). Egress is brokered: HCC provisions a
+   * http://<lan-ip>:8000/v1). Egress is brokered: HCC provisions a
    * dedicated per-slot egress broker for this endpoint and the mcp-host dials
    * the broker, never this address directly. Guaranteed to be an RFC1918
    * IP-literal by control-api admission (phase 3); HCC re-validates fail-closed.

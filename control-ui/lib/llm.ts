@@ -77,9 +77,11 @@ export function providerRequiresBaseUrl(provider: string | undefined | null): bo
   return provider === LLM_LOCAL_PROVIDER
 }
 
-// Example endpoint shown as the baseURL placeholder: a private-LAN IPv4 literal
-// (never a DNS name), matching the only shape the classifier accepts.
-export const LLM_LAN_BASE_URL_PLACEHOLDER = 'http://192.168.1.50:8000/v1'
+// Example endpoint shown as the baseURL placeholder: the private-LAN IPv4 shape
+// the classifier accepts (never a DNS name), with the host octets templated so
+// no concrete RFC1918 literal ships in source — the public/private boundary
+// guard rejects real private IPs outside test fixtures.
+export const LLM_LAN_BASE_URL_PLACEHOLDER = 'http://<lan-ip>:8000/v1'
 
 // Human-facing message per rejection reason, mirroring control-api's
 // LAN_BASE_URL_REASON_MESSAGE (routes/admin/hostSpecValidation.ts). Control-api

@@ -30,7 +30,7 @@ spec:
     name: qwen2.5-32b-instruct
     # Operator LAN endpoint. Private LAN only — never cluster-internal, metadata,
     # or CGNAT.
-    baseURL: http://192.168.1.50:8000/v1
+    baseURL: http://<lan-ip>:8000/v1
   llmPolicy:
     cooldownSeconds: 300
     fallbacks:
@@ -38,7 +38,7 @@ spec:
       # exercises the fallback baseURL slot with a DIFFERENT address.
       - provider: openai-compatible
         model: llama-3.3-70b-instruct
-        baseURL: http://192.168.1.51:8001/v1
+        baseURL: http://<lan-ip>:8001/v1
   channels:
     - all-channels
 ---
