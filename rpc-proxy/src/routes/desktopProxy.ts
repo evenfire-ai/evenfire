@@ -11,6 +11,24 @@ import { tokenDeclaresV2, verifyUserDelegationV2 } from '../userDelegationV2.js'
 
 const sessionService = new DesktopSessionService()
 
+const DESKTOP_UPSTREAM_BLOCKED_HEADERS = new Set([
+  'authorization',
+  'cookie',
+  'x-evenfire-action-delegation',
+])
+
+export function stripDesktopEdgeCredentials(headers: Request['headers']): void {
+  for (const name of Object.keys(headers)) {
+    const normalized = name.toLowerCase()
+    if (
+      DESKTOP_UPSTREAM_BLOCKED_HEADERS.has(normalized) ||
+      normalized.startsWith('x-clerum-edge-')
+    ) {
+      delete headers[name]
+    }
+  }
+}
+
 function isV2ViewRequest(req: AuthedRequest): boolean {
   return Boolean(req.userDelegationV2 && req.authorizedActionV2)
 }
@@ -246,6 +264,7 @@ function createViewRoute(): Router {
       : null
     res.once('close', () => lease?.close())
     res.once('finish', () => lease?.close())
+    stripDesktopEdgeCredentials(req.headers)
     proxy.web(req, res, { target })
   })
 
@@ -297,6 +316,7 @@ async function handleV2DesktopUpgrade(
     socket.once('error', () => lease.close())
     const target = `ws://${hostRef}.${config.hostNamespace}.svc.cluster.local:${config.desktopPort}`
     req.url = `/${path}`
+    stripDesktopEdgeCredentials(req.headers)
     proxy.ws(req, socket, head, { target })
   } catch {
     // A malformed binding, denial, stale authority, or checkpoint outage must
@@ -343,6 +363,7 @@ export function handleDesktopUpgrade(
 
   const target = `ws://${hostRef}.${config.hostNamespace}.svc.cluster.local:${config.desktopPort}`
   req.url = `/${path}`
+  stripDesktopEdgeCredentials(req.headers)
   proxy.ws(req, socket, head, { target })
   return true
 }

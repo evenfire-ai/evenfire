@@ -6,7 +6,12 @@ import request from 'supertest'
 import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
 import { ActionAuthorityCheckpointError } from '../actionAuthorityV2.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
-import { createDesktopRouter, handleDesktopUpgrade, parseCookies } from './desktopProxy.js'
+import {
+  createDesktopRouter,
+  handleDesktopUpgrade,
+  parseCookies,
+  stripDesktopEdgeCredentials,
+} from './desktopProxy.js'
 
 // ── Hoisted mocks ───────────────────────────────────────────────────
 const authTokenMock = vi.hoisted(() => ({
@@ -303,7 +308,7 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     expect(res.body.error).toBe('Invalid desktop session')
   })
 
-  it('requires v2 authority and mounts a lease before proxying', async () => {
+  it('requires v2 authority, mounts a lease, and strips edge credentials before proxying', async () => {
     const claims = desktopDelegation()
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
     authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
@@ -317,10 +322,16 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     await request(makeApp())
       .get('/desktop/chatllm/view/index.html')
       .set('Authorization', 'Bearer v2.valid')
+      .set('Cookie', 'legacy=must-not-forward')
+      .set('x-clerum-edge-action-context', 'must-not-forward')
       .expect(200)
 
     expect(authorityMock.authorizeActionV2).toHaveBeenCalledOnce()
     expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce()
+    const proxied = proxyMock.web.mock.calls.at(-1)![0] as express.Request
+    expect(proxied.headers.authorization).toBeUndefined()
+    expect(proxied.headers.cookie).toBeUndefined()
+    expect(proxied.headers['x-clerum-edge-action-context']).toBeUndefined()
   })
 
   it('destroys an active v2 HTTP view when its mounted lease denies', async () => {
@@ -433,7 +444,7 @@ describe('handleDesktopUpgrade', () => {
     expect(socket.destroy).toHaveBeenCalled()
   })
 
-  it('mounts a v2 lease before WebSocket proxying', async () => {
+  it('mounts a v2 lease and strips edge credentials before WebSocket proxying', async () => {
     const claims = desktopDelegation()
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
     authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
@@ -448,6 +459,8 @@ describe('handleDesktopUpgrade', () => {
       url: '/api/v1/desktop/chatllm/view/websockify',
       headers: {
         authorization: 'Bearer v2.valid',
+        cookie: 'legacy=must-not-forward',
+        'x-clerum-edge-action-context': 'must-not-forward',
       },
     } as any
 
@@ -455,6 +468,9 @@ describe('handleDesktopUpgrade', () => {
     await vi.waitFor(() => expect(proxyMock.ws).toHaveBeenCalledOnce())
 
     expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce()
+    expect(req.headers.authorization).toBeUndefined()
+    expect(req.headers.cookie).toBeUndefined()
+    expect(req.headers['x-clerum-edge-action-context']).toBeUndefined()
     leaseMock.startActiveViewLease.mock.calls[0]![1].onDenied()
     expect(socket.destroy).toHaveBeenCalled()
   })
@@ -528,5 +544,21 @@ describe('handleDesktopUpgrade', () => {
 
     expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
     expect(proxyMock.ws).not.toHaveBeenCalled()
+  })
+})
+
+describe('stripDesktopEdgeCredentials', () => {
+  it('removes bearer, cookie, delegation, and trusted-edge shadow headers', () => {
+    const headers: express.Request['headers'] = {
+      authorization: 'Bearer secret',
+      cookie: 'secret=value',
+      'x-evenfire-action-delegation': 'delegation',
+      'x-clerum-edge-action-context': 'shadow',
+      accept: 'text/html',
+    }
+
+    stripDesktopEdgeCredentials(headers)
+
+    expect(headers).toEqual({ accept: 'text/html' })
   })
 })
