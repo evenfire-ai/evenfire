@@ -35,6 +35,31 @@ function checkpointRequest(binding: WorkflowRunAuthorityBinding) {
 
 export type WorkflowRunAuthorityCheckpointer = (run: DbRunRow) => Promise<void>
 
+export type WorkflowAuthorityCheckpointFailure =
+  | 'denied'
+  | 'not_found'
+  | 'access_path_stale'
+  | 'invalid_binding'
+  | 'authority_unavailable'
+  | 'invalid_response'
+  | 'timeout'
+
+export class WorkflowAuthorityCheckpointError extends Error {
+  constructor(
+    readonly failure: WorkflowAuthorityCheckpointFailure,
+    readonly retryable: boolean
+  ) {
+    super(
+      failure === 'authority_unavailable' || failure === 'timeout'
+        ? 'workflow_authority_unavailable'
+        : failure === 'invalid_response'
+          ? 'workflow_authority_checkpoint_invalid_response'
+          : 'workflow_authority_denied'
+    )
+    this.name = 'WorkflowAuthorityCheckpointError'
+  }
+}
+
 export function createWorkflowRunAuthorityCheckpointer(
   options: {
     baseUrl?: string
@@ -70,7 +95,7 @@ export function createWorkflowRunAuthorityCheckpointer(
       try {
         result = validateActionAuthorityCheckpointResponse(await response.json())
       } catch {
-        throw new Error('workflow_authority_checkpoint_invalid_response')
+        throw new WorkflowAuthorityCheckpointError('invalid_response', true)
       }
       const expectedStatus = {
         allowed: 200,
@@ -81,13 +106,12 @@ export function createWorkflowRunAuthorityCheckpointer(
         invalid_binding: 400,
       }[result.status]
       if (response.status !== expectedStatus) {
-        throw new Error('workflow_authority_checkpoint_invalid_response')
+        throw new WorkflowAuthorityCheckpointError('invalid_response', true)
       }
       if (result.status !== 'allowed') {
-        throw new Error(
+        throw new WorkflowAuthorityCheckpointError(
+          result.status,
           result.status === 'authority_unavailable'
-            ? 'workflow_authority_unavailable'
-            : 'workflow_authority_denied'
         )
       }
       const attribution = result.attribution
@@ -103,11 +127,11 @@ export function createWorkflowRunAuthorityCheckpointer(
         result.destination !== null ||
         (result.validUntil !== null && Date.parse(result.validUntil) <= Date.now())
       ) {
-        throw new Error('workflow_authority_denied')
+        throw new WorkflowAuthorityCheckpointError('invalid_binding', false)
       }
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') {
-        throw new Error('workflow_authority_checkpoint_timeout')
+        throw new WorkflowAuthorityCheckpointError('timeout', true)
       }
       throw error
     } finally {
