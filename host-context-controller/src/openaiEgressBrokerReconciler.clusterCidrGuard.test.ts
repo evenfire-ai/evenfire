@@ -132,6 +132,26 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     expect(provisioned()).toBe(true)
   })
 
+  it('G4b: the opt-out does NOT drop the floor — the apiserver ClusterIP is still refused', async () => {
+    // Opt-out on, no declared CIDRs — but KUBERNETES_SERVICE_HOST is always
+    // injected in-cluster, so the zero-config /32 floor must still pin the
+    // apiserver. The opt-out only waives the REQUIRE-configured gate, never the floor.
+    config.oaiEgressRequireClusterCidrs = false
+    vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.96.0.1')
+
+    const internal = makeHost('g4b', 'http://10.96.0.1:6443/v1')
+    hosts.set(internal.name, internal)
+    await reconciler.reconcileForHost(internal)
+    expect(provisioned()).toBe(false)
+    expect(npCreated()).toBe(false)
+
+    // Positive control: a genuine private-LAN endpoint still provisions under the opt-out.
+    const lan = makeHost('g4b-lan', 'http://192.168.1.50:8000/v1')
+    hosts.set(lan.name, lan)
+    await reconciler.reconcileForHost(lan)
+    expect(provisioned()).toBe(true)
+  })
+
   describe('resolveClusterInternalCidrs (pure)', () => {
     it('unions every configured source and marks the guard configured', () => {
       config.k8sApiCidrs = ['10.96.0.0/12']
