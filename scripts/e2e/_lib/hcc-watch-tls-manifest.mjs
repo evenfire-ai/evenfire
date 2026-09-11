@@ -13,9 +13,14 @@ const { privateKey } = generateKeyPairSync('rsa', {
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   publicKeyEncoding: { type: 'spki', format: 'pem' },
 })
+// Linux cannot reopen Node's socket-backed stdin through /dev/stdin. A POSIX
+// pipe keeps the ephemeral key in memory and lets OpenSSL read it portably.
 const signed = spawnSync(
-  'openssl',
+  '/bin/sh',
   [
+    '-c',
+    "exec 3<&0; trap 'kill \"$signer\" 2>/dev/null; wait \"$signer\" 2>/dev/null; exit 143' TERM; cat <&3 | openssl \"$@\" & signer=$!; exec 3<&-; wait \"$signer\"",
+    'openssl',
     'req',
     '-new',
     '-x509',

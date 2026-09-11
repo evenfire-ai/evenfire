@@ -307,8 +307,11 @@ function certificate() {
     publicKeyEncoding: { type: 'spki', format: 'pem' },
   })
   const result = spawnSync(
-    'openssl',
+    '/bin/sh',
     [
+      '-c',
+      "exec 3<&0; trap 'kill \"$signer\" 2>/dev/null; wait \"$signer\" 2>/dev/null; exit 143' TERM; cat <&3 | openssl \"$@\" & signer=$!; exec 3<&-; wait \"$signer\"",
+      'openssl',
       'req',
       '-new',
       '-x509',
@@ -938,4 +941,37 @@ test('config restoration preserves new host aliases outside fixture ownership', 
     false
   )
   assert.deepEqual(applyPatch(changed, patches).spec.template.spec.hostAliases, aliases)
+})
+
+test('TLS fixture timeout terminates its signer', { timeout: 25000 }, () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hcc-signer-timeout-'))
+  const pidPath = join(directory, 'signer.pid')
+  const signerPath = join(directory, 'signer.cjs')
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'"
+  let signerPid
+  try {
+    writeFileSync(signerPath,
+      `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.stdin.resume(); setTimeout(() => {}, 30000)`)
+    writeFileSync(join(directory, 'openssl'),
+      `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(signerPath)}\n`, { mode: 0o700 })
+    const result = spawnSync(process.execPath, [
+      join(root, 'scripts/e2e/_lib/hcc-watch-tls-manifest.mjs'),
+      'timeout-fixture', 'test-fixture', 'run-fixture',
+      join(root, 'scripts/e2e/_lib/hcc-watch-api-proxy.mjs'),
+    ], { env: { PATH: `${directory}:/usr/bin:/bin` },
+      encoding: 'utf8', timeout: 22000, maxBuffer: 1048576 })
+    signerPid = Number(readFileSync(pidPath, 'utf8'))
+    assert.equal(result.error, undefined, 'the generator enforces its own deadline')
+    assert.equal(result.status, 1, 'signing timeout fails closed')
+    assert.equal(result.stdout, '', 'no partial manifest is emitted')
+    assert.match(result.stderr, /fixture_certificate_generation_failed/)
+    assert.throws(() => process.kill(signerPid, 0), { code: 'ESRCH' }, 'signer was reaped')
+  } finally {
+    if (signerPid) {
+      try { process.kill(signerPid, 'SIGKILL') } catch (error) {
+        if (error.code !== 'ESRCH') throw error
+      }
+    }
+    rmSync(directory, { recursive: true, force: true })
+  }
 })
