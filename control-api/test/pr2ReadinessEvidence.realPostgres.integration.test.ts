@@ -145,7 +145,7 @@ describeRealPostgres('PR2 readiness evidence on real PostgreSQL', () => {
       )
     ).toEqual(Array(17).fill('unavailable'))
 
-    const hop = 'rpc_proxy_trusted_edge' as const
+    const hop = 'mcp_host_live_effects' as const
     const writer = runtimeOwner(hop)
     const withdrawnAt = new Date('2026-09-08T12:00:21.000Z')
     await writePr2ReadinessEvidence(
@@ -187,6 +187,43 @@ describeRealPostgres('PR2 readiness evidence on real PostgreSQL', () => {
     expect((await assemblePr2Readiness(databasePool, 'test.cluster', undefined, SHA))[hop]).toBe(
       'unavailable'
     )
+  })
+
+  it('expires and restores one required runtime hop at the configured max age', async () => {
+    const hop = 'rpc_proxy_trusted_edge' as const
+    await databasePool.query(
+      `UPDATE pr2_readiness_activations
+          SET updated_at = clock_timestamp() - interval '120 seconds'
+        WHERE environment_id = $1`,
+      ['test.cluster']
+    )
+    await databasePool.query(
+      `UPDATE pr2_readiness_evidence
+          SET observed_at = clock_timestamp() - interval '61 seconds'
+        WHERE environment_id = $1
+          AND source_revision = $2
+          AND hop = $3
+          AND evidence_class = 'runtime'
+          AND evidence_kind = 'service_runtime'`,
+      ['test.cluster', SHA, hop]
+    )
+
+    const expired = await assemblePr2Readiness(databasePool, 'test.cluster', undefined, SHA)
+    expect(expired[hop]).toBe('unavailable')
+
+    await databasePool.query(
+      `UPDATE pr2_readiness_evidence
+          SET observed_at = clock_timestamp()
+        WHERE environment_id = $1
+          AND source_revision = $2
+          AND hop = $3
+          AND evidence_class = 'runtime'
+          AND evidence_kind = 'service_runtime'`,
+      ['test.cluster', SHA, hop]
+    )
+
+    const refreshed = await assemblePr2Readiness(databasePool, 'test.cluster', undefined, SHA)
+    expect(refreshed[hop]).toBe('ready')
   })
 
   it('rolls activation and its complete build-evidence batch back together', async () => {
