@@ -122,7 +122,10 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
   it('creates the egress NP in channels namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureChannelReaderEgressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
@@ -163,7 +166,10 @@ describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureMcpHostIngressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]

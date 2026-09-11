@@ -130,6 +130,7 @@ jobs:
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
+              - 'packages/gfs-interaction-policy/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:

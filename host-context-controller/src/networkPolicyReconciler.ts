@@ -2876,7 +2876,8 @@ export class NetworkPolicyReconciler {
             convergence.policy,
             'external-egress',
             isCurrent,
-            convergence.observedPolicy
+            convergence.observedPolicy,
+            fresh.policy
           )
         } else {
           hccLogger.info('external egress policy unchanged', { policy: convergence.name })
@@ -3323,7 +3324,8 @@ export class NetworkPolicyReconciler {
     policy: k8s.V1NetworkPolicy,
     lane: SafetyInventoryLane,
     isCurrent?: () => boolean,
-    expectedSnapshot?: k8s.V1NetworkPolicy | null
+    expectedSnapshot?: k8s.V1NetworkPolicy | null,
+    observedPolicy?: k8s.V1NetworkPolicy | null
   ): Promise<void> {
     await applyNetworkPolicy(
       this.networkingApi,
@@ -3340,7 +3342,8 @@ export class NetworkPolicyReconciler {
       },
       // Best-effort maintenance may skip a disappeared object. External-egress
       // admission must instead retry: POST409 followed by GET404 applied nothing.
-      lane === 'external-egress'
+      lane === 'external-egress',
+      observedPolicy
     )
   }
 

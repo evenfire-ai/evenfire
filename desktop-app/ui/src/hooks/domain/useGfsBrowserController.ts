@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useAuthContext } from '@contexts/AuthContext'
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
@@ -34,6 +40,12 @@ export interface GfsBrowserChild {
   path: string | null
   version: number
   bytes: number
+  /**
+   * Server-computed read decision for the listing caller. Absent on older
+   * servers (treat as unknown); `false` means the row is visible but cannot
+   * be opened or downloaded — a folder grant without inheritance.
+   */
+  readable?: boolean
 }
 
 interface GfsAccessibleResource extends GfsBrowserChild {
@@ -55,6 +67,47 @@ function normalizeAccessibleResource(
     permissions: item.permissions ?? [],
     coversDescendants: item.coversDescendants ?? false,
   }
+}
+
+type NavigableShareRow = {
+  resourceId: string
+  kind: 'file' | 'directory'
+  path: string | null
+  parentResourceId: string | null
+}
+
+/**
+ * Virtual-root hygiene for the "Shared with me" surface. The server lists
+ * EVERY resource carrying a direct grant — including files that live inside
+ * folders the caller can already navigate into. Surfacing those twice (a
+ * loose root item with no location, plus the real folder child) hides where
+ * the file actually lives and invites acting on a different copy than
+ * intended. Suppress a file from the virtual root when an accessible folder
+ * covers it (path prefix, falling back to a direct parent match when the
+ * server omits paths). Orphan shares — files whose location is NOT otherwise
+ * reachable — stay listed; that is this surface's purpose. The filter only
+ * sees already-loaded pages, so a folder on a later page suppresses its
+ * files once that page loads.
+ */
+export function suppressNavigableShares<T extends NavigableShareRow>(rows: T[]): T[] {
+  const folderPathPrefixes = new Set(
+    rows
+      .filter(
+        (row): row is T & { path: string } =>
+          row.kind === 'directory' && typeof row.path === 'string' && row.path.length > 1
+      )
+      .map(row => (row.path.endsWith('/') ? row.path : `${row.path}/`))
+  )
+  const folderIds = new Set(rows.filter(row => row.kind === 'directory').map(row => row.resourceId))
+  return rows.filter(row => {
+    if (row.kind !== 'file') return true
+    if (typeof row.path === 'string' && row.path.length > 1) {
+      for (const prefix of folderPathPrefixes) {
+        if (row.path.startsWith(prefix)) return false
+      }
+    }
+    return !(row.parentResourceId && folderIds.has(row.parentResourceId))
+  })
 }
 
 export interface GfsCrumb {
@@ -192,6 +245,10 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     // Infinity-cached list must not survive a Files remount without a server
     // check — even though the app-level client defaults disable refetching.
     refetchOnMount: 'always',
+    // Grants are often made from another surface (control-ui, an operator,
+    // another user) while this window stays open; focusing the app must
+    // surface the new shares without a hard reload.
+    refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -220,6 +277,12 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
       window.clerum.gfs.listChildren(current!.resourceId, DRIVE, pageParam),
     enabled:
       Boolean(sessionScope) && Boolean(current) && currentIsDirectory && accessState === 'active',
+    // Folder contents change out-of-band: agents with host grants, other
+    // sessions, and operator writes never pass through this client. Revisit
+    // and window focus must revalidate — an Infinity-fresh cached listing
+    // otherwise hides new files until a hard app reload.
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })
@@ -340,37 +403,6 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     },
     [revokeAccess]
   )
-  // Query-surfaced authorization failures (a refetch after revocation is the
-  // normal way the loss is discovered under Infinity staleTime). Discovery is
-  // the session/authority boundary; per-resource verdicts stay local.
-  const queryAuthorizationError = [
-    accessibleQuery.error
-      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
-      : null,
-    childrenQuery.error
-      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
-      : null,
-    affordancesQuery.error
-      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
-      : null,
-    rowAffordancesQuery.error
-      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
-      : null,
-    grantsQuery.error
-      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
-      : null,
-    sharesQuery.error
-      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
-      : null,
-  ]
-    .filter(
-      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
-    )
-    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
-  useEffect(() => {
-    if (!queryAuthorizationError || accessState === 'revoked') return
-    revokeAccess()
-  }, [accessState, queryAuthorizationError, revokeAccess])
   // All GFS mutations share the central fail-closed boundary: an authority
   // rejection (401 / typed lifecycle code) revokes the session even when the
   // caller would only have toasted. Policy verdicts (403/412) stay local.
@@ -480,12 +512,86 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () => (authorityPending ? [] : (childrenQuery.data?.pages ?? []).flatMap(page => page.items)),
     [authorityPending, childrenQuery.data]
   )
+  /**
+   * Children listings deliberately contain no permission bits. Resolve the
+   * caller's affordances for every visible child so row-level Share, Rename,
+   * and Delete controls are consistent across files and folders instead of
+   * only appearing after that row's overflow menu has been opened.
+   *
+   * The query keys are shared with the selected-row observer above. That keeps
+   * the overflow menu and Manage dialog on the same cache entry while the
+   * per-row queries remain fail-closed until their own server verdict arrives.
+   */
+  const rowAffordancesQueries = useQueries({
+    queries: items.map(item => ({
+      queryKey: desktopQueryKeys.gfsAffordances(
+        sessionScope ?? 'anonymous',
+        item.resourceId,
+        DRIVE
+      ),
+      queryFn: () => window.clerum.gfs.affordances(item.resourceId, DRIVE),
+      enabled:
+        Boolean(sessionScope) &&
+        Boolean(current) &&
+        currentIsDirectory &&
+        !authorityPending &&
+        accessState === 'active',
+      // Permission changes made outside this page must not leave row actions
+      // stale when a folder is revisited.
+      refetchOnMount: 'always' as const,
+    })),
+  })
+  const rowAffordancesByResourceId = useMemo(() => {
+    const byResourceId: Record<string, GfsBrowserAffordances> = {}
+    if (authorityPending || accessState === 'revoked') return byResourceId
+    items.forEach((item, index) => {
+      const data = rowAffordancesQueries[index]?.data
+      if (data) byResourceId[item.resourceId] = data as GfsBrowserAffordances
+    })
+    return byResourceId
+  }, [accessState, authorityPending, items, rowAffordancesQueries])
+  // Query-surfaced authorization failures (a refetch after revocation is the
+  // normal way the loss is discovered under Infinity staleTime). Discovery is
+  // the session/authority boundary; per-resource verdicts stay local.
+  const queryAuthorizationError = [
+    accessibleQuery.error
+      ? { message: toMessage(accessibleQuery.error), surface: 'discovery' as const }
+      : null,
+    childrenQuery.error
+      ? { message: toMessage(childrenQuery.error), surface: 'operation' as const }
+      : null,
+    affordancesQuery.error
+      ? { message: toMessage(affordancesQuery.error), surface: 'operation' as const }
+      : null,
+    rowAffordancesQuery.error
+      ? { message: toMessage(rowAffordancesQuery.error), surface: 'operation' as const }
+      : null,
+    ...rowAffordancesQueries.map(query =>
+      query.error ? { message: toMessage(query.error), surface: 'operation' as const } : null
+    ),
+    grantsQuery.error
+      ? { message: toMessage(grantsQuery.error), surface: 'operation' as const }
+      : null,
+    sharesQuery.error
+      ? { message: toMessage(sharesQuery.error), surface: 'operation' as const }
+      : null,
+  ]
+    .filter(
+      (entry): entry is { message: string; surface: 'discovery' | 'operation' } => entry !== null
+    )
+    .find(entry => isGfsSessionAuthorityFailure(entry.message, entry.surface))
+  useEffect(() => {
+    if (!queryAuthorizationError || accessState === 'revoked') return
+    revokeAccess()
+  }, [accessState, queryAuthorizationError, revokeAccess])
   const accessibleResources = useMemo<GfsAccessibleResource[]>(
     () =>
       authorityPending
         ? []
-        : (accessibleQuery.data?.pages ?? []).flatMap(page =>
-            page.items.map(normalizeAccessibleResource)
+        : suppressNavigableShares(
+            (accessibleQuery.data?.pages ?? []).flatMap(page =>
+              page.items.map(normalizeAccessibleResource)
+            )
           ),
     [accessibleQuery.data, authorityPending]
   )
@@ -590,37 +696,80 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     onError: failClosedOnMutationError,
   })
 
-  const openChild = useCallback((child: GfsBrowserChild) => {
-    if (child.kind !== 'directory') return
-    setCrumbs(prev => [
-      ...prev,
-      {
-        resourceId: child.resourceId,
-        gfsUri: child.gfsUri,
-        name: child.name,
-        kind: 'directory',
-        version: child.version,
-        bytes: child.bytes,
-      },
-    ])
-  }, [])
+  /**
+   * Revalidate a folder's children listing as navigation enters it. Folder
+   * contents change out-of-band (agents with host grants, other sessions,
+   * operator writes) and TanStack does not refetch on a live observer's
+   * query-key switch, so revisit would otherwise serve the Infinity-cached
+   * page until a hard app reload. `refetchType: 'all'` also refreshes the
+   * currently-inactive query so fresh data lands as the crumbs update.
+   */
+  const revalidateChildren = useCallback(
+    (resourceId: string) => {
+      if (!sessionScope) return
+      void queryClient.invalidateQueries({
+        exact: true,
+        queryKey: desktopQueryKeys.gfsChildren(sessionScope, resourceId, DRIVE),
+        refetchType: 'all',
+      })
+    },
+    [queryClient, sessionScope]
+  )
 
-  const openResource = useCallback((resource: GfsBrowserChild) => {
+  const openChild = useCallback(
+    (child: GfsBrowserChild) => {
+      if (child.kind !== 'directory') return
+      revalidateChildren(child.resourceId)
+      setCrumbs(prev => [
+        ...prev,
+        {
+          resourceId: child.resourceId,
+          gfsUri: child.gfsUri,
+          name: child.name,
+          kind: 'directory',
+          version: child.version,
+          bytes: child.bytes,
+        },
+      ])
+    },
+    [revalidateChildren]
+  )
+
+  const openResource = useCallback(
+    (resource: GfsBrowserChild) => {
+      setOpenError(null)
+      if (resource.kind === 'directory') revalidateChildren(resource.resourceId)
+      setCrumbs([
+        {
+          resourceId: resource.resourceId,
+          gfsUri: resource.gfsUri,
+          name: resource.name,
+          kind: resource.kind === 'directory' ? 'directory' : 'file',
+          version: resource.version,
+          bytes: resource.bytes,
+        },
+      ])
+    },
+    [revalidateChildren]
+  )
+
+  const goToCrumb = useCallback(
+    (index: number) => {
+      setCrumbs(prev => {
+        const next = prev.slice(0, index + 1)
+        const target = next[index]
+        if (target?.kind === 'directory') revalidateChildren(target.resourceId)
+        return next
+      })
+    },
+    [revalidateChildren]
+  )
+
+  /** Restore an exact browser location after a transient resource selection
+   *  (for example, opening a row's Manage dialog). */
+  const restoreCrumbs = useCallback((nextCrumbs: GfsCrumb[]) => {
+    setCrumbs(nextCrumbs)
     setOpenError(null)
-    setCrumbs([
-      {
-        resourceId: resource.resourceId,
-        gfsUri: resource.gfsUri,
-        name: resource.name,
-        kind: resource.kind === 'directory' ? 'directory' : 'file',
-        version: resource.version,
-        bytes: resource.bytes,
-      },
-    ])
-  }, [])
-
-  const goToCrumb = useCallback((index: number) => {
-    setCrumbs(prev => prev.slice(0, index + 1))
   }, [])
 
   const reset = useCallback(() => {
@@ -630,9 +779,9 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   }, [queryClient])
 
   // Delegation actions throw on server rejection (e.g. 403 escalation_rejected);
-  // the caller surfaces that — never swallow it. `inherit` is only sent when a
-  // caller passes it explicitly (the agent section, directories only); the
-  // user/team panel keeps today's inherit:false behavior by omitting it.
+  // the caller surfaces that — never swallow it. `inherit` omitted defaults to
+  // `true` on the wire (uriHandler), so user/team panel grants cover folder
+  // contents; callers that need a contents-excluding grant pass `false`.
   const grant = useCallback(
     (subjectKeys: string[], bits: string[], inherit?: boolean): Promise<void> => {
       if (!current) return Promise.reject(new Error('No resource selected'))
@@ -671,6 +820,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         : ((affordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     affordancesError: affordancesQuery.error ? toMessage(affordancesQuery.error) : null,
     loadingAffordances: affordancesQuery.isFetching,
+    rowAffordancesByResourceId,
     rowAffordancesResourceId,
     setRowAffordancesResourceId,
     rowAffordances:
@@ -704,6 +854,7 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     openResource,
     openChild,
     goToCrumb,
+    restoreCrumbs,
     reset,
     refreshAffordances,
     grant,

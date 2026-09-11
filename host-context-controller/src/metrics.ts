@@ -315,7 +315,7 @@ export const CREATE_KINDS = [
 export type CreateKind = (typeof CREATE_KINDS)[number]
 export const createsTotal = counter({
   name: 'clerum_hcc_creates_total',
-  help: 'Completed Kubernetes create outcomes: created (resolved), conflict (409), or error; skipped is reserved and zero in this instrumentation stage, by kind.',
+  help: 'Kubernetes create outcomes by kind: created (resolved), conflict (409), error, or skipped after successful presence-based suppression; errors and cancellations are not skipped.',
   labelNames: ['kind', 'outcome'] as const,
 })
 for (const kind of CREATE_KINDS) {

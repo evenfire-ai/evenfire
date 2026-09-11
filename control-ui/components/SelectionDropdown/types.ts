@@ -9,6 +9,7 @@ export type SelectionDropdownOption = {
 }
 
 export type SelectionDropdownProps = {
+  ariaLabel?: string
   className?: string
   id?: string
   options: SelectionDropdownOption[]
@@ -22,6 +23,10 @@ export type SelectionDropdownProps = {
   selectionLabel?: string
   multiple?: boolean
   inline?: boolean
+  /** Render the menu at document.body so ancestor overflow cannot clip it. */
+  portal?: boolean
+  searchable?: boolean
   invalid?: boolean
+  menuClassName?: string
   showSelectedChips?: boolean
 }

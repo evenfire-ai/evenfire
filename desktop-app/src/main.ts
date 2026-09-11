@@ -93,6 +93,17 @@ function windowState(win: BrowserWindow | null): { visible: boolean; focused: bo
   return { visible: isWindowVisible(win), focused: isAppFocused() }
 }
 
+type WindowControlsState = { maximized: boolean; fullscreen: boolean }
+
+function windowControlsState(win: BrowserWindow | null): WindowControlsState {
+  return { maximized: Boolean(win?.isMaximized()), fullscreen: Boolean(win?.isFullScreen()) }
+}
+
+function emitWindowControlsState(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  win.webContents.send('window:controlsState', windowControlsState(win))
+}
+
 /**
  * GAP-D1 (spec-v2 §4.5-4): after the OS sleeps/resumes (or the screen locks and
  * unlocks), open SSE sockets are typically dead but neither the tracker watchdog
@@ -124,6 +135,15 @@ function wireWindowVisibility(win: BrowserWindow): void {
   win.on('restore', emit)
 }
 
+function wireWindowControls(win: BrowserWindow): void {
+  const emit = () => emitWindowControlsState(win)
+  win.on('maximize', emit)
+  win.on('unmaximize', emit)
+  win.on('enter-full-screen', emit)
+  win.on('leave-full-screen', emit)
+  win.on('restore', emit)
+}
+
 /**
  * App-level focus events are process-scoped. Register them once so closing and
  * recreating the main window cannot accumulate listeners that retain a
@@ -147,10 +167,39 @@ ipcMain.handle('window:getVisibility', event => {
   return windowState(mainWindow)
 })
 
+ipcMain.handle('window:getControlsState', event => {
+  assertTrustedSender(event)
+  return windowControlsState(mainWindow)
+})
+
+ipcMain.handle('window:minimize', event => {
+  assertTrustedSender(event)
+  mainWindow?.minimize()
+})
+
+ipcMain.handle('window:toggleMaximize', event => {
+  assertTrustedSender(event)
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isFullScreen()) {
+    mainWindow.setFullScreen(false)
+  } else if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize()
+  } else {
+    mainWindow.maximize()
+  }
+  emitWindowControlsState(mainWindow)
+})
+
+ipcMain.handle('window:close', event => {
+  assertTrustedSender(event)
+  mainWindow?.close()
+})
+
 ipcMain.handle('app:rendererReady', event => {
   assertTrustedSender(event)
   if (!mainWindow || event.sender !== mainWindow.webContents) return
   mainWindowRendererReady = true
+  emitWindowControlsState(mainWindow)
   evenfireDeepLinkRouter.drainPending()
   // U5: flush mcp-oauth completions that arrived before the renderer installed
   // its listener (cold start). The onMcpOauthCompleted listener is registered by
@@ -317,6 +366,7 @@ async function createWindow(): Promise<void> {
     width: 1240,
     height: 860,
     show: false,
+    frame: false,
     title:
       config.appName === EVENFIRE_APP_NAME
         ? EVENFIRE_APP_NAME
@@ -347,6 +397,7 @@ async function createWindow(): Promise<void> {
   })
 
   wireWindowVisibility(window)
+  wireWindowControls(window)
   wireAppWindowVisibility()
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
