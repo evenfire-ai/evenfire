@@ -169,6 +169,35 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expect(secondVersions.rows.map(row => row.version)).toEqual(
       firstVersions.rows.map(row => row.version)
     )
+    await dbPool.query(`
+      REVOKE ALL ON TABLE workflow_authority_bindings FROM control_api_runtime;
+      REVOKE ALL ON TABLE pr2_readiness_activations FROM control_api_runtime;
+      REVOKE ALL ON TABLE pr2_readiness_evidence FROM control_api_runtime;
+      ALTER TABLE workflow_authority_bindings
+        DROP CONSTRAINT workflow_authority_bindings_entity_type_check;
+      ALTER TABLE workflow_authority_bindings
+        ADD CONSTRAINT workflow_authority_bindings_entity_type_check CHECK (entity_type IN (
+          'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'
+        ));
+      DELETE FROM schema_migrations
+       WHERE version IN (
+         '0112_pr2_runtime_privileges',
+         '0113_workflow_recipe_authority_entity'
+       );
+    `)
+    await initDb(connector)
+    const upgradedPr2Corrections = await dbPool.query<{ version: string }>(
+      `SELECT version FROM schema_migrations
+        WHERE version IN (
+          '0112_pr2_runtime_privileges',
+          '0113_workflow_recipe_authority_entity'
+        )
+        ORDER BY version`
+    )
+    expect(upgradedPr2Corrections.rows.map(row => row.version)).toEqual([
+      '0112_pr2_runtime_privileges',
+      '0113_workflow_recipe_authority_entity',
+    ])
     expect(secondVersions.rows.map(row => row.version)).toContain(
       '0063_workflow_approval_trace_binding'
     )
@@ -458,6 +487,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       'codex_subscription_oauth_states',
       'gfs_desktop_operator_links',
       'desktop_user_retirement_operations',
+      'workflow_authority_bindings',
+      'pr2_readiness_activations',
+      'pr2_readiness_evidence',
     ] as const
     const controlApiRelations = await relationPrivileges(dbPool, 'control_api_runtime')
     const expectedControlApiRelations: Record<string, string[]> = {
@@ -480,6 +512,9 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       codex_subscription_oauth_states: ['INSERT', 'SELECT', 'UPDATE'],
       gfs_desktop_operator_links: ['INSERT', 'SELECT', 'UPDATE'],
       desktop_user_retirement_operations: ['INSERT', 'SELECT', 'UPDATE'],
+      workflow_authority_bindings: ['INSERT', 'SELECT'],
+      pr2_readiness_activations: ['INSERT', 'SELECT', 'UPDATE'],
+      pr2_readiness_evidence: ['INSERT', 'SELECT', 'UPDATE'],
     }
     for (const relation of exactControlApiRelations) {
       expectPrivileges(
@@ -490,6 +525,74 @@ describeRealPostgres('control-api real Postgres migrations', () => {
     expectPrivileges([...(controlApiRelations.gfs_blob_manifests ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_parts ?? new Set())], [])
     expectPrivileges([...(controlApiRelations.gfs_upload_sessions ?? new Set())], [])
+
+    const pr2RuntimeClient = await dbPool.connect()
+    try {
+      const bindingId = randomUUID()
+      const environmentId = `runtime-role-${randomUUID()}`
+      const revision = 'd'.repeat(40)
+      await pr2RuntimeClient.query('BEGIN')
+      await pr2RuntimeClient.query('SET LOCAL ROLE control_api_runtime')
+      await pr2RuntimeClient.query(
+        `INSERT INTO workflow_authority_bindings (
+           id, binding_kind, entity_type, entity_id, binding_version, binding_hash,
+           user_id, session_id, session_version, delegation_jti, operation_id,
+           resource, target, target_hash, access_path_id, authorization_revision,
+           path_kind, effective_team_id, behavior_binding_hash,
+           source_issued_at, source_expires_at
+         ) VALUES (
+           $1, 'workflow_read', 'workflow_recipe', 'sandbox-recipes/runtime-role', 2, $2,
+           $3, $4, 1, $5, 'workflow.read',
+           $6::jsonb, $7::jsonb, $8, $9, $10,
+           'direct', NULL, $11, NOW(), NOW() + interval '1 minute'
+         )`,
+        [
+          bindingId,
+          'a'.repeat(64),
+          randomUUID(),
+          randomUUID(),
+          randomUUID(),
+          JSON.stringify({ type: 'workflow_recipe', logicalId: 'sandbox-recipes/runtime-role' }),
+          JSON.stringify({ recipeNamespace: 'sandbox-recipes', recipeName: 'runtime-role' }),
+          `ath2_${'b'.repeat(43)}`,
+          `ap1_${'c'.repeat(43)}`,
+          `ar1_${'d'.repeat(43)}`,
+          `bh2_${'e'.repeat(43)}`,
+        ]
+      )
+      await pr2RuntimeClient.query(
+        `INSERT INTO pr2_readiness_activations (
+           environment_id, source_revision, accepted_by, accepted_at,
+           max_runtime_evidence_age_seconds
+         ) VALUES ($1, $2, 'test:runtime-role', NOW(), 60)`,
+        [environmentId, revision]
+      )
+      await pr2RuntimeClient.query(
+        `INSERT INTO pr2_readiness_evidence (
+           environment_id, source_revision, hop, evidence_class, evidence_kind,
+           writer_principal, evidence_reference, outcome, service_version,
+           contract_version, deployment_revision, image_revision, observed_at
+         ) VALUES (
+           $1, $2, 'action_contracts', 'build', 'exact_head_ci',
+           'operator-build-importer', 'ci:runtime-role', 'passed', '1.0.0',
+           'pr2-readiness-v1', NULL, $2, NOW()
+         )`,
+        [environmentId, revision]
+      )
+      await expect(
+        pr2RuntimeClient.query('SELECT id FROM workflow_authority_bindings WHERE id = $1', [
+          bindingId,
+        ])
+      ).resolves.toMatchObject({ rowCount: 1 })
+      await pr2RuntimeClient.query('SAVEPOINT prohibited_delete')
+      await expect(
+        pr2RuntimeClient.query('DELETE FROM workflow_authority_bindings WHERE id = $1', [bindingId])
+      ).rejects.toThrow(/permission denied/)
+      await pr2RuntimeClient.query('ROLLBACK TO SAVEPOINT prohibited_delete')
+    } finally {
+      await pr2RuntimeClient.query('ROLLBACK').catch(() => undefined)
+      pr2RuntimeClient.release()
+    }
 
     const linkUserId = randomUUID()
     const linkAdminId = randomUUID()
