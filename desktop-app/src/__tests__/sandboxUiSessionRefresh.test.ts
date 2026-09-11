@@ -8,6 +8,11 @@ import {
   handleEmbedRefreshRequest,
   startSandboxUiRefresh,
 } from '../sandboxUiSessionRefresh.js'
+import type {
+  SandboxUiInstallCookieFn,
+  SandboxUiRefreshFn,
+  StartSandboxUiRefreshArgs,
+} from '../sandboxUiSessionRefresh.js'
 
 type Listener = () => void
 
@@ -54,13 +59,13 @@ afterEach(() => {
 
 function makeArgs(
   overrides: {
-    refresh?: ReturnType<typeof vi.fn>
-    installCookie?: ReturnType<typeof vi.fn>
-    onError?: ReturnType<typeof vi.fn>
+    refresh?: SandboxUiRefreshFn
+    installCookie?: SandboxUiInstallCookieFn
+    onError?: (error: Error) => void
     parentWindow?: FakeBrowserWindow
     webContentsId?: number
   } = {}
-) {
+): StartSandboxUiRefreshArgs {
   const parentWindow = overrides.parentWindow ?? new FakeBrowserWindow()
   return {
     recipeNs: 'sandbox-recipes',
@@ -73,8 +78,10 @@ function makeArgs(
       typeof startSandboxUiRefresh
     >[0]['parentWindow'],
     refresh:
-      overrides.refresh ?? vi.fn(async () => ({ setCookie: 'clerum_sandbox_ui_session=NEW' })),
-    installCookie: overrides.installCookie ?? vi.fn(async () => undefined),
+      overrides.refresh ??
+      vi.fn<SandboxUiRefreshFn>(async () => ({ setCookie: 'clerum_sandbox_ui_session=NEW' })),
+    installCookie:
+      overrides.installCookie ?? vi.fn<SandboxUiInstallCookieFn>(async () => undefined),
     onError: overrides.onError ?? vi.fn(),
   }
 }
@@ -98,7 +105,9 @@ describe('startSandboxUiRefresh', () => {
   it('does NOT arm the timer when the parent window is hidden at mount', async () => {
     const window = new FakeBrowserWindow()
     window.visible = false
-    const refresh = vi.fn(async () => ({ setCookie: 'clerum_sandbox_ui_session=X' }))
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => ({
+      setCookie: 'clerum_sandbox_ui_session=X',
+    }))
     const args = makeArgs({ parentWindow: window, refresh })
     startSandboxUiRefresh(args)
     await vi.advanceTimersByTimeAsync(SANDBOX_UI_REFRESH_INTERVAL_MS + 1000)
@@ -108,8 +117,10 @@ describe('startSandboxUiRefresh', () => {
 
 describe('refresh timer', () => {
   it('fires at SANDBOX_UI_REFRESH_INTERVAL_MS and reschedules itself', async () => {
-    const refresh = vi.fn(async () => ({ setCookie: 'clerum_sandbox_ui_session=X' }))
-    const installCookie = vi.fn(async () => undefined)
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => ({
+      setCookie: 'clerum_sandbox_ui_session=X',
+    }))
+    const installCookie = vi.fn<SandboxUiInstallCookieFn>(async () => undefined)
     const args = makeArgs({ refresh, installCookie })
     startSandboxUiRefresh(args)
 
@@ -126,7 +137,7 @@ describe('refresh timer', () => {
   })
 
   it('cancels the timer and surfaces the error when refresh throws', async () => {
-    const refresh = vi.fn(async () => {
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => {
       throw new Error('rpc-proxy 410: recipe deleted')
     })
     const onError = vi.fn()
@@ -145,7 +156,9 @@ describe('refresh timer', () => {
 
   it('cancels on hide and reschedules on show', async () => {
     const window = new FakeBrowserWindow()
-    const refresh = vi.fn(async () => ({ setCookie: 'clerum_sandbox_ui_session=X' }))
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => ({
+      setCookie: 'clerum_sandbox_ui_session=X',
+    }))
     const args = makeArgs({ parentWindow: window, refresh })
     startSandboxUiRefresh(args)
 
@@ -198,8 +211,10 @@ describe('handleEmbedRefreshRequest (Decision 11 — IPC pinning)', () => {
   })
 
   it('allows IPC refresh once the rate-limit window has passed', async () => {
-    const refresh = vi.fn(async () => ({ setCookie: 'clerum_sandbox_ui_session=NEW' }))
-    const installCookie = vi.fn(async () => undefined)
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => ({
+      setCookie: 'clerum_sandbox_ui_session=NEW',
+    }))
+    const installCookie = vi.fn<SandboxUiInstallCookieFn>(async () => undefined)
     const args = makeArgs({ refresh, installCookie })
     startSandboxUiRefresh(args)
 
@@ -212,7 +227,7 @@ describe('handleEmbedRefreshRequest (Decision 11 — IPC pinning)', () => {
   })
 
   it('rejects IPC refresh after a fatal error has stopped the driver', async () => {
-    const refresh = vi.fn(async () => {
+    const refresh = vi.fn<SandboxUiRefreshFn>(async () => {
       throw new Error('rpc-proxy 403: ACL revoked')
     })
     const args = makeArgs({ refresh })
