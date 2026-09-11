@@ -566,6 +566,78 @@ describe('OpenAiEgressBrokerReconciler', () => {
     })
   })
 
+  it('T15: a fallback credentialSlot not owned by openai-compatible is dropped WITHOUT reading the foreign key (R4-H2)', async () => {
+    // Host Secret carries both a foreign key (claude-api-key) and the canonical
+    // openai-compatible key. A fallback that names claude-api-key would have HCC
+    // mirror that foreign key to the admin-chosen LAN IP.
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      metadata: { resourceVersion: '1' },
+      data: { 'claude-api-key': b64('sk-claude'), 'openai-compatible-api-key': b64('sk-oai') },
+    })
+    const host = makeHost({
+      name: 'h15',
+      spec: {
+        llmPolicy: {
+          fallbacks: [
+            {
+              provider: 'openai-compatible',
+              model: 'm',
+              baseURL: LOCAL_URL,
+              credentialSlot: 'claude-api-key',
+            },
+          ],
+        },
+      },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    // No broker materialized: the foreign key is never read or mirrored.
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    expect(coreApi.createNamespacedSecret).not.toHaveBeenCalled()
+    // HCC never reads the Host Secret for this dropped slot.
+    expect(coreApi.readNamespacedSecret).not.toHaveBeenCalled()
+    expect(brokersCondition()).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'CredentialSlotNotOwned',
+    })
+    expect(brokersCondition()?.message).toContain('fallback-0: credential_slot_not_owned')
+  })
+
+  it('T15b: a fallback credentialSlot owned by openai-compatible (suffixed) mirrors that key', async () => {
+    coreApi.readNamespacedSecret.mockResolvedValue({
+      metadata: { resourceVersion: '1' },
+      data: {
+        'openai-compatible-api-key-fb1': b64('sk-fb1'),
+        'openai-compatible-api-key': b64('sk-primary'),
+      },
+    })
+    const host = makeHost({
+      name: 'h15b',
+      spec: {
+        llmPolicy: {
+          fallbacks: [
+            {
+              provider: 'openai-compatible',
+              model: 'm',
+              baseURL: LOCAL_URL,
+              credentialSlot: 'openai-compatible-api-key-fb1',
+            },
+          ],
+        },
+      },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    expect(appsApi.createNamespacedDeployment).toHaveBeenCalledTimes(1)
+    const secretBody = (coreApi.createNamespacedSecret.mock.calls[0][0] as { body: k8s.V1Secret })
+      .body
+    // The mirror carries the fb1 key's value under the canonical mirror key.
+    expect(secretBody.data?.['openai-compatible-api-key']).toBe(b64('sk-fb1'))
+  })
+
   it('T14: anti-oscillation — a second reconcile against the same status does not re-patch', async () => {
     // Fresh GET reflects the last written condition, so the dirty check on the
     // second reconcile sees an equivalent condition and skips the write.

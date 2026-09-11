@@ -5,6 +5,7 @@ import {
   classifyLanBaseURL,
   fallbackSlotId,
 } from '@clerum/egress-policy'
+import { isCredentialSlotOwnedByProvider } from '@clerum/llm-providers'
 import { config } from '../config'
 import { hccLogger } from '../logger'
 import { type SlotOutcome } from '../openaiEgressBrokerStatus'
@@ -23,6 +24,7 @@ export const OPENAI_COMPATIBLE_API_KEY_SLOT = 'openai-compatible-api-key'
 export type SlotDropReason =
   | 'cluster_internal_guard_unconfigured'
   | 'cluster_node_guard_unconfigured'
+  | 'credential_slot_not_owned'
   | LanBaseUrlReason
   | 'url_unparseable'
   | 'scheme_unsupported'
@@ -69,6 +71,20 @@ export function deriveDesiredBrokers(
     if (!baseURL) return
     if (seenSlotIds.has(slotId)) return
     seenSlotIds.add(slotId)
+    // Ownership gate BEFORE admission: a fallback whose credentialSlot is not a
+    // key the openai-compatible provider owns (e.g. 'claude-api-key') would have
+    // HCC mirror a FOREIGN key from the Host Secret to a LAN IP the admin chose.
+    // Drop it here so the reconciler never reads that key (no mirror Secret, no
+    // Deployment). The primary always uses the canonical slot (owned), so this is
+    // a no-op for it. Defense-in-depth behind the control-api ownership gate.
+    if (!isCredentialSlotOwnedByProvider(OPENAI_COMPATIBLE_PROVIDER, credentialDataKey)) {
+      log.warn('credentialSlot not owned by openai-compatible — slot not provisioned', {
+        host: host.name,
+        slotId,
+      })
+      dropped.push({ slotId, reason: 'credential_slot_not_owned' })
+      return
+    }
     const result = admitSlot(host.name, slotId, baseURL, credentialDataKey, denySet)
     if ('reason' in result) {
       dropped.push({ slotId, reason: result.reason })
