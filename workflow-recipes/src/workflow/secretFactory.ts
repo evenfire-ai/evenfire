@@ -13,6 +13,24 @@ import { JwtTokenFactory } from './jwtTokenFactory'
 import { pluginWorkloadSdkTokenSecretKey } from './pluginWorkloadSdkTokens'
 import { buildPluginWorkloadSdkTokenSecretName } from './resourceNames'
 
+/** Secret/Pod residue so a failed eager roll cannot leave a stale env JWT. */
+export const MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION =
+  'clerum.io/mcp-host-runtime-token-generation'
+
+export function readMcpHostRuntimeTokenGeneration(
+  secret: { metadata?: { annotations?: Record<string, string> | null } | null } | undefined
+): string | undefined {
+  const raw = secret?.metadata?.annotations?.[MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION]
+  const trimmed = typeof raw === 'string' ? raw.trim() : ''
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+export function nextMcpHostRuntimeTokenGeneration(current?: string): string {
+  const parsed = Number(current)
+  if (Number.isInteger(parsed) && parsed >= 1) return String(parsed + 1)
+  return '1'
+}
+
 export function buildCoordinatorTokenSecret(
   recipeName: string,
   mcpHostToken: string | undefined,

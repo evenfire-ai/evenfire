@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Readable } from "node:stream";
+import { GfsError } from "../api/errors";
 import type { ImmutableWriteOptions } from "../storage/blobStore";
 import { generationBlobKey } from "../storage/paths";
 import { withDeadlineTransaction, type DeadlineBudget, type DeadlineClient } from "./deadlineQuery";
@@ -9,6 +10,14 @@ export { stageCopiedBlob, type CopyBlobSource, type StageCopiedBlobInput } from 
 export type { PublishedTreeRef } from "./publishedTree";
 
 export type BlobManifestState = "staged" | "committed" | "deleting";
+
+/** A bounded stream source for large mutations; callers retain Buffer support. */
+export interface GfsContentSource {
+  stream: Readable;
+  expectedBytes: number;
+  expectedSha256?: string;
+}
+export type GfsContent = Buffer | GfsContentSource;
 
 export interface ManifestRow {
   blobKey: string;
@@ -199,7 +208,7 @@ export class PgBlobStagingStore {
   ): Promise<Record<string, unknown> | null> {
     const result = await this.db.query(
       `SELECT resource_id, drive, parent_resource_id, name, kind, path_cache,
-              version, bytes, blob_key, content_sha256, deleted_at
+              version, bytes, blob_key, content_sha256, deleted_at, updated_at
          FROM gfs_resources
         WHERE drive = $1 AND resource_id = $2 AND blob_key = $3`,
       [drive, resourceId, blobKey]
@@ -216,7 +225,7 @@ export class PgBlobStagingStore {
     }
     const result = await manifestQuery(this.db,
       `SELECT resource_id, drive, parent_resource_id, name, kind, path_cache,
-              version, bytes, blob_key, content_sha256, deleted_at
+              version, bytes, blob_key, content_sha256, deleted_at, updated_at
          FROM gfs_resources
         WHERE drive = $1 AND resource_id = ANY($2::uuid[])`,
       [drive, ids],
@@ -320,31 +329,37 @@ export async function stageVerifiedBlob(
   blobs: StagingBlobStore,
   ids: { generation: () => string; requestId: () => string },
   resourceId: string,
-  content: Buffer
+  content: GfsContent,
+  options?: ImmutableWriteOptions
 ): Promise<{ blobKey: string; bytes: number; contentSha256: string }> {
   const generation = ids.generation();
   const blobKey = generationBlobKey(resourceId, generation);
-  const contentSha256 = createHash("sha256").update(content).digest("hex");
+  const expectedBytes = Buffer.isBuffer(content) ? content.length : content.expectedBytes;
+  if (!Number.isSafeInteger(expectedBytes) || expectedBytes < 0) {
+    throw new Error("content source expectedBytes must be a non-negative safe integer");
+  }
+  const contentSha256 = Buffer.isBuffer(content) ? createHash("sha256").update(content).digest("hex") : content.expectedSha256 ?? null;
   await manifests.recordStaged({
     blobKey,
     requestId: ids.requestId(),
     resourceId,
     candidateKind: "generation",
     contentSha256,
-    bytes: content.length,
+    bytes: expectedBytes,
   });
   let physicalCandidateOwned = false;
   try {
-    const written = await blobs.writeImmutable(resourceId, generation, content);
+    options?.signal?.throwIfAborted();
+    const written = await blobs.writeImmutable(resourceId, generation, Buffer.isBuffer(content) ? content : content.stream, options);
     physicalCandidateOwned = true;
     if (
       written.blobKey !== blobKey ||
-      written.bytes !== content.length ||
-      written.contentSha256 !== contentSha256
+      written.bytes !== expectedBytes ||
+      (contentSha256 !== null && written.contentSha256 !== contentSha256)
     ) {
-      throw new Error("staged blob verification mismatch");
+      throw new GfsError("checksum_mismatch", "staged blob verification mismatch");
     }
-    await blobs.verify(blobKey, content.length, contentSha256);
+    await blobs.verify(blobKey, expectedBytes, written.contentSha256, options);
     return written;
   } catch (err) {
     // A failure before writeImmutable returns does not prove that this request

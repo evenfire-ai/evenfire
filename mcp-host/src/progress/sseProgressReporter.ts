@@ -7,6 +7,7 @@ import type {
   OutputPreview,
   ProgressEvent,
   ProgressReporter,
+  SuspendedEvent,
   TerminalEvent,
   ThinkingEvent,
   ToolCompleteEvent,
@@ -156,12 +157,24 @@ export class SseProgressReporter implements ProgressReporter {
   }
 
   // P1-1: takes only the server-derived displayName (not the raw tool_name).
-  emitSuspended(displayName: string, requestId: string): void {
-    if (this.completed) return
-    const event: ProgressEvent = {
-      type: 'suspended',
-      data: { taskId: this.taskId, requestId, displayName, reason: 'approval_required' },
+  // U5: `options` is ADDITIVE — absent → the legacy 'approval_required' gate,
+  // byte-identical to before. reason==='connect_required' carries the oauth
+  // mcpServerName so the desktop can open the connect flow.
+  emitSuspended(
+    displayName: string,
+    requestId: string,
+    options?: {
+      reason?: 'approval_required' | 'connect_required'
+      mcpServerName?: string
     }
+  ): void {
+    if (this.completed) return
+    const reason = options?.reason ?? 'approval_required'
+    const data: SuspendedEvent = { taskId: this.taskId, requestId, displayName, reason }
+    if (reason === 'connect_required') {
+      if (options?.mcpServerName) data.mcpServerName = options.mcpServerName
+    }
+    const event: ProgressEvent = { type: 'suspended', data }
     // P1: store the exact redacted payload we publish live so late/re-connected
     // subscribers can replay it (see subscribe). displayName is already the
     // server-derived name from getDisplayName — never the raw tool_name/args.

@@ -12,6 +12,7 @@ COPY packages/network-policy-core ./packages/network-policy-core
 # host-context-controller's npm ci because it resolves the provider set from it
 # (R4).
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller
 
@@ -39,6 +40,7 @@ COPY packages/network-policy-core ./packages/network-policy-core
 # Shared prebuilt data-only providers package (no build step) — same file:
 # dependency the production npm ci below resolves against (R4).
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller
 RUN npm ci --omit=dev

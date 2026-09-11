@@ -56,7 +56,6 @@ describe('Plugin Workload SDK — §6.2 response-shape security invariants', () 
         attemptGeneration: 1,
         policyRevision: 1,
         policyHash: 'a'.repeat(64),
-        maxOutputTokens: null,
       }),
       reportProviderAttemptStatus: vi.fn().mockResolvedValue(undefined),
       reportInvocationStatus: vi.fn().mockResolvedValue(undefined),

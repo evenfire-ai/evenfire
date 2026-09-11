@@ -1,6 +1,7 @@
 import express, { Router } from 'express'
 import type { Request } from 'express'
 import { config } from '../../config.js'
+import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import {
   requireRpcTokenUserMatch,
@@ -8,7 +9,10 @@ import {
   requireValidRpcAccessTokenAny,
 } from '../../middleware/rpcAccessAuth.js'
 import type { RpcAccessClaims } from '../../profileTypes.js'
-import { resolveInvocableMcpServersForContexts } from '../../services/access/mcpInvocable.js'
+import {
+  resolveConnectorsForAgents,
+  resolveInvocableMcpServersForContexts,
+} from '../../services/access/mcpInvocable.js'
 import {
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
@@ -117,16 +121,51 @@ export function createRpcAccessUsersRouter(
     async (req, res, next) => {
       try {
         const userContexts = await getUserContexts(req.params.userId)
+        // `req.params.userId` is authoritative here — `requireRpcTokenUserMatch()`
+        // has already bound it to the RPC token subject. The DB client follows the
+        // pool-wrapper idiom used by the other oauth routes (mcpOauth.ts,
+        // internal/oauth.ts): `{ query: (t, v) => pool.query(t, v) }`.
         const servers = await resolveInvocableMcpServersForContexts(
           gateway,
           config.mcpServersNamespace,
-          userContexts.contextIds
+          userContexts.contextIds,
+          req.params.userId,
+          { query: (text, values) => pool.query(text, values) }
         )
         res.status(200).json({
           userId: req.params.userId,
           contextIds: userContexts.contextIds,
           servers,
         })
+      } catch (error) {
+        next(error)
+      }
+    }
+  )
+
+  // Proactive connectors panel read-model (spec 11 U1): the CLASSIFIED fleet
+  // per agent — `authorized` / `requires_setup` / `no_oauth`. Same gate as
+  // `/mcp-servers`; `req.params.userId` is authoritative (bound to the RPC
+  // token subject by `requireRpcTokenUserMatch()`) and flows only into the
+  // grant-presence key, never from a body. Agents derive from `getUserAgents`.
+  router.get(
+    '/rpc/access/users/:userId/mcp-connectors',
+    requireValidRpcAccessToken(),
+    requireRpcTokenUserMatch(),
+    async (req, res, next) => {
+      try {
+        const { agentNames } = await getUserAgents(req.params.userId)
+        const agents = await resolveConnectorsForAgents(
+          gateway,
+          {
+            mcpServersNamespace: config.mcpServersNamespace,
+            hostsNamespace: config.hostsNamespace,
+            agentNames,
+            userId: req.params.userId,
+          },
+          { query: (text, values) => pool.query(text, values) }
+        )
+        res.status(200).json({ userId: req.params.userId, agents })
       } catch (error) {
         next(error)
       }

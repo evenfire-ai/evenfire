@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { createHash } from 'crypto'
+import { makeStubKc } from '../../test/__fixtures__/testMocks'
 import { config as hccConfig } from '../config'
 import { HostReconciler, type ResolvedSfsMount } from '../hostReconciler'
 import { issueMcpHostRuntimeTokens } from '../mcpHostRuntimeTokenIssuerClient'
@@ -39,25 +40,11 @@ vi.mock('../gfsHostBinding', () => ({
     })),
 }))
 
-// Stand-in KubeConfig that returns a stub for every makeApiClient — buildDeployment
-// is a pure function that doesn't touch the API but the constructor still resolves
-// these.
-function makeStubKc(): k8s.KubeConfig {
-  const stub = new Proxy(
-    {},
-    {
-      get: () => vi.fn(),
-    }
-  )
-  return {
-    makeApiClient: () => stub,
-  } as unknown as k8s.KubeConfig
-}
-
 function makeHost(): HostCRD {
   return {
     name: 'team-mission',
     namespace: 'mcp-host',
+    uid: 'team-mission-uid',
     spec: {
       host: 'team-mission',
       contextRef: 'team-mission-ctx',
@@ -178,10 +165,11 @@ function runtimeSecretAnnotations(host = makeHost(), refreshBefore = '2999-01-01
     'clerum.io/runtime-token-host-binding-hash': helper.runtimeTokenHostBindingHash(host),
     'clerum.io/runtime-token-scope-hash': helper.runtimeTokenScopeHash(host),
     'clerum.io/runtime-token-issuer': 'control-api',
-    'clerum.io/runtime-token-audience': 'workflow-approvals',
-    'clerum.io/runtime-token-schema-version': '2',
+    'clerum.io/runtime-token-audience': 'host-context-controller,workflow-approvals',
+    'clerum.io/runtime-token-schema-version': '3',
     'clerum.io/gfs-token-expected-subject': `host:1st:${host.namespace}/${host.name}`,
     'clerum.io/gfs-token-capability-set-hash': helper.gfsCapabilitySetHash(),
+    'clerum.io/gfs-token-host-uid': host.uid!,
     'clerum.io/runtime-token-refresh-before': refreshBefore,
     'clerum.io/gfs-token-refresh-before': '2999-01-01T00:00:00.000Z',
   }
@@ -348,7 +336,7 @@ describe('HostReconciler runtime credential Secret revision', () => {
     expect(coreApi.replaceNamespacedSecret).toHaveBeenCalledTimes(1)
     expect(result.revision).not.toBe(legacyRevision)
     expect(replacedRuntimeSecret(coreApi).metadata?.annotations).toMatchObject({
-      'clerum.io/runtime-token-schema-version': '2',
+      'clerum.io/runtime-token-schema-version': '3',
       'clerum.io/runtime-token-rollout-required': 'true',
     })
   })
@@ -690,8 +678,8 @@ describe('HostReconciler runtime credential Secret revision', () => {
     const replaceBody = replacedRuntimeSecret(coreApi)
     expect(replaceBody.metadata?.annotations).toMatchObject({
       'clerum.io/runtime-token-issuer': 'control-api',
-      'clerum.io/runtime-token-audience': 'workflow-approvals',
-      'clerum.io/runtime-token-schema-version': '2',
+      'clerum.io/runtime-token-audience': 'host-context-controller,workflow-approvals',
+      'clerum.io/runtime-token-schema-version': '3',
     })
   })
 
@@ -990,6 +978,51 @@ describe('HostReconciler.buildDeployment — SharedFileSystem mounts', () => {
     })
   })
 
+  it('omits the guardrails-revision annotation when the host has no guardrails', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const dep = reconciler.buildDeployment(makeHost())
+    expect(dep.spec!.template!.metadata!.annotations ?? {}).not.toHaveProperty(
+      'clerum.io/guardrails-revision'
+    )
+  })
+
+  it('stamps a 64-hex guardrails-revision on the pod template when guardrails are set', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const guardrails: HostCRD['spec']['guardrails'] = {
+      hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] },
+    }
+    const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+    const dep = reconciler.buildDeployment(host)
+    expect(dep.spec!.template!.metadata!.annotations?.['clerum.io/guardrails-revision']).toMatch(
+      /^[0-9a-f]{64}$/
+    )
+  })
+
+  it('guardrails-revision is nested-key-order-independent and content-sensitive', () => {
+    const reconciler = new HostReconciler(makeStubKc())
+    const revFor = (guardrails: HostCRD['spec']['guardrails']): string | undefined => {
+      const host: HostCRD = { ...makeHost(), spec: { ...makeHost().spec, guardrails } }
+      return reconciler.buildDeployment(host).spec!.template!.metadata!.annotations?.[
+        'clerum.io/guardrails-revision'
+      ]
+    }
+    // Same content, reordered keys at BOTH the top level (hooks/builtins) and the
+    // hook ref (id/digest). A shallow canonicalization would flip the hash here
+    // and roll the pod for nothing; the deep-stable hash must return the same.
+    const a = revFor({
+      hooks: { preCall: [{ id: 'h1', digest: 'sha256:abc' }] },
+      builtins: [{ type: 'token-trim' }],
+    })
+    const reordered = revFor({
+      builtins: [{ type: 'token-trim' }],
+      hooks: { preCall: [{ digest: 'sha256:abc', id: 'h1' }] },
+    })
+    const changed = revFor({ hooks: { preCall: [{ id: 'h2', digest: 'sha256:def' }] } })
+    expect(a).toBe(reordered) // reorder only → same hash → no spurious roll
+    expect(a).not.toBe(changed) // real change → new hash → rolling restart
+    expect(a).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it('keeps liveness separate from runtime-auth readiness', () => {
     const reconciler = new HostReconciler(makeStubKc())
     const dep = reconciler.buildDeployment(makeHost())
@@ -1226,34 +1259,121 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
       // Stub APIs to capture the Deployment body and ack everything.
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(),
-        createNamespacedServiceAccount: vi.fn(async () => ({})),
-        createNamespacedService: vi.fn(async () => ({})),
+        createNamespacedServiceAccount: vi.fn(),
+        readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        createNamespacedService: vi.fn(),
+        readNamespacedService: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { clusterIP: '10.0.0.1' },
+        })),
+        replaceNamespacedService: vi.fn(async ({ body }) => body),
         createNamespacedSecret: vi.fn(async () => ({})),
         replaceNamespacedSecret: vi.fn(async () => ({})),
         deleteNamespacedPersistentVolumeClaim: vi.fn(),
         createNamespacedPersistentVolumeClaim: vi.fn(async () => ({})),
-        readNamespacedPersistentVolumeClaim: vi.fn(),
+        readNamespacedPersistentVolumeClaim: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { volumeName: 'bound-context-volume' },
+        })),
       } as unknown as k8s.CoreV1Api,
       rbacApi: {
-        createNamespacedRole: vi.fn(async () => ({})),
-        createNamespacedRoleBinding: vi.fn(async () => ({})),
+        createNamespacedRole: vi.fn(),
+        readNamespacedRole: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        replaceNamespacedRole: vi.fn(async ({ body }) => body),
+        createNamespacedRoleBinding: vi.fn(),
+        readNamespacedRoleBinding: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
       } as unknown as k8s.RbacAuthorizationV1Api,
       networkingApi: {
         createNamespacedNetworkPolicy: vi.fn(async () => ({})),
-        readNamespacedNetworkPolicy: vi.fn(async () => ({})),
+        readNamespacedNetworkPolicy: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
         replaceNamespacedNetworkPolicy: vi.fn(async () => ({})),
       } as unknown as k8s.NetworkingV1Api,
       appsApi: {
-        // reconcile() now creates two Deployments (per-Host channel-reader +
+        // reconcile() now converges two Deployments (per-Host channel-reader +
         // host). Capture only the host body — the channel-reader Deployment
         // does not carry CLERUM_CONTEXT_FILES_MOUNTS.
-        createNamespacedDeployment: vi.fn(async (req: { body: k8s.V1Deployment }) => {
+        createNamespacedDeployment: vi.fn(),
+        replaceNamespacedDeployment: vi.fn(async (req: { body: k8s.V1Deployment }) => {
           if (req.body.metadata?.name === 'team-mission') {
             captured.body = req.body
           }
           return {}
         }),
-        readNamespacedDeployment: vi.fn(async () => ({ status: { readyReplicas: 1 } })),
+        readNamespacedDeployment: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          status: { readyReplicas: 1 },
+        })),
       } as unknown as k8s.AppsV1Api,
     })
     await reconciler.reconcile(makeHost())
@@ -1271,7 +1391,8 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
   it('creates host-scoped rpc-proxy ingress and egress policies', async () => {
     const networkingApi = {
       createNamespacedNetworkPolicy: vi.fn(async () => ({})),
-      readNamespacedNetworkPolicy: vi.fn(async () => ({})),
+      // This initial-provisioning case starts with no NetworkPolicies.
+      readNamespacedNetworkPolicy: vi.fn().mockRejectedValue({ code: 404 }),
       replaceNamespacedNetworkPolicy: vi.fn(async () => ({})),
     }
     const desktopHost: HostCRD = {
@@ -1284,22 +1405,98 @@ describe('HostReconciler.reconcile — uses resolveContextMounts', () => {
     const reconciler = new HostReconciler(makeStubKc(), {
       coreApi: {
         readNamespacedSecret: readSecretWithChannelReaderRuntimeAuthLabels(desktopHost),
-        createNamespacedServiceAccount: vi.fn(async () => ({})),
-        createNamespacedService: vi.fn(async () => ({})),
+        createNamespacedServiceAccount: vi.fn(),
+        readNamespacedServiceAccount: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        createNamespacedService: vi.fn(),
+        readNamespacedService: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { clusterIP: '10.0.0.1' },
+        })),
+        replaceNamespacedService: vi.fn(async ({ body }) => body),
         createNamespacedSecret: vi.fn(async () => ({})),
         replaceNamespacedSecret: vi.fn(async () => ({})),
         deleteNamespacedPersistentVolumeClaim: vi.fn(),
         createNamespacedPersistentVolumeClaim: vi.fn(async () => ({})),
-        readNamespacedPersistentVolumeClaim: vi.fn(),
+        readNamespacedPersistentVolumeClaim: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          spec: { volumeName: 'bound-context-volume' },
+        })),
       } as unknown as k8s.CoreV1Api,
       rbacApi: {
-        createNamespacedRole: vi.fn(async () => ({})),
-        createNamespacedRoleBinding: vi.fn(async () => ({})),
+        createNamespacedRole: vi.fn(),
+        readNamespacedRole: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
+        replaceNamespacedRole: vi.fn(async ({ body }) => body),
+        createNamespacedRoleBinding: vi.fn(),
+        readNamespacedRoleBinding: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+        })),
       } as unknown as k8s.RbacAuthorizationV1Api,
       networkingApi: networkingApi as unknown as k8s.NetworkingV1Api,
       appsApi: {
-        createNamespacedDeployment: vi.fn(async () => ({})),
-        readNamespacedDeployment: vi.fn(async () => ({ status: { readyReplicas: 1 } })),
+        createNamespacedDeployment: vi.fn(),
+        replaceNamespacedDeployment: vi.fn(async ({ body }) => body),
+        readNamespacedDeployment: vi.fn(async ({ name, namespace }) => ({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: {
+              'clerum.io/host': 'team-mission',
+              'clerum.io/managed-by': 'host-context-controller',
+            },
+          },
+          status: { readyReplicas: 1 },
+        })),
       } as unknown as k8s.AppsV1Api,
     })
 

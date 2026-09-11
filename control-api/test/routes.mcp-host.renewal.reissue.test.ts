@@ -3,7 +3,12 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
-import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
+import {
+  MCP_HOST_CREDENTIAL_CAPABILITY,
+  MCP_HOST_HCC_AUDIENCE,
+  MCP_HOST_WORKFLOW_AUDIENCE,
+  issueMcpHostAccessJwt,
+} from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
 
 // Preserve the real mcpHostJwtToken helpers — we want the full RS256 sign
@@ -88,7 +93,8 @@ function issueExpiredRefreshToken(
   recipe = RECIPE,
   expiredSeconds = 60,
   hostRefs = [`${ns}/${recipe}`],
-  workflowControlScopes = ['workflow:list', 'workflow:read']
+  workflowControlScopes = ['workflow:list', 'workflow:read'],
+  hccCredential?: { hostUid: string }
 ): string {
   // Use the real private key but override expiresIn to a past timestamp via
   // the `exp` claim directly. `jwt.sign` with a numeric `exp` bypasses the
@@ -102,13 +108,21 @@ function issueExpiredRefreshToken(
       hostRefs,
       scope: 'workflow:approval:refresh',
       workflowControlScopes,
+      ...(hccCredential
+        ? {
+            host_uid: hccCredential.hostUid,
+            mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+          }
+        : {}),
       exp: now - expiredSeconds,
     },
     config.adminJwtPrivateKey,
     {
       algorithm: 'RS256',
       issuer: config.adminJwtIssuer,
-      audience: 'workflow-approvals',
+      audience: hccCredential
+        ? [MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE]
+        : MCP_HOST_WORKFLOW_AUDIENCE,
       jwtid: `jti-expired-${Math.random().toString(36).slice(2)}`,
     }
   )
@@ -178,6 +192,33 @@ describe('POST /api/v1/workflow-auth/reissue', () => {
       .send({ hostRef: HOST_REF })
 
     expect(res.status).toBe(200)
+  })
+
+  it('preserves HCC audience, Host UID, and capability through bounded reissue', async () => {
+    const token = issueExpiredRefreshToken(
+      HOST_NS,
+      STANDALONE_RECIPE,
+      60,
+      [HOST_REF],
+      ['workflow:list'],
+      { hostUid: 'signed-host-uid' }
+    )
+    const res = await request(app)
+      .post('/api/v1/workflow-auth/reissue')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        host_ref: HOST_REF,
+        hostUid: 'body-controlled-uid',
+        mcpCapabilities: [],
+      })
+
+    expect(res.status).toBe(200)
+    for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
+      expect(claims.host_uid).toBe('signed-host-uid')
+      expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
+    }
   })
 
   it('returns 401 when the Authorization header is missing', async () => {

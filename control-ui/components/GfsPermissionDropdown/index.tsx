@@ -2,15 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@components/ui'
+import { GFS_PERMISSION_LABELS } from './constants'
 import type { GfsPermissionDropdownProps } from './types'
-
-const PERMISSION_LABELS: Record<string, string> = {
-  read: 'Read',
-  write: 'Write',
-  delete: 'Delete',
-  manage_acl: 'Manage access',
-  share: 'Share',
-}
 
 export function GfsPermissionDropdown({
   disabled = false,
@@ -56,7 +49,7 @@ export function GfsPermissionDropdown({
     value.length === 0
       ? 'Permissions'
       : value.length === 1
-        ? (PERMISSION_LABELS[value[0] ?? ''] ?? value[0])
+        ? (GFS_PERMISSION_LABELS[value[0] ?? ''] ?? value[0])
         : `${value.length} permissions`
 
   return (
@@ -88,7 +81,7 @@ export function GfsPermissionDropdown({
                 <span className="cu-gfs-permission-dropdown__check" aria-hidden="true">
                   {selected ? '✓' : null}
                 </span>
-                <span>{PERMISSION_LABELS[permission] ?? permission}</span>
+                <span>{GFS_PERMISSION_LABELS[permission] ?? permission}</span>
               </Button>
             )
           })}

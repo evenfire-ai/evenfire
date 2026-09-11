@@ -33,8 +33,9 @@ spec:
         # Server-side control-ui proxy timeout in milliseconds. The app-router handler
         # app/control-api/[...path]/route.ts OWNS /control-api/* (the next.config.js
         # rewrite was removed), so this value governs the proxied upstream fetch. It
-        # keeps large GFS uploads (file sent base64-encoded, ~+33%) from being cut
-        # mid-body, and applies only to body-bearing methods so SSE streams are unaffected.
+        # keeps legacy JSON GFS mutations from being cut mid-body. Upload v2 part
+        # requests are raw streamed 8/16 MiB bodies and use the separate v2 timeout
+        # in the route handler; this value does not become a 200 MiB body buffer.
         - name: CONTROL_API_PROXY_TIMEOUT_MS
           value: "300000"
         - name: CONTROL_UI_PUBLIC_TOKEN_CSRF_SECRET
@@ -65,10 +66,9 @@ spec:
         resources:
           limits:
             cpu: 300m
-            # The /control-api proxy route handler buffers a full arrayBuffer copy of
-            # the request body (~22.4MB for a 16MB GFS upload) before forwarding; 256Mi
-            # is tight under concurrent uploads. 512Mi gives headroom over the Next.js
-            # baseline. The minikube overlay must not reduce this.
+            # Legacy JSON mutations are buffered by the generic proxy; v2 part
+            # requests bypass that path and stream. Keep headroom for the legacy
+            # cap and the Next.js baseline. The minikube overlay must not reduce this.
             memory: 512Mi
           requests:
             cpu: 50m

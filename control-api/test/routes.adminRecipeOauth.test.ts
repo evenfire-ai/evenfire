@@ -135,7 +135,7 @@ describe('routes/admin/recipeOauth', () => {
       const [sql, params] = mockPoolQuery.mock.calls[0] as [string, unknown[]]
       expect(sql).toContain("grant_kind = 'service'")
       expect(sql).toContain('user_id IS NULL')
-      expect(params).toEqual([SANDBOX_NS, 'crm', 'salesforce'])
+      expect(params).toEqual(['recipe', SANDBOX_NS, 'crm', 'salesforce'])
     })
   })
 
@@ -145,7 +145,7 @@ describe('routes/admin/recipeOauth', () => {
       const [sql, params] = mockPoolQuery.mock.calls[0] as [string, unknown[]]
       expect(sql).toContain('DELETE FROM oauth_grants')
       expect(sql).toContain("grant_kind = 'service'")
-      expect(params).toEqual([SANDBOX_NS, 'crm', 'salesforce'])
+      expect(params).toEqual(['recipe', SANDBOX_NS, 'crm', 'salesforce'])
     })
   })
 })

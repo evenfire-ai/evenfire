@@ -52,7 +52,9 @@ export async function listWorkflowGrants(
        FROM user_workflow_triggers uwt
        JOIN users u ON u.id = uwt.user_id
   LEFT JOIN profiles p ON p.user_id = u.id
-      WHERE uwt.recipe_namespace = $1 AND uwt.recipe_name = $2
+      WHERE uwt.recipe_namespace = $1
+        AND uwt.recipe_name = $2
+        AND u.lifecycle_state = 'active'
    ORDER BY u.email ASC`,
     [ns, name]
   )

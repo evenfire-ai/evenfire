@@ -3,11 +3,13 @@ import { config } from './config.js'
 export class ApiError extends Error {
   status: number
   bodyText: string
+  retryAfter?: string
 
-  constructor(message: string, status: number, bodyText: string) {
+  constructor(message: string, status: number, bodyText: string, retryAfter?: string | null) {
     super(message)
     this.status = status
     this.bodyText = bodyText
+    if (retryAfter) this.retryAfter = retryAfter
   }
 }
 
@@ -86,8 +88,30 @@ async function sleep(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/**
+ * Stringify an API error value for the ApiError message. Enveloped errors are
+ * objects like `{ code: 'forbidden', message: 'not authorized…' }` — plain
+ * `String()` on those yields "[object Object]", hiding the actual reason.
+ */
+function errorMessageFrom(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    const { code, message } = error as { code?: unknown; message?: unknown }
+    const parts = [code, message].filter(
+      (value): value is string => typeof value === 'string' && value.length > 0
+    )
+    if (parts.length > 0) return parts.join(': ')
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return '[object Object]'
+    }
+  }
+  return String(error)
+}
+
 export async function requestJson<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'HEAD' | 'DELETE',
   url: string,
   options?: {
     token?: string
@@ -120,12 +144,17 @@ export async function requestJson<T>(
       let msg = raw || response.statusText
       try {
         const parsed = JSON.parse(raw) as { error?: unknown; message?: unknown }
-        if (parsed.error) msg = String(parsed.error)
+        if (parsed.error) msg = errorMessageFrom(parsed.error)
         if (parsed.message) msg = `${msg} - ${String(parsed.message)}`
       } catch {
         // Keep raw text as message.
       }
-      throw new ApiError(`${response.status} ${response.statusText}: ${msg}`, response.status, raw)
+      throw new ApiError(
+        `${response.status} ${response.statusText}: ${msg}`,
+        response.status,
+        raw,
+        response.headers.get('retry-after')
+      )
     }
 
     if (!raw) return {} as T

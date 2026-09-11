@@ -16,7 +16,7 @@ import {
 // URL stays `/connectors` while app/mcp-servers/page.tsx renders <McpServerTable>.
 // We assert the page shell (TablePanelHeader subtitle + panel title), which
 // renders identically for the loading, populated, and empty states, then
-// best-effort expand the first connector row when one is present.
+// best-effort open the first connector row when one is present.
 
 test.describe('optional QA recorder: Control UI connectors journey', () => {
   test('records login and the connectors inventory page', async ({ page }, testInfo) => {
@@ -26,7 +26,7 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     const credentials = adminCredentials()
     await loginThroughUi(page, credentials)
 
-    await page.getByRole('link', { name: 'Connectors', exact: true }).click()
+    await page.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
 
     // The rewrite keeps the URL on /connectors; assert it landed.
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
@@ -34,18 +34,19 @@ test.describe('optional QA recorder: Control UI connectors journey', () => {
     // Shell proof: the TablePanelHeader subtitle is unique and renders regardless of
     // whether the inventory is loading, populated, or empty.
     await expect(
-      page.getByText('Browse connector deployments and context bindings.', { exact: true })
+      page.getByText('Browse connector deployments and agent access.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
 
     // Panel title is "Connectors" while loading/empty, or "Connectors (N)" once populated.
     await expect(page.locator('.cu-panel-title').filter({ hasText: /^Connectors/ })).toBeVisible()
 
-    // Best-effort: if at least one connector row rendered, expand the first one to
-    // exercise the detail panel. Guarded so the journey still passes on an empty inventory.
-    const expandFirst = page.getByRole('button', { name: /^Expand connector / }).first()
-    if (await expandFirst.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await expandFirst.click()
-      await expect(page.locator('.cu-connector-detail').first()).toBeVisible({
+    // Best-effort: if at least one connector rendered, use its row menu to open the
+    // dedicated detail/edit screen. Guarded so the journey still passes when empty.
+    const actions = page.getByRole('button', { name: /^Actions for connector / }).first()
+    if (await actions.isVisible({ timeout: 2_000 }).catch(() => false)) {
+      await actions.click()
+      await page.getByRole('menuitem', { name: 'View details' }).click()
+      await expect(page.getByRole('heading', { name: /^Edit Connector:/ })).toBeVisible({
         timeout: 10_000,
       })
     }

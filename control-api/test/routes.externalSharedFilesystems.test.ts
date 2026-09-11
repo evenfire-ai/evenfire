@@ -8,6 +8,11 @@ const mockVerifyExternalSessionToken = vi.fn()
 const mockGetUserContexts = vi.fn()
 const mockGetTeamContexts = vi.fn()
 const mockSignWfcBrowsingCredential = vi.hoisted(() => vi.fn())
+const mockPoolQuery = vi.hoisted(() => vi.fn())
+
+vi.mock('../src/db.js', () => ({
+  pool: { query: (...args: unknown[]) => mockPoolQuery(...args) },
+}))
 
 vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
   verifyExternalSessionToken: (...args: unknown[]) => mockVerifyExternalSessionToken(...args),
@@ -36,6 +41,7 @@ const SESSION = {
   email: 'user@example.com',
   teamId: 'team-1',
   role: 'member' as const,
+  authGeneration: 1,
   exp: Math.floor(Date.now() / 1000) + 3600,
 }
 
@@ -70,6 +76,8 @@ beforeEach(() => {
   mockGetUserContexts.mockReset()
   mockGetTeamContexts.mockReset()
   mockSignWfcBrowsingCredential.mockReset()
+  mockPoolQuery.mockReset()
+  mockPoolQuery.mockResolvedValue({ rows: [{ lifecycle_state: 'active', lifecycle_version: 1 }] })
   mockSignWfcBrowsingCredential.mockReturnValue({ token: 'browsing-token', expiresInSeconds: 60 })
 })
 

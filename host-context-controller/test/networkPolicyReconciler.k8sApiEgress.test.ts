@@ -15,10 +15,13 @@ vi.mock('../src/config', () => ({
   },
 }))
 
-vi.mock('../src/utils', () => ({
-  getErrorCode: (err: any) => err?.code,
-  applyNetworkPolicy: vi.fn().mockResolvedValue(undefined),
-}))
+vi.mock('../src/utils', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/utils')>()
+  return {
+    ...actual,
+    applyNetworkPolicy: vi.fn().mockResolvedValue(undefined),
+  }
+})
 
 const mockApply = vi.mocked(applyNetworkPolicy)
 
@@ -34,9 +37,12 @@ describe('ensureK8sApiEgress', () => {
     mockApply.mockClear()
     // ensureDefaultPolicies() also prunes legacy static policies via the
     // networking API directly (not applyNetworkPolicy), so the mocked client
-    // must expose deleteNamespacedNetworkPolicy.
+    // must expose the read-before-delete legacy cleanup path.
     const mockKc = {
       makeApiClient: () => ({
+        readNamespacedNetworkPolicy: vi
+          .fn()
+          .mockRejectedValue(Object.assign(new Error('not found'), { code: 404 })),
         deleteNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
       }),
     } as unknown as k8s.KubeConfig

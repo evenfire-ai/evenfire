@@ -3,17 +3,18 @@ import { NextFunction, Request, Response } from 'express'
 type Bucket = { count: number; resetAt: number }
 
 function getClientIp(req: Request): string {
-  const forwarded = String(req.headers['x-forwarded-for'] || '')
-  const first = forwarded.split(',')[0]?.trim()
-  return first || req.socket.remoteAddress || 'unknown'
+  // Express resolves the single trusted proxy hop configured in app.ts. Do
+  // not parse an attacker-supplied X-Forwarded-For chain independently here.
+  return req.ip || req.socket.remoteAddress || 'unknown'
 }
 
 export function createRateLimiter(options: {
   windowMs: number
   maxRequests: number
   keyFn?: (req: Request) => string
+  errorCode?: string
 }) {
-  const { windowMs, maxRequests, keyFn = getClientIp } = options
+  const { windowMs, maxRequests, keyFn = getClientIp, errorCode } = options
   const buckets = new Map<string, Bucket>()
 
   setInterval(() => {
@@ -24,6 +25,10 @@ export function createRateLimiter(options: {
   }, windowMs).unref()
 
   return function rateLimitMiddleware(req: Request, res: Response, next: NextFunction): void {
+    // Each route owns its limiter instance, so auth/me/invitation budgets do
+    // not share counters with GFS. The key is intentionally evaluated after
+    // Express trust-proxy processing; callers must not be allowed to choose a
+    // different X-Forwarded-For chain by reaching this service directly.
     const key = keyFn(req)
     const now = Date.now()
     let bucket = buckets.get(key)
@@ -35,10 +40,19 @@ export function createRateLimiter(options: {
 
     bucket.count++
     if (bucket.count > maxRequests) {
-      res.status(429).json({ error: 'Too many requests. Please try again later.' })
+      const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
+      res.setHeader('Retry-After', String(retryAfterSeconds))
+      res.setHeader('X-RateLimit-Limit', String(maxRequests))
+      res.setHeader('X-RateLimit-Remaining', '0')
+      res.status(429).json({
+        error: errorCode || 'Too many requests. Please try again later.',
+        retryAfterSeconds,
+      })
       return
     }
 
+    res.setHeader('X-RateLimit-Limit', String(maxRequests))
+    res.setHeader('X-RateLimit-Remaining', String(Math.max(0, maxRequests - bucket.count)))
     next()
   }
 }

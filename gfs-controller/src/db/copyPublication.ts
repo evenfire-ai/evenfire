@@ -29,7 +29,7 @@ export interface CopyPublicationResult {
   totalBytes: bigint;
 }
 
-const RETURNING = "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at";
+const RETURNING = "resource_id, drive, parent_resource_id, name, kind, path_cache, version, bytes, blob_key, content_sha256, deleted_at, updated_at";
 const AMBIGUOUS_COMMIT_INSPECTION_MS = 2_000;
 const POST_FAILURE_AUDIT_MS = 2_000;
 
@@ -91,11 +91,21 @@ function sameChildren(rows: Record<string, unknown>[], expected: CopyDestination
   return actual.every((value, index) => value === wanted[index]);
 }
 
-function resource(ref: PublishedTreeRef, drive: string): GfsResource {
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+  }
+  throw new Error("gfs_resources.updated_at is required");
+}
+
+function resource(ref: PublishedTreeRef, drive: string, updatedAt: string): GfsResource {
   return {
     resourceId: ref.resourceId, drive, parentResourceId: ref.parentResourceId,
     name: ref.name, kind: ref.kind, pathCache: ref.pathCache, version: 0,
     bytes: Number(ref.bytes), blobKey: ref.blobKey, contentSha256: ref.contentSha256, deletedAt: null,
+    updatedAt,
   };
 }
 
@@ -230,8 +240,8 @@ function insertSql(nodes: readonly ReservedNode[]): { sql: string; values: unkno
   };
 }
 
-function result(input: CopyInput, root: PublishedTreeRef): CopyPublicationResult {
-  return { root: resource(root, input.drive), requestId: input.requestId, objectCount: input.plan.objectCount,
+function result(input: CopyInput, root: PublishedTreeRef, updatedAt: string): CopyPublicationResult {
+  return { root: resource(root, input.drive, updatedAt), requestId: input.requestId, objectCount: input.plan.objectCount,
     fileCount: input.plan.fileCount, folderCount: input.plan.folderCount, totalBytes: input.plan.totalBytes };
 }
 
@@ -239,6 +249,9 @@ function auditEvent(input: CopyInput, resourceId: string, mutationOutcome: "succ
   return {
     recordType: "mutation_outcome" as const,
     subject: input.subject,
+    actorOnBehalfOf: input.actorOnBehalfOf ?? null,
+    desktopUserId: input.desktopUserId,
+    authoritySource: input.authoritySource,
     op: "copy",
     resourceId: normalizeResourceId(resourceId),
     drive: input.drive,
@@ -262,21 +275,33 @@ async function auditFailure(input: CopyInput, error: unknown): Promise<void> {
   );
 }
 
+type AmbiguousInspection =
+  | { outcome: "full"; updatedAt: string }
+  | { outcome: "zero" }
+  | { outcome: "unsafe" };
+
 async function inspectAmbiguous(
   deps: Dependencies,
   input: CopyInput,
   reserved: ReservedNode[],
   budget: DeadlineBudget
-): Promise<"full" | "zero" | "unsafe"> {
+): Promise<AmbiguousInspection> {
   try {
     const published = await deps.manifests.resolvePublishedTree(input.drive, reserved, budget);
-    if (published !== null) return "full";
+    if (published !== null) {
+      const root = reserved[0];
+      if (!root) return { outcome: "unsafe" };
+      const rootRow = published.find(row => String(row.resource_id) === root.resourceId);
+      return { outcome: "full", updatedAt: toIsoTimestamp(rootRow?.updated_at) };
+    }
     return await deps.tx.transaction(async client => {
       const rows = await client.query(`SELECT resource_id FROM gfs_resources WHERE drive = $1 AND resource_id = ANY($2::uuid[])`, [input.drive, reserved.map(node => node.resourceId)]);
-      if (rows.rows.length === 0) return "zero";
-      return "unsafe";
+      if (rows.rows.length === 0) return { outcome: "zero" };
+      return { outcome: "unsafe" };
     }, budget);
-  } catch { return "unsafe"; }
+  } catch {
+    return { outcome: "unsafe" };
+  }
 }
 
 export async function publishCopy(deps: Dependencies, input: CopyInput): Promise<CopyPublicationResult> {
@@ -315,12 +340,16 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
       stagedKeys.push(staged.blobKey);
     }
     const root = reserved[0];
+    if (!root) throw new Error("copy reserved an empty tree");
+    let publishedUpdatedAt: string | undefined;
     await deps.tx.transaction(async client => {
       await revalidate(client, input);
       deadline(input);
       const insert = insertSql(reserved);
       try {
-        await client.query(insert.sql, insert.values);
+        const inserted = await client.query(insert.sql, insert.values);
+        const rootRow = inserted.rows.find(row => String(row.resource_id) === root.resourceId);
+        publishedUpdatedAt = toIsoTimestamp(rootRow?.updated_at);
       } catch (error) {
         if ((error as { code?: string }).code === "23505") {
           throw new GfsError("already_exists", `a resource named '${input.plan.rootName}' already exists here`);
@@ -334,7 +363,7 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
     await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, {
       deadlineAtMs: input.deadlineAtMs, signal: input.signal, now: input.now,
     }).catch(() => undefined);
-    return result(input, root);
+    return result(input, root, toIsoTimestamp(publishedUpdatedAt));
   } catch (error) {
     if ((error as Error).name === "CommitOutcomeUnknownError") {
       // COMMIT uncertainty is resolved with a fresh, short budget. The request
@@ -342,15 +371,24 @@ export async function publishCopy(deps: Dependencies, input: CopyInput): Promise
       // cannot safely gate the independent read-back.
       const recoveryBudget = ambiguousCommitBudget();
       const outcome = await inspectAmbiguous(deps, input, reserved, recoveryBudget);
-      if (outcome === "full") {
-        await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, ambiguousCommitBudget()).catch(() => undefined);
-        return result(input, reserved[0]);
+      switch (outcome.outcome) {
+        case "full": {
+          const recoveredRoot = reserved[0];
+          if (!recoveredRoot) throw error as CommitOutcomeUnknownError;
+          await deps.manifests.removeCommittedMany(input.requestId, stagedKeys, ambiguousCommitBudget()).catch(() => undefined);
+          return result(input, recoveredRoot, outcome.updatedAt);
+        }
+        case "zero":
+          await cleanup(deps, ambiguousCommitBudget(), stagedKeys);
+          await auditFailure(input, error);
+          throw error as CommitOutcomeUnknownError;
+        case "unsafe":
+          throw error as CommitOutcomeUnknownError;
+        default: {
+          const _exhaustive: never = outcome;
+          throw _exhaustive;
+        }
       }
-      if (outcome === "zero") {
-        await cleanup(deps, ambiguousCommitBudget(), stagedKeys);
-        await auditFailure(input, error);
-      }
-      throw error as CommitOutcomeUnknownError;
     }
     await cleanup(deps, inputBudget(input), stagedKeys);
     await auditFailure(input, error);

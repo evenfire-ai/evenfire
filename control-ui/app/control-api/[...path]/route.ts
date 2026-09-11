@@ -5,6 +5,7 @@ export const dynamic = 'force-dynamic'
 
 const CONTROL_API_INTERNAL_URL = process.env.CONTROL_API_INTERNAL_URL || 'http://127.0.0.1:8090'
 const DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS = 30_000
+const DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS = 600_000
 
 // setTimeout / AbortSignal.timeout reject non-integers and values above the 32-bit
 // signed ceiling (ERR_OUT_OF_RANGE), so an out-of-range env value must NOT reach them.
@@ -28,6 +29,14 @@ function resolveProxyTimeoutMs(): number {
     : DEFAULT_CONTROL_API_PROXY_TIMEOUT_MS
 }
 
+function resolveGfsUploadProxyTimeoutMs(): number {
+  const raw = process.env.CONTROL_UI_GFS_UPLOAD_PROXY_TIMEOUT_MS
+  const parsed = raw ? Number(raw) : Number.NaN
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_PROXY_TIMEOUT_MS
+    ? parsed
+    : DEFAULT_GFS_UPLOAD_PROXY_TIMEOUT_MS
+}
+
 // Runtime-configurable cap on the request body this proxy will buffer, homologous
 // with the gfsc write cap (GFS_MAX_WRITE_BODY_BYTES, 24MiB). This handler runs
 // BEFORE any auth (auth lives in control-api, downstream), so without a cap an
@@ -36,6 +45,7 @@ function resolveProxyTimeoutMs(): number {
 // default. Set CONTROL_UI_PROXY_MAX_BODY_BYTES on the deployment to change it.
 const DEFAULT_MAX_BODY_BYTES = 24 * 1024 * 1024
 const MAX_BODY_BYTES_CEILING = 512 * 1024 * 1024
+export const GFS_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
 function resolveMaxBodyBytes(): number {
   const raw = process.env.CONTROL_UI_PROXY_MAX_BODY_BYTES
   const parsed = raw ? Number(raw) : Number.NaN
@@ -122,6 +132,14 @@ function buildUpstreamUrl(req: NextRequest, path: string[]): string {
   return `${base}${upstreamPath}${req.nextUrl.search}`
 }
 
+function isGfsUploadRoute(req: NextRequest, path: string[]): boolean {
+  if (req.method !== 'PUT') return false
+  const pathname = `/${path.join('/')}`
+  return /^\/api\/v1\/gfs\/proxy\/v1\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/parts\/[0-9]+$/i.test(
+    pathname
+  )
+}
+
 function copyRequestHeaders(req: NextRequest): Headers {
   const headers = new Headers()
   req.headers.forEach((value, key) => {
@@ -129,6 +147,11 @@ function copyRequestHeaders(req: NextRequest): Headers {
       headers.set(key, value)
     }
   })
+  const host = req.headers.get('host') ?? req.nextUrl.host
+  if (host) {
+    headers.set('x-forwarded-host', host)
+    headers.set('x-forwarded-proto', req.nextUrl.protocol.replace(':', ''))
+  }
   return headers
 }
 
@@ -165,10 +188,32 @@ async function proxyControlApi(
   const path = Array.isArray(params.path) ? params.path : []
   const upstreamUrl = buildUpstreamUrl(req, path)
   const headers = copyRequestHeaders(req)
+  const rawUpload = isGfsUploadRoute(req, path)
 
   const hasBody = req.method !== 'GET' && req.method !== 'HEAD'
   let body: ArrayBuffer | undefined
-  if (hasBody) {
+  if (rawUpload) {
+    const declaredChunk = Number(req.headers.get('upload-chunk-length'))
+    if (
+      !Number.isSafeInteger(declaredChunk) ||
+      declaredChunk <= 0 ||
+      declaredChunk > GFS_UPLOAD_MAX_PART_BYTES
+    ) {
+      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    }
+    // Count the actual stream before forwarding it. The header is an admission
+    // hint, not a security boundary: without this bounded read a caller could
+    // declare a small part and stream an unbounded body through the UI proxy.
+    const read = await readBodyCapped(req.body, GFS_UPLOAD_MAX_PART_BYTES)
+    if (read === 'too-large') {
+      return NextResponse.json({ error: 'payload_too_large' }, { status: 413 })
+    }
+    const observedBytes = read?.byteLength ?? 0
+    if (observedBytes !== declaredChunk) {
+      return NextResponse.json({ error: 'upload_length_mismatch' }, { status: 400 })
+    }
+    body = read ?? undefined
+  } else if (hasBody) {
     const cap = resolveMaxBodyBytes()
     // Fast path: reject a declared-oversize length before reading a single byte.
     const declared = Number(req.headers.get('content-length'))
@@ -184,7 +229,9 @@ async function proxyControlApi(
   // Only body-bearing methods (uploads/mutations) get the proxy timeout. GET/HEAD —
   // including long-lived SSE notification streams — rely solely on the client's own
   // abort signal, so this timeout can never cut a streaming response.
-  const timeoutSignal = hasBody ? AbortSignal.timeout(resolveProxyTimeoutMs()) : undefined
+  const timeoutSignal = hasBody
+    ? AbortSignal.timeout(rawUpload ? resolveGfsUploadProxyTimeoutMs() : resolveProxyTimeoutMs())
+    : undefined
   const signal = timeoutSignal
     ? typeof AbortSignal.any === 'function'
       ? AbortSignal.any([timeoutSignal, req.signal])
@@ -192,14 +239,15 @@ async function proxyControlApi(
     : req.signal
 
   try {
-    const upstream = await fetch(upstreamUrl, {
+    const fetchInit: RequestInit & { duplex?: 'half' } = {
       method: req.method,
       headers,
       body,
       cache: 'no-store',
       redirect: 'manual',
       signal,
-    })
+    }
+    const upstream = await fetch(upstreamUrl, fetchInit)
 
     return new NextResponse(upstream.body, {
       status: upstream.status,

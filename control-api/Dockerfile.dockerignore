@@ -4,6 +4,16 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/image-policy/
 !packages/image-policy/**
+!packages/display-field/
+!packages/display-field/**
+!packages/llm-providers/
+!packages/llm-providers/**
+!packages/workflow-runtime-core/
+!packages/workflow-runtime-core/package.json
+!packages/workflow-runtime-core/package-lock.json
+!packages/workflow-runtime-core/tsconfig.json
+!packages/workflow-runtime-core/src/
+!packages/workflow-runtime-core/src/**
 !control-api/
 !control-api/package.json
 !control-api/package-lock.json

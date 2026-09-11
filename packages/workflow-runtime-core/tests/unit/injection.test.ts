@@ -182,6 +182,66 @@ describe('requestModelInjection()', () => {
     expect(body.model).toBe('glm-4.7')
   })
 
+  it('refuses a Codex step when grantRedeemable is absent even if WRC returned 2xx', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ configured: true, identityBound: true }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      requestModelInjection('http://wrc:8082', 'wf', provider(), {
+        stepId: 's1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+      })
+    ).rejects.toThrow('Codex grant is not redeemable')
+  })
+
+  it('executes an OpenAI step on 2xx even when grantRedeemable is absent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ configured: true }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      requestModelInjection('http://wrc:8082', 'wf', provider(), {
+        stepId: 's1',
+        provider: 'openai',
+        model: 'gpt-4',
+      })
+    ).resolves.toBeUndefined()
+  })
+
+  it('executes an Anthropic step on 2xx without a Codex readiness field', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 202 })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      requestModelInjection('http://wrc:8082', 'wf', provider(), {
+        stepId: 's1',
+        provider: 'claude',
+        model: 'claude-3',
+      })
+    ).resolves.toBeUndefined()
+  })
+
+  it('executes a Codex step only when WRC marks the grant redeemable', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => ({ configured: true, identityBound: true, grantRedeemable: true }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(
+      requestModelInjection('http://wrc:8082', 'wf', provider(), {
+        stepId: 's1',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+      })
+    ).resolves.toBeUndefined()
+  })
+
   it('throws when WRC returns non-ok', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500, statusText: 'ISE' }))
     await expect(

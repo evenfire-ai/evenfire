@@ -2,9 +2,20 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { desktopQueryDefaults } from '@lib/queryClient'
+import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
+
+// Fire-and-forget UI actions in these probes mirror the production callers,
+// which await the same promises inside try/catch (see FilesPage). Swallow
+// rejections here so a late/rejected mutation — e.g. a createFolder that runs
+// once `current` has cleared and throws "No folder selected" — never escapes as
+// an unhandled rejection and fails an unrelated test later in the full suite.
+const swallow = (promise: Promise<unknown>): void => {
+  void promise.catch(() => {})
+}
 
 const userA = {
   id: 'user-a',
@@ -21,6 +32,8 @@ const userB = {
   teamId: 'team-b',
   teamName: 'Team B',
 }
+
+let lastHarnessQueryClient: QueryClient | null = null
 
 function authValue(me: AuthContextValue['me']): AuthContextValue {
   return {
@@ -70,10 +83,18 @@ function Probe() {
       <div data-testid="current-name">{ctrl.current?.name ?? 'none'}</div>
       <div data-testid="current-version">{ctrl.current?.version ?? 'none'}</div>
       <div data-testid="crumbs">{ctrl.crumbs.map(crumb => crumb.name).join(' / ')}</div>
+      <div data-testid="access-state">{ctrl.accessState}</div>
+      <div data-testid="authority-pending">{ctrl.authorityPending ? 'pending' : 'ready'}</div>
       <div data-testid="accessible-count">{ctrl.accessibleResources.length}</div>
+      <div data-testid="items-count">{ctrl.items.length}</div>
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
+      {ctrl.items.map(item => (
+        <div key={item.resourceId} data-testid={`row-affordances-${item.resourceId}`}>
+          {ctrl.rowAffordancesByResourceId[item.resourceId]?.held.join(',') ?? 'none'}
+        </div>
+      ))}
       {ctrl.accessibleResources.map(resource => (
         <button key={resource.resourceId} type="button" onClick={() => ctrl.openResource(resource)}>
           open {resource.name}
@@ -84,17 +105,17 @@ function Probe() {
           crumb {crumb.name}
         </button>
       ))}
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
       </button>
-      <button type="button" onClick={() => void ctrl.refreshAffordances()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
       </button>
       <button
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
+            ? swallow(ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw=='))
             : undefined
         }
       >
@@ -104,10 +125,12 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.renameResource(
-                ctrl.current.resourceId,
-                'Renamed report.md',
-                ctrl.current.version
+            ? swallow(
+                ctrl.renameResource(
+                  ctrl.current.resourceId,
+                  'Renamed report.md',
+                  ctrl.current.version
+                )
               )
             : undefined
         }
@@ -118,21 +141,64 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
+            ? swallow(ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version))
             : undefined
         }
       >
         replace current
       </button>
+      <button
+        type="button"
+        onClick={() =>
+          ctrl.current
+            ? swallow(
+                ctrl.replaceFileFromPath(
+                  ctrl.current.resourceId,
+                  '/tmp/replacement.bin',
+                  ctrl.current.version
+                )
+              )
+            : undefined
+        }
+      >
+        replace current from path
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          ctrl.current
+            ? swallow(
+                ctrl.moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+              )
+            : undefined
+        }
+      >
+        move current
+      </button>
+      <button type="button" onClick={() => ctrl.retryAccess()}>
+        retry access
+      </button>
     </>
   )
 }
 
-function Harness({ children }: { children: ReactNode }) {
+function Harness({
+  children,
+  productionQueryDefaults = false,
+}: {
+  children: ReactNode
+  productionQueryDefaults?: boolean
+}) {
   const [me, setMe] = useState<AuthContextValue['me']>(userA)
   const [client] = useState(
-    () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    () =>
+      new QueryClient(
+        productionQueryDefaults
+          ? { defaultOptions: desktopQueryDefaults }
+          : { defaultOptions: { queries: { retry: false } } }
+      )
   )
+  lastHarnessQueryClient = client
   return (
     <AuthContext.Provider value={authValue(me)}>
       <QueryClientProvider client={client}>
@@ -145,9 +211,15 @@ function Harness({ children }: { children: ReactNode }) {
   )
 }
 
+/** Same harness, but with the REAL production query cache policy. */
+function ProductionHarness({ children }: { children: ReactNode }) {
+  return <Harness productionQueryDefaults>{children}</Harness>
+}
+
 describe('useGfsBrowserController', () => {
   afterEach(() => {
     cleanup()
+    lastHarnessQueryClient = null
     vi.restoreAllMocks()
   })
 
@@ -184,11 +256,16 @@ describe('useGfsBrowserController', () => {
     })
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
 
+    const grantsKey = desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+    lastHarnessQueryClient?.setQueryData(grantsKey, ['session-a-grant'])
+    expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toEqual(['session-a-grant'])
+
     await act(async () => {
       screen.getByRole('button', { name: 'switch team' }).click()
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('none'))
+    expect(lastHarnessQueryClient?.getQueryData(grantsKey)).toBeUndefined()
   })
 
   it('refreshes cached affordances after permissions change outside Desktop', async () => {
@@ -280,6 +357,105 @@ describe('useGfsBrowserController', () => {
     expect(affordances).toHaveBeenCalledTimes(1)
   })
 
+  it('resolves affordances for every visible child row', async () => {
+    const parent = {
+      resourceId: 'folder-root',
+      rid: 'folder-root',
+      gfsUri: 'gfs://main/folder-root',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Workspace',
+      kind: 'directory' as const,
+      path: '/Workspace',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const childFolder = {
+      resourceId: 'child-folder',
+      rid: 'child-folder',
+      gfsUri: 'gfs://main/child-folder',
+      drive: 'main',
+      parentResourceId: 'folder-root',
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Workspace/Assets',
+      version: 2,
+      bytes: 0,
+    }
+    const childFile = {
+      resourceId: 'child-file',
+      rid: 'child-file',
+      gfsUri: 'gfs://main/child-file',
+      drive: 'main',
+      parentResourceId: 'folder-root',
+      name: 'report.txt',
+      kind: 'file' as const,
+      path: '/Workspace/report.txt',
+      version: 3,
+      bytes: 12,
+    }
+    const readonlyFile = {
+      ...childFile,
+      resourceId: 'readonly-file',
+      rid: 'readonly-file',
+      gfsUri: 'gfs://main/readonly-file',
+      name: 'readonly.txt',
+    }
+    const listChildren = vi.fn(async () => ({
+      items: [childFolder, childFile, readonlyFile],
+      nextCursor: null,
+    }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      const held =
+        resourceId === 'readonly-file'
+          ? ['read']
+          : resourceId === 'folder-root'
+            ? ['read']
+            : ['read', 'write', 'manage_acl']
+      return {
+        held,
+        canDelegate: held.includes('manage_acl'),
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open Workspace' })).toBeTruthy())
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Workspace' }).click()
+    })
+
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('folder-root', 'main', undefined))
+    await waitFor(() => {
+      expect(screen.getByTestId('row-affordances-child-folder').textContent).toBe(
+        'read,write,manage_acl'
+      )
+      expect(screen.getByTestId('row-affordances-child-file').textContent).toBe(
+        'read,write,manage_acl'
+      )
+      expect(screen.getByTestId('row-affordances-readonly-file').textContent).toBe('read')
+    })
+
+    expect(affordances).toHaveBeenCalledWith('child-folder', 'main')
+    expect(affordances).toHaveBeenCalledWith('child-file', 'main')
+    expect(affordances).toHaveBeenCalledWith('readonly-file', 'main')
+  })
+
   it('loads accessible GFS resources and opens one without a pasted link', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -341,6 +517,201 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('team-folder'))
+  })
+
+  it('suppresses directly-shared files that live inside accessible folders (virtual-root hygiene)', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [
+              {
+                resourceId: 'marketing',
+                rid: 'marketing',
+                gfsUri: 'gfs://main/marketing',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'Marketing',
+                kind: 'directory',
+                path: '/Marketing',
+                version: 1,
+                bytes: 0,
+                sources: ['grant'],
+                permissions: ['read'],
+                coversDescendants: true,
+              },
+              {
+                resourceId: 'shared-file',
+                rid: 'sharedfile',
+                gfsUri: 'gfs://main/sharedfile',
+                drive: 'main',
+                parentResourceId: 'marketing',
+                name: 'enterprise-ai-agents-mockup.txt',
+                kind: 'file',
+                path: '/Marketing/enterprise-ai-agents-mockup.txt',
+                version: 1,
+                bytes: 7633,
+                sources: ['grant'],
+                permissions: ['read', 'share'],
+                coversDescendants: false,
+              },
+              {
+                // Nested under an accessible folder even though its immediate
+                // parent is not itself directly listed.
+                resourceId: 'nested-file',
+                rid: 'nestedfile',
+                gfsUri: 'gfs://main/nestedfile',
+                drive: 'main',
+                parentResourceId: 'not-listed-subfolder',
+                name: 'nested.txt',
+                kind: 'file',
+                path: '/Marketing/Assets/nested.txt',
+                version: 1,
+                bytes: 12,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+              {
+                // Orphan share: location not reachable — must stay listed.
+                resourceId: 'orphan-file',
+                rid: 'orphanfile',
+                gfsUri: 'gfs://main/orphanfile',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'lonely.md',
+                kind: 'file',
+                path: '/lonely.md',
+                version: 1,
+                bytes: 8,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+            ],
+            nextCursor: null,
+          })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    // The Marketing folder and the unreachable orphan stay; the two files
+    // reachable by navigating into Marketing are suppressed from the root.
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('2'))
+    expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'open lonely.md' })).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: 'open enterprise-ai-agents-mockup.txt' })
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'open nested.txt' })).toBeNull()
+  })
+
+  it('revalidates folder listings on revisit and window focus under production cache defaults', async () => {
+    const marketingFolder = {
+      resourceId: 'folder-a',
+      rid: 'foldera',
+      gfsUri: 'gfs://main/foldera',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Marketing',
+      kind: 'directory' as const,
+      path: '/Marketing',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const financeFolder = {
+      ...marketingFolder,
+      resourceId: 'folder-b',
+      rid: 'folderb',
+      gfsUri: 'gfs://main/folderb',
+      name: 'Finance',
+      path: '/Finance',
+    }
+    const file = (id: string, name: string) => ({
+      resourceId: id,
+      rid: id,
+      gfsUri: `gfs://main/${id}`,
+      drive: 'main',
+      parentResourceId: 'folder-a',
+      name,
+      kind: 'file' as const,
+      path: `/Marketing/${name}`,
+      version: 1,
+      bytes: 10,
+    })
+    // The out-of-band writer (an agent with a host grant, or an operator).
+    let marketingItems = [file('file-1', 'report.txt')]
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'folder-a'
+        ? { items: marketingItems, nextCursor: null }
+        : { items: [], nextCursor: null }
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [marketingFolder, financeFolder],
+            nextCursor: null,
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          resolve: vi.fn(),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy())
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+
+    // An agent creates a second file while the app is open.
+    marketingItems = [file('file-1', 'report.txt'), file('file-2', 'northstar.md')]
+
+    // Navigating away and back revalidates — no hard reload needed.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Finance' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('0'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+
+    // Focusing the window while the folder stays open revalidates in place.
+    marketingItems = [
+      file('file-1', 'report.txt'),
+      file('file-2', 'northstar.md'),
+      file('file-3', 'northstar-wordmark.svg'),
+    ]
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
   })
 
   it('hydrates readable parent folders for a directly opened file', async () => {
@@ -572,6 +943,544 @@ describe('useGfsBrowserController', () => {
     expect(screen.getByTestId('accessible-error').textContent).toBe('none')
     expect(screen.getByTestId('accessible-count').textContent).toBe('0')
   })
+
+  it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {
+    const docsId = '11111111-1111-1111-1111-111111111111'
+    const rootId = '00000000-0000-0000-0000-00000000000a'
+    const projectsId = '00000000-0000-0000-0000-00000000000b'
+    const archiveId = '00000000-0000-0000-0000-00000000000c'
+    const rid = (id: string) => id.replace(/-/g, '')
+    interface ResolvedResource {
+      resourceId: string
+      parentResourceId: string | null
+      gfsUri: string
+      drive: string
+      name: string
+      kind: 'directory' | 'file'
+      version: number
+    }
+    // The server state flips together with the move: Docs starts under
+    // Projects and ends under Archive, with version 9 (the move receipt).
+    const docsBefore: ResolvedResource = {
+      resourceId: docsId,
+      parentResourceId: projectsId,
+      gfsUri: `gfs://main/${rid(docsId)}`,
+      drive: 'main',
+      name: 'Docs',
+      kind: 'directory',
+      version: 3,
+    }
+    const state = new Map<string, ResolvedResource>([
+      [`gfs://main/${rid(docsId)}`, docsBefore],
+      [
+        `gfs://main/${rid(projectsId)}`,
+        {
+          resourceId: projectsId,
+          parentResourceId: rootId,
+          gfsUri: `gfs://main/${rid(projectsId)}`,
+          drive: 'main',
+          name: 'Projects',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+      [
+        `gfs://main/${rid(archiveId)}`,
+        {
+          resourceId: archiveId,
+          parentResourceId: rootId,
+          gfsUri: `gfs://main/${rid(archiveId)}`,
+          drive: 'main',
+          name: 'Archive',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+      [
+        `gfs://main/${rid(rootId)}`,
+        {
+          resourceId: rootId,
+          parentResourceId: null,
+          gfsUri: `gfs://main/${rid(rootId)}`,
+          drive: 'main',
+          name: 'Root',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+    ])
+    const resolve = vi.fn(async (uri: string) => {
+      const resource = state.get(uri)
+      if (!resource) throw new Error(`Unexpected URI: ${uri}`)
+      return resource
+    })
+    const moveResource = vi.fn(async () => ({ resourceId: docsId, version: 9 }))
+    const renameResource = vi.fn(async () => ({ resourceId: docsId, version: 10 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [
+              {
+                resourceId: docsId,
+                rid: rid(docsId),
+                gfsUri: `gfs://main/${rid(docsId)}`,
+                drive: 'main',
+                parentResourceId: projectsId,
+                name: 'Docs',
+                kind: 'directory',
+                path: null,
+                version: 3,
+                bytes: 0,
+                sources: ['grant'],
+                permissions: ['read', 'write', 'delete'],
+                coversDescendants: true,
+              },
+            ],
+            nextCursor: null,
+          })),
+          resolve,
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write', 'delete'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          moveResource,
+          renameResource,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Docs' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe(docsId))
+    expect(screen.getByTestId('current-version').textContent).toBe('3')
+
+    // The server applies the move: Docs now lives under Archive with v9.
+    state.set(`gfs://main/${rid(docsId)}`, {
+      ...docsBefore,
+      parentResourceId: archiveId,
+      version: 9,
+    })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'move current' }).click()
+    })
+    await waitFor(() =>
+      expect(moveResource).toHaveBeenCalledWith(docsId, 'destination-1', 'main', 3)
+    )
+    // Navigation reconciles to the new location and consumes the new version.
+    await waitFor(() =>
+      expect(screen.getByTestId('crumbs').textContent).toBe('Root / Archive / Docs')
+    )
+    expect(screen.getByTestId('current-version').textContent).toBe('9')
+
+    // A versioned action right after the move uses the post-move version.
+    await act(async () => {
+      screen.getByRole('button', { name: 'rename current' }).click()
+    })
+    await waitFor(() =>
+      expect(renameResource).toHaveBeenCalledWith(docsId, 'Renamed report.md', 'main', 9)
+    )
+  })
+
+  it('fails closed on an authorization failure and drops cached gfs state under production query defaults', async () => {
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    const renameResource = vi.fn(async () => ({ resourceId: 'root', version: 2 }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren,
+          affordances,
+          renameResource,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(1))
+
+    const childrenKey = desktopQueryKeys.gfsChildren(':user-a:team-a', 'root', 'main')
+    expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeTruthy()
+
+    // Access is revoked server-side; the next refetch observes the 401.
+    listChildren.mockRejectedValue(new Error('401 Unauthorized: session rejected'))
+    affordances.mockRejectedValue(new Error('401 Unauthorized: session rejected'))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'rename current' }).click()
+    })
+    await waitFor(() => expect(renameResource).toHaveBeenCalled())
+
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    // The cached listing must not outlive the access that produced it.
+    expect(lastHarnessQueryClient?.getQueryData(childrenKey)).toBeUndefined()
+  })
+
+  it('revalidates accessible resources on remount even under production cache defaults', async () => {
+    const listAccessible = vi.fn(async () => ({ items: [], nextCursor: null }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    // One shared client with the REAL production defaults (Infinity staleTime,
+    // refetchOnMount disabled): the second mount must still hit the server.
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+
+    const first = render(<Probe />, { wrapper })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+    first.unmount()
+
+    render(<Probe />, { wrapper })
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(2))
+  })
+
+  // R4 spec §1 — the authority revocation scenario: caches are fully
+  // populated (roots, children, grants, shares), then the session's authority
+  // is revoked server-side. The remounted browser must not render ANY of it —
+  // not before the (deferred) discovery response lands, and not after it
+  // fails with 401 — and the failure must purge every session-scoped cache.
+  it('withholds cached gfs state while authority revalidates and purges it when discovery fails 401', async () => {
+    const scope = ':user-a:team-a'
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const accessiblePage = {
+      pages: [
+        {
+          items: [
+            {
+              resourceId: 'folder-x',
+              rid: 'folderx',
+              gfsUri: 'gfs://main/folderx',
+              drive: 'main',
+              parentResourceId: null,
+              name: 'Folder X',
+              kind: 'directory',
+              path: '/folder-x',
+              version: 1,
+              bytes: 0,
+              sources: ['grant'],
+              permissions: ['read'],
+              coversDescendants: true,
+            },
+          ],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    }
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'), accessiblePage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'), [
+      {
+        id: 'grant-1',
+        drive: 'main',
+        resourceId: 'folder-x',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'), [
+      {
+        id: 'share-1',
+        drive: 'main',
+        resourceId: 'folder-x',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        includeDescendants: false,
+      },
+    ])
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+    ).toBeTruthy()
+    // The authority window compares cache timestamps against the controller
+    // mount clock; sleep past millisecond granularity so the seeded data is
+    // strictly older than the mount (a same-ms seed would read as fresh).
+    await new Promise(resolve => setTimeout(resolve, 5))
+
+    // Deferred discovery: authority is being rechecked but the server has
+    // not answered yet.
+    let failDiscovery: ((error: Error) => void) | undefined
+    const listAccessible = vi.fn(
+      () =>
+        new Promise<never>((_, reject) => {
+          failDiscovery = reject
+        })
+    )
+    const listChildren = vi.fn(async () => ({ items: [], nextCursor: null }))
+    const affordances = vi.fn(async () => ({
+      held: ['read'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(async () => ({
+            resourceId: 'folder-x',
+            gfsUri: 'gfs://main/folderx',
+            name: 'Folder X',
+            kind: 'directory',
+            version: 1,
+          })),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    render(<Probe />, { wrapper })
+
+    // BEFORE the failure: cached roots/children must be withheld from render.
+    await waitFor(() => expect(listAccessible).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+
+    // Entering the prefetched child cannot bypass revalidation either: the
+    // children cache is populated, but its rows stay withheld.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('folder-x'))
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('items-count').textContent).toBe('0')
+
+    // AFTER the failure: the 401 fails the session closed — every cached
+    // surface is purged and navigation state is gone.
+    await act(async () => {
+      failDiscovery?.(new Error('401 Unauthorized: session rejected'))
+    })
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+    expect(
+      client.getQueryData(desktopQueryKeys.gfsShares(scope, 'folder-x', 'main'))
+    ).toBeUndefined()
+  })
+
+  it('fails a mutation-carrying session closed when an imperative operation reports 401', async () => {
+    const renameResource = vi.fn(async () => {
+      throw new Error('401 Unauthorized: session rejected')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          renameResource,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+
+    // The mutation's rejection propagates to the caller AND the shared
+    // mutation onError boundary fails the session closed.
+    await act(async () => {
+      screen.getByRole('button', { name: 'rename current' }).click()
+    })
+    await waitFor(() => expect(renameResource).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+  })
+
+  // Completes the R3-M1 defect class: the path-based replace — the one
+  // mutation that had escaped the shared onError boundary — must fail the
+  // session closed under the REAL production cache policy, purge every
+  // session-scoped GFS cache, and drop navigation/resource state.
+  it('fails closed when replaceFileFromPath is rejected with 401 under production query defaults', async () => {
+    const scope = ':user-a:team-a'
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const emptyPage = {
+      pages: [{ items: [], nextCursor: null }],
+      pageParams: [undefined],
+    }
+    client.setQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'), {
+      pages: [
+        {
+          items: [
+            {
+              resourceId: 'file-9',
+              rid: 'file9',
+              gfsUri: 'gfs://main/file9',
+              drive: 'main',
+              parentResourceId: null,
+              name: 'report.md',
+              kind: 'file',
+              path: '/report.md',
+              version: 4,
+              bytes: 12,
+              sources: ['grant'],
+              permissions: ['read', 'write'],
+              coversDescendants: false,
+            },
+          ],
+          nextCursor: null,
+        },
+      ],
+      pageParams: [undefined],
+    })
+    client.setQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'), emptyPage)
+    client.setQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'), [
+      {
+        id: 'grant-1',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        inherit: false,
+      },
+    ])
+    client.setQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'), [
+      {
+        id: 'share-1',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'u' },
+        permissions: ['read'],
+        includeDescendants: false,
+      },
+    ])
+
+    const replaceFileFromPath = vi.fn(async () => {
+      throw new Error('401 Unauthorized: session rejected')
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+            version: 1,
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          replaceFileFromPath,
+        },
+      },
+    })
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    render(<Probe />, { wrapper })
+
+    // Navigate in; the session is active and caches hold real data.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('active'))
+    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeTruthy()
+
+    // The path-based replace is rejected with a bare 401.
+    await act(async () => {
+      screen.getByRole('button', { name: 'replace current from path' }).click()
+    })
+    await waitFor(() =>
+      expect(replaceFileFromPath).toHaveBeenCalledWith('root', '/tmp/replacement.bin', 'main', 1)
+    )
+
+    // Authority revoked, caches purged, navigation gone — nothing stale kept.
+    await waitFor(() => expect(screen.getByTestId('access-state').textContent).toBe('revoked'))
+    expect(screen.getByTestId('current').textContent).toBe('none')
+    expect(screen.getByTestId('crumbs').textContent).toBe('')
+    expect(client.getQueryData(desktopQueryKeys.gfsAccessible(scope, 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsChildren(scope, 'root', 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsGrants(scope, 'root', 'main'))).toBeUndefined()
+    expect(client.getQueryData(desktopQueryKeys.gfsShares(scope, 'root', 'main'))).toBeUndefined()
+  })
 })
 
 // The grants listing is gated by the `grantsListEnabled` hook option (the Manage
@@ -587,7 +1496,8 @@ function ManageProbe() {
     <>
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <div data-testid="shares-count">{ctrl.shares.length}</div>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
       <button type="button" onClick={() => setManageOpen(true)}>
@@ -596,17 +1506,29 @@ function ManageProbe() {
       <button type="button" onClick={() => setManageOpen(false)}>
         close manage
       </button>
-      <button type="button" onClick={() => void ctrl.refreshGrants()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshGrants())}>
         refresh grants
       </button>
-      <button type="button" onClick={() => void ctrl.revokeGrant('grant-42')}>
+      <button type="button" onClick={() => swallow(ctrl.revokeGrant('grant-42'))}>
         revoke grant
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['user:bob'], ['read'], true)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['user:bob'], ['read'], true))}>
         grant inherit true
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['team:qa'], ['read'], false)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['team:qa'], ['read'], false))}>
         grant inherit false
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.refreshShares())}>
+        refresh shares
+      </button>
+      <button type="button" onClick={() => swallow(ctrl.revokeShare('share-42'))}>
+        revoke share
+      </button>
+      <button
+        type="button"
+        onClick={() => swallow(ctrl.createShare(['user:bob']).then(() => ctrl.refreshShares()))}
+      >
+        create share
       </button>
     </>
   )
@@ -615,6 +1537,7 @@ function ManageProbe() {
 describe('useGfsBrowserController — grants list / revoke / inherit (#826)', () => {
   afterEach(() => {
     cleanup()
+    lastHarnessQueryClient = null
     vi.restoreAllMocks()
   })
 
@@ -670,6 +1593,12 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() => expect(listGrants).toHaveBeenCalledTimes(1))
     expect(listGrants).toHaveBeenCalledWith('root', 'main')
     await waitFor(() => expect(screen.getByTestId('grants-count').textContent).toBe('1'))
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsGrants(':user-a:team-a', 'root', 'main')
+      )
+    ).toEqual([expect.objectContaining({ id: 'grant-42' })])
+    expect(lastHarnessQueryClient?.getQueryData(['gfs', 'main', 'root', 'grants'])).toBeUndefined()
   })
 
   it('refetches the grants list when refreshGrants runs', async () => {
@@ -816,5 +1745,184 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
     await waitFor(() =>
       expect(grant).toHaveBeenCalledWith('root', ['team:qa'], ['read'], 'main', false)
     )
+  })
+
+  it('lists direct shares when Manage opens and caches them session-scoped', async () => {
+    const listGrants = vi.fn(async () => [])
+    const listShares = vi.fn(async () => [
+      {
+        id: 'share-42',
+        drive: 'main',
+        resourceId: 'root',
+        subject: { type: 'user', id: 'bob' },
+        permissions: ['read'],
+        includeDescendants: false,
+      },
+    ])
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl', 'share'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: true,
+          })),
+          listGrants,
+          listShares,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    expect(listShares).not.toHaveBeenCalled()
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(1))
+    expect(listShares).toHaveBeenCalledWith('root', 'main')
+    await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
+    // Shares live under the session-scoped key (never a cross-session leak).
+    expect(
+      lastHarnessQueryClient?.getQueryData(
+        desktopQueryKeys.gfsShares(':user-a:team-a', 'root', 'main')
+      )
+    ).toEqual([expect.objectContaining({ id: 'share-42' })])
+  })
+
+  it('revokes a direct share by id and refetches the shares list on success', async () => {
+    const share = {
+      id: 'share-42',
+      drive: 'main',
+      resourceId: 'root',
+      subject: { type: 'user', id: 'bob' },
+      permissions: ['read'],
+      includeDescendants: false,
+    }
+    const listShares = vi.fn(async () => [share])
+    const revokeShare = vi.fn(async () => undefined)
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          revokeShare,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'revoke share' }).click()
+    })
+
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('share-42'))
+    // onSuccess: refreshShares invalidates the exact shares key → active refetch.
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(2))
+  })
+
+  it('shows a newly created share without remounting (create → refreshShares)', async () => {
+    const created: unknown[] = []
+    const listShares = vi.fn(async () =>
+      created.length > 0
+        ? [
+            {
+              id: 'share-42',
+              drive: 'main',
+              resourceId: 'root',
+              subject: { type: 'user', id: 'bob' },
+              permissions: ['read'],
+              includeDescendants: false,
+            },
+          ]
+        : []
+    )
+    const createShare = vi.fn(async () => {
+      created.push(true)
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl', 'share'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: true,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares,
+          createShare,
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('root'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+    await waitFor(() => expect(listShares).toHaveBeenCalledTimes(1))
+    expect(screen.getByTestId('shares-count').textContent).toBe('0')
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'create share' }).click()
+    })
+
+    await waitFor(() => expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main'))
+    await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
   })
 })

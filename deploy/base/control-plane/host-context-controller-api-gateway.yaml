@@ -43,7 +43,7 @@ spec:
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /ready
+            path: /health
             port: http
             scheme: HTTP
           initialDelaySeconds: 3

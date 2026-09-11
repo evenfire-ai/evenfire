@@ -53,6 +53,12 @@ export interface LlmPolicy {
   triggerOn: FailoverClass[]
   /** Ordered fallback list, tried in order. Non-empty. */
   fallbacks: FallbackEntry[]
+  /**
+   * Token-budget denials (`providerCode=budget_denied`) are terminal by
+   * default. Set true only when the operator explicitly opts a Host into
+   * failing over after a Codex/control-plane budget block.
+   */
+  budgetDeniedFailover?: boolean
 }
 
 /** A target the engine attempts on a given call. */

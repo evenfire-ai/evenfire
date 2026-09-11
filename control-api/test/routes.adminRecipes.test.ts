@@ -248,6 +248,129 @@ describe.sequential('routes/admin/recipes', () => {
     expect(res.body.metadata.namespace).toBe(SANDBOX_NS)
   })
 
+  function codexSubscriptionRecipe(name: string, connectionRef?: string) {
+    return {
+      metadata: {
+        name,
+        ...(connectionRef !== undefined
+          ? { annotations: { 'clerum.io/codex-connection-ref': connectionRef } }
+          : {}),
+      },
+      spec: {
+        agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+      },
+    }
+  }
+
+  it('POST /admin/recipes — stamps a named Codex grant annotation', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-granted', 'team-plus'))
+      .expect(201)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+    })
+  })
+
+  it('POST /admin/recipes — rejects a Codex recipe without a named grant', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-missing'))
+      .expect(422)
+    expect(res.body.errors[0].rule).toBe('codexRecipeGrantRequired')
+  })
+
+  it('POST /admin/recipes/validate — rejects a Codex recipe with an unassigned grant', async () => {
+    const res = await api
+      .post('/admin/recipes/validate')
+      .send(codexSubscriptionRecipe('codex-unassigned', 'unassigned'))
+      .expect(422)
+    expect(res.body.valid).toBe(false)
+    expect(res.body.errors[0].rule).toBe('codexRecipeGrantRequired')
+  })
+
+  it('PUT /admin/recipes/:name — clears a leftover Codex grant when the agent is no longer Codex', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-then-openai', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-then-openai')
+      .send({
+        spec: { workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }] },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+    })
+  })
+
+  it('PUT /admin/recipes/:name — keeps a recipes-only Codex grant when the annotation is omitted', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-image-bump', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-image-bump')
+      .send({
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write v2', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+    })
+    expect(res.body.spec.steps[0].instruction).toBe('Write v2')
+  })
+
+  it('PUT /admin/recipes/:name — keeps an SDK Codex grant and last-applied annotations', async () => {
+    await api
+      .post('/admin/recipes')
+      .send({
+        metadata: { name: 'sdk-python' },
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }],
+        },
+      })
+      .expect(201)
+    await gateway.updateResource(
+      'workflowrecipes',
+      'sdk-python',
+      {
+        metadata: {
+          annotations: {
+            'clerum.io/codex-connection-ref': 'team-plus',
+            'kubectl.kubernetes.io/last-applied-configuration': '{"kind":"WorkflowRecipe"}',
+          },
+        },
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }],
+        },
+      },
+      SANDBOX_NS
+    )
+    const res = await api
+      .put('/admin/recipes/sdk-python')
+      .send({
+        spec: {
+          pluginWorkloadSdk: { promptBridge: { allowedModels: ['gpt-5.3-codex'] } },
+          workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:v2' }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toMatchObject({
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'kubectl.kubernetes.io/last-applied-configuration': '{"kind":"WorkflowRecipe"}',
+    })
+  })
+
   it('POST /admin/recipes — accepts declared cluster-local sibling egressBindings', async () => {
     const res = await api
       .post('/admin/recipes')

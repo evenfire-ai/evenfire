@@ -116,6 +116,19 @@ describeRealPostgres('GFS reader and writer login isolation', () => {
     expect(migration).toBeDefined()
     await migration!.apply(pool)
 
+    // 0074 is intentionally re-applied here to simulate a legacy role
+    // reconciliation on a cluster that already contains the newer GFS
+    // lifecycle migrations. That historical migration rebuilds the runtime
+    // envelope and therefore removes the 0095 subject-projection grants;
+    // replay the current projection migration before readiness assertions so
+    // this test models the supported post-reconciliation state rather than a
+    // permanently half-migrated database.
+    const lifecycleProjection = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0095_gfs_lifecycle_authority_projection'
+    )
+    expect(lifecycleProjection).toBeDefined()
+    await lifecycleProjection!.apply(pool)
+
     const attributes = await pool.query(
       `SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreatedb, rolcreaterole,
               rolreplication, rolbypassrls

@@ -47,6 +47,51 @@ or deploy old binaries that cannot understand the attempt ledger. Keep the new
 Control API and repair policy rows forward; after the inventory is clean,
 re-enable a canary and repeat the readiness and ledger checks.
 
+## Platform rate limits (issue #348)
+
+The SDK enforces platform-level per-minute rate limits configured through the
+`control-api-config` ConfigMap. The per-run grant quotas `maxRequestsPerRun`
+and `maxNotificationsPerRun` are deprecated: they are still accepted in grant
+payloads for backward compatibility but are ignored by the authorizer. Each
+per-minute limit is enforced over a **trailing (rolling) 60-second window**
+computed from the invocation audit trail — there is no fixed reset tick.
+Denied attempts are recorded and count toward the window, so traffic that
+stays above the limit remains throttled while it keeps arriving; once the
+caller slows below the limit the trailing window drains within ~60 seconds.
+Unlike the deprecated per-run counters, a stepless recipe is never
+permanently trapped.
+
+| ENV variable | Default | Limits |
+|---|---|---|
+| `CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN` | `150` | clientNotifications invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN` | `120` | promptBridge invocations per minute |
+| `CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN` | `600` | shared SDK request bucket per minute |
+| `CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN` | `600` | pre-authorization checks per minute |
+
+The defaults above equal the code defaults in `control-api/src/config.ts` and
+are registered in both `deploy/base/control-plane/configmaps.yaml` and the
+minikube overlay patch (strategic-merge over the base ConfigMap; omitted keys
+inherit base values)
+`deploy/overlays/minikube/configmaps/control-api-config.yaml`; a drift between
+code and manifests fails the config deploy-mirror test.
+
+### Tuning
+
+Limits are tunable without a code deploy. Edit the key in the
+`control-api-config` ConfigMap for the target environment, then restart the
+Control API so the new environment is picked up:
+
+```bash
+# Preflight: confirm you are pointed at the intended cluster before mutating it.
+kubectl config current-context   # must print the target environment's context ("$K8S_CONTEXT")
+kubectl --context "$K8S_CONTEXT" -n control-plane rollout restart deployment/control-api
+kubectl --context "$K8S_CONTEXT" -n control-plane rollout status deployment/control-api --timeout=240s
+```
+
+Values must be positive integers; the Control API fails loudly at startup on
+an invalid value. See also [production.md](production.md) and
+[minikube.md](minikube.md) for environment-specific deployment procedures.
+
 ## Minikube gate
 
 Use the branch-owned profile and generated random ports, then run:

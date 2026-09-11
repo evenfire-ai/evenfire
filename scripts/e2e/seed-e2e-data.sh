@@ -47,7 +47,8 @@
 #   E2E_PLUGIN_SDK_DEMO_TARGET_REF   ordered policy target id (default: primary)
 #   E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT Secret data key owned by provider (derived when omitted)
 #   ADMIN_USERNAME       admin user     (default: admin)
-#   ADMIN_EMAIL          bootstrap email (default: admin@clerum.io)
+#   ADMIN_EMAIL          bootstrap email (default: admin@evenfire.local for
+#                        SEED_PROFILE=minimal, otherwise admin@clerum.io)
 #   ADMIN_PASSWORD       admin pass     (REQUIRED — bootstrap or rotated)
 #   CONTROL_API_NS       ns             (default: control-plane)
 # ======================================================================
@@ -61,11 +62,14 @@ source "${SCRIPT_DIR}/load-dotenv.sh"
 dotenv_load_canonical_root "${REPO_ROOT}"
 # shellcheck source=scripts/e2e/admin-credentials.sh
 source "${SCRIPT_DIR}/admin-credentials.sh"
+# shellcheck source=scripts/e2e/minimal-bootstrap-contract.sh
+source "${SCRIPT_DIR}/minimal-bootstrap-contract.sh"
 
 # ─── Config (all overridable) ──────────────────────────────────────────
 CONTEXT="${CONTEXT:-$(kubectl config current-context)}"
 KC="kubectl --context=${CONTEXT}"
 
+SEED_PROFILE="${SEED_PROFILE:-e2e}"
 DEV_EMAIL="${E2E_DEV_LOGIN_EMAIL:-test@clerum.io}"
 DEV_NAME="${E2E_DEV_LOGIN_NAME:-Test User}"
 DEV_EMAIL_2="${E2E_DEV_LOGIN_EMAIL_2:-test2@clerum.io}"
@@ -98,7 +102,28 @@ AGENT_NAME="${E2E_HOST_REF:-chatllm}"
 CONTEXT_ID="${E2E_CONTEXT_ID:-context1}"
 
 ADMIN_USERNAME="${ADMIN_USERNAME:-admin}"
-ADMIN_EMAIL="${ADMIN_EMAIL:-admin@clerum.io}"
+if [ -z "${ADMIN_EMAIL:-}" ]; then
+  if [ "$SEED_PROFILE" = "minimal" ]; then
+    ADMIN_EMAIL="admin@evenfire.local"
+  else
+    ADMIN_EMAIL="admin@clerum.io"
+  fi
+fi
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  ADMIN_EMAIL="$(clerum_canonical_email "$ADMIN_EMAIL")"
+  if [ -n "${E2E_DEV_LOGIN_EMAIL+x}" ]; then
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "$DEV_EMAIL" true)"
+  else
+    DEV_EMAIL="$(clerum_minimal_desktop_email "$ADMIN_EMAIL" "" false)"
+  fi
+  if ! clerum_minimal_identity_matches "$ADMIN_EMAIL" "$DEV_EMAIL"; then
+    printf '  ERROR: %s\n' "$(clerum_minimal_identity_error "$DEV_EMAIL" "$ADMIN_EMAIL")" >&2
+    exit 1
+  fi
+  if [ -z "${E2E_DEV_LOGIN_NAME:-}" ]; then
+    DEV_NAME="admin"
+  fi
+fi
 ADMIN_PASSWORD="$(e2e_resolve_admin_password "${REPO_ROOT}" || true)"
 DESKTOP_LOGIN_CREDENTIAL="$ADMIN_PASSWORD"
 SEED_DESKTOP_LOGIN="${E2E_SEED_DESKTOP_PASSWORDS:-}"
@@ -161,6 +186,7 @@ if [ -z "$PLUGIN_SDK_DEMO_CREDENTIAL_SLOT" ]; then
     moonshot) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="moonshot-api-key" ;;
     nebius) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="nebius-api-key" ;;
     novita) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="novita-api-key" ;;
+    minimax) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="minimax-api-key" ;;
     azure) PLUGIN_SDK_DEMO_CREDENTIAL_SLOT="azure-openai-api-key" ;;
     *) die "Cannot derive a credential slot for provider '$PLUGIN_SDK_DEMO_PROVIDER'; set E2E_PLUGIN_SDK_DEMO_CREDENTIAL_SLOT explicitly" ;;
   esac
@@ -449,45 +475,6 @@ capture_admin_session_cookie() {
   } > "$AUTH_COOKIE_JAR"
 }
 
-# ─── Step 1: Admin login (bootstrap if cluster is fresh) ───────────────
-log "Admin login as '$ADMIN_USERNAME'"
-: > "$AUTH_HEADER_FILE"
-ADMIN_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-  -X POST "$CAPI_BASE/admin/auth/login" \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-    '{username: $u, password: $p}')" || true)"
-ADMIN_BODY="$(echo "$ADMIN_RESP" | sed '$d')"
-ADMIN_CODE="$(echo "$ADMIN_RESP" | tail -n1)"
-
-if [[ "$ADMIN_CODE" =~ ^2 ]]; then
-  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
-  ok "Admin session cookie obtained"
-else
-  if [ "$ADMIN_CODE" != "401" ]; then
-    die "Admin login failed (status=$ADMIN_CODE body=$ADMIN_BODY)"
-  fi
-  # Fresh cluster → one-shot bootstrap. 409 means an admin already exists but
-  # the password we were given is wrong — that's a real auth failure, surface.
-  log "Login did not return an admin session; attempting first-time bootstrap"
-  : > "$AUTH_HEADER_FILE"
-  SETUP_RESP="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
-    -X POST "$CAPI_BASE/admin/auth/setup" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
-      '{email: $e, username: $u, password: $p}')" || true)"
-  SETUP_BODY="$(echo "$SETUP_RESP" | sed '$d')"
-  SETUP_CODE="$(echo "$SETUP_RESP" | tail -n1)"
-  if [ "$SETUP_CODE" = "409" ]; then
-    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
-  fi
-  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
-    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
-  fi
-  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
-  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
-fi
-
 AUTH_CURL=(-b "$AUTH_COOKIE_JAR" -c "$AUTH_COOKIE_JAR" -H 'Content-Type: application/json')
 
 admin_get() {
@@ -501,6 +488,123 @@ admin_get() {
     die "$label → $code body=$(echo "$resp" | sed '$d')"
   fi
 }
+
+login_admin_only() {
+  local resp body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  resp="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$resp" | sed '$d')"
+  code="$(echo "$resp" | tail -n1)"
+  if ! [[ "$code" =~ ^2 ]]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+  ok "Admin session cookie obtained"
+}
+
+perform_initial_setup() {
+  local response
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/setup" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg e "$ADMIN_EMAIL" --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{email: $e, username: $u, password: $p}')" || true)"
+  SETUP_BODY="$(echo "$response" | sed '$d')"
+  SETUP_CODE="$(echo "$response" | tail -n1)"
+}
+
+verify_minimal_operator_bootstrap() {
+  local admin_count admin_id status source desktop_user_id link_admin_id
+  ADMIN_GET_BODY=""
+  admin_get "$CAPI_BASE/admin/control-admins" "GET /admin/control-admins"
+  admin_count="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '[.admins[]? | select(.username == $username and ((.email // "") | ascii_downcase) == $email)] | length')"
+  if [ "$admin_count" != "1" ]; then
+    die "Minimal bootstrap did not produce exactly one admin '$ADMIN_USERNAME' with email '$ADMIN_EMAIL'"
+  fi
+  admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .id // empty')"
+  status="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.status // "missing"')"
+  source="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.source // "missing"')"
+  desktop_user_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.desktopUserId // empty')"
+  link_admin_id="$(echo "$ADMIN_GET_BODY" | jq -r --arg username "$ADMIN_USERNAME" --arg email "$ADMIN_EMAIL" \
+    '.admins[] | select(.username == $username and ((.email // "") | ascii_downcase) == $email) | .gfsOperatorLink.controlAdminId // empty')"
+  if ! clerum_initial_setup_link_matches "$status" "$source" "$desktop_user_id" "$link_admin_id" "$admin_id"; then
+    # Recovery is only possible by rebuilding the control DB. control-api
+    # stamps last_login_at on every successful admin login and
+    # setupInitialAdminCredentials only matches a bootstrap row whose
+    # last_login_at is still NULL, so once a cluster has logged in without
+    # consuming setup the initial_setup link can never be created on that
+    # database. Say so instead of leaving the operator with a bare refusal.
+    die "Minimal bootstrap is incomplete: expected one active initial_setup Desktop link for '$ADMIN_EMAIL' (status=$status source=$source desktopUserId=${desktop_user_id:-missing} controlAdminId=${link_admin_id:-missing}); refusing ordinary-user fallback. This cluster consumed or bypassed /admin/auth/setup without creating the link, and it cannot be created on the existing database. Rebuild the control DB to recover: re-run 'make minikube-setup' without REUSE_DB/--keep-db (the default rebuilds the DB), passing CONTROL_DB_RESET_PVC_UID when the setup script asks for it."
+  fi
+  ok "Initial admin '$ADMIN_USERNAME' has active initial_setup Desktop operator link (desktopUserId=${desktop_user_id:0:8}…)"
+}
+
+login_first_legacy() {
+  local response body code
+  log "Admin login as '$ADMIN_USERNAME'"
+  : > "$AUTH_HEADER_FILE"
+  response="$(curl -sS -w '\n%{http_code}' -D "$AUTH_HEADER_FILE" \
+    -X POST "$CAPI_BASE/admin/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$ADMIN_USERNAME" --arg p "$ADMIN_PASSWORD" \
+      '{username: $u, password: $p}')" || true)"
+  body="$(echo "$response" | sed '$d')"
+  code="$(echo "$response" | tail -n1)"
+  if [[ "$code" =~ ^2 ]]; then
+    capture_admin_session_cookie || die "Admin login did not return an admin session cookie"
+    ok "Admin session cookie obtained"
+    return
+  fi
+  if [ "$code" != "401" ]; then
+    die "Admin login failed (status=$code body=$body)"
+  fi
+  log "Login did not return an admin session; attempting first-time bootstrap"
+  perform_initial_setup
+  if [ "$SETUP_CODE" = "409" ]; then
+    die "Admin already exists but login failed — ADMIN_PASSWORD is wrong for user '$ADMIN_USERNAME'"
+  fi
+  if ! [[ "$SETUP_CODE" =~ ^2 ]]; then
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+  ok "Bootstrapped initial admin '$ADMIN_USERNAME'"
+}
+
+# ─── Step 1: Bootstrap before login for the minimal self-hosted path ───
+# A fresh DB contains a technical bootstrap admin whose password already
+# matches ADMIN_PASSWORD. Login-first therefore consumes the one-shot setup
+# eligibility, then the normal /admin/users fallback creates an ordinary
+# Desktop member without the governed initial_setup operator link. Minimal
+# installs must consume setup first; reruns may fall back to login only after
+# proving that the active initial_setup link still exists.
+if [ "$SEED_PROFILE" = "minimal" ]; then
+  log "Minimal self-hosted bootstrap: attempting /admin/auth/setup before any admin login"
+  perform_initial_setup
+  setup_outcome="$(clerum_minimal_setup_outcome "$SETUP_CODE")"
+  if [ "$setup_outcome" = "setup_succeeded" ]; then
+    capture_admin_session_cookie || die "Bootstrap did not return an admin session cookie"
+    ok "Bootstrapped initial admin '$ADMIN_USERNAME' with Desktop workspace"
+  elif [ "$setup_outcome" = "setup_already_consumed" ]; then
+    log "Initial setup already consumed; validating the existing governed link after login"
+    login_admin_only
+  else
+    die "Bootstrap failed (status=$SETUP_CODE body=$SETUP_BODY)"
+  fi
+  verify_minimal_operator_bootstrap
+else
+  login_first_legacy
+fi
 
 admin_post() {
   local url="$1" body="$2" label="$3"
@@ -563,6 +667,7 @@ ensure_seed_user_and_team() {
   local email="$1"
   local name="$2"
   local team_name="${name} team"
+  email="$(clerum_canonical_email "$email")"
 
   ADMIN_GET_BODY=""
   admin_get "$CAPI_BASE/admin/users?$(jq -rn --arg q "$email" '$q|@uri' | sed 's/^/q=/')" \

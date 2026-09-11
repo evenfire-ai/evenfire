@@ -64,7 +64,7 @@ export function classifyConnectError(error: unknown): {
   }
 
   const code = extractErrorCode(error)
-  if (code === 'ETIMEDOUT' || /timed? ?out/i.test(msg)) {
+  if (code === 'ETIMEDOUT' || code === -32001 || /timed? ?out/i.test(msg)) {
     return { reason: 'timeout', message: truncate(msg || 'request timed out') }
   }
   if (
@@ -77,8 +77,11 @@ export function classifyConnectError(error: unknown): {
   }
 
   // MCP SDK surfaces protocol errors with numeric JSON-RPC codes in msg.
-  if (/jsonrpc|protocol|invalid params|invalid request/i.test(msg)) {
-    return { reason: 'handshake', message: truncate(msg) }
+  if (/jsonrpc|protocol|invalid params|invalid request/i.test(msg) || isZodValidationError(error)) {
+    return {
+      reason: 'handshake',
+      message: isZodValidationError(error) ? 'invalid MCP response schema' : truncate(msg),
+    }
   }
 
   return { reason: 'unknown', message: truncate(msg || 'unknown error') }
@@ -100,7 +103,18 @@ function errorMessage(error: unknown): string {
   return String(error)
 }
 
-function extractHttpStatus(error: unknown, msg: string): number | null {
+/**
+ * Extract an HTTP status from the *structured* error shape only — never from
+ * the message string. This is the trustworthy signal: `.status`/`.statusCode`,
+ * or a numeric `.code` that falls in the HTTP range (the MCP SDK puts the HTTP
+ * status in `code` for StreamableHTTP errors).
+ *
+ * Deliberately excludes the message regex: a JSON-RPC error carrying
+ * `code: -32003` would let the regex extract "320" from the digits, which is a
+ * false HTTP status. Auth classification (see `isAuthError`) must use ONLY this
+ * structured signal.
+ */
+export function extractStructuredHttpStatus(error: unknown): number | null {
   if (error && typeof error === 'object') {
     const status =
       (error as Record<string, unknown>).status ?? (error as Record<string, unknown>).statusCode
@@ -109,6 +123,12 @@ function extractHttpStatus(error: unknown, msg: string): number | null {
     // MCP SDK sometimes puts an HTTP status in `code` for StreamableHTTP errors.
     if (typeof code === 'number' && code >= 100 && code < 600) return code
   }
+  return null
+}
+
+export function extractHttpStatus(error: unknown, msg: string): number | null {
+  const structured = extractStructuredHttpStatus(error)
+  if (structured !== null) return structured
   // Fallback: "HTTP 401", "status 500", "returned 404"
   const m = msg.match(/(?:HTTP|status|returned|code)[^\d]{0,6}(\d{3})/i)
   if (m) {
@@ -118,12 +138,32 @@ function extractHttpStatus(error: unknown, msg: string): number | null {
   return null
 }
 
-function extractErrorCode(error: unknown): string | null {
+/**
+ * Strict auth-failure detection for a *live* tool call.
+ *
+ * True iff the STRUCTURED HTTP status is exactly 401 or 403. Never consults the
+ * message regex, so a JSON-RPC `-32003` (session-lost) error is NOT an auth
+ * error — that class must keep flowing through the session-recovery path.
+ */
+export function isAuthError(error: unknown): boolean {
+  const status = extractStructuredHttpStatus(error)
+  return status === 401 || status === 403
+}
+
+function extractErrorCode(error: unknown): string | number | null {
   if (error && typeof error === 'object') {
     const code = (error as Record<string, unknown>).code
     if (typeof code === 'string') return code
+    if (typeof code === 'number') return code
   }
   return null
+}
+
+function isZodValidationError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as Record<string, unknown>
+  const hasIssues = Array.isArray(candidate.issues)
+  return hasIssues && (candidate.name === 'ZodError' || candidate.name === '$ZodError')
 }
 
 function truncate(s: string, max = 240): string {

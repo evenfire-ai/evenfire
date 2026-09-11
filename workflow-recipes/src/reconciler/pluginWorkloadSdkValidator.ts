@@ -184,8 +184,15 @@ export interface PluginWorkloadSdkStatusProjection {
 
 export interface PluginWorkloadSdkBootstrapProofInput {
   ready: true
-  contractVersion: 2
+  contractVersion: 2 | 3
   podUid: string
+  codexBinding?: {
+    connectionKey: string
+    catalogRevision: number
+    credentialRevision: number
+    model: string
+    bindingHash: string
+  }
   provider?: string
   model?: string
   policyReady?: boolean
@@ -200,6 +207,21 @@ export interface PluginWorkloadSdkBootstrapProofInput {
   clientNotificationsPolicyState?: string
   clientNotificationsPolicyReason?: string
   verifiedAt: string
+}
+
+/**
+ * parseEagerSdkBootstrapProof always sets policyState (default `unknown`).
+ * A stale v2 Codex image or a missing binding must not render as `(active)`.
+ */
+function promptBridgePolicyPendingReason(
+  bootstrapProof: PluginWorkloadSdkBootstrapProofInput | undefined,
+  codexBindingPending: boolean
+): string {
+  if (codexBindingPending) {
+    if (bootstrapProof?.contractVersion !== 3) return 'codex_bootstrap_contract_stale'
+    return bootstrapProof.policyReason ?? 'codex_execution_binding_missing'
+  }
+  return bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown'
 }
 
 /**
@@ -244,6 +266,12 @@ export function buildPluginWorkloadSdkStatus(args: {
   teardownConfirmed?: boolean
   bootstrapProof?: PluginWorkloadSdkBootstrapProofInput
   now: string
+  /**
+   * The currently-persisted capability (recipe.status.pluginWorkloadSdk), used
+   * to CARRY FORWARD the stable `validatedAt` marker across steady-state
+   * throttle patches (issue #375 R1) instead of resetting it to `now`.
+   */
+  existingCapability?: PluginWorkloadSdkCapabilityStatus | null
 }): PluginWorkloadSdkStatusProjection {
   const {
     spec,
@@ -255,6 +283,7 @@ export function buildPluginWorkloadSdkStatus(args: {
     teardownConfirmed,
     bootstrapProof,
     now,
+    existingCapability,
   } = args
   const sdk = spec.pluginWorkloadSdk
 
@@ -331,14 +360,23 @@ export function buildPluginWorkloadSdkStatus(args: {
     clientNotifications &&
     bootstrapProof?.ready === true &&
     bootstrapProof.clientNotificationsPolicyReady !== true
-  if (policyPending || clientNotificationsPolicyPending) {
-    const family = promptBridge && policyPending ? 'promptBridge' : 'clientNotifications'
+  const codexBindingPending =
+    promptBridge &&
+    bootstrapProof?.provider === 'codex-subscription' &&
+    (bootstrapProof.policyReason === 'codex_execution_binding_missing' ||
+      bootstrapProof.contractVersion !== 3 ||
+      !bootstrapProof.codexBinding)
+  if (policyPending || clientNotificationsPolicyPending || codexBindingPending) {
+    const family =
+      promptBridge && (policyPending || codexBindingPending)
+        ? 'promptBridge'
+        : 'clientNotifications'
     const policyReason =
       family === 'clientNotifications'
         ? (bootstrapProof?.clientNotificationsPolicyReason ??
           bootstrapProof?.clientNotificationsPolicyState ??
           'unknown')
-        : (bootstrapProof?.policyReason ?? bootstrapProof?.policyState ?? 'unknown')
+        : promptBridgePolicyPendingReason(bootstrapProof, codexBindingPending)
     const message =
       policyReason === 'grant_missing'
         ? `Plugin Workload SDK ${family} is awaiting an operator grant`
@@ -408,6 +446,17 @@ export function buildPluginWorkloadSdkStatus(args: {
     .filter((f): f is string => f !== undefined)
     .join(', ')
 
+  // issue #375 (R1): validatedAt is the stable "first reached validated" marker.
+  // On a steady-state throttle refresh (already validated, only verifiedAt
+  // advances) it must be CARRIED FORWARD, not reset to `now`. Stamp a fresh
+  // `now` ONLY on the real transition into validated — no prior capability, or a
+  // prior state other than 'validated', or a prior validated record that somehow
+  // lacked the marker.
+  const validatedAt =
+    existingCapability?.state === 'validated' && existingCapability.validatedAt
+      ? existingCapability.validatedAt
+      : now
+
   return {
     conditions: [
       {
@@ -424,7 +473,7 @@ export function buildPluginWorkloadSdkStatus(args: {
       clientNotifications,
       message: `Capability validated (${families})`,
       ...CLEARED_PLUGIN_WORKLOAD_SDK_METADATA,
-      validatedAt: now,
+      validatedAt,
       ...(bootstrapProof
         ? {
             bootstrapContractVersion: bootstrapProof.contractVersion,

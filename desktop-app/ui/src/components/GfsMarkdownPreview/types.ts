@@ -3,4 +3,5 @@ export type GfsMarkdownPreviewProps = {
   fileName: string
   gfsUri: string
   onClose: () => void
+  onDownloadError?: (error: unknown) => void
 }

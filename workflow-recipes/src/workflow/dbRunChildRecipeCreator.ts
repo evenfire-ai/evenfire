@@ -10,6 +10,7 @@ import {
   buildChildRecipe,
   buildDbRunChildName,
 } from './childRecipeFactory.js'
+import { CODEX_CONNECTION_REF_ANNOTATION } from './llmAllowedModelsSnapshot.js'
 import { WORKFLOW_TEAM_ID_LABEL } from './schedulingHandler.js'
 
 export const RUN_ID_LABEL = 'clerum.io/workflow-run-id'
@@ -167,6 +168,16 @@ export async function createDbRunChildRecipe(
       ...(run.intermediate_parameters
         ? {
             [RUN_INTERMEDIATE_PARAMS_ANNOTATION]: JSON.stringify(run.intermediate_parameters),
+          }
+        : {}),
+      // The Codex grant identity is inherited by copy: the trusted controller
+      // stamps the parent's chosen connection key on the child so control-api
+      // can attest the grant by reading the child recipe named in hostRef.
+      // A parent without the annotation stays fail-closed (`unassigned`).
+      ...(response.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]?.trim()
+        ? {
+            [CODEX_CONNECTION_REF_ANNOTATION]:
+              response.metadata.annotations[CODEX_CONNECTION_REF_ANNOTATION].trim(),
           }
         : {}),
     },

@@ -18,7 +18,7 @@ named `chatllm` you can message immediately.
 - **Node.js 24+** (service builds; desktop app)
 - **git**, **make**, and **ruby** (ruby renders the control-api DB migration
   overlay; ships with macOS, `apt-get install ruby` on Debian/Ubuntu)
-- One LLM API key from any of the 21 supported providers (e.g. OpenAI,
+- One LLM API key from any of the 22 supported providers (e.g. OpenAI,
   Anthropic Claude, Google Gemini, Groq, Mistral, Z.AI, Alibaba Bailian) —
   optional for setup (it boots with placeholders), but the agent can't call a
   model without one. Full list: [../deploy/llm-providers.md](../deploy/llm-providers.md)
@@ -116,7 +116,28 @@ screen — live activity, artifacts, sandbox UIs — see
 
 The headless path exercises the production JWT chain end to end. With
 `make minikube-pf-all` holding port-forwards in another terminal
-(control-api :8090, external-rest-api :8091, rpc-proxy :8094, mcp-host :8080):
+(control-api :8090, external-rest-api :8091, rpc-proxy :8094, mcp-host :8080)
+on the shared `clerum-test` profile. For a branch-owned profile, first-hand
+entry point (gitignored helper at repo root — do not search for it):
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Implementation: `.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+This is the host-side hold for Control UI / Desktop. Profile-owned random
+ports only (never shared `:3000`/`:8090`). `make minikube-pf-all-bg` is a
+gate refresh only; it must not replace `branch-profile-pf`. Do not start UI
+PFs from a sandboxed agent shell. Run the make target on the host. Do not
+kill this lane's `branch-profile-pf`. `branch-profile-pf-health` starts PFs
+then STOPS them on EXIT — do not use it as the lasting hold.
+
+Shared-profile curl example (fixed ports):
 
 ```bash
 EXT=http://localhost:8091  RPC=http://localhost:8094  HOST=chatllm
@@ -177,7 +198,7 @@ Details: [Connect Telegram](../how-to/connect-telegram.md).
 | `minikube start` fails on memory           | Raise Docker Desktop to ≥10 GB RAM / 6 CPUs — or, if you can't spare it, `MINIKUBE_MEMORY=9216 MINIKUBE_IMAGE_TAG=latest make minikube-setup` (stock Docker Desktop's ~9.9 GB is just under the 10 GB default) |
 | Pods `Pending` early on                    | Calico is still coming up — wait, then `make minikube-status`                                                                                                                                                  |
 | postgres CrashLoopBackOff after cold start | `make minikube-setup ARGS="--reset-db --skip-build"`                                                                                                                                                           |
-| Port-forwards die                          | re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops)                                                                                                                                               |
+| Port-forwards die                          | Shared profile: re-run `make minikube-pf-all` (it holds them open; Ctrl-C stops). Branch-owned profile: `MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf` (do not use `branch-profile-pf-health` as the lasting hold; do not replace it with `make minikube-pf-all-bg`) |
 
 ## Next steps
 

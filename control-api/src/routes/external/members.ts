@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import { config } from '../../config.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   requireValidExternalSessionToken,
@@ -26,7 +28,12 @@ function currentUserId(req: ExternalAuthedRequest): string | null {
 
 export function createExternalMembersRouter(): Router {
   const router = Router()
-  router.use('/external/members', requireValidExternalSessionToken)
+  const externalMembersRateLimits = createExternalClientRateLimiters(
+    'members',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
+  router.use('/external/members', ...externalMembersRateLimits, requireValidExternalSessionToken)
 
   router.get(
     '/external/members/manageable-teams',
@@ -187,13 +194,27 @@ export function createExternalMembersRouter(): Router {
     try {
       const managerUserId = currentUserId(req)
       if (!managerUserId) return res.status(403).json({ error: 'Forbidden' })
-      const result = await deleteManagedUserForUser(managerUserId, req.params.userId)
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+      if (!reason) return res.status(400).json({ error: 'reason_required' })
+      const idempotencyKey = String(req.header('Idempotency-Key') || '').trim()
+      if (!idempotencyKey) return res.status(400).json({ error: 'idempotency_key_required' })
+      const result = await deleteManagedUserForUser(managerUserId, req.params.userId, {
+        reason,
+        idempotencyKey,
+        requestId: req.correlationId ?? null,
+      })
       if ('error' in result) {
         if (result.error === 'forbidden_uncontrolled_teams') {
           return res.status(403).json({ error: 'forbidden_uncontrolled_teams' })
         }
         if (result.error === 'invalid_target') {
           return res.status(400).json({ error: 'invalid_target' })
+        }
+        if (result.error === 'invalid_retirement_input') {
+          return res.status(400).json({ error: 'invalid_retirement_input' })
+        }
+        if (result.error === 'idempotency_conflict' || result.error === 'retirement_conflict') {
+          return res.status(409).json({ error: result.error })
         }
         return res.status(404).json({ error: 'not_found' })
       }

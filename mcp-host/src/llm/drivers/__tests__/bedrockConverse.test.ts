@@ -224,6 +224,7 @@ describe('classifyBedrockError', () => {
     ['AccessDeniedException', LlmErrorCode.AuthenticationFailed, false],
     ['UnrecognizedClientException', LlmErrorCode.AuthenticationFailed, false],
     ['ServiceQuotaExceededException', LlmErrorCode.InsufficientQuota, false],
+    ['ResourceNotFoundException', LlmErrorCode.ModelNotAvailable, false],
     ['ValidationException', LlmErrorCode.ApiCallFailed, false],
     ['ServiceUnavailableException', LlmErrorCode.ModelOverloaded, true],
     ['InternalServerException', LlmErrorCode.ModelOverloaded, true],
@@ -243,6 +244,30 @@ describe('classifyBedrockError', () => {
     })
     expect(c.code).toBe(LlmErrorCode.RateLimited)
     expect(c.retryable).toBe(true)
+  })
+
+  it('maps an unmodeled name with a 404 $metadata status to ModelNotAvailable', () => {
+    const c = classifyBedrockError({
+      name: 'SomeNewException',
+      message: 'model gone',
+      $metadata: { httpStatusCode: 404 },
+    })
+    expect(c.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c.retryable).toBe(false)
+    // Diagnostics still propagate on the $metadata fallback path.
+    expect(c.httpStatus).toBe(404)
+    expect(c.providerCode).toBe('SomeNewException')
+  })
+
+  it('propagates httpStatus + providerCode (exception name) on a modeled error', () => {
+    const c = classifyBedrockError({
+      name: 'ResourceNotFoundException',
+      message: 'model gone',
+      $metadata: { httpStatusCode: 404 },
+    })
+    expect(c.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c.httpStatus).toBe(404)
+    expect(c.providerCode).toBe('ResourceNotFoundException')
   })
 
   it('falls back to ApiCallFailed(retryable) for an unrecognized shape', () => {

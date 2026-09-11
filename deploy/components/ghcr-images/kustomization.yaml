@@ -98,3 +98,6 @@ images:
   - name: clerum/webhook-proxy
     newName: ghcr.io/evenfire-ai/webhook-proxy
     newTag: v0.7.0
+  - name: clerum/codex-llm-proxy
+    newName: ghcr.io/evenfire-ai/codex-llm-proxy
+    newTag: v0.7.0

@@ -31,6 +31,7 @@
  * third-party arm is conservative.
  */
 import OpenAI from 'openai'
+import { LlmErrorCode } from '../core/errors'
 import type {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
@@ -39,6 +40,7 @@ import type {
 } from '../core/types'
 import { OpenAIProvider } from './openai'
 import type { LlmProvider } from './registryCore'
+import type { ClassifiedError } from './types'
 
 /**
  * Clamp/normalize call options to the portable subset every OpenAI-compatible
@@ -64,6 +66,17 @@ function toPortableOptions<T extends { temperature?: number; tool_choice?: strin
   }
   return next
 }
+
+/**
+ * Provider-native error codes that mean "this model does not work for you right
+ * now" (retired or inaccessible — ambiguous by design, spec 02 §3.1). z.ai uses
+ * numeric codes; Bailian native slugs. Both compat-mode APIs surface them in
+ * `error.code`.
+ */
+const MODEL_NOT_AVAILABLE_CODES = new Set(['1211', '1220', 'ModelNotFound', 'Model.AccessDenied'])
+
+/** Provider-native billing/quota codes (z.ai 1113, Bailian Arrearage). */
+const BILLING_CODES = new Set(['1113', 'Arrearage'])
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   /** Provider temperature upper bound — 1 for Moonshot, else the [0,2] default. */
@@ -94,6 +107,43 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
 
   override getProviderType(): LlmProvider {
     return this.cfg.id as LlmProvider
+  }
+
+  /**
+   * The OpenAI-compatible arm inherits the shared HTTP classifier from the base
+   * class, but several third parties encode model-availability and billing in a
+   * PROVIDER-NATIVE `error.code` that the raw HTTP status hides — most notably
+   * billing arriving inside a 429 (which the base class would treat as a
+   * retryable rate-limit and loop on). Intercept those codes first, then fall
+   * through to the shared HTTP/unknown classification. (spec 02 §3.1)
+   *
+   * Recognised codes (open sets — unmatched codes fall through):
+   *   - z.ai:    1211 / 1220 → model not available; 1113 → billing/quota.
+   *   - Bailian: ModelNotFound / Model.AccessDenied → model not available;
+   *              Arrearage → billing/quota.
+   */
+  override classifyError(err: unknown): ClassifiedError {
+    const rawCode =
+      (err as { error?: { code?: unknown }; code?: unknown })?.error?.code ??
+      (err as { code?: unknown })?.code
+    const providerCode = rawCode == null ? undefined : String(rawCode)
+    if (providerCode) {
+      const message =
+        (err as { error?: { message?: string }; message?: string })?.error?.message ??
+        (err as { message?: string })?.message ??
+        'Unknown LLM error'
+      const httpStatus =
+        typeof (err as { status?: unknown })?.status === 'number'
+          ? (err as { status: number }).status
+          : undefined
+      const mapped = MODEL_NOT_AVAILABLE_CODES.has(providerCode)
+        ? LlmErrorCode.ModelNotAvailable
+        : BILLING_CODES.has(providerCode)
+          ? LlmErrorCode.InsufficientQuota
+          : null
+      if (mapped) return { code: mapped, retryable: false, message, httpStatus, providerCode }
+    }
+    return super.classifyError(err)
   }
 
   // Third-party OpenAI-compatible APIs use the portable legacy field. The

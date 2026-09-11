@@ -115,6 +115,81 @@ describe('POST /configure — provider hot-swap', () => {
     const result = svc.configure({ provider: 'openai', model: 'gpt-4' } as ConfigureRequest)
     expect(result.configured).toBe(false)
   })
+
+  it('swaps onto codex-subscription without an apiKey so the next step cannot inherit the prior key', () => {
+    const factory = vi.fn(mockLlmFactory())
+    const svc = new WorkflowService('test', { llmFactory: factory })
+    svc.configure({ provider: 'openai', model: 'gpt-4', apiKey: 'sk-123' })
+    const result = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    } as ConfigureRequest)
+    expect(result).toEqual({
+      configured: true,
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+      identityBound: true,
+    })
+    expect(result.grantRedeemable).toBeUndefined()
+    expect(factory).toHaveBeenLastCalledWith('codex-subscription', 'gpt-5.3-codex', '')
+  })
+
+  it('treats a 200 Codex configure as identity-bound, not execute-ready', () => {
+    const svc = new WorkflowService('test', { llmFactory: mockLlmFactory() })
+    const result = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+    } as ConfigureRequest)
+    expect(result.configured).toBe(true)
+    expect(result.identityBound).toBe(true)
+    expect(result.grantRedeemable).not.toBe(true)
+    expect(result).not.toHaveProperty('connectionRef')
+    expect(result).not.toHaveProperty('apiKey')
+  })
+
+  it('does not leave the prior provider ready when a Codex configure fails', () => {
+    const factory = vi
+      .fn()
+      .mockImplementationOnce(mockLlmFactory())
+      .mockImplementationOnce(() => {
+        throw new Error('static slot')
+      })
+    const svc = new WorkflowService('test', { llmFactory: factory })
+    expect(svc.configure({ provider: 'openai', model: 'gpt-4', apiKey: 'sk-123' }).configured).toBe(
+      true
+    )
+    const result = svc.configure({
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+      soulContent: 'must not stick on a failed bind',
+    } as ConfigureRequest)
+    expect(result.configured).toBe(false)
+    expect(svc.isReady()).toBe(false)
+    expect(svc.isSoulOverrideActive()).toBe(false)
+  })
+
+  it('constructs keyless Codex through the default factory without throwing on primarySlot', () => {
+    const previous = process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+    process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
+    try {
+      const svc = new WorkflowService('test')
+      const result = svc.configure({
+        provider: 'codex-subscription',
+        model: 'gpt-5.3-codex',
+      } as ConfigureRequest)
+      expect(result).toEqual({
+        configured: true,
+        provider: 'codex-subscription',
+        model: 'gpt-5.3-codex',
+        identityBound: true,
+      })
+      expect(result.grantRedeemable).toBeUndefined()
+      expect(svc.isReady()).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED
+      else process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = previous
+    }
+  })
 })
 
 describe('POST /configure — SOUL override', () => {

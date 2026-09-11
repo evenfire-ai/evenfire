@@ -36,7 +36,9 @@
  * (which records operator actions) with 1000+ rows per run.
  */
 import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
+import { config } from '../config.js'
 import { pool } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
 import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
 import {
   type DiscoveredModel,
@@ -86,6 +88,8 @@ export interface CatalogSyncRun {
 // COMMIT/ROLLBACK.
 const SYNC_ADVISORY_LOCK_KEY = 'llm-catalog-sync-v1'
 
+const log = rootLogger.child({ service: 'llm_catalog_sync' })
+
 /** A row of the provider's existing catalog rows, for the source branch. */
 interface ExistingRow {
   id: string
@@ -121,6 +125,7 @@ async function reconcileProvider(
   provider: LlmProviderId,
   discovered: DiscoveredModel[],
   markStale: boolean,
+  providerMinLive: number,
   counters: { added: number; updated: number; staled: number }
 ): Promise<void> {
   const existingRes = await client.query(
@@ -128,11 +133,14 @@ async function reconcileProvider(
     [provider]
   )
   const existingByModel = new Map<string, ExistingRow>()
+  let existingDiscoveryCount = 0
   for (const raw of existingRes.rows as Record<string, unknown>[]) {
+    const source = String(raw.source)
+    if (source === 'discovery') existingDiscoveryCount += 1
     existingByModel.set(String(raw.model), {
       id: String(raw.id),
       model: String(raw.model),
-      source: String(raw.source),
+      source,
     })
   }
 
@@ -192,11 +200,34 @@ async function reconcileProvider(
 
   // VANISHED discovery rows → flag stale (never delete, never disable). Only
   // from an authoritative (live) catalog — see the `markStale` doc above. Newly
-  // inserted rows are in `discoveredIds`, so they are excluded. `<> ALL('{}')`
-  // is true for every row, so an empty (live) catalog for a mapped provider
-  // stales all its discovery rows (models genuinely gone) — still never
-  // deleted/disabled.
+  // inserted rows are in `discoveredIds`, so they are excluded.
   if (!markStale) return
+
+  // §4.5 sanity guard, LAYER 2 — per-provider zero/low-live floor. A provider
+  // that comes back with FEWER than the floor of live models but still has
+  // discovery rows in DB is treated as SUSPICIOUS (an external-catalog glitch,
+  // not a genuine mass-deprecation), and its rows are left untouched. This
+  // DELIBERATELY replaces the old catastrophic behavior where `model <> ALL('{}')`
+  // stale-marked EVERY discovery row of a provider whose live list came back
+  // empty. `providerMinLive` (default 0) makes the zero-live case the mandatory
+  // floor; a higher value also guards implausibly-low counts. The surgical case
+  // (a provider otherwise complete with one model gone) stays ABOVE the floor and
+  // is still stale-marked — an accepted, recoverable gap.
+  const providerFloor = Math.max(1, providerMinLive)
+  if (discovered.length < providerFloor && existingDiscoveryCount > 0) {
+    log.warn(
+      {
+        event: 'llm_catalog_sync_provider_floor_skip',
+        provider,
+        liveCount: discovered.length,
+        providerMinLive,
+        existingDiscoveryCount,
+      },
+      `skipping stale-marking for provider "${provider}": only ${discovered.length} live model(s) returned but ${existingDiscoveryCount} discovery row(s) exist (suspected flappy catalog)`
+    )
+    return
+  }
+
   const staleRes = await client.query(
     `UPDATE llm_allowed_models
         SET stale = true
@@ -220,12 +251,42 @@ export async function syncDiscoveredModels(
   opts: {
     loadCatalog?: (o: { fetchImpl?: FetchLike }) => Promise<ModelsDevCatalogResult>
     fetchImpl?: FetchLike
+    /** §4.5 layer-3 absolute floor (default from config). */
+    minPlausibleLiveTotal?: number
+    /** §4.5 layer-2 per-provider floor (default from config). */
+    providerMinLive?: number
   } = {},
   connector: SyncConnector = pool
 ): Promise<CatalogSyncResult> {
   const load = opts.loadCatalog ?? loadModelsDevCatalog
+  const minPlausibleLiveTotal = opts.minPlausibleLiveTotal ?? config.modelsDevMinPlausibleLiveTotal
+  const providerMinLive = opts.providerMinLive ?? config.llmCatalogSyncProviderMinLive
   const { source, fetchedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
   const byProvider = mapCatalogToProviders(catalog)
+
+  // §4.5 sanity guard, LAYER 3 — absolute global plausibility floor. Compared
+  // BEFORE touching any row, against a config constant, with NO baseline / no
+  // persisted history / no per-provider math. If a LIVE run's TOTAL mapped model
+  // count is implausibly small, we suppress the vanished→stale inference for the
+  // WHOLE run — a flappy/truncated external catalog must not mass-stale the
+  // allowlist. "Abort" here means skip only the stale UPDATEs: the inert
+  // `INSERT enabled=false` rows for genuinely-new models still proceed (they
+  // never reach runtime until an operator enables them). Cold start (empty DB)
+  // is unaffected: the stale UPDATE's universe (source='discovery' AND
+  // stale=false) is empty, so it marks 0 rows with or without this guard.
+  const totalLive = PROVIDER_IDS.reduce((n, p) => n + (byProvider[p]?.length ?? 0), 0)
+  const sourceIsLive = source === 'live'
+  const globallyImplausible = sourceIsLive && totalLive < minPlausibleLiveTotal
+  if (globallyImplausible) {
+    log.warn(
+      {
+        event: 'llm_catalog_sync_implausible_live_total',
+        totalLive,
+        minPlausibleLiveTotal,
+      },
+      `LIVE catalog returned only ${totalLive} total model(s) (< floor ${minPlausibleLiveTotal}); suppressing ALL stale-marking this run (inserts still proceed)`
+    )
+  }
 
   const client = await connector.connect()
   let inTransaction = false
@@ -235,13 +296,21 @@ export async function syncDiscoveredModels(
     // Serialize concurrent syncs (xact-scoped advisory lock).
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [SYNC_ADVISORY_LOCK_KEY])
 
-    // Only an authoritative (live) catalog may drive the vanished→stale
-    // inference; a vendored fallback must not stale live models (see
-    // reconcileProvider).
-    const markStale = source === 'live'
+    // Layer 1 (source==='live') AND layer 3 (global plausibility) both gate the
+    // vanished→stale inference for the whole run; layer 2 (per-provider floor)
+    // is applied inside reconcileProvider. A vendored fallback must not stale
+    // live models (see reconcileProvider).
+    const markStale = sourceIsLive && !globallyImplausible
     const counters = { added: 0, updated: 0, staled: 0 }
     for (const provider of PROVIDER_IDS) {
-      await reconcileProvider(client, provider, byProvider[provider] ?? [], markStale, counters)
+      await reconcileProvider(
+        client,
+        provider,
+        byProvider[provider] ?? [],
+        markStale,
+        providerMinLive,
+        counters
+      )
     }
 
     // Persist the run summary (the UI's "last synced"). ran_at defaults to NOW();

@@ -6,6 +6,7 @@ export type ClerumResourceType =
   | 'contexts'
   | 'communicationchannels'
   | 'mcpservers'
+  | 'llmhooks'
   | 'workflowrecipes'
   | 'workflowrecipepolicies'
   | 'sharedfilesystems'

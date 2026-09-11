@@ -22,6 +22,7 @@ import {
   DEFAULT_CUSTOM_COORDINATOR_ACTIVE_DEADLINE_SECONDS,
   WORKFLOW_OUTPUT_PVC_NAME,
 } from './runtimeConstants'
+import { MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION } from './secretFactory'
 import { AgentSpec, WorkflowConfig } from './types'
 
 /** Directory where the mcp-host mounts per-caller SDK bearer tokens (Secret volume). */
@@ -600,6 +601,8 @@ export interface McpHostPodOptions {
   pluginWorkloadSdkEnabled?: boolean
   /** Runtime contract used by mcp-host usage attribution. */
   pluginWorkloadSdkRuntimeMode?: 'workflow' | 'sdk-only'
+  /** Secret residue copied onto the eager pod after a scope/binding remint. */
+  runtimeTokenGeneration?: string
 }
 
 export function buildMcpHostPod(
@@ -745,6 +748,14 @@ export function buildMcpHostPod(
               name: 'MCP_HOST_GATEWAY_URL',
               value: 'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092',
             },
+            // Recipe pods do not mount the Host mcp-host-config ConfigMap.
+            // WRC keyless-configures oauth-broker against this process, so the
+            // Codex factory kill-switch and proxy URL must be on the pod.
+            { name: 'MCP_HOST_CODEX_SUBSCRIPTION_ENABLED', value: 'true' },
+            {
+              name: 'CODEX_LLM_PROXY_RUNTIME_URL',
+              value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
+            },
             // PromptBridge resolves exactly one signed target credential per
             // attempt through WRC. Notification-only hosts are provider-free
             // and deliberately receive no broker URL.
@@ -878,6 +889,9 @@ export function buildMcpHostPod(
         ...(pod.metadata?.annotations ?? {}),
         [PLUGIN_WORKLOAD_SDK_RUNTIME_CONTRACT_HASH_ANNOTATION]:
           pluginWorkloadSdkRuntimeContractHash(pod),
+        ...(options.runtimeTokenGeneration
+          ? { [MCP_HOST_RUNTIME_TOKEN_GENERATION_ANNOTATION]: options.runtimeTokenGeneration }
+          : {}),
       },
     }
   }

@@ -6,9 +6,17 @@ export { googleLoginData, passwordLoginData, verifyUserPassword } from './login.
 export {
   adminDeleteUser,
   createAdminUser,
+  DesktopUserRetirementError,
   getAdminUserContext,
   listUsers,
+  retireDesktopUser,
   updateAdminUserContext,
+} from './users.js'
+export type {
+  DesktopUserRetirementActor,
+  DesktopUserRetirementErrorCode,
+  DesktopUserRetirementOutcome,
+  RetireDesktopUserResult,
 } from './users.js'
 
 export {

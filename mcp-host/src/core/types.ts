@@ -129,6 +129,12 @@ export interface CompletionResponse {
   /** True only when the provider response carried authoritative token counters. */
   usage_reported?: boolean
   finish_reason: FinishReason
+  /**
+   * Physical ledger identity when the provider authorized a spend (Codex).
+   * Absent for static-credential providers that use a separate ticket issuer.
+   */
+  providerAttemptId?: string
+  providerAttemptIndex?: number
 }
 
 export interface ToolCompletionRequest {
@@ -306,6 +312,13 @@ export interface Conversation {
   turns: Turn[]
   pending_approval?: PendingApproval
   auto_approved_tools: Set<string>
+  /**
+   * Guardrail doom-loop counter (spec §6.4) — tracks consecutive identical
+   * `(resolved tool, effective-input)` tool calls across turns within a task.
+   * Ephemeral (like `auto_approved_tools`): not persisted; resets on resume.
+   * Absent until the first guarded tool call.
+   */
+  guardrail_doom_loop?: { lastKey?: string; count: number }
   created_at: Date
   updated_at: Date
   /**
@@ -494,6 +507,16 @@ export interface PendingApproval {
   intent_summary?: string
   /** Exact active-turn context retained while this approval is pending. */
   traceContext?: TraceContextV1 | null
+  /**
+   * U5 — suspension reason. Absent / 'approval_required' is the default HITL
+   * gate (back-compat). 'connect_required' is a REACTIVE OAuth-consent
+   * suspension: the live tool call surfaced a 401 on an oauth mcp-server and the
+   * user must (re)connect before the tool can run. Persisted durably so a cold
+   * restart rehydrates the right kind of suspension — never a generic approval.
+   */
+  reason?: 'approval_required' | 'connect_required'
+  /** U5 — the oauth mcp-server to connect. Set iff reason==='connect_required'. */
+  mcpServerName?: string
 }
 
 // ─── Loop Types ─────────────────────────────────────────────
@@ -520,6 +543,7 @@ export type AgentEventType =
   | 'llm:completed'
   | 'safety:input_blocked'
   | 'safety:output_sanitized'
+  | 'guardrail:decision'
   | 'context:compacted'
   | 'compaction:skipped'
   | 'compaction:thrashing'

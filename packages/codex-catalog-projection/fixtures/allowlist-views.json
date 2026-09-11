@@ -1,0 +1,52 @@
+{
+  "mapped": {
+    "metadata": {
+      "annotations": {
+        "clerum.io/content-hash": "aa",
+        "clerum.io/catalog-revision": "1",
+        "clerum.io/connection-revision": "1",
+        "clerum.io/codex-connection-status": "connected",
+        "clerum.io/codex-enabled": "true",
+        "clerum.io/codex-connections": {
+          "deployment-default": {
+            "status": "connected",
+            "catalogRevision": 1,
+            "connectionRevision": 1,
+            "models": ["gpt-5.3-codex"]
+          },
+          "team-plus": {
+            "status": "revoked",
+            "catalogRevision": 3,
+            "connectionRevision": 8,
+            "models": ["gpt-5.3-codex"]
+          },
+          "personal-pro": {
+            "status": "connected",
+            "catalogRevision": 4,
+            "connectionRevision": 2,
+            "models": ["gpt-5.1"]
+          }
+        }
+      }
+    },
+    "data": {
+      "codex-subscription": "[{\"model\":\"gpt-5.3-codex\",\"stale\":false},{\"model\":\"gpt-5.1\",\"stale\":false}]",
+      "openai": "[{\"model\":\"gpt-4\"}]"
+    }
+  },
+  "legacy": {
+    "metadata": {
+      "annotations": {
+        "clerum.io/content-hash": "bb",
+        "clerum.io/catalog-revision": "4",
+        "clerum.io/connection-revision": "2",
+        "clerum.io/codex-connection-status": "connected",
+        "clerum.io/codex-enabled": "true"
+      }
+    },
+    "data": {
+      "codex-subscription": "[{\"model\":\"gpt-5.3-codex\"},{\"model\":\"gpt-5.1\"}]",
+      "openai": "[{\"model\":\"gpt-4\"}]"
+    }
+  }
+}

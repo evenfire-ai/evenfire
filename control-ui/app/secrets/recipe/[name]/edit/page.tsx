@@ -288,7 +288,7 @@ function EditRecipeSecretContent() {
                             fontSize: '0.7rem',
                             padding: '0.15rem 0.4rem',
                             borderRadius: '4px',
-                            background: 'var(--cu-bg-soft, #eef)',
+                            background: 'var(--cu-surface-hover)',
                             color: 'var(--cu-text-soft)',
                             whiteSpace: 'nowrap',
                           }}

@@ -69,6 +69,31 @@ export function getPool(): Pool {
   return pool
 }
 
+/**
+ * issue #375 (M4, jozer review): dedicated single-connection pool for the
+ * grant-update LISTEN session.
+ *
+ * The shared pool has `poolMax` (production default 4) slots, and TWO consumers
+ * pin a client for the process lifetime: dbRunProcessor's LISTEN session
+ * (pre-existing) and the grant-update listener (new). Checking the second
+ * LISTEN session out of the shared pool cut working headroom from 3 to 2 and
+ * made the 30s tick (pollOrphans + checkStuckRuns) plus one CRD MODIFIED
+ * enough to exhaust it (5s connectionTimeoutMillis rejections). A LISTEN
+ * session should not be a shared-pool checkout at all: this dedicated
+ * `max: 1` pool gives the listener its own connection, so it consumes ZERO
+ * shared-pool slots while keeping the exact PoolClient checkout/release and
+ * reconnect semantics the listener is built (and tested) against.
+ */
+export function createGrantUpdateListenerPool(cfg: DbConfig): Pool {
+  const p = new Pool({ ...createPoolConfig(cfg), max: 1 })
+  // Same mandate as initDb: a client error without a pool-level listener
+  // crashes the process via 'error' event propagation.
+  p.on('error', (err: Error) => {
+    log.error('pg grant-update listener pool error', { err: err.message })
+  })
+  return p
+}
+
 /** Test seam — allow unit tests to swap the module-level pool. */
 export function __setPoolForTests(p: Pool | null): void {
   pool = p

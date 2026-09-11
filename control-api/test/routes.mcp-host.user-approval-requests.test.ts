@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import * as notificationDeliveryQueueService from '../src/services/notificationDeliveryQueueService.js'
@@ -211,6 +212,7 @@ describe('User Approval Request Routes', () => {
         hostRefs: [`${NS}/${RECIPE}`],
         scope: 'workflow:approval:refresh',
         workflowControlScopes: ['workflow:list', 'workflow:read'],
+        mcpCapabilities: [],
         iss: 'test-issuer',
         aud: 'workflow-approvals',
         jti: 'jti-1',
@@ -225,6 +227,43 @@ describe('User Approval Request Routes', () => {
       expect(res.body).toHaveProperty('refreshToken')
       expect(res.body).toHaveProperty('mcpHostControlToken')
       expect(res.body).toHaveProperty('controlExpiresInSeconds')
+    })
+
+    it('preserves HCC authority only from verified refresh lineage and ignores body upgrades', async () => {
+      const { refreshToken } = issueTestTokens()
+      vi.mocked(mcpHostJwt.consumeMcpHostRefreshJwt).mockResolvedValueOnce({
+        sub: 'mcp-host/standalone',
+        recipeNamespace: 'mcp-host',
+        recipeName: 'standalone',
+        hostRefs: ['chatllm'],
+        host_uid: 'signed-host-uid',
+        scope: 'workflow:approval:refresh',
+        workflowControlScopes: ['workflow:list'],
+        mcpCapabilities: [mcpHostJwt.MCP_HOST_CREDENTIAL_CAPABILITY],
+        iss: 'control-api',
+        aud: [mcpHostJwt.MCP_HOST_WORKFLOW_AUDIENCE, mcpHostJwt.MCP_HOST_HCC_AUDIENCE],
+        jti: 'hcc-refresh-jti',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+
+      const res = await request(app)
+        .post('/api/v1/workflow-auth/refresh')
+        .set('Authorization', `Bearer ${refreshToken}`)
+        .send({ hostUid: 'body-controlled-uid', mcpCapabilities: [] })
+
+      expect(res.status).toBe(200)
+      for (const encoded of [res.body.accessToken, res.body.refreshToken]) {
+        const claims = jwt.decode(encoded) as Record<string, unknown>
+        expect(claims.aud).toEqual([
+          mcpHostJwt.MCP_HOST_WORKFLOW_AUDIENCE,
+          mcpHostJwt.MCP_HOST_HCC_AUDIENCE,
+        ])
+        expect(claims.host_uid).toBe('signed-host-uid')
+        expect(claims.mcpCapabilities).toEqual([mcpHostJwt.MCP_HOST_CREDENTIAL_CAPABILITY])
+      }
+      const control = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
+      expect(control.host_uid).toBeUndefined()
+      expect(control.mcpCapabilities).toBeUndefined()
     })
 
     it('rejects invalid refresh token', async () => {

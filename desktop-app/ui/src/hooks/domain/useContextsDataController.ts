@@ -11,6 +11,7 @@ import type {
 } from './useContextsDataController.types'
 
 const EMPTY_STRING_LIST: string[] = []
+const EMPTY_CONTEXT_DISPLAY_BY_ID: Record<string, string> = {}
 
 type SharedFileDirectorySpec = {
   contextId: string
@@ -241,6 +242,10 @@ export function useContextsDataController() {
       contextIds: catalogQuery.data?.contextIds ?? EMPTY_STRING_LIST,
       userContextIds: catalogQuery.data?.userContextIds ?? EMPTY_STRING_LIST,
       teamContextIds: catalogQuery.data?.teamContextIds ?? EMPTY_STRING_LIST,
+      // Visible context name (Context CRD `spec.displayName`) keyed by id. No
+      // producer on the session path yet (spec §8 / UT-7b), so this is empty
+      // today and consumers apply the single fallback `contextDisplayById[id] ?? id`.
+      contextDisplayById: catalogQuery.data?.contextDisplayById ?? EMPTY_CONTEXT_DISPLAY_BY_ID,
       sharedFilesByContext,
       sharedFileDirectoriesByContext,
       refresh,

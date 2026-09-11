@@ -22,7 +22,7 @@ by (potentially) three different people.
 ```mermaid
 flowchart LR
   subgraph P["1. PROVIDER — who serves the model"]
-    P1["Host CRD spec.model.provider<br/>one of 21 ids<br/>chosen by the operator"]
+    P1["Host CRD spec.model.provider<br/>one of 22 ids<br/>chosen by the operator"]
   end
   subgraph M["2. MODEL — which model of that provider"]
     M1["allowlist llm_allowed_models<br/>operator-declared in Control UI<br/>user picks within it, per chat"]
@@ -51,7 +51,7 @@ A few rules that follow from this split, and that surprise people:
 
 ## 2. Which providers are supported
 
-**21 providers**, defined once in
+**23 providers**, defined once in
 [`packages/llm-providers/index.cjs`](../../packages/llm-providers/index.cjs) —
 the single source of truth consumed by mcp-host, control-api, the workflow
 runtime, the host controller and the Control UI.
@@ -60,7 +60,7 @@ They differ only in _how much code_ the integration needs. That is the axis that
 determines everything else (which config they need, where they work, what can go
 wrong):
 
-### Group A — OpenAI-compatible, pure data (16)
+### Group A — OpenAI-compatible, pure data (17)
 
 These speak an OpenAI-compatible `/chat/completions` API. Integrating them is a
 `baseURL` + one API key, **no driver code**. They are all handled by one shared
@@ -84,6 +84,7 @@ class, `OpenAICompatibleProvider`.
 | Moonshot      | `moonshot`   | `moonshot-api-key`   | `kimi-k2.6`                                         |
 | Nebius        | `nebius`     | `nebius-api-key`     | `Qwen/Qwen3-235B-A22B-Instruct-2507`                |
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
+| MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                         |
 
 `openai` itself also speaks this protocol but uses the official SDK (Group B).
 
@@ -114,8 +115,8 @@ authenticates with an `api-key` header instead of `Authorization: Bearer`, and
 
 | Surface                       | Providers supported                     |
 | ----------------------------- | --------------------------------------- |
-| Interactive Host (chat agent) | all **21**                              |
-| WorkflowRecipe LLM steps      | **19** — `bedrock` and `azure` excluded |
+| Interactive Host (chat agent) | all **22**                              |
+| WorkflowRecipe LLM steps      | **20** — `bedrock` and `azure` excluded |
 
 `bedrock` and `azure` are deliberately absent from the WorkflowRecipe CRD enum:
 the workflow `configure` transport carries a **single** credential string, so it
@@ -304,12 +305,12 @@ failing over on those would just mask bugs.
 
 ### Known sharp edge: workflow steps and the secret mapping
 
-The WorkflowRecipe CRD admits **19** providers, but the shipped
+The WorkflowRecipe CRD admits **20** providers, but the shipped
 `clerum-model-secret-mapping` ConfigMap
 ([`deploy/base/mcp-host/model-secret-mapping.yaml`](../../deploy/base/mcp-host/model-secret-mapping.yaml))
 maps only **five**: `openai`, `claude`, `zai`, `bailian`, `vertex`.
 
-A recipe pinning any of the other 14 (`groq`, `mistral`, `xai`, …) passes
+A recipe pinning any of the other 15 (`groq`, `mistral`, `xai`, `minimax`, …) passes
 admission and then fails at runtime with `404 No secret mapping found`. This
 ConfigMap is declarative — nothing generates it — so to use those providers in
 workflows an operator must add the entry themselves:

@@ -110,6 +110,10 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
+        # N12: filled at deploy time by the kustomize `replacements` in
+        # deploy/base/kustomization.yaml from the canonical PublicEgressExceptionSet
+        # (deploy/base/public-egress-exceptions.yaml) — single source of truth,
+        # shared with mcp-server public-web egress. Keep empty here.
         except: []
   # http_request tool: external HTTP with the same public-only boundary.
   - ports:
@@ -118,6 +122,10 @@ spec:
     to:
     - ipBlock:
         cidr: 0.0.0.0/0
+        # N12: filled at deploy time by the kustomize `replacements` in
+        # deploy/base/kustomization.yaml from the canonical PublicEgressExceptionSet
+        # (deploy/base/public-egress-exceptions.yaml) — single source of truth,
+        # shared with mcp-server public-web egress. Keep empty here.
         except: []
 ---
 # ─── L1: K8s API server egress (HCC-managed mcp-host pods) ────────────────────

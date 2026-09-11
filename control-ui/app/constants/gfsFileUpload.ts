@@ -1,5 +1,7 @@
-// Raw-file upload cap. base64 inflates this ×1.34 on the wire, so 16MiB → ~22.4MB
-// body, which must stay under gfsc's GFS_MAX_WRITE_BODY_BYTES (24MiB, set via the
-// host-context-controller gfsc template). Raise all three in step.
-export const GFS_FILE_UPLOAD_MAX_BYTES = 16 * 1024 * 1024
-export const GFS_FILE_UPLOAD_MAX_MEGABYTES = 16
+// The writer owns product policy. These copies only bound protocol and version skew.
+export const GFS_FILE_UPLOAD_DEFAULT_PRODUCT_MAX_BYTES = 200 * 1024 * 1024
+export const GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES = 1024 * 1024 * 1024
+export const GFS_FILE_UPLOAD_PREFERRED_PART_BYTES = 8 * 1024 * 1024
+export const GFS_FILE_UPLOAD_MAX_PART_BYTES = 16 * 1024 * 1024
+export const GFS_FILE_UPLOAD_DEFAULT_CONCURRENCY = 4
+export const GFS_FILE_UPLOAD_FALLBACK_CONCURRENCY = 2

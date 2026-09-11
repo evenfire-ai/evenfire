@@ -91,11 +91,20 @@ else
   MISSING=$((MISSING + 1))
 fi
 
-# ── Node.js (>= 24) ────────────────────────────────────────────────────
+# ── Node.js (>= 24; Desktop/Electron validation wants 24.x) ───────────
+# The platform itself runs in containers, so the quickstart only needs a
+# floor here. Pinning the whole install to 24.x would lock out newer runtimes
+# for a Desktop-only concern. Desktop validation is where 24.x is contractual:
+# CI pins node-version 24 and desktop-app/scripts/verify-electron-runtime.mjs
+# enforces it before any Desktop test/build result counts.
 if command -v node >/dev/null 2>&1; then
   NODE_VER="$(node --version | sed 's/^v//')"
+  NODE_MAJOR="${NODE_VER%%.*}"
   if version_ge "$NODE_VER" "24.0.0"; then
     ok "node     v${NODE_VER}"
+    if [ "$NODE_MAJOR" != "24" ]; then
+      warn "node     v${NODE_VER} runs the quickstart, but Desktop/Electron validation requires 24.x"
+    fi
   else
     err "node     v${NODE_VER} (need >= 24)"
     hint "brew install node@24" "curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash - && sudo apt-get install -y nodejs"
@@ -208,10 +217,21 @@ env_value() {
 }
 
 echo
-ENV_FILE="$PROJECT_DIR/.env"
+# Check the .env setup will actually load. scripts/e2e/load-dotenv.sh resolves a
+# Git worktree to the PRIMARY checkout's .env and deliberately ignores a
+# worktree-local one, so testing "$PROJECT_DIR/.env" here fails this gate in
+# every worktree on a file that is never read.
+# shellcheck source=scripts/e2e/load-dotenv.sh
+. "$PROJECT_DIR/scripts/e2e/load-dotenv.sh"
+ENV_DIR="$(dotenv_canonical_dir "$PROJECT_DIR")"
+ENV_FILE="$ENV_DIR/.env"
 if [ ! -f "$ENV_FILE" ]; then
-  err ".env     not found — setup aborts in Step 1"
-  echo -e "        Create it: ${BOLD}cp .env.example .env${NC}"
+  err ".env     not found at ${ENV_FILE} — setup aborts in Step 1"
+  if [ "$ENV_DIR" != "$PROJECT_DIR" ]; then
+    echo    "        This is a Git worktree; setup reads the primary checkout's .env,"
+    echo    "        so a worktree-local copy would be ignored."
+  fi
+  echo -e "        Create it: ${BOLD}cp $PROJECT_DIR/.env.example $ENV_FILE${NC}"
   echo    "        then set ADMIN_PASSWORD (required, no default) and ONE LLM key"
   MISSING=$((MISSING + 1))
 else
@@ -229,7 +249,7 @@ else
   # At least one LLM key — setup infers the provider from whichever is set.
   #
   # Canonical provider→primary-credential map, mirrored from the registry in
-  # packages/llm-providers/index.cjs (PROVIDER_CREDENTIAL_SLOTS). All 21
+  # packages/llm-providers/index.cjs (PROVIDER_CREDENTIAL_SLOTS). All 22
   # providers; the value is each provider's PRIMARY credential env var (vertex
   # and bedrock also need secondary vars — see the per-provider note below).
   # Keep in sync with that file if providers are added.
@@ -254,6 +274,7 @@ perplexity:PERPLEXITY_API_KEY \
 moonshot:MOONSHOT_API_KEY \
 nebius:NEBIUS_API_KEY \
 novita:NOVITA_API_KEY \
+minimax:MINIMAX_API_KEY \
 azure:AZURE_OPENAI_API_KEY"
 
   provider_key_for() {
@@ -278,7 +299,7 @@ azure:AZURE_OPENAI_API_KEY"
     # just can't reach a model until a real key is added — matches the
     # "optional" behavior documented in docs/deploy/minikube.md.
     warn ".env     no LLM key set — setup will boot with placeholders (default zai); the agent can't call a model until you add one"
-    echo    "        Set one of 21 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
+    echo    "        Set one of 22 providers in .env (OPENAI_API_KEY / CLAUDE_API_KEY / GEMINI_API_KEY / GROQ_API_KEY / MISTRAL_API_KEY …); setup infers the provider. Full list: docs/deploy/llm-providers.md"
   fi
 
   # Provider/key consistency — non-fatal, catches a common mismatch.

@@ -7,7 +7,7 @@
 // headful Chromium + video recording are managed by
 // playwright.qa-recorder.config.ts).
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the recorder").
+// Contract: docs/testing/control-ui-headful-journeys.md.
 import { expect, test } from '@playwright/test'
 import {
   CONTROL_API_URL,
@@ -52,26 +52,17 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-agents')
 
-    // 2) Contexts — /contexts is a real App Router segment; URL is stable.
-    await mainNav.getByRole('link', { name: 'Contexts', exact: true }).click()
-    await expect(page).toHaveURL(/\/contexts$/, { timeout: 20_000 })
-    await expect(
-      page.getByText('Group connectors into reusable access scopes.', { exact: true })
-    ).toBeVisible({ timeout: 20_000 })
-    await expectPersistentSidebar()
-    await screenshotAndLog(page, testInfo, 'control-ui-navigation-contexts')
-
-    // 3) Connectors — sidebar href is /connectors (rewritten from /mcp-servers);
+    // 2) Connectors — sidebar href is /connectors (rewritten from /mcp-servers);
     //    the browser URL stays /connectors.
-    await mainNav.getByRole('link', { name: 'Connectors', exact: true }).click()
+    await mainNav.getByRole('link', { name: 'Installed Connectors', exact: true }).click()
     await expect(page).toHaveURL(/\/connectors\/?$/, { timeout: 20_000 })
     await expect(
-      page.getByText('Browse connector deployments and context bindings.', { exact: true })
+      page.getByText('Browse connector deployments and agent access.', { exact: true })
     ).toBeVisible({ timeout: 20_000 })
     await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-connectors')
 
-    // 4) External Channels — sidebar href is /external-channels (rewritten from
+    // 3) External Channels — sidebar href is /external-channels (rewritten from
     //    /communication-channels); the browser URL stays /external-channels.
     await mainNav.getByRole('link', { name: 'External Channels', exact: true }).click()
     await expect(page).toHaveURL(/\/external-channels$/, { timeout: 20_000 })
@@ -81,7 +72,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-external-channels')
 
-    // 5) LLM Models — Catalog and Discovery Review share one tabbed operator
+    // 4) LLM Models — Catalog and Discovery Review share one tabbed operator
     //    surface, so the sidebar uses one direct link.
     await mainNav.getByRole('link', { name: 'LLM Models', exact: true }).click()
     await expect(page).toHaveURL(/\/llm-models/, { timeout: 20_000 })
@@ -92,7 +83,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-llm-models')
 
-    // 6) Users & Teams — sidebar href is /users-and-teams/users (rewritten from
+    // 5) Users & Teams — sidebar href is /users-and-teams/users (rewritten from
     //    /profile-admin/users); the browser URL stays /users-and-teams/users.
     await mainNav.getByRole('link', { name: 'Users & Teams', exact: true }).click()
     await expect(page).toHaveURL(/\/users-and-teams\/users$/, { timeout: 20_000 })
@@ -105,7 +96,7 @@ test.describe('optional QA recorder: Control UI navigation', () => {
     await expectPersistentSidebar()
     await screenshotAndLog(page, testInfo, 'control-ui-navigation-users-teams')
 
-    // 7) Settings — rendered in the sidebar FOOTER (outside 'Main sections').
+    // 6) Settings — rendered in the sidebar FOOTER (outside 'Main sections').
     //    Sidebar href is /settings/ui (rewritten from /settings); the browser
     //    URL stays /settings/ui. Target the link globally since it is not in the
     //    mainNav region.

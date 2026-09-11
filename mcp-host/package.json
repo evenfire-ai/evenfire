@@ -1,6 +1,6 @@
 {
   "name": "clerum-mcp-host",
-  "version": "0.1.237",
+  "version": "0.1.318",
   "description": "MCP Host - reads Host CRD and provides LLM access via OpenAI/Claude",
   "main": "dist/main.js",
   "engines": {
@@ -27,6 +27,8 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.0",
     "@aws-sdk/client-bedrock-runtime": "^3.895.0",
+    "@clerum/codex-catalog-projection": "file:../packages/codex-catalog-projection",
+    "@clerum/llm-provider-attempt-contract": "file:../packages/llm-provider-attempt-contract",
     "@clerum/llm-providers": "file:../packages/llm-providers",
     "@google/genai": "^2.10.0",
     "@kubernetes/client-node": "^1.0.0",

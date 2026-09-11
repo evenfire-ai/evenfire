@@ -1,0 +1,217 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type * as k8s from '@kubernetes/client-node'
+import {
+  type MockCoreApi,
+  type MockNetworkingApi,
+  asAppsApi,
+  asCoreApi,
+  asCustomApi,
+  asNetworkingApi,
+  createMockAppsApi,
+  createMockCoreApi,
+  createMockCustomApi,
+  createMockNetworkingApi,
+} from '../../test/__fixtures__/testMocks'
+import { updatedLogs } from '../../test/__fixtures__/updatedLogs'
+import { LlmHookReconciler, computePodKey } from '../llmHookReconciler'
+import type { HostCRD, LlmHookCRD } from '../types'
+import { asApiserverNetworkPolicy, updatedPolicyLogs } from './asApiserverNetworkPolicy'
+
+vi.mock('../config', () => ({
+  config: {
+    llmHooksNamespace: 'llm-hooks',
+    hostNamespace: 'mcp-host',
+    mcpServerImagePullPolicy: 'IfNotPresent',
+  },
+}))
+
+const IMG = 'registry.example.com/hook@sha256:' + 'a'.repeat(64)
+
+function makeImageHook(): LlmHookCRD {
+  return {
+    name: 'pre-hook',
+    namespace: 'llm-hooks',
+    generation: 1,
+    spec: {
+      target: { image: { ref: IMG, port: 8080 } },
+      path: '/',
+      lifecyclePoints: ['preCall'],
+    },
+  }
+}
+
+function makeServiceHook(): LlmHookCRD {
+  return {
+    name: 'svc-hook',
+    namespace: 'llm-hooks',
+    generation: 1,
+    spec: {
+      target: { service: { name: 'hook-svc', namespace: 'llm-hooks', port: 8080 } },
+      path: '/',
+      lifecyclePoints: ['preCall'],
+    },
+  }
+}
+
+function makeHost(hookId: string): HostCRD {
+  return {
+    name: 'chatllm',
+    namespace: 'mcp-host',
+    spec: {
+      host: 'chatllm',
+      contextRef: 'ctx',
+      secretRef: 'secret',
+      guardrails: { hooks: { preCall: [{ id: hookId }] } },
+    },
+  }
+}
+
+describe('LlmHook NetworkPolicy no-op gate', () => {
+  let networkingApi: MockNetworkingApi
+  let coreApi: MockCoreApi
+  let reconciler: LlmHookReconciler
+  let hooks: Map<string, LlmHookCRD>
+  let hosts: Map<string, HostCRD>
+
+  beforeEach(() => {
+    networkingApi = createMockNetworkingApi()
+    coreApi = createMockCoreApi()
+    hooks = new Map()
+    hosts = new Map()
+    reconciler = new LlmHookReconciler({} as k8s.KubeConfig, hooks, hosts, {
+      appsApi: asAppsApi(createMockAppsApi()),
+      coreApi: asCoreApi(coreApi),
+      customApi: asCustomApi(createMockCustomApi()),
+      networkingApi: asNetworkingApi(networkingApi),
+    })
+    networkingApi.createNamespacedNetworkPolicy.mockRejectedValue({ code: 409 })
+  })
+
+  it('NOOP-LLMNP-1: image-hook policy (caller :811) skips replace', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const desired = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+      expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+        name: desired.metadata!.name,
+        namespace: 'llm-hooks',
+      })
+      expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+      expect(updatedPolicyLogs(log, `NetworkPolicy "${desired.metadata?.name}"`)).toEqual([])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('NOOP-LLMNP-2: service-target policy (caller :889) skips replace', async () => {
+    const hook = makeServiceHook()
+    coreApi.readNamespacedService.mockResolvedValue({
+      spec: { selector: { app: 'hook-svc' } },
+    })
+    // Capture the policy built by the production caller before simulating its stored form.
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+    networkingApi.createNamespacedNetworkPolicy.mockResolvedValueOnce({})
+    await (reconciler as any).ensureServiceTargetNetworkPolicy(hook)
+    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    const desired = networkingApi.createNamespacedNetworkPolicy.mock.calls[0][0].body
+    networkingApi.readNamespacedNetworkPolicy.mockClear()
+    networkingApi.createNamespacedNetworkPolicy.mockClear()
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
+
+    await (reconciler as any).ensureServiceTargetNetworkPolicy(hook)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+      name: desired.metadata!.name,
+      namespace: 'llm-hooks',
+    })
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('NOOP-LLMNP-3: host-egress policy (caller :964) skips replace', async () => {
+    const hook = makeImageHook()
+    const host = makeHost(hook.name)
+    hooks.set(hook.name, hook)
+    hosts.set(host.name, host)
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
+    networkingApi.createNamespacedNetworkPolicy.mockResolvedValueOnce({})
+    await (reconciler as any).ensureHostEgressNetworkPolicy(host)
+    expect(networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+    const desired = networkingApi.createNamespacedNetworkPolicy.mock.calls[0][0].body
+    expect(desired.spec?.egress?.length).toBeGreaterThan(0)
+    networkingApi.readNamespacedNetworkPolicy.mockClear()
+    networkingApi.createNamespacedNetworkPolicy.mockClear()
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(desired))
+
+    await (reconciler as any).ensureHostEgressNetworkPolicy(host)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledExactlyOnceWith({
+      name: desired.metadata!.name,
+      namespace: 'mcp-host',
+    })
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('WRITE-LLMNP-1: added egress rule replaces once', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const empty = (reconciler as any).buildNetworkPolicy(podKey, [hook], []) as k8s.V1NetworkPolicy
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(asApiserverNetworkPolicy(empty))
+    const extra: k8s.V1NetworkPolicyEgressRule[] = [
+      { to: [{ ipBlock: { cidr: '1.2.3.4/32' } }], ports: [{ port: 443, protocol: 'TCP' }] },
+    ]
+    const log = vi.spyOn(console, 'log')
+    try {
+      await (reconciler as any).ensureNetworkPolicy(podKey, [hook], extra)
+      expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledOnce()
+      expect(updatedLogs(log, 'Updated', 'NetworkPolicy')).toEqual([
+        `[LlmHook] Updated NetworkPolicy "${empty.metadata?.name}"`,
+      ])
+    } finally {
+      log.mockRestore()
+    }
+  })
+
+  it('preserves live annotations when a present policy needs convergence without POST', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const desired = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    const existing = asApiserverNetworkPolicy(desired)
+    existing.metadata = {
+      ...existing.metadata,
+      annotations: { 'example.com/operator': 'retained' },
+    }
+    existing.spec = { ...existing.spec!, ingress: [{}] }
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(existing)
+    await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    const body = networkingApi.replaceNamespacedNetworkPolicy.mock.calls[0][0].body
+    expect(body.metadata?.annotations?.['example.com/operator']).toBe('retained')
+    expect(body.spec?.ingress).toEqual(desired.spec?.ingress)
+  })
+
+  it('propagates GET 403 without creating or replacing a policy', async () => {
+    const error = { code: 403 }
+    networkingApi.readNamespacedNetworkPolicy.mockRejectedValue(error)
+    const hook = makeImageHook()
+    await expect(
+      (reconciler as any).ensureNetworkPolicy(computePodKey(hook)!, [hook], [])
+    ).rejects.toBe(error)
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+})

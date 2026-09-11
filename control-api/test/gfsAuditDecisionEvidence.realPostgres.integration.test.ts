@@ -94,7 +94,16 @@ describeRealPostgres('GFS typed audit decision evidence', () => {
       `SELECT conname
          FROM pg_constraint
         WHERE conrelid = 'gfs_audit'::regclass
-          AND conname LIKE 'gfs_audit_%_valid'`
+          AND conname = ANY($1::text[])`,
+      [
+        [
+          'gfs_audit_record_type_valid',
+          'gfs_audit_authorization_source_valid',
+          'gfs_audit_cached_authorization_source_valid',
+          'gfs_audit_mutation_outcome_valid',
+          'gfs_audit_record_type_fields_valid',
+        ],
+      ]
     )
     expect(new Set(constraints.rows.map(row => row.conname))).toEqual(
       new Set([

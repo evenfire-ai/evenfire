@@ -32,6 +32,15 @@ export interface Config {
   // Kubernetes namespace where per-Host channel-reader Deployments live
   channelsNamespace: string
 
+  // Kubernetes namespace where LlmHook image workloads (guardrail hook pods)
+  // live and where the LlmHook CRDs are watched.
+  llmHooksNamespace: string
+
+  // Periodic LlmHook fullReconcile interval (seconds). Drives the reference-
+  // counted orphan sweep (guardrails phase-4 §3) and readiness convergence when
+  // a watch drops events. 0 disables.
+  llmHookResyncIntervalSec: number
+
   // Container image used for per-Host channel-reader Deployments
   channelReaderImage: string
 
@@ -147,6 +156,12 @@ export interface Config {
   // 1st-party mcp-host credentials.
   hccTargetNamespace: string
 
+  // Control API RS256 verifier contract for Host-scoped MCP API routes.
+  mcpHostJwtPublicKey: string
+  mcpHostJwtIssuer: string
+  mcpHostJwtMaxTtlSeconds: number
+  mcpHostApiRateLimitPerMinute: number
+
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
   // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
@@ -155,6 +170,32 @@ export interface Config {
   // Periodic Host fullReconcile interval (seconds). Guards against silent
   // event drops on long K8s watch disconnects. 0 disables.
   hostResyncIntervalSec: number
+
+  // Periodic NetworkPolicy convergence interval (seconds). Re-enters the
+  // coordinated single-flight pass (not a naked fullReconcile) so a dropped
+  // watch cannot leave stale allows. Default 0 disables the interval; startup
+  // still runs one convergence pass. Non-canonical values fail loud at load.
+  // Set via CONTEXT_MAPPER_NETPOL_RESYNC_SEC.
+  netPolResyncIntervalSec: number
+
+  // Periodic L0/L1 defaults-only interval (seconds). Re-applies
+  // ensureDefaultPolicies without entering a fleet fullReconcile. Default 0
+  // disables the interval. Non-canonical values fail loud at load. Set via
+  // CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC.
+  netPolDefaultsResyncIntervalSec: number
+
+  // Absolute orphan-delete cap for a NetworkPolicy fullReconcile sweep.
+  // Candidates strictly above this count refuse deletes and increment the
+  // cap metric; the pass still certifies. 0 refuses every orphan delete.
+  // Negative values fail loud at load. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP.
+  netPolOrphanDeleteCap: number
+
+  // Percent orphan-delete cap against the listed managed fleet. Candidates
+  // strictly above this fraction are refused. Inert on a tiny inventory
+  // where percent*fleet < 1. Values above 100 never fire. Set via
+  // CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT.
+  netPolOrphanDeleteCapPercent: number
 
   // Per-request deadline for finite Kubernetes calls on the serialized Host
   // convergence path. Watches keep their independent long-lived lifecycle.
@@ -196,6 +237,10 @@ export interface Config {
   // requiring a watch event. 0 disables. Must sit below externalEgressOverlapSec
   // so accumulated IPs never expire between refreshes (issue #299).
   externalEgressResyncIntervalSec: number
+
+  // Deadline for one DNS resolution attempt. A silent resolver cannot block
+  // safety convergence indefinitely.
+  externalEgressDnsResolveTimeoutMs: number
 
   // Grace kept after a DNS TTL before an accumulated /32 may expire (seconds).
   // The sliding window that fixes #299: entries live for TTL + overlap, so a
@@ -243,6 +288,39 @@ function getEnvInt(key: string, defaultValue: number): number {
   if (!value) return defaultValue
   const parsed = parseInt(value, 10)
   return isNaN(parsed) ? defaultValue : parsed
+}
+
+/** Reject negative orphan-delete caps. 0 is a valid never-delete kill-switch. */
+function requireNonNegativeEnvInt(key: string, value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${key} must be a non-negative integer, got '${process.env[key] ?? ''}'`)
+  }
+  return value
+}
+
+/**
+ * Unsigned base-10 integer, including 0. Rejects the parseInt coercions
+ * (`2e1`→2, `10.9`→10, `12abc`→12) that getEnvInt would swallow.
+ */
+function requireCanonicalNonNegativeEnvInt(key: string, defaultValue: number): number {
+  const raw = process.env[key]
+  if (raw === undefined || raw === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`${key} must be an unsigned base-10 integer, got '${raw}'`)
+  }
+  const parsed = Number(raw)
+  return requireNonNegativeEnvInt(key, parsed)
+}
+
+export function parseExternalEgressDnsTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 5_000
+  const parsed = Number(raw)
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 2_147_483_647) {
+    throw new Error(
+      `HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS must be a positive integer no greater than 2147483647, got '${raw}'`
+    )
+  }
+  return parsed
 }
 
 /**
@@ -506,6 +584,12 @@ export const config: Config = {
   // Per-Host channel-reader Deployments namespace
   channelsNamespace: getEnv('CONTEXT_MAPPER_CHANNELS_NAMESPACE', 'channels')!,
 
+  // LlmHook image-workload / CRD-watch namespace (guardrails phase-4).
+  llmHooksNamespace: getEnv('CONTEXT_MAPPER_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
+  // Periodic LlmHook resync (default 5 min, matching hostResyncIntervalSec).
+  llmHookResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_LLM_HOOK_RESYNC_SEC', 300),
+
   // Per-Host channel-reader Deployment image (matches deploy/base/channels/channel-reader.yaml)
   channelReaderImage: getEnv('CONTEXT_MAPPER_CHANNEL_READER_IMAGE', 'clerum/channel-reader:0.9.5')!,
 
@@ -539,7 +623,16 @@ export const config: Config = {
     },
   },
 
-  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply
+  // Runtime namespaces where L0 deny-all + L1 infrastructure policies apply.
+  //
+  // llm-hooks is deliberately NOT listed: this list is a package deal, and its
+  // L1 pass grants namespace-wide DNS (`ensureDnsEgress` uses podSelector: {})
+  // plus HCC-gateway egress to every pod carrying clerum.io/managed-by — which
+  // hook pod templates do. That would hand a pure `/v1` responder the implicit
+  // DNS N5 forbids. The llm-hooks baseline is static instead
+  // (deploy/base/llm-hooks/networkpolicies.yaml: deny-all ingress + egress),
+  // with per-pod-key ingress and scoped CoreDNS emitted by LlmHookReconciler
+  // only for hooks that declare egressBindings.
   runtimeNamespaces: getEnv(
     'CONTEXT_MAPPER_RUNTIME_NAMESPACES',
     'mcp-server,mcp-host,sandbox-recipes,rpc-proxy'
@@ -623,7 +716,7 @@ export const config: Config = {
     },
     limits: {
       memory: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_MEMORY', '4Gi')!,
-      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1000m')!,
+      cpu: getEnv('CONTEXT_MAPPER_DESKTOP_RESOURCES_LIMIT_CPU', '1')!,
     },
   },
 
@@ -674,6 +767,14 @@ export const config: Config = {
   // HCC provisions the shared 1st-party mcp-host credentials by default.
   hccTargetNamespace: getEnv('HCC_TARGET_NAMESPACE')?.trim() || 'mcp-host',
 
+  mcpHostJwtPublicKey: getEnv('HCC_MCP_HOST_JWT_PUBLIC_KEY', '')!,
+  mcpHostJwtIssuer: getEnv('HCC_MCP_HOST_JWT_ISSUER', 'control-api')!,
+  mcpHostJwtMaxTtlSeconds: Math.max(1, getEnvInt('HCC_MCP_HOST_JWT_MAX_TTL_SECONDS', 600)),
+  mcpHostApiRateLimitPerMinute: Math.max(
+    1,
+    getEnvInt('HCC_MCP_HOST_API_RATE_LIMIT_PER_MINUTE', 120)
+  ),
+
   // URL of the nginx gateway that mediates mcp-host → control-api traffic.
   // Injected into mcp-host pods as MCP_HOST_GATEWAY_URL. Per the architecture
   // diagram this is the "nginx (only /mcp-host)" allowlist-proxy.
@@ -685,6 +786,29 @@ export const config: Config = {
   // Periodic Host resync (default 5 min). 0 disables watches-only self-heal
   // for runtime-auth degraded mcp-host pods; use only for diagnostic runs.
   hostResyncIntervalSec: getEnvInt('CONTEXT_MAPPER_HOST_RESYNC_SEC', 300),
+
+  // Periodic NetworkPolicy resync. Default 0 (disabled): startup still
+  // converges once; the interval is opt-in so a bad cache cannot periodically
+  // sweep. Unset or 0 → no interval.
+  netPolResyncIntervalSec: requireCanonicalNonNegativeEnvInt('CONTEXT_MAPPER_NETPOL_RESYNC_SEC', 0),
+  // Periodic L0/L1 defaults-only tick (#488). Default 0 (disabled): start()
+  // still applies defaults once as a bootstrap barrier. The interval is
+  // opt-in and is not shipped in deploy/base. Unset or 0 → no interval.
+  netPolDefaultsResyncIntervalSec: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_DEFAULTS_RESYNC_SEC',
+    0
+  ),
+  // Mass-delete guard for the namespace-wide orphan sweep. Thresholds are
+  // strict `>`: exactly N candidates still delete; N+1 refuses deletes and
+  // still certifies.
+  netPolOrphanDeleteCap: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP',
+    10
+  ),
+  netPolOrphanDeleteCapPercent: requireCanonicalNonNegativeEnvInt(
+    'CONTEXT_MAPPER_NETPOL_ORPHAN_DELETE_CAP_PERCENT',
+    20
+  ),
 
   // Every finite Kubernetes request that can hold Host convergence gets its
   // own deadline. Watch streams are intentionally excluded.
@@ -714,6 +838,9 @@ export const config: Config = {
   // they expire, closing the #299 rotation gap. 0 disables (reintroduces the
   // stale-snapshot risk; only for operators who explicitly opt out).
   externalEgressResyncIntervalSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_RESYNC_SEC', 60),
+  externalEgressDnsResolveTimeoutMs: parseExternalEgressDnsTimeoutMs(
+    getEnv('HCC_EXTERNAL_EGRESS_DNS_TIMEOUT_MS')
+  ),
   externalEgressOverlapSec: getExternalEgressEnvInt('HCC_EXTERNAL_EGRESS_OVERLAP_SEC', 300),
   externalEgressRefreshFloorSec: getExternalEgressEnvInt(
     'HCC_EXTERNAL_EGRESS_REFRESH_FLOOR_SEC',

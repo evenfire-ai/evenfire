@@ -158,6 +158,7 @@ describe('classifyGoogleError', () => {
     [{ status: 429 }, LlmErrorCode.RateLimited, true],
     [{ status: 403 }, LlmErrorCode.AuthenticationFailed, false],
     [{ status: 401 }, LlmErrorCode.AuthenticationFailed, false],
+    [{ status: 404 }, LlmErrorCode.ModelNotAvailable, false],
     [{ status: 503 }, LlmErrorCode.ModelOverloaded, true],
     [{ status: 400 }, LlmErrorCode.ApiCallFailed, false],
   ] as const)('maps http status %o', (err, code, retryable) => {
@@ -170,12 +171,25 @@ describe('classifyGoogleError', () => {
     ['RESOURCE_EXHAUSTED', LlmErrorCode.RateLimited, true],
     ['PERMISSION_DENIED', LlmErrorCode.AuthenticationFailed, false],
     ['UNAUTHENTICATED', LlmErrorCode.AuthenticationFailed, false],
+    ['NOT_FOUND', LlmErrorCode.ModelNotAvailable, false],
     ['UNAVAILABLE', LlmErrorCode.ModelOverloaded, true],
     ['INVALID_ARGUMENT', LlmErrorCode.ApiCallFailed, false],
   ] as const)('maps gRPC status string %s', (status, code, retryable) => {
     const c = classifyGoogleError({ status })
     expect(c.code).toBe(code)
     expect(c.retryable).toBe(retryable)
+  })
+
+  it('propagates httpStatus for a numeric-status error', () => {
+    const c = classifyGoogleError({ status: 404, message: 'model gone' })
+    expect(c.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c.httpStatus).toBe(404)
+  })
+
+  it('propagates the gRPC status string as providerCode', () => {
+    const c = classifyGoogleError({ status: 'NOT_FOUND', message: 'model gone' })
+    expect(c.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c.providerCode).toBe('NOT_FOUND')
   })
 
   it('falls back to ApiCallFailed(retryable) for an unrecognized shape', () => {

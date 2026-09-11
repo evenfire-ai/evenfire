@@ -1,0 +1,54 @@
+# Deployment + Service for the reference guardrail hook, in the llm-hooks
+# namespace. LlmHook CRs point at this via a `service` target
+# (name: reference-guardrail-hook, namespace: llm-hooks, port: 8080).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reference-guardrail-hook
+  namespace: llm-hooks
+  labels:
+    app: reference-guardrail-hook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reference-guardrail-hook
+  template:
+    metadata:
+      labels:
+        app: reference-guardrail-hook
+    spec:
+      containers:
+        - name: hook
+          image: reference-guardrail-hook:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 1
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reference-guardrail-hook
+  namespace: llm-hooks
+  labels:
+    app: reference-guardrail-hook
+spec:
+  selector:
+    app: reference-guardrail-hook
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080

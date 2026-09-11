@@ -1,0 +1,40 @@
+{
+  "diagram": "architecture",
+  "style": "openai-official",
+  "title": "Self-hosted Desktop GFS operator parity",
+  "viewBox": "0 0 1400 1040",
+  "nodes": [
+    {"id":"control-ui","label":"Control UI","description":"setup · revoke · reactivate","layer":"client"},
+    {"id":"desktop","label":"Desktop App","description":"ordinary or operator GFS","layer":"client"},
+    {"id":"setup","label":"Initial setup","description":"self-hosted bootstrap","layer":"client"},
+    {"id":"edge","label":"External REST edge","description":"token 600 · client 1200 · aggregate 1800 / min","layer":"boundary"},
+    {"id":"control-api","label":"Control API","description":"authority resolver · token broker · lifecycle","layer":"authority"},
+    {"id":"gfsc","label":"GFSC data plane","description":"active user/admin/link generation gate","layer":"authority"},
+    {"id":"postgres","label":"PostgreSQL","description":"lifecycle · link history · audit · grants","layer":"store"},
+    {"id":"audit","label":"Audit + metrics","description":"actor · request · source · outcome","layer":"store"},
+    {"id":"active","label":"Active generation","description":"generation N","layer":"lifecycle"},
+    {"id":"revoked","label":"Revoked tombstone","description":"reason · actor · row version","layer":"lifecycle"},
+    {"id":"successor","label":"Successor generation","description":"generation N+1","layer":"lifecycle"},
+    {"id":"retired","label":"User retired","description":"all authority denied","layer":"lifecycle"},
+    {"id":"followups","label":"Global follow-ups","description":"IPv6 keys · coherent 429 metadata","layer":"followup"}
+  ],
+  "arrows": [
+    {"source":"control-ui","target":"control-api","label":"admin lifecycle"},
+    {"source":"desktop","target":"edge","label":"GFS requests"},
+    {"source":"setup","target":"control-api","label":"initial_setup"},
+    {"source":"edge","target":"control-api","label":"request ID + rate gates"},
+    {"source":"control-api","target":"gfsc","label":"signed authority"},
+    {"source":"control-api","target":"postgres","label":"resolve / mutate"},
+    {"source":"gfsc","target":"postgres","label":"fail-closed state read"},
+    {"source":"control-api","target":"audit","label":"governed event"},
+    {"source":"active","target":"revoked","label":"revoke"},
+    {"source":"revoked","target":"successor","label":"reactivate"},
+    {"source":"active","target":"retired","label":"parent retirement"},
+    {"source":"followups","target":"edge","label":"global contracts","style":"dashed"}
+  ],
+  "legend": [
+    {"label":"primary request / authority flow","color":"#10a37f"},
+    {"label":"state transition","color":"#1d4ed8"},
+    {"label":"audit or follow-up contract","color":"#71717a","style":"dashed"}
+  ]
+}

@@ -40,6 +40,38 @@ describe('renderSuccessHtml (spec §9.9 OAuth callback success page)', () => {
     expect(metaContent).not.toMatch(/&(?!amp;|quot;|lt;|gt;|#)/)
   })
 
+  it('recipe subject (no source opt) emits a FROZEN deep-link with NO source/mcpServerName param', () => {
+    const html = renderSuccessHtml('slack', 'slack-bot')
+    const metaContent = /content="0;url=([^"]+)"/.exec(html)?.[1] ?? ''
+    expect(metaContent).not.toContain('source')
+    expect(metaContent).not.toContain('mcpServerName')
+    // Same when opts is present but source is absent — a stray mcpServerName in
+    // opts must NOT leak into the recipe deep-link (only the mcp path forwards it).
+    const html2 = renderSuccessHtml('slack', 'slack-bot', {
+      backgroundEnabled: true,
+      mcpServerName: 'should-not-appear',
+    })
+    const meta2 = /content="0;url=([^"]+)"/.exec(html2)?.[1] ?? ''
+    expect(meta2).not.toContain('source')
+    expect(meta2).not.toContain('mcpServerName')
+  })
+
+  it('mcp subject appends &source=mcp AND &mcpServerName=<X> on the same oauth-completed host', () => {
+    const html = renderSuccessHtml('google', 'google-drive', {
+      source: 'mcp',
+      mcpServerName: 'gdrive',
+    })
+    const metaContent = /content="0;url=([^"]+)"/.exec(html)?.[1] ?? ''
+    // HTML-attribute context escapes `&` → `&amp;`; decode for a clean parse.
+    const url = new URL(metaContent.replace(/&amp;/g, '&'))
+    expect(url.protocol).toBe('clerum:')
+    expect(url.host).toBe('oauth-completed')
+    expect(url.searchParams.get('clientId')).toBe('google-drive')
+    expect(url.searchParams.get('provider')).toBe('google')
+    expect(url.searchParams.get('source')).toBe('mcp')
+    expect(url.searchParams.get('mcpServerName')).toBe('gdrive')
+  })
+
   it('JSON-escapes the URL inside the inline <script> to block </script> injection', () => {
     // Even if a clientId carried `</script>`, the JSON.stringify+\\u003c
     // replace should keep it from closing the inline script tag.

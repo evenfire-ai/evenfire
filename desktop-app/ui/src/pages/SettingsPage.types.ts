@@ -7,6 +7,7 @@ import type {
 import type { UserNotificationPreferences } from '../../../src/types'
 
 export type SettingsPageProps = {
+  shortcutsFocusRequestId?: number
   notificationSettings: NotificationSettings
   desktopNotificationPermission: DesktopNotificationPermission
   themeMode: ThemeMode

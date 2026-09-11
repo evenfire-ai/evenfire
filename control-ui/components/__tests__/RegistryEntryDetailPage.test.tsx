@@ -139,4 +139,24 @@ describe('RegistryEntryDetailPage', () => {
       '/plugins/sandbox-recipes/market-report/workloads'
     )
   })
+
+  it('puts the description above the metadata and omits downloads', async () => {
+    navigationState.params = { name: 'market-report', version: '1.0.0' }
+    mockGetRegistryCatalog.mockResolvedValueOnce({
+      data: [RECIPE_ENTRY],
+      meta: { total: 1 },
+      categories: ['analytics'],
+      installed: { catalogKeys: [], serverNames: [], recipeKeys: [] },
+    })
+
+    render(<RegistryEntryDetailPage />)
+
+    const descriptionLabel = await screen.findByText('Description', { exact: true })
+    const versionLabel = screen.getByText('Version', { exact: true })
+
+    expect(
+      descriptionLabel.compareDocumentPosition(versionLabel) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy()
+    expect(screen.queryByText('Downloads', { exact: true })).not.toBeInTheDocument()
+  })
 })

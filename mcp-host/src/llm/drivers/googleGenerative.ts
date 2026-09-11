@@ -296,30 +296,45 @@ export function classifyGoogleError(err: unknown): ClassifiedError {
     (typeof e.code === 'string' && e.code) ||
     e.error?.status ||
     undefined
+  // Additive diagnostics threaded to TaskError (spec 02, Pieza A): the numeric
+  // HTTP status and the provider-native code (the gRPC status string, e.g.
+  // NOT_FOUND / PERMISSION_DENIED, when GCP surfaced one).
+  const diag: Pick<ClassifiedError, 'httpStatus' | 'providerCode'> = {
+    httpStatus,
+    providerCode: statusString || undefined,
+  }
 
   if (httpStatus !== undefined) {
-    if (httpStatus === 429) return { code: LlmErrorCode.RateLimited, retryable: true, message }
+    if (httpStatus === 429)
+      return { code: LlmErrorCode.RateLimited, retryable: true, message, ...diag }
     if (httpStatus === 401 || httpStatus === 403)
-      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message }
+      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message, ...diag }
+    // Retired or inaccessible model — non-retryable, NOT a failover trigger
+    // (spec 02 §3.1). Same gap the shared classifier closes for the other arms.
+    if (httpStatus === 404)
+      return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     if (httpStatus >= 500 && httpStatus < 600)
-      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message }
-    if (httpStatus === 400) return { code: LlmErrorCode.ApiCallFailed, retryable: false, message }
+      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
+    if (httpStatus === 400)
+      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
   }
 
   switch (statusString) {
     case 'RESOURCE_EXHAUSTED':
-      return { code: LlmErrorCode.RateLimited, retryable: true, message }
+      return { code: LlmErrorCode.RateLimited, retryable: true, message, ...diag }
     case 'PERMISSION_DENIED':
     case 'UNAUTHENTICATED':
-      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message }
+      return { code: LlmErrorCode.AuthenticationFailed, retryable: false, message, ...diag }
     case 'UNAVAILABLE':
     case 'INTERNAL':
     case 'DEADLINE_EXCEEDED':
-      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message }
+      return { code: LlmErrorCode.ModelOverloaded, retryable: true, message, ...diag }
+    case 'NOT_FOUND':
+      // gRPC equivalent of a 404 — retired/inaccessible model.
+      return { code: LlmErrorCode.ModelNotAvailable, retryable: false, message, ...diag }
     case 'INVALID_ARGUMENT':
     case 'FAILED_PRECONDITION':
-    case 'NOT_FOUND':
-      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message }
+      return { code: LlmErrorCode.ApiCallFailed, retryable: false, message, ...diag }
   }
 
   return classifyUnknown(err)

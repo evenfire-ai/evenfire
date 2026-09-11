@@ -26,4 +26,10 @@ describe('config', () => {
   it('uses the configured profile session cookie TTL default', () => {
     expect(config.profileSessionCookieTtlSeconds).toBe(60 * 60 * 12)
   })
+
+  it('uses the approved independent GFS edge backstop defaults', () => {
+    expect(config.externalGfsEdgeAggregateRlPerMin).toBe(1_800)
+    expect(config.externalGfsEdgeAuthenticatedIpRlPerMin).toBe(1_200)
+    expect(config.externalGfsEdgeTokenIpRlPerMin).toBe(600)
+  })
 })

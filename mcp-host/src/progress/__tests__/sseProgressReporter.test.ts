@@ -151,6 +151,47 @@ describe('SseProgressReporter', () => {
     })
   })
 
+  it('U5: emitSuspended with connect_required carries reason + mcpServerName', () => {
+    const reporter = new SseProgressReporter('task-1', undefined, NoopSafety)
+    const received: ProgressEvent[] = []
+    reporter.subscribe(e => received.push(e))
+
+    reporter.emitSuspended('Monday', 'req-connect', {
+      reason: 'connect_required',
+      mcpServerName: 'monday',
+    })
+
+    expect(received).toHaveLength(1)
+    expect(received[0]).toEqual({
+      type: 'suspended',
+      data: {
+        taskId: 'task-1',
+        requestId: 'req-connect',
+        displayName: 'Monday',
+        reason: 'connect_required',
+        mcpServerName: 'monday',
+      },
+    })
+  })
+
+  it('U5: omitting options keeps the legacy approval_required shape (back-compat)', () => {
+    const reporter = new SseProgressReporter('task-1', undefined, NoopSafety)
+    const received: ProgressEvent[] = []
+    reporter.subscribe(e => received.push(e))
+
+    reporter.emitSuspended('Shell', 'req-42', { reason: 'approval_required' })
+
+    expect(received[0].data).toEqual({
+      taskId: 'task-1',
+      requestId: 'req-42',
+      displayName: 'Shell',
+      reason: 'approval_required',
+    })
+    // connect-only fields are absent for the default gate.
+    expect('mcpServerName' in received[0].data).toBe(false)
+    expect('provider' in received[0].data).toBe(false)
+  })
+
   it('P1-1: the suspended event never carries the raw tool_name', () => {
     const reporter = new SseProgressReporter('task-1', undefined, NoopSafety)
     const received: ProgressEvent[] = []

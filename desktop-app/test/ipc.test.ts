@@ -24,6 +24,7 @@ function makeTrustedEvent(senderId = 77) {
   const destroyedCallbacks: Array<() => void> = []
   const sender = {
     id: senderId,
+    isDestroyed: vi.fn(() => false),
     send: vi.fn(),
     once: vi.fn((eventName: string, callback: () => void) => {
       if (eventName === 'destroyed') destroyedCallbacks.push(callback)
@@ -115,9 +116,14 @@ describe('ipc host status stream handlers', () => {
     grantGfs: vi.fn(),
     listGfsGrants: vi.fn(),
     revokeGfsGrant: vi.fn(),
+    listGfsShares: vi.fn(),
+    revokeGfsShare: vi.fn(),
     listMyAgents: vi.fn(),
     createGfsShare: vi.fn(),
     setSandboxUiVisible: vi.fn(),
+    findInActiveSandboxUi: vi.fn().mockResolvedValue(9),
+    stopActiveSandboxUiFind: vi.fn().mockResolvedValue(undefined),
+    focusActiveSandboxUi: vi.fn().mockResolvedValue(true),
   }
 
   beforeEach(async () => {
@@ -152,6 +158,81 @@ describe('ipc host status stream handlers', () => {
     await Promise.resolve(handler?.(event, { visible: false }))
 
     expect(service.setSandboxUiVisible).toHaveBeenCalledWith(false)
+  })
+
+  it('validates and forwards only bounded trusted sandbox find requests', async () => {
+    const { event, sender } = makeTrustedEvent()
+    const handler = testState.handlers.get('sandboxUi:findInPage')
+
+    await expect(
+      Promise.resolve(handler?.(event, { query: '', operation: 'start', clientRequestId: 1 }))
+    ).rejects.toThrow('find query')
+    await expect(
+      Promise.resolve(handler?.(event, { query: 'x', operation: 'sideways', clientRequestId: 1 }))
+    ).rejects.toThrow('operation')
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          operation: 'start',
+          clientRequestId: 0,
+        })
+      )
+    ).rejects.toThrow('client request ID')
+    expect(service.findInActiveSandboxUi).not.toHaveBeenCalled()
+
+    await expect(
+      Promise.resolve(
+        handler?.(event, {
+          query: 'invoice',
+          operation: 'previous',
+          clientRequestId: 4,
+        })
+      )
+    ).resolves.toBe(9)
+    expect(service.findInActiveSandboxUi).toHaveBeenCalledWith(
+      'invoice',
+      'previous',
+      4,
+      expect.any(Function)
+    )
+    const onResult = service.findInActiveSandboxUi.mock.calls.at(-1)?.[3]
+    onResult?.({ requestId: 9, activeMatchOrdinal: 1, matches: 2, finalUpdate: true })
+    expect(sender.send).toHaveBeenCalledWith('sandboxUi:findResult', {
+      requestId: 9,
+      clientRequestId: 4,
+      activeMatchOrdinal: 1,
+      matches: 2,
+      finalUpdate: true,
+    })
+  })
+
+  it('stops active sandbox find through a trusted sender only', async () => {
+    const handler = testState.handlers.get('sandboxUi:stopFindInPage')
+    await Promise.resolve(handler?.(makeTrustedEvent().event))
+    expect(service.stopActiveSandboxUiFind).toHaveBeenCalledOnce()
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+  })
+
+  it('restores focus to an active sandbox only for the trusted renderer', async () => {
+    const handler = testState.handlers.get('sandboxUi:focusActive')
+    await expect(Promise.resolve(handler?.(makeTrustedEvent().event))).resolves.toBe(true)
+    expect(service.focusActiveSandboxUi).toHaveBeenCalledOnce()
+    await expect(
+      Promise.resolve(
+        handler?.({
+          senderFrame: { url: 'https://evil.example.com' },
+          sender: { id: 1, send: vi.fn(), once: vi.fn() },
+        })
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
   })
 
   it.each([NaN, Infinity, 1.5, 0, -1, Number.MAX_SAFE_INTEGER + 1])(
@@ -490,6 +571,30 @@ describe('ipc host status stream handlers', () => {
     expect(service.revokeGfsGrant).toHaveBeenCalledWith('22222222-2222-2222-2222-222222222222')
   })
 
+  it('routes GFS share list and revoke through trusted IPC with sanitized input', async () => {
+    service.listGfsShares.mockResolvedValue([])
+    service.revokeGfsShare.mockResolvedValue(undefined)
+    const { event } = makeTrustedEvent()
+
+    const listHandler = testState.handlers.get('gfs:listShares')
+    await Promise.resolve(
+      listHandler?.(event, {
+        resourceId: ' 11111111-1111-1111-1111-111111111111 ',
+        drive: ' main ',
+      })
+    )
+    expect(service.listGfsShares).toHaveBeenCalledWith(
+      '11111111-1111-1111-1111-111111111111',
+      'main'
+    )
+
+    const revokeHandler = testState.handlers.get('gfs:revokeShare')
+    await Promise.resolve(
+      revokeHandler?.(event, { shareId: ' 22222222-2222-4222-8222-222222222222 ' })
+    )
+    expect(service.revokeGfsShare).toHaveBeenCalledWith('22222222-2222-4222-8222-222222222222')
+  })
+
   it('lists my agents through the dedicated channel (not the cached catalog)', async () => {
     const agents = [
       {
@@ -556,6 +661,26 @@ describe('ipc host status stream handlers', () => {
       )
     ).rejects.toThrow('Untrusted IPC sender')
     expect(service.revokeGfsGrant).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['gfs:listShares', { resourceId: '11111111-1111-1111-1111-111111111111', drive: 'main' }],
+    ['gfs:revokeShare', { shareId: '22222222-2222-4222-8222-222222222222' }],
+  ])('rejects untrusted sender for %s', async (channel, payload) => {
+    const handler = testState.handlers.get(channel)
+    await expect(
+      Promise.resolve(
+        handler?.(
+          {
+            senderFrame: { url: 'https://evil.example.com' },
+            sender: { id: 1, send: vi.fn(), once: vi.fn() },
+          },
+          payload
+        )
+      )
+    ).rejects.toThrow('Untrusted IPC sender')
+    expect(service.listGfsShares).not.toHaveBeenCalled()
+    expect(service.revokeGfsShare).not.toHaveBeenCalled()
   })
 
   it('rejects untrusted sender for my agents listing', async () => {

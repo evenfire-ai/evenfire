@@ -17,13 +17,24 @@ vi.mock('../src/config.js', () => ({
 describe('directory login without team memberships', () => {
   beforeEach(() => {
     dbMocks.txQuery.mockReset()
+    bcryptMock.compare.mockClear()
     bcryptMock.compare.mockResolvedValue(true)
   })
 
   it('returns a teamless member session instead of creating a default team for password login', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({
-        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null, password_hash: 'hash' }],
+        rows: [
+          {
+            id: 'u1',
+            email: 'a@b.com',
+            name: 'Ada',
+            picture: null,
+            password_hash: 'hash',
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
         rowCount: 1,
       }) // SELECT user by email
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // findFirstActiveMembership → none
@@ -49,7 +60,17 @@ describe('directory login without team memberships', () => {
   it('skips accepted invitation healing when password login already has a membership', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({
-        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null, password_hash: 'hash' }],
+        rows: [
+          {
+            id: 'u1',
+            email: 'a@b.com',
+            name: 'Ada',
+            picture: null,
+            password_hash: 'hash',
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
         rowCount: 1,
       }) // SELECT user by email
       .mockResolvedValueOnce({
@@ -75,7 +96,17 @@ describe('directory login without team memberships', () => {
   it('heals accepted invitations when password login has no active membership', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({
-        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null, password_hash: 'hash' }],
+        rows: [
+          {
+            id: 'u1',
+            email: 'a@b.com',
+            name: 'Ada',
+            picture: null,
+            password_hash: 'hash',
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
         rowCount: 1,
       }) // SELECT user by email
       .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // findFirstActiveMembership → none
@@ -101,11 +132,20 @@ describe('directory login without team memberships', () => {
   it('returns a teamless member session instead of creating a default team for Google login', async () => {
     dbMocks.txQuery
       .mockResolvedValueOnce({
-        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null }],
+        rows: [
+          {
+            id: 'u1',
+            email: 'a@b.com',
+            name: 'Ada',
+            picture: null,
+            lifecycle_state: 'active',
+            lifecycle_version: 1,
+          },
+        ],
         rowCount: 1,
       }) // SELECT user by email
       .mockResolvedValueOnce({
-        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null }],
+        rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null, lifecycle_version: 1 }],
         rowCount: 1,
       }) // UPDATE user
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // INSERT profiles
@@ -132,7 +172,17 @@ describe('directory login without team memberships', () => {
   it('does NOT self-heal (no team created) when the password is wrong', async () => {
     bcryptMock.compare.mockResolvedValue(false)
     dbMocks.txQuery.mockResolvedValueOnce({
-      rows: [{ id: 'u1', email: 'a@b.com', name: 'Ada', picture: null, password_hash: 'hash' }],
+      rows: [
+        {
+          id: 'u1',
+          email: 'a@b.com',
+          name: 'Ada',
+          picture: null,
+          password_hash: 'hash',
+          lifecycle_state: 'active',
+          lifecycle_version: 1,
+        },
+      ],
       rowCount: 1,
     }) // SELECT user
 
@@ -155,5 +205,49 @@ describe('directory login without team memberships', () => {
       expect.stringContaining('INSERT INTO teams'),
       expect.anything()
     )
+  })
+
+  it('denies password login for a retired user before bcrypt or membership healing', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'u-retired',
+          email: 'retired@b.com',
+          name: 'Retired',
+          picture: null,
+          password_hash: 'hash',
+          lifecycle_state: 'retired',
+          lifecycle_version: 2,
+        },
+      ],
+      rowCount: 1,
+    })
+
+    await expect(passwordLoginData({ email: 'retired@b.com', password: 'x' })).resolves.toEqual({
+      error: 'user_retired',
+    })
+    expect(bcryptMock.compare).not.toHaveBeenCalled()
+    expect(dbMocks.txQuery).toHaveBeenCalledTimes(1)
+  })
+
+  it('denies Google login for a retired user before profile healing or identity update', async () => {
+    dbMocks.txQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: 'u-retired',
+          email: 'retired@b.com',
+          name: 'Retired',
+          picture: null,
+          lifecycle_state: 'retired',
+          lifecycle_version: 2,
+        },
+      ],
+      rowCount: 1,
+    })
+
+    await expect(googleLoginData({ email: 'retired@b.com', name: 'New name' })).resolves.toEqual({
+      error: 'user_retired',
+    })
+    expect(dbMocks.txQuery).toHaveBeenCalledTimes(1)
   })
 })

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -9,11 +10,13 @@ import {
   getRecipe,
   getRecipeSecrets,
 } from '../../lib/api'
+import { llmChainRequiresSecret } from '../../lib/llm'
 import { collectWorkflowRecipeSecretRefs } from '../../lib/workflowRecipeSecretRefs'
 import { useConfirmDialog } from '../ConfirmDialog'
+import { RowActionsMenu } from '../RowActionsMenu'
 import { TablePanelHeader } from '../TablePanelHeader'
 import { useToast } from '../Toast'
-import { IconPencil, IconRefresh, IconX } from '../icons'
+import { IconRefresh } from '../icons'
 
 type RecipeSecretStatus = 'provisioned' | 'missing'
 
@@ -54,6 +57,7 @@ export function RecipeSecretsPanel({
 }) {
   const router = useRouter()
   const [rows, setRows] = useState<Row[]>([])
+  const [brokerBackedAgent, setBrokerBackedAgent] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [deletingName, setDeletingName] = useState<string | null>(null)
@@ -72,6 +76,10 @@ export function RecipeSecretsPanel({
 
       const spec = (recipe.spec ?? {}) as Record<string, unknown>
       const refs = collectWorkflowRecipeSecretRefs(spec)
+      const agent = (spec.agent ?? {}) as { provider?: string }
+      setBrokerBackedAgent(
+        typeof agent.provider === 'string' && !llmChainRequiresSecret(agent.provider)
+      )
 
       const next: Row[] = []
       for (const ref of refs.values()) {
@@ -166,25 +174,25 @@ export function RecipeSecretsPanel({
             namespace where the workload will read the Secret.
           </>
         }
-        actions={
-          <>
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void load()}
-              disabled={loading}
-              aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
-            >
-              <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={navigateToCreateBlank}
-            >
-              Create secret
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={navigateToCreateBlank}
+          >
+            Create secret
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void load()}
+            disabled={loading}
+            aria-label={loading ? 'Refreshing…' : 'Reload secrets'}
+          >
+            <IconRefresh className={loading ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
         }
       />
 
@@ -199,10 +207,14 @@ export function RecipeSecretsPanel({
           <span className="cu-muted">Loading secrets…</span>
         </div>
       ) : rows.length === 0 ? (
-        <div className="cu-empty">This recipe declares no API-key Secret references.</div>
+        <div className="cu-empty">
+          {brokerBackedAgent
+            ? 'This recipe uses a broker-backed agent and does not require an LLM secret.'
+            : 'This recipe declares no API-key Secret references.'}
+        </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -264,7 +276,7 @@ export function RecipeSecretsPanel({
                         ? 'No keys declared by recipe.'
                         : 'No keys defined.'}
                   </td>
-                  <td style={{ textAlign: 'right' }}>
+                  <td className="cu-table__cell-actions">
                     {row.status === 'missing' ? (
                       <button
                         type="button"
@@ -275,36 +287,34 @@ export function RecipeSecretsPanel({
                         Add
                       </button>
                     ) : (
-                      <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--toolbar"
-                          onClick={() => navigateToEdit(row.name, row.namespace)}
-                          aria-label={`Update recipe secret ${row.name}`}
-                        >
-                          <IconPencil width={16} height={16} />
-                        </button>
-                        <button
-                          type="button"
-                          className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                          onClick={() => void deleteRow(row.name, row.namespace)}
-                          disabled={deletingName === `${row.namespace}/${row.name}`}
-                          aria-label={
-                            deletingName === `${row.namespace}/${row.name}`
-                              ? 'Deleting…'
-                              : `Delete recipe secret ${row.name}`
-                          }
-                        >
-                          <IconX width={16} height={16} />
-                        </button>
-                      </div>
+                      <RowActionsMenu
+                        ariaLabel={`Actions for recipe secret ${row.name}`}
+                        horizontalTrigger
+                        actions={[
+                          {
+                            key: 'edit',
+                            label: 'Update',
+                            onClick: () => navigateToEdit(row.name, row.namespace),
+                          },
+                          {
+                            key: 'delete',
+                            label:
+                              deletingName === `${row.namespace}/${row.name}`
+                                ? 'Deleting…'
+                                : 'Delete',
+                            danger: true,
+                            disabled: deletingName === `${row.namespace}/${row.name}`,
+                            onClick: () => void deleteRow(row.name, row.namespace),
+                          },
+                        ]}
+                      />
                     )}
                   </td>
                 </tr>
               ))}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       )}
 
       {missingCount > 0 ? (

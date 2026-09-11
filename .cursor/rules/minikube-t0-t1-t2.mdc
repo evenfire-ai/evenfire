@@ -1,0 +1,89 @@
+---
+description: Local Minikube T0/T1/T2 certification contract — entry points, what counts as a T2 verdict, profile ownership, and evidence rules
+alwaysApply: true
+---
+
+# Local Minikube T0/T1/T2 contract
+
+Development-only. Requires a clean branch descended from `origin/dev`, the
+branch-owned `MINIKUBE_PROFILE`, and an explicit Kubernetes context. Never a
+production/GKE/Cloudflare/staging runbook. `evenfire-infra` is a different
+repository — never mix its PRs or clusters into this lane.
+
+## Entry points (only these)
+
+- `make minikube-t2-preflight` — read-only planner. NOT T0/T1/T2. Default
+  `T2_PLAN_MODE=false` fails loud (`BOOTSTRAP_REQUIRED`) on an unbootstrapped
+  profile and never calls `pre-gate-sync`.
+- `make minikube-t2` — full orchestrator: T0, planner (`T2_PLAN_MODE=true` so
+  `full-bootstrap` is reachable), bootstrap/reconcile, T1, then the T2 verdict.
+- `make minikube-t2-runtime` — closes T2 only (`T2_RUN_T0=false T2_RUN_T1=false`)
+  when T0 and T1 are already green on the same HEAD and the pre-gate marker is
+  `already-synced`. Never use those flags to skip an uncertified lane.
+
+## What T2 is / is not
+
+- A T2 verdict is ONLY the final exact-head preflight inside `make minikube-t2`
+  or `make minikube-t2-runtime`: it runs with `T2_PLAN_MODE=false` and the plan
+  state must be `already-synced`, ending in `MINIKUBE_T2_PASS` with
+  `T0=`/`T1=`/`T2=` statuses.
+- `T2_PREFLIGHT_PASS` from the standalone planner is NOT T2.
+- `make minikube-pre-gate-sync` is NOT T2.
+- Product E2E scripts (e.g. `scripts/e2e/e2e-hcc-rollout-readiness.sh`), CI,
+  unit suites, and Playwright are separate lanes; none stands in for T2.
+- Health/Playwright are opt-in via `T2_HEALTHCHECK_COMMAND` /
+  `T2_PLAYWRIGHT_COMMAND` (`T2_REQUIRE_PLAYWRIGHT=true` refuses `NOT_RUN`).
+
+## Branch-profile UI port-forwards
+
+First-hand (do not search): `.local-notes/minikube-profiles/branch.mk`.
+Implementation: `branch-profile.sh` in that directory. HARD DENY:
+`ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+Host-side hold for Control UI / Desktop. Profile-owned random ports only
+(never `:3000` / `:8090`). Run on the host, not a sandboxed agent shell.
+`make minikube-pf-all-bg` is a gate refresh only — it does not replace
+`branch-profile-pf`. Do not kill this lane's forwards.
+`branch-profile-pf-health` stops PFs on EXIT. Inner `pre-gate-sync` may use
+`--skip-port-forwards`; never pass that globally into `make minikube-t2`.
+
+## Profile and evidence
+
+- Reuse the owned `MINIKUBE_PROFILE`; do not create a new profile because HEAD
+  changed. Never touch another worktree's profile or its port-forwards.
+- Every `kubectl` uses `--context=<owned profile>`; never switch the global
+  current-context.
+- Bootstrap/reconcile must build the worktree: `IMAGE_SOURCE=local`.
+- T1 is fail-loud: unavailable DSN or zero executed tests is FAIL, never green.
+ The JSON reporter must be complete and green and the Vitest process must also
+ exit zero. Role-reset suites use the throwaway `postgres:16-alpine`, never
+ shared `control-postgres`.
+- A T1 `next:` line or `REAL_PG_REQUIRED_BUT_UNAVAILABLE` is not a Docker
+  license. Do not `docker run` probes, `docker desktop restart` (destroys the
+  Minikube container), or experiment with published ports. Re-enter
+  `make minikube-t2` or `make minikube-t2-real-postgres` on the owned profile.
+- Self-healing single run: the orchestrator planner (`T2_PLAN_MODE=true`)
+ selects `full-reconcile` (naming the deployment) for a bootstrapped profile
+ with an unready required deployment — never `PROFILE_UNHEALTHY` before a
+ transition. Standalone preflight and the final exact-head check stay
+ fail-loud. T1 restores branch-profile GFS credentials on exit, and
+ `pre-gate-sync` provisions GFS serving with `GFS_RESTORE_ACTIVE_NOLOGIN=true`
+ and `GFS_RECOVER_ABANDONED_STATE=true` only in the `minikube-t2` transition;
+ other security gates refresh MCP auth with `--skip-gfs` and do not mutate GFS,
+ so no manual repair script sits between plan and verdict.
+ `settle-gfs-reader-rollout.sh` clears
+ Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
+ first, and the `gfs-rollout-shim` PATH prefix replaces the reader
+ `rollout status` wait with a readiness poll because HCC's gfsReconciler
+ strips `restartedAt` and makes generation waits time out.
+- Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
+
+Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.
+Deep contract: `docs/testing/minikube-t2-runbook.md`.

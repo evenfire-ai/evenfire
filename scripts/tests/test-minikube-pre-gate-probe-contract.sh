@@ -52,7 +52,11 @@ else
 fi
 
 probe_line="$(grep -n '^preflight_host_lifecycle_probe$' "$PARENT" | cut -d: -f1)"
-fingerprint_line="$(grep -n '^cluster_fingerprint=' "$PARENT" | cut -d: -f1)"
+# The sync script fingerprints once for change detection and once again after
+# generated profile inputs are settled.  This ordering contract only needs the
+# first (preflight) occurrence; selecting it explicitly keeps the assertion
+# scalar and avoids a false failure when the post-deploy recomputation exists.
+fingerprint_line="$(grep -n 'cluster_fingerprint=.*pre_gate_marker_cluster_fingerprint' "$PARENT" | head -n 1 | cut -d: -f1)"
 if [ -n "$probe_line" ] && [ -n "$fingerprint_line" ] && [ "$probe_line" -lt "$fingerprint_line" ]; then
   pass "probe preflight runs before package checks and cluster rebuild"
 else

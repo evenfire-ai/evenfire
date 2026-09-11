@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import { randomBytes } from 'node:crypto'
+import { config } from '../../config.js'
+import { createExternalClientRateLimiters } from '../../middleware/externalClientIdentity.js'
 import {
   type ExternalAuthedRequest,
   rejectBodyUserTeamMismatch,
@@ -32,9 +34,14 @@ function invitationLookupIpKey(req: {
 
 export function createExternalInvitationsRouter(): Router {
   const router = Router()
-
+  const externalInvitationsEdgeRateLimits = createExternalClientRateLimiters(
+    'invitations',
+    config.approvalRlExternalClientIpPerMin,
+    config.approvalRlExternalEdgePerMin
+  )
   router.get(
     '/external/invitations/token/:token',
+    ...externalInvitationsEdgeRateLimits,
     rateLimitMiddleware({
       bucketType: 'external_invitation_lookup',
       maxPerMinute: 30,
@@ -67,6 +74,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password-token',
+    ...externalInvitationsEdgeRateLimits,
     rateLimitMiddleware({
       bucketType: 'external_invitation_password_token',
       maxPerMinute: 10,
@@ -116,11 +124,22 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
           }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
           return res.status(400).json({ error: 'invalid_password' })
         }
 
         const userId = result.data.userId
         if (!userId) {
+          return res.status(409).json({ error: 'invitation_not_ready' })
+        }
+        const authGeneration = Number(result.data.authGeneration)
+        if (
+          result.data.lifecycleState !== 'active' ||
+          !Number.isSafeInteger(authGeneration) ||
+          authGeneration < 1
+        ) {
           return res.status(409).json({ error: 'invitation_not_ready' })
         }
 
@@ -129,6 +148,7 @@ export function createExternalInvitationsRouter(): Router {
           email: result.data.email,
           teamId: result.data.teamId || null,
           role: result.data.role,
+          authGeneration,
         })
 
         return res.status(200).json({
@@ -143,6 +163,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/password',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
@@ -174,6 +195,9 @@ export function createExternalInvitationsRouter(): Router {
           if (result.error === 'expired') {
             return res.status(410).json({ error: 'expired' })
           }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
           return res.status(400).json({ error: 'invalid_password' })
         }
         return res.status(200).json(result.data)
@@ -185,6 +209,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.post(
     '/external/invitations/desktop-authorization',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     rejectBodyUserTeamMismatch,
     async (req, res, next) => {
@@ -226,6 +251,7 @@ export function createExternalInvitationsRouter(): Router {
 
   router.get(
     '/external/invitations/pending',
+    ...externalInvitationsEdgeRateLimits,
     requireValidExternalSessionToken,
     async (req, res, next) => {
       try {
@@ -240,50 +266,66 @@ export function createExternalInvitationsRouter(): Router {
     }
   )
 
-  router.post('/external/invitations/accept', async (req: ExternalAuthedRequest, res, next) => {
-    try {
-      const email = String(req.body?.email || '')
-        .trim()
-        .toLowerCase()
-      const token = String(req.body?.token || '').trim()
-      if (!email || !token) return res.status(400).json({ error: 'invalid payload' })
-
-      let validation: { email: string; invitationUuid: string }
+  router.post(
+    '/external/invitations/accept',
+    ...externalInvitationsEdgeRateLimits,
+    async (req: ExternalAuthedRequest, res, next) => {
       try {
-        validation = await validateInvitationFlowToken(token, email)
+        const email = String(req.body?.email || '')
+          .trim()
+          .toLowerCase()
+        const token = String(req.body?.token || '').trim()
+        if (!email || !token) return res.status(400).json({ error: 'invalid payload' })
+
+        let validation: { email: string; invitationUuid: string }
+        try {
+          validation = await validateInvitationFlowToken(token, email)
+        } catch (error) {
+          if (memberRegistrationErrorResponse(error)) throw error
+          return res.status(400).json({ error: 'invalid_invitation' })
+        }
+        const result = await acceptInvitationForEmail(validation.email, validation.invitationUuid)
+        if ('error' in result) {
+          if (result.error === 'not_found') {
+            return res.status(404).json({ error: 'not_found' })
+          }
+          if (result.error === 'forbidden') {
+            return res.status(403).json({ error: 'forbidden' })
+          }
+          if (result.error === 'expired') {
+            return res.status(410).json({ error: 'expired' })
+          }
+          if (result.error === 'user_retired') {
+            return res.status(401).json({ error: 'Unauthorized' })
+          }
+          return res.status(400).json({ error: 'not_pending' })
+        }
+
+        const authGeneration = Number(result.data.authGeneration)
+        if (
+          result.data.lifecycleState !== 'active' ||
+          !Number.isSafeInteger(authGeneration) ||
+          authGeneration < 1
+        ) {
+          return res.status(409).json({ error: 'invitation_not_ready' })
+        }
+        const sessionToken = signExternalSessionToken({
+          userId: result.data.userId,
+          email: result.data.email,
+          teamId: result.data.teamId || null,
+          role: result.data.role,
+          authGeneration,
+        })
+
+        return res.status(200).json({
+          ...result.data,
+          token: sessionToken,
+        })
       } catch (error) {
-        if (memberRegistrationErrorResponse(error)) throw error
-        return res.status(400).json({ error: 'invalid_invitation' })
+        return next(error)
       }
-      const result = await acceptInvitationForEmail(validation.email, validation.invitationUuid)
-      if ('error' in result) {
-        if (result.error === 'not_found') {
-          return res.status(404).json({ error: 'not_found' })
-        }
-        if (result.error === 'forbidden') {
-          return res.status(403).json({ error: 'forbidden' })
-        }
-        if (result.error === 'expired') {
-          return res.status(410).json({ error: 'expired' })
-        }
-        return res.status(400).json({ error: 'not_pending' })
-      }
-
-      const sessionToken = signExternalSessionToken({
-        userId: result.data.userId,
-        email: result.data.email,
-        teamId: result.data.teamId || null,
-        role: result.data.role,
-      })
-
-      return res.status(200).json({
-        ...result.data,
-        token: sessionToken,
-      })
-    } catch (error) {
-      return next(error)
     }
-  })
+  )
 
   return router
 }

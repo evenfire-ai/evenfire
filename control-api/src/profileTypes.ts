@@ -44,6 +44,8 @@ export type AuthClaims = {
   email: string
   teamId: string | null
   role: TeamRole
+  /** Authoritative users.lifecycle_version captured when the session was issued. */
+  authGeneration: number
   exp: number
 }
 

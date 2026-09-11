@@ -4,6 +4,7 @@ import { mcpHostHttpMetrics } from '../../../middleware/mcpHostHttpMetrics.js'
 import { rateLimitMiddleware } from '../../../middleware/rateLimitMiddleware.js'
 import { mcpHostJwtReissueTotal } from '../../../observability/metrics.js'
 import {
+  MCP_HOST_CREDENTIAL_CAPABILITY,
   consumeExpiredRefreshJti,
   getMcpHostExpiredRefreshRateLimitKey,
   issueMcpHostAccessJwt,
@@ -101,7 +102,6 @@ export function createMcpHostReissueRoutes(): Router {
                   reason: 'recipe_name_mismatch',
                   route: 'workflow_auth_reissue',
                   mode,
-                  jwtRecipe: claims.recipeName,
                 },
                 'auth denied'
               )
@@ -119,7 +119,6 @@ export function createMcpHostReissueRoutes(): Router {
                   reason: 'missing_host_ref',
                   route: 'workflow_auth_reissue',
                   mode,
-                  recipeNamespace: claims.recipeNamespace,
                 },
                 'auth denied'
               )
@@ -133,8 +132,6 @@ export function createMcpHostReissueRoutes(): Router {
                   reason: 'host_ref_mismatch',
                   route: 'workflow_auth_reissue',
                   mode,
-                  hostRef,
-                  recipeNamespace: claims.recipeNamespace,
                 },
                 'auth denied'
               )
@@ -147,7 +144,6 @@ export function createMcpHostReissueRoutes(): Router {
                 event: 'auth_denied',
                 reason: 'unsupported_reissue_namespace',
                 route: 'workflow_auth_reissue',
-                recipeNamespace: claims.recipeNamespace,
               },
               'auth denied'
             )
@@ -164,19 +160,23 @@ export function createMcpHostReissueRoutes(): Router {
             return res.status(401).json({ error: 'Unauthorized' })
           }
 
+          const hccCredential = claims.mcpCapabilities.includes(MCP_HOST_CREDENTIAL_CAPABILITY)
+            ? { hostUid: claims.host_uid! }
+            : undefined
+
           // Preserve hostRefs from the incoming (expired) refresh token so
           // the host identity binding survives the recovery re-issue.
           const access = issueMcpHostAccessJwt(
             claims.recipeNamespace,
             claims.recipeName,
             claims.hostRefs,
-            { workflowControlScopes: claims.workflowControlScopes }
+            { workflowControlScopes: claims.workflowControlScopes, hccCredential }
           )
           const refresh = issueMcpHostRefreshJwt(
             claims.recipeNamespace,
             claims.recipeName,
             claims.hostRefs,
-            { workflowControlScopes: claims.workflowControlScopes }
+            { workflowControlScopes: claims.workflowControlScopes, hccCredential }
           )
           const control = issueMcpHostControlJwt(
             claims.recipeNamespace,
@@ -190,9 +190,7 @@ export function createMcpHostReissueRoutes(): Router {
             {
               event: 'workflow_auth_reissued',
               mode,
-              recipeNamespace: claims.recipeNamespace,
-              recipeName: claims.recipeName,
-              hostRef,
+              hccQualified: hccCredential !== undefined,
             },
             'workflow auth re-issued'
           )

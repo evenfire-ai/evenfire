@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isValidK8sName, toK8sName } from '../k8sValidation'
+import { getAgentNameError, isValidK8sName, toK8sName } from '../k8sValidation'
 
 describe('isValidK8sName', () => {
   it('accepts RFC 1123 DNS labels', () => {
@@ -13,6 +13,38 @@ describe('isValidK8sName', () => {
     expect(isValidK8sName('trail-')).toBe(false)
     expect(isValidK8sName('UPPER')).toBe(false)
     expect(isValidK8sName('a'.repeat(64))).toBe(false)
+  })
+})
+
+describe('getAgentNameError', () => {
+  it('accepts a valid agent name', () => {
+    expect(getAgentNameError('my-agent')).toBe('')
+    expect(getAgentNameError('abc')).toBe('')
+    expect(getAgentNameError('a'.repeat(63))).toBe('')
+  })
+
+  it('requires a name', () => {
+    expect(getAgentNameError('')).toBe('Agent name is required.')
+    expect(getAgentNameError('   ')).toBe('Agent name is required.')
+  })
+
+  it('rejects invalid characters', () => {
+    expect(getAgentNameError('my_agent')).not.toBe('')
+    expect(getAgentNameError('MyAgent')).not.toBe('')
+  })
+
+  it('requires a leading letter', () => {
+    expect(getAgentNameError('1agent')).toBe('Agent name must start with a letter.')
+    expect(getAgentNameError('-agent')).toBe('Agent name must start with a letter.')
+  })
+
+  it('requires an alphanumeric end', () => {
+    expect(getAgentNameError('agent-')).toBe('Agent name must end with a letter or number.')
+  })
+
+  it('enforces the 3-63 character range', () => {
+    expect(getAgentNameError('ab')).toBe('Agent name must be at least 3 characters long.')
+    expect(getAgentNameError('a'.repeat(64))).toBe('Agent name must be 63 characters or fewer.')
   })
 })
 

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { ApiException } from '@kubernetes/client-node'
 import request from 'supertest'
+import { rootLogger } from '../src/observability/logger.js'
 import { createAdminSecretsRouter } from '../src/routes/admin/secrets.js'
 
 /** The write shape the admin routes hand to the gateway. */
@@ -12,15 +14,29 @@ type SecretWrite = {
   data?: Record<string, string>
 }
 
+function writeSummary(body: SecretWrite) {
+  return {
+    name: body.name,
+    namespace: body.namespace || 'mcp-server',
+    keys: [
+      ...new Set([...Object.keys(body.data ?? {}), ...Object.keys(body.stringData ?? {})]),
+    ].sort((a, b) => a.localeCompare(b)),
+  }
+}
+
 /**
  * Minimal mock gateway with methods used by the POST /admin/mcp-secrets handler.
  */
 function createGateway() {
   return {
     listSecrets: vi.fn(async () => []),
-    createSecret: vi.fn(async (body: unknown) => body),
-    updateSecret: vi.fn(async (body: unknown) => body),
-    deleteSecret: vi.fn(async (_name: string, _namespace?: string) => ({ deleted: true })),
+    createSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    updateSecret: vi.fn(async (body: SecretWrite) => writeSummary(body)),
+    deleteSecret: vi.fn(async (name: string, namespace?: string) => ({
+      name,
+      namespace: namespace || 'mcp-server',
+      deleted: true as const,
+    })),
     getSecret: vi.fn(
       async (
         name: string,
@@ -38,7 +54,11 @@ function createGateway() {
     // Secret, values included. A handler that echoed this back would leak
     // every stored credential, so the leak assertions below are meaningful.
     mergeSecret: vi.fn(async (body: SecretWrite) => ({
-      metadata: { name: body.name, namespace: 'mcp-server' },
+      name: body.name,
+      namespace: body.namespace || 'mcp-server',
+      keys: ['EXISTING_KEY', ...Object.keys(body.stringData ?? {})].sort((a, b) =>
+        a.localeCompare(b)
+      ),
       data: Object.fromEntries(
         Object.entries(body.stringData ?? {}).map(([key, value]) => [
           key,
@@ -341,6 +361,160 @@ describe('POST /admin/mcp-secrets', () => {
 
     expect(res.body.error).toContain('K8s API timeout')
   })
+
+  // ── Audit: create must be logged like rotate (R3-M2) ────────────────────
+  // A rotation that actually happened must never go unlogged; the same is
+  // now true of create, because the connector screen is a primary credential-
+  // creation path. Key NAMES are safe to log; values never are.
+
+  it('emits mcp-secret-created with name, namespace, and sorted key names only', async () => {
+    const gateway = createGateway()
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const app = makeApp(gateway)
+    const credentialValue = 'never-log-this-secret-value'
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({
+          name: 'web-research-credentials',
+          data: { SEARCH_API_KEY: credentialValue, GITHUB_TOKEN: credentialValue },
+        })
+        .expect(201)
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-created',
+          name: 'web-research-credentials',
+          namespace: 'mcp-server',
+          createdKeys: ['GITHUB_TOKEN', 'SEARCH_API_KEY'],
+        }),
+        'MCP Secret created'
+      )
+      const serialized = JSON.stringify(infoSpy.mock.calls)
+      expect(serialized).not.toContain(credentialValue)
+      expect(serialized).not.toContain(Buffer.from(credentialValue, 'utf8').toString('base64'))
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('emits mcp-secret-create-failed with the same names-only fields when createSecret throws', async () => {
+    const gateway = createGateway()
+    gateway.createSecret.mockRejectedValueOnce(new Error('K8s API timeout'))
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+    const credentialValue = 'never-log-this-failed-secret'
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'fail-secret', data: { SEARCH_API_KEY: credentialValue } })
+        .expect(500)
+
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-created' }),
+        expect.anything()
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          module: 'admin-secrets',
+          event: 'mcp-secret-create-failed',
+          name: 'fail-secret',
+          namespace: 'mcp-server',
+          createdKeys: ['SEARCH_API_KEY'],
+          err: { name: 'Error', message: 'K8s API timeout' },
+        }),
+        'MCP Secret create failed'
+      )
+      const serialized = JSON.stringify([...infoSpy.mock.calls, ...warnSpy.mock.calls])
+      expect(serialized).not.toContain(credentialValue)
+      expect(serialized).not.toContain(Buffer.from(credentialValue, 'utf8').toString('base64'))
+    } finally {
+      infoSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not log ApiException headers when createSecret hits AlreadyExists', async () => {
+    const gateway = createGateway()
+    const body = {
+      kind: 'Status',
+      apiVersion: 'v1',
+      status: 'Failure',
+      message: 'secrets "fail-secret" already exists',
+      reason: 'AlreadyExists',
+      code: 409,
+    }
+    const headers = {
+      'audit-id': 'a1b2c3-secret-audit-uuid',
+      'x-kubernetes-pf-flowschema-uid': 'internal-flowschema-uid',
+      'content-type': 'application/json',
+    }
+    const err = new ApiException(409, 'Conflict', body, headers)
+    expect(err.message).toContain('Headers:')
+    expect(err.message).toContain('audit-id')
+    gateway.createSecret.mockRejectedValueOnce(err)
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'fail-secret', data: { SEARCH_API_KEY: 'never-log-this-secret-value' } })
+        .expect(500)
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-create-failed',
+          name: 'fail-secret',
+          createdKeys: ['SEARCH_API_KEY'],
+        }),
+        'MCP Secret create failed'
+      )
+      const serialized = JSON.stringify(warnSpy.mock.calls)
+      expect(serialized).not.toContain('Headers:')
+      expect(serialized).not.toContain('audit-id')
+      expect(serialized).not.toContain('x-kubernetes-pf')
+      expect(serialized).not.toContain('never-log-this-secret-value')
+      expect(warnSpy.mock.calls[0][0]).toEqual(
+        expect.objectContaining({
+          err: { name: 'Error', message: 'secrets "fail-secret" already exists' },
+        })
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not emit a create audit when validation rejects the request', async () => {
+    const gateway = createGateway()
+    const infoSpy = vi.spyOn(rootLogger, 'info').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
+    const app = makeApp(gateway)
+
+    try {
+      await request(app)
+        .post('/admin/mcp-secrets')
+        .send({ name: 'my-secret', data: {} })
+        .expect(400)
+
+      expect(gateway.createSecret).not.toHaveBeenCalled()
+      expect(infoSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-created' }),
+        expect.anything()
+      )
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'mcp-secret-create-failed' }),
+        expect.anything()
+      )
+    } finally {
+      infoSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
 })
 
 describe('DELETE /admin/mcp-secrets/:name', () => {
@@ -350,7 +524,11 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
 
     const res = await request(app).delete('/admin/mcp-secrets/my-db-creds').expect(200)
 
-    expect(res.body).toEqual({ deleted: true })
+    expect(res.body).toEqual({
+      name: 'my-db-creds',
+      namespace: 'mcp-server',
+      deleted: true,
+    })
     expect(gateway.deleteSecret).toHaveBeenCalledOnce()
     expect(gateway.deleteSecret).toHaveBeenCalledWith('my-db-creds', 'mcp-server')
   })
@@ -363,6 +541,44 @@ describe('DELETE /admin/mcp-secrets/:name', () => {
 
     const [, ns] = gateway.deleteSecret.mock.calls[0]
     expect(ns).toBe('mcp-server')
+  })
+
+  it('refuses to delete a Secret owned by a WorkflowRecipe', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'recipe-creds',
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/recipe-secret': 'true' },
+      },
+    })
+    const app = makeApp(gateway)
+
+    const res = await request(app).delete('/admin/mcp-secrets/recipe-creds').expect(409)
+
+    expect(res.body.error).toContain('WorkflowRecipe')
+    expect(gateway.deleteSecret).not.toHaveBeenCalled()
+  })
+
+  it('binds deletion to the object observed by the ownership check', async () => {
+    const gateway = createGateway()
+    gateway.getSecret.mockResolvedValueOnce({
+      metadata: {
+        name: 'versioned-creds',
+        namespace: 'mcp-server',
+        labels: {},
+        uid: 'secret-uid',
+        resourceVersion: '17',
+      },
+    })
+    const app = makeApp(gateway)
+
+    await request(app).delete('/admin/mcp-secrets/versioned-creds').expect(200)
+
+    expect(gateway.deleteSecret).toHaveBeenCalledWith('versioned-creds', 'mcp-server', {
+      uid: 'secret-uid',
+      resourceVersion: '17',
+    })
   })
 
   it('returns 500 when gateway.deleteSecret throws', async () => {
@@ -640,17 +856,42 @@ describe('PUT /admin/mcp-secrets/:name (credential rotation, issue #223)', () =>
     // The rotation itself succeeds; only the secondary affectedConnectors
     // lookup fails. The operator must see the rotation as the success it is,
     // not a 500 that suggests the credential is unchanged.
-    gateway.listResource.mockRejectedValueOnce(new Error('mcpservers list forbidden'))
+    const sentinel = 'RP231_NESTED_ERROR_SENTINEL'
+    gateway.listResource.mockRejectedValueOnce(
+      Object.assign(new Error('mcpservers list forbidden'), {
+        response: { body: { value: sentinel } },
+      })
+    )
+    const warnSpy = vi.spyOn(rootLogger, 'warn').mockImplementation(() => {})
     const app = makeApp(gateway)
 
-    const res = await request(app)
-      .put('/admin/mcp-secrets/linear-credentials')
-      .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
-      .expect(200)
+    try {
+      const res = await request(app)
+        .put('/admin/mcp-secrets/linear-credentials')
+        .send({ data: { LINEAR_API_KEY: 'rotated-value' } })
+        .expect(200)
 
-    expect(gateway.mergeSecret).toHaveBeenCalledOnce()
-    expect(res.body.name).toBe('linear-credentials')
-    expect(res.body.affectedConnectors).toEqual([])
+      expect(gateway.mergeSecret).toHaveBeenCalledOnce()
+      expect(res.body.name).toBe('linear-credentials')
+      expect(res.body.affectedConnectors).toEqual([])
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'mcp-secret-rotated-affected-connectors-unavailable',
+          name: 'linear-credentials',
+          namespace: 'mcp-server',
+        }),
+        'Affected connectors unavailable after MCP Secret rotation'
+      )
+      const [fields] = warnSpy.mock.calls[0]
+      expect(fields).toEqual(
+        expect.objectContaining({
+          err: { name: 'Error', message: 'mcpservers list forbidden' },
+        })
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain(sentinel)
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   it('returns 500 when gateway.mergeSecret throws', async () => {

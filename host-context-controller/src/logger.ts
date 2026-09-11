@@ -19,6 +19,8 @@ function minLevel(): LogLevel {
 
 function sanitize(value: unknown, seen = new WeakSet<object>()): unknown {
   if (Array.isArray(value)) return value.map(item => sanitize(item, seen))
+  // Error.message / stack are non-enumerable; Object.entries would log `{ err: {} }`.
+  if (value instanceof Error) return { name: value.name, message: value.message }
   if (!value || typeof value !== 'object') return value
   if (seen.has(value)) return '[Circular]'
   seen.add(value)

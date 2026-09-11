@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: codex-llm-proxy
+  namespace: control-plane
+  labels:
+    app: codex-llm-proxy
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: codex-llm-proxy-config
+  namespace: control-plane
+  labels:
+    app: codex-llm-proxy
+data:
+  CODEX_LLM_PROXY_RUNTIME_PORT: "8080"
+  CODEX_LLM_PROXY_ADMIN_PORT: "8081"
+  CODEX_LLM_PROXY_PROBE_PORT: "9090"
+  CODEX_LLM_PROXY_MAX_BODY_BYTES: "1048576"
+  CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: "300000"
+  CODEX_LLM_PROXY_MAX_DEADLINE_MS: "300000"
+  CODEX_LLM_PROXY_JWT_ISSUER: control-api
+  CODEX_LLM_PROXY_EXECUTION_ENABLED: "false"
+  CODEX_LLM_PROXY_CONTROL_API_URL: http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1
+  CODEX_LLM_PROXY_CONTROL_API_SERVICE: codex-llm-proxy
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: codex-llm-proxy
+  namespace: control-plane
+  labels:
+    app: codex-llm-proxy
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: codex-llm-proxy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: codex-llm-proxy
+    spec:
+      serviceAccountName: codex-llm-proxy
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: codex-llm-proxy
+          image: clerum/codex-llm-proxy:0.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: codex-llm-proxy-config
+          env:
+            - name: CODEX_LLM_PROXY_JWT_PUBLIC_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: control-api-public-key
+                  key: CONTROL_API_PUBLIC_KEY_PEM
+            - name: CODEX_LLM_PROXY_CONTROL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: codex-llm-proxy-secrets
+                  key: CODEX_LLM_PROXY_CONTROL_API_TOKEN
+          ports:
+            - name: runtime
+              containerPort: 8080
+              protocol: TCP
+            - name: admin
+              containerPort: 8081
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /readyz, port: metrics }
+            initialDelaySeconds: 4
+            periodSeconds: 8
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: metrics }
+            initialDelaySeconds: 8
+            periodSeconds: 12
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            seccompProfile:
+              type: RuntimeDefault
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: codex-llm-proxy
+  namespace: control-plane
+  labels:
+    app: codex-llm-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app: codex-llm-proxy
+  ports:
+    - name: runtime
+      port: 8080
+      protocol: TCP
+      targetPort: runtime
+    - name: admin
+      port: 8081
+      protocol: TCP
+      targetPort: admin
+    - name: metrics
+      port: 9090
+      protocol: TCP
+      targetPort: metrics

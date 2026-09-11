@@ -222,7 +222,7 @@ describe('WorkflowRunModal — error handling', () => {
 
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent(
-        'Workflow runtime infrastructure is still preparing. Wait for the recipe workload, MCP server, Context allowlist, and ready endpoints, then retry.'
+        'Workflow runtime infrastructure is still preparing. Wait for the recipe workload, MCP server, connector access, and ready endpoints, then retry.'
       )
     })
   })

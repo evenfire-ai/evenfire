@@ -1,0 +1,14 @@
+---
+description: Desktop renderer application and visual coding rules
+globs:
+  - desktop-app/ui/**
+alwaysApply: false
+---
+
+Read and apply both canonical Desktop renderer documents for every matching
+path:
+
+- @docs/agents/desktop-ui-rules.md
+- @desktop-app/ui/docs/STYLE_STANDARDIZATION.md
+
+These renderer rules do not apply to `desktop-app/**` outside `ui/**`.

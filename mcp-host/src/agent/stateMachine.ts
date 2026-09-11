@@ -20,6 +20,7 @@ import type { ConversationStore } from '../core/conversation/conversationStore'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
 import { PressureContextManager } from '../core/extensions/contextManager'
 import { STATELESS_CRON_APPROVAL_PROMPT } from '../core/extensions/mcpApprovalGateController'
+import type { GuardrailsConfig } from '../core/guardrails/config'
 import type { LlmPort } from '../core/interfaces'
 // Core architecture imports
 import { SimpleEventEmitter } from '../core/orchestration/eventEmitter'
@@ -70,6 +71,12 @@ export interface PendingApprovalInfo {
   parameters: Record<string, unknown>
   description: string
   since: string
+  // U5 — suspension discriminator, mirrored from the underlying PendingApproval
+  // so the polling projections match the SSE `suspended` event. Absent reason ⇒
+  // generic HITL approval (back-compat). mcpServerName set iff
+  // reason==='connect_required' (oauth connect flow).
+  reason?: 'approval_required' | 'connect_required'
+  mcpServerName?: string
 }
 
 /**
@@ -200,6 +207,7 @@ export class AgentStateMachine extends EventEmitter {
 
   // Phase 6: Approval
   private approvalConfig: ApprovalConfig | undefined
+  private guardrailsConfig: GuardrailsConfig | undefined
 
   // Phase 7–8: Workspace memory & personalization
   private workspaceProvider: ScopedWorkspaceProvider | undefined
@@ -574,6 +582,12 @@ export class AgentStateMachine extends EventEmitter {
   /**
    * Phase 6: Set the approval configuration (from Host CRD or dev env).
    */
+  /** Guardrails block from the Host CRD (spec §5). Absent = no guardrails = today. */
+  setGuardrailsConfig(config: GuardrailsConfig | undefined): void {
+    this.guardrailsConfig = config
+    console.log('[Guardrail] Guardrails config set:', { rules: config?.rules?.length ?? 0 })
+  }
+
   setApprovalConfig(config: ApprovalConfig | undefined): void {
     this.approvalConfig = config
     console.log('[Agent] Approval config set:', config?.defaultPolicy || 'none')
@@ -894,13 +908,23 @@ export class AgentStateMachine extends EventEmitter {
       if (executor.executorState === 'waiting_approval' && executor.pendingApproval) {
         const msg = executor.sourceTask.sourceMessage
         const entry = this.approvalMap.get(executor.pendingApproval.request_id)
+        const approval = executor.pendingApproval
         approvals.push({
-          requestId: executor.pendingApproval.request_id,
+          requestId: approval.request_id,
           userId: msg?.sender || 'anonymous',
-          toolName: executor.pendingApproval.tool_name,
-          parameters: executor.pendingApproval.parameters,
-          description: executor.pendingApproval.description,
+          toolName: approval.tool_name,
+          parameters: approval.parameters,
+          description: approval.description,
           since: entry?.registeredAt?.toISOString() ?? new Date().toISOString(),
+          // U5 — thread the connect_required discriminator; omitted for generic
+          // approvals so the legacy shape is byte-identical (back-compat).
+          // mcpServerName rides ONLY connect_required, matching the SSE
+          // producer and the other polling projections (no stray field on a
+          // corrupt/legacy row whose reason normalized away).
+          ...(approval.reason ? { reason: approval.reason } : {}),
+          ...(approval.reason === 'connect_required' && approval.mcpServerName
+            ? { mcpServerName: approval.mcpServerName }
+            : {}),
         })
       }
     }
@@ -968,6 +992,17 @@ export class AgentStateMachine extends EventEmitter {
       requestId: approval.request_id,
       userId,
       notification: notificationMsg,
+      // U5 — carry the connect_required discriminator down the polling chain
+      // (messageHandler → pendingTaskResults → handleTaskResult) so a REST poll
+      // reconstructs the connect suspension, matching the SSE `suspended` event.
+      // Omitted for generic approvals (back-compat).
+      ...(approval.reason ? { reason: approval.reason } : {}),
+      // mcpServerName rides ONLY the connect_required discriminator, matching
+      // the SSE producer (sseProgressReporter) — so corrupt/legacy rows can never emit
+      // a stray field without its reason.
+      ...(approval.reason === 'connect_required' && approval.mcpServerName
+        ? { mcpServerName: approval.mcpServerName }
+        : {}),
     })
   }
 
@@ -1358,6 +1393,7 @@ export class AgentStateMachine extends EventEmitter {
       modelName: effective?.model ?? this.modelName,
       contextWindowTokens: effective?.contextWindowTokens,
       approvalConfig: this.approvalConfig,
+      guardrailsConfig: this.guardrailsConfig,
       coreEvents: this.coreEvents,
       cronScheduler: this.cronScheduler,
       taskLifecycle: this.lifecycle,

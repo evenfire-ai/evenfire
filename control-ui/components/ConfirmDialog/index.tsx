@@ -6,6 +6,7 @@ import type { ConfirmDialogOptions, ConfirmDialogProps, ConfirmDialogRequest } f
 function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
   const titleId = useId()
   const messageId = useId()
+  const detailsId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
@@ -30,6 +31,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
   const {
     cancelLabel = 'Cancel',
     confirmLabel = 'OK',
+    details,
     message,
     title = 'Confirm action',
     tone = 'default',
@@ -49,7 +51,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-describedby={messageId}
+        aria-describedby={details ? `${messageId} ${detailsId}` : messageId}
         onMouseDown={event => event.stopPropagation()}
       >
         <div className="cu-modal-panel__head">
@@ -60,6 +62,11 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
         <p id={messageId} className="cu-modal-copy">
           {message}
         </p>
+        {details ? (
+          <div id={detailsId} className="cu-modal-copy cu-modal-copy--details">
+            {details}
+          </div>
+        ) : null}
         <div className="cu-modal-panel__foot">
           <button
             ref={cancelButtonRef}

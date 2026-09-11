@@ -22,6 +22,7 @@ vi.mock('../src/config', () => ({
     hostNamespace: 'mcp-host',
     rpcProxyNamespace: 'rpc-proxy',
     channelsNamespace: 'channels',
+    llmHooksNamespace: 'llm-hooks',
     hostFullReconcileConcurrency: 2,
     channelReaderImage: 'clerum/channel-reader:test',
     channelReaderImagePullPolicy: 'IfNotPresent',
@@ -121,7 +122,10 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
   it('creates the egress NP in channels namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureChannelReaderEgressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
@@ -152,11 +156,20 @@ describe('HostReconciler.ensureChannelReaderEgressNetworkPolicy', () => {
   })
 })
 
+// NOTE: the mcp-host→llm-hooks egress policy moved to LlmHookReconciler
+// (per-host, scoped to referenced hook pods — N1/N7); see
+// src/llmHookReconciler.test.ts "per-host egress". HostReconciler still deletes
+// `mcp-host-<host>-egress-llm-hooks` on host delete (covered by the
+// deleteHostNetworkPolicies test below).
+
 describe('HostReconciler.ensureMcpHostIngressNetworkPolicy', () => {
   it('creates the ingress NP in mcp-host namespace with correct selectors', async () => {
     const { reconciler, mocks } = createReconciler()
 
+    // This case exercises initial creation of an absent policy.
+    mocks.networkingApi.readNamespacedNetworkPolicy.mockRejectedValueOnce({ code: 404 })
     await (reconciler as any).ensureMcpHostIngressNetworkPolicy(HOST)
+    expect(mocks.networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
 
     expect(mocks.networkingApi.createNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
     const call = (mocks.networkingApi.createNamespacedNetworkPolicy as any).mock.calls[0][0]
@@ -292,7 +305,7 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
 
     await (reconciler as any).deleteHostNetworkPolicies('chatllm', 'mcp-host')
 
-    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(5)
+    expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledTimes(6)
     const calls = (mocks.networkingApi.deleteNamespacedNetworkPolicy as any).mock.calls
     expect(calls).toContainEqual([
       { name: 'mcp-host-chatllm-ingress-channel-reader', namespace: 'mcp-host' },
@@ -301,7 +314,9 @@ describe('HostReconciler.deleteHostNetworkPolicies', () => {
       { name: 'mcp-host-chatllm-ingress-rpc-proxy', namespace: 'mcp-host' },
     ])
     expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
-    expect(calls).toContainEqual([{ name: 'mcp-host-chatllm-egress-gfs', namespace: 'mcp-host' }])
+    expect(calls).toContainEqual([
+      { name: 'mcp-host-chatllm-egress-codex-proxy', namespace: 'mcp-host' },
+    ])
     expect(calls).toContainEqual([{ name: 'channel-reader-chatllm-egress', namespace: 'channels' }])
     expect(calls).toContainEqual([
       { name: 'rpc-proxy-chatllm-egress-mcp-host', namespace: 'rpc-proxy' },

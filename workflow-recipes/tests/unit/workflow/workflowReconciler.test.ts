@@ -5056,7 +5056,7 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect.objectContaining({
         name: 'wf-child-run-mcp-host-runtime-tokens',
         namespace: 'sandbox-recipes',
-        body: {
+        body: expect.objectContaining({
           data: {
             'mcp-host-runtime-access-token': Buffer.from('mcp-host-runtime-access-token').toString(
               'base64'
@@ -5069,7 +5069,12 @@ describe('WorkflowReconciler — reconcile loop', () => {
             ).toString('base64'),
             'mcp-host-gfs-token': Buffer.from('gfs-runtime-value').toString('base64'),
           },
-        },
+          metadata: expect.objectContaining({
+            annotations: expect.objectContaining({
+              'clerum.io/mcp-host-runtime-token-generation': '1',
+            }),
+          }),
+        }),
       }),
       expect.any(Object)
     )
@@ -5287,13 +5292,18 @@ describe('WorkflowReconciler — reconcile loop', () => {
       expect.objectContaining({
         name: 'wf-test-wf-mcp-host-runtime-tokens',
         namespace: 'sandbox-recipes',
-        body: {
+        body: expect.objectContaining({
           data: {
             'mcp-host-workflow-control-token': Buffer.from(
               'mcp-host-workflow-control-token'
             ).toString('base64'),
           },
-        },
+          metadata: expect.objectContaining({
+            annotations: expect.objectContaining({
+              'clerum.io/mcp-host-runtime-token-generation': '1',
+            }),
+          }),
+        }),
       }),
       expect.any(Object)
     )

@@ -195,7 +195,7 @@ describe('routes/recipe-oauth — POST /recipe-oauth/token', () => {
     const grantQuery = mockPoolQuery.mock.calls.find(
       ([sql]) => typeof sql === 'string' && sql.includes('oauth_grants')
     )
-    expect(grantQuery?.[1]).toEqual([SANDBOX_NS, 'crm', 'salesforce'])
+    expect(grantQuery?.[1]).toEqual(['recipe', SANDBOX_NS, 'crm', 'salesforce'])
   })
 
   it('returns 429 when the per-recipe rate limit is exceeded', async () => {

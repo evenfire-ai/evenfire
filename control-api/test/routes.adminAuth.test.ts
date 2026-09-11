@@ -27,6 +27,7 @@ const adminSvc = vi.hoisted(() => ({
   revokeControlAdminPasswordResetRequest: vi.fn(),
   revokeAdminTokenJti: vi.fn(),
   setupInitialAdminCredentials: vi.fn(),
+  setupInitialAdminWithDesktopWorkspace: vi.fn(),
 }))
 
 const adminToken = vi.hoisted(() => ({
@@ -52,6 +53,9 @@ const rateLimit = vi.hoisted(() => ({
 }))
 
 vi.mock('../src/services/adminAuthService.js', () => adminSvc)
+vi.mock('../src/services/initialAdminSetupService.js', () => ({
+  setupInitialAdminWithDesktopWorkspace: adminSvc.setupInitialAdminWithDesktopWorkspace,
+}))
 vi.mock(
   '../src/services/controlAdminInvitationRegistrationService.js',
   () => controlAdminInvitationRegistrationSvc
@@ -70,6 +74,7 @@ describe('routes/adminAuth', () => {
     Object.values(rateLimit).forEach(fn => fn.mockClear())
     adminSvc.isValidAdminEmail.mockReturnValue(true)
     adminSvc.isValidAdminUsername.mockReturnValue(true)
+    config.desktopGfsOperatorLinkingEnabled = false
     adminToken.signAdminToken.mockReturnValue('admin-jwt')
     uiAuth.requireAuthForControlUI.mockImplementation((req: any, _res: any, next: any) => {
       req.adminAuth = { sub: 'admin-id', role: 'admin', jti: 'j1', exp: 9999999999, typ: 'user' }
@@ -192,11 +197,44 @@ describe('routes/adminAuth', () => {
     expect(res.status).toBe(200)
     expect(directorySvc.provisionAdminDesktopWorkspace).toHaveBeenCalledWith(
       expect.objectContaining({
+        controlAdminId: 'admin-1',
         email: 'new@example.com',
         displayName: 'newadmin',
         passwordHash: expect.any(String),
         agentNames: expect.any(Array),
         contextIds: expect.any(Array),
+        linkDesktopOperator: false,
+      })
+    )
+  })
+
+  it('requests the exact initial-setup link only when the narrow self-hosted flag is enabled', async () => {
+    config.desktopGfsOperatorLinkingEnabled = true
+    adminSvc.setupInitialAdminWithDesktopWorkspace.mockResolvedValue({
+      id: 'admin-1',
+      username: 'newadmin',
+      email: 'new@example.com',
+      role: 'admin',
+      status: 'active',
+      failedAttempts: 0,
+      lockedUntil: null,
+    })
+
+    const app = express()
+    app.use(express.json())
+    app.use(createAdminAuthRouter())
+
+    await request(app)
+      .post('/admin/auth/setup')
+      .send({ email: 'new@example.com', username: 'newadmin', password: 'secret123' })
+      .expect(200)
+
+    expect(adminSvc.setupInitialAdminWithDesktopWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bootstrapUsername: expect.any(String),
+        email: 'new@example.com',
+        username: 'newadmin',
+        linkDesktopOperator: true,
       })
     )
   })
@@ -275,7 +313,9 @@ describe('routes/adminAuth', () => {
     )
   })
 
-  it('still returns 200 when desktop provisioning throws', async () => {
+  it('fails closed and remains retryable when self-hosted provisioning throws', async () => {
+    config.desktopGfsOperatorLinkingEnabled = true
+    adminSvc.setupInitialAdminWithDesktopWorkspace.mockRejectedValue(new Error('boom'))
     adminSvc.setupInitialAdminCredentials.mockResolvedValue({
       id: 'admin-1',
       username: 'newadmin',
@@ -285,7 +325,6 @@ describe('routes/adminAuth', () => {
       failedAttempts: 0,
       lockedUntil: null,
     })
-    directorySvc.provisionAdminDesktopWorkspace.mockRejectedValue(new Error('boom'))
 
     const app = express()
     app.use(express.json())
@@ -295,10 +334,10 @@ describe('routes/adminAuth', () => {
       .post('/admin/auth/setup')
       .send({ email: 'new@example.com', username: 'newadmin', password: 'secret123' })
 
-    expect(res.status).toBe(200)
+    expect(res.status).toBe(503)
     expect(res.body.token).toBeUndefined()
-    expect(String(res.headers['set-cookie'])).toContain('control_ui_admin_session=admin-jwt')
-    expect(res.body.me).toMatchObject({ email: 'new@example.com', username: 'newadmin' })
+    expect(String(res.headers['set-cookie'] || '')).not.toContain('control_ui_admin_session=')
+    expect(res.body).toEqual({ error: 'Initial admin setup is incomplete; retry' })
   })
 
   it('returns me and supports logout', async () => {

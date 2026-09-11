@@ -939,6 +939,37 @@ describe('db.initDb', () => {
     expect(clientRelease).toHaveBeenCalledTimes(1)
   })
 
+  it('rolls back the desktop-user retirement migration without recording it when its DDL fails', async () => {
+    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const priorVersions = CONTROL_API_MIGRATIONS.filter(
+      migration => migration.version !== '0094_desktop_user_retirement_lifecycle'
+    ).map(migration => ({ version: migration.version }))
+
+    clientQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('SELECT version FROM schema_migrations')) {
+        return { rows: priorVersions, rowCount: priorVersions.length }
+      }
+      if (sql.includes('CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations')) {
+        throw new Error('retirement ledger ddl failed')
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    await expect(initDb()).rejects.toThrow('retirement ledger ddl failed')
+
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql).trim())
+    expect(sqls).toContainEqual(
+      expect.stringContaining('CREATE TABLE IF NOT EXISTS desktop_user_retirement_operations')
+    )
+    expect(sqls).toContain('ROLLBACK')
+    expect(sqls).not.toContain('COMMIT')
+    const retirementRecord = clientQuery.mock.calls.find(
+      ([, params]) =>
+        Array.isArray(params) && params[0] === '0094_desktop_user_retirement_lifecycle'
+    )
+    expect(retirementRecord).toBeUndefined()
+  })
+
   it('deduplicates pending control-admin invitations before creating the opened-status unique index', async () => {
     clientQuery.mockImplementation(async (sql: string) => {
       if (sql.includes('SELECT version FROM schema_migrations')) {

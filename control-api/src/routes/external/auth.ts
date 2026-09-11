@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
+import { isCurrentExternalSession } from '../../middleware/externalSessionAuth.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { AuthClaims, RpcScope, TEAM_ROLES } from '../../profileTypes.js'
 import {
@@ -39,12 +40,16 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         name: google.name,
         picture: google.picture,
       })
+      if ('error' in login) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
       const role = login.membership.role
       const token = signExternalSessionToken({
         userId: login.user.id,
         email: google.email,
         teamId: login.membership.team_id || null,
         role,
+        authGeneration: login.authGeneration,
       })
       return res.status(200).json({
         token,
@@ -79,6 +84,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       }
       if ('error' in login) {
+        if (login.error === 'user_retired') {
+          return res.status(401).json({ error: 'Unauthorized' })
+        }
         if (login.error === 'password_not_set') {
           return res.status(409).json({ error: 'password_not_set' })
         }
@@ -91,6 +99,7 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         email: login.user.email,
         teamId: login.membership.team_id || null,
         role,
+        authGeneration: login.authGeneration,
       })
       return res.status(200).json({
         token,
@@ -140,6 +149,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if (!token || token.length > 4096) return res.status(401).json({ error: 'Unauthorized' })
       const claims = verifyExternalSessionToken(token)
       if (!claims) return res.status(401).json({ error: 'Unauthorized' })
+      if (!(await isCurrentExternalSession(claims))) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
       return res.status(200).json({ claims })
     } catch (error) {
       return next(error)
@@ -158,11 +170,12 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(400).json({ error: 'invalid payload' })
       }
       const membership = await pool.query(
-        `SELECT 1
+        `SELECT u.lifecycle_version
            FROM users u
            JOIN team_members tm ON tm.user_id = u.id
           WHERE u.id = $1
             AND LOWER(u.email) = LOWER($2)
+            AND u.lifecycle_state = 'active'
             AND tm.team_id = $3
             AND tm.role = $4
             AND tm.status = 'active'
@@ -172,7 +185,13 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
       if ((membership.rowCount ?? 0) === 0) {
         return res.status(403).json({ error: 'membership_not_found' })
       }
-      const token = signExternalSessionToken({ userId, email, teamId, role })
+      const authGeneration = Number(
+        (membership.rows[0] as { lifecycle_version?: unknown }).lifecycle_version
+      )
+      if (!Number.isSafeInteger(authGeneration) || authGeneration < 1) {
+        return res.status(403).json({ error: 'membership_not_found' })
+      }
+      const token = signExternalSessionToken({ userId, email, teamId, role, authGeneration })
       return res.status(200).json({ token })
     } catch (error) {
       return next(error)
@@ -186,6 +205,9 @@ export function createExternalAuthRouter(gateway: K8sGateway): Router {
         return res.status(401).json({ error: 'Unauthorized' })
       const claims = verifyExternalSessionToken(sessionToken)
       if (!claims) return res.status(401).json({ error: 'Unauthorized' })
+      if (!(await isCurrentExternalSession(claims))) {
+        return res.status(401).json({ error: 'Unauthorized' })
+      }
       const requestedScopes = normalizeRequestedScopes(req.body?.scopes)
       const hostRefs = normalizeRequestedHostRefs(req.body?.hostRefs)
       if (hostRefs.length === 0) {

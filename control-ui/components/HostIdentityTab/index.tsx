@@ -221,6 +221,7 @@ export function HostIdentityTab({ hostName }: { hostName: string }) {
             className="cu-identity-editor__markdown"
             invalid={activeTooLarge}
             onChange={value => setField(activeConfig.key, value)}
+            placeholder={activeConfig.placeholder}
             value={activeValue}
           />
           <div className={activeTooLarge ? 'cu-field__error' : 'cu-field__hint'}>

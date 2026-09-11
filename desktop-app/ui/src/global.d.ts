@@ -19,6 +19,9 @@ declare module 'react' {
   interface CSSProperties {
     /** Column template for `.da-grid` (consumed by `.da-grid__head` / `.da-grid__row`). */
     '--da-grid-cols'?: string
+    /** Session-only chat-drawer width, set inline on `.content-panel` and read by
+     *  `.chat-drawer` + its embed gutter (see `useChatDrawerResize`). */
+    '--chat-drawer-width'?: string
   }
 }
 

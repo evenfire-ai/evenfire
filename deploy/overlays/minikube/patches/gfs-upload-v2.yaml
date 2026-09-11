@@ -1,0 +1,55 @@
+# Local/T2 activation for the upload-v2 release contract. The public base and
+# production overlays remain disabled until their separately authorized
+# rollout. HCC owns generated GFSC configuration; never patch gfsc Deployments
+# directly or add these operator settings to GlobalFileSystem.spec.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_V2_ENABLED
+              value: 'true'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_PROTOCOL_MAX_FILE_BYTES
+              value: '1073741824'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_PRODUCT_MAX_FILE_BYTES
+              value: '209715200'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_FILE_BYTES
+              value: '209715200'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_PREFERRED_CHUNK_BYTES
+              value: '8388608'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CHUNK_BYTES
+              value: '16777216'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MIN_PART_BYTES
+              value: '1048576'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_PART_COUNT
+              value: '1024'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_SESSION_TTL_MS
+              value: '86400000'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_COMPLETED_RECEIPT_TTL_MS
+              value: '86400000'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_STALE_PART_LEASE_MS
+              value: '600000'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_PER_SUBJECT
+              value: '2'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_ACTIVE_GLOBAL
+              value: '8'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION
+              value: '4'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_PART_STREAMS_GLOBAL
+              value: '16'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_INSTABILITY_FAILURE_THRESHOLD
+              value: '3'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MAX_CONCURRENT_FINALIZATIONS
+              value: '1'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_MIN_FREE_BYTES
+              value: '10737418240'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_PART_TIMEOUT_MS
+              value: '300000'
+            - name: CONTEXT_MAPPER_GFSC_UPLOAD_FINALIZE_TIMEOUT_MS
+              value: '600000'

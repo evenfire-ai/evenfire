@@ -1,6 +1,7 @@
 'use client'
 
 import React from 'react'
+import { IconChevronRight } from '@components/icons'
 import { cn } from '@lib/cn'
 import type {
   ButtonProps,
@@ -14,26 +15,50 @@ import type {
 
 export function Button({
   block = false,
+  children,
   className,
+  disabled = false,
+  icon = false,
+  loading = false,
   size = 'md',
+  toolbar = false,
   type = 'button',
   variant = 'secondary',
   ...props
 }: ButtonProps) {
   return (
     <button
+      aria-busy={loading || undefined}
       className={cn(
         'cu-btn',
         variant === 'primary' && 'cu-btn--primary',
-        variant === 'ghost' && 'cu-btn--ghost',
+        (variant === 'ghost' || variant === 'ghost-danger') && 'cu-btn--ghost',
+        variant === 'ghost-danger' && !icon && 'cu-btn--ghost-danger',
+        // `cu-btn--icon.cu-btn--toolbar` sets `color` at specificity 0,2,0, which
+        // would beat `cu-btn--ghost-danger` at 0,1,0 and render a delete glyph
+        // grey. `cu-btn--danger-icon` is the existing class that already gets
+        // this combination right, so reuse it rather than recomposing.
+        variant === 'ghost-danger' && icon && 'cu-btn--danger-icon',
         variant === 'danger' && 'cu-btn--danger',
         size === 'sm' && 'cu-btn--sm',
         block && 'cu-btn--block',
+        icon && 'cu-btn--icon',
+        toolbar && 'cu-btn--toolbar',
         className
       )}
+      disabled={disabled || loading}
       type={type}
       {...props}
-    />
+    >
+      {loading ? (
+        <span className="cu-btn__content">
+          <span aria-hidden="true" className="cu-btn__spinner" />
+          {children}
+        </span>
+      ) : (
+        children
+      )}
+    </button>
   )
 }
 
@@ -53,14 +78,58 @@ export function Field({ children, description, error, htmlFor, label, required }
   )
 }
 
-export function FormSection({ children, description, title }: FormSectionProps) {
+export function FormSection({
+  children,
+  description,
+  title,
+  collapsible = false,
+  open: openProp,
+  onOpenChange,
+}: FormSectionProps) {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(false)
+  const open = openProp ?? uncontrolledOpen
+  const contentId = React.useId()
+
+  function toggle() {
+    const next = !open
+    if (openProp === undefined) setUncontrolledOpen(next)
+    onOpenChange?.(next)
+  }
+
+  if (!collapsible) {
+    return (
+      <section className="cu-form-section">
+        <div className="cu-form-section__header">
+          <h3 className="cu-form-section__title">{title}</h3>
+          {description ? <p className="cu-form-section__description">{description}</p> : null}
+        </div>
+        {children}
+      </section>
+    )
+  }
+
+  // Collapsed stays a single line: the description rides with the content it
+  // explains rather than adding a second line to the closed state.
   return (
     <section className="cu-form-section">
-      <div className="cu-form-section__header">
-        <h3 className="cu-form-section__title">{title}</h3>
-        {description ? <p className="cu-form-section__description">{description}</p> : null}
-      </div>
-      {children}
+      <h3 className="cu-form-section__title">
+        <button
+          type="button"
+          className="cu-form-section__toggle"
+          aria-expanded={open}
+          aria-controls={contentId}
+          onClick={toggle}
+        >
+          <IconChevronRight className={open ? 'is-expanded' : undefined} width={18} height={18} />
+          {title}
+        </button>
+      </h3>
+      {open ? (
+        <div className="cu-form-section__content" id={contentId}>
+          {description ? <p className="cu-form-section__description">{description}</p> : null}
+          {children}
+        </div>
+      ) : null}
     </section>
   )
 }

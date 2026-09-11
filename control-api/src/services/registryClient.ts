@@ -213,10 +213,19 @@ export interface RegistryEntry {
   recipe_type: string | null
   mcp_server_meta: Record<string, unknown> | null
   recipe_meta: Record<string, unknown> | null
+  // Catalog record for an installed guardrail hook (entry_type 'llm-hook'), read
+  // by the install-hook saga (guardrails spec §8.5). Shape mirrors the registry's
+  // HookMeta: { target, lifecyclePoints, path?, credentialSchema?, defaultConfig?, requiredEgress? }.
+  hook_meta: Record<string, unknown> | null
   artifact_refs: Record<string, unknown> | null
   downloads: number
   installs: number
   created_at: string
+  // Ownership — hooks are org-scoped (§8.5); the saga verifies owner_type==='org'
+  // and the org identity feeds the platform trust-level policy (never the
+  // publisher-influenced trust_level column at face value).
+  owner_type?: string
+  owner_id?: string | null
 }
 
 interface PaginatedResponse<T> {

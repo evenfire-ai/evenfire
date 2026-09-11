@@ -1,15 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { GFS_FILE_UPLOAD_MAX_BYTES, GFS_FILE_UPLOAD_MAX_MEGABYTES } from '@constants/gfsFileUpload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 
 describe('assertGfsFileUploadSize', () => {
-  it('accepts files at the upload limit', () => {
-    expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES)).not.toThrow()
+  it('allows product-policy decisions through the 1 GiB protocol maximum', () => {
+    expect(() => assertGfsFileUploadSize(250 * 1024 * 1024)).not.toThrow()
+    expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024)).not.toThrow()
   })
 
-  it('rejects files above the upload limit', () => {
-    expect(() => assertGfsFileUploadSize(GFS_FILE_UPLOAD_MAX_BYTES + 1)).toThrow(
-      `GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`
+  it('rejects files above the absolute protocol maximum', () => {
+    expect(() => assertGfsFileUploadSize(1024 * 1024 * 1024 + 1)).toThrow(
+      'GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.'
     )
   })
 })

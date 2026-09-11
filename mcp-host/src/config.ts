@@ -2,6 +2,7 @@
  * Configuration settings loaded from environment variables.
  */
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
+import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
@@ -46,6 +47,10 @@ export interface Config {
   // Kubernetes namespace
   namespace: string
 
+  // Namespace where installed LlmHook workloads/Services live (spec §8.2). The
+  // guardrail hook resolver derives in-cluster endpoints against this namespace.
+  llmHooksNamespace: string
+
   // Name of the operator-managed LLM allowlist ConfigMap watched by the
   // ConfigStore (R3). Configurable so canary/test namespaces can point at a
   // differently-named artifact; default matches the control-api writer.
@@ -54,6 +59,15 @@ export interface Config {
   // Dev mode: Model configuration from env vars
   devModelProvider?: LlmProvider
   devModelName?: string
+  // Default OFF. Codex provider construction stays dark until the operator
+  // sets MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true.
+  codexSubscriptionEnabled: boolean
+  // Server-owned Codex proxy URL. Callers cannot override this per request.
+  codexProxyRuntimeBaseUrl: string
+  // Explicit authorize override for tests/dev. Host chat ignores an empty hash
+  // and binds policyRevision/policyHash from the allowlist ConfigMap instead.
+  codexPolicyRevision: number
+  codexPolicyHash: string
 
   // Dev mode: MCP servers (parsed from CLERUM_MCP_SERVERS JSON)
   devMcpServers?: McpServerInfo[]
@@ -73,10 +87,18 @@ export interface Config {
   // Context Mapper poll interval in ms (for production mode)
   contextMapperPollInterval: number
 
+  // Maximum time an already-published MCP fleet may survive without a fresh,
+  // authenticated HCC inventory snapshot.
+  hccAuthorityMaxStalenessMs: number
+
   // MCP server health heartbeat interval in ms. mcp-host periodically
   // tools/list's each connected server to keep observedAt fresh and detect
   // silent failures. Must stay well under the desktop's 120s stale threshold.
   mcpStatusHeartbeatInterval: number
+
+  // Per-heartbeat round budget. A stalled MCP server must not retain the
+  // scheduler in-flight forever or cause overlapping rounds.
+  mcpStatusHeartbeatTimeoutMs: number
 
   // Agent configuration
   agentTaskDelay: number
@@ -95,6 +117,9 @@ export interface Config {
   // Dev-mode approval config parsed from CLERUM_APPROVAL_CONFIG; in prod the
   // values come from the Host CRD.
   approvalConfig?: ApprovalConfig
+  // Dev-mode guardrails config parsed from CLERUM_GUARDRAILS_CONFIG (spec §5); in
+  // prod the block comes from the Host CRD. Absent = no guardrails = today.
+  guardrailsConfig?: GuardrailsConfig
 
   // Nudge controller (default OFF).
   enableNudge: boolean
@@ -347,6 +372,27 @@ export function parseStatelessHeartbeatIntervalMs(raw: string | undefined): numb
 }
 
 /**
+ * Parse an MCP status-heartbeat duration. These values participate in the
+ * liveness scheduler, so an explicit typo must fail at boot rather than turn
+ * into an unbounded timer or a silent fallback.
+ */
+export function parseMcpStatusHeartbeatDuration(
+  name: string,
+  raw: string | undefined,
+  defaultValue: number
+): number {
+  if (raw === undefined || raw.trim() === '') return defaultValue
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`[Config] ${name}='${raw}' is not a positive safe integer`)
+  }
+  const value = Number(raw)
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`[Config] ${name}='${raw}' is not a positive safe integer`)
+  }
+  return value
+}
+
+/**
  * Parse CLERUM_HOST_CONFIG JSON for dev mode.
  */
 function parseDevHostConfig(): HostSpec | undefined {
@@ -377,7 +423,11 @@ function parseDevHostConfig(): HostSpec | undefined {
  * model per provider comes straight from the registry descriptor.
  */
 function getDefaultModel(provider: LlmProvider): string {
-  return descriptorFor(provider).defaultModel
+  const model = descriptorFor(provider).defaultModel
+  if (!model) {
+    throw new Error(`[Config] provider '${provider}' requires an explicit model`)
+  }
+  return model
 }
 
 function buildDevHostConfig(provider?: LlmProvider, modelName?: string): HostSpec {
@@ -438,6 +488,29 @@ export function resolveDevModelProvider(raw: string | undefined): LlmProvider | 
   return raw
 }
 
+/**
+ * Keep the poll cadence strictly inside the authority-retention window.
+ *
+ * A cadence at or above the staleness ceiling guarantees that a healthy fleet
+ * can be revoked before the next authoritative poll arrives. Failing startup
+ * closed is safer than silently widening the retention window or allowing a
+ * deployment to flap forever after every successful reconnect.
+ */
+export function validateHccAuthorityTiming(
+  contextMapperPollIntervalMs: number,
+  hccAuthorityMaxStalenessMs: number
+): void {
+  if (
+    Number.isFinite(contextMapperPollIntervalMs) &&
+    Number.isFinite(hccAuthorityMaxStalenessMs) &&
+    contextMapperPollIntervalMs >= hccAuthorityMaxStalenessMs
+  ) {
+    throw new Error(
+      `CLERUM_CONTEXT_MAPPER_POLL_INTERVAL (${contextMapperPollIntervalMs}ms) must be less than HCC_AUTHORITY_MAX_STALENESS_MS (${hccAuthorityMaxStalenessMs}ms)`
+    )
+  }
+}
+
 // In dev mode, try CLERUM_HOST_CONFIG first, then fall back to building from env vars
 function getDevHostConfig(): HostSpec | undefined {
   if (!devMode) return undefined
@@ -475,6 +548,22 @@ function parseDevMcpServers(): McpServerInfo[] | undefined {
  * Parse CLERUM_APPROVAL_CONFIG JSON for dev mode.
  * Format: {"defaultPolicy":"designated_approvers","channels":{"telegram":{"enabled":true,"approvers":["123"]}}}
  */
+/** Parse CLERUM_GUARDRAILS_CONFIG JSON for dev mode (the `Host.spec.guardrails` block, spec §5). */
+function parseGuardrailsConfig(): GuardrailsConfig | undefined {
+  const configJson = process.env.CLERUM_GUARDRAILS_CONFIG
+  if (!configJson) return undefined
+  try {
+    const parsed = JSON.parse(configJson) as GuardrailsConfig
+    console.log('[Config] Parsed guardrails config from CLERUM_GUARDRAILS_CONFIG:', {
+      rules: parsed.rules?.length ?? 0,
+    })
+    return parsed
+  } catch (error) {
+    console.error('[Config] Failed to parse CLERUM_GUARDRAILS_CONFIG:', error)
+    return undefined
+  }
+}
+
 function parseApprovalConfig(): ApprovalConfig | undefined {
   const configJson = process.env.CLERUM_APPROVAL_CONFIG
   if (!configJson) {
@@ -499,6 +588,39 @@ function parseApprovalPromptHistoryMaxBytes(raw: string): number {
   return Number.isSafeInteger(value) && value >= 1_024 && value <= 32_768 ? value : Number.NaN
 }
 
+const contextMapperPollInterval = parseInt(
+  getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!,
+  10
+)
+// Fail-closed window for an UNREACHABLE HCC (5xx / transport failures only).
+// It is bounded so a revoked-but-unconfirmable authority cannot linger forever,
+// yet generous enough to survive a normal HCC `Recreate` rollout (measured ~77s
+// in clerum-dev, with a startupProbe budget of up to 120s) without tearing down
+// the whole MCP fleet and aborting in-flight tool calls.
+//
+// Crucially, this window ONLY governs the `unavailable` failure class. Identity /
+// authorization failures (401/403 — Host UID change, revoked grant) revoke
+// immediately on the next reachable call, and a grant change while HCC is healthy
+// is applied by the next successful poll. Raising this ceiling intentionally trades
+// bounded revocation latency during an HCC outage for fleet availability; it does
+// not widen the NP-08 credential-disclosure surface because HCC cannot serve a new
+// credential while unavailable and rechecks live authorization when reachable.
+// See issue #425.
+//
+// Operators may lower it, or raise it up to HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+// for slower-starting clusters. The minikube e2e lane pins 60000 explicitly so the
+// revoke-on-staleness scenario stays fast and deterministic.
+const HCC_AUTHORITY_MAX_STALENESS_CEILING_MS = 600_000 // 10 min hard upper bound
+const hccAuthorityMaxStalenessMs = Math.min(
+  getEnvNumber('HCC_AUTHORITY_MAX_STALENESS_MS', 180_000),
+  HCC_AUTHORITY_MAX_STALENESS_CEILING_MS
+)
+
+// Dev mode does not retain a Kubernetes-authoritative MCP fleet, so the
+// production polling/staleness relationship is intentionally not required for
+// local fixture runs. Every cluster-mode process must satisfy it at startup.
+if (!devMode) validateHccAuthorityTiming(contextMapperPollInterval, hccAuthorityMaxStalenessMs)
+
 export const config: Config = {
   devMode,
   devHostConfig: getDevHostConfig(),
@@ -515,6 +637,9 @@ export const config: Config = {
   // Kubernetes namespace
   namespace: getEnv('CLERUM_NAMESPACE', 'default')!,
 
+  // Namespace where installed LlmHook workloads/Services live (spec §8.2).
+  llmHooksNamespace: getEnv('CLERUM_LLM_HOOKS_NAMESPACE', 'llm-hooks')!,
+
   // LLM allowlist ConfigMap name (R3). CROSS-SERVICE CONTRACT: the default
   // (`clerum-llm-allowed-models`) is the CM produced by control-api
   // (control-api/src/services/llmAllowedModelsConfigMap.ts) and also read by WRC
@@ -527,6 +652,16 @@ export const config: Config = {
   // resolveDevModelProvider fail-closes on a set-but-invalid value.
   devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
   devModelName,
+  codexSubscriptionEnabled: process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  codexProxyRuntimeBaseUrl: getEnv(
+    'CODEX_LLM_PROXY_RUNTIME_URL',
+    'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'
+  )!,
+  // Empty hash is not a grant: Host chat computes the per-model digest from
+  // clerum.io/catalog-revision + clerum.io/connection-revision on the allowlist
+  // ConfigMap. Set both env vars together only as a test/dev override.
+  codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
+  codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
 
   // Dev mode MCP servers
   devMcpServers: devMode ? parseDevMcpServers() : undefined,
@@ -550,13 +685,24 @@ export const config: Config = {
   )!,
 
   // Context Mapper poll interval (default 30 seconds)
-  contextMapperPollInterval: parseInt(getEnv('CLERUM_CONTEXT_MAPPER_POLL_INTERVAL', '30000')!, 10),
+  contextMapperPollInterval,
+
+  // Bound transient HCC/Kubernetes authority outages. Identity failures revoke
+  // immediately; 5xx/transport failures may preserve the last good fleet only
+  // within this finite window.
+  hccAuthorityMaxStalenessMs,
 
   // MCP status heartbeat. Defaults to 30 seconds so a single missed tick does
   // not trip desktop staleness.
-  mcpStatusHeartbeatInterval: parseInt(
-    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL', '30000')!,
-    10
+  mcpStatusHeartbeatInterval: parseMcpStatusHeartbeatDuration(
+    'CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL',
+    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_INTERVAL'),
+    30_000
+  ),
+  mcpStatusHeartbeatTimeoutMs: parseMcpStatusHeartbeatDuration(
+    'CLERUM_MCP_STATUS_HEARTBEAT_TIMEOUT_MS',
+    getEnv('CLERUM_MCP_STATUS_HEARTBEAT_TIMEOUT_MS'),
+    25_000
   ),
 
   // Agent configuration
@@ -581,6 +727,7 @@ export const config: Config = {
   enableApproval: getEnvBool('CLERUM_ENABLE_APPROVAL', true),
   // Dev-mode override; in prod the values come from the Host CRD.
   approvalConfig: parseApprovalConfig(),
+  guardrailsConfig: parseGuardrailsConfig(),
 
   // Nudge controller (default OFF).
   enableNudge: getEnvBool('CLERUM_ENABLE_NUDGE', false),

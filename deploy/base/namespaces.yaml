@@ -44,6 +44,24 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: llm-hooks
+  labels:
+    app.kubernetes.io/name: clerum
+    app.kubernetes.io/part-of: clerum
+    kubernetes.io/metadata.name: llm-hooks
+    # Guardrail hook pods run vendor/third-party images; baseline enforce is the
+    # floor (blocks privileged / hostPath / hostNetwork), restricted warn/audit
+    # surfaces drift. Mirrors mcp-server / sandbox-recipes.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: profiles
   labels:
     app.kubernetes.io/name: clerum

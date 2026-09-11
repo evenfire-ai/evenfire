@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
-# Start a Clerum minikube profile. Single-node is the default; multi-node is
+# Start an Evenfire minikube profile. Single-node is the default; multi-node is
 # opt-in via MINIKUBE_MULTI_NODE=true or MINIKUBE_NODES=<n>.
 
 set -euo pipefail
+
+START_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=profile-readiness.sh
+source "$START_SCRIPT_DIR/profile-readiness.sh"
 
 PROFILE="${MINIKUBE_PROFILE:-clerum-test}"
 MINIKUBE_MULTI_NODE="${MINIKUBE_MULTI_NODE:-false}"
@@ -142,22 +146,37 @@ start_args=(
   --driver=docker
 )
 
+PROFILE_ACTION=VALIDATE_ONLY
+if [[ "${VALIDATE_ONLY}" != "true" ]]; then
+  profile_status=""
+  if profile_status="$(minikube -p "${PROFILE}" status 2>/dev/null)" &&
+    minikube_profile_status_is_healthy "${profile_status}"; then
+    PROFILE_ACTION=REUSED
+  else
+    PROFILE_ACTION=STARTED
+  fi
+fi
+
 if [[ "${MINIKUBE_NODES}" -gt 1 ]]; then
   start_args+=(--nodes="${MINIKUBE_NODES}")
   if [[ "${VALIDATE_ONLY}" == "true" ]]; then
     log "Validating multi-node minikube profile '${PROFILE}' with ${MINIKUBE_NODES} expected nodes"
+  elif [[ "${PROFILE_ACTION}" == "REUSED" ]]; then
+    log "Reusing healthy multi-node minikube profile '${PROFILE}' with ${MINIKUBE_NODES} expected nodes"
   else
     log "Starting multi-node minikube profile '${PROFILE}' with ${MINIKUBE_NODES} nodes"
   fi
 else
   if [[ "${VALIDATE_ONLY}" == "true" ]]; then
     log "Validating single-node minikube profile '${PROFILE}'"
+  elif [[ "${PROFILE_ACTION}" == "REUSED" ]]; then
+    log "Reusing healthy single-node minikube profile '${PROFILE}'"
   else
     log "Starting single-node minikube profile '${PROFILE}'"
   fi
 fi
 
-if [[ "${VALIDATE_ONLY}" != "true" ]]; then
+if [[ "${PROFILE_ACTION}" == "STARTED" ]]; then
   minikube "${start_args[@]}"
 fi
 
@@ -177,3 +196,5 @@ if ! minikube -p "${PROFILE}" status >/dev/null; then
 fi
 
 ok "Minikube profile '${PROFILE}' is healthy"
+printf 'MINIKUBE_PROFILE_ACTION=%s\n' "${PROFILE_ACTION}"
+printf 'MINIKUBE_PROFILE_READINESS=HEALTHY\n'

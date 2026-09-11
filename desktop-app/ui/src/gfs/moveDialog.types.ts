@@ -1,0 +1,26 @@
+import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
+
+export type GfsMoveDialogProps = {
+  /** The resource being moved (kind powers the dialog title + cycle guard).
+   * `parentResourceId`, when known (list rows carry it), lets the dialog
+   * disable a no-op move into the folder that already contains the target. */
+  target: {
+    resourceId: string
+    name: string
+    kind: 'file' | 'directory'
+    parentResourceId?: string | null
+  }
+  /** Cache scope from useGfsBrowserController — shares the page's gfs queries. */
+  sessionScope?: string
+  /** Dialog-local starting path (typically the page crumbs, minus the target). */
+  initialCrumbs: GfsCrumb[]
+  /** Commit the move; resolves on success (caller toasts) and throws the
+   *  server verdict on denial so the dialog can surface it in place. */
+  onMove: (destinationId: string, destinationName: string) => Promise<void>
+  onClose: () => void
+  busy?: boolean
+  /** Central fail-closed boundary (R4 spec §1): destination-listing authority
+   *  failures must revoke the session even though the dialog owns these
+   *  query observers. Policy verdicts return false and stay local. */
+  onAuthorityFailure?: (message: string) => boolean
+}

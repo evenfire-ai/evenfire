@@ -1,3 +1,4 @@
+import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { McpManager } from '../../mcp/manager'
 import { Tool, ToolRegistry } from '../interfaces'
 import { Attachment, ToolDefinition, ToolOutput } from '../types'
@@ -78,7 +79,14 @@ class McpToolAdapter implements Tool {
     private readonly fullName: string,
     private readonly desc: string,
     private readonly schema: Record<string, unknown>,
-    private readonly mcpManager: McpManager
+    private readonly mcpManager: McpManager,
+    /**
+     * Authoritative server name from `McpTool.serverName` (set by the MCP client
+     * at connect). Carried explicitly because `traceDescriptor()` feeds the
+     * tool-lane guardrail identity that `server=` rules match on — see below.
+     */
+    private readonly serverName: string,
+    private readonly userId?: string
   ) {}
 
   name() {
@@ -97,17 +105,32 @@ class McpToolAdapter implements Tool {
     return false
   }
   traceDescriptor() {
-    const separator = this.fullName.indexOf('__')
+    // `sourceRef` is the tool-lane guardrail's `server` identity (provenance.ts),
+    // so a `server=` deny rule matches on THIS value. It used to be sliced off the
+    // display name at the first `__`, which is a guess: a server whose own name
+    // contains `__` derives truncated, the rule then fails to match, and a deny
+    // that does not match lets the call through. Registration hands over the
+    // registry's own `serverName` instead — the same value `serverNameOf` uses in
+    // the tool catalog.
     return {
       kind: 'mcp_server_tool' as const,
-      sourceRef: separator > 0 ? this.fullName.slice(0, separator) : null,
+      sourceRef: this.serverName || null,
     }
   }
 
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
-      const result = await this.mcpManager.callTool(this.fullName, params)
+      // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
+      // `this.userId` — the authenticated task sender baked in at construction
+      // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
+      // rpc-proxy edge `auth.sub` in handleMessageRoute). `params` is model /
+      // tool-arg data and is forwarded as the call payload only; it can NEVER
+      // become the identity, so a `userId` field inside `params` cannot spoof
+      // another user's broker token.
+      const result = await this.mcpManager.callTool(this.fullName, params, {
+        userId: this.userId,
+      })
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
       let content: string
@@ -124,6 +147,17 @@ class McpToolAdapter implements Tool {
         duration_ms: Date.now() - startTime,
         is_error: result.isError,
         attachments: attachments.length > 0 ? attachments : undefined,
+        // U5 — map the typed reactive-consent marker to `metadata.connect_required`
+        // on the SUCCESS path (the manager never lets the McpAuthError throw reach
+        // the catch below — that route would be dead code). The tool-use loop and
+        // resume path read this to raise a durable `connect_required` suspension.
+        metadata: result.connectRequired
+          ? {
+              connect_required: {
+                mcpServerName: result.connectRequired.mcpServerName,
+              },
+            }
+          : undefined,
       }
     } catch (err) {
       return {
@@ -144,7 +178,16 @@ class McpToolAdapter implements Tool {
 export class McpToolRegistryAdapter implements ToolRegistry {
   private tools = new Map<string, Tool>()
 
-  constructor(private readonly mcpManager: McpManager) {
+  /**
+   * @param userId caller identity (authenticated session `sender`) threaded to
+   *   `manager.callTool` so oauth grantScope='user' tools dispatch to the
+   *   caller's per-user partition. A fresh adapter is built per turn, so it
+   *   always carries exactly one userId.
+   */
+  constructor(
+    private readonly mcpManager: McpManager,
+    private readonly userId?: string
+  ) {
     this.refresh()
   }
 
@@ -175,7 +218,9 @@ export class McpToolRegistryAdapter implements ToolRegistry {
    */
   private refresh(): void {
     this.tools.clear()
-    // getAllTools() returns names already prefixed as serverName__toolName
+    // getAllTools() returns names already prefixed as serverName__toolName, and
+    // preserves the authoritative `serverName` alongside it. `serverNameOf` reads
+    // that field and only falls back to parsing the prefix when it is absent.
     const allTools = this.mcpManager.getAllTools()
     for (const mcpTool of allTools) {
       this.tools.set(
@@ -184,7 +229,9 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           mcpTool.name,
           mcpTool.description || '',
           mcpTool.inputSchema || {},
-          this.mcpManager
+          this.mcpManager,
+          serverNameOf(mcpTool),
+          this.userId
         )
       )
     }

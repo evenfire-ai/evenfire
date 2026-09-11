@@ -19,6 +19,7 @@ export interface ChatComposerStateContextValue {
   agentError: string | null
   failedAgentSend: FailedAgentSend | null
   activeMessageCount: number
+  composerFocusRequestId: number
 }
 
 export interface ChatComposerStateProviderProps {

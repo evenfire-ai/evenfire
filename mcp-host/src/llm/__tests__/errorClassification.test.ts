@@ -11,21 +11,65 @@ describe('classifyByHttpStatus', () => {
     expect(classifyByHttpStatus(42)).toBeNull()
   })
 
-  it('maps 401 and 403 to AuthenticationFailed, not retryable', () => {
-    expect(classifyByHttpStatus({ status: 401, message: 'unauthorized' })).toEqual({
+  it('maps 401 to AuthenticationFailed, not retryable', () => {
+    expect(classifyByHttpStatus({ status: 401, message: 'unauthorized' })).toMatchObject({
       code: LlmErrorCode.AuthenticationFailed,
       retryable: false,
       message: 'unauthorized',
     })
-    expect(classifyByHttpStatus({ status: 403, message: 'forbidden' })).toEqual({
-      code: LlmErrorCode.AuthenticationFailed,
+  })
+
+  it('maps 403 to AuthenticationFailed (identity/authorization), uniform with 401 (R1-M1)', () => {
+    // 403 is an identity/authorization failure (account access / IAM permission),
+    // not billing — genuine quota has its own channel. It shares the `auth`
+    // failover class with 401 across all four provider arms; the 401-vs-403
+    // detail survives in httpStatus, not in the failover class.
+    const c = classifyByHttpStatus({ status: 403, message: 'forbidden' })
+    expect(c?.code).toBe(LlmErrorCode.AuthenticationFailed)
+    expect(c?.retryable).toBe(false)
+    expect(c?.httpStatus).toBe(403)
+  })
+
+  it('maps 404 to ModelNotAvailable, NOT retryable', () => {
+    // Model retired OR not accessible to this account — indistinguishable by
+    // API. Non-retryable so the tool-use loop does not retry it, and NOT a
+    // failover trigger so it does not silently divert cross-provider.
+    const c = classifyByHttpStatus({ status: 404, message: 'model not found' })
+    expect(c?.code).toBe(LlmErrorCode.ModelNotAvailable)
+    expect(c?.retryable).toBe(false)
+    expect(c?.httpStatus).toBe(404)
+  })
+
+  it('maps body-level model_not_found (code or type) to ModelNotAvailable', () => {
+    expect(
+      classifyByHttpStatus({ status: 400, error: { code: 'model_not_found', message: 'gone' } })
+    ).toMatchObject({
+      code: LlmErrorCode.ModelNotAvailable,
       retryable: false,
-      message: 'forbidden',
+      providerCode: 'model_not_found',
     })
+    expect(
+      classifyByHttpStatus({ status: 400, error: { type: 'model_not_found', message: 'gone' } })
+    ).toMatchObject({ code: LlmErrorCode.ModelNotAvailable, retryable: false })
+  })
+
+  it('maps body-level invalid_api_key to AuthenticationFailed', () => {
+    expect(
+      classifyByHttpStatus({ status: 401, error: { code: 'invalid_api_key', message: 'bad key' } })
+    ).toMatchObject({ code: LlmErrorCode.AuthenticationFailed, retryable: false })
+  })
+
+  it('propagates httpStatus and providerCode onto the ClassifiedError', () => {
+    const c = classifyByHttpStatus({
+      status: 429,
+      error: { code: 'rate_limit', message: 'slow down' },
+    })
+    expect(c?.httpStatus).toBe(429)
+    expect(c?.providerCode).toBe('rate_limit')
   })
 
   it('maps 402 to InsufficientQuota, not retryable', () => {
-    expect(classifyByHttpStatus({ status: 402, message: 'payment required' })).toEqual({
+    expect(classifyByHttpStatus({ status: 402, message: 'payment required' })).toMatchObject({
       code: LlmErrorCode.InsufficientQuota,
       retryable: false,
       message: 'payment required',
@@ -33,7 +77,7 @@ describe('classifyByHttpStatus', () => {
   })
 
   it('maps 429 to RateLimited, retryable', () => {
-    expect(classifyByHttpStatus({ status: 429, message: 'rate limited' })).toEqual({
+    expect(classifyByHttpStatus({ status: 429, message: 'rate limited' })).toMatchObject({
       code: LlmErrorCode.RateLimited,
       retryable: true,
       message: 'rate limited',
@@ -41,12 +85,12 @@ describe('classifyByHttpStatus', () => {
   })
 
   it('maps 503 and 529 to ModelOverloaded, retryable', () => {
-    expect(classifyByHttpStatus({ status: 503, message: 'unavailable' })).toEqual({
+    expect(classifyByHttpStatus({ status: 503, message: 'unavailable' })).toMatchObject({
       code: LlmErrorCode.ModelOverloaded,
       retryable: true,
       message: 'unavailable',
     })
-    expect(classifyByHttpStatus({ status: 529, message: 'overloaded' })).toEqual({
+    expect(classifyByHttpStatus({ status: 529, message: 'overloaded' })).toMatchObject({
       code: LlmErrorCode.ModelOverloaded,
       retryable: true,
       message: 'overloaded',
@@ -63,7 +107,7 @@ describe('classifyByHttpStatus', () => {
   })
 
   it('maps 400 without quota signal to ApiCallFailed, NOT retryable', () => {
-    expect(classifyByHttpStatus({ status: 400, message: 'bad request' })).toEqual({
+    expect(classifyByHttpStatus({ status: 400, message: 'bad request' })).toMatchObject({
       code: LlmErrorCode.ApiCallFailed,
       retryable: false,
       message: 'bad request',
@@ -72,7 +116,7 @@ describe('classifyByHttpStatus', () => {
 
   it('recognizes body-level insufficient_quota via error.code', () => {
     const err = { status: 429, error: { code: 'insufficient_quota', message: 'out of credit' } }
-    expect(classifyByHttpStatus(err)).toEqual({
+    expect(classifyByHttpStatus(err)).toMatchObject({
       code: LlmErrorCode.InsufficientQuota,
       retryable: false,
       message: 'out of credit',
@@ -81,7 +125,7 @@ describe('classifyByHttpStatus', () => {
 
   it('recognizes body-level insufficient_quota via error.type', () => {
     const err = { status: 429, error: { type: 'insufficient_quota', message: 'out of credit' } }
-    expect(classifyByHttpStatus(err)).toEqual({
+    expect(classifyByHttpStatus(err)).toMatchObject({
       code: LlmErrorCode.InsufficientQuota,
       retryable: false,
       message: 'out of credit',

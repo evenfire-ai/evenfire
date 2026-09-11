@@ -1,0 +1,44 @@
+{
+  "diagram": "architecture-overview",
+  "style": "openai-official",
+  "title": "Self-hosted Desktop GFS operator parity",
+  "viewBox": "0 0 1200 900",
+  "sections": [
+    {
+      "id": "initial-setup",
+      "label": "Initial self-hosted setup",
+      "flow": [
+        "Setup route creates the initial admin and Desktop user",
+        "Create one explicit initial_setup operator pair at generation 1",
+        "Persist exact IDs, actor/source, and request correlation"
+      ]
+    },
+    {
+      "id": "runtime-authority",
+      "label": "Runtime authority path",
+      "flow": [
+        "Desktop session sends a GFS request",
+        "Control API resolves ordinary versus linked-admin authority",
+        "GFSC checks active user/admin/link generations before root, grants, or shares"
+      ]
+    },
+    {
+      "id": "revoke",
+      "label": "Visible Control UI revoke",
+      "flow": [
+        "Control UI requests revoke",
+        "CAS transition writes a tombstone and governed audit event",
+        "Operator root is denied while the ordinary user path remains scoped"
+      ]
+    },
+    {
+      "id": "safeguards",
+      "label": "Current safeguards and follow-ups",
+      "items": [
+        "Edge 600/1200/1800 and Control API 10/120/30 rate-limit classes",
+        "Migrations 0091 through 0096",
+        "Global IPv6-key and coherent-429 follow-ups"
+      ]
+    }
+  ]
+}

@@ -15,7 +15,9 @@ import {
   assertMayGrantBatch,
   assertMutationSubjectTransport,
   auditMutation,
+  callerAuditFields,
   driveOf,
+  heldPermissions,
   normalizeMutationSubjects,
   parsePermissions,
   permissionReadFilter,
@@ -62,35 +64,62 @@ export function registerGfsShareRoutes(router: Router): void {
 export async function handleShareRead(req: Request, res: Response): Promise<void> {
   try {
     const { drive, resourceId } = permissionReadFilter(req)
-    const result = await pool.query(
-      `SELECT id, drive, resource_id, subject_type, subject_id, permissions, include_descendants
-         FROM gfs_shares
-        WHERE drive = $1 AND resource_id = $2::uuid
-        ORDER BY created_at ASC, id ASC`,
-      [drive, resourceId]
-    )
-    res.status(200).json({
-      items: (result.rows as Record<string, unknown>[]).map(row => {
-        const subjectId = String(row.subject_id ?? '')
-        return {
-          id: String(row.id),
-          drive: String(row.drive),
-          resourceId: String(row.resource_id),
-          subject: {
-            type: String(row.subject_type),
-            ...(subjectId ? { id: subjectId } : {}),
-          },
-          permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
-          includeDescendants: Boolean(row.include_descendants),
-        }
-      }),
-    })
+    res.status(200).json({ items: await queryShareItems(drive, resourceId) })
   } catch (err) {
     if (err instanceof GfsGrantError) {
       sendGfsGrantError(res, err)
       return
     }
     throw err
+  }
+}
+
+async function queryShareItems(
+  drive: string,
+  resourceId: string
+): Promise<Record<string, unknown>[]> {
+  const result = await pool.query(
+    `SELECT id, drive, resource_id, subject_type, subject_id, permissions, include_descendants
+       FROM gfs_shares
+      WHERE drive = $1 AND resource_id = $2::uuid
+      ORDER BY created_at ASC, id ASC`,
+    [drive, resourceId]
+  )
+  return (result.rows as Record<string, unknown>[]).map(row => {
+    const subjectId = String(row.subject_id ?? '')
+    return {
+      id: String(row.id),
+      drive: String(row.drive),
+      resourceId: String(row.resource_id),
+      subject: {
+        type: String(row.subject_type),
+        ...(subjectId ? { id: subjectId } : {}),
+      },
+      permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : [],
+      includeDescendants: Boolean(row.include_descendants),
+    }
+  })
+}
+
+/** External list parity with grants: ACL metadata requires manage_acl, and a
+ * missing resource is indistinguishable from an inaccessible one. */
+export async function handleShareListForCaller(req: Request, res: Response): Promise<void> {
+  try {
+    const caller = resolveCaller(req)
+    const { drive, resourceId } = permissionReadFilter(req)
+    if (!caller.isOperator) {
+      const held = await heldPermissions(pool, caller, drive, resourceId)
+      if (!held.includes('manage_acl')) {
+        throw new GfsGrantError(403, 'manage_acl_required')
+      }
+    }
+    res.status(200).json({ items: await queryShareItems(drive, resourceId) })
+  } catch (error) {
+    if (error instanceof GfsGrantError) {
+      sendGfsGrantError(res, error)
+      return
+    }
+    throw error
   }
 }
 
@@ -153,6 +182,7 @@ export async function writeGfsShareBatchInTransaction(
     auditIds.push(
       await auditMutation(db, {
         actorKey: params.caller.actorKey,
+        ...callerAuditFields(params.caller),
         targetKey: subjectKey(subject),
         op: `share.create[${params.permissions.join(',')}]`,
         drive: params.drive,
@@ -232,7 +262,9 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
            FOR UPDATE`,
         [id]
       )
-      if (existing.rows.length === 0) return { kind: 'not_found' as const }
+      if (existing.rows.length === 0) {
+        return caller.isOperator ? { kind: 'not_found' as const } : { kind: 'hidden' as const }
+      }
       const row = existing.rows[0] as {
         drive: string
         resource_id: string
@@ -258,6 +290,7 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
         if (!(error instanceof GfsGrantError)) throw error
         const auditId = await auditMutation(db, {
           actorKey: caller.actorKey,
+          ...callerAuditFields(caller),
           targetKey: subjectKey(subject),
           op: 'share.delete',
           drive: row.drive,
@@ -283,6 +316,7 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
       await db.query(`DELETE FROM gfs_shares WHERE id = $1::uuid`, [id])
       const auditId = await auditMutation(db, {
         actorKey: caller.actorKey,
+        ...callerAuditFields(caller),
         targetKey: subjectKey(subject),
         op: 'share.delete',
         drive: row.drive,
@@ -307,6 +341,10 @@ export async function handleShareDelete(req: Request, res: Response): Promise<vo
     })
     if (result.kind === 'not_found') {
       res.status(404).json({ error: 'share_not_found' })
+      return
+    }
+    if (result.kind === 'hidden') {
+      res.status(403).json({ error: 'forbidden' })
       return
     }
     if (result.kind === 'denied') {

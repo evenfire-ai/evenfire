@@ -38,13 +38,24 @@ import {
   wfcInitJobNamePrefix,
   wfcServiceName,
 } from './k8s/sharedFileSystemFactory'
+import { hccLogger } from './logger'
+import { createsTotal } from './metrics'
 import type {
   SharedFileSystemCRD,
   SharedFileSystemCondition,
   SharedFileSystemPhase,
   SharedFileSystemStatus,
 } from './types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from './utils'
+import {
+  applyNetworkPolicy,
+  deploymentMatchesDesired,
+  ensureResource,
+  getErrorCode,
+  observeCreate,
+  observeExistenceRead,
+  preserveDeploymentAnnotations,
+  replaceWithConflictRetry,
+} from './utils'
 
 const GROUP = 'clerum.io'
 const VERSION = 'v1alpha1'
@@ -264,20 +275,31 @@ export class SharedFileSystemReconciler {
   private async ensurePvc(sfs: SharedFileSystemCRD): Promise<string> {
     const pvc = buildPvc(sfs, this.factoryConfig)
     const name = pvcName(sfs)
-    try {
-      await this.coreApi.createNamespacedPersistentVolumeClaim({
-        namespace: this.factoryConfig.hostNamespace,
-        body: pvc,
-      })
-      console.log(`${LOG} Created PVC "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        throw err
-      }
-      // PVC spec is largely immutable post-create (size can grow, accessModes
-      // can't change). We don't attempt to replace — just log and continue.
-      console.log(`${LOG} PVC "${name}" already exists`)
-    }
+    const namespace = this.factoryConfig.hostNamespace
+    await ensureResource<k8s.V1PersistentVolumeClaim>({
+      read: () =>
+        observeExistenceRead('PersistentVolumeClaim', () =>
+          this.coreApi.readNamespacedPersistentVolumeClaim({ namespace, name })
+        ),
+      create: async () => {
+        await observeCreate('PersistentVolumeClaim', () =>
+          this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
+        )
+        hccLogger.info('SharedFileSystem PVC created', { scope: LOG, name, namespace })
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
+      converge: async read => {
+        // Preserve the existing PVC without resizing or changing accessModes.
+        // After POST409, consume a fresh read; only disappearance is benign.
+        try {
+          await read()
+        } catch (err) {
+          if (err == null || getErrorCode(err) !== 404) throw err
+          return
+        }
+        hccLogger.info('SharedFileSystem PVC already exists', { scope: LOG, name, namespace })
+      },
+    })
     return name
   }
 
@@ -336,33 +358,35 @@ export class SharedFileSystemReconciler {
   private async ensureDeployment(sfs: SharedFileSystemCRD): Promise<string> {
     const dep = buildDeployment(sfs, this.factoryConfig)
     const name = wfcDeploymentName(sfs)
-    try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: this.factoryConfig.hostNamespace,
-        body: dep,
-      })
-      console.log(`${LOG} Created Deployment "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        throw err
-      }
-      await replaceWithConflictRetry({
-        description: `Deployment "${name}"`,
-        logPrefix: LOG,
-        body: dep,
-        read: () =>
-          this.appsApi.readNamespacedDeployment({
-            namespace: this.factoryConfig.hostNamespace,
-            name,
-          }),
-        replace: body =>
-          this.appsApi.replaceNamespacedDeployment({
-            namespace: this.factoryConfig.hostNamespace,
-            name,
-            body,
-          }),
-      })
-    }
+    const namespace = this.factoryConfig.hostNamespace
+    await ensureResource<k8s.V1Deployment>({
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ namespace, name })
+        ),
+      create: async () => {
+        await observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace, body: dep })
+        )
+        hccLogger.info('SharedFileSystem Deployment created', { scope: LOG, name, namespace })
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `Deployment "${name}"`,
+          logPrefix: LOG,
+          body: dep,
+          read,
+          // The public auth-key reconciler may use `kubectl rollout restart` on
+          // this HCC-owned Deployment. Preserve the pod-template restart marker
+          // when the periodic SFS reconcile replaces the raw desired manifest;
+          // otherwise HCC would immediately create a second Recreate outage and
+          // defeat the reconciler's one-rollout contract.
+          mergeExisting: preserveDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
+          replace: body => this.appsApi.replaceNamespacedDeployment({ namespace, name, body }),
+        }),
+    })
     return name
   }
 
@@ -371,20 +395,31 @@ export class SharedFileSystemReconciler {
   private async ensureService(sfs: SharedFileSystemCRD): Promise<string> {
     const svc = buildService(sfs, this.factoryConfig)
     const name = wfcServiceName(sfs)
-    try {
-      await this.coreApi.createNamespacedService({
-        namespace: this.factoryConfig.hostNamespace,
-        body: svc,
-      })
-      console.log(`${LOG} Created Service "${name}"`)
-    } catch (err) {
-      if (getErrorCode(err) !== 409) {
-        throw err
-      }
-      // Don't replace Service — clusterIP is immutable and the spec we build
-      // is otherwise stable. Log and continue.
-      console.log(`${LOG} Service "${name}" already exists`)
-    }
+    const namespace = this.factoryConfig.hostNamespace
+    await ensureResource<k8s.V1Service>({
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ namespace, name })
+        ),
+      create: async () => {
+        await observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({ namespace, body: svc })
+        )
+        hccLogger.info('SharedFileSystem Service created', { scope: LOG, name, namespace })
+      },
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      converge: async read => {
+        // Preserve the Service, including immutable clusterIP. A POST409 must
+        // reread: disappearance is benign, but other read failures propagate.
+        try {
+          await read()
+        } catch (err) {
+          if (err == null || getErrorCode(err) !== 404) throw err
+          return
+        }
+        hccLogger.info('SharedFileSystem Service already exists', { scope: LOG, name, namespace })
+      },
+    })
     return name
   }
 

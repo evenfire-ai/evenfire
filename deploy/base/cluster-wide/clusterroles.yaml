@@ -42,6 +42,10 @@ rules:
   - contexts
   - communicationchannels
   - mcpservers
+  # llmhooks: the install-hook saga creates/deletes LlmHook CRs in the llm-hooks
+  # namespace, and the admin resources router lists/gets/deletes them (guardrails
+  # spec §8.5). Secret access in llm-hooks is a namespace Role (deploy/base/llm-hooks).
+  - llmhooks
   verbs:
   - get
   - list

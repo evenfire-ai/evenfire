@@ -12,11 +12,11 @@ function makeZai(model?: string) {
 }
 
 describe('ZaiProvider (OpenAICompatibleProvider)', () => {
-  it('inherits classifyError from OpenAIProvider', () => {
+  it('delegates a plain rate-limit to the shared HTTP classifier', () => {
     const zai = makeZai('zai-model')
     expect(zai).toBeInstanceOf(OpenAIProvider)
     const result = zai.classifyError({ status: 429, message: 'rate limited' })
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       code: LlmErrorCode.RateLimited,
       retryable: true,
       message: 'rate limited',

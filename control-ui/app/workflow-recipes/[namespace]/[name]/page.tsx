@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter, useSearchParams } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { AuthGate } from '@components/AuthGate'
 import { BodyLoadingSkeleton } from '@components/BodyLoadingSkeleton'
 import { useConfirmDialog } from '@components/ConfirmDialog'
@@ -9,10 +10,12 @@ import { CreateFlowSkeleton } from '@components/CreateFlowSkeleton'
 import { CreatePageHeader } from '@components/CreatePageHeader'
 import { DashboardLayout } from '@components/DashboardLayout'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { KebabMenu } from '@components/KebabMenu'
 import { RecipeEditor } from '@components/RecipeEditor'
 import { RecipeIntegrationsPanel } from '@components/RecipeIntegrationsPanel'
 import { RecipeSecretsPanel } from '@components/RecipeSecretsPanel'
 import { GrantsReadonlyPanel, RecipeStatusContent } from '@components/RecipeStatusContent'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SectionLoadingSkeleton } from '@components/SectionLoadingSkeleton'
 import { IconWorkflow } from '@components/Sidebar/icons'
 import { SkeletonTableRows } from '@components/SkeletonTableRows'
@@ -61,7 +64,7 @@ const RUNS_COLUMNS: TableHeaderColumn[] = [
   { key: 'startedAt', label: 'Started' },
   { key: 'completedAt', label: 'Completed' },
   { key: 'triggerer', label: 'Triggered by' },
-  { key: 'arrow', label: '' },
+  { key: 'actions', align: 'right', ariaLabel: 'Actions' },
 ]
 
 const STATUS_POLL_MS = 5000
@@ -233,66 +236,6 @@ function chipStyle(tone: 'ok' | 'warn' | 'error' | 'info'): React.CSSProperties 
         borderColor: 'var(--cu-border-subtle)',
       }
   }
-}
-
-type KebabItem = {
-  label: string
-  onClick: () => void
-  danger?: boolean
-  disabled?: boolean
-}
-
-function KebabMenu({ items, ariaLabel }: { items: KebabItem[]; ariaLabel: string }) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    function handleDocClick(e: MouseEvent) {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false)
-    }
-    function handleEsc(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', handleDocClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleDocClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [open])
-  return (
-    <div ref={ref} className="cu-kebab">
-      <button
-        type="button"
-        aria-label={ariaLabel}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className="cu-btn cu-btn--ghost cu-btn--sm cu-kebab__trigger"
-        onClick={() => setOpen(v => !v)}
-      >
-        ⋯
-      </button>
-      {open ? (
-        <div role="menu" className="cu-kebab__menu">
-          {items.map(item => (
-            <button
-              key={item.label}
-              type="button"
-              role="menuitem"
-              disabled={item.disabled}
-              className={`cu-kebab__item${item.danger ? ' cu-kebab__item--danger' : ''}`}
-              onClick={() => {
-                setOpen(false)
-                item.onClick()
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
 }
 
 export const dynamic = 'force-dynamic'
@@ -811,23 +754,23 @@ function WorkflowRecipeDetailContent() {
                 </div>
               ) : null}
               {loadingRuns && visibleRuns.length === 0 ? (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <TableViewport className="cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={RUNS_COLUMNS} />
                     </thead>
                     <tbody>
                       <SkeletonTableRows columns={RUNS_COLUMNS.length} rows={3} />
                     </tbody>
-                  </table>
-                </div>
+                  </DataTable>
+                </TableViewport>
               ) : visibleRuns.length === 0 ? (
                 <div className="cu-empty">
                   No runs yet. Click <strong>Run…</strong> to trigger one.
                 </div>
               ) : (
-                <div className="cu-table-wrap">
-                  <table className="cu-table">
+                <TableViewport className="cu-table-wrap">
+                  <DataTable className="eft-table cu-table">
                     <thead>
                       <TableHeaderRow columns={RUNS_COLUMNS} />
                     </thead>
@@ -899,15 +842,31 @@ function WorkflowRecipeDetailContent() {
                             <td style={{ padding: '10px' }}>{formatTime(run.startedAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTime(run.completedAt)}</td>
                             <td style={{ padding: '10px' }}>{formatTriggerer(run)}</td>
-                            <td style={{ padding: '10px', textAlign: 'right' }} aria-hidden>
-                              ›
+                            <td
+                              className="cu-table__cell-actions"
+                              onClick={event => event.stopPropagation()}
+                              onKeyDown={event => event.stopPropagation()}
+                            >
+                              {canOpenRun ? (
+                                <RowActionsMenu
+                                  ariaLabel={`Actions for run ${shortId}`}
+                                  horizontalTrigger
+                                  actions={[
+                                    {
+                                      key: 'view',
+                                      label: 'View details',
+                                      onClick: openRun,
+                                    },
+                                  ]}
+                                />
+                              ) : null}
                             </td>
                           </tr>
                         )
                       })}
                     </tbody>
-                  </table>
-                </div>
+                  </DataTable>
+                </TableViewport>
               )}
             </div>
           </>
@@ -953,7 +912,7 @@ function WorkloadsTab({
               the current runtime pod state.
             </>
           }
-          actions={
+          refreshAction={
             <button
               type="button"
               className="cu-btn cu-btn--icon cu-btn--toolbar"
@@ -971,21 +930,21 @@ function WorkloadsTab({
           </div>
         ) : null}
         {loading && rowIds.length === 0 ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={WORKLOAD_COLUMNS} />
               </thead>
               <tbody>
                 <SkeletonTableRows columns={WORKLOAD_COLUMNS.length} rows={3} />
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+          </TableViewport>
         ) : rowIds.length === 0 ? (
           <div className="cu-empty">This plugin has no workloads or pods yet.</div>
         ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table">
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table">
               <thead>
                 <TableHeaderRow columns={WORKLOAD_COLUMNS} />
               </thead>
@@ -1063,8 +1022,8 @@ function WorkloadsTab({
                   })
                 })}
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+          </TableViewport>
         )}
       </div>
     </>
@@ -1092,8 +1051,8 @@ function ConditionsTab({ status }: { status: Record<string, unknown> | null }) {
           No conditions reported. Everything that the controller checks is healthy.
         </div>
       ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table">
+        <TableViewport className="cu-table-wrap">
+          <DataTable className="eft-table cu-table">
             <thead>
               <TableHeaderRow columns={CONDITION_COLUMNS} />
             </thead>
@@ -1128,8 +1087,8 @@ function ConditionsTab({ status }: { status: Record<string, unknown> | null }) {
                 )
               })}
             </tbody>
-          </table>
-        </div>
+          </DataTable>
+        </TableViewport>
       )}
     </div>
   )

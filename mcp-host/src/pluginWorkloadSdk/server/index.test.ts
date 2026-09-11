@@ -128,4 +128,48 @@ describe('PluginWorkloadSdk server usage attribution', () => {
     expect(JSON.stringify(event)).not.toContain('credentialTicket')
     expect(JSON.stringify(event)).not.toContain('secret-')
   })
+
+  it('does not emit reporter usage for Codex subscription', () => {
+    expect(
+      buildPromptBridgeUsageEvent({
+        binding: {
+          hostRef: 'sandbox-recipes/risk-review',
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'risk-review',
+        },
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        inputTokens: 10,
+        outputTokens: 5,
+        callerRef: 'worker',
+        metadata: {
+          workflowExecutionId: `${WORKFLOW_RUN_ID}:risk-review:2026-07-12T12:00:00.000Z`,
+          workflowRunId: WORKFLOW_RUN_ID,
+          llmSecretName: 'chatllm-api-keys',
+        },
+      })
+    ).toBeNull()
+    expect(
+      buildPromptBridgeUsageEvent({
+        binding: {
+          hostRef: 'plugin-workload-sdk/sandbox-app',
+          recipeNamespace: 'sandbox-apps',
+          recipeName: 'prompt-notify',
+        },
+        runtimeMode: 'sdk-only',
+        invocationId: '00000000-0000-4000-8000-000000000100',
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        inputTokens: 10,
+        outputTokens: 5,
+        callerRef: 'backend-worker',
+        promptBridgeMetadata: {
+          targetRef: 'codex-primary',
+          credentialSlot: 'codex-oauth',
+          fallbackUsed: false,
+          attemptCount: 1,
+        },
+      })
+    ).toBeNull()
+  })
 })

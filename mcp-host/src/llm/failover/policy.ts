@@ -80,5 +80,10 @@ export function parseLlmPolicy(raw: unknown): LlmPolicy | null {
   if (fallbacks.length === 0) return null
 
   const { cooldownSeconds, triggerOn } = parseCooldownAndTriggers(rec)
-  return { cooldownSeconds, triggerOn, fallbacks }
+  return {
+    cooldownSeconds,
+    triggerOn,
+    fallbacks,
+    ...(rec.budgetDeniedFailover === true ? { budgetDeniedFailover: true } : {}),
+  }
 }

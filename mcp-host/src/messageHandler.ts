@@ -45,6 +45,36 @@ export interface PendingTaskEntry {
     requestId: string
     userId: string
     notification: string
+    // U5 — connect_required discriminator carried from the tool:approval_needed
+    // event so a REST poll rebuilds the connect suspension. Absent reason ⇒
+    // generic approval (back-compat).
+    reason?: 'approval_required' | 'connect_required'
+    mcpServerName?: string
+  }
+}
+
+/**
+ * U5 — pick the connect_required discriminator off a `tool:approval_needed`
+ * event payload for the polling `approval` projections (both the inline
+ * MessageResponse and the stored PendingTaskEntry). Returns an empty object for
+ * a generic approval so the legacy wire shape stays byte-identical
+ * (back-compat). Pure field propagation — the decision already happened
+ * upstream (buildConnectRequiredApproval); nothing is inferred here.
+ */
+function connectApprovalFields(data: Record<string, unknown>): {
+  reason?: 'approval_required' | 'connect_required'
+  mcpServerName?: string
+} {
+  const reason = data.reason as 'approval_required' | 'connect_required' | undefined
+  const isConnect = reason === 'connect_required'
+  return {
+    ...(reason ? { reason } : {}),
+    // mcpServerName rides ONLY connect_required, matching the SSE producer.
+    // Runtime typeof guard: never pass a non-string through the blind cast even if
+    // an upstream contract ever regressed.
+    ...(isConnect && typeof data.mcpServerName === 'string'
+      ? { mcpServerName: data.mcpServerName }
+      : {}),
   }
 }
 
@@ -208,6 +238,7 @@ export class IncomingMessageHandler {
             requestId: data.requestId as string,
             userId: data.userId as string,
             notification: data.notification as string,
+            ...connectApprovalFields(data),
           },
         })
       }
@@ -413,6 +444,7 @@ export class IncomingMessageHandler {
             requestId: data.requestId as string,
             userId: data.userId as string,
             notification: data.notification as string,
+            ...connectApprovalFields(data),
           },
           model: this.deps.getModel(),
         })
@@ -433,6 +465,7 @@ export class IncomingMessageHandler {
             requestId: data.requestId as string,
             userId: data.userId as string,
             notification: data.notification as string,
+            ...connectApprovalFields(data),
           },
         })
       }

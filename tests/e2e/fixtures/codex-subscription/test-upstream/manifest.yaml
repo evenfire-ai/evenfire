@@ -1,0 +1,89 @@
+# Test-only Codex upstream. Certificates and tokens are created at runtime by
+# scripts/e2e/e2e-codex-subscription-runtime.sh and must never be committed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${UPSTREAM_NAME}
+  namespace: control-plane
+  labels:
+    app: ${UPSTREAM_NAME}
+    clerum.io/test-only: 'true'
+    e2e.clerum.io/suite: codex-subscription
+    e2e.clerum.io/run: '${RUN_ID}'
+spec:
+  type: ClusterIP
+  selector:
+    app: ${UPSTREAM_NAME}
+  ports:
+    - name: https
+      port: 443
+      targetPort: 8443
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${UPSTREAM_NAME}
+  namespace: control-plane
+  labels:
+    app: ${UPSTREAM_NAME}
+    clerum.io/test-only: 'true'
+    e2e.clerum.io/suite: codex-subscription
+    e2e.clerum.io/run: '${RUN_ID}'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${UPSTREAM_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${UPSTREAM_NAME}
+        clerum.io/test-only: 'true'
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: upstream
+          image: node:24.16.0-alpine
+          command: ['node', '/fixture/server.mjs']
+          env:
+            - name: CODEX_TEST_UPSTREAM_PORT
+              value: '8443'
+            - name: CODEX_TEST_UPSTREAM_CERT_PATH
+              value: /certs/tls.crt
+            - name: CODEX_TEST_UPSTREAM_KEY_PATH
+              value: /certs/tls.key
+          ports:
+            - containerPort: 8443
+              name: https
+          volumeMounts:
+            - name: fixture
+              mountPath: /fixture
+              readOnly: true
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 1000
+            capabilities:
+              drop: ['ALL']
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: fixture
+          configMap:
+            name: ${UPSTREAM_NAME}-source
+        - name: certs
+          secret:
+            secretName: ${UPSTREAM_NAME}-tls

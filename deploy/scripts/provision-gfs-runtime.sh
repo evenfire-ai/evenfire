@@ -102,7 +102,7 @@ context_allowed_via_env() {
 }
 
 case "$CONTEXT" in
-  *example-dev*|minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
+  minikube|clerum-test|clerum-codex-*|clerum-detached-*|clerum-feat-*|clerum-pr-*)
     ;;
   *)
     # A non-dev context passes only if explicitly named in ALLOWED_CONTEXTS or
@@ -189,7 +189,12 @@ finalize_credentials_after_overlay() {
   wait_for_gfsc_secret_references
 
   log "Finalizing staged GFS credentials after the overlay"
-  CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
+  # This entrypoint has already validated the target context (including the
+  # explicit --allow-prod path). Carry that decision into the credential
+  # mutator as an exact, single-context remote authorization instead of
+  # relying on a gke_* name prefix.
+  GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" \
+    CONTEXT="$CONTEXT" bash "$ROOT/deploy/scripts/reconcile-gfs-deploy-credentials.sh"
 
   log "Waiting for the exact GFSC writer and reader rollouts"
   kctl -n gfs rollout status deployment/gfsc-writer --timeout=240s
@@ -209,7 +214,11 @@ if [ "$SKIP_SYNC" = "1" ]; then
   log "Skipping runtime auth configuration sync"
 else
   log "Syncing runtime auth configuration"
-  bash scripts/minikube/sync-auth-key.sh --context "$CONTEXT"
+  # This entrypoint is the explicit non-local boundary. Carry the same exact
+  # context authorization into the auth-key mutator; it must not infer remote
+  # ownership from a failed local Minikube probe.
+  GFS_REMOTE_RECONCILE_AUTHORIZED=true ALLOWED_CONTEXTS="$CONTEXT" \
+    bash "$ROOT/scripts/minikube/sync-auth-key.sh" --context "$CONTEXT" --require-gfs
 fi
 
 if [ "$SKIP_INSTANCES" = "1" ]; then

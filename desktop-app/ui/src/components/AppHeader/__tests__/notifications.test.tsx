@@ -26,6 +26,16 @@ vi.mock('@hooks/domain/useMcpServersDataController', () => ({
   useMcpServersDataController: () => ({ globalMcpServers: [], mcpServersByAgent: {} }),
 }))
 
+vi.mock('@hooks/domain/useSearchPluginsAppsController', () => ({
+  useSearchPluginsAppsController: () => ({
+    plugins: [],
+    apps: [],
+    loading: false,
+    error: null,
+    ensureLoaded: vi.fn(async () => undefined),
+  }),
+}))
+
 vi.mock('@hooks/domain/useTeamsDataController', () => ({
   useTeamsDataController: () => ({
     teams: [],
@@ -42,8 +52,6 @@ vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     navItem: 'apps',
     handleNavSelect: vi.fn(),
-    handleOpenContextDetails: vi.fn(),
-    handleOpenTeamDetails: vi.fn(),
   }),
 }))
 
@@ -73,6 +81,7 @@ describe('AppHeader notification tray presentation', () => {
     cleanup()
     notificationMocks.notifications.length = 0
     vi.clearAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('opens a notification when its card surface is clicked', () => {
@@ -94,6 +103,36 @@ describe('AppHeader notification tray presentation', () => {
 
     expect(notificationMocks.open).toHaveBeenCalledWith(notification)
     expect(screen.queryByRole('dialog', { name: 'Notifications and approvals' })).toBeNull()
+  })
+
+  it('opens through the controlled command request and preserves tray lifecycle', async () => {
+    const { rerender } = render(<AppHeader notificationOpenRequestId={0} />)
+
+    rerender(<AppHeader notificationOpenRequestId={1} />)
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    await waitFor(() => expect(notificationMocks.refresh).toHaveBeenCalledOnce())
+  })
+
+  it('does not show the empty notification state before the open refresh settles', async () => {
+    let resolveRefresh: (() => void) | undefined
+    notificationMocks.refresh.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        resolveRefresh = resolve
+      })
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    expect(screen.queryByText('No notifications or pending approvals right now.')).toBeNull()
+
+    resolveRefresh?.()
+
+    await waitFor(() => {
+      expect(screen.getByText('No notifications or pending approvals right now.')).toBeTruthy()
+    })
   })
 
   it('opens a clickable notification card with the keyboard', () => {
@@ -200,6 +239,18 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(true)
   })
 
+  it('aligns the embedded-app drawer to the measured embed slot edge', () => {
+    render(
+      <AppHeader notificationTrayMode="drawer" notificationTrayReady notificationTrayLeft={416} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const tray = screen.getByRole('dialog', { name: 'Notifications and approvals' })
+    expect(tray.classList.contains('notification-menu--embed-aligned')).toBe(true)
+    expect(tray.style.getPropertyValue('--notification-drawer-left')).toBe('416px')
+  })
+
   it('keeps the existing floating overlay outside embedded apps', async () => {
     const onShellOverlayOpenChange = vi.fn()
     render(<AppHeader onShellOverlayOpenChange={onShellOverlayOpenChange} />)
@@ -214,5 +265,39 @@ describe('AppHeader notification tray presentation', () => {
         .getByRole('dialog', { name: 'Notifications and approvals' })
         .classList.contains('notification-menu--app-drawer')
     ).toBe(false)
+  })
+
+  it('uses the shared search label at constrained widths', () => {
+    vi.stubGlobal('innerWidth', 1200)
+
+    render(<AppHeader />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
+  })
+
+  it('uses the shared search label above the constrained-width breakpoint', () => {
+    vi.stubGlobal('innerWidth', 1400)
+
+    render(<AppHeader />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
+  })
+
+  it('opens and focuses the existing global search for a command request', () => {
+    const { rerender } = render(<AppHeader searchFocusRequestId={0} />)
+    const other = document.createElement('button')
+    document.body.append(other)
+    other.focus()
+
+    rerender(<AppHeader searchFocusRequestId={1} />)
+
+    const search = screen.getByRole('textbox', { name: 'Search' })
+    expect(document.activeElement).toBe(search)
+    expect(search.getAttribute('aria-label')).toBe('Search')
+    other.remove()
   })
 })

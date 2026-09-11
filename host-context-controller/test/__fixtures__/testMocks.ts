@@ -93,6 +93,9 @@ function hostNameFromResourceName(name = ''): string {
   if (name.startsWith('mcp-host-') && name.endsWith('-egress-gfs')) {
     return name.replace(/^mcp-host-/, '').replace(/-egress-gfs$/, '')
   }
+  if (name.startsWith('mcp-host-') && name.endsWith('-egress-codex-proxy')) {
+    return name.replace(/^mcp-host-/, '').replace(/-egress-codex-proxy$/, '')
+  }
   if (name.startsWith('rpc-proxy-') && name.endsWith('-egress-mcp-host')) {
     return name.replace(/^rpc-proxy-/, '').replace(/-egress-mcp-host$/, '')
   }
@@ -128,11 +131,18 @@ function hccOwnedLabels(name = ''): Record<string, string> {
 export function createMockAppsApi(): MockAppsApi {
   return {
     createNamespacedDeployment: vi.fn().mockResolvedValue({}),
-    readNamespacedDeployment: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        status: { readyReplicas: 1 },
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedDeployment: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          status: { readyReplicas: 1 },
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     replaceNamespacedDeployment: vi.fn().mockResolvedValue({}),
     patchNamespacedDeployment: vi.fn().mockResolvedValue({}),
@@ -144,11 +154,18 @@ export function createMockAppsApi(): MockAppsApi {
 export function createMockCoreApi(): MockCoreApi {
   return {
     createNamespacedService: vi.fn().mockResolvedValue({}),
-    readNamespacedService: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-        spec: { clusterIP: '10.0.0.1' },
-      } as MockK8sResource)
+    readNamespacedService: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+          spec: { clusterIP: '10.0.0.1' },
+        } as MockK8sResource)
     ),
     listNamespacedService: vi.fn().mockResolvedValue({ items: [] }),
     replaceNamespacedService: vi.fn().mockResolvedValue({}),
@@ -167,10 +184,17 @@ export function createMockCoreApi(): MockCoreApi {
     patchNamespacedSecret: vi.fn().mockResolvedValue({}),
     deleteNamespacedSecret: vi.fn().mockResolvedValue({}),
     createNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
-    readNamespacedPersistentVolumeClaim: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedPersistentVolumeClaim: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     replaceNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
     deleteNamespacedPersistentVolumeClaim: vi.fn().mockResolvedValue({}),
@@ -182,10 +206,17 @@ export function createMockCoreApi(): MockCoreApi {
     deleteNamespacedConfigMap: vi.fn().mockResolvedValue({}),
     // Per-Host ServiceAccount (lives on CoreV1Api)
     createNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
-    readNamespacedServiceAccount: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedServiceAccount: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     deleteNamespacedServiceAccount: vi.fn().mockResolvedValue({}),
     // #827 partial-leftover discovery lists these owned kinds by ownership label.
@@ -201,15 +232,23 @@ export function createMockCustomApi(): MockCustomApi {
     patchNamespacedCustomObject: vi.fn().mockResolvedValue({}),
     patchNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({}),
     createNamespacedCustomObject: vi.fn().mockResolvedValue({}),
-    getNamespacedCustomObject: vi.fn().mockResolvedValue({
-      metadata: { name: 'stateless-host', namespace: 'mcp-host' },
-      spec: {
-        host: 'stateless-host',
-        contextRef: 'context-a',
-        secretRef: 'host-secret',
-        lifecycle: { stateless: true },
-      },
-      status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+    getNamespacedCustomObject: vi.fn(({ name }: { name?: string } = {}) => {
+      const hostName = name ?? 'stateless-host'
+      return Promise.resolve({
+        metadata: {
+          name: hostName,
+          namespace: 'mcp-host',
+          uid: `${hostName}-uid`,
+          resourceVersion: '42',
+        },
+        spec: {
+          host: hostName,
+          contextRef: 'context-a',
+          secretRef: 'host-secret',
+          lifecycle: { stateless: true },
+        },
+        status: { lifecycle: { state: 'suspended', wakeHandledGeneration: 0 } },
+      })
     }),
     getNamespacedCustomObjectStatus: vi.fn().mockResolvedValue({ status: { conditions: [] } }),
     replaceNamespacedCustomObject: vi.fn().mockResolvedValue({}),
@@ -220,9 +259,18 @@ export function createMockCustomApi(): MockCustomApi {
 export function createMockNetworkingApi(): MockNetworkingApi {
   return {
     createNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
+    // name + uid + resourceVersion because that is what a real apiserver read
+    // returns, and the NetworkPolicy safety mutations (safetyPolicyIdentity)
+    // refuse to act on a partial identity — a delete keyed on name alone could
+    // hit a policy recreated between the read and the write.
     readNamespacedNetworkPolicy: vi.fn(({ name }: { name?: string } = {}) =>
       Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
+        metadata: {
+          name,
+          uid: `uid-${name ?? 'unnamed'}`,
+          resourceVersion: '1',
+          labels: hccOwnedLabels(name),
+        },
       } as MockK8sResource)
     ),
     replaceNamespacedNetworkPolicy: vi.fn().mockResolvedValue({}),
@@ -234,18 +282,31 @@ export function createMockNetworkingApi(): MockNetworkingApi {
 export function createMockRbacApi(): MockRbacApi {
   return {
     createNamespacedRole: vi.fn().mockResolvedValue({}),
-    readNamespacedRole: vi.fn(({ name }: { name?: string } = {}) =>
+    readNamespacedRole: vi.fn(({ name, namespace }: { name?: string; namespace?: string } = {}) =>
       Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
+        metadata: {
+          name,
+          namespace,
+          uid: `uid-${name}`,
+          resourceVersion: '1',
+          labels: hccOwnedLabels(name),
+        },
       } as MockK8sResource)
     ),
     replaceNamespacedRole: vi.fn().mockResolvedValue({}),
     deleteNamespacedRole: vi.fn().mockResolvedValue({}),
     createNamespacedRoleBinding: vi.fn().mockResolvedValue({}),
-    readNamespacedRoleBinding: vi.fn(({ name }: { name?: string } = {}) =>
-      Promise.resolve({
-        metadata: { resourceVersion: '1', labels: hccOwnedLabels(name) },
-      } as MockK8sResource)
+    readNamespacedRoleBinding: vi.fn(
+      ({ name, namespace }: { name?: string; namespace?: string } = {}) =>
+        Promise.resolve({
+          metadata: {
+            name,
+            namespace,
+            uid: `uid-${name}`,
+            resourceVersion: '1',
+            labels: hccOwnedLabels(name),
+          },
+        } as MockK8sResource)
     ),
     deleteNamespacedRoleBinding: vi.fn().mockResolvedValue({}),
     // #827 partial-leftover discovery lists RBAC by ownership label.
@@ -272,4 +333,10 @@ export function asNetworkingApi(mock: MockNetworkingApi): k8s.NetworkingV1Api {
 
 export function asRbacApi(mock: MockRbacApi): k8s.RbacAuthorizationV1Api {
   return mock as unknown as k8s.RbacAuthorizationV1Api
+}
+
+/** Constructor-only KubeConfig: every makeApiClient returns an empty stub. */
+export function makeStubKc(): k8s.KubeConfig {
+  const stub = new Proxy({}, { get: () => vi.fn() })
+  return { makeApiClient: () => stub } as unknown as k8s.KubeConfig
 }

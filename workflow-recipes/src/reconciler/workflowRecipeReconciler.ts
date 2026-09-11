@@ -14,9 +14,16 @@
  * 11. Handle delete (reverse dependency order, skip PVCs)
  */
 import * as k8s from '@kubernetes/client-node'
-import { STATE_ANNOTATION } from '@clerum/network-policy-core'
+import {
+  type EgressEntry,
+  RESOLVED_AT_ANNOTATION,
+  STATE_ANNOTATION,
+  TARGETS_ANNOTATION,
+  serializeState,
+} from '@clerum/network-policy-core'
 import { OperatorConfig, loadConfig } from '../config'
 import { getPool } from '../db'
+import { createLogger } from '../observability/logger'
 import {
   ConfigMapResourceDef,
   CronJobDef,
@@ -31,6 +38,7 @@ import {
   StatefulSetDef,
   StatusCondition,
   WorkflowRecipeCRD,
+  WorkflowRecipeSpec,
   WorkflowRecipeStatus,
   WorkloadDef,
 } from '../types'
@@ -41,6 +49,7 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
+import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -55,7 +64,11 @@ import {
 import { evaluateComputedValues } from './computedValuesEvaluator'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from './crdConstants'
 import { sort as sortDependencies } from './dependencyGraph'
-import { type AccumulateOutput, accumulateExternalEgress } from './externalEgressAccumulator'
+import {
+  type AccumulateOutput,
+  accumulateExternalEgress,
+  contractExternalEgress,
+} from './externalEgressAccumulator'
 import {
   type FqdnLookup,
   defaultFqdnLookup,
@@ -86,11 +99,24 @@ import {
   waitForExternalEgressReady,
   waitForNetworkReady,
 } from './mcpDelegation'
+import {
+  effectivePolicyTypes,
+  intersectNetworkPolicyRules,
+  networkPolicySpecSignature,
+} from './networkPolicyContraction'
+import {
+  type NetworkPolicyFamily,
+  buildNetworkPolicyReplacement,
+  classifyOwnerlessNetworkPolicyOwnership,
+  decideNetworkPolicyConvergence,
+  networkPolicyMetadataMatchesDesired,
+} from './networkPolicyConvergence'
 import { issueOAuthBrokerToken } from './oauthBrokerTokenIssuerClient'
 import {
   PLUGIN_WORKLOAD_SDK_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_POLICY_PENDING_CONDITION_TYPE,
   PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE,
+  type PluginWorkloadSdkStatusProjection,
   buildPluginWorkloadSdkStatus,
   validatePluginWorkloadSdkSpec,
 } from './pluginWorkloadSdkValidator'
@@ -123,6 +149,36 @@ const PARENT_RECIPE_LABEL = 'clerum.io/parent-recipe'
 const WORKFLOW_RUN_ID_LABEL = 'clerum.io/workflow-run-id'
 const WORKFLOW_ACTOR_ID_LABEL = 'clerum.io/workflow-actor-id'
 const WORKFLOW_ACTOR_TYPE_LABEL = 'clerum.io/workflow-actor-type'
+export const TRANSPORT_NETWORK_CONDITION_TYPE = 'TransportExternalEgressReady'
+const TRANSPORT_NETWORK_CONDITION_TYPES = new Set([TRANSPORT_NETWORK_CONDITION_TYPE])
+
+export function hasPendingTransportNetworkReadiness(recipe: WorkflowRecipeCRD): boolean {
+  return (
+    recipe.status?.conditions?.some(
+      condition =>
+        condition.type === TRANSPORT_NETWORK_CONDITION_TYPE && condition.status !== 'True'
+    ) ?? false
+  )
+}
+
+function pendingTransportNetworkConditions(
+  recipe: WorkflowRecipeCRD,
+  message: string
+): StatusCondition[] {
+  const previous = recipe.status?.conditions?.find(
+    condition => condition.type === TRANSPORT_NETWORK_CONDITION_TYPE
+  )
+  return [
+    {
+      type: TRANSPORT_NETWORK_CONDITION_TYPE,
+      status: 'False',
+      reason: 'ExternalEgressPending',
+      message,
+      lastTransitionTime:
+        previous?.status === 'False' ? previous.lastTransitionTime : new Date().toISOString(),
+    },
+  ]
+}
 
 function externalEgressReadinessError(
   recipeName: string,
@@ -130,11 +186,13 @@ function externalEgressReadinessError(
 ): Error {
   const pending = result.pending.map(name => `${name}: pending`)
   const failed = result.failed.map(({ name, message }) => `${name}: ${message}`)
-  return new Error(
+  const message =
     `External egress policy readiness not achieved for WorkflowRecipe "${recipeName}". ` +
-      `${[...pending, ...failed].join('; ')}. ` +
-      `External egress bindings are not enforceable until HCC reports ExternalEgressReady=True.`
-  )
+    `${[...pending, ...failed].join('; ')}. ` +
+    `External egress bindings are not enforceable until HCC reports ExternalEgressReady=True.`
+  return result.failed.length === 0
+    ? new TransportNetworkReadinessPendingError(message)
+    : new Error(message)
 }
 
 function clusterNetworkPolicyEnforcementError(recipeName: string): Error {
@@ -158,6 +216,32 @@ function declaresInheritedParentResources(recipe: WorkflowRecipeCRD): boolean {
         ownerRef.controller === true
     )
   )
+}
+
+/**
+ * Order `a.b.c.d/32` strings by address, not by lexeme (issue #299).
+ *
+ * A plain string sort puts "140.82.112.4/32" before "93.184.216.10/32" because
+ * it compares '1' to '9' — the opposite of the numeric order, and confusing in
+ * a record meant to be read. The accumulator already emits its entries in a
+ * stable key order, so this is about the record's OWN readable contract rather
+ * than about rescuing an unordered input.
+ *
+ * INVARIANT IT RELIES ON: input is always a valid IPv4 `a.b.c.d/32`. That holds
+ * upstream — `resolveExternalEgress` emits `/32` only from `result.ipv4`
+ * (AAAA is resolved and dropped), and `parseState` admits an entry only if
+ * `isValidIpv4`. A non-numeric octet would yield NaN and an unstable order —
+ * never a throw — so if IPv6 egress is ever added, order silently degrades
+ * here and this comparator is the place to fix.
+ */
+function compareCidrByAddress(a: string, b: string): number {
+  const octets = (cidr: string) => cidr.split('/')[0].split('.').map(Number)
+  const left = octets(a)
+  const right = octets(b)
+  for (let i = 0; i < 4; i += 1) {
+    if (left[i] !== right[i]) return left[i] - right[i]
+  }
+  return 0
 }
 
 function isTerminalWorkflowStatusPhase(phase: unknown): boolean {
@@ -442,6 +526,46 @@ class NetworkPolicyOwnershipConflictError extends Error {
   }
 }
 
+class NetworkPolicyInfraError extends Error {
+  readonly code?: string | number
+
+  constructor(message: string, cause: unknown, code?: string | number) {
+    super(message, { cause })
+    this.name = 'NetworkPolicyInfraError'
+    this.code = code
+  }
+}
+
+interface NetworkPolicyApplyOptions {
+  family: NetworkPolicyFamily
+  existing?: k8s.V1NetworkPolicy | null
+  recipeName?: string
+}
+
+interface NetworkPolicyReadResult {
+  existing: k8s.V1NetworkPolicy | null
+  recoveredFromReadFailure: boolean
+}
+
+/** A fenced mutation lost its snapshot; only a fresh reconciliation may retry. */
+class NetworkPolicyReplanRequiredError extends RetryableReconcileError {
+  override name = 'NetworkPolicyReplanRequiredError'
+}
+
+class TransportNetworkReadinessPendingError extends RetryableReconcileError {
+  override name = 'TransportNetworkReadinessPendingError'
+}
+
+function throwNetworkPolicyMutationError(error: unknown, name: string, namespace: string): never {
+  if (getErrorCode(error) === 409 || getErrorCode(error) === 404) {
+    throw new NetworkPolicyReplanRequiredError(
+      `NetworkPolicy "${name}" in ${namespace} changed during a fenced mutation; a fresh reconciliation is required`,
+      { cause: error }
+    )
+  }
+  throw error
+}
+
 class InternalDependencyReconcileError extends Error {
   constructor(
     message: string,
@@ -501,6 +625,8 @@ export interface ReconcileResult {
    * UI/API-consumable reasons that should not be inferred from free-form messages.
    */
   workloadConditions?: StatusCondition[]
+  /** Undefined preserves admission state; [] clears it only after a full admission check. */
+  transportNetworkConditions?: StatusCondition[]
   /** SDK-only eager-host provider health, kept separate from workflow phase. */
   pluginWorkloadSdkProviderUnavailable?: boolean
   /** SDK host identity is ready, but an operator prompt policy is not active yet. */
@@ -508,6 +634,17 @@ export interface ReconcileResult {
   /** Cleanup completed successfully while the SDK feature flag was off. */
   pluginWorkloadSdkTeardownConfirmed?: boolean
   pluginWorkloadSdkBootstrapProof?: EagerSdkBootstrapProof
+  /**
+   * SDK capability projection (conditions + `status.pluginWorkloadSdk` value)
+   * derived once per reconcile from this result. Populated by the watcher after
+   * `reconcile()` returns (see `projectPluginWorkloadSdk`) so BOTH
+   * `shouldPatchRecipeStatus` (to detect a computed awaiting_policy↔validated
+   * transition that no other diff would surface — issue #375) and `patchStatus`
+   * (to avoid recomputing it) consume the same object. Left undefined on paths
+   * that do not run the SDK lane (e.g. workload-status-only refresh), where the
+   * SDK comparison is intentionally skipped.
+   */
+  pluginWorkloadSdkProjection?: PluginWorkloadSdkStatusProjection
   workflowPhase?: import('../workflow/types').WorkflowPhase
   clearWorkflowExecution?: boolean
   /** When true, the caller should NOT patch the CRD status — the phase hasn't changed. */
@@ -679,6 +816,99 @@ export function egressSignature(policy: k8s.V1NetworkPolicy): string {
   )
 }
 
+function contractionWriteNeeded(
+  existing: k8s.V1NetworkPolicy,
+  desired: k8s.V1NetworkPolicy
+): boolean {
+  if (networkPolicySpecSignature(existing) !== networkPolicySpecSignature(desired)) return true
+  const currentAnnotations = existing.metadata?.annotations ?? {}
+  const desiredAnnotations = desired.metadata?.annotations ?? {}
+  return [STATE_ANNOTATION, TARGETS_ANNOTATION, RESOLVED_AT_ANNOTATION].some(
+    key => currentAnnotations[key] !== desiredAnnotations[key]
+  )
+}
+
+/**
+ * Intersect a desired policy with the rules already enforced by the live
+ * snapshot. Used only by the pre-DNS contraction phase: it may remove rules but
+ * can never add one. Selector/policy-type drift cannot be proven subtractive,
+ * so the caller revokes the policy instead.
+ */
+function subtractiveNetworkPolicy(
+  existing: k8s.V1NetworkPolicy,
+  desired: k8s.V1NetworkPolicy | null
+): k8s.V1NetworkPolicy | null {
+  if (!desired) return null
+  const existingSelector = JSON.stringify(canonicalize(existing.spec?.podSelector ?? {}))
+  const desiredSelector = JSON.stringify(canonicalize(desired.spec?.podSelector ?? {}))
+  const existingTypes = JSON.stringify(effectivePolicyTypes(existing.spec))
+  const desiredTypes = JSON.stringify(effectivePolicyTypes(desired.spec))
+  if (existingSelector !== desiredSelector || existingTypes !== desiredTypes) return null
+
+  const contractedSpec: k8s.V1NetworkPolicySpec = { ...desired.spec! }
+  if (desired.spec?.egress !== undefined) {
+    contractedSpec.egress = intersectNetworkPolicyRules(
+      existing.spec?.egress,
+      desired.spec.egress,
+      'to'
+    )
+  }
+  if (desired.spec?.ingress !== undefined) {
+    contractedSpec.ingress = intersectNetworkPolicyRules(
+      existing.spec?.ingress,
+      desired.spec.ingress,
+      '_from'
+    )
+  }
+  const contracted: k8s.V1NetworkPolicy = { ...desired, spec: contractedSpec }
+
+  // State is authorization provenance for later fail-static rounds. Keep only
+  // entries represented by a retained live ipBlock+port rule so a transient DNS
+  // failure cannot re-add an annotation-only destination that was not enforced.
+  const rawState = contracted.metadata?.annotations?.[STATE_ANNOTATION]
+  if (rawState) {
+    const livePairs = new Set<string>()
+    for (const rule of contractedSpec.egress ?? []) {
+      for (const peer of rule.to ?? []) {
+        const cidr = peer.ipBlock?.cidr
+        if (!cidr?.endsWith('/32')) continue
+        for (const port of rule.ports ?? []) {
+          livePairs.add(
+            `${cidr.slice(0, -3)}\u0000${String(port.port)}\u0000${port.protocol ?? 'TCP'}`
+          )
+        }
+      }
+    }
+    const entries = (JSON.parse(rawState) as EgressEntry[]).filter(entry =>
+      livePairs.has(`${entry.ip}\u0000${entry.port}\u0000${entry.protocol}`)
+    )
+    const priorResolvedAt = contracted.metadata?.annotations?.[RESOLVED_AT_ANNOTATION]
+    contracted.metadata = {
+      ...(contracted.metadata ?? {}),
+      annotations: {
+        ...(contracted.metadata?.annotations ?? {}),
+        ...serializeState({ entries }),
+        ...(priorResolvedAt ? { [RESOLVED_AT_ANNOTATION]: priorResolvedAt } : {}),
+      },
+    }
+  }
+  return contracted
+}
+
+interface WorkloadEgressContractionPlan {
+  plans: Array<{
+    workload: WorkloadDef
+    namespace: string
+    policyName: string
+    externalDeclared: Array<{ fqdn: string; port: number }>
+  }>
+  ingressSourcesByTarget: Map<string, rb.WorkloadIngressSource[]>
+}
+
+interface RecipeEgressContractionPlan {
+  workload: WorkloadEgressContractionPlan
+}
+
 export class WorkflowRecipeReconciler {
   private appsApi: k8s.AppsV1Api
   private batchApi: k8s.BatchV1Api
@@ -755,9 +985,11 @@ export class WorkflowRecipeReconciler {
     if (controlApiPem) {
       const { initializeControlApiPublicKey } = await import('../workflow/restEndpoints')
       await initializeControlApiPublicKey(controlApiPem)
-      console.log('[WR-Reconciler] control-api JWT public key loaded — admin delegation enabled')
+      createLogger('wrc', 'workflow-recipes').info(
+        '[WR-Reconciler] control-api JWT public key loaded — admin delegation enabled'
+      )
     } else {
-      console.warn(
+      createLogger('wrc', 'workflow-recipes').warn(
         '[WR-Reconciler] CONTROL_API_PUBLIC_KEY_PEM not set — admin artifact delegation will return 401'
       )
     }
@@ -817,7 +1049,7 @@ export class WorkflowRecipeReconciler {
       pluginWorkloadSdkRevocationClient: new HttpPluginWorkloadSdkRevocationClient(),
     }
     this.workflowReconciler = new WorkflowReconciler(deps)
-    console.log('[WR-Reconciler] Workflow subsystem initialized')
+    createLogger('wrc', 'workflow-recipes').info('[WR-Reconciler] Workflow subsystem initialized')
   }
 
   private get delegationDeps(): DelegationDeps {
@@ -881,9 +1113,9 @@ export class WorkflowRecipeReconciler {
         namespace
       )
       if (!ready) {
-        console.warn(
-          `[WR-Reconciler] Generic network readiness not confirmed for: ${pending.join(', ')}`
-        )
+        createLogger('wrc', recipe.metadata.name).warn('Generic network readiness not confirmed', {
+          value1: pending.join(', '),
+        })
       }
     }
   }
@@ -899,8 +1131,9 @@ export class WorkflowRecipeReconciler {
       throw clusterNetworkPolicyEnforcementError(recipe.metadata.name)
     }
     if (this.config.networkPolicyEnforcementMode === 'warn') {
-      console.warn(
-        `[WR-Reconciler] NetworkPolicy enforcement mode is "warn" for recipe "${recipe.metadata.name}". ${policyReadiness}, but packet-level cluster enforcement must still be validated before treating this as a security gate.`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'NetworkPolicy enforcement is in warn mode; packet-level enforcement still requires validation',
+        { name: recipe.metadata.name, policyReadiness }
       )
     }
   }
@@ -927,8 +1160,9 @@ export class WorkflowRecipeReconciler {
         parentLabel !== ownerRecipeName ||
         recipe.metadata.annotations?.[INHERITED_PARENT_RESOURCES_ANNOTATION] !== 'true'
       ) {
-        console.warn(
-          `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because normal DB-run inheritance metadata is incomplete or inconsistent`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Ignoring controller ownerReference because DB-run inheritance metadata is inconsistent',
+          { ownerRecipeName, name: recipe.metadata.name }
         )
         return recipe.metadata.name
       }
@@ -940,8 +1174,9 @@ export class WorkflowRecipeReconciler {
       )
       if (!verifiedOwnerRecipeName) {
         if (parentLabel) {
-          console.warn(
-            `[WR-Reconciler] Ignoring ${PARENT_RECIPE_LABEL}="${parentLabel}" on workflow "${recipe.metadata.name}" because controller ownerReference "${ownerRecipeName}" could not be verified`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Ignoring parent-recipe label because controller ownership could not be verified',
+            { PARENT_RECIPE_LABEL, parentLabel, name: recipe.metadata.name, ownerRecipeName }
           )
         }
         return recipe.metadata.name
@@ -961,16 +1196,17 @@ export class WorkflowRecipeReconciler {
           )
         }
         if (provenance === 'invalid') {
-          console.warn(
-            `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because workflow_runs does not bind run "${workflowRunId}" to this exact parent and child`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Ignoring controller ownerReference because workflow_runs does not bind the exact parent and child',
+            { ownerRecipeName, name: recipe.metadata.name, workflowRunId }
           )
           return recipe.metadata.name
         }
       } catch (error) {
         if (error instanceof RuntimeScopeResolutionPendingError) throw error
-        console.warn(
-          `[WR-Reconciler] Deferring runtime scope resolution for workflow "${recipe.metadata.name}" because DB-run provenance is temporarily unavailable:`,
-          error
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Deferring runtime scope resolution because DB-run provenance is unavailable',
+          { name: recipe.metadata.name, err: error }
         )
         throw new RuntimeScopeResolutionPendingError(
           `DB-run provenance is temporarily unavailable for workflow "${recipe.metadata.name}"`,
@@ -982,11 +1218,72 @@ export class WorkflowRecipeReconciler {
     }
 
     if (parentLabel) {
-      console.warn(
-        `[WR-Reconciler] Ignoring ${PARENT_RECIPE_LABEL}="${parentLabel}" on workflow "${recipe.metadata.name}" because no controller WorkflowRecipe ownerReference is present`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Ignoring parent-recipe label without a controller WorkflowRecipe ownerReference',
+        { PARENT_RECIPE_LABEL, parentLabel, name: recipe.metadata.name }
       )
     }
     return recipe.metadata.name
+  }
+
+  private claimedCodexParent(recipe: WorkflowRecipeCRD): boolean {
+    const parentLabel = recipe.metadata.labels?.[PARENT_RECIPE_LABEL]?.trim()
+    const ownerRef = recipe.metadata.ownerReferences?.some(
+      ref =>
+        ref.kind === 'WorkflowRecipe' &&
+        ref.controller === true &&
+        typeof ref.name === 'string' &&
+        ref.name.trim().length > 0
+    )
+    return Boolean(parentLabel || ownerRef)
+  }
+
+  private async loadCodexParent(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<{ spec: WorkflowRecipeSpec | null; annotations?: Record<string, string> }> {
+    if (runtimeScopeRecipeName === recipe.metadata.name) return { spec: null }
+    try {
+      const live = (await this.customApi.getNamespacedCustomObject({
+        group: CRD_GROUP,
+        version: CRD_VERSION,
+        namespace: recipe.metadata.namespace,
+        plural: WORKFLOWRECIPE_PLURAL,
+        name: runtimeScopeRecipeName,
+      })) as { metadata?: { annotations?: Record<string, string> }; spec?: WorkflowRecipeSpec }
+      return { spec: live.spec ?? null, annotations: live.metadata?.annotations }
+    } catch {
+      return { spec: null }
+    }
+  }
+
+  private async bindCodexReconcileContext(
+    recipe: WorkflowRecipeCRD,
+    runtimeScopeRecipeName: string
+  ): Promise<void> {
+    const setter = this.workflowReconciler?.setCodexReconcileContext
+    if (typeof setter !== 'function') return
+    const parent = await this.loadCodexParent(recipe, runtimeScopeRecipeName)
+    // The Codex grant (connection key) follows the same authority rule as the
+    // Codex spec: the runtime-scope parent's annotation when inherited, the
+    // recipe's own annotation when standalone. Missing/unreadable annotations
+    // resolve to the fail-closed `unassigned` sentinel inside the reader.
+    const recipeUid = recipe.metadata.uid?.trim()
+    // No Kubernetes uid yet → skip bind. Miss stays fail-closed `unassigned`;
+    // never key the Map by recipe name.
+    if (!recipeUid) return
+    const grantAnnotations =
+      runtimeScopeRecipeName !== recipe.metadata.name
+        ? parent.annotations
+        : recipe.metadata.annotations
+    setter.call(this.workflowReconciler, {
+      recipeUid,
+      recipeName: recipe.metadata.name,
+      runtimeScopeRecipeName,
+      claimedParent: this.claimedCodexParent(recipe),
+      parentSpec: parent.spec,
+      connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
+    })
   }
 
   private async hasVerifiedInheritedParentResources(recipe: WorkflowRecipeCRD): Promise<boolean> {
@@ -1038,14 +1335,16 @@ export class WorkflowRecipeReconciler {
 
       const liveOwnerUid = liveOwner.metadata?.uid
       if (liveOwner.metadata?.deletionTimestamp) {
-        console.warn(
-          `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because the owner is deleting`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Ignoring controller ownerReference because the owner is deleting',
+          { ownerRecipeName, name: recipe.metadata.name }
         )
         return null
       }
       if (liveOwnerUid !== ownerRecipeUid) {
-        console.warn(
-          `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because owner UID did not match the live WorkflowRecipe`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Ignoring controller ownerReference because the live owner UID differs',
+          { ownerRecipeName, name: recipe.metadata.name }
         )
         return null
       }
@@ -1053,14 +1352,15 @@ export class WorkflowRecipeReconciler {
     } catch (error) {
       const code = getErrorCode(error)
       if (code === 404) {
-        console.warn(
-          `[WR-Reconciler] Ignoring controller ownerReference "${ownerRecipeName}" on workflow "${recipe.metadata.name}" because the owner WorkflowRecipe was not found`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Ignoring controller ownerReference because the owner was not found',
+          { ownerRecipeName, name: recipe.metadata.name }
         )
         return null
       }
-      console.warn(
-        `[WR-Reconciler] Deferring runtime scope resolution for workflow "${recipe.metadata.name}" because the owner WorkflowRecipe is temporarily unavailable:`,
-        error
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Deferring runtime scope resolution because the owner is unavailable',
+        { name: recipe.metadata.name, err: error }
       )
       throw new RuntimeScopeResolutionPendingError(
         `Owner WorkflowRecipe "${ownerRecipeName}" is temporarily unavailable`,
@@ -1076,6 +1376,7 @@ export class WorkflowRecipeReconciler {
     if (!this.workflowReconciler) return
     const runtimeScopeRecipeName =
       resolvedRuntimeScopeRecipeName ?? (await this.workflowRuntimeScopeRecipeName(recipe))
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     const coordinatorRefresher = this.workflowReconciler as WorkflowReconciler & {
       ensureCoordinatorRuntimeCredentials?: (
         recipeNamespace: string,
@@ -1092,9 +1393,9 @@ export class WorkflowRecipeReconciler {
         runtimeScopeRecipeName
       )
     } catch (error) {
-      console.error(
-        `[WR-Reconciler] Failed to repair coordinator runtime credentials for steady-state workflow "${recipe.metadata.name}"; continuing without phase change:`,
-        error
+      createLogger('wrc', recipe.metadata.name).error(
+        'Failed to repair coordinator runtime credentials; continuing without phase change',
+        { name: recipe.metadata.name, err: error }
       )
     }
     try {
@@ -1102,12 +1403,13 @@ export class WorkflowRecipeReconciler {
         recipe.metadata.namespace,
         recipe.metadata.name,
         recipe.spec,
-        runtimeScopeRecipeName
+        runtimeScopeRecipeName,
+        recipe.metadata.uid
       )
     } catch (error) {
-      console.error(
-        `[WR-Reconciler] Failed to repair mcpHost runtime credentials for steady-state workflow "${recipe.metadata.name}"; continuing without phase change:`,
-        error
+      createLogger('wrc', recipe.metadata.name).error(
+        'Failed to repair mcpHost runtime credentials; continuing without phase change',
+        { name: recipe.metadata.name, err: error }
       )
     }
     try {
@@ -1119,9 +1421,9 @@ export class WorkflowRecipeReconciler {
         runtimeScopeRecipeName
       )
     } catch (error) {
-      console.error(
-        `[WR-Reconciler] Failed to refresh runtime HTTP egress for steady-state workflow "${recipe.metadata.name}"; keeping last valid NetworkPolicy:`,
-        error
+      createLogger('wrc', recipe.metadata.name).error(
+        'Failed to refresh runtime HTTP egress; keeping the last valid NetworkPolicy',
+        { name: recipe.metadata.name, err: error }
       )
     }
   }
@@ -1140,8 +1442,9 @@ export class WorkflowRecipeReconciler {
   }
 
   private staleRecipeResult(recipe: WorkflowRecipeCRD, stage: string): ReconcileResult {
-    console.warn(
-      `[WR-Reconciler] Skipping stale reconcile for "${recipe.metadata.name}" at ${stage}; recipe is gone or deleting`
+    createLogger('wrc', recipe.metadata.name).warn(
+      'Skipping stale reconcile because the recipe is gone or deleting',
+      { name: recipe.metadata.name, stage }
     )
     return {
       phase: recipe.status?.phase ?? 'candidate',
@@ -1256,7 +1559,9 @@ export class WorkflowRecipeReconciler {
       name: recipe.metadata.name,
       body: patch,
     })
-    console.log(`[WR-Reconciler] Added finalizer to "${recipe.metadata.name}"`)
+    createLogger('wrc', recipe.metadata.name).info('Added recipe finalizer', {
+      name: recipe.metadata.name,
+    })
   }
 
   async removeFinalizer(recipe: WorkflowRecipeCRD): Promise<void> {
@@ -1275,19 +1580,43 @@ export class WorkflowRecipeReconciler {
       })
     } catch (error) {
       if (getErrorCode(error) === 404) {
-        console.warn(
-          `[WR-Reconciler] Finalizer already gone for "${recipe.metadata.name}" because the recipe no longer exists`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Finalizer already gone because the recipe no longer exists',
+          { name: recipe.metadata.name }
         )
         return
       }
       throw error
     }
-    console.log(`[WR-Reconciler] Removed finalizer from "${recipe.metadata.name}"`)
+    createLogger('wrc', recipe.metadata.name).info('Removed recipe finalizer', {
+      name: recipe.metadata.name,
+    })
   }
 
   // ─── Main Pipeline ────────────────────────────────────────────────
 
   async reconcile(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
+    // issue #375: compute the Plugin Workload SDK capability projection ONCE per
+    // reconcile and attach it to the result. shouldPatchRecipeStatus reads it to
+    // publish a computed awaiting_policy↔validated transition that no
+    // phase/message/workload diff would otherwise surface; patchStatus reuses
+    // the same object instead of rebuilding it. Paths that bypass this method
+    // (e.g. observeCurrentWorkloadStatus) leave the projection undefined, which
+    // both consumers treat as "no SDK opinion this pass".
+    const result = await this.reconcileInternal(recipe)
+    result.pluginWorkloadSdkProjection = this.projectPluginWorkloadSdk(recipe, result)
+    createLogger('wrc', recipe.metadata.name).info('recipe reconciliation completed', {
+      recipe: recipe.metadata.name,
+      namespace: recipe.metadata.namespace,
+      uid: recipe.metadata.uid,
+      generation: recipe.metadata.generation,
+      phase: result.phase,
+      requeueAfterMs: result.requeueAfterMs ?? 0,
+    })
+    return result
+  }
+
+  private async reconcileInternal(recipe: WorkflowRecipeCRD): Promise<ReconcileResult> {
     const name = recipe.metadata.name
     const ns = recipe.metadata.namespace
     const currentPhase = recipe.status?.phase ?? 'candidate'
@@ -1297,8 +1626,9 @@ export class WorkflowRecipeReconciler {
     // but a manually-applied CRD in another namespace must not be reconciled.
     const allowedNamespaces = [this.config.sandboxNamespace]
     if (!allowedNamespaces.includes(ns)) {
-      console.warn(
-        `[WR-Reconciler] Refusing to reconcile "${name}" — namespace "${ns}" is not in allowlist (${allowedNamespaces.join(', ')}). This recipe bypassed the admission layer; leaving untouched.`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Refusing to reconcile a recipe outside the namespace allowlist',
+        { name, ns, value3: allowedNamespaces.join(', ') }
       )
       return {
         phase: 'failed',
@@ -1308,9 +1638,7 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    console.log(
-      `[WR-Reconciler] Reconciling "${name}" in namespace "${ns}" (phase: ${currentPhase})`
-    )
+    createLogger('wrc', recipe.metadata.name).info('Reconciling recipe', { name, ns, currentPhase })
 
     if (!(await this.recipeStillActive(recipe))) {
       return this.staleRecipeResult(recipe, 'initial check')
@@ -1394,7 +1722,10 @@ export class WorkflowRecipeReconciler {
       if (violations.length > 0) {
         if (isWorkflow) await this.revokeCoordinatorGfsNetworkPolicy(recipe)
         const details = violations.map(v => `[${v.policy}] ${v.rule}: ${v.message}`).join('; ')
-        console.error(`[WR-Reconciler] Policy violation for "${name}": ${details}`)
+        createLogger('wrc', recipe.metadata.name).error('Recipe policy violation', {
+          name,
+          details,
+        })
         return {
           phase: 'failed',
           message: `Policy violation: ${details}`,
@@ -1473,9 +1804,9 @@ export class WorkflowRecipeReconciler {
         approvalScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
       } catch (error) {
         if (!(error instanceof RuntimeScopeResolutionPendingError)) throw error
-        console.warn(
-          `[WR-Reconciler] Runtime scope resolution pending for workflow "${name}"; keeping current state and requeueing:`,
-          error
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Runtime scope resolution pending; keeping current state and requeueing',
+          { name, err: error }
         )
         return {
           phase: currentPhase as RecipePhase,
@@ -1491,14 +1822,23 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      if (currentPhase === 'active' && awaitsTriggeredRun && !wfExecPhase) {
-        // Plugin Workload SDK promptBridge recipes keep an eager mcp-host whose
-        // provider must be (re-)configured once it becomes Ready and after any
-        // pod restart. Fall through to the inner reconcile so ensureEagerSdkMcpHost
-        // retries the /configure; the short-circuit below would freeze it
-        // provider_unavailable forever. clientNotifications-only needs no provider,
-        // so it keeps the cheap short-circuit.
-        if (!recipe.spec.pluginWorkloadSdk?.promptBridge) {
+      if (
+        currentPhase === 'active' &&
+        awaitsTriggeredRun &&
+        !wfExecPhase &&
+        !hasPendingTransportNetworkReadiness(recipe)
+      ) {
+        // Plugin Workload SDK recipes (BOTH families) keep an eager mcp-host and
+        // must fall through to the inner reconcile: promptBridge so
+        // ensureEagerSdkMcpHost retries the /configure (the short-circuit below
+        // would freeze it provider_unavailable forever), and clientNotifications-
+        // only so the reconcile re-gathers the bootstrap proof and recomputes the
+        // capability projection (issue #375 jozer BLOCKER: short-circuiting here
+        // returned skipStatusPatch:true, so a computed awaiting_policy→validated
+        // transition was never published for that family). The Step 8 ownership
+        // gate inside the inner reconcile covers Secret-ownership revocation on
+        // the fall-through path, exactly as it already did for promptBridge.
+        if (!recipe.spec.pluginWorkloadSdk) {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
@@ -1559,8 +1899,9 @@ export class WorkflowRecipeReconciler {
             skipStatusPatch: recipe.status?.message === derivedMessage,
           }
         }
-        console.log(
-          `[WR-Reconciler] Workflow "${name}" ${wfExecPhase} — transitioning recipe phase: ${currentPhase} → ${derivedPhase}`
+        createLogger('wrc', recipe.metadata.name).info(
+          'Transitioning recipe phase from workflow execution state',
+          { name, wfExecPhase, currentPhase, derivedPhase }
         )
         return { phase: derivedPhase, message: derivedMessage, workloadStatuses: [] }
       }
@@ -1578,18 +1919,24 @@ export class WorkflowRecipeReconciler {
       // EXCEPTION: "initializing" and "recovering" phases mean pods may not exist yet,
       // may be broken (e.g. CreateContainerConfigError), or were just deleted by crash
       // recovery. We MUST reconcile to allow infrastructure creation to complete.
-      if (wfInProgress && (currentPhase === 'deploying' || currentPhase === 'failed')) {
+      if (
+        wfInProgress &&
+        (currentPhase === 'deploying' || currentPhase === 'failed') &&
+        !hasPendingTransportNetworkReadiness(recipe)
+      ) {
         if (wfExecPhase === 'initializing' || wfExecPhase === 'recovering') {
-          console.log(
-            `[WR-Reconciler] Workflow "${name}" ${wfExecPhase} — allowing reconcile for pod creation`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Allowing workflow reconciliation for pod creation',
+            { name, wfExecPhase }
           )
           // Fall through to WorkflowReconciler.reconcile() which will create/recreate pods
         } else {
           if (coordinatorGfsPolicyCanOpen) {
             await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
           }
-          console.log(
-            `[WR-Reconciler] Workflow "${name}" in-progress (wf: ${wfExecPhase}) — skipping reconcile`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Skipping reconciliation for an in-progress workflow',
+            { name, wfExecPhase }
           )
           await this.ensureSteadyWorkflowRuntimeCredentials(recipe, approvalScopeRecipeName)
           // Issue #637 — same revocation enforcement as the active short-circuit
@@ -1612,7 +1959,11 @@ export class WorkflowRecipeReconciler {
 
       // "active" covers both completed workflow infrastructure and an already-active
       // recipe whose current execution is still running.
-      if (currentPhase === 'active' && !awaitsTriggeredRun) {
+      if (
+        currentPhase === 'active' &&
+        !awaitsTriggeredRun &&
+        !hasPendingTransportNetworkReadiness(recipe)
+      ) {
         if (coordinatorGfsPolicyCanOpen) {
           await this.ensureCoordinatorGfsNetworkPolicyIfEnabled(recipe)
         }
@@ -1624,11 +1975,24 @@ export class WorkflowRecipeReconciler {
         // operator re-labels the Secret.
         const activeOwnership = await this.revokeOrRequeueSteadyWorkflow(recipe, 'active')
         if (activeOwnership) return activeOwnership
-        return {
-          phase: 'active' as RecipePhase,
-          message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
-          workloadStatuses: [],
-          skipStatusPatch: true,
+        // issue #375 (jozer BLOCKER): Plugin Workload SDK recipes fall through to
+        // the inner reconcile (mirroring the awaiting-trigger carve-out above) so
+        // the bootstrap proof is re-gathered and a computed capability transition
+        // (e.g. awaiting_policy→validated) is actually published — this
+        // short-circuit's skipStatusPatch:true suppressed it unconditionally.
+        // The gfs/credentials/ownership enforcement above has already run.
+        // EXCEPTION: while a workflow execution is in progress the short-circuit
+        // is kept even for SDK recipes — this branch exists to protect the
+        // coordinator's 409-free windows, and the capability publication is
+        // level-triggered (requeue + watchdog) so it lands on the next
+        // non-running pass.
+        if (!recipe.spec.pluginWorkloadSdk || wfInProgress) {
+          return {
+            phase: 'active' as RecipePhase,
+            message: wfExecPhase ? `Workflow ${wfExecPhase}` : 'Workflow completed',
+            workloadStatuses: [],
+            skipStatusPatch: true,
+          }
         }
       }
 
@@ -1666,8 +2030,9 @@ export class WorkflowRecipeReconciler {
         // otherwise it propagates out of the workflow branch where the watcher
         // swallows it with no deterministic retry (issue #571).
         if (isRetryableInfraError(error)) {
-          console.warn(
-            `[WR-Reconciler] Transient infra error assigning instances for "${recipe.metadata.name}" — will retry: ${String(error)}`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Transient infrastructure error assigning workload instances; will retry',
+            { name: recipe.metadata.name, err: error }
           )
           return {
             phase: (recipe.status?.phase ?? 'deploying') as RecipePhase,
@@ -1753,14 +2118,18 @@ export class WorkflowRecipeReconciler {
       let workflowInternalDependencyConditions: StatusCondition[] | undefined
       let workflowSecretOwnershipConditions: StatusCondition[] | undefined
       let workflowWorkloadConditions: StatusCondition[] | undefined
+      let workflowTransportNetworkConditions: StatusCondition[] | undefined =
+        workflowWorkloads.length === 0 ? [] : undefined
       if (workflowWorkloads.length > 0) {
-        console.log(
-          `[WR-Reconciler] Deploying ${workflowWorkloads.length} workflow workload(s) for "${name}"`
-        )
+        createLogger('wrc', recipe.metadata.name).info('Deploying workflow workloads', {
+          length: workflowWorkloads.length,
+          name,
+        })
         try {
           const workflowDeploy = await this.deployWorkflowWorkloads(recipe, name)
           workflowInternalDependencyConditions = workflowDeploy.internalDependencyConditions
           workflowWorkloadConditions = workflowDeploy.workloadConditions
+          workflowTransportNetworkConditions = workflowDeploy.transportNetworkConditions
           // Issue #637 — surface the EnvSecretOwnershipDenied condition from the
           // workflow build path too; previously it was computed and dropped, so a
           // denied workflow workload degraded silently with no status condition.
@@ -1771,16 +2140,30 @@ export class WorkflowRecipeReconciler {
             error instanceof InternalDependencyReconcileError ? error.conditions : undefined
           const workloadConditions =
             error instanceof ImmutableStatefulSetDriftError ? [error.condition] : undefined
-          if (error instanceof RetryableReconcileError) {
-            // Transient infra failure (e.g. DNS SERVFAIL on egress). Degrade
-            // instead of failing so the next reconcile retries before the
-            // workflow runs — don't mark workflowPhase failed.
+          if (
+            error instanceof RetryableReconcileError ||
+            error instanceof NetworkPolicyInfraError
+          ) {
+            const safe = this.safeInfrastructureErrorFields(error)
+            const retryableMessage =
+              error instanceof RetryableReconcileError
+                ? message
+                : `Workflow workload infrastructure temporarily unavailable (${safe.errorCode ?? safe.errorName})`
+            // Transient infra failure (e.g. DNS SERVFAIL or a NetworkPolicy
+            // optimistic-concurrency race). Degrade instead of failing and
+            // schedule a deterministic retry before the workflow runs — a
+            // status patch alone only emits a status-only MODIFIED event and
+            // cannot be relied on to enter the full reconcile path again.
             return {
               phase: 'degraded' as RecipePhase,
-              message,
+              message: retryableMessage,
               workloadStatuses: [],
               internalDependencyConditions,
               workloadConditions,
+              requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+              ...(error instanceof TransportNetworkReadinessPendingError
+                ? { transportNetworkConditions: pendingTransportNetworkConditions(recipe, message) }
+                : {}),
             }
           }
           return {
@@ -1794,8 +2177,9 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      console.log(
-        `[WR-Reconciler] Workflow "${name}" first deploy (${recipe.spec.steps!.length} steps) — creating infrastructure`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Creating workflow infrastructure for first deployment',
+        { name, length: recipe.spec.steps!.length }
       )
       // Recovery handoff: when this workflow was latched `failed` by a transient
       // infra blip, hand the inner reconciler a `recovering` execution phase
@@ -1818,6 +2202,7 @@ export class WorkflowRecipeReconciler {
             resourceInstances: recipe.status.resourceInstances,
           }
         : undefined
+      await this.bindCodexReconcileContext(recipe, approvalScopeRecipeName)
       const result = await this.workflowReconciler.reconcile(
         name,
         recipe.metadata.uid ?? '',
@@ -1844,6 +2229,7 @@ export class WorkflowRecipeReconciler {
         clearWorkflowExecution: result.clearWorkflowExecution,
         workflowConditions: result.workflowConditions,
         workloadConditions: workflowWorkloadConditions,
+        transportNetworkConditions: workflowTransportNetworkConditions,
         pluginWorkloadSdkBootstrapProof: result.pluginWorkloadSdkBootstrapProof,
         pluginWorkloadSdkPolicyPending: result.pluginWorkloadSdkPolicyPending,
         // Thread the inner reconciler's transient-skip up so the watcher leaves
@@ -1942,18 +2328,21 @@ export class WorkflowRecipeReconciler {
       (recipe.status?.workloads?.length ?? 0) > 0 &&
       (recipe.status?.workloads ?? []).every(w => w.ready === true)
     if (latchedByTransientError) {
-      console.log(
-        `[WR-Reconciler] Recipe "${name}" is failed with a transient infra message — re-reconciling to self-heal`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Retrying a recipe failed by transient infrastructure',
+        { name }
       )
     }
     if (latchedBySharedMcpInternalDependencyBoundary) {
-      console.log(
-        `[WR-Reconciler] Recipe "${name}" is failed by a shared mcp-server internal-dependency boundary decision — re-reconciling to self-heal`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Retrying a recipe failed by a shared MCP internal-dependency boundary',
+        { name }
       )
     }
     if (latchedDespiteHealthyWorkloads) {
-      console.log(
-        `[WR-Reconciler] Recipe "${name}" is failed but all observed workloads are ready — re-reconciling to re-derive phase from live health`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Retrying a failed recipe whose observed workloads are ready',
+        { name }
       )
     }
     if (
@@ -1962,9 +2351,10 @@ export class WorkflowRecipeReconciler {
       !latchedBySharedMcpInternalDependencyBoundary &&
       !latchedDespiteHealthyWorkloads
     ) {
-      console.log(
-        `[WR-Reconciler] Skipping non-deployable recipe "${name}" (phase: ${currentPhase})`
-      )
+      createLogger('wrc', recipe.metadata.name).info('Skipping non-deployable recipe', {
+        name,
+        currentPhase,
+      })
       return {
         phase: currentPhase as RecipePhase,
         message: recipe.status?.message ?? `Recipe is in ${currentPhase} state`,
@@ -2132,8 +2522,9 @@ export class WorkflowRecipeReconciler {
       try {
         await this.ensureOAuthBrokerTokenSecret(recipe)
       } catch (err) {
-        console.warn(
-          `[WR-Reconciler] Broker-token issuance failed during reconcile for "${name}" (will retry via rotation loop): ${err instanceof Error ? err.message : String(err)}`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Broker-token issuance failed during reconcile; the rotation loop will retry',
+          { name, err }
         )
       }
 
@@ -2174,12 +2565,16 @@ export class WorkflowRecipeReconciler {
             secretKeys
           )
           if (preDeployedServers.length > 0) {
-            console.log(
-              `[WR-Reconciler] Pre-deployed ${preDeployedServers.length} McpServer(s) for network isolation`
+            createLogger('wrc', recipe.metadata.name).info(
+              'Pre-deployed McpServers for network isolation',
+              { length: preDeployedServers.length }
             )
           }
         } catch (error) {
-          console.error(`[WR-Reconciler] Pre-deploy failed for "${name}":`, error)
+          createLogger('wrc', recipe.metadata.name).error('Recipe pre-deploy failed', {
+            name,
+            err: error,
+          })
           // The pre-deploy McpServer handshake is an eventually-consistent
           // wait on HCC reconciling the child McpServers + NetworkPolicies. A
           // failure here means HCC has not caught up yet, NOT that the recipe
@@ -2199,7 +2594,9 @@ export class WorkflowRecipeReconciler {
       // Step 7c: Wait for HCC to confirm network isolation
       if (preDeployedServers.length > 0) {
         await this.waitForTransportNetworkReadiness(recipe, preDeployedServers, mcpBatchNs)
-        console.log(`[WR-Reconciler] Transport network readiness checked for MCP workloads`)
+        createLogger('wrc', recipe.metadata.name).info(
+          '[WR-Reconciler] Transport network readiness checked for MCP workloads'
+        )
       }
 
       if (!(await this.recipeStillActive(recipe))) {
@@ -2223,10 +2620,9 @@ export class WorkflowRecipeReconciler {
           // instance and surface the denial so the operator labels the Secret.
           await this.teardownDeniedWorkload(workload, recipe, secretKeys).catch(err => {
             deniedTeardownFailed = true
-            console.error(
-              `[WR-Reconciler] Issue #637: teardown of denied workload "${workload.id}" failed; ` +
-                `will requeue:`,
-              err
+            createLogger('wrc', recipe.metadata.name).error(
+              'Teardown of denied workload failed; will requeue',
+              { id: workload.id, err }
             )
           })
           workloadStatuses.push({
@@ -2352,6 +2748,7 @@ export class WorkflowRecipeReconciler {
       // Step 9b: Sandbox UI egress policy + symmetric ingress on each
       // internal-egress target (without the ingress side the target stays
       // behind deny-all-<ns> and UI→backend traffic is dropped).
+      const externalEgressPlan = await this.prepareRecipeEgressContractions(recipe)
       await this.reconcileUiEgressPolicy(recipe)
       await this.reconcileUiIngressPolicies(recipe)
       // Egress for background-OAuth workloads → control-api broker route.
@@ -2363,7 +2760,7 @@ export class WorkflowRecipeReconciler {
       // any sibling targets it points at. MCP workloads inherit egress
       // through HCC via the McpServer CRD path; UI workloads use
       // `spec.ui.egress.*` which is handled by reconcileUiEgressPolicy.
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      await this.reconcileWorkloadEgressPolicies(recipe, externalEgressPlan.workload)
 
       // Step 9d: WRC-owned intra-recipe internal dependency policies.
       // This lane is separate from HCC binding-allow and legacy wl-* policies.
@@ -2382,10 +2779,17 @@ export class WorkflowRecipeReconciler {
         }
       }
 
-      // Step 9a: MCP delegation — finalize (Context patch + remove pre-deploy annotation)
+      // Step 9a: MCP delegation — finalize (Context patch + ensure McpServer CRDs).
       // McpServer CRDs were already created in Step 7b (pre-deploy handshake).
       // This step patches the Context allowlist and ensures McpServer CRDs are up-to-date.
       // Same namespace invariant as Step 7b: MCP children live in mcp-server.
+      //
+      // NOTE: `pre-deploy` is deliberately NOT removed here. `buildMcpServerManifest`
+      // omits it, but the replace merge in `ensureMcpServer` carries the live object's
+      // `pre-deploy: "true"` over, so it persists — by design. HCC's network-ready
+      // re-ack guard keys off `pre-deploy === "true"`, so stripping it would break the
+      // stdio readiness handshake. The spec-hash gate excludes `pre-deploy` from the
+      // hash (see HASH_EXCLUDED_ANNOTATIONS) so 7b and 9a converge to a no-op write.
       if (hasTransportWorkloads) {
         if (!(await this.recipeStillActive(recipe))) {
           return this.staleRecipeResult(recipe, 'MCP delegation finalization')
@@ -2398,12 +2802,16 @@ export class WorkflowRecipeReconciler {
             secretKeys
           )
           if (delegated.length > 0) {
-            console.log(
-              `[WR-Reconciler] Delegated ${delegated.length} MCP server(s): ${delegated.join(', ')}`
-            )
+            createLogger('wrc', recipe.metadata.name).info('Delegated MCP servers', {
+              length: delegated.length,
+              value2: delegated.join(', '),
+            })
           }
         } catch (error) {
-          console.error(`[WR-Reconciler] MCP delegation failed for "${name}":`, error)
+          createLogger('wrc', recipe.metadata.name).error('MCP delegation failed', {
+            name,
+            err: error,
+          })
           // Same eventually-consistent handshake rationale as the pre-deploy
           // step above: delegation depends on HCC having persisted the child
           // McpServers/Context. A failure is transient (HCC not caught up),
@@ -2455,6 +2863,7 @@ export class WorkflowRecipeReconciler {
           internalDependencyConditions,
           secretOwnershipConditions: secretOwnership.conditions,
           workloadConditions,
+          transportNetworkConditions: [],
         }
       }
 
@@ -2507,6 +2916,7 @@ export class WorkflowRecipeReconciler {
         internalDependencyConditions,
         secretOwnershipConditions: secretOwnership.conditions,
         workloadConditions,
+        transportNetworkConditions: [],
         pluginWorkloadSdkProviderUnavailable: sdkOnlyProviderUnavailable,
         pluginWorkloadSdkPolicyPending: sdkOnlyPolicyPending,
         pluginWorkloadSdkBootstrapProof: sdkOnlyRuntime?.pluginWorkloadSdkBootstrapProof,
@@ -2530,18 +2940,28 @@ export class WorkflowRecipeReconciler {
       //
       // (1) RetryableReconcileError — explicitly thrown for a transient step
       //     (e.g. DNS SERVFAIL/timeout on egress resolution). Degrade so the
-      //     periodic reconcile retries and the recipe self-heals once the
-      //     dependency recovers. egressResolutionError() raises this ONLY when
+      //     watcher schedules a deterministic retry and the recipe self-heals
+      //     once the dependency recovers. egressResolutionError() raises this ONLY when
       //     every failure was transient; a permanent failure yields a plain
       //     Error that must stay terminal (fail-closed) below.
       if (error instanceof RetryableReconcileError) {
-        console.warn(
-          `[WR-Reconciler] Transient failure reconciling "${name}" (will retry): ${error.message}`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Transient reconciliation failure; will retry',
+          { name, err: error }
         )
         return {
           phase: 'degraded',
           message: error.message,
           workloadStatuses: [],
+          requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
+          ...(error instanceof TransportNetworkReadinessPendingError
+            ? {
+                transportNetworkConditions: pendingTransportNetworkConditions(
+                  recipe,
+                  error.message
+                ),
+              }
+            : {}),
         }
       }
       // (2) A raw retryable infra error (connect ETIMEDOUT/ECONNRESET, 5xx,
@@ -2559,9 +2979,13 @@ export class WorkflowRecipeReconciler {
       //     decision and hiding the permanent misconfiguration.
       const isEgressResolutionError =
         error instanceof Error && error.message.includes('egress resolution failed')
-      if (!isEgressResolutionError && isRetryableInfraError(error)) {
-        console.warn(
-          `[WR-Reconciler] Transient infra error reconciling "${name}" — keeping phase "${currentPhase}", will retry: ${String(error)}`
+      if (
+        !isEgressResolutionError &&
+        (error instanceof NetworkPolicyInfraError || isRetryableInfraError(error))
+      ) {
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Transient infrastructure error during reconciliation; keeping phase and retrying',
+          { name, currentPhase, err: error }
         )
         return {
           phase: currentPhase as RecipePhase,
@@ -2579,7 +3003,10 @@ export class WorkflowRecipeReconciler {
           requeueAfterMs: TRANSIENT_REQUEUE_BASE_MS,
         }
       }
-      console.error(`[WR-Reconciler] Failed to reconcile "${name}":`, error)
+      createLogger('wrc', recipe.metadata.name).error('Recipe reconciliation failed', {
+        name,
+        err: error,
+      })
       return {
         phase: 'failed',
         message: String(error),
@@ -2599,11 +3026,14 @@ export class WorkflowRecipeReconciler {
         message: 'Plugin Workload SDK subsystem not initialized — missing clerum-wrc-signing-key',
       }
     }
+    const runtimeScopeRecipeName = await this.workflowRuntimeScopeRecipeName(recipe)
+    await this.bindCodexReconcileContext(recipe, runtimeScopeRecipeName)
     return this.workflowReconciler.reconcilePluginWorkloadSdkOnly(
       recipe.metadata.name,
       recipe.metadata.uid ?? '',
       recipe.metadata.namespace,
-      recipe.spec
+      recipe.spec,
+      runtimeScopeRecipeName
     )
   }
 
@@ -2796,10 +3226,10 @@ export class WorkflowRecipeReconciler {
       const readyReplicas = dep.status?.readyReplicas ?? 0
       ready = readyReplicas >= 1
     } catch (error) {
-      console.warn(
-        `[WR-Reconciler] Could not read webhook-gateway Deployment for "${name}":`,
-        error
-      )
+      createLogger('wrc', recipe.metadata.name).warn('Could not read webhook-gateway Deployment', {
+        name,
+        err: error,
+      })
     }
     if (ready) {
       conditions.push(
@@ -2887,28 +3317,16 @@ export class WorkflowRecipeReconciler {
       `WebhookGateway Service "${gatewayServiceName(recipeName)}"`
     )
 
+    // The gateway policies use the same live convergence path as other
+    // WRC-authored NetworkPolicies (issue #575). Their controller ownerReference
+    // is part of the comparison, so recreating a recipe under the same name repairs
+    // a stale UID instead of accepting the old garbage-collection lineage.
     for (const policy of [
       built.proxyIngressPolicy,
       built.handlerEgressPolicy,
       built.handlerIngressPolicy,
     ]) {
-      const policyName = policy.metadata!.name!
-      await this.createOrReplace(
-        () => this.networkingApi.createNamespacedNetworkPolicy({ namespace: ns, body: policy }),
-        async () => {
-          const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: ns,
-          })
-          policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-          return this.networkingApi.replaceNamespacedNetworkPolicy({
-            name: policyName,
-            namespace: ns,
-            body: policy,
-          })
-        },
-        `WebhookGateway NetworkPolicy "${policyName}"`
-      )
+      await this.applyNetworkPolicy(policy, ns, { family: 'webhook-gateway' })
     }
   }
 
@@ -2971,6 +3389,7 @@ export class WorkflowRecipeReconciler {
     internalDependencyConditions: StatusCondition[]
     secretOwnershipConditions: StatusCondition[]
     workloadConditions: StatusCondition[]
+    transportNetworkConditions?: StatusCondition[]
   }> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0)
@@ -2980,8 +3399,9 @@ export class WorkflowRecipeReconciler {
         workloadConditions: [],
       }
     if (!(await this.recipeStillActive(recipe))) {
-      console.warn(
-        `[WR-Reconciler] Skipping workflow workload deploy for "${name}"; recipe is gone or deleting`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Skipping workload deployment because the recipe is gone or deleting',
+        { name }
       )
       return {
         internalDependencyConditions: [],
@@ -3024,7 +3444,10 @@ export class WorkflowRecipeReconciler {
           secretKeys
         )
       } catch (err) {
-        console.error(`[WR-Reconciler] Pre-deploy MCP failed for workflow "${name}":`, err)
+        createLogger('wrc', recipe.metadata.name).error('MCP pre-deploy failed for workflow', {
+          name,
+          err,
+        })
         // Eventually-consistent HCC handshake (see the non-workflow pre-deploy
         // step). Throw RetryableReconcileError so the workflow deploy path
         // (which maps it to `degraded`) retries instead of failing the run.
@@ -3039,8 +3462,9 @@ export class WorkflowRecipeReconciler {
       await this.waitForTransportNetworkReadiness(recipe, preDeployedServers, mcpBatchNs)
     }
     if (!(await this.recipeStillActive(recipe))) {
-      console.warn(
-        `[WR-Reconciler] Skipping workflow workload materialization for "${name}"; recipe is gone or deleting`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Skipping workload materialization because the recipe is gone or deleting',
+        { name }
       )
       return {
         internalDependencyConditions: [],
@@ -3056,8 +3480,9 @@ export class WorkflowRecipeReconciler {
     try {
       await this.ensureOAuthBrokerTokenSecret(recipe)
     } catch (err) {
-      console.warn(
-        `[WR-Reconciler] Broker-token issuance failed during workflow reconcile for "${name}" (will retry via rotation loop): ${err instanceof Error ? err.message : String(err)}`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Broker-token issuance failed during workflow reconciliation; rotation will retry',
+        { name, err }
       )
     }
 
@@ -3070,9 +3495,13 @@ export class WorkflowRecipeReconciler {
     for (const workloadId of sortOrder) {
       const workload = workloads.find(w => w.id === workloadId)!
       if (secretOwnership.deniedWorkloadIds.has(workload.id)) {
-        console.error(
-          `[WR-Reconciler] EnvSecretOwnershipDenied for workflow workload "${workloadId}" in ` +
-            `"${name}": ${secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference'}`
+        createLogger('wrc', recipe.metadata.name).error(
+          'Secret ownership denied for workflow workload',
+          {
+            workloadId,
+            name,
+            value3: secretOwnership.messageByWorkload.get(workloadId) ?? 'foreign Secret reference',
+          }
         )
         try {
           await this.teardownDeniedWorkload(workload, recipe, secretKeys)
@@ -3122,10 +3551,11 @@ export class WorkflowRecipeReconciler {
             break
         }
       } catch (err) {
-        console.error(
-          `[WR-Reconciler] Failed to deploy workload "${workloadId}" for workflow "${name}":`,
-          err
-        )
+        createLogger('wrc', recipe.metadata.name).error('Failed to deploy workflow workload', {
+          workloadId,
+          name,
+          err,
+        })
         if (workload.type === 'statefulset') {
           throw err
         }
@@ -3162,9 +3592,9 @@ export class WorkflowRecipeReconciler {
           `Service "${svcName}"`
         )
       } catch (err) {
-        console.error(
-          `[WR-Reconciler] Service creation failed for workload "${workload.id}" in workflow "${name}":`,
-          err
+        createLogger('wrc', recipe.metadata.name).error(
+          'Service creation failed for workflow workload',
+          { id: workload.id, name, err }
         )
       }
     }
@@ -3172,23 +3602,17 @@ export class WorkflowRecipeReconciler {
     // Sandbox UI egress policy + symmetric ingress on internal-egress
     // targets (no-op when spec.ui is unset; idempotent)
     try {
+      const externalEgressPlan = await this.prepareRecipeEgressContractions(recipe)
       await this.reconcileUiEgressPolicy(recipe)
       await this.reconcileUiIngressPolicies(recipe)
       await this.reconcileOAuthBrokerEgressPolicy(recipe)
-    } catch (err) {
-      console.error(
-        `[WR-Reconciler] UI egress/ingress policies failed for workflow "${name}":`,
-        err
-      )
-      throw err
-    }
 
-    // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
-    // no workload declares egressBindings).
-    try {
-      await this.reconcileWorkloadEgressPolicies(recipe)
+      // Per-workload egressBindings → NetworkPolicies (idempotent; no-op when
+      // no workload declares egressBindings). Its subtractive phase already ran
+      // recipe-wide above, before the first DNS lookup.
+      await this.reconcileWorkloadEgressPolicies(recipe, externalEgressPlan.workload)
     } catch (err) {
-      console.error(`[WR-Reconciler] Workload egress policies failed for workflow "${name}":`, err)
+      createLogger('wrc', name).error('recipe network policy reconciliation failed', { err })
       throw err
     }
 
@@ -3206,8 +3630,9 @@ export class WorkflowRecipeReconciler {
     // Children live in `mcp-server` (mcpBatchNs), not the recipe's own ns.
     if (hasTransport) {
       if (!(await this.recipeStillActive(recipe))) {
-        console.warn(
-          `[WR-Reconciler] Skipping workflow MCP delegation for "${name}"; recipe is gone or deleting`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'Skipping MCP delegation because the recipe is gone or deleting',
+          { name }
         )
         return {
           internalDependencyConditions,
@@ -3223,12 +3648,16 @@ export class WorkflowRecipeReconciler {
           secretKeys
         )
         if (delegated.length > 0) {
-          console.log(
-            `[WR-Reconciler] MCP delegation for workflow "${name}": ${delegated.join(', ')}`
-          )
+          createLogger('wrc', recipe.metadata.name).info('Delegated workflow MCP servers', {
+            name,
+            value2: delegated.join(', '),
+          })
         }
       } catch (err) {
-        console.error(`[WR-Reconciler] MCP delegation failed for workflow "${name}":`, err)
+        createLogger('wrc', recipe.metadata.name).error('Workflow MCP delegation failed', {
+          name,
+          err,
+        })
         // Same eventually-consistent HCC handshake as the non-workflow
         // delegation step: degrade + retry instead of failing the run.
         throw new RetryableReconcileError(
@@ -3243,6 +3672,7 @@ export class WorkflowRecipeReconciler {
       internalDependencyConditions,
       secretOwnershipConditions: secretOwnership.conditions,
       workloadConditions: [],
+      transportNetworkConditions: [],
     }
   }
 
@@ -3251,7 +3681,7 @@ export class WorkflowRecipeReconciler {
   async reconcileDelete(recipe: WorkflowRecipeCRD): Promise<void> {
     const name = recipe.metadata.name
 
-    console.log(`[WR-Reconciler] Deleting resources for "${name}"`)
+    createLogger('wrc', recipe.metadata.name).info('Deleting recipe resources', { name })
     this.secretReverseIndex?.delete(name)
 
     // ─── Workflow Delete (Stage 1) ────────────────────────────────────
@@ -3288,7 +3718,10 @@ export class WorkflowRecipeReconciler {
     try {
       await cleanupDelegation(this.delegationDeps, recipe, this.config.namespace)
     } catch (error) {
-      console.error(`[WR-Reconciler] Delegation cleanup failed for "${name}":`, error)
+      createLogger('wrc', recipe.metadata.name).error('Delegation cleanup failed', {
+        name,
+        err: error,
+      })
       throw error
     }
   }
@@ -3330,10 +3763,11 @@ export class WorkflowRecipeReconciler {
         completed.push('compute-pods(coordinator,mcp-host,snippet-runner)')
       } catch (error) {
         failures.push('compute-pods')
-        console.error(
-          `[WR-Reconciler] Terminal compute-pod teardown failed for "${name}" (run ${runId}):`,
-          error
-        )
+        createLogger('wrc', recipe.metadata.name).error('Terminal compute-pod teardown failed', {
+          name,
+          runId,
+          err: error,
+        })
       }
     }
 
@@ -3352,10 +3786,11 @@ export class WorkflowRecipeReconciler {
       }
     } catch (error) {
       failures.push('mcp-server-delegation')
-      console.error(
-        `[WR-Reconciler] Terminal delegation cleanup failed for "${name}" (run ${runId}):`,
-        error
-      )
+      createLogger('wrc', recipe.metadata.name).error('Terminal delegation cleanup failed', {
+        name,
+        runId,
+        err: error,
+      })
     }
 
     // 3. WRC-owned transport Deployment(s) in mcp-server. See step 2 rationale.
@@ -3366,16 +3801,20 @@ export class WorkflowRecipeReconciler {
       }
     } catch (error) {
       failures.push('transport-deployments')
-      console.error(
-        `[WR-Reconciler] Terminal transport-Deployment teardown failed for "${name}" (run ${runId}):`,
-        error
+      createLogger('wrc', recipe.metadata.name).error(
+        'Terminal transport Deployment teardown failed',
+        { name, runId, err: error }
       )
     }
 
-    console.log(
-      `[WR-Reconciler] Workflow "${name}" terminal (run ${runId}) — cleanup attempted [${completed.join('; ') || 'nothing'}]` +
-        `${failures.length ? `; failed (left for archive-cron) [${failures.join(', ')}]` : ''}` +
-        `; preserved artifact-reader + output PVC + output-anchor + CR + DB`
+    createLogger('wrc', recipe.metadata.name).info(
+      'Terminal workflow cleanup attempted; artifacts, output resources, recipe and database retained',
+      {
+        name,
+        runId,
+        value3: completed.join('; ') || 'nothing',
+        value4: failures.length ? `; failed (left for archive-cron) [${failures.join(', ')}]` : '',
+      }
     )
   }
 
@@ -3447,7 +3886,9 @@ export class WorkflowRecipeReconciler {
     // PVCs: honor clerum.io/pvc-retention annotation (default: "retain").
     const pvcRetention = recipe.metadata.annotations?.['clerum.io/pvc-retention'] ?? 'retain'
     if (await this.hasVerifiedInheritedParentResources(recipe)) {
-      console.log(`[WR-Reconciler] Skipping inherited parent resources for child "${name}"`)
+      createLogger('wrc', recipe.metadata.name).info('Skipping inherited parent resources', {
+        name,
+      })
       return
     }
 
@@ -3495,8 +3936,9 @@ export class WorkflowRecipeReconciler {
                 `PVC "${res.id}" in ${resNs}`
               )
             } else {
-              console.log(
-                `[WR-Reconciler] Retaining PVC "${res.id}" (pvc-retention: ${pvcRetention})`
+              createLogger('wrc', recipe.metadata.name).info(
+                'Retaining PVC according to retention policy',
+                { id: res.id, pvcRetention }
               )
             }
             break
@@ -3596,22 +4038,31 @@ export class WorkflowRecipeReconciler {
     if (idempotency) stampSpecHash(idempotency.manifest)
     try {
       await createFn()
-      console.log(`[WR-Reconciler] Created ${label}`)
+      createLogger('wrc', 'workflow-recipes').info('Created resource', { label })
     } catch (error: unknown) {
       if (getErrorCode(error) === 409) {
         if (idempotency && (await this.applyIsNoop(idempotency))) {
-          console.log(`[WR-Reconciler] ${label} unchanged (spec-hash match); skipping update`)
+          createLogger('wrc', 'workflow-recipes').info(
+            'Resource spec hash unchanged; skipping update',
+            { label }
+          )
           return
         }
         try {
           await replaceFn()
-          console.log(`[WR-Reconciler] Updated ${label}`)
+          createLogger('wrc', 'workflow-recipes').info('Updated resource', { label })
         } catch (updateError) {
-          console.error(`[WR-Reconciler] Failed to update ${label}:`, updateError)
+          createLogger('wrc', 'workflow-recipes').error('Failed to update resource', {
+            label,
+            err: updateError,
+          })
           throw updateError
         }
       } else {
-        console.error(`[WR-Reconciler] Failed to create ${label}:`, error)
+        createLogger('wrc', 'workflow-recipes').error('Failed to create resource', {
+          label,
+          err: error,
+        })
         throw error
       }
     }
@@ -3830,22 +4281,24 @@ export class WorkflowRecipeReconciler {
     const desiredHash = stampSpecHash(statefulSet)
     try {
       await this.appsApi.createNamespacedStatefulSet({ namespace, body: statefulSet })
-      console.log(`[WR-Reconciler] Created StatefulSet "${name}" in ${namespace}`)
+      createLogger('wrc', 'workflow-recipes').info('Created StatefulSet', { name, namespace })
       return
     } catch (error: unknown) {
       if (getErrorCode(error) !== 409) {
-        console.error(
-          `[WR-Reconciler] Failed to create StatefulSet "${name}" in ${namespace}:`,
-          error
-        )
+        createLogger('wrc', 'workflow-recipes').error('Failed to create StatefulSet', {
+          name,
+          namespace,
+          err: error,
+        })
         throw error
       }
     }
 
     const existing = await this.appsApi.readNamespacedStatefulSet({ name, namespace })
     if (existing.metadata?.annotations?.[SPEC_HASH_ANNOTATION] === desiredHash) {
-      console.log(
-        `[WR-Reconciler] StatefulSet "${name}" in ${namespace} unchanged (spec-hash match); skipping update`
+      createLogger('wrc', 'workflow-recipes').info(
+        'StatefulSet spec hash unchanged; skipping update',
+        { name, namespace }
       )
       return
     }
@@ -3873,18 +4326,27 @@ export class WorkflowRecipeReconciler {
       }
     )
     const patchKind = patchBody.spec ? 'metadata+mutable spec' : 'metadata'
-    console.log(`[WR-Reconciler] Patched StatefulSet "${name}" in ${namespace} (${patchKind})`)
+    createLogger('wrc', 'workflow-recipes').info('Patched StatefulSet', {
+      name,
+      namespace,
+      patchKind,
+    })
   }
 
   private async safeDelete(deleteFn: () => Promise<unknown>, label: string): Promise<void> {
     try {
       await deleteFn()
-      console.log(`[WR-Reconciler] Deleted ${label}`)
+      createLogger('wrc', 'workflow-recipes').info('Deleted resource', { label })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[WR-Reconciler] ${label} already gone`)
+        createLogger('wrc', 'workflow-recipes').info('Resource already gone', {
+          label,
+        })
       } else {
-        console.error(`[WR-Reconciler] Failed to delete ${label}:`, error)
+        createLogger('wrc', 'workflow-recipes').error('Failed to delete resource', {
+          label,
+          err: error,
+        })
       }
     }
   }
@@ -3899,13 +4361,18 @@ export class WorkflowRecipeReconciler {
   private async deleteOrThrow(deleteFn: () => Promise<unknown>, label: string): Promise<void> {
     try {
       await deleteFn()
-      console.log(`[WR-Reconciler] Deleted ${label}`)
+      createLogger('wrc', 'workflow-recipes').info('Deleted resource', { label })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[WR-Reconciler] ${label} already gone`)
+        createLogger('wrc', 'workflow-recipes').info('Resource already gone', {
+          label,
+        })
         return
       }
-      console.error(`[WR-Reconciler] Failed to delete ${label}:`, error)
+      createLogger('wrc', 'workflow-recipes').error('Failed to delete resource', {
+        label,
+        err: error,
+      })
       throw error
     }
   }
@@ -3931,16 +4398,22 @@ export class WorkflowRecipeReconciler {
       existing = await read()
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[WR-Reconciler] ${label} already gone`)
+        createLogger('wrc', recipe.metadata.name).info('Resource already gone', {
+          label,
+        })
       } else {
-        console.error(`[WR-Reconciler] Skipping delete of ${label} — ownership read failed:`, error)
+        createLogger('wrc', recipe.metadata.name).error(
+          'Skipping resource deletion because ownership could not be read',
+          { label, err: error }
+        )
       }
       return
     }
     const owner = existing.metadata?.labels?.['clerum.io/recipe']
     if (owner !== recipe.metadata.name) {
-      console.log(
-        `[WR-Reconciler] Skipping delete of ${label} — owned by "${owner ?? 'unset'}", not "${recipe.metadata.name}" (issue #571)`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Skipping resource deletion because another recipe owns it',
+        { label, value2: owner ?? 'unset', name: recipe.metadata.name }
       )
       return
     }
@@ -3948,36 +4421,97 @@ export class WorkflowRecipeReconciler {
   }
 
   /**
-   * Reconcile the per-recipe `ui-egress-<recipeName>` NetworkPolicy in
-   * `sandboxUiNamespace`. Ensures the policy converges with `recipe.spec.ui`:
-   *   - spec.ui set   → create-or-replace the policy
-   *   - spec.ui unset → delete any leftover policy from a prior reconcile
-   *
-   * The policy lives in a different namespace from the WorkflowRecipe CRD, so
-   * it carries no ownerReference and relies on this method (and reconcileDelete)
-   * for cleanup.
+   * One recipe-wide subtractive barrier. Every WRC policy whose authorization
+   * derives from UI/workload egress intent is narrowed before any resolver call
+   * in any lane. Later phases may add current intent only after their own lookup
+   * succeeds; a UI fault can therefore no longer strand a removed workload or
+   * symmetric-ingress permission.
+   */
+  private async prepareRecipeEgressContractions(
+    recipe: WorkflowRecipeCRD
+  ): Promise<RecipeEgressContractionPlan> {
+    await this.contractUiEgressPolicy(recipe)
+    const workload = await this.contractWorkloadEgressPolicies(recipe)
+    await this.contractUiIngressPolicies(recipe)
+    await this.contractWorkloadIngressPolicies(recipe, workload.ingressSourcesByTarget)
+    return { workload }
+  }
+
+  private async contractUiEgressPolicy(
+    recipe: WorkflowRecipeCRD
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    const namespace = this.config.sandboxUiNamespace
+    const policyName = `ui-egress-${recipe.metadata.name}`
+    const existing = await this.readNetworkPolicyOrNull(policyName, namespace)
+    if (!existing) return null
+
+    const externals = recipe.spec.ui?.egress?.external ?? []
+    const declarations = externals.map(entry => ({ fqdn: entry.fqdn, port: entry.port }))
+    const contraction = contractExternalEgress({
+      externals: declarations,
+      previousAnnotations: existing.metadata?.annotations,
+      now: Date.now(),
+      config: {
+        overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+        maxEntries: this.config.externalEgressMaxEntries,
+      },
+      isAllowedIp: ip => !isBlockedExternalIPv4(ip),
+    })
+    const needsStateAnnotations =
+      declarations.length > 0 ||
+      contraction.entries.length > 0 ||
+      existing.metadata?.annotations?.[STATE_ANNOTATION] !== undefined
+    const desired = rb.buildUiEgressNetworkPolicy(
+      recipe,
+      namespace,
+      this.config.sandboxNamespace,
+      contraction.resolved,
+      needsStateAnnotations ? contraction.annotations : undefined
+    )
+    return this.applyNetworkPolicyContraction({
+      existing,
+      desired: subtractiveNetworkPolicy(existing, desired),
+      namespace,
+      recipeName: recipe.metadata.name,
+    })
+  }
+
+  /**
+   * Reconcile the additive/fail-static half of the per-recipe UI policy. The
+   * caller supplies the snapshot returned by the recipe-wide contraction pass,
+   * which has already narrowed UI, workload, and symmetric ingress policies
+   * before the first DNS lookup can fail.
    */
   private async reconcileUiEgressPolicy(recipe: WorkflowRecipeCRD): Promise<void> {
     const policyName = `ui-egress-${recipe.metadata.name}`
     const ns = this.config.sandboxUiNamespace
 
     const externals = recipe.spec.ui?.egress?.external ?? []
-    const { resolved, failures } = await resolveExternalEgress(externals, this.fqdnLookup)
+    const externalDeclarations = externals.map(e => ({ fqdn: e.fqdn, port: e.port }))
+    const egressConfig = {
+      overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+      maxEntries: this.config.externalEgressMaxEntries,
+    }
+
+    let resolution: Awaited<ReturnType<typeof resolveExternalEgress>>
+    try {
+      resolution = await resolveExternalEgress(externals, this.fqdnLookup)
+    } catch (error: unknown) {
+      // DNS/controller latency is a race window. Re-contract from a fresh read
+      // before propagating so a concurrent widening cannot survive merely
+      // because the lookup itself faulted.
+      await this.contractUiEgressPolicy(recipe)
+      throw error
+    }
+    const existing = await this.contractUiEgressPolicy(recipe)
+    const { resolved, failures } = resolution
     this.recordExternalEgressTtl(resolved)
 
-    // Permanent failures (no-records / blocked range) never author a partial
-    // policy — fail exactly as the single-snapshot resolver did.
     const permanentFailures = failures.filter(f => !f.retryable)
-    if (permanentFailures.length > 0) {
-      throw egressResolutionError(
-        `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-        permanentFailures
-      )
-    }
+    let blockingFailures = permanentFailures
 
     let effectiveResolved: rb.ResolvedExternalEgressInput[] = resolved
     let stateAnnotations: Record<string, string> | undefined
-    let existing: k8s.V1NetworkPolicy | null = null
     let egressRenewalDue = false
     // H-E: the write gate compares rendered spec.egress (ipBlock cidr+port, no
     // fqdn), so a rename old.example.com→new.example.com onto the SAME ip/port is
@@ -3985,41 +4519,34 @@ export class WorkflowRecipeReconciler {
     // annotation and losing the overlap grace when the new name later rotates.
     // acc.changed is over (fqdn,ip,port,protocol), so it catches the rename.
     let egressStateChanged = false
-    // R1-M2: read the live policy for ALL cases, not only external egress, so an
-    // internal-only sibling policy (ui.egress.internal[] with no external[]) can
-    // hit the no-op gate below instead of being rewritten on every reconcile —
-    // which the 60s external-egress refresh loop amplifies for mixed recipes. For
-    // external egress it also seeds the accumulator's rehydration (H5).
-    existing = await this.readNetworkPolicyOrNull(policyName, ns)
     if (externals.length > 0) {
       // issue #299: fold this DNS snapshot into the accumulated sliding-window
       // set persisted on the live policy's annotations (rehydrate H5).
       const acc = accumulateExternalEgress({
-        externals: externals.map(e => ({ fqdn: e.fqdn, port: e.port })),
+        externals: externalDeclarations,
         resolveResult: { resolved, failures },
         previousAnnotations: existing?.metadata?.annotations,
         now: Date.now(),
-        config: {
-          overlapMs: this.config.externalEgressOverlapSeconds * 1000,
-          maxEntries: this.config.externalEgressMaxEntries,
-        },
+        config: egressConfig,
       })
       // Bootstrap fail-closed: a transient resolver failure with NOTHING to
       // freeze (no rehydratable prior set) must not author an empty policy.
       if (acc.entries.length === 0 && failures.length > 0) {
-        throw egressResolutionError(
-          `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
-          failures
-        )
+        blockingFailures = failures
       }
       // Audit L3: a transient failure of a newly-added FQDN (with resolving
       // siblings) does not throw and freezes nothing — surface it so the missing
       // egress until the next refresh is not silent.
       if (failures.length > 0) {
-        console.warn(
-          `[WR-Reconciler] ${policyName}: ${failures.length} external egress FQDN(s) failed to resolve this round; policy written without them until the next refresh converges: ${failures
-            .map(f => `${f.fqdn} (${f.retryable ? 'transient' : 'permanent'})`)
-            .join(', ')}`
+        createLogger('wrc', recipe.metadata.name).warn(
+          'External egress FQDN resolution failed; next refresh must converge the policy',
+          {
+            policyName,
+            length: failures.length,
+            value3: failures
+              .map(f => `${f.fqdn} (${f.retryable ? 'transient' : 'permanent'})`)
+              .join(', '),
+          }
         )
       }
       this.warnEgressAccumulator(policyName, acc)
@@ -4046,11 +4573,30 @@ export class WorkflowRecipeReconciler {
       stateAnnotations
     )
 
-    if (!policy) {
-      await this.safeDelete(
-        () => this.networkingApi.deleteNamespacedNetworkPolicy({ name: policyName, namespace: ns }),
-        `NetworkPolicy "${policyName}" in ${ns}`
+    if (blockingFailures.length > 0) {
+      if (existing) {
+        await this.applyNetworkPolicyContraction({
+          existing,
+          desired: subtractiveNetworkPolicy(existing, policy),
+          namespace: ns,
+          recipeName: recipe.metadata.name,
+        })
+      }
+      throw egressResolutionError(
+        `WorkflowRecipe "${recipe.metadata.name}" ui external egress resolution failed`,
+        blockingFailures
       )
+    }
+
+    if (!policy) {
+      if (existing) {
+        await this.applyNetworkPolicyContraction({
+          existing,
+          desired: null,
+          namespace: ns,
+          recipeName: recipe.metadata.name,
+        })
+      }
       return
     }
 
@@ -4059,32 +4605,50 @@ export class WorkflowRecipeReconciler {
     // write when the persisted window is aging (renewalDue, audit M1), even if
     // the set is unchanged, so a stable-then-rotated IP keeps its overlap grace.
     if (!this.egressWriteNeeded(existing, policy) && !egressRenewalDue && !egressStateChanged) {
-      console.log(
-        `[WR-Reconciler] NetworkPolicy "${policyName}" in ${ns} egress set unchanged — no-op`
+      createLogger('wrc', recipe.metadata.name).info('NetworkPolicy egress set unchanged; no-op', {
+        policyName,
+        ns,
+      })
+    } else {
+      await this.applyOwnedRecipeNetworkPolicy(policy, ns, recipe.metadata.name)
+      // #299: the policy has landed — record the set it actually enforces.
+      this.logResolvedEgressSet(
+        recipe.metadata.name,
+        policyName,
+        externals.map(e => e.fqdn),
+        effectiveResolved,
+        egressStateChanged
       )
-      return
+    }
+  }
+
+  private async contractUiIngressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+    const namespace = this.config.sandboxNamespace
+    const portsByWorkload = new Map<string, Set<number>>()
+    for (const rule of recipe.spec.ui?.egress?.internal ?? []) {
+      const ports = portsByWorkload.get(rule.workloadRef) ?? new Set<number>()
+      ports.add(rule.port)
+      portsByWorkload.set(rule.workloadRef, ports)
     }
 
-    await this.createOrReplace(
-      () =>
-        this.networkingApi.createNamespacedNetworkPolicy({
-          namespace: ns,
-          body: policy,
-        }),
-      async () => {
-        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-          name: policyName,
-          namespace: ns,
-        })
-        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-        return this.networkingApi.replaceNamespacedNetworkPolicy({
-          name: policyName,
-          namespace: ns,
-          body: policy,
-        })
-      },
-      `NetworkPolicy "${policyName}" in ${ns}`
-    )
+    for (const workload of recipe.spec.workloads ?? []) {
+      const name = rb.uiIngressPolicyName(recipe.metadata.name, workload.id)
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) continue
+      const desired = rb.buildUiIngressNetworkPolicy(
+        recipe,
+        workload.id,
+        [...(portsByWorkload.get(workload.id) ?? [])],
+        namespace,
+        this.config.sandboxUiNamespace
+      )
+      await this.applyNetworkPolicyContraction({
+        existing,
+        desired: subtractiveNetworkPolicy(existing, desired),
+        namespace,
+        recipeName: recipe.metadata.name,
+      })
+    }
   }
 
   /**
@@ -4128,7 +4692,10 @@ export class WorkflowRecipeReconciler {
         await this.deleteUiIngressIfExists(recipe.metadata.name, w.id, ns)
         continue
       }
-      await this.applyNetworkPolicy(policy, ns)
+      await this.applyNetworkPolicy(policy, ns, {
+        family: 'ui-ingress',
+        recipeName: recipe.metadata.name,
+      })
     }
   }
 
@@ -4138,10 +4705,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.uiIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   private internalDependencyCondition(
@@ -4278,7 +4849,7 @@ export class WorkflowRecipeReconciler {
         )
         if (!policy) continue
         rememberDesired(policy)
-        await this.applyNetworkPolicy(policy, sourceNamespace)
+        await this.applyNetworkPolicy(policy, sourceNamespace, { family: 'internal-dependency' })
       }
 
       for (const [targetWorkloadId, sources] of sourcesByTarget.entries()) {
@@ -4293,11 +4864,14 @@ export class WorkflowRecipeReconciler {
         )
         if (!policy) continue
         rememberDesired(policy)
-        await this.applyNetworkPolicy(policy, targetNamespace)
+        await this.applyNetworkPolicy(policy, targetNamespace, { family: 'internal-dependency' })
       }
 
       await this.pruneStaleInternalDependencyPolicies(recipe, desiredByNamespace)
     } catch (error) {
+      if (error instanceof RetryableReconcileError || error instanceof NetworkPolicyInfraError) {
+        throw error
+      }
       const reason =
         error instanceof NetworkPolicyOwnershipConflictError
           ? 'OwnershipConflict'
@@ -4353,13 +4927,125 @@ export class WorkflowRecipeReconciler {
         if (!name || desiredNames.has(name)) continue
         try {
           await this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace })
-          console.log(
-            `[WR-Reconciler] Deleted stale internal-dependency NetworkPolicy "${name}" in ${namespace}`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Deleted stale internal-dependency NetworkPolicy',
+            { name, namespace }
           )
         } catch (error) {
           if (getErrorCode(error) !== 404) throw error
         }
       }
+    }
+  }
+
+  private async contractWorkloadEgressPolicies(
+    recipe: WorkflowRecipeCRD
+  ): Promise<WorkloadEgressContractionPlan> {
+    const workloads = recipe.spec.workloads ?? []
+    const uiWorkloadId = recipe.spec.ui?.workloadRef
+    const ingressSourcesByTarget = new Map<string, rb.WorkloadIngressSource[]>()
+    const plans: WorkloadEgressContractionPlan['plans'] = []
+
+    for (const workload of workloads) {
+      if (workload.transport) continue
+      if (uiWorkloadId && workload.id === uiWorkloadId) continue
+      const namespace = this.resolveWorkloadNamespace(workload, uiWorkloadId)
+      const bindings = workload.egressBindings ?? []
+      if (bindings.length === 0) {
+        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, workload.id, namespace)
+        continue
+      }
+
+      const externalDeclared: Array<{ fqdn: string; port: number }> = []
+      for (const binding of bindings) {
+        if (!binding.dns || binding.port == null) continue
+        const resolved = rb.resolveClusterLocalBinding(binding.dns, recipe, namespace)
+        if (resolved?.kind === 'cluster-local') {
+          const sources = ingressSourcesByTarget.get(resolved.workloadId) ?? []
+          sources.push({
+            fromWorkloadId: workload.id,
+            fromNamespace: namespace,
+            port: binding.port,
+            protocol: (binding.protocol ?? 'TCP') as 'TCP' | 'UDP',
+          })
+          ingressSourcesByTarget.set(resolved.workloadId, sources)
+        } else if (!resolved) {
+          externalDeclared.push({ fqdn: binding.dns, port: binding.port })
+        }
+      }
+
+      const policyName = rb.workloadEgressPolicyName(recipe.metadata.name, workload.id)
+      await this.contractOneWorkloadEgressPolicy(recipe, workload, namespace, externalDeclared)
+      plans.push({ workload, namespace, policyName, externalDeclared })
+    }
+
+    return { plans, ingressSourcesByTarget }
+  }
+
+  private async contractOneWorkloadEgressPolicy(
+    recipe: WorkflowRecipeCRD,
+    workload: WorkloadDef,
+    namespace: string,
+    externalDeclared: Array<{ fqdn: string; port: number }>
+  ): Promise<k8s.V1NetworkPolicy | null> {
+    const policyName = rb.workloadEgressPolicyName(recipe.metadata.name, workload.id)
+    const existing = await this.readNetworkPolicyOrNull(policyName, namespace)
+    if (!existing) return null
+
+    const contraction = contractExternalEgress({
+      externals: externalDeclared,
+      previousAnnotations: existing.metadata?.annotations,
+      now: Date.now(),
+      config: {
+        overlapMs: this.config.externalEgressOverlapSeconds * 1000,
+        maxEntries: this.config.externalEgressMaxEntries,
+      },
+      isAllowedIp: ip => !isBlockedExternalIPv4(ip),
+    })
+    const needsStateAnnotations =
+      externalDeclared.length > 0 ||
+      contraction.entries.length > 0 ||
+      existing.metadata?.annotations?.[STATE_ANNOTATION] !== undefined
+    const desired = rb.buildWorkloadEgressNetworkPolicy(
+      workload,
+      recipe,
+      namespace,
+      contraction.resolved,
+      needsStateAnnotations ? contraction.annotations : undefined
+    )
+    return this.applyNetworkPolicyContraction({
+      existing,
+      desired: subtractiveNetworkPolicy(existing, desired),
+      namespace,
+      recipeName: recipe.metadata.name,
+    })
+  }
+
+  private async contractWorkloadIngressPolicies(
+    recipe: WorkflowRecipeCRD,
+    ingressSourcesByTarget: Map<string, rb.WorkloadIngressSource[]>
+  ): Promise<void> {
+    const workloads = recipe.spec.workloads ?? []
+    const uiWorkloadId = recipe.spec.ui?.workloadRef
+    for (const workload of workloads) {
+      if (workload.transport) continue
+      if (uiWorkloadId && workload.id === uiWorkloadId) continue
+      const namespace = this.resolveWorkloadNamespace(workload, uiWorkloadId)
+      const name = rb.workloadIngressPolicyName(recipe.metadata.name, workload.id)
+      const existing = await this.readNetworkPolicyOrNull(name, namespace)
+      if (!existing) continue
+      const desired = rb.buildWorkloadIngressNetworkPolicy(
+        workload,
+        recipe,
+        namespace,
+        ingressSourcesByTarget.get(workload.id) ?? []
+      )
+      await this.applyNetworkPolicyContraction({
+        existing,
+        desired: subtractiveNetworkPolicy(existing, desired),
+        namespace,
+        recipeName: recipe.metadata.name,
+      })
     }
   }
 
@@ -4378,80 +5064,45 @@ export class WorkflowRecipeReconciler {
    * silent authorization drift, so any unresolved or blocked hostname fails
    * the reconcile before policy apply.
    */
-  private async reconcileWorkloadEgressPolicies(recipe: WorkflowRecipeCRD): Promise<void> {
+  private async reconcileWorkloadEgressPolicies(
+    recipe: WorkflowRecipeCRD,
+    preparation: WorkloadEgressContractionPlan
+  ): Promise<void> {
     const workloads = recipe.spec.workloads ?? []
     if (workloads.length === 0) return
     const uiWorkloadId = recipe.spec.ui?.workloadRef
+    const { plans, ingressSourcesByTarget } = preparation
 
-    // Aggregate ingress sources keyed by target workload id. Filled as we
-    // walk each source workload's cluster-local bindings.
-    const ingressSourcesByTarget = new Map<string, rb.WorkloadIngressSource[]>()
-
-    for (const w of workloads) {
-      // Skip MCP + UI workloads — covered by other code paths.
-      if (w.transport) continue
-      if (uiWorkloadId && w.id === uiWorkloadId) continue
-      const wlNs = this.resolveWorkloadNamespace(w, uiWorkloadId)
-      const bindings = w.egressBindings ?? []
-      if (bindings.length === 0) {
-        // Reap any policy left over from a previous reconcile that DID
-        // have bindings — keeps the policy set in lockstep with the spec.
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
-        continue
+    // Phase 2: resolve and add/freeze only the identities that survived phase 1.
+    for (const plan of plans) {
+      const { workload: w, namespace: wlNs, policyName: wlPolicyName, externalDeclared } = plan
+      let resolution: Awaited<ReturnType<typeof resolveExternalEgress>>
+      try {
+        resolution = await resolveExternalEgress(externalDeclared, this.fqdnLookup)
+      } catch (error: unknown) {
+        await this.contractOneWorkloadEgressPolicy(recipe, w, wlNs, externalDeclared)
+        throw error
       }
-
-      // Split into cluster-local sibling targets vs external FQDNs.
-      const externalDeclared: { fqdn: string; port: number }[] = []
-      for (const b of bindings) {
-        if (!b.dns || b.port == null) continue
-        const port = b.port
-        const resolved = rb.resolveClusterLocalBinding(b.dns, recipe, wlNs)
-        if (resolved && resolved.kind === 'cluster-local') {
-          const sources = ingressSourcesByTarget.get(resolved.workloadId) ?? []
-          sources.push({
-            fromWorkloadId: w.id,
-            fromNamespace: wlNs,
-            port,
-            protocol: (b.protocol ?? 'TCP') as 'TCP' | 'UDP',
-          })
-          ingressSourcesByTarget.set(resolved.workloadId, sources)
-        } else if (!resolved) {
-          // null = treat as external FQDN
-          externalDeclared.push({ fqdn: b.dns, port })
-        }
-        // resolved.kind === 'mismatch' is unreachable here — validation
-        // ran upstream and would have thrown.
-      }
-
-      const { resolved: resolvedExternal, failures } = await resolveExternalEgress(
-        externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
-        this.fqdnLookup
+      let existingWlPolicy = await this.contractOneWorkloadEgressPolicy(
+        recipe,
+        w,
+        wlNs,
+        externalDeclared
       )
+      const { resolved: resolvedExternal, failures } = resolution
       this.recordExternalEgressTtl(resolvedExternal)
 
-      // Permanent failures never author a partial policy — fail as before.
       const permanentFailures = failures.filter(f => !f.retryable)
-      if (permanentFailures.length > 0) {
-        throw egressResolutionError(
-          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-          permanentFailures
-        )
-      }
+      let blockingFailures = permanentFailures
 
       let effectiveExternal: rb.ResolvedExternalEgressInput[] = resolvedExternal
       let wlStateAnnotations: Record<string, string> | undefined
-      let existingWlPolicy: k8s.V1NetworkPolicy | null = null
       let wlEgressRenewalDue = false
       let wlEgressStateChanged = false // H-E: catch fqdn-attribution-only changes
-      const wlPolicyName = rb.workloadEgressPolicyName(recipe.metadata.name, w.id)
-      // R1-M2: read the live policy for ALL cases so an internal-only (cluster-
-      // local) workload egress policy hits the no-op gate instead of churning
-      // every reconcile; for external egress it also seeds rehydration (H5).
-      existingWlPolicy = await this.readNetworkPolicyOrNull(wlPolicyName, wlNs)
       if (externalDeclared.length > 0) {
         // issue #299: accumulate the sliding-window egress set (rehydrate H5).
         const acc = accumulateExternalEgress({
-          externals: externalDeclared.map(e => ({ fqdn: e.fqdn, port: e.port })),
+          externals: externalDeclared,
           resolveResult: { resolved: resolvedExternal, failures },
           previousAnnotations: existingWlPolicy?.metadata?.annotations,
           now: Date.now(),
@@ -4462,10 +5113,7 @@ export class WorkflowRecipeReconciler {
         })
         // Bootstrap fail-closed: transient failure with nothing to freeze.
         if (acc.entries.length === 0 && failures.length > 0) {
-          throw egressResolutionError(
-            `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
-            failures
-          )
+          blockingFailures = failures
         }
         this.warnEgressAccumulator(wlPolicyName, acc)
         // Defense-in-depth (audit M3): re-validate rehydrated IPs vs blocked ranges.
@@ -4489,8 +5137,30 @@ export class WorkflowRecipeReconciler {
         effectiveExternal,
         wlStateAnnotations
       )
+      if (blockingFailures.length > 0) {
+        if (existingWlPolicy) {
+          await this.applyNetworkPolicyContraction({
+            existing: existingWlPolicy,
+            desired: subtractiveNetworkPolicy(existingWlPolicy, policy),
+            namespace: wlNs,
+            recipeName: recipe.metadata.name,
+          })
+        }
+        throw egressResolutionError(
+          `WorkflowRecipe "${recipe.metadata.name}" workload "${w.id}" egress resolution failed`,
+          blockingFailures
+        )
+      }
       if (!policy) {
-        await this.deleteWorkloadEgressIfExists(recipe.metadata.name, w.id, wlNs)
+        if (existingWlPolicy) {
+          await this.applyNetworkPolicyContraction({
+            existing: existingWlPolicy,
+            desired: null,
+            namespace: wlNs,
+            recipeName: recipe.metadata.name,
+          })
+          existingWlPolicy = null
+        }
         continue
       }
       // issue #299: NO-OP when the accumulated set and rules are already live —
@@ -4500,12 +5170,25 @@ export class WorkflowRecipeReconciler {
         !wlEgressRenewalDue &&
         !wlEgressStateChanged
       ) {
-        console.log(
-          `[WR-Reconciler] NetworkPolicy "${wlPolicyName}" in ${wlNs} egress set unchanged — no-op`
+        createLogger('wrc', recipe.metadata.name).info(
+          'network policy egress set unchanged; skipping live apply',
+          { policy: wlPolicyName, namespace: wlNs, family: 'workload-egress' }
         )
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, {
+        family: 'workload-egress',
+        recipeName: recipe.metadata.name,
+        existing: existingWlPolicy,
+      })
+      // #299: the policy has landed — record the set it actually enforces.
+      this.logResolvedEgressSet(
+        recipe.metadata.name,
+        wlPolicyName,
+        externalDeclared.map(e => e.fqdn),
+        effectiveExternal,
+        wlEgressStateChanged
+      )
     }
 
     // Now ingress side: for each target workload that any sibling pointed
@@ -4524,7 +5207,10 @@ export class WorkflowRecipeReconciler {
         await this.deleteWorkloadIngressIfExists(recipe.metadata.name, w.id, wlNs)
         continue
       }
-      await this.applyNetworkPolicy(policy, wlNs)
+      await this.applyNetworkPolicy(policy, wlNs, {
+        family: 'workload-ingress',
+        recipeName: recipe.metadata.name,
+      })
     }
   }
 
@@ -4564,8 +5250,211 @@ export class WorkflowRecipeReconciler {
       return await this.networkingApi.readNamespacedNetworkPolicy({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) return null
+      if (isRetryableInfraError(error)) {
+        const safe = this.safeInfrastructureErrorFields(error)
+        throw new NetworkPolicyInfraError(
+          `NetworkPolicy "${name}" in ${namespace} read temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+          error,
+          safe.errorCode
+        )
+      }
       throw error
     }
+  }
+
+  private assertRecipeNetworkPolicyOwnership(
+    existing: k8s.V1NetworkPolicy,
+    recipeName: string,
+    policyName: string,
+    namespace: string
+  ): void {
+    const labels = existing.metadata?.labels ?? {}
+    if (
+      labels['clerum.io/managed-by'] !== 'workflow-recipes' ||
+      labels['clerum.io/recipe'] !== recipeName
+    ) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: existing policy is not owned by WorkflowRecipe "${recipeName}"`
+      )
+    }
+  }
+
+  private assertMutableRecipeNetworkPolicy(
+    snapshot: k8s.V1NetworkPolicy,
+    recipeName: string,
+    policyName: string,
+    namespace: string
+  ): void {
+    // Recipe-scoped policies are label-owned, not garbage-collection owned.
+    // Check every freshly read snapshot, including final apply after DNS.
+    if (snapshot.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+    this.assertRecipeNetworkPolicyOwnership(snapshot, recipeName, policyName, namespace)
+    const ownership = classifyOwnerlessNetworkPolicyOwnership(snapshot)
+    if (ownership.kind === 'conflict') {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to mutate NetworkPolicy "${policyName}" in ${namespace}: ${ownership.reason}`
+      )
+    }
+  }
+
+  /**
+   * Apply a strictly subtractive pre-DNS transition against the exact snapshot
+   * that was read. This path never creates a policy and therefore cannot add an
+   * authorization before DNS succeeds. ResourceVersion/UID fencing makes a
+   * concurrent replacement fail loud instead of mutating a newer object.
+   */
+  private async applyNetworkPolicyContraction(input: {
+    existing: k8s.V1NetworkPolicy
+    desired: k8s.V1NetworkPolicy | null
+    namespace: string
+    recipeName: string
+  }): Promise<k8s.V1NetworkPolicy | null> {
+    const { existing, desired, namespace, recipeName } = input
+    const policyName = existing.metadata?.name
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!policyName || !resourceVersion) {
+      throw new Error('NetworkPolicy contraction requires policy name and resourceVersion')
+    }
+    this.assertMutableRecipeNetworkPolicy(existing, recipeName, policyName, namespace)
+
+    if (desired === null) {
+      const uid = existing.metadata?.uid
+      if (!uid) throw new Error('NetworkPolicy contraction delete requires policy uid')
+      try {
+        await this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+          body: { preconditions: { uid, resourceVersion } },
+        })
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 404) {
+          throwNetworkPolicyMutationError(error, policyName, namespace)
+        }
+      }
+      createLogger('wrc', recipeName).info('contracted recipe network policy', {
+        policy: policyName,
+        namespace,
+        action: 'delete',
+      })
+      return null
+    }
+
+    if (!contractionWriteNeeded(existing, desired)) return existing
+    const replacement = buildNetworkPolicyReplacement(desired, existing)
+    try {
+      await this.networkingApi.replaceNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+        body: replacement,
+      })
+    } catch (error: unknown) {
+      throwNetworkPolicyMutationError(error, policyName, namespace)
+    }
+    let live: k8s.V1NetworkPolicy
+    try {
+      live = await this.networkingApi.readNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+      })
+    } catch (error: unknown) {
+      if (getErrorCode(error) === 404) return null
+      throw error
+    }
+    this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
+    const liveUid = live.metadata?.uid
+    const liveResourceVersion = live.metadata?.resourceVersion
+    if (
+      live.metadata?.name !== policyName ||
+      live.metadata?.namespace !== namespace ||
+      !liveUid ||
+      !liveResourceVersion
+    ) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `NetworkPolicy "${policyName}" in ${namespace} has incomplete or inconsistent identity after contraction`
+      )
+    }
+    if (existing.metadata?.uid && liveUid !== existing.metadata.uid) {
+      throw new NetworkPolicyReplanRequiredError(
+        `NetworkPolicy "${policyName}" in ${namespace} changed identity during contraction`
+      )
+    }
+    const provenLive = subtractiveNetworkPolicy(live, desired)
+    if (!provenLive || contractionWriteNeeded(live, provenLive)) {
+      // The apiserver read-back is broader or carries provenance that does not
+      // match its enforced rules. Do not let phase 2 treat the request body as
+      // reality; revoke this exact owned identity and force a clean re-plan.
+      try {
+        await this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace,
+          body: { preconditions: { uid: liveUid, resourceVersion: liveResourceVersion } },
+        })
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 404)
+          throwNetworkPolicyMutationError(error, policyName, namespace)
+      }
+      throw new NetworkPolicyOwnershipConflictError(
+        `NetworkPolicy "${policyName}" in ${namespace} did not read back as the requested contraction`
+      )
+    }
+    createLogger('wrc', recipeName).info('contracted recipe network policy', {
+      policy: policyName,
+      namespace,
+      action: 'replace',
+    })
+    return live
+  }
+
+  private async applyOwnedRecipeNetworkPolicy(
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    recipeName: string
+  ): Promise<void> {
+    const policyName = policy.metadata?.name
+    if (!policyName) throw new Error('Recipe NetworkPolicy requires a name')
+    await this.createOrReplace(
+      () => this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: policy }),
+      async () => {
+        let live: k8s.V1NetworkPolicy
+        try {
+          live = await this.networkingApi.readNamespacedNetworkPolicy({
+            name: policyName,
+            namespace,
+          })
+        } catch (error: unknown) {
+          if (getErrorCode(error) === 404) {
+            throw new NetworkPolicyReplanRequiredError(
+              `NetworkPolicy "${policyName}" in ${namespace} disappeared after create conflict; a fresh reconciliation is required`,
+              { cause: error }
+            )
+          }
+          throw error
+        }
+        this.assertMutableRecipeNetworkPolicy(live, recipeName, policyName, namespace)
+        if (!live.metadata?.resourceVersion) {
+          throw new NetworkPolicyOwnershipConflictError(
+            `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: live resourceVersion is missing`
+          )
+        }
+        const replacement = buildNetworkPolicyReplacement(policy, live)
+        try {
+          return await this.networkingApi.replaceNamespacedNetworkPolicy({
+            name: policyName,
+            namespace,
+            body: replacement,
+          })
+        } catch (error: unknown) {
+          // This PUT is fenced by the freshly checked owner/resourceVersion.
+          // Losing that snapshot is unfinished convergence, not bad user intent.
+          throwNetworkPolicyMutationError(error, policyName, namespace)
+        }
+      },
+      `NetworkPolicy "${policyName}" in ${namespace}`
+    )
   }
 
   /**
@@ -4605,6 +5494,7 @@ export class WorkflowRecipeReconciler {
     desired: k8s.V1NetworkPolicy
   ): boolean {
     if (!existing) return true
+    if (!networkPolicyMetadataMatchesDesired(desired, existing)) return true
     // Decide the write off the ENFORCED rules (the ipBlock set + ports), NOT the
     // raw state annotation: serializeState embeds expiresAt/lastObservedAt, which
     // renew on every OK tick, so comparing the annotation string would rewrite
@@ -4633,44 +5523,289 @@ export class WorkflowRecipeReconciler {
    */
   private warnEgressAccumulator(policyName: string, acc: AccumulateOutput): void {
     if (acc.frozenFqdns.length > 0) {
-      console.warn(
-        `[WR-Reconciler] ${policyName}: egress set FROZEN (fail-static) for ${acc.frozenFqdns.join(
-          ', '
-        )} — DNS resolution is transiently failing; serving last-known IPs, not pruning.`
+      createLogger('wrc', 'workflow-recipes').warn(
+        'External egress frozen during transient DNS failure; serving last accepted IPs',
+        { policyName, value2: acc.frozenFqdns.join(', ') }
       )
     }
     if (acc.overCap) {
-      console.warn(
-        `[WR-Reconciler] ${policyName}: egress set hit the maxEntries cap — evicted ${acc.evicted.length} least-recently-observed entr${
-          acc.evicted.length === 1 ? 'y' : 'ies'
-        } (never rejecting the policy).`
+      createLogger('wrc', 'workflow-recipes').warn(
+        'External egress exceeded maxEntries; evicted least-recently-observed entries',
+        { policyName, length: acc.evicted.length, value3: acc.evicted.length === 1 ? 'y' : 'ies' }
       )
     }
   }
 
-  private async applyNetworkPolicy(policy: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
-    const policyName = policy.metadata!.name!
-    await this.createOrReplace(
-      () =>
-        this.networkingApi.createNamespacedNetworkPolicy({
-          namespace,
-          body: policy,
-        }),
-      async () => {
-        const existing = await this.networkingApi.readNamespacedNetworkPolicy({
-          name: policyName,
-          namespace,
-        })
-        this.assertInternalDependencyPolicyOwnership(policy, existing, namespace)
-        policy.metadata!.resourceVersion = existing.metadata?.resourceVersion
-        return this.networkingApi.replaceNamespacedNetworkPolicy({
-          name: policyName,
-          namespace,
-          body: policy,
-        })
-      },
-      `NetworkPolicy "${policyName}" in ${namespace}`
+  /**
+   * Record the external egress set that was just written — one entry per
+   * declared FQDN — so the WRC lane leaves a reconstructable history (#299).
+   *
+   * WHY THIS EXISTS. HCC emits `[NetPol] Resolved <fqdn> → [cidrs]` per DNS
+   * binding (`host-context-controller/src/networkPolicyReconciler.ts`), so its
+   * lane can be replayed from retained logs: which addresses a host actually
+   * used over weeks, whether that universe is closed, whether it drifts. WRC has
+   * had its own resolution path since the SAME initial commit (`fqdnResolver.ts`)
+   * and simply never got the equivalent record; #299 later added the sliding
+   * window on top of it. The asymmetry is an omission, not a consequence of
+   * arriving later — and `wl-egress-*`/`ui-egress-*` is the lane where the hosts
+   * whose DNS round outruns their retention sit, so the half of the fleet that
+   * most needs the history is the half that had none.
+   *
+   * PER FQDN, NOT PER POLICY. `egress.external[]` is a list, so one policy
+   * routinely covers several hosts. Flattening their IPs into a single union
+   * cannot answer which host used which address — the only question the history
+   * exists for. Keyed by `source.fqdn`, this matches HCC's shape.
+   *
+   * AFTER THE WRITE, ON THE ENFORCED SET. Called once the policy has landed, and
+   * given the post-M3 (`isBlockedExternalIPv4`) filtered set that was actually
+   * rendered — not the accumulator's raw entries, which can still carry a
+   * rehydrated blocked address the policy then drops. A record that disagrees
+   * with the policy is worse than no record: it would attest to an allowance
+   * that never existed.
+   *
+   * ON CHANGE ONLY. `changed` is `acc.changed` — true iff the
+   * (fqdn,ip,port,protocol) set differs from the persisted state, so a
+   * timestamp-only refresh stays silent. It is ONE of the three terms the H4
+   * write gate keys on, so every entry here corresponds to a write that landed;
+   * the converse does not hold — a renewal (M1) or an annotation migration
+   * writes without emitting one.
+   *
+   * A DECLARED FQDN THAT RESOLVED TO NOTHING STILL EMITS, with `cidrs: []`. A
+   * set collapsing to empty is the most consequential event in the series and
+   * must not be indistinguishable from "nothing happened".
+   *
+   * WHAT THE RECORD DOES NOT CARRY. `cidrs` and `ports` are two independent
+   * deduped projections, not pairs: a host on `(A,443)` and `(B,8443)` renders
+   * `cidrs:[A,B] ports:[443,8443]`, which reads the same as both addresses on
+   * both ports. The record is an ADDRESS history — that is what it is for — so
+   * it matches the enforced policy on each projection, not on their pairing.
+   */
+  private logResolvedEgressSet(
+    recipeName: string,
+    policyName: string,
+    declaredFqdns: string[],
+    resolved: rb.ResolvedExternalEgressInput[],
+    changed: boolean
+  ): void {
+    if (!changed) return
+    const log = createLogger('wrc', recipeName)
+    for (const fqdn of [...new Set(declaredFqdns)].sort()) {
+      const forHost = resolved.filter(r => r.source.fqdn === fqdn)
+      log.info('resolved external egress set', {
+        policy: policyName,
+        fqdn,
+        // Sorted by ADDRESS so an unchanged set renders byte-identically and a
+        // real change is visible as a diff. Ports are carried separately because
+        // `changed` is defined over (fqdn,ip,port,protocol): a port-only change
+        // must not render an identical entry.
+        cidrs: [...new Set(forHost.map(r => r.cidr))].sort(compareCidrByAddress),
+        ports: [...new Set(forHost.map(r => r.port))].sort((a, b) => a - b),
+      })
+    }
+  }
+
+  /**
+   * Reconcile one WRC-authored NetworkPolicy from the live object, not from the
+   * legacy spec-hash seal. NetworkPolicy is an enforcement resource: a stored
+   * annotation can describe what WRC wrote previously while the live spec or
+   * lifecycle ownership has since drifted. One validated live snapshot therefore
+   * owns both the no-op decision and the resourceVersion used by a replace.
+   */
+  private async applyNetworkPolicy(
+    policy: k8s.V1NetworkPolicy,
+    namespace: string,
+    options: NetworkPolicyApplyOptions
+  ): Promise<void> {
+    const desired = structuredClone(policy)
+    const policyName = desired.metadata?.name
+    if (!policyName) throw new Error('Cannot apply a NetworkPolicy without metadata.name')
+    desired.metadata = desired.metadata ?? {}
+    desired.metadata.namespace = desired.metadata.namespace ?? namespace
+    this.assertDesiredNetworkPolicyOwner(desired, options.family, namespace)
+
+    const recipeName =
+      desired.metadata?.labels?.['clerum.io/recipe'] ??
+      desired.metadata?.labels?.['clerum.io/recipe-name'] ??
+      policyName
+    const log = createLogger('wrc', recipeName)
+    const fields = { policy: policyName, namespace, family: options.family }
+    const hasSuppliedExisting = Object.prototype.hasOwnProperty.call(options, 'existing')
+    let readResult: NetworkPolicyReadResult = hasSuppliedExisting
+      ? { existing: options.existing ?? null, recoveredFromReadFailure: false }
+      : await this.readNetworkPolicyForApply(policyName, namespace, log, fields)
+    let existing = readResult.existing
+
+    if (!existing) {
+      try {
+        await this.networkingApi.createNamespacedNetworkPolicy({ namespace, body: desired })
+        log.info('network policy created', fields)
+        return
+      } catch (error: unknown) {
+        if (getErrorCode(error) !== 409) {
+          log.error('network policy create failed', {
+            ...fields,
+            ...this.safeInfrastructureErrorFields(error),
+          })
+          if (isRetryableInfraError(error)) {
+            const safe = this.safeInfrastructureErrorFields(error)
+            throw new NetworkPolicyInfraError(
+              `NetworkPolicy "${policyName}" in ${namespace} create temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+              error,
+              safe.errorCode
+            )
+          }
+          throw error
+        }
+        // A real create race is exceptional in the read-first path. Re-read once
+        // and evaluate the winner from scratch; never blind-replace after 409.
+        readResult = await this.readNetworkPolicyForApply(policyName, namespace, log, fields)
+        existing = readResult.existing
+        if (!existing) {
+          throw new RetryableReconcileError(
+            `NetworkPolicy "${policyName}" in ${namespace} still absent after create conflict`,
+            { cause: error }
+          )
+        }
+      }
+    }
+
+    // Deletion wins over ownership: a terminating object cannot be adopted or
+    // safely classified from partial labels. Wait for 404, then recreate from the
+    // current desired state.
+    if (existing.metadata?.deletionTimestamp) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+
+    // Domain invariants run outside the read catch. A confirmed veto propagates
+    // immediately and can never be replaced by a second transport error.
+    if (options.recipeName) {
+      this.assertRecipeNetworkPolicyOwnership(existing, options.recipeName, policyName, namespace)
+    }
+    this.assertInternalDependencyPolicyOwnership(desired, existing, namespace)
+    const decision = decideNetworkPolicyConvergence(options.family, desired, existing)
+    if (decision.action === 'conflict') {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to replace NetworkPolicy "${policyName}" in ${namespace}: ${decision.reason}`
+      )
+    }
+    if (decision.action === 'retry') {
+      // The early deletion guard currently handles this before ownership checks.
+      // Keep the pure decision's retry outcome fail-closed at this consumer too.
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} is terminating; retrying after deletion`
+      )
+    }
+    if (decision.action === 'unchanged' && !readResult.recoveredFromReadFailure) {
+      log.info('network policy unchanged; skipping update', fields)
+      return
+    }
+
+    const resourceVersion = existing.metadata?.resourceVersion
+    if (!resourceVersion) {
+      throw new RetryableReconcileError(
+        `NetworkPolicy "${policyName}" in ${namespace} has no resourceVersion`
+      )
+    }
+    const replacement = buildNetworkPolicyReplacement(desired, existing)
+    try {
+      await this.networkingApi.replaceNamespacedNetworkPolicy({
+        name: policyName,
+        namespace,
+        body: replacement,
+      })
+      log.info('network policy replaced', {
+        ...fields,
+        reason: decision.action === 'unchanged' ? 'read-recovery' : decision.reason,
+      })
+    } catch (error: unknown) {
+      log.error('network policy replace failed', {
+        ...fields,
+        ...this.safeInfrastructureErrorFields(error),
+      })
+      const errorCode = getErrorCode(error)
+      if (errorCode === 404 || errorCode === 409) {
+        throw new RetryableReconcileError(
+          `NetworkPolicy "${policyName}" in ${namespace} ${errorCode === 404 ? 'disappeared' : 'changed'} during replace`,
+          { cause: error }
+        )
+      }
+      if (isRetryableInfraError(error)) {
+        const safe = this.safeInfrastructureErrorFields(error)
+        throw new NetworkPolicyInfraError(
+          `NetworkPolicy "${policyName}" in ${namespace} replace temporarily unavailable (${safe.errorCode ?? safe.errorName})`,
+          error,
+          safe.errorCode
+        )
+      }
+      throw error
+    }
+  }
+
+  private assertDesiredNetworkPolicyOwner(
+    desired: k8s.V1NetworkPolicy,
+    family: NetworkPolicyFamily,
+    namespace: string
+  ): void {
+    const controllerOwners = (desired.metadata?.ownerReferences ?? []).filter(
+      owner => owner.controller === true
     )
+    const invalidControllerOwner =
+      controllerOwners.length > 1 || controllerOwners.some(owner => !owner.uid)
+    const gatewayOwnerMissing = family === 'webhook-gateway' && controllerOwners.length !== 1
+    if (invalidControllerOwner || gatewayOwnerMissing) {
+      throw new NetworkPolicyOwnershipConflictError(
+        `Refusing to apply NetworkPolicy "${desired.metadata?.name ?? '<unknown>'}" in ${namespace}: desired controller owner is incomplete`
+      )
+    }
+  }
+
+  private async readNetworkPolicyForApply(
+    name: string,
+    namespace: string,
+    log: ReturnType<typeof createLogger>,
+    fields: { policy: string; namespace: string; family: NetworkPolicyFamily }
+  ): Promise<NetworkPolicyReadResult> {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        return {
+          existing: await this.readNetworkPolicyOrNull(name, namespace),
+          recoveredFromReadFailure: attempt > 1,
+        }
+      } catch (error: unknown) {
+        if (attempt === 2) {
+          throw error
+        }
+        log.warn('network policy read unavailable; retrying once', {
+          ...fields,
+          ...this.safeInfrastructureErrorFields(error),
+        })
+      }
+    }
+    return { existing: null, recoveredFromReadFailure: false }
+  }
+
+  private safeInfrastructureErrorFields(error: unknown): {
+    errorName: string
+    errorCode?: string | number
+    retryable: boolean
+  } {
+    const candidateCode = (error as { code?: unknown } | null)?.code
+    const candidateName = error instanceof Error ? error.name : 'UnknownError'
+    const errorCode =
+      typeof candidateCode === 'number'
+        ? candidateCode
+        : typeof candidateCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(candidateCode)
+          ? candidateCode
+          : getErrorCode(error)
+    return {
+      errorName: /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(candidateName)
+        ? candidateName
+        : 'UnknownError',
+      ...(errorCode === undefined ? {} : { errorCode }),
+      retryable: isRetryableInfraError(error),
+    }
   }
 
   private coordinatorGfsNetworkPolicy(recipe: WorkflowRecipeCRD): k8s.V1NetworkPolicy {
@@ -4822,10 +5957,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.workloadEgressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   private async deleteWorkloadIngressIfExists(
@@ -4834,10 +5973,14 @@ export class WorkflowRecipeReconciler {
     namespace: string
   ): Promise<void> {
     const name = rb.workloadIngressPolicyName(recipeName, workloadId)
-    await this.safeDelete(
-      () => this.networkingApi.deleteNamespacedNetworkPolicy({ name, namespace }),
-      `NetworkPolicy "${name}" in ${namespace}`
-    )
+    const existing = await this.readNetworkPolicyOrNull(name, namespace)
+    if (!existing) return
+    await this.applyNetworkPolicyContraction({
+      existing,
+      desired: null,
+      namespace,
+      recipeName,
+    })
   }
 
   // ─── Workload Ensure Methods ──────────────────────────────────────
@@ -4942,12 +6085,14 @@ export class WorkflowRecipeReconciler {
         )
         combined = combined ? combineSecretAccess(combined, access) : access
         if (access.state === 'denied') {
-          console.error(
-            `[WR-Reconciler] Refusing to project Secret "${name}" (ns ${secretNs}) into recipe "${recipe.metadata.name}" — not owned or shared; label clerum.io/shared=true or clerum.io/owner-recipe=${recipe.metadata.name}`
+          createLogger('wrc', recipe.metadata.name).error(
+            'Refusing to project a Secret that is neither owned nor shared',
+            { name, secretNs, name3: recipe.metadata.name, name4: recipe.metadata.name }
           )
         } else if (access.state === 'error') {
-          console.warn(
-            `[WR-Reconciler] Secret "${name}" (ns ${secretNs}) ownership could not be verified for recipe "${recipe.metadata.name}" — failing closed and requeuing`
+          createLogger('wrc', recipe.metadata.name).warn(
+            'Secret ownership could not be verified; failing closed and requeueing',
+            { name, secretNs, name3: recipe.metadata.name }
           )
         }
       }
@@ -5066,8 +6211,9 @@ export class WorkflowRecipeReconciler {
       // Read failed — do NOT silently skip (that would leave a foreign Secret
       // projected with a healthy status). Requeue and retry, matching the deploy
       // path's fail-closed contract for an unverifiable Secret.
-      console.warn(
-        `[WR-Reconciler] Issue #637: ownership recheck read failed for "${recipe.metadata.name}" — requeuing: ${String(error)}`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Secret ownership recheck failed; requeueing',
+        { name: recipe.metadata.name, err: error }
       )
       return { ...clean, needsRequeue: true, requeueReason: 'Secret read failed' }
     }
@@ -5090,11 +6236,13 @@ export class WorkflowRecipeReconciler {
     const failedTeardowns: string[] = []
     for (const workload of recipe.spec.workloads ?? []) {
       if (!secretOwnership.deniedWorkloadIds.has(workload.id)) continue
-      console.warn(
-        `[WR-Reconciler] Issue #637: revoking steady workflow workload "${workload.id}" of ` +
-          `"${recipe.metadata.name}" — ${
-            secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref'
-          }`
+      createLogger('wrc', recipe.metadata.name).warn(
+        'Revoking steady workflow workload because Secret access was denied',
+        {
+          id: workload.id,
+          name: recipe.metadata.name,
+          value3: secretOwnership.messageByWorkload.get(workload.id) ?? 'foreign Secret ref',
+        }
       )
       try {
         await this.teardownDeniedWorkload(workload, recipe, secretKeys)
@@ -5104,9 +6252,9 @@ export class WorkflowRecipeReconciler {
         // the next pass retries; the EnvSecretOwnershipDenied condition is written
         // only once teardown actually succeeds.
         failedTeardowns.push(workload.id)
-        console.error(
-          `[WR-Reconciler] Issue #637: teardown FAILED for denied workload "${workload.id}" of ` +
-            `"${recipe.metadata.name}" — requeuing: ${String(error)}`
+        createLogger('wrc', recipe.metadata.name).error(
+          'Denied workload teardown failed; requeueing',
+          { id: workload.id, name: recipe.metadata.name, err: error }
         )
       }
     }
@@ -5223,9 +6371,9 @@ export class WorkflowRecipeReconciler {
         namespace,
         labelSelector: `app=${resourceName}`,
       })
-      console.log(
-        `[WR-Reconciler] Issue #637: deleted StatefulSet "${resourceName}" managed Pods in ` +
-          `${namespace} (Secret ownership revoked); PVCs and StatefulSet preserved`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Deleted StatefulSet pods after Secret ownership revocation; preserving StatefulSet and PVCs',
+        { resourceName, namespace }
       )
     } catch (error) {
       if (getErrorCode(error) !== 404) throw error
@@ -5584,7 +6732,18 @@ export class WorkflowRecipeReconciler {
       }
     }
 
-    return this.workloadStatusResult(workloadStatuses)
+    const result = this.workloadStatusResult(workloadStatuses)
+    if (hasPendingTransportNetworkReadiness(recipe)) {
+      const condition = recipe.status?.conditions?.find(
+        condition => condition.type === TRANSPORT_NETWORK_CONDITION_TYPE
+      )
+      return {
+        ...result,
+        phase: 'degraded',
+        message: condition?.message ?? 'Transport external egress admission is pending',
+      }
+    }
+    return result
   }
 
   private workloadStatusResult(
@@ -5790,7 +6949,10 @@ export class WorkflowRecipeReconciler {
     // PVCs: create only (never replace — immutable after creation)
     try {
       await this.coreApi.createNamespacedPersistentVolumeClaim({ namespace: ns, body: manifest })
-      console.log(`[WR-Reconciler] Created PVC "${res.id}" in ${ns}`)
+      createLogger('wrc', recipe.metadata.name).info('Created PVC', {
+        id: res.id,
+        ns,
+      })
     } catch (error: unknown) {
       if (getErrorCode(error) === 409) {
         const existing = await this.coreApi.readNamespacedPersistentVolumeClaim({
@@ -5798,7 +6960,10 @@ export class WorkflowRecipeReconciler {
           namespace: ns,
         })
         this.assertExistingResourcePvcOwnedByRecipe(existing, manifest, res, recipe, ns)
-        console.log(`[WR-Reconciler] PVC "${res.id}" already exists in ${ns} (owned, skip)`)
+        createLogger('wrc', recipe.metadata.name).info(
+          'Owned PVC already exists; skipping creation',
+          { id: res.id, ns }
+        )
       } else {
         throw error
       }
@@ -5952,16 +7117,19 @@ export class WorkflowRecipeReconciler {
         { name: secretName, namespace: ns, body: { data: manifest.data } },
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )
-      console.log(`[WR-Reconciler] Refreshed Secret "${secretName}" in ${ns}`)
+      createLogger('wrc', recipe.metadata.name).info('Refreshed Secret', { secretName, ns })
       return
     }
 
     try {
       await this.coreApi.createNamespacedSecret({ namespace: ns, body: manifest })
-      console.log(`[WR-Reconciler] Created Secret "${secretName}" in ${ns}`)
+      createLogger('wrc', recipe.metadata.name).info('Created Secret', { secretName, ns })
     } catch (err) {
       if (getErrorCode(err) !== 409) throw err
-      console.log(`[WR-Reconciler] Secret "${secretName}" already exists in ${ns} (skip)`)
+      createLogger('wrc', recipe.metadata.name).info('Secret already exists; skipping creation', {
+        secretName,
+        ns,
+      })
     }
   }
 
@@ -5990,7 +7158,7 @@ export class WorkflowRecipeReconciler {
       )
       return
     }
-    await this.applyNetworkPolicy(policy, ns)
+    await this.applyNetworkPolicy(policy, ns, { family: 'oauth-broker-egress' })
   }
 
   private async ensureConfigMap(
@@ -6031,6 +7199,44 @@ export class WorkflowRecipeReconciler {
   // ─── Status Patch ─────────────────────────────────────────────────
 
   /** Persist reconcile result to the CRD status subresource. */
+  /**
+   * Build the Plugin Workload SDK status projection (owned conditions +
+   * `status.pluginWorkloadSdk` value) from a reconcile result. Extracted so it
+   * can be computed ONCE per reconcile by the watcher (issue #375): the watcher
+   * attaches it to `result.pluginWorkloadSdkProjection` after `reconcile()`
+   * returns, `shouldPatchRecipeStatus` reads it to detect an
+   * awaiting_policy↔validated transition that no other diff would surface, and
+   * `patchStatus` reuses it instead of recomputing. `providerUnavailable` is
+   * derived here (not inferred from phase/message) so the SDK-only provider
+   * health bit stays explicit.
+   */
+  projectPluginWorkloadSdk(
+    recipe: WorkflowRecipeCRD,
+    result: ReconcileResult,
+    now: string = new Date().toISOString()
+  ): PluginWorkloadSdkStatusProjection {
+    return buildPluginWorkloadSdkStatus({
+      spec: recipe.spec,
+      existingConditions: recipe.status?.conditions,
+      phase: result.phase,
+      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
+      providerUnavailable:
+        result.pluginWorkloadSdkProviderUnavailable === true ||
+        (result.workflowConditions ?? []).some(
+          condition =>
+            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
+            condition.status === 'True'
+        ),
+      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
+      policyPending: result.pluginWorkloadSdkPolicyPending === true,
+      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
+      now,
+      // issue #375 (R1): carry forward the stable validatedAt marker across
+      // steady-state throttle patches instead of resetting it to `now`.
+      existingCapability: recipe.status?.pluginWorkloadSdk,
+    })
+  }
+
   async patchStatus(recipe: WorkflowRecipeCRD, result: ReconcileResult): Promise<void> {
     const workloads = result.workloadStatuses.map(ws => {
       const def = (recipe.spec.workloads ?? []).find(w => w.id === ws.id)
@@ -6127,29 +7333,35 @@ export class WorkflowRecipeReconciler {
         recipe.status?.conditions,
       result.workloadConditions
     )
-    // Plugin Workload SDK conditions are derived here so every status patch
-    // carries a consistent projection of spec.pluginWorkloadSdk + feature flag,
-    // while the SDK-only provider health bit is propagated explicitly through
-    // ReconcileResult rather than inferred from a free-form phase/message.
-    const pluginSdkProjection = buildPluginWorkloadSdkStatus({
-      spec: recipe.spec,
-      existingConditions: recipe.status?.conditions,
-      phase: result.phase,
-      featureFlagEnabled: this.config.pluginWorkloadSdkEnabled,
-      providerUnavailable:
-        result.pluginWorkloadSdkProviderUnavailable === true ||
-        (result.workflowConditions ?? []).some(
-          condition =>
-            condition.type === PLUGIN_WORKLOAD_SDK_PROVIDER_UNAVAILABLE_CONDITION_TYPE &&
-            condition.status === 'True'
-        ),
-      teardownConfirmed: result.pluginWorkloadSdkTeardownConfirmed === true,
-      policyPending: result.pluginWorkloadSdkPolicyPending === true,
-      bootstrapProof: result.pluginWorkloadSdkBootstrapProof,
-      now,
-    })
-    const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
+    const priorTransportConditions =
       workloadReconcileMergedConditions ??
+      secretOwnershipMergedConditions ??
+      internalDependencyMergedConditions ??
+      workflowOutputMergedConditions ??
+      webhookMergedConditions ??
+      recipe.status?.conditions
+    // Observers and earlier failures cannot discharge an admission requirement.
+    const transportNetworkMergedConditions =
+      result.transportNetworkConditions === undefined
+        ? undefined
+        : mergeOwnedConditions(
+            priorTransportConditions,
+            result.transportNetworkConditions,
+            TRANSPORT_NETWORK_CONDITION_TYPES
+          )
+    // Plugin Workload SDK conditions are derived so every status patch carries a
+    // consistent projection of spec.pluginWorkloadSdk + feature flag, while the
+    // SDK-only provider health bit is propagated explicitly through
+    // ReconcileResult rather than inferred from a free-form phase/message. Reuse
+    // the projection the watcher already computed for the patch decision
+    // (issue #375) so the exact object that drove shouldPatchRecipeStatus is
+    // what gets written; recompute only on paths that never attached one (e.g.
+    // observeCurrentWorkloadStatus).
+    const pluginSdkProjection =
+      result.pluginWorkloadSdkProjection ?? this.projectPluginWorkloadSdk(recipe, result, now)
+    const pluginSdkMergedConditions = mergePluginWorkloadSdkConditions(
+      transportNetworkMergedConditions ??
+        workloadReconcileMergedConditions ??
         secretOwnershipMergedConditions ??
         internalDependencyMergedConditions ??
         workflowOutputMergedConditions ??
@@ -6159,6 +7371,7 @@ export class WorkflowRecipeReconciler {
     )
     const mergedConditions =
       pluginSdkMergedConditions ??
+      transportNetworkMergedConditions ??
       workloadReconcileMergedConditions ??
       secretOwnershipMergedConditions ??
       internalDependencyMergedConditions ??
@@ -6202,9 +7415,10 @@ export class WorkflowRecipeReconciler {
       { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
     )
 
-    console.log(
-      `[WR-Reconciler] Status patched for "${recipe.metadata.name}": phase=${result.phase}`
-    )
+    createLogger('wrc', recipe.metadata.name).info('Patched recipe status', {
+      name: recipe.metadata.name,
+      phase: result.phase,
+    })
   }
 
   // ─── UUID Instance Assignment ──────────────────────────────────────
@@ -6255,9 +7469,10 @@ export class WorkflowRecipeReconciler {
         },
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )
-      console.log(
-        `[WR-Reconciler] Assigned workload instances for "${recipe.metadata.name}": ${JSON.stringify(instances)}`
-      )
+      createLogger('wrc', recipe.metadata.name).info('Assigned workload instances', {
+        name: recipe.metadata.name,
+        value2: JSON.stringify(instances),
+      })
     }
 
     return newlyAssigned
@@ -6299,8 +7514,9 @@ export class WorkflowRecipeReconciler {
     ) {
       // Logged once (only reached when no instance is recorded yet) — the single
       // observable marker that a fleet migration re-scoped this workload.
-      console.log(
-        `[WR-Reconciler] Migrating workload "${workload.id}" of recipe "${recipe.metadata.name}" to scoped name "${scopedName}" (issue #571)`
+      createLogger('wrc', recipe.metadata.name).info(
+        'Migrating workload to its scoped resource name',
+        { id: workload.id, name: recipe.metadata.name, scopedName }
       )
       return scopedName
     }
@@ -6369,9 +7585,10 @@ export class WorkflowRecipeReconciler {
         },
         { middleware: [k8s.setHeaderMiddleware('Content-Type', 'application/merge-patch+json')] }
       )
-      console.log(
-        `[WR-Reconciler] Assigned ${Object.keys(instances).length} resource instance(s) for "${recipe.metadata.name}"`
-      )
+      createLogger('wrc', recipe.metadata.name).info('Assigned resource instances', {
+        length: Object.keys(instances).length,
+        name: recipe.metadata.name,
+      })
     }
 
     return newlyAssigned
@@ -6533,8 +7750,9 @@ export class WorkflowRecipeReconciler {
       if (!observedStatus?.ready) {
         if (anyOwned) {
           cleanupPending = true
-          console.log(
-            `[WR-Reconciler] Legacy StatefulSet cleanup for ${namespace}/${workload.id} deferred until scoped workload is ready`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Deferring legacy StatefulSet cleanup until scoped workload is ready',
+            { namespace, id: workload.id }
           )
         }
         continue
@@ -6674,8 +7892,9 @@ export class WorkflowRecipeReconciler {
       if (!observedStatus?.ready) {
         if (anyOwned) {
           cleanupPending = true
-          console.log(
-            `[WR-Reconciler] Legacy Deployment cleanup for ${namespace}/${workload.id} deferred until scoped workload is ready`
+          createLogger('wrc', recipe.metadata.name).info(
+            'Deferring legacy Deployment cleanup until scoped workload is ready',
+            { namespace, id: workload.id }
           )
         }
         continue
@@ -6766,7 +7985,9 @@ export class WorkflowRecipeReconciler {
   ): Promise<void> {
     try {
       await deleteFn()
-      console.log(`[WR-Reconciler] Deleted ${description}`)
+      createLogger('wrc', 'workflow-recipes').info('Deleted workload resource', {
+        description,
+      })
     } catch (err: unknown) {
       if (getErrorCode(err) === 404) {
         return

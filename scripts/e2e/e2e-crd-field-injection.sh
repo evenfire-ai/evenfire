@@ -55,6 +55,7 @@ require_safe_kube_context || exit 1
 cleanup_e2e_resources
 ensure_e2e_resources_absent ||
   fail "Stale e2e-sec resources remain after cleanup; refusing stale-positive E2E run"
+# shellcheck disable=SC2154 # e2e-lib.sh owns the shared result counters.
 [ "$e2e_fail" -gt 0 ] && exit 1
 
 # ═══ Test 1: imagePullPolicy override prevention ═════════════════════
@@ -78,8 +79,11 @@ spec:
     url: http://e2e-sec-pullpolicy.mcp-server.svc:3000/mcp
 EOF
 
-log "Waiting for HCC to create Deployment..."
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-pullpolicy "$TIMEOUT_POD"; then
+  ok "imagePullPolicy fixture rendered a ready Deployment"
+else
+  fail "imagePullPolicy fixture did not render a ready Deployment"
+fi
 
 PULL_POLICY=$(kctl get deployment e2e-sec-pullpolicy -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.containers[0].imagePullPolicy}' 2>/dev/null || echo "NOT_FOUND")
@@ -237,7 +241,11 @@ spec:
       value: postgres://safe
 EOF
 
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-envvars "$TIMEOUT_POD"; then
+  ok "Dangerous-env fixture rendered a ready Deployment"
+else
+  fail "Dangerous-env fixture did not render a ready Deployment"
+fi
 
 ENV_JSON=$(kctl get deployment e2e-sec-envvars -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.containers[0].env}' 2>/dev/null || echo "[]")
@@ -276,7 +284,11 @@ spec:
       - DAC_OVERRIDE
 EOF
 
-sleep 15
+if wait_for_deployment "$MCP_NS" e2e-sec-uid70 "$TIMEOUT_POD"; then
+  ok "Non-root UID fixture rendered a ready Deployment"
+else
+  fail "Non-root UID fixture did not render a ready Deployment"
+fi
 
 UID_70=$(kctl get deployment e2e-sec-uid70 -n "$MCP_NS" \
   -o jsonpath='{.spec.template.spec.securityContext.runAsUser}' 2>/dev/null || echo "NOT_FOUND")
@@ -292,5 +304,6 @@ ensure_e2e_resources_absent && ok "All e2e-sec resources cleaned up" || fail "e2
 
 # ═══ Summary ═════════════════════════════════════════════════════════
 header "Summary"
+# shellcheck disable=SC2154 # e2e-lib.sh owns the shared result counters.
 echo -e "  ${GREEN}PASS${NC}: ${e2e_pass}  ${RED}FAIL${NC}: ${e2e_fail}  Total: ${e2e_total}"
 [ "$e2e_fail" -gt 0 ] && exit 1 || exit 0

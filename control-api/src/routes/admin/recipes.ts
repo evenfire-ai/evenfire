@@ -16,6 +16,12 @@ import {
   parseSecretOwnership,
 } from '../../secretOwnership.js'
 import {
+  CODEX_CONNECTION_REF_ANNOTATION,
+  assertCodexConnectionKey,
+  isCodexUnassignedConnectionKey,
+  readHostCodexConnectionRef,
+} from '../../services/codexSubscriptionConnection.js'
+import {
   ensureRegistryPullSecrets,
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
@@ -159,7 +165,12 @@ function parseWorkflowSecretOwnershipBody(
 }
 
 export interface RecipeBody {
-  metadata?: { name?: string; namespace?: string; labels?: Record<string, unknown> }
+  metadata?: {
+    name?: string
+    namespace?: string
+    labels?: Record<string, unknown>
+    annotations?: Record<string, unknown>
+  }
   spec?: Record<string, unknown>
 }
 
@@ -1234,11 +1245,92 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
   return errors
 }
 
+function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
+  const agent = spec?.agent
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return false
+  return (agent as { provider?: unknown }).provider === 'codex-subscription'
+}
+
+function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
+  const sdk = spec?.pluginWorkloadSdk
+  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
+}
+
+function readRequestedCodexRecipeGrant(body: RecipeBody): string {
+  const raw = body.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+  return readHostCodexConnectionRef(typeof raw === 'string' ? raw : '')
+}
+
+function validateCodexRecipeGrant(
+  body: RecipeBody,
+  opts?: { allowOmittedGrant?: boolean }
+): ValidationError[] {
+  if (!recipeUsesCodexBroker(body.spec)) return []
+  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
+  const key = readRequestedCodexRecipeGrant(body)
+  if (isCodexUnassignedConnectionKey(key)) {
+    return [
+      {
+        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
+        rule: 'codexRecipeGrantRequired',
+        message: 'Codex subscription recipes must choose an existing ChatGPT grant',
+      },
+    ]
+  }
+  try {
+    assertCodexConnectionKey(key)
+  } catch {
+    return [
+      {
+        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
+        rule: 'codexRecipeGrantInvalid',
+        message: 'clerum.io/codex-connection-ref is not a valid connection key',
+      },
+    ]
+  }
+  return []
+}
+
+function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
+  const annotations = body.metadata?.annotations
+  return Boolean(
+    annotations &&
+    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION)
+  )
+}
+
+function sanitizeRecipeCodexAnnotation(
+  body: RecipeBody,
+  currentAnnotations?: Record<string, string>,
+  currentSpec?: Record<string, unknown>
+): Record<string, string> {
+  const incoming = readRequestedCodexRecipeGrant(body)
+  if (recipeUsesCodexBroker(body.spec)) {
+    if (!bodyHasCodexGrantAnnotation(body)) return {}
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
+    }
+  }
+  const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
+  if (leavingCodex) {
+    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+  }
+  if (bodyHasCodexGrantAnnotation(body)) {
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
+    }
+  }
+  void currentAnnotations
+  return {}
+}
+
 function sanitizeRecipeBody(
   body: RecipeBody,
-  currentLabels?: Record<string, string>
+  currentLabels?: Record<string, string>,
+  currentAnnotations?: Record<string, string>,
+  currentSpec?: Record<string, unknown>
 ): {
-  metadata: { name: string; labels?: Record<string, string> }
+  metadata: { name: string; labels?: Record<string, string>; annotations: Record<string, string> }
   spec: Record<string, unknown>
 } {
   const metadata = { ...(body.metadata ?? {}) }
@@ -1258,6 +1350,10 @@ function sanitizeRecipeBody(
     metadata: {
       name: metadata.name as string,
       ...(sanitizedLabels ? { labels: sanitizedLabels } : {}),
+      annotations: {
+        ...(currentAnnotations ?? {}),
+        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations, currentSpec),
+      },
     },
     spec: body.spec as Record<string, unknown>,
   }
@@ -1391,7 +1487,10 @@ async function checkRecipeNameAvailable(
 async function updateRecipeWithConflictRetry(
   gateway: K8sGateway,
   name: string,
-  body: { metadata?: { labels?: Record<string, string> }; spec: Record<string, unknown> },
+  body: {
+    metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> }
+    spec: Record<string, unknown>
+  },
   namespace: string
 ): Promise<unknown> {
   let lastConflict: unknown
@@ -1538,6 +1637,11 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       const errors = validateRecipeBody(body)
       if (errors.length > 0) {
         res.status(422).json({ valid: false, errors })
+        return
+      }
+      const grantErrors = validateCodexRecipeGrant(body)
+      if (grantErrors.length > 0) {
+        res.status(422).json({ valid: false, errors: grantErrors })
         return
       }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
@@ -1721,6 +1825,11 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
+      const grantErrors = validateCodexRecipeGrant(body)
+      if (grantErrors.length > 0) {
+        res.status(422).json({ errors: grantErrors })
+        return
+      }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
       if (egressErrors.length > 0) {
         res.status(422).json({ errors: egressErrors })
@@ -1826,6 +1935,11 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
+      const grantErrors = validateCodexRecipeGrant(body, { allowOmittedGrant: true })
+      if (grantErrors.length > 0) {
+        res.status(422).json({ errors: grantErrors })
+        return
+      }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
       if (egressErrors.length > 0) {
         res.status(422).json({ errors: egressErrors })
@@ -1868,10 +1982,15 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
             return
           }
         }
-        const currentLabels = isPlainObject(resource)
-          ? stringLabels(isPlainObject(resource.metadata) ? resource.metadata.labels : undefined)
-          : undefined
-        const sanitized = sanitizeRecipeBody(body, currentLabels)
+        const currentMeta =
+          isPlainObject(resource) && isPlainObject(resource.metadata)
+            ? resource.metadata
+            : undefined
+        const currentLabels = stringLabels(currentMeta?.labels)
+        const currentAnnotations = stringLabels(currentMeta?.annotations)
+        const currentSpec =
+          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
+        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations, currentSpec)
         const updated = await updateRecipeWithConflictRetry(gateway, req.params.name, sanitized, ns)
         res
           .status(200)

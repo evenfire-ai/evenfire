@@ -5,6 +5,7 @@ import { ensureDefaultTeamAndGrants } from '../src/services/directory/adminProvi
 
 const dbMocks = vi.hoisted(() => ({ txQuery: vi.fn() }))
 const traceMocks = vi.hoisted(() => ({ appendPermissionEvents: vi.fn() }))
+const operatorLinkMocks = vi.hoisted(() => ({ linkInTransaction: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: { query: vi.fn() },
   withTransaction: async (work: (db: { query: typeof dbMocks.txQuery }) => Promise<unknown>) =>
@@ -12,6 +13,11 @@ vi.mock('../src/db.js', () => ({
 }))
 vi.mock('../src/services/tracing/controlApiPermissionEvents.js', () => ({
   appendControlApiPermissionEventsInTransaction: traceMocks.appendPermissionEvents,
+}))
+vi.mock('../src/services/gfsDesktopOperatorLinkService.js', () => ({
+  gfsDesktopOperatorLinkService: {
+    linkInTransaction: operatorLinkMocks.linkInTransaction,
+  },
 }))
 
 describe('ensureDefaultTeamAndGrants', () => {
@@ -68,7 +74,19 @@ describe('ensureDefaultTeamAndGrants', () => {
 })
 
 describe('provisionAdminDesktopWorkspace', () => {
-  beforeEach(() => dbMocks.txQuery.mockReset())
+  beforeEach(() => {
+    dbMocks.txQuery.mockReset()
+    operatorLinkMocks.linkInTransaction.mockReset()
+    operatorLinkMocks.linkInTransaction.mockResolvedValue({
+      created: true,
+      link: {
+        desktopUserId: 'user-1',
+        controlAdminId: 'admin-1',
+        source: 'initial_setup',
+        createdAt: new Date('2026-08-10T12:00:00.000Z'),
+      },
+    })
+  })
 
   it('creates user, sets password, and provisions team + grants for a new email', async () => {
     dbMocks.txQuery
@@ -82,11 +100,13 @@ describe('provisionAdminDesktopWorkspace', () => {
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     await mod.provisionAdminDesktopWorkspace({
+      controlAdminId: 'admin-1',
       email: 'New@Example.com',
       displayName: 'Ada',
       passwordHash: 'HASH',
       agentNames: ['chatllm'],
       contextIds: ['context1'],
+      linkDesktopOperator: false,
     })
 
     expect(dbMocks.txQuery).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO users'), [
@@ -113,11 +133,13 @@ describe('provisionAdminDesktopWorkspace', () => {
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     await mod.provisionAdminDesktopWorkspace({
+      controlAdminId: 'admin-1',
       email: 'old@example.com',
       displayName: 'Old',
       passwordHash: 'H',
       agentNames: [],
       contextIds: [],
+      linkDesktopOperator: false,
     })
 
     expect(dbMocks.txQuery).not.toHaveBeenCalledWith(
@@ -139,11 +161,13 @@ describe('provisionAdminDesktopWorkspace', () => {
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     await mod.provisionAdminDesktopWorkspace({
+      controlAdminId: 'admin-1',
       email: 'old@example.com',
       displayName: 'Old',
       passwordHash: 'H',
       agentNames: [],
       contextIds: [],
+      linkDesktopOperator: false,
       seedPassword: false,
     })
 
@@ -164,11 +188,13 @@ describe('provisionAdminDesktopWorkspace', () => {
 
     const mod = await import('../src/services/directory/adminProvisioning.js')
     await mod.provisionAdminDesktopWorkspace({
+      controlAdminId: 'admin-1',
       email: 'new@example.com',
       displayName: 'Ada',
       passwordHash: 'HASH',
       agentNames: ['chatllm'],
       contextIds: ['context1'],
+      linkDesktopOperator: false,
       seedPassword: false,
     })
 
@@ -180,6 +206,58 @@ describe('provisionAdminDesktopWorkspace', () => {
       expect.stringContaining('INSERT INTO team_agents'),
       ['team-1', 'chatllm']
     )
+  })
+
+  it('creates the exact initial-setup operator link inside the Desktop provisioning transaction', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
+
+    const mod = await import('../src/services/directory/adminProvisioning.js')
+    const result = await mod.provisionAdminDesktopWorkspace({
+      controlAdminId: 'admin-1',
+      email: 'admin@example.com',
+      displayName: 'Admin',
+      passwordHash: 'HASH',
+      agentNames: [],
+      contextIds: [],
+      linkDesktopOperator: true,
+    })
+
+    expect(result).toEqual({ userId: 'user-1' })
+    expect(operatorLinkMocks.linkInTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ query: dbMocks.txQuery }),
+      {
+        desktopUserId: 'user-1',
+        controlAdminId: 'admin-1',
+        operatorSub: 'admin-1',
+        source: 'initial_setup',
+      }
+    )
+  })
+
+  it('fails the Desktop provisioning transaction when initial link creation fails', async () => {
+    dbMocks.txQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'user-1' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ id: 'team-1' }], rowCount: 1 })
+    operatorLinkMocks.linkInTransaction.mockRejectedValueOnce(new Error('link conflict'))
+
+    const mod = await import('../src/services/directory/adminProvisioning.js')
+    await expect(
+      mod.provisionAdminDesktopWorkspace({
+        controlAdminId: 'admin-1',
+        email: 'admin@example.com',
+        displayName: 'Admin',
+        passwordHash: 'HASH',
+        agentNames: [],
+        contextIds: [],
+        linkDesktopOperator: true,
+      })
+    ).rejects.toThrow('link conflict')
   })
 })
 

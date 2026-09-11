@@ -70,7 +70,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('snippet worker MCP retry', () => {
+describe.sequential('snippet worker MCP retry', () => {
   it('creates a fresh MCP client transport for each retry attempt', async () => {
     const { executeSnippetPayload } = await import('../../../src/workflow/snippetWorker')
     const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'snippet-mcp-retry-'))

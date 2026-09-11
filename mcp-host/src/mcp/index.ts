@@ -2,8 +2,16 @@
  * MCP (Model Context Protocol) client module.
  */
 
-export { McpClient } from './client'
-export { McpManager } from './manager'
+export { McpClient, McpAuthError, staticTokenProvider } from './client'
+export type { McpTokenProvider } from './client'
+export {
+  McpManager,
+  SHARED_PRINCIPAL,
+  userPrincipal,
+  serializeClientKey,
+  serverNameFromClientKey,
+} from './manager'
+export type { McpPrincipal, McpTokenProviderFactory } from './manager'
 export {
   ServerStatusTracker,
   classifyConnectError,

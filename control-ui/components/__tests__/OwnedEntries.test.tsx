@@ -25,31 +25,37 @@ vi.mock('../ConfirmDialog', () => ({
   useConfirmDialog: () => ({ confirm: confirmMock, confirmDialog: null }),
 }))
 
-const navigation = vi.hoisted(() => ({ push: vi.fn() }))
+const navigation = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }))
+let mockSearchParams = new URLSearchParams()
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: navigation.push }),
+  useRouter: () => ({ push: navigation.push, replace: navigation.replace }),
+  useSearchParams: () => mockSearchParams,
 }))
 
 function render(ui: React.ReactNode) {
   return rtlRender(<ToastProvider>{ui}</ToastProvider>)
 }
+async function openActions(entry = '@acme/db', version = '1.0.0') {
+  fireEvent.click(await screen.findByRole('button', { name: `Actions for ${entry} v${version}` }))
+}
 afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
+  mockSearchParams = new URLSearchParams()
   confirmMock.mockResolvedValue(false)
   // Default: nothing installed, so entries show the Install CTA.
   vi.mocked(api.getRegistryCatalog).mockResolvedValue(EMPTY_INSTALLED as never)
 })
 
 describe('OwnedEntries', () => {
-  it('renders a skeleton while owned entries load', () => {
+  it('keeps headers mounted while owned entries load', () => {
     vi.mocked(api.getOwnedRegistryEntries).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.getOwnedRegistryEntries>
     )
-    const view = render(<OwnedEntries orgScope="acme" />)
+    render(<OwnedEntries orgScope="acme" />)
     expect(screen.getByRole('status', { name: /loading published entries/i })).toBeInTheDocument()
-    expect(screen.queryByText(/Loading your published entries/i)).toBeNull()
-    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+    expect(screen.getByRole('columnheader', { name: /name/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /visibility/i })).toBeInTheDocument()
   })
 
   it('renders owned entries with visibility + status', async () => {
@@ -109,7 +115,7 @@ describe('OwnedEntries', () => {
     expect(screen.queryByText('Connector')).toBeNull()
   })
 
-  it('shows Share access only for private entries; public shows a no-grant note', async () => {
+  it('shows Share access only for private entries; public shows no note', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -117,9 +123,10 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    expect(screen.getAllByRole('button', { name: /share access/i })).toHaveLength(1)
-    expect(screen.getByText(/no grant needed/i)).toBeInTheDocument()
+    await screen.findAllByText('@acme/db')
+    await openActions()
+    expect(screen.getByRole('menuitem', { name: /share access/i })).toBeInTheDocument()
+    expect(screen.queryByText(/no grant needed/i)).toBeNull()
   })
 
   it('clicking Share access opens the Grant access modal', async () => {
@@ -129,7 +136,8 @@ describe('OwnedEntries', () => {
     render(<OwnedEntries orgScope="acme" />)
     // Modal is not in the DOM until the button is clicked.
     expect(screen.queryByRole('dialog')).toBeNull()
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
     expect(await screen.findByLabelText(/grantee org/i)).toBeInTheDocument()
     expect(api.listOrgGrants).toHaveBeenCalledWith('@acme/db')
@@ -143,7 +151,8 @@ describe('OwnedEntries', () => {
       new Promise(() => undefined) as ReturnType<typeof api.listOrgGrants>
     )
     const view = render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(screen.getByRole('status', { name: /loading grants/i })).toBeInTheDocument()
     expect(screen.queryByText(/Loading grants/i)).toBeNull()
     expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
@@ -154,7 +163,8 @@ describe('OwnedEntries', () => {
       data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
     })
     render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: /share access/i }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: /share access/i }))
     expect(await screen.findByRole('dialog', { name: /grant access/i })).toBeInTheDocument()
     // Disambiguate from the icon close button (aria-label="Close") using text.
     fireEvent.click(screen.getByText('Close', { selector: 'button' }))
@@ -165,6 +175,81 @@ describe('OwnedEntries', () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({ data: [] })
     render(<OwnedEntries orgScope="acme" />)
     expect(await screen.findByText(/haven’t published/i)).toBeInTheDocument()
+  })
+
+  it('?type=llm-hook narrows the list to guardrail hooks and offers Show all', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        { name: '@acme/redactor', version: '1.0.0', entryType: 'llm-hook', status: 'published' },
+        { name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' },
+      ],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/redactor')).toBeInTheDocument()
+    expect(screen.queryByText('@acme/db')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: /show all entries/i }))
+    expect(navigation.replace).toHaveBeenCalledWith('/marketplace/org/entries')
+  })
+
+  it('a type filter that matches nothing says so without claiming the org has published nothing', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText(/no guardrail hooks published yet/i)).toBeInTheDocument()
+    expect(screen.queryByText(/haven’t published/i)).toBeNull()
+  })
+
+  it('an unrecognised type filter falls back to the full list', async () => {
+    mockSearchParams = new URLSearchParams('type=not-a-type')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/db')).toBeInTheDocument()
+    expect(screen.queryByText(/showing .* only/i)).toBeNull()
+  })
+
+  it('a type filter naming an inherited object key falls back to the full list', async () => {
+    // `?type=toString` used to resolve to Object.prototype.toString off the
+    // label map, which read as a real label and crashed the render.
+    mockSearchParams = new URLSearchParams('type=toString')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [{ name: '@acme/db', version: '2.0.0', serverMode: 'http', status: 'published' }],
+    } as never)
+    render(<OwnedEntries orgScope="acme" />)
+
+    expect(await screen.findByText('@acme/db')).toBeInTheDocument()
+    expect(screen.queryByText(/showing .* only/i)).toBeNull()
+  })
+
+  it('keeps the sharing notice when a type filter hides every private entry', async () => {
+    mockSearchParams = new URLSearchParams('type=llm-hook')
+    vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
+      data: [
+        {
+          name: '@acme/redactor',
+          version: '1.0.0',
+          entryType: 'llm-hook',
+          visibility: 'public',
+          status: 'published',
+        },
+        { name: '@acme/db', version: '2.0.0', serverMode: 'http', visibility: 'private' },
+      ],
+    } as never)
+    render(<OwnedEntries orgScope="acme" canShare={false} sharingUnavailable />)
+
+    await screen.findByText('@acme/redactor')
+    // The private entry is filtered out of the table, but the notice describes
+    // org state, so it must still explain why sharing is unavailable.
+    expect(screen.queryByText('@acme/db')).toBeNull()
+    expect(screen.getByText(/Cross-org sharing/i)).toBeInTheDocument()
   })
 
   it('error + Retry re-fetches', async () => {
@@ -192,7 +277,8 @@ describe('OwnedEntries', () => {
       data: [{ name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' }],
     })
     render(<OwnedEntries orgScope="acme" />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+    await openActions()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('/marketplace/install'))
   })
 
@@ -206,8 +292,9 @@ describe('OwnedEntries', () => {
       installed: { catalogKeys: [], serverNames: [], recipeKeys: ['@acme/db@1.0.0'] },
     } as never)
     render(<OwnedEntries orgScope="acme" />)
-    expect(await screen.findByRole('button', { name: 'Installed' })).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'Install' })).toBeNull()
+    await openActions()
+    expect(screen.getByRole('menuitem', { name: 'Installed' })).toBeDisabled()
+    expect(screen.queryByRole('menuitem', { name: 'Install' })).toBeNull()
   })
 
   it('removes an entry from the row actions menu after confirmation', async () => {
@@ -236,7 +323,7 @@ describe('OwnedEntries', () => {
     expect(api.deleteRegistryEntry).not.toHaveBeenCalled()
   })
 
-  it('collapses same-named versions into one row showing the latest, expandable to previous', async () => {
+  it('renders every published version as a first-class record row', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -245,21 +332,20 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    // One collapsed row: latest version leads, previous count summarized.
+    await screen.findAllByText('@acme/db')
+    expect(screen.getAllByText('@acme/db')).toHaveLength(3)
     expect(screen.getByText('1.2.0')).toBeInTheDocument()
-    expect(screen.getByText('+2 more')).toBeInTheDocument()
-    // Previous versions are hidden until the row is expanded.
-    expect(screen.queryByText('1.1.0')).toBeNull()
-    expect(screen.queryByText('1.0.0')).toBeNull()
-
-    fireEvent.click(screen.getByText('@acme/db'))
-    expect(await screen.findByText('Previous versions')).toBeInTheDocument()
     expect(screen.getByText('1.1.0')).toBeInTheDocument()
     expect(screen.getByText('1.0.0')).toBeInTheDocument()
+    expect(screen.queryByText('Previous versions')).toBeNull()
+    expect(Array.from(document.querySelectorAll('tbody tr')).map(row => row.textContent)).toEqual([
+      expect.stringContaining('1.2.0'),
+      expect.stringContaining('1.1.0'),
+      expect.stringContaining('1.0.0'),
+    ])
   })
 
-  it('row Install targets the latest version; expanded rows install previous versions', async () => {
+  it('each version row installs that exact published version', async () => {
     vi.mocked(api.getOwnedRegistryEntries).mockResolvedValue({
       data: [
         { name: '@acme/db', version: '1.0.0', visibility: 'private', status: 'published' },
@@ -267,18 +353,14 @@ describe('OwnedEntries', () => {
       ],
     })
     render(<OwnedEntries orgScope="acme" />)
-    await screen.findByText('@acme/db')
-    // Collapsed row's Install goes to the latest version.
-    fireEvent.click(screen.getByRole('button', { name: 'Install' }))
+    await screen.findAllByText('@acme/db')
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for @acme/db v2.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('version=2.0.0'))
 
     navigation.push.mockClear()
-    fireEvent.click(screen.getByText('@acme/db'))
-    await screen.findByText('Previous versions')
-    // Now there are two Installs: the latest (main row) then the previous (detail).
-    const installs = screen.getAllByRole('button', { name: 'Install' })
-    expect(installs).toHaveLength(2)
-    fireEvent.click(installs[1])
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for @acme/db v1.0.0' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Install' }))
     expect(navigation.push).toHaveBeenCalledWith(expect.stringContaining('version=1.0.0'))
   })
 

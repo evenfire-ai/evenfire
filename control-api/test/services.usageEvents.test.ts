@@ -201,6 +201,89 @@ describe('validateUsageEvent', () => {
     ).toBeNull()
   })
 
+  it('rejects reporter Codex events in every reporter shape', () => {
+    expect(validateUsageEvent({ ...VALID_EVENT, provider: 'codex-subscription' })).toBeNull()
+    expect(
+      validateUsageEvent({
+        ...VALID_EVENT,
+        provider: 'codex-subscription',
+        source_kind: 'workflow',
+        run_id: '00000000-0000-4000-8000-000000000001',
+        recipe_name: 'e2e-recipe',
+        task_id: '00000000-0000-4000-8000-000000000001:e2e-recipe:2026-05-09T00:00:00.000Z',
+        llm_secret_name: 'openai-key',
+      })
+    ).toBeNull()
+    expect(
+      validateUsageEvent({
+        ...SDK_EVENT,
+        provider: 'codex-subscription',
+      })
+    ).toBeNull()
+  })
+
+  it('accepts finalize-origin Codex channel events with a null secret', () => {
+    const ev = validateUsageEvent(
+      {
+        request_id: '33333333-3333-4333-8333-333333333333',
+        ts: '2026-04-29T10:00:00.000Z',
+        run_id: null,
+        host_ref: 'research-host',
+        context_ref: null,
+        team_id: null,
+        provider: 'codex-subscription',
+        model: 'gpt-5.1',
+        llm_secret_name: null,
+        source_kind: 'channel',
+        user_id: null,
+        sender: null,
+        channel_type: null,
+        recipe_name: null,
+        cron_job_id: null,
+        task_id: null,
+        iteration: null,
+        input_tokens: 12,
+        output_tokens: 4,
+      },
+      { origin: 'finalize' }
+    )
+    expect(ev).toMatchObject({
+      provider: 'codex-subscription',
+      source_kind: 'channel',
+      user_id: null,
+      llm_secret_name: null,
+      request_id: '33333333-3333-4333-8333-333333333333',
+    })
+  })
+
+  it('rejects finalize-origin Codex events that still carry a secret or a non-channel source', () => {
+    const base = {
+      request_id: '33333333-3333-4333-8333-333333333333',
+      ts: '2026-04-29T10:00:00.000Z',
+      run_id: null,
+      host_ref: 'research-host',
+      context_ref: null,
+      team_id: null,
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      llm_secret_name: null,
+      source_kind: 'channel',
+      user_id: null,
+      sender: null,
+      channel_type: null,
+      recipe_name: null,
+      input_tokens: 12,
+      output_tokens: 4,
+    }
+    expect(
+      validateUsageEvent({ ...base, llm_secret_name: 'codex-secret' }, { origin: 'finalize' })
+    ).toBeNull()
+    expect(
+      validateUsageEvent({ ...base, source_kind: 'workflow' }, { origin: 'finalize' })
+    ).toBeNull()
+    expect(validateUsageEvent({ ...base, provider: 'openai' }, { origin: 'finalize' })).toBeNull()
+  })
+
   it('accepts workflow promptBridge usage with the SDK channel marker', () => {
     const workflowEvent = {
       ...VALID_EVENT,

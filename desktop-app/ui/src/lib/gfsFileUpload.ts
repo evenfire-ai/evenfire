@@ -1,7 +1,11 @@
-import { GFS_FILE_UPLOAD_MAX_BYTES, GFS_FILE_UPLOAD_MAX_MEGABYTES } from '@constants/gfsFileUpload'
+import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 
 export function assertGfsFileUploadSize(byteLength: number): void {
-  if (byteLength > GFS_FILE_UPLOAD_MAX_BYTES) {
-    throw new Error(`GFS uploads are limited to ${GFS_FILE_UPLOAD_MAX_MEGABYTES} MB per file.`)
+  if (
+    !Number.isSafeInteger(byteLength) ||
+    byteLength < 0 ||
+    byteLength > GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES
+  ) {
+    throw new Error('GFS uploads cannot exceed the 1 GiB Upload v2 protocol maximum.')
   }
 }

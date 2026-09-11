@@ -1,0 +1,197 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1040" width="1400" height="1040">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+    .title { font-size: 24px; font-weight: 600; fill: #0d0d0d; letter-spacing: -0.01em; }
+    .subtitle { font-size: 13px; fill: #6e6e80; }
+    .section { font-size: 12px; font-weight: 500; fill: #6e6e80; letter-spacing: 0.06em; }
+    .node-title { font-size: 16px; font-weight: 600; fill: #0d0d0d; }
+    .node-copy { font-size: 12px; fill: #6e6e80; }
+    .small { font-size: 11px; fill: #6e6e80; }
+    .label { font-size: 12px; fill: #6e6e80; }
+    .state-title { font-size: 13px; font-weight: 600; fill: #0d0d0d; }
+    .state-copy { font-size: 11px; fill: #6e6e80; }
+  </style>
+  <defs>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#10a37f"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#1d4ed8"/>
+    </marker>
+    <marker id="arrow-gray" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#71717a"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="1040" fill="#ffffff"/>
+  <text x="700" y="36" text-anchor="middle" class="title">Self-hosted Desktop GFS operator parity</text>
+  <text x="700" y="60" text-anchor="middle" class="subtitle">Explicit setup link · authoritative lifecycle resolution · fail-closed data-plane enforcement</text>
+
+  <!-- Client layer -->
+  <text x="48" y="92" class="section">CLIENT SURFACES</text>
+  <rect x="48" y="104" width="230" height="72" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="48" y="104" width="4" height="72" rx="2" fill="#1d4ed8"/>
+  <text x="163" y="134" text-anchor="middle" class="node-title">Control UI</text>
+  <text x="163" y="155" text-anchor="middle" class="node-copy">setup · revoke · reactivate</text>
+
+  <rect x="48" y="216" width="230" height="72" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="48" y="216" width="4" height="72" rx="2" fill="#10a37f"/>
+  <text x="163" y="246" text-anchor="middle" class="node-title">Desktop App</text>
+  <text x="163" y="267" text-anchor="middle" class="node-copy">ordinary or operator GFS</text>
+
+  <rect x="48" y="328" width="230" height="72" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="48" y="328" width="4" height="72" rx="2" fill="#f97316"/>
+  <text x="163" y="358" text-anchor="middle" class="node-title">Initial setup</text>
+  <text x="163" y="379" text-anchor="middle" class="node-copy">self-hosted bootstrap</text>
+
+  <!-- Boundary layer -->
+  <text x="360" y="92" class="section">TRUST BOUNDARY</text>
+  <rect x="360" y="112" width="300" height="176" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="360" y="112" width="4" height="176" rx="2" fill="#10a37f"/>
+  <text x="378" y="143" class="node-title">External REST edge</text>
+  <text x="378" y="168" class="node-copy">GFS backstop tiers</text>
+  <text x="378" y="193" class="small">token-IP 600 / min</text>
+  <text x="378" y="214" class="small">client-IP 1200 / min</text>
+  <text x="378" y="235" class="small">aggregate 1800 / min</text>
+  <text x="378" y="264" class="small">request ID + trusted client identity</text>
+
+  <!-- Authority layer -->
+  <text x="712" y="92" class="section">AUTHORITY SERVICES</text>
+  <rect x="712" y="112" width="322" height="190" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="712" y="112" width="4" height="190" rx="2" fill="#1d4ed8"/>
+  <text x="730" y="143" class="node-title">Control API</text>
+  <text x="730" y="168" class="node-copy">authority resolver + token broker</text>
+  <text x="730" y="195" class="small">10 / min token per Desktop user</text>
+  <text x="730" y="216" class="small">120 / min reads per session/IP/actor</text>
+  <text x="730" y="237" class="small">30 / min operations per session/IP/actor</text>
+  <text x="730" y="264" class="small">active user + admin + link generation</text>
+  <text x="730" y="283" class="small">signed principal + request correlation</text>
+
+  <rect x="1086" y="112" width="266" height="190" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="1086" y="112" width="4" height="190" rx="2" fill="#10a37f"/>
+  <text x="1104" y="143" class="node-title">GFSC data plane</text>
+  <text x="1104" y="168" class="node-copy">authoritative identity gate</text>
+  <text x="1104" y="195" class="small">user lifecycle + auth generation</text>
+  <text x="1104" y="216" class="small">admin status + session generation</text>
+  <text x="1104" y="237" class="small">exact active link generation</text>
+  <text x="1104" y="264" class="small">ordinary or linked-admin subject</text>
+  <text x="1104" y="283" class="small">deny on stale, missing, or malformed state</text>
+
+  <!-- Store layer -->
+  <text x="712" y="380" class="section">AUTHORITATIVE STORE</text>
+  <rect x="712" y="400" width="322" height="160" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="712" y="400" width="4" height="160" rx="2" fill="#71717a"/>
+  <text x="730" y="431" class="node-title">PostgreSQL</text>
+  <text x="730" y="456" class="node-copy">lifecycle and permission source</text>
+  <text x="730" y="484" class="small">users · admins · memberships</text>
+  <text x="730" y="505" class="small">link generations · tombstones</text>
+  <text x="730" y="526" class="small">grants · session versions</text>
+
+  <rect x="1086" y="400" width="266" height="160" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="1086" y="400" width="4" height="160" rx="2" fill="#71717a"/>
+  <text x="1104" y="431" class="node-title">Audit + metrics</text>
+  <text x="1104" y="456" class="node-copy">append-only evidence</text>
+  <text x="1104" y="484" class="small">actor + effective admin</text>
+  <text x="1104" y="505" class="small">source + request ID</text>
+  <text x="1104" y="526" class="small">decision + mutation outcome</text>
+
+  <!-- Lifecycle panel -->
+  <rect x="48" y="480" width="612" height="260" rx="8" fill="none" stroke="#e5e5e5" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="64" y="504" class="section">IMMUTABLE OPERATOR-LINK LIFECYCLE</text>
+  <rect x="72" y="548" width="126" height="78" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="72" y="548" width="4" height="78" rx="2" fill="#10a37f"/>
+  <text x="135" y="580" text-anchor="middle" class="state-title">Active</text>
+  <text x="135" y="600" text-anchor="middle" class="state-copy">generation N</text>
+
+  <rect x="216" y="548" width="126" height="78" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="216" y="548" width="4" height="78" rx="2" fill="#f97316"/>
+  <text x="279" y="580" text-anchor="middle" class="state-title">Revoked</text>
+  <text x="279" y="600" text-anchor="middle" class="state-copy">retained tombstone</text>
+
+  <rect x="360" y="548" width="126" height="78" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="360" y="548" width="4" height="78" rx="2" fill="#1d4ed8"/>
+  <text x="423" y="580" text-anchor="middle" class="state-title">Successor</text>
+  <text x="423" y="600" text-anchor="middle" class="state-copy">generation N+1</text>
+
+  <rect x="504" y="548" width="126" height="78" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <rect x="504" y="548" width="4" height="78" rx="2" fill="#71717a"/>
+  <text x="567" y="580" text-anchor="middle" class="state-title">Retired</text>
+  <text x="567" y="600" text-anchor="middle" class="state-copy">authority denied</text>
+
+  <text x="72" y="668" class="small">Revoke = governed event + CAS state transition</text>
+  <text x="72" y="688" class="small">Reactivate = new generation; tombstones are never rewritten</text>
+  <text x="72" y="708" class="small">Parent retirement precedes restrictive deletion semantics</text>
+
+  <!-- Follow-up panel -->
+  <rect x="712" y="622" width="640" height="118" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="730" y="651" class="section">INDEPENDENT GLOBAL FOLLOW-UPS</text>
+  <text x="730" y="681" class="node-title">IPv6 canonical keys</text>
+  <text x="730" y="704" class="node-copy">same configured prefix → same durable client bucket</text>
+  <text x="1030" y="681" class="node-title">Coherent 429 metadata</text>
+  <text x="1030" y="704" class="node-copy">one rejecting bucket → one retry contract</text>
+
+  <!-- Validation panel -->
+  <rect x="712" y="780" width="640" height="140" rx="8" fill="#ffffff" stroke="#e5e5e5" stroke-width="1.5"/>
+  <text x="730" y="809" class="section">VALIDATION</text>
+  <text x="730" y="840" class="small">T0/T1: source, unit, integration, migration, readiness, and CI gates</text>
+  <text x="730" y="862" class="small">T2: same branch-owned Minikube profile + local images + exact marker</text>
+  <text x="730" y="884" class="small">Browser: six visible Control UI/Desktop journeys, 0 skips, 0 retries</text>
+  <text x="730" y="906" class="small">Negative paths: retired, stale, revoked, unlinked, forbidden, and rate-limited</text>
+
+  <!-- Primary and control flows -->
+  <path d="M 278 140 H 320 V 76 H 680 V 140 H 712" fill="none" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <rect x="390" y="62" width="116" height="18" fill="#ffffff"/>
+  <text x="448" y="75" text-anchor="middle" class="label">admin lifecycle</text>
+
+  <path d="M 278 252 H 360" fill="none" stroke="#10a37f" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="282" y="236" width="84" height="18" fill="#ffffff"/>
+  <text x="324" y="249" text-anchor="middle" class="label">GFS requests</text>
+
+  <path d="M 278 364 H 320 V 320 H 680 V 220 H 712" fill="none" stroke="#f97316" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <rect x="354" y="304" width="112" height="18" fill="#ffffff"/>
+  <text x="410" y="317" text-anchor="middle" class="label">initial_setup</text>
+
+  <path d="M 660 200 H 712" fill="none" stroke="#10a37f" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="646" y="181" width="124" height="18" fill="#ffffff"/>
+  <text x="708" y="194" text-anchor="middle" class="label">request ID + gates</text>
+
+  <path d="M 1034 205 H 1086" fill="none" stroke="#10a37f" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <rect x="1014" y="185" width="96" height="18" fill="#ffffff"/>
+  <text x="1062" y="198" text-anchor="middle" class="label">signed authority</text>
+
+  <path d="M 873 302 V 400" fill="none" stroke="#71717a" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <rect x="882" y="342" width="108" height="18" fill="#ffffff"/>
+  <text x="936" y="355" text-anchor="middle" class="label">resolve / mutate</text>
+
+  <path d="M 1219 302 V 400" fill="none" stroke="#71717a" stroke-width="1.5" marker-end="url(#arrow-gray)"/>
+  <rect x="1228" y="342" width="126" height="18" fill="#ffffff"/>
+  <text x="1291" y="355" text-anchor="middle" class="label">state read</text>
+
+  <path d="M 1034 260 H 1060 V 480 H 1086" fill="none" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+  <rect x="1038" y="366" width="122" height="18" fill="#ffffff"/>
+  <text x="1099" y="379" text-anchor="middle" class="label">governed event</text>
+
+  <!-- Lifecycle transitions -->
+  <path d="M 198 587 H 216" fill="none" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <rect x="190" y="520" width="60" height="18" fill="#ffffff"/>
+  <text x="220" y="533" text-anchor="middle" class="label">revoke</text>
+  <path d="M 342 587 H 360" fill="none" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <rect x="330" y="520" width="76" height="18" fill="#ffffff"/>
+  <text x="368" y="533" text-anchor="middle" class="label">reactivate</text>
+  <path d="M 135 626 V 650 H 567 V 626" fill="none" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+  <rect x="286" y="638" width="88" height="18" fill="#ffffff"/>
+  <text x="330" y="651" text-anchor="middle" class="label">retire parent</text>
+
+  <!-- Follow-up relation routed outside the lifecycle panel -->
+  <path d="M 712 681 H 680 V 760 H 20 V 200 H 360" fill="none" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+  <rect x="26" y="188" width="122" height="18" fill="#ffffff"/>
+  <text x="87" y="201" text-anchor="middle" class="label">shared contracts</text>
+
+  <!-- Legend -->
+  <line x1="730" y1="950" x2="770" y2="950" stroke="#10a37f" stroke-width="1.5" marker-end="url(#arrow-green)"/>
+  <text x="780" y="954" class="small">primary request / authority flow</text>
+  <line x1="1010" y1="950" x2="1050" y2="950" stroke="#1d4ed8" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+  <text x="1060" y="954" class="small">state transition</text>
+  <line x1="1160" y1="950" x2="1200" y2="950" stroke="#71717a" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrow-gray)"/>
+  <text x="1210" y="954" class="small">audit / follow-up contract</text>
+</svg>

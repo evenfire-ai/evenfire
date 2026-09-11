@@ -29,6 +29,35 @@ function renderTable({
 }
 
 describe('CommunicationChannelsTable', () => {
+  it('navigates the durable record row without activating from its action menu', () => {
+    const onOpenChannel = vi.fn()
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[
+            {
+              metadata: { name: 'channel-a', namespace: 'channels' },
+              spec: { hostRef: 'agent-a' },
+            },
+          ]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onOpenChannel={onOpenChannel}
+        />
+      </ToastProvider>
+    )
+
+    const row = screen.getByText('channel-a').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel channel-a' }))
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+    expect(screen.getAllByRole('menuitem')[0]).toHaveTextContent('View details')
+  })
+
   it('shows configured provider types in one column', () => {
     renderTable({
       items: [
@@ -75,7 +104,7 @@ describe('CommunicationChannelsTable', () => {
       ],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy channel telegram-channel config' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel telegram-channel' }))
 
     expect(
       screen.queryByRole('menuitem', { name: 'Copy config into Telegram' })
@@ -112,7 +141,7 @@ describe('CommunicationChannelsTable', () => {
       ],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy channel slack-channel config' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel slack-channel' }))
 
     expect(
       screen.queryByRole('menuitem', { name: 'Copy config into Slack' })
@@ -146,7 +175,7 @@ describe('CommunicationChannelsTable', () => {
       ],
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Copy channel teams-channel config' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
 
     expect(
       screen.queryByRole('menuitem', { name: 'Copy config into Microsoft Teams' })
@@ -154,5 +183,127 @@ describe('CommunicationChannelsTable', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Copy config into Slack' }))
 
     expect(onCopyChannel).toHaveBeenCalledWith('teams-channel', 'slack')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Row actions kebab
+// ─────────────────────────────────────────────────────────────────────────────
+describe('CommunicationChannelsTable — row actions kebab', () => {
+  function teamsChannelItem(): CommunicationChannelItem {
+    return {
+      metadata: { name: 'teams-channel', namespace: 'channels' },
+      spec: { hostRef: 'agent-a', teamsSettings: { appId: 'app-123' } },
+    } as unknown as CommunicationChannelItem
+  }
+
+  it('routes the View details menu item through the row navigation handler', () => {
+    const onOpenChannel = vi.fn()
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[teamsChannelItem()]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onOpenChannel={onOpenChannel}
+          onRefresh={vi.fn()}
+          refreshing={false}
+        />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
+
+    const detailItems = screen.getAllByRole('menuitem', { name: 'View details' })
+    const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(detailItems).toHaveLength(1)
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
+
+    fireEvent.click(detailItems[0])
+    expect(onOpenChannel).toHaveBeenCalledWith('teams-channel')
+  })
+
+  it('opens the confirm dialog when Delete is clicked on the kebab', () => {
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[teamsChannelItem()]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onOpenChannel={vi.fn()}
+          onRefresh={vi.fn()}
+          refreshing={false}
+        />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent(/Delete communication channel/)
+  })
+
+  it('still renders the kebab without a detail action when row navigation is omitted', () => {
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[teamsChannelItem()]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onRefresh={vi.fn()}
+          refreshing={false}
+        />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
+
+    expect(screen.queryByRole('menuitem', { name: 'View details' })).not.toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
+  })
+
+  it('exposes each copy target as its own menu item inside the row kebab', () => {
+    const onCopyChannel = vi.fn()
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[teamsChannelItem()]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onCopyChannel={onCopyChannel}
+          onRefresh={vi.fn()}
+          refreshing={false}
+        />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
+
+    // teams-channel is configured for Teams, so copy targets are Slack + Telegram
+    expect(screen.getByRole('menuitem', { name: 'Copy config into Slack' })).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'Copy config into Telegram' })).toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Copy config into Microsoft Teams' })
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Copy config into Slack' }))
+    expect(onCopyChannel).toHaveBeenCalledWith('teams-channel', 'slack')
+  })
+
+  it('disables copy-target items when onCopyChannel is not provided', () => {
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[teamsChannelItem()]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onRefresh={vi.fn()}
+          refreshing={false}
+        />
+      </ToastProvider>
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
+
+    const slackCopy = screen.getByRole('menuitem', { name: 'Copy config into Slack' })
+    const telegramCopy = screen.getByRole('menuitem', { name: 'Copy config into Telegram' })
+    expect(slackCopy).toBeDisabled()
+    expect(telegramCopy).toBeDisabled()
   })
 })

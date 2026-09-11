@@ -12,6 +12,17 @@ import {
   validateExecParams,
 } from '../src/k8s.js'
 
+const log = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+}))
+
+vi.mock('../src/observability/logger.js', () => ({
+  rootLogger: { child: () => log },
+}))
+
 // ── Module-level constants ──────────────────────────────────────────────
 
 describe('ALLOWED_EXEC_NAMESPACES', () => {
@@ -312,20 +323,21 @@ describe('artifact listing commands', () => {
   })
 
   it('caps BusyBox fallback listing output from pod exec', async () => {
+    const sentinel = 'RP231_NESTED_ERROR_SENTINEL'
     const execRaw = vi
       .fn()
-      .mockRejectedValueOnce(new Error('find: unrecognized: -printf'))
+      .mockRejectedValueOnce(
+        Object.assign(new Error('find: unrecognized: -printf'), {
+          response: { body: { value: sentinel } },
+        })
+      )
       .mockResolvedValueOnce('report.md\n')
     const gateway = makeGatewayWithExecRaw(execRaw)
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    log.warn.mockClear()
 
-    try {
-      await expect(
-        gateway.listFilesInDirectory('pod-1', 'mcp-host', undefined, '/tmp/clerum-output/')
-      ).resolves.toContain('report.md')
-    } finally {
-      warnSpy.mockRestore()
-    }
+    await expect(
+      gateway.listFilesInDirectory('pod-1', 'mcp-host', undefined, '/tmp/clerum-output/')
+    ).resolves.toContain('report.md')
 
     expect(execRaw).toHaveBeenNthCalledWith(
       2,
@@ -336,6 +348,22 @@ describe('artifact listing commands', () => {
       MAX_ARTIFACT_LISTING_BYTES,
       'Artifact listing too large to return'
     )
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'artifact-listing-find-printf-unsupported',
+        podName: 'pod-1',
+        namespace: 'mcp-host',
+      }),
+      'find -printf failed; falling back to find -type f'
+    )
+    const [fields] = log.warn.mock.calls[0]
+    expect(fields).toEqual(
+      expect.objectContaining({
+        err: { name: 'Error', message: 'find: unrecognized: -printf' },
+      })
+    )
+    expect(fields).not.toHaveProperty('directory')
+    expect(JSON.stringify(log.warn.mock.calls)).not.toContain(sentinel)
   })
 
   it('does not fall back when the metadata listing exceeds the cap', async () => {

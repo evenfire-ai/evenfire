@@ -4,9 +4,9 @@ export const CREATE_FLOW_LOADING = {
   createAgent: {
     iconKey: 'robot',
     title: 'Create agent',
-    subtitle: 'Provision a new agent with context, credentials, and access.',
+    subtitle: 'Provision a new agent with connectors, credentials, and access.',
     backLabel: 'Back to agents',
-    steps: ['Agent', 'Context', 'Model & Credentials', 'Access'],
+    steps: ['Agent', 'Model & Credentials', 'Access', 'Add Connectors'],
     stepFlowClassName: 'cu-create-step-flow--4',
   },
   createCommunicationChannel: {
@@ -15,14 +15,6 @@ export const CREATE_FLOW_LOADING = {
     subtitle: 'Define channel routing and link it to an agent.',
     backLabel: 'Back to channels',
     steps: ['Channel', 'Routing'],
-    stepFlowClassName: 'cu-create-step-flow--2',
-  },
-  createContext: {
-    iconKey: 'group-work',
-    title: 'Create context',
-    subtitle: 'Define a new context and attach connectors.',
-    backLabel: 'Back to contexts',
-    steps: ['Context', 'Connectors'],
     stepFlowClassName: 'cu-create-step-flow--2',
   },
   createControlAdmin: {
@@ -38,8 +30,8 @@ export const CREATE_FLOW_LOADING = {
     title: 'Create connector',
     subtitle: 'Register a new connector and optionally create its managed deployment metadata.',
     backLabel: 'Back to connectors',
-    steps: ['Connector', 'Runtime', 'Network', 'Secrets'],
-    stepFlowClassName: 'cu-create-step-flow--4',
+    steps: ['Connector', 'Access', 'Secrets'],
+    stepFlowClassName: 'cu-create-step-flow--3',
   },
   createMember: {
     iconKey: 'users',
@@ -60,7 +52,7 @@ export const CREATE_FLOW_LOADING = {
   createSharedFileSystem: {
     iconKey: 'shared-files',
     title: 'Create SharedFileSystem',
-    subtitle: 'Provision workspace storage that Contexts can mount read-only into agent pods.',
+    subtitle: 'Provision workspace storage that agents can mount read-only into their pods.',
     backLabel: 'Back to Agent Files',
     steps: ['Storage', 'Access', 'Folders'],
     stepFlowClassName: 'cu-create-step-flow--3',
@@ -70,16 +62,16 @@ export const CREATE_FLOW_LOADING = {
     title: 'Create team',
     subtitle: 'Create a team now. You can assign a leader later.',
     backLabel: 'Back to teams',
-    steps: ['Team', 'Members', 'Contexts', 'Agents'],
-    stepFlowClassName: 'cu-create-step-flow--4 cu-team-create-panel',
+    steps: ['Team', 'Members', 'Agents'],
+    stepFlowClassName: 'cu-create-step-flow--3 cu-team-create-panel',
   },
   installRegistryEntry: {
     iconKey: 'store',
     title: 'Install from Marketplace',
-    subtitle: 'Install a Marketplace entry into your cluster and bind it to a context.',
+    subtitle: 'Install a Marketplace entry into your cluster.',
     backLabel: 'Back to Marketplace',
-    steps: ['Package', 'Install'],
-    stepFlowClassName: 'cu-create-step-flow--2',
+    steps: ['Package', 'Credentials', 'Install'],
+    stepFlowClassName: 'cu-create-step-flow--3',
   },
   installPlugin: {
     iconKey: 'workflow',

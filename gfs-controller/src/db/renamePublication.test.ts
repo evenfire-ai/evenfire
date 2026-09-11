@@ -95,7 +95,7 @@ describe("transactional rename publication", () => {
   it("renames root and subtree paths while preserving identity, parent, drive and blob", async () => {
     const f = fixture(); const beforeChild = { ...f.db.tree[1] };
     const renamed = await f.writes.rename(f.input);
-    expect(renamed).toMatchObject({ resourceId: TARGET, parentResourceId: PARENT, drive: "main", name: "new", pathCache: "/docs/new", version: 5 });
+    expect(renamed).toMatchObject({ resourceId: TARGET, parentResourceId: PARENT, drive: "main", name: "new", pathCache: "/docs/new", version: 5, updatedAt: "2026-07-17T00:00:01.000Z" });
     expect(f.db.tree[1]).toMatchObject({ resource_id: CHILD, parent_resource_id: TARGET, path_cache: "/docs/new/file.txt",
       version: beforeChild.version, blob_key: beforeChild.blob_key, content_sha256: beforeChild.content_sha256 });
     expect(f.audit.calls).toHaveLength(1);

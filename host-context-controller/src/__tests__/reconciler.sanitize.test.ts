@@ -90,7 +90,11 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // These tests inspect the first generated workload, before it exists in the API.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+      assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
@@ -121,6 +125,19 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
       await reconciler.reconcile(server)
       const container = capturedContainer(appsApi)
       expect(container.imagePullPolicy).toBe('IfNotPresent')
+    })
+
+    it('does not mutate a watched desired spec while building the sanitized Deployment', async () => {
+      const server = makeServer({
+        imagePullPolicy: 'Always',
+        security: { runAsUser: 0, addCapabilities: ['CHOWN', 'SYS_ADMIN'] },
+      })
+      const originalSpec = structuredClone(server.spec)
+
+      await reconciler.reconcile(server)
+
+      expect(capturedContainer(appsApi).imagePullPolicy).toBe('IfNotPresent')
+      expect(server.spec).toEqual(originalSpec)
     })
   })
 
@@ -270,6 +287,7 @@ describe('CRD Field Injection Prevention (sanitizeCrdSpec)', () => {
       const copyContainer = capturedInitContainer(appsApi, 'copy-mcp-app')
       const bridgeContainer = capturedContainer(appsApi, 'stdio-bridge')
       for (const container of [copyContainer, bridgeContainer]) {
+        expect(container.imagePullPolicy).toBe('IfNotPresent')
         expect(container.securityContext?.allowPrivilegeEscalation).toBe(false)
         expect(container.securityContext?.capabilities?.drop).toEqual(['ALL'])
         expect(container.securityContext?.capabilities?.add).toBeUndefined()

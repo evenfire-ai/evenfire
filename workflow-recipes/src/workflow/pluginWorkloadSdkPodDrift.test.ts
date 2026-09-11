@@ -63,6 +63,27 @@ describe('readMcpHostPodDriftStateIfExists', () => {
     })
   })
 
+  it('reads the runtime token generation used after a failed remint roll', async () => {
+    const coreApi = {
+      readNamespacedPod: vi.fn().mockResolvedValue({
+        metadata: {
+          annotations: {
+            'clerum.io/mcp-host-runtime-token-generation': '3',
+          },
+        },
+        spec: { containers: [{ name: 'mcp-host', image: 'registry.example/mcp-host:current' }] },
+      }),
+    }
+
+    await expect(
+      readMcpHostPodDriftStateIfExists(coreApi as never, POD_NAME, NAMESPACE)
+    ).resolves.toEqual({
+      image: 'registry.example/mcp-host:current',
+      tokenGeneration: '3',
+      deleting: false,
+    })
+  })
+
   it('returns undefined when the pod disappeared before the drift read', async () => {
     const coreApi = {
       readNamespacedPod: vi.fn().mockRejectedValue({ code: 404 }),

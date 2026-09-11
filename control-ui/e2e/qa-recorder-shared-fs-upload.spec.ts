@@ -45,7 +45,7 @@ test.describe('optional QA recorder: Control UI SharedFileSystem', () => {
       ).toBeVisible({ timeout: 20_000 })
       await expect(
         page.getByText(
-          'Provision workspace storage that Contexts can mount read-only into agent pods.',
+          'Provision workspace storage that agents can mount read-only into their pods.',
           { exact: true }
         )
       ).toBeVisible({ timeout: 20_000 })

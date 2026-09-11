@@ -2,7 +2,7 @@
  * VENDORED offline snapshot of the public models.dev catalog
  * (https://models.dev/api.json, MIT-licensed). GENERATED DATA — do not edit by hand.
  *
- * Trimmed to only the ~21 models.dev provider keys that control-api maps to its
+ * Trimmed to only the ~22 models.dev provider keys that control-api maps to its
  * providers, and to only the fields discovery consumes ({ id, name?, limit.context? }).
  * Used by services/modelsDevClient.ts as the offline fallback when the LIVE fetch
  * of api.json fails, so catalog sync always has data. Regenerate by re-fetching
@@ -4531,6 +4531,26 @@ export const VENDORED_MODELS_DEV_SNAPSHOT: RawModelsDevCatalog = {
       },
       'gpt-5.1': { id: 'gpt-5.1', name: 'GPT-5.1', limit: { context: 272000 } },
       'gpt-5.5': { id: 'gpt-5.5', name: 'GPT-5.5', limit: { context: 1050000 } },
+    },
+  },
+  minimax: {
+    name: 'MiniMax (minimax.io)',
+    models: {
+      'MiniMax-M2.7': { id: 'MiniMax-M2.7', name: 'MiniMax-M2.7', limit: { context: 204800 } },
+      'MiniMax-M2.7-highspeed': {
+        id: 'MiniMax-M2.7-highspeed',
+        name: 'MiniMax-M2.7-highspeed',
+        limit: { context: 204800 },
+      },
+      'MiniMax-M2.1': { id: 'MiniMax-M2.1', name: 'MiniMax-M2.1', limit: { context: 204800 } },
+      'MiniMax-M2': { id: 'MiniMax-M2', name: 'MiniMax-M2', limit: { context: 196608 } },
+      'MiniMax-M2.5-highspeed': {
+        id: 'MiniMax-M2.5-highspeed',
+        name: 'MiniMax-M2.5-highspeed',
+        limit: { context: 204800 },
+      },
+      'MiniMax-M3': { id: 'MiniMax-M3', name: 'MiniMax-M3', limit: { context: 1000000 } },
+      'MiniMax-M2.5': { id: 'MiniMax-M2.5', name: 'MiniMax-M2.5', limit: { context: 204800 } },
     },
   },
 }

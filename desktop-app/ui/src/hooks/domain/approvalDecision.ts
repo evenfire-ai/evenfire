@@ -1,6 +1,6 @@
-import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
+import { makeTaskKey, parseTaskKey } from '@contexts/AgentTaskTrackerContext'
 import type { ApprovalDecisionResult } from '../../../../src/types'
-import type { SessionFsmStore } from './sessionFsm'
+import type { SessionFsmState, SessionFsmStore } from './sessionFsm'
 
 /**
  * Central approval-decision logic (spec-v2 §4.7.4). All four decision surfaces
@@ -50,7 +50,98 @@ export interface ApprovalDecisionTarget {
   taskId: string
   requestId: string
   decision: 'approve' | 'deny'
-  source: 'desktop_notification' | 'inapp_bell' | 'in_chat' | 'placeholder'
+  // `connect_completed` (U5): the OAuth deep-link returned for an mcp-server;
+  // the suspended task is resumed through the SAME approval RPC (mcp-host
+  // re-executes the tool with the freshly-minted grant). Always an approve.
+  source: 'desktop_notification' | 'inapp_bell' | 'in_chat' | 'placeholder' | 'connect_completed'
+}
+
+/**
+ * U5 (mcp-oauth reactive consent) — deep-link correlation.
+ *
+ * Given the FSM snapshot and the `mcpServerName` carried on the OAuth
+ * `oauth-completed?source=mcp` deep link, return the resume target for EVERY
+ * conversation currently suspended on that server. Correlating by `mcpServerName`
+ * (not client_id) is robust to 2+ concurrent suspensions:
+ *   - suspensions on OTHER servers do not match and are left untouched;
+ *   - a per-user grant is global to the user, so once the connect completes,
+ *     every conversation waiting on that server can resume — this returns them all;
+ *   - it reads only the FSM snapshot (the single source of truth already used by
+ *     resume/reconcile), so no ephemeral client_id→conversation map is needed and
+ *     it survives an app restart (the durable suspension re-seeds the snapshot).
+ *
+ * Pure and total: unit-testable without React. Always yields `decision:'approve'`
+ * — a connect completion only ever resumes.
+ */
+export function resolveConnectResumeTargets(
+  snapshot: Record<string, SessionFsmState>,
+  mcpServerName: string
+): ApprovalDecisionTarget[] {
+  const server = String(mcpServerName || '').trim()
+  if (!server) return []
+  const targets: ApprovalDecisionTarget[] = []
+  for (const [chatKey, entry] of Object.entries(snapshot)) {
+    const approval = entry.pendingApproval
+    if (
+      entry.phase !== 'awaiting_approval' ||
+      !approval ||
+      approval.reason !== 'connect_required' ||
+      approval.mcpServerName !== server ||
+      !entry.activeTaskId
+    ) {
+      continue
+    }
+    const { agentRef, chatId } = parseTaskKey(chatKey)
+    targets.push({
+      agentRef,
+      chatId,
+      taskId: entry.activeTaskId,
+      requestId: approval.requestId,
+      decision: 'approve',
+      source: 'connect_completed',
+    })
+  }
+  return targets
+}
+
+/**
+ * U3 (mcp-oauth proactive consent) — the OAuth deep-link return handler.
+ *
+ * A `clerum://oauth-completed?source=mcp&mcpServerName=<X>` arrives in TWO
+ * independent situations, and BOTH must be handled from the single completion:
+ *   - REACTIVE: a turn suspended with `connect_required` is waiting on <X> →
+ *     `resolveConnectResumeTargets` yields its resume target(s) and each is
+ *     driven through the SAME central decider (approve → the tool re-executes).
+ *   - PROACTIVE: the user clicked "Authorize" in the connectors panel with no
+ *     turn in flight → `resolveConnectResumeTargets` yields `[]`.
+ *
+ * In EITHER case the grant store just changed, so the panel's tri-state is now
+ * stale — this ALWAYS refreshes it (the coexistence must-fix: when a suspended
+ * turn AND the panel are both live, resume the turn *and* refresh the panel).
+ * When there is no turn, the refresh is the only effect (the proactive branch).
+ * Pure orchestration over injected deps — no decision logic, no React — so it is
+ * unit-testable and re-reads truth solely from U1 (D4).
+ *
+ * `refreshConnectors` runs exactly once per completion, so the queue's existing
+ * `(server,provider)` dedup keeps a cold-start-replayed completion from firing a
+ * problematic double refresh (a redundant invalidate is idempotent regardless).
+ */
+export interface McpOauthCompletionDeps {
+  getSnapshot: () => Record<string, SessionFsmState>
+  decide: (target: ApprovalDecisionTarget) => void
+  refreshConnectors: () => void
+}
+
+export function handleMcpOauthCompletion(
+  deps: McpOauthCompletionDeps,
+  mcpServerName: string
+): { resumedCount: number; wasProactive: boolean } {
+  const resumeTargets = resolveConnectResumeTargets(deps.getSnapshot(), mcpServerName)
+  for (const target of resumeTargets) {
+    deps.decide(target)
+  }
+  deps.refreshConnectors()
+  return { resumedCount: resumeTargets.length, wasProactive: resumeTargets.length === 0 }
 }
 
 export interface DecideApprovalDeps {

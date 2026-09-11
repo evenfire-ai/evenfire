@@ -12,6 +12,15 @@ vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
+  // R1-H3 fase 1: the reductor gate now runs inside a carrier transaction. Route
+  // the transaction client's queries through the SAME `mockPoolQuery` so the
+  // sequenced expectations are unchanged; the advisory lock / idle-timeout guards
+  // are no-ops here (serialization is covered by the real-Postgres race test).
+  withTransaction: (work: (db: { query: (...a: unknown[]) => unknown }) => Promise<unknown>) =>
+    work({ query: (...args: unknown[]) => mockPoolQuery(...args) }),
+  advisoryLockModelName: async () => {},
+  advisoryLockModelNames: async () => {},
+  boundCarrierTransactionIdleTimeout: async () => {},
 }))
 
 vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
@@ -233,8 +242,14 @@ describe('admin llm-models routes', () => {
   })
 
   it('PUT /admin/llm-models/:id updates and returns 200', async () => {
+    // A disable (enabled true→false) now runs the availability-reduction gate
+    // first: gate read + grant-impact query + the update's own read/UPDATE/audit.
+    // Hosts come from the (empty) MockGateway store, so there is no impact and
+    // the write proceeds.
     mockPoolQuery
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // getAllowedModel
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // updateAllowedModel read
       .mockResolvedValueOnce({ rows: [{ ...MODEL_ROW, enabled: false }], rowCount: 1 }) // UPDATE
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ROW.id}`)
@@ -260,8 +275,12 @@ describe('admin llm-models routes', () => {
   })
 
   it('DELETE /admin/llm-models/:id returns 204 on success', async () => {
+    // A DELETE always runs the impact gate first: gate read + grant-impact query,
+    // then the delete's own read/DELETE/audit. Empty MockGateway → no impact.
     mockPoolQuery
-      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // getAllowedModel
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // gate getAllowedModel
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // grant-impact query → none
+      .mockResolvedValueOnce({ rows: [MODEL_ROW], rowCount: 1 }) // deleteAllowedModel read
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // DELETE
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
     await authed('delete', `/api/v1/admin/llm-models/${MODEL_ROW.id}`).expect(204)

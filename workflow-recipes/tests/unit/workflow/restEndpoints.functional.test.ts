@@ -1171,7 +1171,7 @@ describe('requestModelInjection', () => {
       { stepId: 'broker-review', provider: 'zai', model: 'glm-4.7' },
       'http://wf-my-recipe-mcp-host.sandbox-recipes.svc.cluster.local:8080',
       'wrc-configure-token',
-      undefined
+      { codexConnectionKey: 'unassigned' }
     )
   })
 

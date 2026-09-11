@@ -5,13 +5,14 @@ import { IconTrash } from '@/components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@/components/ui'
 import {
   LLM_DEFAULT_COOLDOWN_SECONDS,
-  LLM_PROVIDER_OPTIONS,
   LLM_TRIGGER_CLASSES,
   LLM_TRIGGER_LABELS,
   type LlmFallbackEntry,
   type LlmPolicy,
   type LlmProvider,
   type LlmTriggerClass,
+  OPENAI_SUBSCRIPTION_PROVIDER,
+  OPERATOR_PROVIDER_OPTIONS,
   constrainModelOptions,
   getCredentialSlotOptions,
   getProviderDisplayLabel,
@@ -310,11 +311,14 @@ function FallbackRow({
               })
             }}
           >
-            {LLM_PROVIDER_OPTIONS.map(option => (
+            {OPERATOR_PROVIDER_OPTIONS.map(option => (
               <option key={option.value} value={option.value}>
                 {option.label}
               </option>
             ))}
+            {entry.provider === OPENAI_SUBSCRIPTION_PROVIDER ? (
+              <option value={OPENAI_SUBSCRIPTION_PROVIDER}>OpenAI (ChatGPT subscription)</option>
+            ) : null}
           </SelectInput>
         </Field>
 
@@ -351,8 +355,8 @@ function FallbackRow({
         {supportsCredentialSlot ? (
           <Field
             htmlFor={`${rowId}-slot`}
-            label="Credential slot"
-            description="Optional key of the same LLM Secret (e.g. another key for the same provider). Empty = the provider's normal slot."
+            label="Credential source"
+            description="Use the provider's primary credential, or choose another key already in this LLM Secret."
           >
             <SelectInput
               id={`${rowId}-slot`}
@@ -362,7 +366,7 @@ function FallbackRow({
                 onChange({ credentialSlot: e.target.value ? e.target.value : undefined })
               }
             >
-              <option value="">Provider default slot</option>
+              <option value="">Use the provider&apos;s primary credential</option>
               {slotOptions.map(option => (
                 <option key={option} value={option}>
                   {option}
@@ -372,10 +376,10 @@ function FallbackRow({
             </SelectInput>
           </Field>
         ) : (
-          <Field label="Credential slot">
+          <Field label="Credential source">
             <p className="cu-field__hint cu-llm-policy__slot-note">
-              {getProviderDisplayLabel(entry.provider)} fallbacks reuse the primary credentials — a
-              separate key slot isn&apos;t supported.
+              {getProviderDisplayLabel(entry.provider)} fallbacks reuse the primary credential. A
+              separate credential source isn&apos;t supported for this provider.
             </p>
           </Field>
         )}

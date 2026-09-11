@@ -12,11 +12,16 @@
 #   2. allow-k8s-api-egress-* carries the endpoint IP in all 6 namespaces
 #   3. DNS egress to kube-dns ClusterIP present in every clerum namespace
 #   4. runtime-namespace pods with K8s-API RBAC carry the opt-in label  (WARN)
+#   5. llm-hooks: no policy grants a sealed guardrail hook pod egress (N5)
 #
 # Usage:
 #   make gcp-prod-np-preflight            # sets CONTEXT for you
 #   make gcp-dev-np-preflight
 #   CONTEXT=<kube-context> deploy/scripts/np-enforce-preflight.sh
+#
+# PROBE_HOOK_DNS=1 additionally execs one `getent hosts` inside a sealed hook pod
+# (check 5) and expects it to FAIL. Off by default: every other check here reads
+# cluster state only, and that one runs a command in a workload.
 #
 # CONTEXT MUST be passed explicitly — the script never inherits the current
 # kubectl context (per CLAUDE.md: the active context is not load-bearing).
@@ -40,6 +45,9 @@ K8S_API_NAMESPACES="channels control-plane mcp-host mcp-server rpc-proxy sandbox
 ALL_NAMESPACES="channels control-plane ingress mcp-host mcp-server profiles rpc-proxy sandbox-recipes sandbox-ui webhook-ingress"
 # HCC runtime namespaces — allow-k8s-api-egress-* is opt-in here (PR #314).
 RUNTIME_NAMESPACES="mcp-server rpc-proxy sandbox-recipes sandbox-ui"
+# Guardrail hook workloads. Deliberately NOT a runtime namespace: that list also
+# emits namespace-wide DNS, which N5 forbids for a hook declaring no egress.
+HOOKS_NS="${HOOKS_NS:-llm-hooks}"
 
 blockers=0
 warns=0
@@ -277,6 +285,80 @@ EOF
 done
 if [ "$flagged" -eq 0 ]; then
   pass "no RBAC-empowered pod is missing the label in: $RUNTIME_NAMESPACES"
+fi
+echo
+
+# ── Check 5: llm-hooks sealed-hook egress (N5) ──────────────────────────────
+# A guardrail hook that declares no egressBindings must reach NOTHING — not even
+# DNS (deploy/base/llm-hooks/networkpolicies.yaml). Two ways that breaks:
+#   - a namespace-wide Egress policy. Listing llm-hooks in
+#     CONTEXT_MAPPER_RUNTIME_NAMESPACES makes HCC emit allow-dns-egress-llm-hooks
+#     with podSelector: {}, which selects every pod in the namespace.
+#   - an Egress policy selecting clerum.io/managed-by=host-context-controller,
+#     the label every hook pod template carries.
+# `llmhook-<podKey>` policies are the per-hook ones: egress there is the DECLARED
+# kind, scoped by the reconciler to that hook's own bindings, so it is expected.
+echo "[5] llm-hooks: no policy grants a sealed hook pod egress (N5)"
+if ! kq get namespace "$HOOKS_NS" >/dev/null 2>&1; then
+  pass "namespace $HOOKS_NS not present — nothing to check"
+else
+  hook_findings=0
+  # `egress` is read LAST so a rule containing '|' cannot shift the earlier fields.
+  # policyTypes alone is not a grant: the baseline default-deny carries
+  # policyTypes [Ingress, Egress] with NO egress rules, which is what denies all
+  # outbound. Only a non-empty egress list actually opens anything.
+  while IFS='|' read -r np ptypes selector egress; do
+    [ -z "$np" ] && continue
+    case "$ptypes" in *Egress*) ;; *) continue ;; esac
+    if [ -z "$egress" ] || [ "$egress" = "[]" ]; then continue; fi
+    case "$np" in llmhook-*) continue ;; esac
+    if [ -z "$selector" ] || [ "$selector" = "{}" ]; then
+      bad "$HOOKS_NS/$np grants Egress to EVERY pod in the namespace (podSelector: {})"
+      hook_findings=$((hook_findings + 1))
+    elif printf '%s' "$selector" | grep -q 'host-context-controller'; then
+      bad "$HOOKS_NS/$np grants Egress via clerum.io/managed-by — that selects hook pods"
+      hook_findings=$((hook_findings + 1))
+    else
+      warn "$HOOKS_NS/$np grants Egress via $selector — confirm it selects no hook pod"
+      hook_findings=$((hook_findings + 1))
+    fi
+  done <<EOF
+$(kq -n "$HOOKS_NS" get networkpolicies -o jsonpath='{range .items[*]}{.metadata.name}|{.spec.policyTypes}|{.spec.podSelector.matchLabels}|{.spec.egress}{"\n"}{end}' 2>/dev/null)
+EOF
+  if [ "$hook_findings" -eq 0 ]; then
+    pass "no namespace-wide or managed-by Egress policy in $HOOKS_NS"
+  fi
+
+  # Static policy inspection cannot see a policy applied out of band, nor a CNI
+  # that fails to enforce one. The probe can: resolve from inside a hook whose
+  # own policy declares no Egress and expect it to hang/fail.
+  if [ "${PROBE_HOOK_DNS:-0}" = "1" ]; then
+    probed=0
+    while IFS='|' read -r pod podkey; do
+      if [ -z "$pod" ] || [ -z "$podkey" ]; then continue; fi
+      PTYPES="$(kq -n "$HOOKS_NS" get networkpolicy "llmhook-$podkey" \
+        -o jsonpath='{.spec.policyTypes}' 2>/dev/null)"
+      case "$PTYPES" in *Egress*) continue ;; esac
+      # A blocked lookup hangs until `timeout` kills it, which surfaces as a
+      # non-zero exit (143) plus kubectl noise on stderr — both expected here.
+      if kq -n "$HOOKS_NS" exec "$pod" -- sh -c \
+        'timeout 5 getent hosts kubernetes.default.svc.cluster.local >/dev/null 2>&1' \
+        2>/dev/null; then
+        bad "$HOOKS_NS/$pod resolved DNS — a hook declaring no egress reached kube-dns"
+      else
+        pass "$HOOKS_NS/$pod cannot resolve DNS (sealed as designed)"
+      fi
+      probed=1
+      break
+    done <<EOF
+$(kq -n "$HOOKS_NS" get pods -o jsonpath='{range .items[*]}{.metadata.name}|{.metadata.labels.clerum\.io/hook-pod-key}{"\n"}{end}' 2>/dev/null)
+EOF
+    if [ "$probed" -eq 0 ]; then
+      printf '  ----  no sealed hook pod to probe (none running, or all declare egress)\n'
+    fi
+  else
+    printf '  ----  DNS probe skipped (PROBE_HOOK_DNS=1 execs a resolve test in a hook pod)\n'
+  fi
 fi
 echo
 

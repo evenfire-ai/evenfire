@@ -5,12 +5,24 @@ import { RegistryClient } from '../src/registry'
 import { start } from '../src/server'
 import type { RegistryHit } from '../src/types'
 
-function freePort(): Promise<number> {
-  return new Promise(resolve => {
-    const s = http.createServer().listen(0, () => {
+function freePort(excluded = new Set<number>()): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = http.createServer()
+    s.once('error', reject)
+    s.listen(0, () => {
       const addr = s.address()
       const port = typeof addr === 'object' && addr ? addr.port : 0
-      s.close(() => resolve(port))
+      s.close(error => {
+        if (error) {
+          reject(error)
+          return
+        }
+        if (port > 0 && !excluded.has(port)) {
+          resolve(port)
+          return
+        }
+        freePort(excluded).then(resolve, reject)
+      })
     })
   })
 }
@@ -29,9 +41,12 @@ describe('webhook-proxy end-to-end (W1.1)', () => {
   ) => Promise<{ status: number; body: string }>
 
   beforeAll(async () => {
-    proxyPort = await freePort()
-    metricsPort = await freePort()
-    gatewayPort = await freePort()
+    const allocated = new Set<number>()
+    proxyPort = await freePort(allocated)
+    allocated.add(proxyPort)
+    metricsPort = await freePort(allocated)
+    allocated.add(metricsPort)
+    gatewayPort = await freePort(allocated)
 
     // Stub gateway: collect requests, return 200 OK with JSON.
     gatewayRequests = []

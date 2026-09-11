@@ -42,14 +42,14 @@ const key = {
 }
 
 describe('RegistryApiKeysPanel', () => {
-  it('renders a skeleton while registry API keys load', () => {
+  it('keeps headers mounted while registry API keys load', () => {
     vi.mocked(api.listRegistryApiKeys).mockReturnValue(
       new Promise(() => undefined) as ReturnType<typeof api.listRegistryApiKeys>
     )
-    const view = render(<RegistryApiKeysPanel />)
+    render(<RegistryApiKeysPanel />)
     expect(screen.getByRole('status', { name: /loading registry api keys/i })).toBeInTheDocument()
-    expect(screen.queryByText(/^Loading/i)).toBeNull()
-    expect(view.container.querySelectorAll('.cu-skeleton').length).toBeGreaterThan(0)
+    expect(screen.getByRole('columnheader', { name: /prefix/i })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /last used/i })).toBeInTheDocument()
   })
 
   it('renders the org header and table on success', async () => {
@@ -151,7 +151,8 @@ describe('RegistryApiKeysPanel', () => {
       .mockResolvedValueOnce({ org: 'acme', keys: [] })
     vi.mocked(api.revokeRegistryApiKey).mockResolvedValue(undefined)
     render(<RegistryApiKeysPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for API key efrk_abc' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke' }))
     await waitFor(() => {
       expect(api.revokeRegistryApiKey).toHaveBeenCalledWith('k1')
       expect(api.listRegistryApiKeys).toHaveBeenCalledTimes(2)
@@ -171,7 +172,8 @@ describe('RegistryApiKeysPanel', () => {
       Object.assign(new Error('not found'), { status: 404 })
     )
     render(<RegistryApiKeysPanel />)
-    fireEvent.click(await screen.findByRole('button', { name: /revoke/i }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for API key efrk_abc' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke' }))
     await waitFor(() => {
       expect(api.listRegistryApiKeys).toHaveBeenCalledTimes(2)
     })
@@ -214,6 +216,33 @@ describe('RegistryApiKeysPanel', () => {
     expect(await screen.findByText(/100-key limit/i)).toBeInTheDocument()
   })
 
+  it('consumes an external create signal once across error to ready transitions', async () => {
+    vi.mocked(api.listRegistryApiKeys)
+      .mockResolvedValueOnce({ org: 'acme', keys: [] })
+      .mockRejectedValueOnce(Object.assign(new Error('Network failure'), { status: 500 }))
+      .mockResolvedValueOnce({ org: 'acme', keys: [] })
+
+    const view = render(<RegistryApiKeysPanel createSignal={1} refreshSignal={0} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog', { name: /create api key/i })).toBeNull()
+
+    view.rerender(
+      <ToastProvider>
+        <RegistryApiKeysPanel createSignal={1} refreshSignal={1} />
+      </ToastProvider>
+    )
+    expect(await screen.findByText(/could not load api keys/i)).toBeInTheDocument()
+
+    view.rerender(
+      <ToastProvider>
+        <RegistryApiKeysPanel createSignal={1} refreshSignal={2} />
+      </ToastProvider>
+    )
+    expect(await screen.findByText(/no api keys yet/i)).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /create api key/i })).toBeNull()
+  })
+
   it('default sort: two keys with different created_at render newest-first', async () => {
     const olderKey = {
       ...key,
@@ -236,5 +265,23 @@ describe('RegistryApiKeysPanel', () => {
     const cells = screen.getAllByText(/^efrk_/)
     expect(cells[0]).toHaveTextContent('efrk_new')
     expect(cells[1]).toHaveTextContent('efrk_old')
+  })
+
+  it('owns its card when it is the whole page', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [] })
+    const view = render(<RegistryApiKeysPanel />)
+    await waitFor(() => expect(api.listRegistryApiKeys).toHaveBeenCalled())
+
+    expect(view.container.querySelector('.cu-card--viewport-fill')).toBeInTheDocument()
+  })
+
+  it('drops its card when embedded, so it does not nest inside the host card', async () => {
+    vi.mocked(api.listRegistryApiKeys).mockResolvedValue({ org: 'acme', keys: [] })
+    const view = render(<RegistryApiKeysPanel embedded />)
+    await waitFor(() => expect(api.listRegistryApiKeys).toHaveBeenCalled())
+
+    // cu-card--viewport-fill means "fill the viewport". Two of them nested
+    // produced the visible card-in-card border on the Marketplace org area.
+    expect(view.container.querySelector('.cu-card--viewport-fill')).not.toBeInTheDocument()
   })
 })

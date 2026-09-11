@@ -1,13 +1,15 @@
 import { Router } from 'express'
 import type { K8sGateway } from '../../k8s.js'
+import type { UiAuthedRequest } from '../../middleware/controlUIAuth.js'
 import {
-  adminDeleteUser,
+  DesktopUserRetirementError,
   createAdminUser,
   createPasswordSetupInvitationForUser,
   findMembership,
   getAdminUserContext,
   listTeams,
   listUsers,
+  retireDesktopUser,
   updateAdminUserContext,
 } from '../../services/directory/index.js'
 import { disableVerifiedMediumAccount } from '../../services/workflowApprovalMediumIdentityService.js'
@@ -244,23 +246,33 @@ export function createAdminUsersRouter(gateway: K8sGateway): Router {
 
   registerAdminUserAccessRoutes(router, gateway)
 
-  /**
-   * Hard-delete user profile, memberships, and personal context/agent links (DB CASCADE).
-   * Teams are retained even when this leaves them with no members.
-   */
-  router.delete('/admin/users/:userId', async (req, res, next) => {
+  /** Governed retirement requires the authenticated Control Admin and replay key. */
+  router.delete('/admin/users/:userId', async (req: UiAuthedRequest, res, next) => {
     try {
-      const result = await adminDeleteUser(req.params.userId)
-      if ('error' in result) {
-        if (result.error === 'not_found') {
-          res.status(404).json({ error: 'not_found' })
-          return
-        }
-        const exhaustive: never = result.error
-        throw new Error(`Unhandled adminDeleteUser result: ${exhaustive}`)
+      const controlAdminId = req.adminAuth?.sub
+      if (!controlAdminId) {
+        return res.status(401).json({ error: 'Unauthorized' })
       }
-      res.status(200).json({ deleted: true, id: result.id })
+      const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+      if (!reason) return res.status(400).json({ error: 'reason_required' })
+      const idempotencyKey = String(req.header('Idempotency-Key') || '').trim()
+      if (!idempotencyKey) return res.status(400).json({ error: 'idempotency_key_required' })
+      const result = await retireDesktopUser(
+        { kind: 'control_admin', controlAdminId },
+        req.params.userId,
+        reason,
+        idempotencyKey,
+        req.correlationId ?? null
+      )
+      return res.status(200).json({ deleted: true, id: result.id })
     } catch (error) {
+      if (error instanceof DesktopUserRetirementError) {
+        if (error.code === 'not_found') return res.status(404).json({ error: 'not_found' })
+        if (error.code === 'invalid_input') {
+          return res.status(400).json({ error: 'invalid_retirement_input' })
+        }
+        return res.status(409).json({ error: error.code })
+      }
       next(error)
     }
   })

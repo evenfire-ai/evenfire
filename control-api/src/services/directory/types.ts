@@ -86,7 +86,9 @@ export function normalizeChannels(input: unknown): ChannelMapping {
   }
 }
 
-export type AdminDeleteUserResult = { ok: true; id: string } | { error: 'not_found' }
+export type AdminDeleteUserResult =
+  | { ok: true; id: string }
+  | { error: 'not_found' | 'gfs_operator_link_history_retained' }
 export type AdminDeleteTeamResult =
   | { ok: true; id: string }
   | { error: 'not_found' | 'team_not_empty' }

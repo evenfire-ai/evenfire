@@ -62,8 +62,21 @@ function resolveHostName(body: unknown): { hostName: string } | { error: string 
   if (typeof raw !== 'string') return { error: 'host_required' }
   const trimmed = raw.trim()
   if (!trimmed) return { error: 'host_required' }
-  if (trimmed.length > 63 || !HOST_NAME_RE.test(trimmed)) return { error: 'invalid_host_name' }
+  if (trimmed !== raw || trimmed.length > 63 || !HOST_NAME_RE.test(trimmed)) {
+    return { error: 'invalid_host_name' }
+  }
   return { hostName: trimmed }
+}
+
+function resolveHostUid(body: unknown): { hostUid: string } | { error: string } {
+  if (!body || typeof body !== 'object') return { error: 'host_uid_required' }
+  const raw = (body as { hostUid?: unknown }).hostUid
+  if (typeof raw !== 'string') return { error: 'host_uid_required' }
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed !== raw || trimmed.length > 128 || /[^A-Za-z0-9._:-]/.test(trimmed)) {
+    return { error: 'invalid_host_uid' }
+  }
+  return { hostUid: trimmed }
 }
 
 function resolveIssueTarget(req: {
@@ -114,27 +127,39 @@ export function createAuthMcpHostIssueRoutes(): Router {
             return res.status(400).json({ error: 'invalid_issuance_namespace' })
           }
 
+          if (provisioner.iss === 'hcc' && recipeName !== 'standalone') {
+            return res.status(403).json({ error: 'provisioner_target_mismatch' })
+          }
+
           // 1st-party (hcc): hostRefs[0] is the actual Host CRD name so per-event
           // identity binding can verify the bearer pod is acting on its own behalf.
           // 3rd-party (wrc): hostRefs[0] keeps the recipe-binding shape — recipe
           // pods don't run on a single named host. Authorization for recipe tokens
           // uses recipeNamespace/recipeName instead.
           let hostRefs: string[]
+          let hccCredential: { hostUid: string } | undefined
           if (provisioner.iss === 'hcc') {
             const hostResolved = resolveHostName(req.body)
             if ('error' in hostResolved) {
               return res.status(400).json({ error: hostResolved.error })
             }
+            const uidResolved = resolveHostUid(req.body)
+            if ('error' in uidResolved) {
+              return res.status(400).json({ error: uidResolved.error })
+            }
             hostRefs = [hostResolved.hostName]
+            hccCredential = { hostUid: uidResolved.hostUid }
           } else {
             hostRefs = [`${recipeNamespace}/${recipeName}`]
           }
 
           const access = issueMcpHostAccessJwt(recipeNamespace, recipeName, hostRefs, {
             workflowControlScopes: controlScopes.scopes,
+            hccCredential,
           })
           const refresh = issueMcpHostRefreshJwt(recipeNamespace, recipeName, hostRefs, {
             workflowControlScopes: controlScopes.scopes,
+            hccCredential,
           })
           const control = issueMcpHostControlJwt(recipeNamespace, recipeName, hostRefs, {
             scopes: controlScopes.scopes,
@@ -142,15 +167,11 @@ export function createAuthMcpHostIssueRoutes(): Router {
           req.log?.info(
             {
               event: 'mcp_host_credentials_issued',
-              recipeNamespace,
-              recipeName,
               provisioner: provisioner.iss,
-              sub: provisioner.sub,
-              jti: provisioner.jti,
               accessTtlSec: access.expiresInSeconds,
               controlTtlSec: control.expiresInSeconds,
-              hostRefs,
-              workflowControlScopes: controlScopes.scopes,
+              workflowControlScopeCount: controlScopes.scopes.length,
+              hccQualified: hccCredential !== undefined,
             },
             'mcpHost credentials issued'
           )

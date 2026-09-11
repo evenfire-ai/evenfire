@@ -168,6 +168,48 @@ describe('POST /api/v1/internal/usage/llm/events', () => {
     expect(res.body).toEqual({ accepted: 0, duplicates: 1, rejected: 0 })
   })
 
+  it('drops reporter Codex events so they cannot open a second ledger row', async () => {
+    mockPoolQuery.mockResolvedValue({ rows: [{ request_id: VALID_EVENT.request_id }], rowCount: 1 })
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const res = await authedPost(app)
+      .send({
+        events: [
+          VALID_EVENT,
+          {
+            ...VALID_EVENT,
+            request_id: '66666666-6666-4666-8666-666666666666',
+            provider: 'codex-subscription',
+            llm_secret_name: null,
+            source_kind: 'channel',
+          },
+        ],
+      })
+      .expect(200)
+    expect(res.body).toEqual({ accepted: 1, duplicates: 0, rejected: 1 })
+    const insert = mockPoolQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO usage_events')
+    )
+    expect(insert?.[1]).toEqual(expect.arrayContaining([VALID_EVENT.request_id, 'openai']))
+    expect(JSON.stringify(insert?.[1] ?? [])).not.toContain('codex-subscription')
+  })
+
+  it('rejects a Codex-only reporter batch without inserting', async () => {
+    const app = createApp(new MockGateway('mcp-server') as never)
+    const res = await authedPost(app)
+      .send({
+        events: [
+          {
+            ...VALID_EVENT,
+            provider: 'codex-subscription',
+            llm_secret_name: null,
+          },
+        ],
+      })
+      .expect(200)
+    expect(res.body).toEqual({ accepted: 0, duplicates: 0, rejected: 1 })
+    expect(mockPoolQuery).not.toHaveBeenCalled()
+  })
+
   it('reports schema-rejected events separately', async () => {
     mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
     const app = createApp(new MockGateway('mcp-server') as never)

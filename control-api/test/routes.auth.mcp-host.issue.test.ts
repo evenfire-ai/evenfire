@@ -3,7 +3,12 @@ import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { createApp } from '../src/app.js'
 import { config } from '../src/config.js'
-import { ALL_MCP_HOST_CONTROL_SCOPES } from '../src/utils/auth/mcpHostJwtToken.js'
+import {
+  ALL_MCP_HOST_CONTROL_SCOPES,
+  MCP_HOST_CREDENTIAL_CAPABILITY,
+  MCP_HOST_HCC_AUDIENCE,
+  MCP_HOST_WORKFLOW_AUDIENCE,
+} from '../src/utils/auth/mcpHostJwtToken.js'
 import { MockGateway } from './mockGateway.js'
 
 vi.mock('../src/services/notificationEmitter.js', () => ({
@@ -114,7 +119,7 @@ describe('routes/auth/mcp-host issue', () => {
     const res = await request(app)
       .post('/api/v1/auth/mcp-host/mcp-host/standalone/tokens')
       .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
-      .send({ ...ISSUE_BODY, host: 'trader' })
+      .send({ ...ISSUE_BODY, host: 'trader', hostUid: 'host-uid-trader' })
 
     expect(res.status).toBe(200)
     expect(res.body).toHaveProperty('mcpHostAccessToken')
@@ -124,10 +129,20 @@ describe('routes/auth/mcp-host issue', () => {
     expect(res.body.hostRefs).toEqual(['trader'])
 
     const controlClaims = jwt.decode(res.body.mcpHostControlToken) as Record<string, unknown>
+    const accessClaims = jwt.decode(res.body.mcpHostAccessToken) as Record<string, unknown>
+    const refreshClaims = jwt.decode(res.body.mcpHostRefreshToken) as Record<string, unknown>
     expect(controlClaims.scopes).toEqual(ALL_MCP_HOST_CONTROL_SCOPES)
     expect(controlClaims.scope).toBeUndefined()
     expect(controlClaims.aud).toBe('mcp-host')
     expect(controlClaims.hostRefs).toEqual(['trader'])
+    for (const claims of [accessClaims, refreshClaims]) {
+      expect(claims.aud).toEqual([MCP_HOST_WORKFLOW_AUDIENCE, MCP_HOST_HCC_AUDIENCE])
+      expect(claims.host_uid).toBe('host-uid-trader')
+      expect(claims.mcpCapabilities).toEqual([MCP_HOST_CREDENTIAL_CAPABILITY])
+      expect(claims.hostRefs).toEqual(['trader'])
+    }
+    expect(controlClaims.host_uid).toBeUndefined()
+    expect(controlClaims.mcpCapabilities).toBeUndefined()
   })
 
   it('uses the workflowControlScopes declared by the trusted provisioner', async () => {
@@ -201,6 +216,47 @@ describe('routes/auth/mcp-host issue', () => {
     expect(res.body.error).toBe('invalid_host_name')
   })
 
+  it('rejects a non-canonical HCC Host name instead of normalizing caller input', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/mcp-host/mcp-host/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({ ...ISSUE_BODY, host: ' trader ' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('invalid_host_name')
+  })
+
+  it('rejects HCC issuance without the live Host UID', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/mcp-host/mcp-host/standalone/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({ ...ISSUE_BODY, host: 'trader' })
+
+    expect(res.status).toBe(400)
+    expect(res.body.error).toBe('host_uid_required')
+  })
+
+  it('does not let a WRC body upgrade a workflow token into HCC credential authority', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/mcp-host/sandbox-recipes/test-recipe/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('wrc')}`)
+      .send({
+        ...ISSUE_BODY,
+        host: 'trader',
+        hostUid: 'forged-host-uid',
+        mcpCapabilities: [MCP_HOST_CREDENTIAL_CAPABILITY],
+        audience: MCP_HOST_HCC_AUDIENCE,
+      })
+
+    expect(res.status).toBe(200)
+    for (const encoded of [res.body.mcpHostAccessToken, res.body.mcpHostRefreshToken]) {
+      const claims = jwt.decode(encoded) as Record<string, unknown>
+      expect(claims.aud).toBe(MCP_HOST_WORKFLOW_AUDIENCE)
+      expect(claims.host_uid).toBeUndefined()
+      expect(claims.mcpCapabilities).toBeUndefined()
+    }
+  })
+
   it('rejects HCC issuance with an empty / whitespace host', async () => {
     const res = await request(app)
       .post('/api/v1/auth/mcp-host/mcp-host/standalone/tokens')
@@ -239,6 +295,16 @@ describe('routes/auth/mcp-host issue', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.error).toBe('provisioner_namespace_mismatch')
+  })
+
+  it('rejects a non-standalone HCC issuance target before signing', async () => {
+    const res = await request(app)
+      .post('/api/v1/auth/mcp-host/mcp-host/other-recipe/tokens')
+      .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
+      .send({ ...ISSUE_BODY, host: 'trader', hostUid: 'host-uid-trader' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('provisioner_target_mismatch')
   })
 
   it('rejects WRC for mcp-host namespace', async () => {
@@ -281,7 +347,7 @@ describe('routes/auth/mcp-host issue', () => {
     const res = await request(app)
       .post('/api/v1/auth/mcp-host/agents/standalone/tokens')
       .set('Authorization', `Bearer ${signInternalControlJwt('hcc')}`)
-      .send({ ...ISSUE_BODY, host: 'chatllm' })
+      .send({ ...ISSUE_BODY, host: 'chatllm', hostUid: 'host-uid-chatllm' })
 
     expect(res.status).toBe(200)
     expect(res.body).toHaveProperty('mcpHostAccessToken')

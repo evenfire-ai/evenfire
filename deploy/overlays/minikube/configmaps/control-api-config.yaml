@@ -32,6 +32,32 @@ data:
   CONTROL_API_DESKTOP_RPC_PROXY_BASE_URL: 'http://127.0.0.1:8094'
   CONTROL_API_DESKTOP_PROFILE_UI_BASE_URL: 'http://127.0.0.1:3001'
   CONTROL_API_DESKTOP_APP_NAME: 'Evenfire'
+  # minikube-only: base URL control-api uses to build the OAuth `redirect_uri`
+  # for the mcp-server per-user flow (control-api/src/routes/external/oauthCallback.ts).
+  # Without it, control-api falls back to the request Host — which, behind the
+  # rpc-proxy → gateway chain, is the internal svc hostname
+  # (control-api-rpc-gateway.control-plane.svc.cluster.local:8090), NOT reachable
+  # by the user's browser and NOT matching the provider's registered redirect URI.
+  # Locally the user consents in their own browser, so the callback must land on
+  # the port-forwarded loopback. Register this EXACT literal as the redirect URI
+  # in each provider's OAuth app: the CONTROL_API_OAUTH_CALLBACK_BASE_URL value
+  # below, suffixed with /api/v1/oauth-callback/<oauth.id>.
+  # (Distinct from RPC_PROXY_OAUTH_CALLBACK_BASE_URL, which is the legacy
+  # recipe/embed flow and uses `localhost` — do not conflate them.)
+  CONTROL_API_OAUTH_CALLBACK_BASE_URL: 'http://127.0.0.1:8090'
+  # Enable the mcp-server per-user OAuth broker (control-api/src/routes/mcpOauth.ts).
+  # `MCP_OAUTH_BROKER_ENABLED` is fail-closed OFF by default: without it every
+  # POST /api/v1/mcp-oauth/user-token returns 404 not_found (requireBrokerEnabled),
+  # which mcp-host reads as `no_grant` — so a per-user oauth mcp-server suspends
+  # for consent forever and NEVER resolves a token even after the grant exists.
+  # Required for the U1–U6 reactive-consent flow to work end to end.
+  MCP_OAUTH_BROKER_ENABLED: 'true'
+  # Self-hosted-only GFS operator parity. Managed/base deployments remain
+  # fail-closed because this narrow elevation flag is absent there.
+  CONTROL_API_DESKTOP_GFS_OPERATOR_LINKING_ENABLED: 'true'
+  # Branch profiles use profile-owned random port-forwards; run
+  # `make minikube-sync-codex-subscription-url` after pf-all-stack to align
+  # Codex subscription browser OAuth redirect_uri with the live Control UI origin.
   CONTROL_API_CONTROL_UI_BASE_URL: 'http://127.0.0.1:3000'
   CONTROL_API_CONTROL_UI_APP_NAME: 'Evenfire'
   CONTROL_API_POLICY_AUTH_AUDIENCE: 'control-api'
@@ -53,6 +79,20 @@ data:
   WORKFLOW_APPROVAL_DEFAULT_TTL_SEC: '86400'
   WORKFLOW_APPROVAL_MAX_TTL_SEC: '172800'
   WORKFLOW_APPROVAL_EXPIRY_INTERVAL_MS: '60000'
+  # Plugin Workload SDK platform rate limits (issue #348). This file is a
+  # strategic-merge PATCH over the base ConfigMap (registered under patches:
+  # in the minikube kustomization). A key omitted here inherits the BASE value
+  # from deploy/base/control-plane/configmaps.yaml (the deploy-mirror test
+  # pins base to the code defaults). All four keys are set explicitly so
+  # minikube's effective values (150/120/600/600) are visible here. Per-run
+  # SDK quotas are deprecated and ignored; limits are enforced over a
+  # trailing 60s window (no fixed reset); once traffic slows below the limit
+  # the window drains within ~60s — stepless recipes are never permanently
+  # trapped.
+  CONTROL_API_PLUGIN_SDK_NOTIFICATIONS_PER_MIN: "150"
+  CONTROL_API_PLUGIN_SDK_PROMPTBRIDGE_PER_MIN: "120"
+  CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN: "600"
+  CONTROL_API_PLUGIN_SDK_PREAUTH_PER_MIN: "600"
   # OSS default: point at the shared registry so a self-hoster browses the
   # public catalog out of the box and can run the connect flow (register →
   # approve → claim) against it. self-hosted is the only mode that fits an OSS
@@ -82,3 +122,10 @@ data:
   # it. Set the line below to 'false' to hide it explicitly.
   # CONTROL_API_PUBLISHER_UI_ENABLED: 'false'
   CLERUM_ATTACHMENT_MAX_BYTES: '52428800'
+  CONTROL_API_CODEX_SUBSCRIPTION_ENABLED: 'true'
+  CODEX_LLM_PROXY_EXECUTION_ENABLED: 'true'
+  # Codex browser OAuth redirect_uri derives from this control-ui origin plus
+  # /control-api/api/v1/auth/codex-subscription/callback. Loopback profiles may
+  # override via the browser Origin header when both sides are 127.0.0.1/localhost.
+  # Browser connect requires CONTROL_API_CODEX_OAUTH_CLIENT_ID registered with OpenAI
+  # for that exact callback URL; the default CLI client supports device code only.

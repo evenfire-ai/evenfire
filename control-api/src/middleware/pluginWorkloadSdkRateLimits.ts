@@ -1,4 +1,5 @@
 import type { RequestHandler } from 'express'
+import { config } from '../config.js'
 import type { UiAuthedRequest } from './controlUIAuth.js'
 import { rateLimitMiddleware } from './rateLimitMiddleware.js'
 
@@ -13,7 +14,8 @@ export function createPluginWorkloadSdkRequestRateLimit(): RequestHandler {
     // Keep the shared authenticated bucket above the provider-attempt burst
     // budget. Credential-ticket issuance/introspection have their own tighter
     // bucket; status and notification traffic must not starve each other.
-    maxPerMinute: 600,
+    // ENV-tunable platform limit (issue #348): CONTROL_API_PLUGIN_SDK_REQUEST_BUCKET_PER_MIN.
+    maxPerMinute: config.pluginSdkRequestBucketRlPerMin,
     getBucketKey: req => {
       const claims = req.mcpHostJwt
       if (!claims) return 'plugin_workload_sdk_request:unauthenticated'
@@ -26,7 +28,7 @@ export function createPluginWorkloadSdkRequestRateLimit(): RequestHandler {
 export function createPluginWorkloadSdkInternalRateLimit(): RequestHandler {
   return rateLimitMiddleware({
     bucketType: 'plugin_workload_sdk_internal',
-    maxPerMinute: 120,
+    maxPerMinute: 120, // not ENV: not part of the plugin abuse surface (issue #348)
     getBucketKey: req => {
       const claims = req.internalControl
       if (!claims) return 'plugin_workload_sdk_internal:unauthenticated'
@@ -44,7 +46,7 @@ export function createPluginWorkloadSdkInternalRateLimit(): RequestHandler {
 export function createPluginWorkloadSdkAdminRateLimit(): RequestHandler {
   return rateLimitMiddleware({
     bucketType: 'plugin_workload_sdk_admin',
-    maxPerMinute: 120,
+    maxPerMinute: 120, // not ENV: not part of the plugin abuse surface (issue #348)
     getBucketKey: req => {
       const sub = (req as UiAuthedRequest).adminAuth?.sub
       return `plugin_workload_sdk_admin:${sub || 'unauthenticated'}`

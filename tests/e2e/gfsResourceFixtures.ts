@@ -41,16 +41,108 @@ function seedGfsBlob(resourceId: string, content: Buffer): void {
   }
 }
 
+function normalizedGenerationBlobKey(resourceId: string, blobKey: string): string {
+  const match =
+    /^([0-9a-f]{32})\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
+      blobKey
+    )
+  if (!match) throw new Error(`refusing to clean invalid GFS generation key: ${blobKey}`)
+  const ownerRid = match[1]!.toLowerCase()
+  const expectedRid = ridOf(resourceId)
+  if (ownerRid !== expectedRid) {
+    throw new Error(`GFS generation key ${blobKey} does not belong to resource ${resourceId}`)
+  }
+  return `${ownerRid}/${match[2]!.toLowerCase()}`
+}
+
 function cleanupGfsBlob(resourceId: string, blobKey?: string | null): void {
   const physicalPath = blobKey
-    ? (() => {
-        if (!/^[0-9a-f]{32}\/[0-9a-f-]{36}$/i.test(blobKey)) {
-          throw new Error(`refusing to clean invalid GFS generation key: ${blobKey}`)
-        }
-        return `/data/gfs/.generations/${blobKey}`
-      })()
+    ? `/data/gfs/.generations/${normalizedGenerationBlobKey(resourceId, blobKey)}`
     : `/data/gfs/${ridOf(resourceId)}`
   kubectlOut(['-n', 'gfs', 'exec', gfsWriterPod(), '--', 'rm', '-f', physicalPath], 20_000)
+}
+
+function cleanupGfsGenerationDirectory(resourceId: string): void {
+  const directory = `/data/gfs/.generations/${ridOf(resourceId)}`
+  kubectlOut(
+    [
+      '-n',
+      'gfs',
+      'exec',
+      gfsWriterPod(),
+      '--',
+      'sh',
+      '-c',
+      `rmdir ${directory} 2>/dev/null || true`,
+    ],
+    20_000
+  )
+}
+
+interface GfsFixtureBlobInventoryRow {
+  resourceId: string
+  currentBlobKey: string | null
+  manifestBlobKey: string | null
+  manifestKind: 'generation' | 'legacy_flat' | null
+  manifestState: 'deleting' | null
+}
+
+function fixtureBlobInventory(name: string): GfsFixtureBlobInventoryRow[] {
+  const output = runControlPostgresSql(`
+    SELECT resource.resource_id::text,
+           coalesce(resource.blob_key, ''),
+           coalesce(manifest.blob_key, ''),
+           coalesce(manifest.candidate_kind, ''),
+           coalesce(manifest.state, '')
+      FROM gfs_resources AS resource
+      LEFT JOIN gfs_blob_manifests AS manifest
+        ON manifest.resource_id = resource.resource_id
+     WHERE resource.drive = ${sqlLiteral(GFS_E2E_DRIVE)}
+       AND resource.kind = 'file'
+       AND (
+         resource.path_cache = ${sqlLiteral(`/${name}`)}
+         OR resource.path_cache LIKE ${sqlLiteral(`/${name}/%`)}
+       )
+     ORDER BY resource.resource_id, manifest.blob_key;
+  `)
+  return output
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const parts = splitSqlRow(line)
+      if (parts.length !== 5 || !UUID_RE.test(parts[0] ?? '')) {
+        throw new Error(`invalid GFS fixture blob inventory row: ${line}`)
+      }
+      const [resourceId, rawCurrent = '', rawManifest = '', rawKind = '', rawState = ''] = parts
+      const currentBlobKey = rawCurrent ? normalizedGenerationBlobKey(resourceId, rawCurrent) : null
+      let manifestBlobKey: string | null = null
+      let manifestKind: GfsFixtureBlobInventoryRow['manifestKind'] = null
+      let manifestState: GfsFixtureBlobInventoryRow['manifestState'] = null
+      if (rawManifest || rawKind || rawState) {
+        if (
+          !rawManifest ||
+          (rawKind !== 'generation' && rawKind !== 'legacy_flat') ||
+          rawState !== 'deleting'
+        ) {
+          throw new Error(`invalid GFS fixture blob manifest row: ${line}`)
+        }
+        manifestKind = rawKind
+        manifestState = rawState
+        if (manifestKind === 'generation') {
+          manifestBlobKey = normalizedGenerationBlobKey(resourceId, rawManifest)
+        } else {
+          const expectedLegacyKey = ridOf(resourceId)
+          if (rawManifest.toLowerCase() !== expectedLegacyKey) {
+            throw new Error(
+              `GFS legacy blob key ${rawManifest} does not belong to resource ${resourceId}`
+            )
+          }
+          manifestBlobKey = expectedLegacyKey
+        }
+      }
+      return { resourceId, currentBlobKey, manifestBlobKey, manifestKind, manifestState }
+    })
 }
 
 export function seedGfsDirectoryFixture(name: string): GfsDirectoryFixture {
@@ -335,30 +427,65 @@ export function countGfsLiveChildrenByName(input: {
 
 export function cleanupGfsFixture(name: string): void {
   assertFixtureName(name)
-  const resources = runControlPostgresSql(`
-    SELECT resource_id::text || '|' || coalesce(blob_key, '')
-      FROM gfs_resources
-     WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
-       AND kind = 'file'
-       AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)});
-  `)
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(splitSqlRow)
-    .filter(
-      (parts): parts is [string, string] => parts.length === 2 && UUID_RE.test(parts[0] ?? '')
-    )
+  const inventory = fixtureBlobInventory(name)
+  const blobTargets = new Map<string, { resourceId: string; blobKey: string | null }>()
+  const deletingManifestKeys = new Set<string>()
+  const resourceIds = new Set<string>()
+  for (const row of inventory) {
+    resourceIds.add(row.resourceId)
+    // A fixture may start as a directly seeded legacy-flat blob and later
+    // publish an immutable generation. Once blob_key points at the generation,
+    // the original flat bytes are no longer visible through GFS but remain
+    // protected by the production cleanup safety window. The fixture owns both
+    // exact paths and must remove both instead of lowering that safety window.
+    blobTargets.set(`${row.resourceId}|legacy_flat`, {
+      resourceId: row.resourceId,
+      blobKey: null,
+    })
+    if (row.currentBlobKey) {
+      blobTargets.set(`${row.resourceId}|${row.currentBlobKey}`, {
+        resourceId: row.resourceId,
+        blobKey: row.currentBlobKey,
+      })
+    }
+    if (row.manifestKind === 'generation' && row.manifestBlobKey) {
+      blobTargets.set(`${row.resourceId}|${row.manifestBlobKey}`, {
+        resourceId: row.resourceId,
+        blobKey: row.manifestBlobKey,
+      })
+    }
+    if (row.manifestState === 'deleting' && row.manifestBlobKey) {
+      deletingManifestKeys.add(row.manifestBlobKey)
+    }
+  }
   const cleanupErrors: unknown[] = []
-  for (const [resourceId, blobKey] of resources) {
+  for (const { resourceId, blobKey } of blobTargets.values()) {
     try {
       cleanupGfsBlob(resourceId, blobKey || null)
     } catch (error) {
       cleanupErrors.push(error)
     }
   }
+  for (const resourceId of resourceIds) {
+    try {
+      cleanupGfsGenerationDirectory(resourceId)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(cleanupErrors, `failed to fully clean GFS fixture ${name}`)
+  }
   try {
+    const manifestKeys = [...deletingManifestKeys]
+    const manifestCleanup = manifestKeys.length
+      ? `DELETE FROM gfs_blob_manifests
+           WHERE state = 'deleting'
+             AND blob_key IN (${manifestKeys.map(sqlLiteral).join(', ')});`
+      : ''
     runControlPostgresSql(`
+      BEGIN;
+
       WITH fixture_resources AS (
         SELECT resource_id
           FROM gfs_resources
@@ -375,10 +502,14 @@ export function cleanupGfsFixture(name: string): void {
       )
       DELETE FROM gfs_shares WHERE resource_id IN (SELECT resource_id FROM fixture_resources);
 
+      ${manifestCleanup}
+
       UPDATE gfs_resources
          SET deleted_at = now(), updated_at = now()
        WHERE drive = ${sqlLiteral(GFS_E2E_DRIVE)}
          AND (path_cache = ${sqlLiteral(`/${name}`)} OR path_cache LIKE ${sqlLiteral(`/${name}/%`)});
+
+      COMMIT;
     `)
   } catch (error) {
     cleanupErrors.push(error)

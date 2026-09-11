@@ -15,11 +15,3 @@ export type HostItem = {
 }
 
 export type HostRef = { name: string; namespace: string }
-
-export type HostLifecycleInfo = {
-  kind: 'stateful' | 'stateless' | 'blocked'
-  label: string
-  state: string
-  reason: string
-  title: string
-}

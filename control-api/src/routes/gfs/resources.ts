@@ -370,7 +370,16 @@ export async function handlePatch(req: Request, res: Response): Promise<void> {
     const patched = await withTransaction(async db => {
       try {
         return await applyResourcePatch(db, caller, drive, id, body, async params => {
-          await auditMutation(db, { ...params, requestId, sourceIp })
+          await auditMutation(db, {
+            ...params,
+            ...(Object.prototype.hasOwnProperty.call(caller, 'actorOnBehalfOf')
+              ? { actorOnBehalfOf: caller.actorOnBehalfOf ?? null }
+              : {}),
+            ...(caller.desktopUserId ? { desktopUserId: caller.desktopUserId } : {}),
+            ...(caller.authoritySource ? { authoritySource: caller.authoritySource } : {}),
+            requestId,
+            sourceIp,
+          })
         })
       } catch (err) {
         if (err instanceof ResourcePatchError && err.status === 403) {

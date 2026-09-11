@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { SPEC_HASH_ANNOTATION, computeSpecHash, specHashUnchanged, stampSpecHash } from './specHash'
+import { PRE_DEPLOY_ANNOTATION } from './mcpDelegation'
+import {
+  HASH_EXCLUDED_ANNOTATIONS,
+  SPEC_HASH_ANNOTATION,
+  computeSpecHash,
+  specHashUnchanged,
+  stampSpecHash,
+} from './specHash'
 
 describe('computeSpecHash', () => {
   it('is stable across object key ordering (canonical)', () => {
@@ -49,6 +56,31 @@ describe('computeSpecHash', () => {
     const a = { metadata: { labels: { 'clerum.io/recipe': 'r1' } }, spec: { replicas: 1 } }
     const b = { metadata: { labels: { 'clerum.io/recipe': 'r2' } }, spec: { replicas: 1 } }
     expect(computeSpecHash(a)).not.toBe(computeSpecHash(b))
+  })
+
+  // Issue #413: WRC step 7b injects `pre-deploy: "true"` and step 9a omits it, for
+  // the SAME McpServer in the SAME pass. If the hash counted this annotation the two
+  // manifests would never converge and the idempotency gate would fire a replace
+  // twice every pass forever. Excluding it makes 7b and 9a hash identically.
+  it('ignores the pre-deploy handshake annotation (7b/9a convergence)', () => {
+    const nineA = {
+      metadata: { name: 'srv', namespace: 'mcp-server', labels: { 'clerum.io/recipe': 'r1' } },
+      spec: { transport: 'stdio' },
+    }
+    const sevenB = {
+      metadata: {
+        name: 'srv',
+        namespace: 'mcp-server',
+        labels: { 'clerum.io/recipe': 'r1' },
+        annotations: { [PRE_DEPLOY_ANNOTATION]: 'true' },
+      },
+      spec: { transport: 'stdio' },
+    }
+    expect(computeSpecHash(sevenB)).toBe(computeSpecHash(nineA))
+  })
+
+  it('keeps HASH_EXCLUDED_ANNOTATIONS in sync with PRE_DEPLOY_ANNOTATION', () => {
+    expect(HASH_EXCLUDED_ANNOTATIONS).toContain(PRE_DEPLOY_ANNOTATION)
   })
 })
 

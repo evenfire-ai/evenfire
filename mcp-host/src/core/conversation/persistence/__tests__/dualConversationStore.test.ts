@@ -119,11 +119,9 @@ describe('DualConversationStore — dual-write parity', () => {
       await sqlite.persistQueue.drainSessionKey('u-cold:rpc:a:chat-1')
 
       const dual = new DualConversationStore(new InMemoryConversationStore(), sqlite.store)
-      const page = await dual.getSessionMessagesByKey(
-        'u-cold:rpc:a:chat-1',
-        'u-cold:rpc:',
-        { limit: 1 }
-      )
+      const page = await dual.getSessionMessagesByKey('u-cold:rpc:a:chat-1', 'u-cold:rpc:', {
+        limit: 1,
+      })
 
       expect(page?.turns.map(turn => turn.user_input)).toEqual(['cold question'])
     } finally {
@@ -151,6 +149,16 @@ describe('DualConversationStore — dual-write parity', () => {
 
   it('records matching parity for summaries written through both stores', async () => {
     const sqlite = makeSqliteStore({ cacheSize: 4 })
+    // Memory derives lastActivityAt from `conversation.updated_at` (stamped when
+    // the turn completes) while SQLite stamps its row from `Date.now()` when the
+    // persist worker writes it — two independent clock reads. They usually land
+    // on the same millisecond, but ~2% of runs straddle a boundary and the parity
+    // probe reports a spurious mismatch (the source of this test's flake). Freeze
+    // the clock so both reads are identical; a whole-second boundary keeps the
+    // SQLite seconds↔ms round-trip exact. Only Date is faked, so the persist
+    // queue's real setImmediate/setInterval timing (and vi.waitFor) still runs.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
     try {
       const memory = new InMemoryConversationStore()
       const parity: Array<{ op: string; match: boolean }> = []
@@ -161,14 +169,24 @@ describe('DualConversationStore — dual-write parity', () => {
       const conversation = await manager.getOrCreate('u-1:rpc:a:chat-1', { userId: 'u-1' })
       await manager.startTurn(conversation, 'question', 'task-1')
       await manager.completeTurn(conversation, 'answer')
+      // Writes reach SQLite through the async persist queue; drainPrefix waits
+      // for every in-flight write under this prefix so the durable row (stamped
+      // at the frozen instant) has landed before the parity probe reads it.
+      await sqlite.persistQueue.drainPrefix('u-1:rpc:')
+      // Timestamps are now locked into both stores; the clock can advance again.
+      vi.useRealTimers()
 
       await dual.listSessionSummariesByPrefix('u-1:rpc:', { limit: 10 })
       await dual.getSessionMessagesByKey('u-1:rpc:a:chat-1', 'u-1:rpc:', { limit: 10 })
-      await new Promise(resolve => setImmediate(resolve))
-
-      expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: true })
-      expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: true })
+      // getSessionMessagesByKey records its parity fire-and-forget (a
+      // queueMicrotask awaiting a SQLite worker round-trip), so poll until both
+      // probes have recorded instead of racing a single fixed wait.
+      await vi.waitFor(() => {
+        expect(parity).toContainEqual({ op: 'listSessionSummariesByPrefix', match: true })
+        expect(parity).toContainEqual({ op: 'getSessionMessagesByKey', match: true })
+      })
     } finally {
+      vi.useRealTimers()
       await sqlite.shutdown()
     }
   })

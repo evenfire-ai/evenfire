@@ -1,11 +1,14 @@
 import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
 import path from 'node:path'
 import { AppService } from './appService.js'
+import { routeClerumOauthCompleted } from './clerumDeepLink.js'
 import { config } from './config.js'
+import { installDesktopTextContextMenus } from './desktopTextContextMenu.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
+import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
 import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
@@ -16,6 +19,7 @@ import {
   parseSandboxUiDeepLink,
 } from './sandboxUiDeepLinks.js'
 import { shouldAcceptSandboxUiProtocolLink } from './sandboxUiProtocolWindowPolicy.js'
+import { wireHostDesktopShortcutRouting } from './shortcutRouter.js'
 import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.js'
 
 const EVENFIRE_APP_NAME = 'Evenfire'
@@ -32,6 +36,15 @@ process.stderr?.on?.('error', () => {})
 let mainWindow: BrowserWindow | null = null
 const appService = new AppService()
 const sandboxUiDeepLinkQueue = new SandboxUiDeepLinkQueue()
+// U5: deliver mcp-oauth completions to the renderer, or queue them when the
+// renderer is not yet ready (cold start), draining after `app:rendererReady`.
+const mcpOauthCompletionQueue = new McpOauthCompletionQueue(completion => {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindowRendererReady) {
+    mainWindow.webContents.send('rpc:mcpOauthCompleted', completion)
+    return true
+  }
+  return false
+})
 let mainWindowLifecycleReady = false
 let mainWindowRendererReady = false
 let appWindowVisibilityWired = false
@@ -80,6 +93,17 @@ function windowState(win: BrowserWindow | null): { visible: boolean; focused: bo
   return { visible: isWindowVisible(win), focused: isAppFocused() }
 }
 
+type WindowControlsState = { maximized: boolean; fullscreen: boolean }
+
+function windowControlsState(win: BrowserWindow | null): WindowControlsState {
+  return { maximized: Boolean(win?.isMaximized()), fullscreen: Boolean(win?.isFullScreen()) }
+}
+
+function emitWindowControlsState(win: BrowserWindow): void {
+  if (win.isDestroyed()) return
+  win.webContents.send('window:controlsState', windowControlsState(win))
+}
+
 /**
  * GAP-D1 (spec-v2 §4.5-4): after the OS sleeps/resumes (or the screen locks and
  * unlocks), open SSE sockets are typically dead but neither the tracker watchdog
@@ -111,6 +135,15 @@ function wireWindowVisibility(win: BrowserWindow): void {
   win.on('restore', emit)
 }
 
+function wireWindowControls(win: BrowserWindow): void {
+  const emit = () => emitWindowControlsState(win)
+  win.on('maximize', emit)
+  win.on('unmaximize', emit)
+  win.on('enter-full-screen', emit)
+  win.on('leave-full-screen', emit)
+  win.on('restore', emit)
+}
+
 /**
  * App-level focus events are process-scoped. Register them once so closing and
  * recreating the main window cannot accumulate listeners that retain a
@@ -134,11 +167,45 @@ ipcMain.handle('window:getVisibility', event => {
   return windowState(mainWindow)
 })
 
+ipcMain.handle('window:getControlsState', event => {
+  assertTrustedSender(event)
+  return windowControlsState(mainWindow)
+})
+
+ipcMain.handle('window:minimize', event => {
+  assertTrustedSender(event)
+  mainWindow?.minimize()
+})
+
+ipcMain.handle('window:toggleMaximize', event => {
+  assertTrustedSender(event)
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isFullScreen()) {
+    mainWindow.setFullScreen(false)
+  } else if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize()
+  } else {
+    mainWindow.maximize()
+  }
+  emitWindowControlsState(mainWindow)
+})
+
+ipcMain.handle('window:close', event => {
+  assertTrustedSender(event)
+  mainWindow?.close()
+})
+
 ipcMain.handle('app:rendererReady', event => {
   assertTrustedSender(event)
   if (!mainWindow || event.sender !== mainWindow.webContents) return
   mainWindowRendererReady = true
+  emitWindowControlsState(mainWindow)
   evenfireDeepLinkRouter.drainPending()
+  // U5: flush mcp-oauth completions that arrived before the renderer installed
+  // its listener (cold start). The onMcpOauthCompleted listener is registered by
+  // useAppController's effect, which runs before App's rendererReady effect, so
+  // it is guaranteed installed by the time this handshake fires.
+  mcpOauthCompletionQueue.drain()
 })
 
 ipcMain.handle('sandboxUi:listPendingDeepLinks', event => {
@@ -228,22 +295,33 @@ function registerCustomProtocols(): void {
  * the OS-protocol-handler level.
  */
 function handleClerumUrl(rawUrl: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(rawUrl)
-  } catch {
+  // U5 (mcp-oauth reactive consent): the routing decision — which producer this
+  // deep link came from — lives in the pure, unit-tested `routeClerumOauthCompleted`.
+  // The sandbox-ui path (source absent / !== 'mcp') is byte-identical to before.
+  const route = routeClerumOauthCompleted(rawUrl, CLERUM_PROTOCOL)
+  if (route.kind === 'ignore') return
+
+  if (route.kind === 'mcp') {
+    // An mcp-server OAuth completion resumes the suspended conversation: forward
+    // `mcpServerName` (the correlation key, self-describing on the deep-link) to
+    // the renderer, which matches it against its suspended entries and re-fires
+    // the approval/resume RPC. It does NOT dispatch to the sandbox-ui embed.
+    // Queued when the renderer is not yet ready (cold start) so it is never
+    // swallowed before `onMcpOauthCompleted` is installed.
+    mcpOauthCompletionQueue.submit({
+      mcpServerName: route.mcpServerName,
+      provider: route.provider,
+    })
+    focusMainWindow()
     return
   }
-  if (parsed.protocol !== `${CLERUM_PROTOCOL}:`) return
-  if (parsed.hostname.toLowerCase() !== 'oauth-completed') return
-
-  const oauthClientId = parsed.searchParams.get('clientId') || ''
-  const provider = parsed.searchParams.get('provider') || ''
-  if (!oauthClientId) return
 
   void (async () => {
     const driver = await import('./sandboxUiDriver.js')
-    driver.dispatchSandboxUiOauthCompleted({ oauthClientId, provider })
+    driver.dispatchSandboxUiOauthCompleted({
+      oauthClientId: route.oauthClientId,
+      provider: route.provider,
+    })
   })()
 
   focusMainWindow()
@@ -288,6 +366,7 @@ async function createWindow(): Promise<void> {
     width: 1240,
     height: 860,
     show: false,
+    frame: false,
     title:
       config.appName === EVENFIRE_APP_NAME
         ? EVENFIRE_APP_NAME
@@ -301,6 +380,7 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
+  wireHostDesktopShortcutRouting(window)
   mainWindowRendererReady = false
   window.on('closed', () => {
     if (mainWindow === window) {
@@ -317,6 +397,7 @@ async function createWindow(): Promise<void> {
   })
 
   wireWindowVisibility(window)
+  wireWindowControls(window)
   wireAppWindowVisibility()
 
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
@@ -358,6 +439,7 @@ if (gotSingleInstanceLock) {
   app
     .whenReady()
     .then(async () => {
+      installDesktopTextContextMenus()
       wireAdaptiveSystemIcon()
       // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
       // runtime eagerly on first call, and a plugin can be mounted the moment

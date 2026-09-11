@@ -1,6 +1,6 @@
 import type { GfsVerifiedClaims } from "../auth/verify";
 import type { AuditSink } from "../authz/audit";
-import type { AuthzContext } from "../authz/permissionClient";
+import { auditAttribution, type AuthzContext } from "../authz/permissionClient";
 import type { GfsWriteService } from "../db/writeStore";
 import { GfsError } from "./errors";
 import { toView } from "./read";
@@ -46,6 +46,7 @@ export async function executeRenameRoute(input: RenameRouteInput): Promise<Retur
   }
   const updated = await input.writes.rename({
     requestId: input.requestId, subject: input.context.primarySubject, audit: input.audit,
+    ...auditAttribution(input.context),
     drive, resourceId: input.resourceId, newName, ifMatch: Number(ifMatch),
     maxObjects: input.limits.maxObjects, deadlineAtMs: Date.now() + input.limits.timeoutMs,
   });

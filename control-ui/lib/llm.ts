@@ -1,11 +1,13 @@
 import {
   type LlmProviderId,
+  PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
   PROVIDER_DISPLAY_LABELS,
   PROVIDER_IDS,
   PROVIDER_NON_SECRET_ENV,
   isLlmProviderId,
 } from '@clerum/llm-providers'
+import { CODEX_UNASSIGNED_CONNECTION_KEY } from './codexSubscription'
 
 // The canonical provider set, labels and credential slots live in the shared
 // @clerum/llm-providers package (spec §3-R4) — this module derives its
@@ -18,6 +20,9 @@ export type PromptBridgeTargetPolicyInput = {
   provider: string
   model: string
   credentialSlot: string
+  // Codex subscription connection key for oauth-broker targets. Optional and
+  // pass-through: the ordered policy serializer never invents or drops it.
+  connectionRef?: string
 }
 
 /**
@@ -44,6 +49,41 @@ export const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> 
   id => ({ value: id, label: PROVIDER_DISPLAY_LABELS[id] })
 )
 
+/** Runtime broker id. Never offer this as a second Provider row in operator pickers. */
+export const OPENAI_SUBSCRIPTION_PROVIDER = 'codex-subscription' as const
+
+export function isOpenAiFamily(provider: string | undefined | null): boolean {
+  return provider === 'openai' || provider === OPENAI_SUBSCRIPTION_PROVIDER
+}
+
+/** Provider dropdown: one OpenAI entry. Runtime still persists `codex-subscription`. */
+export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> =
+  LLM_PROVIDER_OPTIONS.filter(option => option.value !== OPENAI_SUBSCRIPTION_PROVIDER)
+
+export function catalogGroupKey(provider: string): string {
+  return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
+}
+
+export type OpenAiCredentialSource = 'api-key' | 'subscription'
+
+export function openAiCredentialSources(
+  catalog: LlmModelCatalogEntry[],
+  model: string
+): { apiKey: boolean; subscription: boolean } {
+  return {
+    apiKey: catalog.some(
+      row => row.provider === 'openai' && row.model === model && row.enabled && !row.stale
+    ),
+    subscription: catalog.some(
+      row =>
+        row.provider === OPENAI_SUBSCRIPTION_PROVIDER &&
+        row.model === model &&
+        row.enabled &&
+        !row.stale
+    ),
+  }
+}
+
 // The list of usable models per provider is no longer a static catalog: it is
 // the operator-declared allowlist served by control-api (`/admin/llm-models`,
 // spec §3-R3). Fetch it with `useLlmAllowedModels()` and pass the rows to the
@@ -55,6 +95,10 @@ export type LlmModelCatalogEntry = {
   provider: string
   model: string
   enabled: boolean
+  // Discovery rows that vanished stay visible on already-saved Hosts but must
+  // not appear as a new pick. The API always normalizes this; optional here so
+  // unit fixtures can omit it (treated as not stale).
+  stale?: boolean
 }
 
 // Wizard pre-select / fallback default per provider. This stays static on
@@ -63,7 +107,7 @@ export type LlmModelCatalogEntry = {
 // absorb it into the shared providers package. When this default is not
 // enabled in the allowlist, `resolveDefaultModel()` falls back to the first
 // enabled model of the provider.
-export const LLM_DEFAULT_MODEL_BY_PROVIDER: Record<LlmProvider, string> = {
+export const LLM_DEFAULT_MODEL_BY_PROVIDER: Partial<Record<LlmProvider, string>> = {
   openai: 'gpt-5.4-mini',
   claude: 'claude-sonnet-4-6',
   zai: 'glm-5.1',
@@ -85,6 +129,7 @@ export const LLM_DEFAULT_MODEL_BY_PROVIDER: Record<LlmProvider, string> = {
   moonshot: 'kimi-k2.6',
   nebius: 'Qwen/Qwen3-235B-A22B-Instruct-2507',
   novita: 'deepseek/deepseek-v3.2',
+  minimax: 'MiniMax-M2',
   // Azure: the "model" is a per-deployment name the operator chooses; this is
   // only a placeholder pre-select (operator overrides in the allowlist).
   azure: 'gpt-4.1',
@@ -102,6 +147,7 @@ const SECRET_FIELD_HINTS: Record<string, { label: string; placeholder: string }>
   'claude-api-key': { label: 'Claude API key', placeholder: 'sk-ant-...' },
   'zai-api-key': { label: 'Z.AI API key', placeholder: 'zai-...' },
   'bailian-api-key': { label: 'Bailian API key', placeholder: 'bailian-...' },
+  'minimax-api-key': { label: 'MiniMax API key', placeholder: 'eyJ...' },
   'vertex-service-account-json': {
     label: 'Google Vertex AI service account JSON',
     placeholder: '{ "type": "service_account", ... }',
@@ -171,13 +217,17 @@ export const BEDROCK_CREDENTIAL_KEYS: string[] = PROVIDER_CREDENTIAL_SLOTS.bedro
   slot => slot.dataKey
 )
 
-// Group completeness for the "provider usable" chip (spec R4.5.5): a provider is
-// usable once every `required` slot has a value. `present` counts required slots
-// filled; `usable` is true when all required slots are present.
+// Completeness follows `authMode`, not "are there required slots?". A
+// zero-slot oauth-broker provider is usable without a Kubernetes Secret.
+// Static-credentials providers stay usable only when every required slot is
+// present. `present`/`total` count required slots (always 0 for brokers).
 export function getLlmGroupCompleteness(
   group: LlmCredentialGroup,
   isPresent: (dataKey: string) => boolean
 ): { present: number; total: number; usable: boolean } {
+  if (PROVIDER_AUTH_MODE[group.provider] === 'oauth-broker') {
+    return { present: 0, total: 0, usable: true }
+  }
   const required = group.slots.filter(slot => slot.required)
   const present = required.filter(slot => isPresent(slot.dataKey)).length
   return {
@@ -185,6 +235,73 @@ export function getLlmGroupCompleteness(
     total: required.length,
     usable: required.length > 0 && present === required.length,
   }
+}
+
+// True when this provider still needs a Host/recipe LLM Secret. Broker-backed
+// providers (Codex) authenticate via Control API tickets, never via slots.
+export function providerRequiresLlmSecret(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'static-credentials'
+}
+
+// Secrets editor: only providers that store Kubernetes Secret slots. OAuth
+// brokers (Codex) connect on their own page and must not appear in the picker.
+export const LLM_SECRET_EDITOR_GROUPS: LlmCredentialGroup[] = LLM_CREDENTIAL_GROUPS.filter(group =>
+  providerRequiresLlmSecret(group.provider)
+)
+
+// A Host/recipe LLM chain needs a Secret iff any target (primary or fallback)
+// uses static credentials. Codex-only chains save without `secretRef`.
+export function llmChainRequiresSecret(
+  primary: string,
+  fallbacks?: Array<{ provider: string }>
+): boolean {
+  if (providerRequiresLlmSecret(primary)) return true
+  return (fallbacks ?? []).some(entry => providerRequiresLlmSecret(entry.provider))
+}
+
+// Codex (and any future oauth-broker) cannot be priced in currency — Token
+// Budget `unit=cost` is rejected when the scoped providers include a broker.
+export function providerAllowsCostBudget(provider: string): boolean {
+  return !isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker'
+}
+
+export function budgetUnitAllowedForProviders(
+  unit: 'cost' | 'tokens',
+  providers: readonly string[]
+): boolean {
+  if (unit !== 'cost') return true
+  return providers.every(providerAllowsCostBudget)
+}
+
+// Recipe authoring guard: a broker-backed agent must name an explicit model
+// and must not carry an LLM secretRef or a cost-unit budget. The grant lives
+// on metadata.annotations[clerum.io/codex-connection-ref], not in spec.
+export function brokerBackedRecipeAuthoringError(
+  spec: Record<string, unknown>,
+  connectionRef?: string
+): string | null {
+  const agent = spec.agent
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return null
+  const record = agent as Record<string, unknown>
+  const provider = typeof record.provider === 'string' ? record.provider : ''
+  if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
+    return null
+  }
+  const model = typeof record.model === 'string' ? record.model.trim() : ''
+  if (!model) return 'Codex subscription requires an explicit catalog model.'
+  if (record.secretRef != null) {
+    return 'Codex subscription recipes must not declare an LLM secretRef.'
+  }
+  const budget = spec.budget
+  if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
+    const unit = (budget as Record<string, unknown>).unit
+    if (unit === 'cost') return 'Codex subscription budgets must use unit tokens, not cost.'
+  }
+  const grant = typeof connectionRef === 'string' ? connectionRef.trim() : ''
+  if (!grant || grant === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return 'Codex subscription recipes must choose an existing ChatGPT grant.'
+  }
+  return null
 }
 
 // UI descriptor for a group's usable/partial/absent chip (spec R4.5.5). Single
@@ -353,6 +470,8 @@ export function normalizeProvider(value: string | undefined | null): LlmProvider
 
 export function getProviderLabel(provider: string | undefined | null): string {
   const normalized = normalizeProvider(provider)
+  // Operator presentation: one OpenAI family. Runtime id stays codex-subscription.
+  if (normalized === OPENAI_SUBSCRIPTION_PROVIDER) return 'OpenAI'
   const match = LLM_PROVIDER_OPTIONS.find(option => option.value === normalized)
   return match?.label || 'OpenAI'
 }
@@ -367,6 +486,7 @@ export function isKnownProvider(provider: string | undefined | null): boolean {
 // unrecognized provider — important where free-form providers surface, e.g.
 // the LLM-prices table and the unpriced-model chips.
 export function getProviderDisplayLabel(provider: string): string {
+  if (provider === OPENAI_SUBSCRIPTION_PROVIDER) return 'OpenAI'
   return isKnownProvider(provider) ? getProviderLabel(provider) : provider
 }
 
@@ -386,10 +506,15 @@ export function formatContextWindow(value: number | null | undefined): string {
 export function getModelOptions(
   catalog: LlmModelCatalogEntry[],
   provider: string,
-  options: { includeDisabled?: boolean } = {}
+  options: { includeDisabled?: boolean; includeStale?: boolean } = {}
 ): string[] {
   return catalog
-    .filter(entry => entry.provider === provider && (options.includeDisabled || entry.enabled))
+    .filter(
+      entry =>
+        entry.provider === provider &&
+        (options.includeDisabled || entry.enabled) &&
+        (options.includeStale || !entry.stale)
+    )
     .map(entry => entry.model)
 }
 
@@ -397,12 +522,13 @@ export function getModelOptions(
 // suggestions). De-duplicated, insertion order preserved.
 export function getAllModelOptions(
   catalog: LlmModelCatalogEntry[],
-  options: { includeDisabled?: boolean } = {}
+  options: { includeDisabled?: boolean; includeStale?: boolean } = {}
 ): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const entry of catalog) {
     if (!options.includeDisabled && !entry.enabled) continue
+    if (!options.includeStale && entry.stale) continue
     if (seen.has(entry.model)) continue
     seen.add(entry.model)
     out.push(entry.model)
@@ -415,9 +541,42 @@ export function getAllModelOptions(
 // the provider has no enabled models (caller shows an empty/error picker; no
 // hardcoded fallback per spec R4.5.1).
 export function resolveDefaultModel(provider: LlmProvider, enabledModels: string[]): string {
+  // Broker-backed providers have no static default and must never silently
+  // pick the first enabled catalog row — the operator names the model.
+  if (PROVIDER_AUTH_MODE[provider] === 'oauth-broker') return ''
   const explicit = LLM_DEFAULT_MODEL_BY_PROVIDER[provider]
   if (explicit && enabledModels.includes(explicit)) return explicit
   return enabledModels[0] ?? ''
+}
+
+export const HOST_MODEL_NAME_REQUIRED =
+  'Select a model before saving. The agent needs a non-empty model name.'
+
+export function hostModelNameError(name: string): string | null {
+  return name.trim() ? null : HOST_MODEL_NAME_REQUIRED
+}
+
+/**
+ * ChatGPT grants still need a concrete spec.model.name. Same policy as
+ * control-api pickCodexGrantModel: current if offered, else grant default if
+ * offered, else first offered. An empty catalog invents nothing.
+ */
+export function resolveCodexGrantModel(
+  current: string,
+  grantModels: string[],
+  grantDefault?: string | null
+): string {
+  const trimmed = current.trim()
+  if (trimmed && grantModels.includes(trimmed)) return trimmed
+  const fallback = grantDefault?.trim() ?? ''
+  if (fallback && grantModels.includes(fallback)) return fallback
+  return grantModels[0] ?? ''
+}
+
+export function offeredCodexModelNames(
+  rows: Array<{ model: string; enabled: boolean; stale: boolean }>
+): string[] {
+  return rows.filter(row => row.enabled && !row.stale).map(row => row.model)
 }
 
 // ── Per-host model allowlist subset (spec Topic 3a) ───────────────────────

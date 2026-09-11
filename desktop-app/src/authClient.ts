@@ -276,6 +276,18 @@ export class AuthClient {
     return requestJson<{ status: string }>('GET', url('/health'))
   }
 
+  /**
+   * Health check against an EXPLICIT external-rest-api base URL rather than the
+   * active `config` one. Used to probe a candidate backend (e.g. localhost)
+   * without mutating the active runtime config. Pass a short-lived `signal`
+   * (e.g. `AbortSignal.timeout(...)`) to keep the probe snappy — the app-wide
+   * timeout still applies as an upper bound via `withTimeout`.
+   */
+  async healthAt(baseUrl: string, signal?: AbortSignal): Promise<{ status: string }> {
+    const normalized = baseUrl.replace(/\/+$/, '')
+    return requestJson<{ status: string }>('GET', `${normalized}/health`, { signal })
+  }
+
   async getDesktopEnvironment(): Promise<DesktopEnvironmentDiscovery> {
     return requestJson<DesktopEnvironmentDiscovery>('GET', url('/api/v1/desktop/environment'))
   }

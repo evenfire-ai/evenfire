@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ChannelReader, type ChannelReaderOptions } from '../src/main'
+import { ChannelReader, type ChannelReaderOptions, UNRESOLVED_NOTICE_GLOBAL_CAP } from '../src/main'
 import { RPCClient } from '../src/rpcClient'
 import type { ChannelAdapter, Message } from '../src/types'
 
@@ -94,8 +94,9 @@ describe('authorizeProviderMessage response shape', () => {
 interface BuildReaderOptions {
   /** Omit the key entirely for the default; pass `undefined` for "no reason at all". */
   reason?: 'unresolved' | 'error'
-  medium?: 'slack' | 'telegram'
+  medium?: 'slack' | 'telegram' | 'teams' | 'email'
   ephemeralThrows?: boolean
+  sendMessageThrows?: boolean
   profileUiUrl?: string
 }
 
@@ -108,6 +109,7 @@ interface BuildReaderOptions {
 function buildReader(options: BuildReaderOptions = {}) {
   const medium = options.medium ?? 'slack'
   const ephemeralThrows = options.ephemeralThrows ?? false
+  const sendMessageThrows = options.sendMessageThrows ?? false
   // `{ reason: undefined }` has to survive as "no reason", so the default is
   // applied only when the caller omits the key. A `?? 'unresolved'` default
   // would silently turn the absent-reason case into the unresolved case.
@@ -120,13 +122,16 @@ function buildReader(options: BuildReaderOptions = {}) {
   const sendEphemeral = vi.fn(async (_channelId: string, _userId: string, _content: string) => {
     if (ephemeralThrows) throw new Error('user_not_in_channel')
   })
+  const sendMessage = vi.fn(async () => {
+    if (sendMessageThrows) throw new Error('telegram_send_failed')
+  })
 
   const adapter: ChannelAdapter = {
     channelType: medium,
     connect: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
     fetchMessages: vi.fn(async () => []),
-    sendMessage: vi.fn(async () => undefined),
+    sendMessage,
     editMessage: vi.fn(async () => undefined),
     sendEphemeral,
   }
@@ -194,8 +199,8 @@ function buildReader(options: BuildReaderOptions = {}) {
   // contain a throwing adapter itself, so an escaped throw must surface here as a
   // rejected promise rather than being absorbed by the harness.
   const deliver = async (
-    channelId: string,
-    userId: string,
+    channelId = 'C1',
+    userId = 'U1',
     workspaceId = 'T1',
     providerChannelId = channelId
   ): Promise<void> =>
@@ -213,6 +218,7 @@ function buildReader(options: BuildReaderOptions = {}) {
     deliverBatch,
     runSweep,
     sendEphemeral,
+    sendMessage,
     adapter,
     authorizeProviderMessage,
   }
@@ -336,10 +342,208 @@ describe('unresolved sender notice', () => {
     expect(sendEphemeral).not.toHaveBeenCalled()
   })
 
-  it('never sends for a non-Slack medium', async () => {
-    const { deliver, sendEphemeral } = buildReader({ medium: 'telegram' })
+  it('never sends for email, the one medium the guard excludes', async () => {
+    // Slack, Teams, and Telegram all send now (Telegram via sendMessage, asserted
+    // below), so this can no longer be phrased as "non-Slack" -- email is the
+    // only medium sendUnresolvedSenderNotice's top guard still drops.
+    const { deliver, sendEphemeral, sendMessage } = buildReader({ medium: 'email' })
     await deliver('C1', 'U1')
     expect(sendEphemeral).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+  })
+})
+
+describe('unresolved sender notice on Teams', () => {
+  it('threads the notice under the conversation ROOT, not the activity that triggered it', async () => {
+    const { buildMessage, deliverBatch, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.test',
+    })
+
+    // Root and leaf deliberately differ. A Teams channel message carries the
+    // root activity id as threadId (providerReplyToMessageId) and the activity
+    // that just arrived as messageId; a truthiness assertion passes for either,
+    // which is why the previous version of this test could not fail.
+    await deliverBatch([
+      { ...buildMessage('C1', 'U1'), messageId: 'leaf-activity', threadId: 'root-activity' },
+    ])
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    const [channelId, content, replyToMessageId] = sendMessage.mock.calls[0]
+    expect(channelId).toBe('C1')
+    expect(content).toContain('https://profile.test')
+    // Threading is the whole mitigation for Teams having no ephemeral concept:
+    // a reply against the leaf does not attach to the conversation, and a
+    // top-level post announces the notice to the entire channel.
+    expect(replyToMessageId).toBe('root-activity')
+  })
+
+  it('falls back to the message id in a direct chat, which has no separate root', async () => {
+    const { buildMessage, deliverBatch, sendMessage } = buildReader({ medium: 'teams' })
+
+    await deliverBatch([{ ...buildMessage('C1', 'U1'), messageId: 'leaf-activity' }])
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mock.calls[0][2]).toBe('leaf-activity')
+  })
+
+  it('sends the Teams notice at most once per user per conversation', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'teams' })
+
+    await deliver()
+    await deliver()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('delivers the Teams notice via sendMessage, never sendEphemeral', async () => {
+    const { deliver, sendEphemeral, sendMessage } = buildReader({ medium: 'teams' })
+
+    await deliver()
+
+    // Pinned in both directions: if TeamsAdapter ever grows a sendEphemeral shim
+    // and this code gets routed onto it, the notice becomes invisible to everyone
+    // and the feature silently dies. sendMessage having been called is what makes
+    // this assertion able to fail; sendEphemeral alone cannot, since it is also
+    // uncalled when Teams is dropped at the provider guard entirely.
+    expect(sendEphemeral).not.toHaveBeenCalled()
+    expect(sendMessage).toHaveBeenCalled()
+  })
+})
+
+describe('unresolved sender notice on Telegram', () => {
+  it('sends a terse Telegram notice with no product or profile details', async () => {
+    const { deliver, sendMessage } = buildReader({
+      medium: 'telegram',
+      profileUiUrl: 'https://profile.test',
+    })
+
+    await deliver()
+
+    const content = sendMessage.mock.calls[0][1] as string
+    expect(content).not.toMatch(/evenfire/i)
+    expect(content).not.toMatch(/profile/i)
+    expect(content).not.toMatch(/https?:\/\//)
+  })
+
+  it('delivers the Telegram notice with no reply id, unlike Teams', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram' })
+
+    await deliver()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    // Teams threads under the triggering message via a third argument; Telegram
+    // must not. Group and supergroup chats do have a channel-wide audience (see
+    // telegramOperationalMessage.ts), so this is not a threading-is-pointless
+    // argument; the copy itself is deliberately terse so a top-level post leaks
+    // nothing meaningful, and threading here is a possible follow-up.
+    expect(sendMessage.mock.calls[0]).toEqual(['C1', expect.any(String)])
+  })
+
+  // Real Telegram messages always carry providerWorkspaceId: null (Telegram has no
+  // workspace/tenant concept), unlike Slack and Teams, which require one. A guard
+  // that keeps requiring a workspace id for every provider would silently drop
+  // this notice for every real Telegram sender while still passing a test harness
+  // that defaults workspaceId to a non-empty string.
+  it('sends the Telegram notice even though Telegram messages carry no workspace id', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram' })
+
+    await deliver('C1', 'U1', '')
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('records the key even when sendMessage throws, so one failure is not retried forever', async () => {
+    const { deliver, sendMessage } = buildReader({ medium: 'telegram', sendMessageThrows: true })
+    // Nothing catches for us: an uncontained throw rejects this and fails the test.
+    await expect(deliver('C1', 'U1')).resolves.toBeUndefined()
+    await deliver('C1', 'U1')
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  // The notice is best-effort; the batch is not. TelegramAdapter.sendMessage
+  // rethrows on failure (unlike SlackAdapter, which swallows its own errors), and
+  // this runs inside the per-message loop in handleMessages.
+  it('keeps processing the rest of the batch when sendMessage throws', async () => {
+    const { buildMessage, deliverBatch, sendMessage, authorizeProviderMessage } = buildReader({
+      medium: 'telegram',
+      sendMessageThrows: true,
+    })
+    await expect(
+      deliverBatch([buildMessage('C1', 'U1'), buildMessage('C2', 'U2')])
+    ).resolves.toBeUndefined()
+    // Both messages reached authorization, and both got their own notice attempt:
+    // a throw escaping the first would have aborted the loop at one apiece.
+    expect(authorizeProviderMessage).toHaveBeenCalledTimes(2)
+    expect(sendMessage).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('unresolved notice global cap', () => {
+  it('stops sending notices once the global cap is reached', async () => {
+    const { deliverBatch, sendMessage, buildMessage } = buildReader({ medium: 'teams' })
+
+    // Distinct users so the per-conversation dedup never fires and only the
+    // global cap can be what stops the sends.
+    const messages = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(messages)
+
+    expect(sendMessage).toHaveBeenCalledTimes(UNRESOLVED_NOTICE_GLOBAL_CAP)
+  })
+
+  it('warns exactly once for the transition into the capped state, not once per blocked send', async () => {
+    // A prior ruling had this NOT deduplicate, on the theory that a repeated
+    // line is the signal. That was wrong: at the cap, one warning per inbound
+    // message from every unresolved sender across every provider is loudest in
+    // exactly the misconfiguration the cap exists to contain.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { deliverBatch, buildMessage } = buildReader({ medium: 'teams' })
+
+    const messages = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(messages)
+
+    const capWarnings = warnSpy.mock.calls.filter(call =>
+      String(call[0]).includes('Unresolved-sender notice cap')
+    )
+    expect(capWarnings).toHaveLength(1)
+    expect(String(capWarnings[0][0])).toContain(String(UNRESOLVED_NOTICE_GLOBAL_CAP))
+
+    warnSpy.mockRestore()
+  })
+
+  it('warns again on a later trip into the cap, once the TTL sweep drains records below it', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { deliverBatch, buildMessage, runSweep } = buildReader({ medium: 'teams' })
+
+    const firstBatch = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `U${i}`, 'T1')
+    )
+    await deliverBatch(firstBatch)
+
+    // Past UNRESOLVED_NOTICE_TTL_MS (24h): the sweep evicts every record from the
+    // first batch, dropping the map back under the cap.
+    await vi.advanceTimersByTimeAsync(25 * 60 * 60 * 1000)
+    runSweep()
+
+    const secondBatch = Array.from({ length: UNRESOLVED_NOTICE_GLOBAL_CAP + 5 }, (_, i) =>
+      buildMessage('C1', `V${i}`, 'T1')
+    )
+    await deliverBatch(secondBatch)
+
+    const capWarnings = warnSpy.mock.calls.filter(call =>
+      String(call[0]).includes('Unresolved-sender notice cap')
+    )
+    // One for the first trip into the cap, one for the second: still not one
+    // per blocked send within either batch.
+    expect(capWarnings).toHaveLength(2)
+
+    warnSpy.mockRestore()
+    vi.useRealTimers()
   })
 })
 
@@ -350,14 +554,69 @@ describe('unresolved notice link', () => {
     expect(sendEphemeral.mock.calls[0][2]).toContain('https://profile.example.com')
   })
 
+  it('links straight to the Teams tab, not the Profile UI root', async () => {
+    // The root drops the user on Profile with no indication of where to go, and
+    // the path they need is four levels in (Settings > Social channels > Teams >
+    // Connect). Deep-link to the tab that owns the Connect button.
+    const { deliver, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.example.com',
+    })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toContain(
+      'https://profile.example.com/settings/social/teams'
+    )
+  })
+
+  it('links straight to the Slack tab too', async () => {
+    const { deliver, sendEphemeral } = buildReader({
+      medium: 'slack',
+      profileUiUrl: 'https://profile.example.com',
+    })
+    await deliver('C1', 'U1')
+    expect(sendEphemeral.mock.calls[0][2]).toContain(
+      'https://profile.example.com/settings/social/slack'
+    )
+  })
+
+  it('does not double the slash when the configured URL has a trailing one', async () => {
+    const { deliver, sendMessage } = buildReader({
+      medium: 'teams',
+      profileUiUrl: 'https://profile.example.com/',
+    })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toContain(
+      'https://profile.example.com/settings/social/teams'
+    )
+    expect(sendMessage.mock.calls[0][1]).not.toContain('.com//settings')
+  })
+
+  it('pins the Teams copy exactly, the way the Slack copy is pinned', async () => {
+    // Without an exact assertion the Teams copy could be replaced wholesale and
+    // stay green: the only other Teams assertion checks the URL, which comes
+    // from profileSocialChannelUrl rather than from this string.
+    const { deliver, sendMessage } = buildReader({ medium: 'teams', profileUiUrl: undefined })
+    await deliver()
+    expect(sendMessage.mock.calls[0][1]).toBe(
+      "I can't accept messages from this Teams account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Teams and choose Connect Microsoft Teams. ' +
+        'If you think you should already have access, contact your admin.'
+    )
+    expect(sendMessage.mock.calls[0][1]).not.toContain('undefined')
+    expect(sendMessage.mock.calls[0][1]).not.toContain('/settings/social')
+  })
+
   it('sends the copy unchanged when no profile URL is configured', async () => {
     const { deliver, sendEphemeral } = buildReader({ profileUiUrl: undefined })
     await deliver('C1', 'U1')
     const text = sendEphemeral.mock.calls[0][2]
     expect(text).toBe(
-      "I can't accept messages from this Slack account. If you haven't linked it yet, " +
-        'do that in your evenfire profile. If you think you should already have access, contact your admin.'
+      "I can't accept messages from this Slack account. If you haven't linked it yet on the " +
+        'profile UI, open Settings > Social channels > Slack and choose Connect Slack. ' +
+        'If you think you should already have access, contact your admin.'
     )
     expect(text).not.toContain('undefined')
+    // No profile URL configured means no dangling path fragment either.
+    expect(text).not.toContain('/settings/social')
   })
 })

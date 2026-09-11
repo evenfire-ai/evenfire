@@ -1393,6 +1393,40 @@ describe('POST /admin/registry/install', () => {
       })
       .expect(404)
   })
+
+  it('installing an McpServer preserves spec.displayName on the target context (R4-B4)', async () => {
+    vi.mocked(getEntryVersion).mockResolvedValueOnce(MOCK_ENTRY)
+    vi.mocked(getCredentialSchema).mockResolvedValueOnce(MOCK_SCHEMA_NONE)
+    vi.mocked(reportInstall).mockResolvedValueOnce({ acknowledged: true, stored: true })
+
+    const gw = new MockGateway('mcp-server')
+    // Seed a context that ALREADY carries displayName plus an existing allowlist
+    // entry — displayName is the additive field the allowlist update must not
+    // drop when it rebuilds the context spec.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: { contextId: 'ctx-keep', mcpServers: ['srv-other'], displayName: 'Keep Me' },
+    })
+    const app = makeApp(gw)
+
+    await request(app)
+      .post('/admin/registry/install')
+      .send({
+        serverName: 'my-airtable',
+        contextRef: 'ctx-keep',
+        registryEntryName: 'airtable-mcp',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(201)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and the new server joined the allowlist alongside the pre-existing one.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other', 'my-airtable'])
+  })
 })
 
 describe('POST /admin/registry/install — image allowlist enforce (2.3)', () => {
@@ -2810,6 +2844,38 @@ describe('DELETE /admin/registry/uninstall/:serverName', () => {
     const { app } = makeApp()
 
     await request(app).delete('/admin/registry/uninstall/INVALID').expect(400)
+  })
+
+  it('uninstalling an McpServer preserves spec.displayName on referencing contexts (R4-B5)', async () => {
+    const gw = new MockGateway('mcp-server')
+    await gw.createResource('mcpservers', {
+      metadata: { name: 'srv-target' },
+      spec: { image: 'test:1.0' },
+    })
+    // Context references the server being uninstalled AND carries displayName —
+    // the additive field the allowlist-pruning rebuild must not drop.
+    await gw.createResource('contexts', {
+      metadata: { name: 'ctx-keep' },
+      spec: {
+        contextId: 'ctx-keep',
+        mcpServers: ['srv-target', 'srv-other'],
+        displayName: 'Keep Me',
+      },
+    })
+    // Suppress makeApp's default installed-srv/ctx1 seed so the store holds only
+    // the fixtures this assertion cares about.
+    ;(gw as unknown as { _seeded?: boolean })._seeded = true
+    const { app } = makeApp(gw)
+
+    await request(app).delete('/admin/registry/uninstall/srv-target').expect(200)
+
+    // Observable result (T4): re-read the persisted context. displayName survived
+    // and only the uninstalled server left the allowlist.
+    const ctx = (await gw.getResource('contexts', 'ctx-keep', 'mcp-server')) as {
+      spec: { displayName?: string; mcpServers?: string[] }
+    }
+    expect(ctx.spec.displayName).toBe('Keep Me')
+    expect(ctx.spec.mcpServers).toEqual(['srv-other'])
   })
 })
 
@@ -4236,5 +4302,272 @@ describe('transport.url path derivation for remote installs', () => {
   it('defaults to "/" when URL has bare origin without trailing slash', async () => {
     const spec = await specForUrl('https://mcp.example.com')
     expect(spec.transport.url).toBe('http://my-srv.mcp-server.svc.cluster.local:3000/')
+  })
+})
+
+// ── POST /admin/registry/upgrade-hook — install-time trust gates are re-run ────
+// Regression for the upgrade-hook bypass: the sanctioned update path must clear
+// the SAME host-independent gates as install (resources.ts withholds raw
+// create/update for exactly this reason), must not change the target kind, and
+// must re-check each referencing Host's trust floor (§8.2/§8.4).
+describe('POST /admin/registry/upgrade-hook — gates are not bypassed', () => {
+  const IMG_A = `reg.example/hook@sha256:${'a'.repeat(64)}`
+  const IMG_B = `reg.example/hook@sha256:${'b'.repeat(64)}`
+  const clusterScope: PublishScope = { curator: false, orgName: 'acme', scope: '@acme' }
+
+  // A base llm-hook registry entry; tests override name/trust_level/hook_meta.
+  const hookEntry = (over: Record<string, unknown>) => ({
+    id: 'h1',
+    name: '@acme/hook',
+    version: '2.0.0',
+    entry_type: 'llm-hook',
+    owner_type: 'org',
+    description: 'a hook',
+    author: 'acme',
+    origin: 'org',
+    category: 'guardrail',
+    tags: [],
+    trust_level: 'low',
+    quality_tier: 'production',
+    status: 'published',
+    server_mode: null,
+    transport: null,
+    recipe_type: null,
+    mcp_server_meta: null,
+    recipe_meta: null,
+    artifact_refs: null,
+    downloads: 0,
+    installs: 0,
+    created_at: '2026-03-20T00:00:00Z',
+    ...over,
+  })
+
+  async function seedInstalledImageHook(
+    gw: MockGateway,
+    name = 'my-hook',
+    overrides: { annotations?: Record<string, string>; spec?: Record<string, unknown> } = {}
+  ) {
+    await gw.createResource(
+      'llmhooks',
+      {
+        metadata: {
+          name,
+          annotations: overrides.annotations ?? {
+            'clerum.io/catalog-id': '@acme/hook',
+            'clerum.io/catalog-version': '1.0.0',
+            'clerum.io/trust-level': 'low',
+          },
+        },
+        spec: {
+          target: { image: { ref: IMG_A, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+          ...(overrides.spec ?? {}),
+        },
+      },
+      config.llmHooksNamespace
+    )
+  }
+
+  it('refuses an image→remote upgrade that becomes content-bearing + remote at low trust (the exploit)', async () => {
+    const gw = new MockGateway()
+    // catalog-id matches the entry named below, so this exercises the KIND/TRUST
+    // gates rather than the entry-identity check.
+    await seedInstalledImageHook(gw, 'my-hook', {
+      annotations: {
+        'clerum.io/catalog-id': '@attacker/hook',
+        'clerum.io/catalog-version': '1.0.0',
+      },
+    })
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    // @attacker is neither the cluster org nor official → capped at defaultHookTrustCap.
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@attacker/hook',
+        trust_level: 'low',
+        hook_meta: {
+          target: { remote: { baseUrl: 'https://attacker.example' } },
+          lifecyclePoints: ['preCall'],
+        },
+      })
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({
+        hookName: 'my-hook',
+        registryEntryName: '@attacker/hook',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(403)
+    expect(res.body.error).toBe('content_egress_requires_high_trust')
+    // The CR must NOT have been re-targeted to the attacker endpoint.
+    const cr = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      spec: { target: Record<string, unknown> }
+    }
+    expect(cr.spec.target).toEqual({ image: { ref: IMG_A, port: 8080 } })
+  })
+
+  it('refuses changing the target kind on upgrade even when trust is high (image→remote)', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw, 'my-hook', {
+      annotations: { 'clerum.io/catalog-id': '@clerum/hook', 'clerum.io/catalog-version': '1.0.0' },
+    })
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    // @clerum is official → curated → trust honored as high, so the content/egress
+    // gate passes; target-kind immutability then blocks the re-target.
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@clerum/hook',
+        trust_level: 'high',
+        hook_meta: {
+          target: { remote: { baseUrl: 'https://vetted.example' } },
+          lifecyclePoints: ['preCall'],
+        },
+      })
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({
+        hookName: 'my-hook',
+        registryEntryName: '@clerum/hook',
+        registryEntryVersion: '2.0.0',
+      })
+      .expect(422)
+    expect(res.body.error).toBe('hook_target_kind_immutable')
+  })
+
+  it('restamps the catalog annotations and the resolved trust level', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw)
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'high',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+      .expect(200)
+    // the response and the audit trail must name the version that was installed
+    expect(res.body.registryVersion).toBe('2.0.0')
+    expect(res.body.trustLevel).toBe('high')
+
+    const cr = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      metadata: { annotations: Record<string, string> }
+    }
+    // without the restamp these stayed at 1.0.0 / low forever, and
+    // getInstalledRegistryState kept re-offering the same upgrade
+    expect(cr.metadata.annotations['clerum.io/catalog-version']).toBe('2.0.0')
+    expect(cr.metadata.annotations['clerum.io/trust-level']).toBe('high')
+  })
+
+  it('refuses an upgrade that names a different entry than the one installed', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw)
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/other-hook',
+        trust_level: 'low',
+        hook_meta: { target: { image: { ref: IMG_B, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({
+        hookName: 'my-hook',
+        registryEntryName: '@acme/other-hook',
+        registryEntryVersion: '1.0.0',
+      })
+      .expect(409)
+    expect(res.body.error).toBe('hook_entry_identity_mismatch')
+    // nothing was written
+    const cr = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      spec: { target: { image: { ref: string } } }
+    }
+    expect(cr.spec.target.image.ref).toBe(IMG_A)
+  })
+
+  it('moves egressBindings and contentAccess with the version instead of inheriting them', async () => {
+    const gw = new MockGateway()
+    // v1: a metadata-only preCall shaper WITH egress
+    await seedInstalledImageHook(gw, 'my-hook', {
+      spec: {
+        contentAccess: 'metadata',
+        target: {
+          image: {
+            ref: IMG_A,
+            port: 8080,
+            envSecret: 'my-hook-creds',
+            egressBindings: [{ toFQDN: 'old.example', ports: [443] }],
+          },
+        },
+      },
+    })
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    // v2 drops the egress and becomes a real content inspector
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: {
+          target: { image: { ref: IMG_B, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+          contentAccess: 'content',
+        },
+      })
+    )
+
+    await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+      .expect(200)
+
+    const cr = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      spec: {
+        contentAccess?: string
+        target: { image: { egressBindings?: unknown[]; envSecret?: string } }
+      }
+    }
+    // the reviewed egress REDUCTION must land — previously the old rule persisted
+    expect(cr.spec.target.image.egressBindings).toBeUndefined()
+    // and the hook must actually receive bodies — previously it stayed 'metadata'
+    // and mcp-host's projection stripped every message, a silent no-op upgrade
+    expect(cr.spec.contentAccess).toBe('content')
+    // install-time wiring is still preserved
+    expect(cr.spec.target.image.envSecret).toBe('my-hook-creds')
+  })
+
+  it('allows a same-kind image→image digest bump', async () => {
+    const gw = new MockGateway()
+    await seedInstalledImageHook(gw)
+    vi.mocked(resolvePublishScope).mockResolvedValue(clusterScope)
+    // @acme is the cluster org → curated; content-alone (image, no egress) at low is fine.
+    vi.mocked(getEntryVersion).mockResolvedValue(
+      hookEntry({
+        name: '@acme/hook',
+        trust_level: 'low',
+        hook_meta: {
+          target: { image: { ref: IMG_B, port: 8080 } },
+          lifecyclePoints: ['preCall'],
+        },
+      })
+    )
+
+    const res = await request(makeApp(gw))
+      .post('/admin/registry/upgrade-hook')
+      .send({ hookName: 'my-hook', registryEntryName: '@acme/hook', registryEntryVersion: '2.0.0' })
+      .expect(200)
+    expect(res.body.hookName).toBe('my-hook')
+    const cr = (await gw.getResource('llmhooks', 'my-hook', config.llmHooksNamespace)) as {
+      spec: { target: { image: { ref: string } } }
+    }
+    expect(cr.spec.target.image.ref).toBe(IMG_B)
   })
 })

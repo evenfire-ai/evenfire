@@ -50,6 +50,30 @@ describe('signGfsToken', () => {
     ])
   })
 
+  it('signs linked-admin provenance without conflating Desktop actor and token subject', () => {
+    const desktopUserId = '11111111-1111-4111-8111-111111111111'
+    const controlAdminId = '22222222-2222-4222-8222-222222222222'
+    const { token } = signGfsToken({
+      subject: controlAdminId,
+      drive: 'main',
+      scopes: ['gfs.write'],
+      principalType: 'control-admin',
+      brokeredAuthority: {
+        desktopUserId,
+        controlAdminId,
+        authoritySource: 'linked-admin',
+      },
+    })
+    const decoded = jwt.verify(token, config.rpcJwtPublicKey, VERIFY) as jwt.JwtPayload
+    expect(decoded.sub).toBe(controlAdminId)
+    expect(decoded.principalType).toBe('control-admin')
+    expect(decoded.brokeredAuthority).toEqual({
+      desktopUserId,
+      controlAdminId,
+      authoritySource: 'linked-admin',
+    })
+  })
+
   it('FAILS verification under the wrong audience (fail-loud)', () => {
     const { token } = signGfsToken({ subject: 'u', drive: 'main', scopes: ['gfs.read'] })
     expect(() =>

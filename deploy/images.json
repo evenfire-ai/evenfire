@@ -22,7 +22,9 @@
         "control-api/**",
         "packages/workflow-runtime-core/**",
         "packages/workflow-recipe-capability-policy/**",
-        "packages/image-policy/**"
+        "packages/image-policy/**",
+        "packages/display-field/**",
+        "packages/llm-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -31,7 +33,13 @@
       "name": "control-ui",
       "path": "control-ui",
       "rooted": true,
-      "source_paths": ["control-ui/**", "packages/workflow-recipe-capability-policy/**"],
+      "source_paths": [
+        "control-ui/**",
+        "packages/workflow-recipe-capability-policy/**",
+        "packages/display-field/**",
+        "packages/frontend-components/**",
+        "packages/gfs-interaction-policy/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -50,7 +58,8 @@
         "host-context-controller/**",
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
-        "packages/network-policy-core/**"
+        "packages/network-policy-core/**",
+        "packages/codex-catalog-projection/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -59,7 +68,11 @@
       "name": "mcp-host",
       "path": "mcp-host",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -68,7 +81,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.slim",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -77,7 +94,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.full",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -86,7 +107,11 @@
       "path": "mcp-host",
       "dockerfile": "Dockerfile.desktop",
       "rooted": true,
-      "source_paths": ["mcp-host/**"],
+      "source_paths": [
+        "mcp-host/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**"
+      ],
       "published": true,
       "deployed_to_minikube": false
     },
@@ -115,7 +140,11 @@
       "name": "profile-ui",
       "path": "profile-ui",
       "rooted": true,
-      "source_paths": ["profile-ui/**", "packages/desktop-app-links/**"],
+      "source_paths": [
+        "profile-ui/**",
+        "packages/desktop-app-links/**",
+        "packages/frontend-components/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -137,6 +166,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -155,6 +186,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -172,6 +205,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -190,6 +225,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/network-policy-core/**",
+        "packages/llm-provider-attempt-contract/**",
+        "packages/codex-catalog-projection/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -258,6 +295,17 @@
       "name": "webhook-proxy",
       "path": "webhook-proxy",
       "source_paths": ["webhook-proxy/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "codex-llm-proxy",
+      "path": "codex-llm-proxy",
+      "rooted": true,
+      "source_paths": [
+        "codex-llm-proxy/**",
+        "packages/llm-provider-attempt-contract/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },

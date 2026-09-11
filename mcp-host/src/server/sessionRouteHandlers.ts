@@ -52,6 +52,12 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         ? {
             requestId: approval.request_id,
             displayName: getDisplayName(approval.tool_name),
+            // U5 — surface the connect_required discriminator on the REST rejoin
+            // snapshot so a reconnecting desktop rebuilds a "Connect <server>"
+            // suspension (not a generic approval) after a cold restart. Absent for
+            // the default HITL gate (reason undefined ⇒ fields omitted).
+            ...(approval.reason ? { reason: approval.reason } : {}),
+            ...(approval.mcpServerName ? { mcpServerName: approval.mcpServerName } : {}),
           }
         : undefined
     // Lifetime token totals — projected to the wire shape (omitted until the

@@ -20,7 +20,7 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
   router.get(
     BASE,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireExternalWorkflowCaller(req, res)
+      const caller = await requireExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const recipes = await getAuthorizedRecipeResources(caller, gateway)
@@ -31,7 +31,7 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
   router.get(
     `${BASE}/:ns/:name`,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireExternalWorkflowCaller(req, res)
+      const caller = await requireExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params
@@ -60,7 +60,7 @@ export function createExternalWorkflowReadRoutes(gateway: K8sGateway): Router {
   router.get(
     `${BASE}/:ns/:name/health`,
     asyncHandler(async (req: Request, res: Response) => {
-      const caller = requireExternalWorkflowCaller(req, res)
+      const caller = await requireExternalWorkflowCaller(req, res)
       if (!caller) return
 
       const { ns, name } = req.params

@@ -46,6 +46,19 @@ export interface GfsTokenClaims extends jwt.JwtPayload {
   drive: string
   scopes: GfsScope[]
   pathBindings: GfsPathBinding[]
+  /** Current users.lifecycle_version or control-admin session_version. */
+  authGeneration?: number
+  brokeredAuthority?: GfsBrokeredAuthority
+  principalType?: 'user' | 'control-admin'
+}
+
+export interface GfsBrokeredAuthority {
+  desktopUserId: string
+  controlAdminId: string
+  authoritySource: 'linked-admin'
+  linkLineageId?: string
+  linkGeneration?: number
+  desktopUserGeneration?: number
 }
 
 /**
@@ -81,12 +94,18 @@ export function signGfsToken(input: {
   drive: string
   scopes: readonly GfsScope[]
   pathBindings?: readonly GfsPathBinding[]
+  authGeneration?: number
+  brokeredAuthority?: GfsBrokeredAuthority
+  principalType?: 'user' | 'control-admin'
 }): { token: string; expiresInSeconds: number } {
   const claims: Omit<GfsTokenClaims, 'iat' | 'exp'> = {
     sub: input.subject,
     drive: input.drive,
     scopes: [...input.scopes],
     pathBindings: input.pathBindings ? input.pathBindings.map(b => ({ ...b })) : [],
+    ...(input.authGeneration === undefined ? {} : { authGeneration: input.authGeneration }),
+    ...(input.brokeredAuthority ? { brokeredAuthority: { ...input.brokeredAuthority } } : {}),
+    ...(input.principalType ? { principalType: input.principalType } : {}),
   }
   const token = jwt.sign(claims, config.rpcJwtPrivateKey, {
     algorithm: 'RS256',

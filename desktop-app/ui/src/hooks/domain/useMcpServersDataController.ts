@@ -7,6 +7,7 @@ import { getMcpServerDerivedData } from './mcpServerDerivedData'
 import { desktopQueryKeys } from './queryKeys'
 
 const EMPTY_STRING_LIST: string[] = []
+const EMPTY_AGENT_DISPLAY_BY_NAME: Record<string, string> = {}
 const EMPTY_AGENT_CONTEXT_BY_NAME: Record<string, string | null> = {}
 const EMPTY_MCP_SERVERS_BY_AGENT: Record<string, string[]> = {}
 const EMPTY_GLOBAL_MCP_SERVERS: ScopedMcpServer[] = []
@@ -261,6 +262,7 @@ export function useMcpServersDataController(params: UseMcpServersDataControllerP
       error,
       accessCatalog: catalogQuery.data ?? null,
       agentNames: catalogQuery.data?.agentNames ?? EMPTY_STRING_LIST,
+      agentDisplayByName: catalogQuery.data?.agentDisplayByName ?? EMPTY_AGENT_DISPLAY_BY_NAME,
       agentContextByName: catalogQuery.data?.agentContextByName ?? EMPTY_AGENT_CONTEXT_BY_NAME,
       mcpServersByAgent: catalogQuery.data?.mcpServersByAgent ?? EMPTY_MCP_SERVERS_BY_AGENT,
       agentMcpServersByAgent,

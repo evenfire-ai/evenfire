@@ -95,6 +95,27 @@ export class GfsReconciler {
     } while (true)
   }
 
+  private async writeStatus(
+    gfs: GlobalFileSystemCRD,
+    status: GlobalFileSystemStatus
+  ): Promise<void> {
+    // Compare against status observed on this exact LIST/watch object, not
+    // process memory keyed only by name. A local name cache could suppress the
+    // repair of a recreated object when its DELETE event was missed, or of
+    // status that another actor removed. Conversely, an identical observed
+    // status proves this is our own status-only MODIFIED event and closes the
+    // patch -> watch -> reconcile loop without another API write.
+    if (
+      gfs.status?.phase === status.phase &&
+      gfs.status?.pvcName === status.pvcName &&
+      gfs.status?.serviceName === status.serviceName &&
+      gfs.status?.serviceUrl === status.serviceUrl
+    ) {
+      return
+    }
+    await this.api.patchStatus(gfs.name, gfs.namespace, status)
+  }
+
   async reconcile(gfs: GlobalFileSystemCRD): Promise<void> {
     const ns = this.config.gfsNamespace
     const writerDeployment = buildDeployment(gfs, this.config, 'writer')
@@ -135,7 +156,7 @@ export class GfsReconciler {
     }
     const phase = writerReady ? 'Ready' : 'Initializing'
 
-    await this.api.patchStatus(gfs.name, gfs.namespace, {
+    await this.writeStatus(gfs, {
       phase,
       pvcName: pvcName(gfs),
       serviceName: serviceName(gfs),

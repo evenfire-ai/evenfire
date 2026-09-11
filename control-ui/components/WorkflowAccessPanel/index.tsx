@@ -1,15 +1,16 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TabBar } from '@components/TabBar'
 import { useToast } from '@components/Toast'
-import { IconX } from '@components/icons'
 import {
   allowWorkflowApprovalTeam,
   getAdminTeams,
   getAdminUsers,
+  isSilentApiError,
   listWorkflowApprovalAllowedTeams,
   listWorkflowGrants,
   listWorkflowTeamGrants,
@@ -46,6 +47,21 @@ function uniqueIds(ids: string[]): string[] {
   return [...new Set(ids.map(id => id.trim()).filter(Boolean))]
 }
 
+function apiErrorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object') return null
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : null
+}
+
+function apiErrorRetryAfterSeconds(error: unknown): number | null {
+  if (apiErrorStatus(error) !== 429 || !error || typeof error !== 'object') return null
+  const body = (error as { body?: unknown }).body
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).retryAfterSeconds
+  const seconds = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN
+  return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : null
+}
+
 function removeId(ids: string[], id: string): string[] {
   return ids.filter(existing => existing !== id)
 }
@@ -56,6 +72,10 @@ function userLabel(user: AccessUserRow): string {
 
 function teamLabel(team: AccessTeamRow): string {
   return team.name || team.id
+}
+
+function compareIdentity(left: string, right: string): number {
+  return left.localeCompare(right, undefined, { numeric: true, sensitivity: 'base' })
 }
 
 function sectionCount(mode: 'create' | 'edit', loadedCount: number | null, selectedCount: number) {
@@ -201,18 +221,39 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     [selectedApprovalTeamIds]
   )
 
-  const displayUsers =
-    mode === 'edit'
-      ? (userGrants ?? [])
-      : (allUsers ?? []).filter(user => selectedUserSet.has(user.id))
-  const displayTeams =
-    mode === 'edit'
-      ? (teamGrants ?? [])
-      : (allTeams ?? []).filter(team => selectedTeamSet.has(team.id))
-  const displayApprovalTeams =
-    mode === 'edit'
-      ? (approvalTeams ?? [])
-      : (allTeams ?? []).filter(team => selectedApprovalTeamSet.has(team.id))
+  const displayUsers = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (userGrants ?? [])
+        : (allUsers ?? []).filter(user => selectedUserSet.has(user.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(userLabel(left), userLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allUsers, mode, selectedUserSet, userGrants]
+  )
+  const displayTeams = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (teamGrants ?? [])
+        : (allTeams ?? []).filter(team => selectedTeamSet.has(team.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(teamLabel(left), teamLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allTeams, mode, selectedTeamSet, teamGrants]
+  )
+  const displayApprovalTeams = useMemo(
+    () =>
+      (mode === 'edit'
+        ? (approvalTeams ?? [])
+        : (allTeams ?? []).filter(team => selectedApprovalTeamSet.has(team.id))
+      ).toSorted(
+        (left, right) =>
+          compareIdentity(teamLabel(left), teamLabel(right)) || compareIdentity(left.id, right.id)
+      ),
+    [allTeams, approvalTeams, mode, selectedApprovalTeamSet]
+  )
 
   const ungrantedUsers = (allUsers ?? []).filter(user => !selectedUserSet.has(user.id))
   const ungrantedTeams = (allTeams ?? []).filter(team => !selectedTeamSet.has(team.id))
@@ -296,12 +337,56 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
     const added = nextTeamIds.filter(id => !current.includes(id))
     const removed = current.filter(id => !nextTeamIds.includes(id))
     setSectionPatch('approval-target-teams', { mutating: true, mutateError: null })
+    const errors: string[] = []
+    let rateLimited = false
+    let retryAfterSeconds: number | null = null
+    let appliedMutations = 0
+    const recordMutationError = (error: unknown): boolean => {
+      if (isSilentApiError(error)) throw error
+      if (apiErrorStatus(error) === 429) {
+        rateLimited = true
+        const retry = apiErrorRetryAfterSeconds(error)
+        retryAfterSeconds = Math.max(retryAfterSeconds ?? 0, retry ?? 0) || null
+        return true
+      }
+      errors.push(error instanceof Error ? error.message : String(error))
+      return false
+    }
+    let stopMutations = false
     try {
-      await Promise.all([
-        ...added.map(teamId => allowWorkflowApprovalTeam(namespace, recipeName, teamId)),
-        ...removed.map(teamId => revokeWorkflowApprovalTeam(namespace, recipeName, teamId)),
-      ])
+      // Serialize allow/revoke so a shared 20/min grant-write bucket cannot
+      // leave a partial write behind a Promise.all rejection.
+      for (const teamId of added) {
+        try {
+          await allowWorkflowApprovalTeam(namespace, recipeName, teamId)
+          appliedMutations += 1
+        } catch (error) {
+          stopMutations = recordMutationError(error)
+          if (stopMutations) break
+        }
+      }
+      for (const teamId of stopMutations ? [] : removed) {
+        try {
+          await revokeWorkflowApprovalTeam(namespace, recipeName, teamId)
+          appliedMutations += 1
+        } catch (error) {
+          stopMutations = recordMutationError(error)
+          if (stopMutations) break
+        }
+      }
       await loadApprovalTeams()
+      if (rateLimited || errors.length > 0) {
+        const messages = [...errors]
+        if (rateLimited) {
+          const partialPrefix = appliedMutations > 0 ? 'Some changes were saved. ' : ''
+          messages.unshift(
+            retryAfterSeconds === null
+              ? `${partialPrefix}Too many approval target team changes. Try again shortly.`
+              : `${partialPrefix}Too many approval target team changes. Try again in about ${retryAfterSeconds} seconds.`
+          )
+        }
+        throw new Error(messages.join('; '))
+      }
       if (added.length > 0) {
         showToast('Approval target team allowed.', { tone: 'success' })
       } else if (removed.length > 0) {
@@ -310,7 +395,7 @@ export function WorkflowAccessPanel(props: WorkflowAccessPanelProps): React.JSX.
         showToast('Approval target teams updated.', { tone: 'success' })
       }
     } catch (error) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || isSilentApiError(error)) return
       setSectionPatch('approval-target-teams', {
         mutateError:
           error instanceof Error ? error.message : 'Failed to save approval target teams',
@@ -595,28 +680,34 @@ function AccessUserSection({
       ) : rows.length === 0 ? (
         <div className="cu-workflow-access__empty">{emptyText}</div>
       ) : (
-        <div className="cu-workflow-access__rows">
+        <RecordList className="cu-workflow-access__rows">
           {rows.map(user => (
-            <div className="cu-workflow-access__row" key={user.id}>
+            <RecordListRow
+              className="cu-workflow-access__row"
+              data-access-id={user.id}
+              key={user.id}
+            >
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{userLabel(user)}</span>
                 {(user.displayName || user.name) && (
                   <span className="cu-workflow-access__row-meta">{user.email}</span>
                 )}
               </div>
-              <button
-                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                type="button"
-                disabled={busy}
-                aria-label={`${definition.revokeLabel}: ${user.email}`}
-                title={`${definition.revokeLabel}: ${user.email}`}
-                onClick={() => void onRevoke(user.id)}
-              >
-                <IconX width={16} height={16} />
-              </button>
-            </div>
+              <RowActionMenu
+                actions={[
+                  {
+                    key: 'remove',
+                    label: definition.revokeLabel,
+                    danger: true,
+                    disabled: busy,
+                    onSelect: () => void onRevoke(user.id),
+                  },
+                ]}
+                ariaLabel={`Actions for ${definition.revokeLabel.replace(/^Remove /, '')}: ${userLabel(user)}`}
+              />
+            </RecordListRow>
           ))}
-        </div>
+        </RecordList>
       )}
       <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
         <SelectionDropdown
@@ -690,25 +781,31 @@ function AccessTeamSection({
       ) : rows.length === 0 ? (
         <div className="cu-workflow-access__empty">{emptyText}</div>
       ) : (
-        <div className="cu-workflow-access__rows">
+        <RecordList className="cu-workflow-access__rows">
           {rows.map(team => (
-            <div className="cu-workflow-access__row" key={team.id}>
+            <RecordListRow
+              className="cu-workflow-access__row"
+              data-access-id={team.id}
+              key={team.id}
+            >
               <div className="cu-workflow-access__row-main">
                 <span className="cu-workflow-access__row-title">{teamLabel(team)}</span>
               </div>
-              <button
-                className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                type="button"
-                disabled={busy}
-                aria-label={`${definition.revokeLabel}: ${teamLabel(team)}`}
-                title={`${definition.revokeLabel}: ${teamLabel(team)}`}
-                onClick={() => void onRevoke(team.id)}
-              >
-                <IconX width={16} height={16} />
-              </button>
-            </div>
+              <RowActionMenu
+                actions={[
+                  {
+                    key: 'remove',
+                    label: definition.revokeLabel,
+                    danger: true,
+                    disabled: busy,
+                    onSelect: () => void onRevoke(team.id),
+                  },
+                ]}
+                ariaLabel={`Actions for ${definition.revokeLabel.replace(/^Remove /, '')}: ${teamLabel(team)}`}
+              />
+            </RecordListRow>
           ))}
-        </div>
+        </RecordList>
       )}
       <div className="cu-workflow-access__picker cu-workflow-access__picker--inline">
         <SelectionDropdown

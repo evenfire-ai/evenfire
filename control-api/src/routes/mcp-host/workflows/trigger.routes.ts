@@ -14,7 +14,7 @@ import {
   requireMcpHostControlScope,
   requireMcpHostControlWorkflowCaller,
 } from '../../workflows/shared/auth.js'
-import { workflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
+import { mcpHostWorkflowTriggerRateLimit } from '../../workflows/shared/rateLimit.js'
 
 const logger = rootLogger.child({ module: 'mcp-host-workflows' })
 
@@ -23,7 +23,7 @@ export function createMcpHostWorkflowTriggerRoutes(gateway: K8sGateway): Router 
 
   router.post(
     '/workflows/:ns/:name/trigger',
-    workflowTriggerRateLimit(),
+    mcpHostWorkflowTriggerRateLimit(),
     asyncHandler(async (req: Request, res: Response) => {
       const caller = requireMcpHostControlWorkflowCaller(req, res)
       if (!caller) return

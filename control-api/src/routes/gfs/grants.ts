@@ -1,6 +1,7 @@
 import type { Request, Router } from 'express'
 import { createHash } from 'node:crypto'
 import { type DbClient, pool, withTransaction } from '../../db.js'
+import type { ExternalGfsAuthority } from '../../gfs/externalAuthority.js'
 import { isValidHostSubjectId } from '../../gfs/hostSubject.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireAuthForControlUI } from '../../middleware/controlUIAuth.js'
@@ -70,6 +71,26 @@ export interface GfsCaller {
   subjects: Set<string>
   /** Audit actor key (`operator:` or `user:<uuid>`). */
   actorKey: string
+  /** Effective admin for a linked Desktop operator; never the Desktop actor. */
+  effectiveControlAdminId?: string
+  /** Authenticated Desktop actor for brokered external requests. */
+  desktopUserId?: string
+  /** Broker authority attribution; independent of authorization_source evidence. */
+  authoritySource?: 'user-session' | 'linked-admin'
+  /** Persisted legacy/effective actor_on_behalf_of value. */
+  actorOnBehalfOf?: string | null
+}
+
+export function callerAuditFields(caller: GfsCaller): {
+  actorOnBehalfOf: string | null
+  desktopUserId?: string
+  authoritySource?: 'user-session' | 'linked-admin'
+} {
+  return {
+    actorOnBehalfOf: caller.actorOnBehalfOf ?? null,
+    ...(caller.desktopUserId ? { desktopUserId: caller.desktopUserId } : {}),
+    ...(caller.authoritySource ? { authoritySource: caller.authoritySource } : {}),
+  }
 }
 
 type RequestWithResolvedGfsSubjects = Request & {
@@ -86,7 +107,24 @@ type RequestWithResolvedGfsSubjects = Request & {
 export function resolveCaller(req: Request): GfsCaller {
   const admin = (req as { adminAuth?: { sub?: string } }).adminAuth
   if (admin?.sub) {
-    return { isOperator: true, subjects: new Set(['operator:']), actorKey: 'operator:' }
+    return {
+      isOperator: true,
+      subjects: new Set(['operator:']),
+      actorKey: 'operator:',
+      actorOnBehalfOf: 'operator:',
+    }
+  }
+  const authority = (req as { gfsAuthority?: ExternalGfsAuthority }).gfsAuthority
+  if (authority?.kind === 'linked-admin') {
+    return {
+      isOperator: true,
+      subjects: new Set(['operator:']),
+      actorKey: 'operator:',
+      effectiveControlAdminId: authority.controlAdminId,
+      desktopUserId: authority.desktopUserId,
+      authoritySource: 'linked-admin',
+      actorOnBehalfOf: authority.controlAdminId,
+    }
   }
   const external = (req as { externalAuth?: { userId?: string; teamId?: string | null } })
     .externalAuth
@@ -96,7 +134,14 @@ export function resolveCaller(req: Request): GfsCaller {
     const subjects = new Set(preResolved && preResolved.length > 0 ? preResolved : [key])
     subjects.add(key)
     if (external.teamId) subjects.add(`team:${external.teamId}`)
-    return { isOperator: false, subjects, actorKey: key }
+    return {
+      isOperator: false,
+      subjects,
+      actorKey: key,
+      desktopUserId: external.userId,
+      authoritySource: 'user-session',
+      actorOnBehalfOf: null,
+    }
   }
   throw new GfsGrantError(401, 'unauthenticated')
 }
@@ -497,6 +542,9 @@ export async function auditMutation(
     outcome: 'allowed' | 'denied'
     requestId?: string
     sourceIp?: string
+    actorOnBehalfOf?: string | null
+    desktopUserId?: string
+    authoritySource?: 'user-session' | 'linked-admin'
   }
 ): Promise<string | null> {
   const gfsUri = `gfs://${params.drive}/${params.resourceId}`
@@ -507,24 +555,30 @@ export async function auditMutation(
         params.op,
         gfsUri,
         params.outcome,
-        params.actorKey,
+        params.actorOnBehalfOf === undefined ? params.actorKey : (params.actorOnBehalfOf ?? ''),
+        params.desktopUserId ?? '',
+        params.authoritySource ?? '',
         params.requestId ?? '',
       ].join(' ')
     )
     .digest('hex')
   const result = await db.query(
-    `INSERT INTO gfs_audit (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id, row_hash)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    `INSERT INTO gfs_audit
+       (subject, actor_on_behalf_of, op, gfs_uri, outcome, source_ip, request_id,
+        row_hash, desktop_user_id, authority_source)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::uuid, $10)
      RETURNING sequence_no::text AS id`,
     [
       params.targetKey,
-      params.actorKey,
+      params.actorOnBehalfOf === undefined ? params.actorKey : params.actorOnBehalfOf,
       params.op,
       gfsUri,
       params.outcome,
       params.sourceIp ?? null,
       params.requestId ?? null,
       rowHash,
+      params.desktopUserId ?? null,
+      params.authoritySource ?? null,
     ]
   )
   const row = result.rows[0] as { id?: unknown } | undefined
@@ -642,7 +696,9 @@ export function permissionReadFilter(req: Request): { drive: string; resourceId:
 }
 
 export function requestIdOf(req: Request): string | undefined {
-  const id = (req as { correlationId?: string }).correlationId
+  const id =
+    (req as { gfsRequestId?: string; correlationId?: string }).gfsRequestId ??
+    (req as { correlationId?: string }).correlationId
   return typeof id === 'string' && id.length > 0 ? id : undefined
 }
 
@@ -652,6 +708,9 @@ type GfsPermissionEventOperator = {
 }
 
 function permissionEventOperator(req: Request, caller: GfsCaller): GfsPermissionEventOperator {
+  if (caller.effectiveControlAdminId) {
+    return { kind: 'control_admin', sub: caller.effectiveControlAdminId }
+  }
   const adminSub = (req as { adminAuth?: { sub?: string } }).adminAuth?.sub
   if (adminSub) return { kind: 'control_admin', sub: adminSub }
   const userId = (req as { externalAuth?: { userId?: string } }).externalAuth?.userId
@@ -798,6 +857,7 @@ export async function writeGfsGrantBatchInTransaction(
     auditIds.push(
       await auditMutation(db, {
         actorKey: params.caller.actorKey,
+        ...callerAuditFields(params.caller),
         targetKey: subjectKey(subject),
         op: `grant.put[${params.permissions.join(',')}]`,
         drive: params.drive,
@@ -994,7 +1054,9 @@ export async function handleGrantDelete(
            FOR UPDATE`,
         [id]
       )
-      if (existing.rows.length === 0) return { kind: 'not_found' as const }
+      if (existing.rows.length === 0) {
+        return caller.isOperator ? { kind: 'not_found' as const } : { kind: 'hidden' as const }
+      }
       const row = existing.rows[0] as {
         drive: string
         resource_id: string
@@ -1022,6 +1084,7 @@ export async function handleGrantDelete(
         if (!(error instanceof GfsGrantError)) throw error
         const auditId = await auditMutation(db, {
           actorKey: caller.actorKey,
+          ...callerAuditFields(caller),
           targetKey: subjectKey(subject),
           op: 'grant.delete',
           drive: row.drive,
@@ -1047,6 +1110,7 @@ export async function handleGrantDelete(
       await db.query(`DELETE FROM gfs_grants WHERE id = $1::uuid`, [id])
       const auditId = await auditMutation(db, {
         actorKey: caller.actorKey,
+        ...callerAuditFields(caller),
         targetKey: subjectKey(subject),
         op: 'grant.delete',
         drive: row.drive,
@@ -1071,6 +1135,10 @@ export async function handleGrantDelete(
     })
     if (result.kind === 'not_found') {
       res.status(404).json({ error: 'grant_not_found' })
+      return
+    }
+    if (result.kind === 'hidden') {
+      res.status(403).json({ error: 'forbidden' })
       return
     }
     if (result.kind === 'denied') {

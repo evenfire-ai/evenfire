@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Targeted GFSC rollout transitions after a credential is committed.
+# shellcheck disable=SC2034
 
 deployment_uses_secret() {
   local deployment="$1" secret="$2" refs error
@@ -61,6 +62,11 @@ credential_rollout_required() {
 credential_adoption_timestamp() {
   local deployment="$1" selector="$2" expected_dsn="$3" rows live oldest="" pod created ready
   if ! deployment_exists "$deployment"; then
+    GFS_ROLLOUT_PROOF_KIND='deployment-absent'
+    GFS_ROLLOUT_PROOF_RESOURCE_VERSION=""
+    GFS_ROLLOUT_PROOF_TEMPLATE_REVISION='future-pod'
+    GFS_ROLLOUT_PROOF_POD_COUNT=0
+    GFS_ROLLOUT_PROOF_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     date -u '+%Y-%m-%dT%H:%M:%SZ'
     return 0
   fi
@@ -88,6 +94,108 @@ rollout_exact() {
   kc -n "$GFS_NS" rollout status "deployment/${deployment}" --timeout="$ROLLOUT_TIMEOUT"
 }
 
+credential_rollout_proof() {
+  local secret="$1" deployment="$2" rotated_at="$3"
+  local secret_json secret_rv active_dsn template_revision generation observed_revision
+  local selector rows pod_name pod_created pod_ready pod_deleting pod_owner
+  local owner_revision owner_revision_status
+  local pod_count=0 current_rv
+  if ! deployment_uses_secret "$deployment" "$secret"; then
+    die "$GFS_NS/$deployment does not reference $GFS_NS/$secret; refusing to certify credential consumption"
+  fi
+  if ! secret_json="$(kc -n "$GFS_NS" get secret "$secret" -o json)"; then
+    die "cannot snapshot $GFS_NS/$secret for rollout proof"
+  fi
+  if ! IFS=$'\t' read -r secret_rv active_dsn < <(printf '%s' "$secret_json" | python3 -c 'import base64, json, sys
+obj = json.load(sys.stdin)
+metadata = obj.get("metadata") or {}
+encoded = (obj.get("data") or {}).get("connection-string") or ""
+if not encoded:
+    raise SystemExit(1)
+try:
+    dsn = base64.b64decode(encoded, validate=True).decode()
+except (ValueError, UnicodeDecodeError):
+    raise SystemExit(1)
+print(str(metadata.get("resourceVersion", "")) + "\t" + dsn)'); then
+    die "cannot decode the committed $GFS_NS/$secret credential for rollout proof"
+  fi
+  [ -n "$secret_rv" ] || die "the $GFS_NS/$secret rollout proof has no resourceVersion"
+  # The standard Deployment revision is the portable template identity. A
+  # custom annotation is not guaranteed to be copied to Pods by Kubernetes or
+  # by HCC's reconciler, so it cannot be the sole rollout proof.
+  template_revision="$(kc -n "$GFS_NS" get deployment "$deployment" \
+    -o 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null || true)"
+  generation="$(kc -n "$GFS_NS" get deployment "$deployment" \
+    -o 'jsonpath={.metadata.generation}' 2>/dev/null || true)"
+  observed_revision="$(kc -n "$GFS_NS" get deployment "$deployment" \
+    -o 'jsonpath={.status.observedGeneration}' 2>/dev/null || true)"
+  if [[ ! "$generation" =~ ^[1-9][0-9]*$ ]] ||
+     [[ ! "$observed_revision" =~ ^[1-9][0-9]*$ ]] ||
+     [ "$generation" != "$observed_revision" ]; then
+    die "$GFS_NS/$deployment generation is not observed; refusing a pre-rollout credential proof"
+  fi
+  [ -n "$template_revision" ] ||
+    die "$GFS_NS/$deployment has no observed Deployment revision; refusing an unverifiable credential proof"
+  case "$deployment" in
+    gfsc-reader) selector='app=gfs-controller,clerum.io/gfsc-role=reader' ;;
+    gfsc-writer) selector='app=gfs-controller,clerum.io/gfsc-role=writer' ;;
+    *) die "unsupported GFSC deployment for credential proof: $deployment" ;;
+  esac
+  if ! rows="$(kc -n "$GFS_NS" get pods -l "$selector" -o \
+    'jsonpath={range .items[*]}{.metadata.name}{"|"}{.metadata.creationTimestamp}{"|"}{.status.conditions[?(@.type=="Ready")].status}{"|"}{.metadata.deletionTimestamp}{"|"}{.metadata.ownerReferences[0].name}{"\n"}{end}')"; then
+    die "cannot list $GFS_NS/$deployment pods for credential proof"
+  fi
+  while IFS='|' read -r pod_name pod_created pod_ready pod_deleting pod_owner; do
+    [ -n "$pod_name" ] || continue
+    [ -z "$pod_deleting" ] || continue
+    if ! python3 - "$pod_created" "$rotated_at" <<'PY'
+from datetime import datetime, timezone
+import sys
+created, rotated = sys.argv[1:]
+def parse(value):
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+try:
+    ok = parse(created) >= parse(rotated)
+except ValueError:
+    ok = False
+raise SystemExit(0 if ok else 1)
+PY
+    then
+      die "$GFS_NS/$deployment Ready pod predates the committed credential rotation"
+    fi
+    [ "$pod_ready" = True ] || die "$GFS_NS/$deployment has a live pod that is not Ready"
+    [ -n "$pod_owner" ] || die "$GFS_NS/$deployment Ready pod has no owning ReplicaSet"
+    owner_revision_status=0
+    owner_revision="$(kc -n "$GFS_NS" get rs "$pod_owner" \
+      -o 'jsonpath={.metadata.annotations.deployment\.kubernetes\.io/revision}' 2>/dev/null)" || owner_revision_status=$?
+    if [ "$owner_revision_status" -ne 0 ] || [ -z "$owner_revision" ]; then
+      die "$GFS_NS/$deployment Ready pod owner ReplicaSet could not be verified"
+    fi
+    [ "$owner_revision" = "$template_revision" ] ||
+      die "$GFS_NS/$deployment Ready pod is not on the observed template revision"
+    if ! printf '%s' "$active_dsn" |
+      kc -n "$GFS_NS" exec -i "$pod_name" -c gfsc -- node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => input += chunk);
+process.stdin.on("end", () => process.exit(input === process.env.GFS_PG_CONNECTION_STRING ? 0 : 1));' \
+      >/dev/null 2>&1; then
+      die "$GFS_NS/$deployment Ready pod did not consume the committed credential"
+    fi
+    pod_count=$((pod_count + 1))
+  done <<<"$rows"
+  [ "$pod_count" -gt 0 ] || die "no live $GFS_NS/$deployment pod exists for credential proof"
+  current_rv="$(kc -n "$GFS_NS" get secret "$secret" -o \
+    'jsonpath={.metadata.resourceVersion}' 2>/dev/null || true)"
+  [ "$current_rv" = "$secret_rv" ] ||
+    die "$GFS_NS/$secret changed during rollout proof; refusing stale readiness"
+  GFS_ROLLOUT_PROOF_KIND='pod-env'
+  GFS_ROLLOUT_PROOF_RESOURCE_VERSION="$secret_rv"
+  GFS_ROLLOUT_PROOF_TEMPLATE_REVISION="$template_revision"
+  GFS_ROLLOUT_PROOF_POD_COUNT="$pod_count"
+  GFS_ROLLOUT_PROOF_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+
 complete_rollout() {
   local secret="$1" deployment="$2" rotated state rc
   rotated="$(gfs_secret_rotated_at "$secret")"
@@ -106,11 +214,17 @@ complete_rollout() {
   esac
   if ! deployment_exists "$deployment"; then
     log "${GFS_NS}/${deployment} is not present; credential is staged for its future pod"
+    GFS_ROLLOUT_PROOF_KIND='deployment-absent'
+    GFS_ROLLOUT_PROOF_RESOURCE_VERSION=""
+    GFS_ROLLOUT_PROOF_TEMPLATE_REVISION='future-pod'
+    GFS_ROLLOUT_PROOF_POD_COUNT=0
+    GFS_ROLLOUT_PROOF_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     mark_secret_rollout_ready "$secret" "$rotated" rollout-running \
       || die "staged credential state was superseded; refusing a stale completion"
     return 0
   fi
   if rollout_exact "$deployment"; then
+    credential_rollout_proof "$secret" "$deployment" "$rotated"
     mark_secret_rollout_ready "$secret" "$rotated" rollout-running \
       || die "${deployment} rolled out but credential state was superseded; refusing a stale completion"
     return 0

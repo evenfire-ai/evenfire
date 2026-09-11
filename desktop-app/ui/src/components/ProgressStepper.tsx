@@ -12,6 +12,9 @@ interface ProgressStepperProps {
   onApprove?: () => void
   onDeny?: () => void
   onCancel?: () => void
+  // U5 (mcp-oauth reactive consent): fired for a `connect_required` suspension —
+  // opens the provider "Connect <server>" OAuth flow instead of Approve/Deny.
+  onConnect?: () => void
 }
 
 function ThinkingIndicator({ label }: { label: string }) {
@@ -258,9 +261,11 @@ export function ProgressStepper({
   onApprove,
   onDeny,
   onCancel,
+  onConnect,
 }: ProgressStepperProps) {
   const [expanded, setExpanded] = useState(false)
   const [approvalPending, setApprovalPending] = useState(false)
+  const [connectPending, setConnectPending] = useState(false)
   const [isCancelling, setIsCancelling] = useState(false)
 
   const handleCancelClick = () => {
@@ -273,6 +278,15 @@ export function ProgressStepper({
     const timeout = setTimeout(() => setIsCancelling(false), 5000)
     return () => clearTimeout(timeout)
   }, [isCancelling])
+
+  // U5: re-enable the Connect button after a short window so a user who dismissed
+  // the browser consent (task still suspended) can retry. Once the connect
+  // completes the task resumes and the suspended block unmounts entirely.
+  useEffect(() => {
+    if (!connectPending) return
+    const timeout = setTimeout(() => setConnectPending(false), 5000)
+    return () => clearTimeout(timeout)
+  }, [connectPending])
 
   const status = progress?.status
   const stopAgentAriaLabel = isCancelling ? 'Stopping agent' : 'Stop agent'
@@ -396,17 +410,37 @@ export function ProgressStepper({
 
   if (status === 'suspended') {
     const info = progress.suspendedInfo
+    // U5: a `connect_required` suspension renders a "Connect <server>" prompt and
+    // a Connect button (opens the provider OAuth flow) — NEVER Approve/Deny.
+    // `canConnect` requires BOTH the marker and a usable `onConnect` (which the
+    // caller only wires when `mcpServerName` is present). If a connect_required
+    // ever arrives without an actionable connect (defensive — mcp-host always
+    // emits mcpServerName), it renders an explanatory suspended state with Cancel,
+    // NOT Approve/Deny: approving would resume with no grant → another 401 → a
+    // re-suspension loop (the loop sessionFsm.ts guards against).
+    const isConnect = info?.reason === 'connect_required'
+    const connectServer = info?.mcpServerName || 'the connector'
+    const canConnect = isConnect && !!onConnect
     return (
       <div data-testid="progress-stepper" className="progress-stepper status-suspended">
         <div className="stepper-suspended-row">
           <span className="stepper-suspended-icon">&#9888;</span>
-          <span className="stepper-suspended-label">
-            {info
-              ? `${formatToolApprovalLabel({
-                  displayName: info.displayName,
-                  toolName: info.toolName,
-                })} requires approval`
-              : 'Waiting for approval...'}
+          <span
+            className="stepper-suspended-label"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {canConnect
+              ? `Connect ${connectServer} to continue`
+              : isConnect
+                ? 'A connector must be reconnected to continue. Cancel and retry if this persists.'
+                : info
+                  ? `${formatToolApprovalLabel({
+                      displayName: info.displayName,
+                      toolName: info.toolName,
+                    })} requires approval`
+                  : 'Waiting for approval...'}
           </span>
           {onCancel && (
             <IconButton
@@ -425,7 +459,25 @@ export function ProgressStepper({
             </IconButton>
           )}
         </div>
-        {info && (onApprove || onDeny) && (
+        {info && canConnect && (
+          <div className="stepper-approval-actions">
+            <Button
+              data-testid="connect-mcp-btn"
+              className="stepper-btn stepper-btn-approve"
+              color="success"
+              disabled={connectPending}
+              onClick={() => {
+                setConnectPending(true)
+                onConnect()
+              }}
+              size="sm"
+              variant="soft"
+            >
+              {connectPending ? 'Connecting...' : `Connect ${connectServer}`}
+            </Button>
+          </div>
+        )}
+        {info && !canConnect && !isConnect && (onApprove || onDeny) && (
           <div className="stepper-approval-actions">
             {onApprove && (
               <Button

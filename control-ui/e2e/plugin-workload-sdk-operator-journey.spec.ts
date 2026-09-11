@@ -325,7 +325,7 @@ test.describe('Plugin Workload SDK — operator journey (installed plugin → gr
       // the authoritative install path for this local compatibility sample.
       await uiLogin(page)
       await dismissAdminEmailReminder(page)
-      await page.getByRole('link', { name: 'Installed plugins', exact: true }).click()
+      await page.getByRole('link', { name: 'Installed Plugins', exact: true }).click()
       const installedPluginRow = page.getByRole('link', {
         name: `Open ${installedRecipeName}`,
       })

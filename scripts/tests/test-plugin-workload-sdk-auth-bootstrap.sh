@@ -237,6 +237,16 @@ assert_admin_resolution_contract() {
   fi
 }
 
+assert_missing_canonical_dotenv_is_optional() {
+  local no_env_repo="$TMP_ROOT/no-canonical-env"
+  mkdir -p "$no_env_repo"
+  if (set -e; dotenv_load_canonical_root "$no_env_repo"); then
+    pass 'missing canonical .env leaves documented defaults available'
+  else
+    fail 'missing canonical .env aborts the bootstrap under set -e'
+  fi
+}
+
 assert_nul_credential_transport() {
   local result
   result="$(
@@ -267,6 +277,7 @@ assert_nul_credential_transport() {
 }
 
 assert_admin_resolution_contract
+assert_missing_canonical_dotenv_is_optional
 assert_nul_credential_transport
 
 if grep -Fq 'e2e_write_nul_credentials "$admin_username" "$admin_password"' "$SCRIPT"; then

@@ -80,7 +80,9 @@ make minikube-pre-gate-sync GATE=<gate-name>
 ```
 
 Use `--force-cluster-sync --skip-port-forwards` when deployable code changed
-and your test runner will hold its own port-forwards:
+and your test runner will hold its own port-forwards. Inner `pre-gate-sync`
+may use `--skip-port-forwards`; never pass that globally into
+`make minikube-t2`.
 
 ```bash
 make minikube-pre-gate-sync GATE=<gate-name> ARGS="--force-cluster-sync --skip-port-forwards"
@@ -106,7 +108,29 @@ phase. Direct `npx vitest` runs still require a held port-forward terminal:
 make minikube-pf-all
 ```
 
-With port-forwards held, verify the localhost ports used by the tests:
+For Control UI / Desktop on a branch-owned profile, the first-hand entry
+point (gitignored helper at repo root — do not search for it) is the
+host-side hold. Implementation:
+`.local-notes/minikube-profiles/branch-profile.sh`.
+HARD DENY: do not `ls`/`cat` `~/.cache/clerum/minikube-profiles/`.
+Profile-owned random ports only (never shared `:3000`/`:8090`).
+`make minikube-pf-all-bg` is a gate refresh only; it must not replace
+`branch-profile-pf`. Do not start UI PFs from a sandboxed agent shell. Run
+the make target on the host. Do not kill this lane's `branch-profile-pf`.
+`branch-profile-pf-health` starts PFs then STOPS them on EXIT — do not use
+it as the lasting hold.
+
+```bash
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf
+
+MINIKUBE_PROFILE=<owned-profile> \
+  make -f .local-notes/minikube-profiles/branch.mk branch-profile-health
+```
+
+With shared-profile (`make minikube-pf-all`) port-forwards held, verify the
+localhost ports used by the tests. A branch-owned profile uses the random
+ports from `branch-profile-health`, never shared `:8090`:
 
 ```bash
 curl -sS http://127.0.0.1:8090/health

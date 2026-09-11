@@ -160,4 +160,17 @@ export default defineConfig({
     trace: 'retain-on-failure',
     video: 'retain-on-failure',
   },
+  projects: [
+    {
+      name: 'default',
+      testIgnore: '**/gfs-upload-v2.test.ts',
+    },
+    {
+      name: 'packaged-gfs-upload-v2',
+      testMatch: /gfs-upload-v2\.test\.ts/,
+      fullyParallel: false,
+      timeout: 45 * 60_000,
+      use: { trace: 'retain-on-failure' },
+    },
+  ],
 })

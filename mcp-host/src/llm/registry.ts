@@ -19,12 +19,17 @@
 import type { ProviderCredentials } from '../types'
 import { AzureOpenAIProvider } from './azure'
 import { ClaudeProvider } from './claude'
+import { type CodexSubscriptionDeps, CodexSubscriptionProvider } from './codexSubscription'
 import { buildBedrockConverseDriver } from './drivers/bedrockConverse'
 import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
 import { OpenAIProvider } from './openai'
 import { OpenAICompatibleProvider } from './openaiCompatible'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
 import type { SingleTurnProvider } from './types'
+
+export type MakeProviderOptions = {
+  codex?: CodexSubscriptionDeps
+}
 
 export {
   ALL_PROVIDERS,
@@ -58,7 +63,8 @@ export {
 export function makeProvider(
   provider: LlmProvider,
   credentials: ProviderCredentials,
-  model?: string
+  model?: string,
+  options?: MakeProviderOptions
 ): SingleTurnProvider {
   const d = descriptorFor(provider)
   switch (provider) {
@@ -68,22 +74,38 @@ export function makeProvider(
       return new ClaudeProvider(credentials[primarySlot(d).dataKey], model)
     case 'vertex':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel)
+      return buildGoogleGenerativeDriver(credentials, model ?? d.defaultModel ?? '')
     case 'bedrock':
       // Own-SDK arm — lazy require lives inside the driver builder.
-      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel)
+      return buildBedrockConverseDriver(credentials, model ?? d.defaultModel ?? '')
     case 'azure':
       // Light-driver arm: OpenAI wire shape but per-resource host
       // (AZURE_OPENAI_ENDPOINT) + `api-key` header + deployment-name-as-model, so
       // it deliberately has NO static baseURL and must not hit the data arm
       // below. Fails closed (throws) if the operator omitted the endpoint.
-      return new AzureOpenAIProvider(credentials[primarySlot(d).dataKey], model ?? d.defaultModel)
+      return new AzureOpenAIProvider(
+        credentials[primarySlot(d).dataKey],
+        model ?? d.defaultModel ?? ''
+      )
+    case 'codex-subscription':
+      if (process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true') {
+        throw new Error('[LLM] makeProvider: codex-subscription is disabled')
+      }
+      if (!model?.trim() || !options?.codex) {
+        throw new Error(
+          '[LLM] makeProvider: codex-subscription requires an explicit model and runtime authorizer/proxy dependencies'
+        )
+      }
+      return new CodexSubscriptionProvider(model, options.codex)
   }
 
   // Data-driven arm: anything carrying a baseURL is OpenAI-compatible and is
   // built straight from its descriptor — no per-id branch. A new divergent
   // (own-SDK) provider must instead add its own case above.
   if (d.baseURL) {
+    if (!d.defaultModel) {
+      throw new Error(`[LLM] makeProvider: provider '${d.id}' requires a defaultModel`)
+    }
     return new OpenAICompatibleProvider(
       { id: d.id, baseURL: d.baseURL, defaultModel: d.defaultModel },
       credentials[primarySlot(d).dataKey],

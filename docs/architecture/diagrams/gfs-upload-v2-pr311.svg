@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated with Fireworks Tech Graph, Style 1 (Flat Icon), refined for PR #311. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 920" width="1400" height="920" role="img" aria-labelledby="diagram-title diagram-desc">
+  <title id="diagram-title">GFS Upload v2 — PR #311 resumable indexed upload flow</title>
+  <desc id="diagram-desc">Control UI and Desktop send bounded indexed parts through External REST and Control API to the GFSC writer, PostgreSQL, and GFS storage. Resume uses HEAD and status reconciliation without blind replay.</desc>
+  <style>
+    text { font-family: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .title { font-size: 26px; font-weight: 700; fill: #123226; }
+    .subtitle { font-size: 14px; fill: #3f6250; }
+    .section { font-size: 13px; font-weight: 700; letter-spacing: 1.2px; fill: #2d5d46; }
+    .label { font-size: 16px; font-weight: 700; fill: #16251e; }
+    .sub { font-size: 12px; fill: #557064; }
+    .tiny { font-size: 11px; fill: #60766b; }
+    .arrow-label { font-size: 11px; font-weight: 700; fill: #32483b; }
+    .chip { font-size: 12px; font-weight: 700; fill: #24533a; }
+    .legend { font-size: 11px; fill: #50665a; }
+  </style>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#effbf3"/>
+      <stop offset="1" stop-color="#d7f1e0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#347257" flood-opacity="0.14"/>
+    </filter>
+    <marker id="arrowData" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowControl" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ea580c"/>
+    </marker>
+    <marker id="arrowStore" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#16a34a"/>
+    </marker>
+    <marker id="arrowRecovery" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#9333ea"/>
+    </marker>
+    <marker id="arrowReject" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+    </marker>
+  </defs>
+  <rect width="1400" height="920" fill="url(#bg)"/>
+  <rect x="28" y="24" width="1344" height="872" rx="24" fill="#f9fffb" fill-opacity="0.86" stroke="#b7dfc5" stroke-width="1.5"/>
+  <text x="64" y="66" class="title">GFS Upload v2 · resumable indexed flow</text>
+  <text x="64" y="94" class="subtitle">PR #311 · product cap 200 MiB · every data request stays below the Cloudflare request ceiling</text>
+  <rect x="1130" y="48" width="190" height="34" rx="17" fill="#dcfce7" stroke="#86efac" stroke-width="1.2"/>
+  <text x="1225" y="70" text-anchor="middle" class="chip">ARCHITECTURE COMPLEMENT</text>
+  <rect x="48" y="128" width="290" height="500" rx="16" fill="#eef8f1" stroke="#9bd7ad" stroke-width="1.5"/>
+  <text x="72" y="157" class="section">CLIENTS</text>
+  <text x="72" y="176" class="tiny">visible UI and bounded local reads</text>
+  <rect x="370" y="128" width="300" height="500" rx="16" fill="#fff8ed" stroke="#f5c27d" stroke-width="1.5"/>
+  <text x="394" y="157" class="section">EDGE + AUTHORITY</text>
+  <text x="394" y="176" class="tiny">rate limit, auth, canonical drive, admission</text>
+  <rect x="704" y="128" width="304" height="500" rx="16" fill="#effaf2" stroke="#9bd7ad" stroke-width="1.5"/>
+  <text x="728" y="157" class="section">WRITER + PERSISTENCE</text>
+  <text x="728" y="176" class="tiny">parts, leases, checksums, finalization</text>
+  <rect x="1040" y="128" width="312" height="500" rx="16" fill="#eef6ff" stroke="#a8c8f2" stroke-width="1.5"/>
+  <text x="1064" y="157" class="section">STORAGE</text>
+  <text x="1064" y="176" class="tiny">staging first, immutable object second</text>
+  <rect x="76" y="198" width="234" height="104" rx="12" fill="#ffffff" stroke="#8cc9a0" stroke-width="1.6" filter="url(#shadow)"/>
+  <rect x="76" y="198" width="234" height="23" rx="12" fill="#d8f0df"/>
+  <rect x="76" y="213" width="234" height="8" fill="#d8f0df"/>
+  <circle cx="92" cy="209" r="4" fill="#ef4444"/><circle cx="105" cy="209" r="4" fill="#f59e0b"/><circle cx="118" cy="209" r="4" fill="#10b981"/>
+  <text x="193" y="256" text-anchor="middle" class="label">Control UI</text>
+  <text x="193" y="278" text-anchor="middle" class="sub">XHR · progress · resume</text>
+  <rect x="76" y="344" width="234" height="104" rx="12" fill="#ffffff" stroke="#8cc9a0" stroke-width="1.6" filter="url(#shadow)"/>
+  <rect x="76" y="344" width="234" height="23" rx="12" fill="#d8f0df"/>
+  <rect x="76" y="359" width="234" height="8" fill="#d8f0df"/>
+  <circle cx="92" cy="355" r="4" fill="#ef4444"/><circle cx="105" cy="355" r="4" fill="#f59e0b"/><circle cx="118" cy="355" r="4" fill="#10b981"/>
+  <text x="193" y="402" text-anchor="middle" class="label">Desktop App</text>
+  <text x="193" y="424" text-anchor="middle" class="sub">bounded streams · fallback 4→2</text>
+  <rect x="76" y="494" width="234" height="82" rx="12" fill="#f4fff6" stroke="#8cc9a0" stroke-width="1.6"/>
+  <text x="193" y="526" text-anchor="middle" class="label">Chunk scheduler</text>
+  <text x="193" y="548" text-anchor="middle" class="sub">8 MiB target · 16 MiB hard cap</text>
+  <text x="193" y="566" text-anchor="middle" class="tiny">per-part progress, no whole-file buffer</text>
+  <path d="M 424 198 L 616 198 L 640 222 L 640 282 L 616 306 L 424 306 L 400 282 L 400 222 Z" fill="#fffaf2" stroke="#f4a261" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="520" y="242" text-anchor="middle" class="label">External REST API</text>
+  <text x="520" y="264" text-anchor="middle" class="sub">edge limiter · Retry-After</text>
+  <text x="520" y="283" text-anchor="middle" class="tiny">relay only; no session store</text>
+  <path d="M 424 360 L 616 360 L 640 384 L 640 452 L 616 476 L 424 476 L 400 452 L 400 384 Z" fill="#fffaf2" stroke="#f4a261" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="520" y="407" text-anchor="middle" class="label">Control API</text>
+  <text x="520" y="430" text-anchor="middle" class="sub">owner / drive / token canonical</text>
+  <text x="520" y="449" text-anchor="middle" class="tiny">weighted PG admission + active slots</text>
+  <rect x="400" y="532" width="240" height="58" rx="10" fill="#fff1f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="520" y="556" text-anchor="middle" class="label" fill="#991b1b">Negative gate</text>
+  <text x="520" y="575" text-anchor="middle" class="tiny" fill="#b91c1c">oversize · geometry · auth · 429</text>
+  <rect x="738" y="198" width="236" height="145" rx="12" fill="#f4fff6" stroke="#79c98f" stroke-width="1.8" filter="url(#shadow)"/>
+  <text x="856" y="239" text-anchor="middle" class="label">GFSC writer</text>
+  <text x="856" y="263" text-anchor="middle" class="sub">indexed parts · checksum</text>
+  <text x="856" y="284" text-anchor="middle" class="sub">idempotent replay · leases</text>
+  <text x="856" y="305" text-anchor="middle" class="tiny">finalize · reconcile · re-authorize</text>
+  <ellipse cx="856" cy="432" rx="112" ry="19" fill="#3f7ba3" stroke="#245474" stroke-width="1.6"/>
+  <rect x="744" y="432" width="224" height="92" fill="#3f7ba3" stroke="#245474" stroke-width="1.6"/>
+  <ellipse cx="856" cy="524" rx="112" ry="19" fill="#2f6184" stroke="#245474" stroke-width="1.6"/>
+  <ellipse cx="856" cy="466" rx="112" ry="19" fill="none" stroke="#b9dcf0" stroke-opacity="0.4" stroke-width="1.1"/>
+  <text x="856" y="475" text-anchor="middle" fill="#ffffff" font-size="15" font-weight="700">PostgreSQL</text>
+  <text x="856" y="497" text-anchor="middle" fill="#dbeafe" font-size="12">sessions · parts · quotas</text>
+  <path d="M 1076 216 L 1122 216 L 1134 202 L 1314 202 L 1314 312 L 1076 312 Z" fill="#e8f5ff" stroke="#83b8e8" stroke-width="1.7" filter="url(#shadow)"/>
+  <path d="M 1076 216 L 1122 216 L 1134 202 L 1188 202 L 1188 216 Z" fill="#d3ecff" stroke="#83b8e8" stroke-width="1.2"/>
+  <text x="1195" y="253" text-anchor="middle" class="label">GFS staging</text>
+  <text x="1195" y="276" text-anchor="middle" class="sub">committed part files</text>
+  <text x="1195" y="295" text-anchor="middle" class="tiny">server-owned .uploads path</text>
+  <path d="M 1076 380 L 1296 380 L 1314 398 L 1314 508 L 1076 508 Z" fill="#ecfff2" stroke="#79c98f" stroke-width="1.7" filter="url(#shadow)"/>
+  <path d="M 1296 380 L 1296 398 L 1314 398" fill="none" stroke="#79c98f" stroke-width="1.2"/>
+  <text x="1195" y="430" text-anchor="middle" class="label">Immutable blob</text>
+  <text x="1195" y="453" text-anchor="middle" class="sub">ordered final object</text>
+  <text x="1195" y="475" text-anchor="middle" class="tiny">resource + manifest receipt</text>
+  <rect x="48" y="654" width="1304" height="218" rx="16" fill="#f7f2ff" stroke="#c8b7f1" stroke-width="1.5"/>
+  <text x="72" y="683" class="section" fill="#6b46a1">RECOVERY CONTRACT</text>
+  <text x="72" y="703" class="tiny">Durable status is authoritative after timeout, disconnect, or process restart.</text>
+  <rect x="420" y="724" width="430" height="88" rx="12" fill="#ffffff" stroke="#bda7ef" stroke-width="1.7" filter="url(#shadow)"/>
+  <text x="635" y="756" text-anchor="middle" class="label">HEAD + status reconciliation</text>
+  <text x="635" y="778" text-anchor="middle" class="sub">adopt committed parts · retry absent parts only</text>
+  <text x="635" y="798" text-anchor="middle" class="tiny">outcome_unknown never becomes blind replay</text>
+  <text x="958" y="721" class="label" font-size="14">Legend</text>
+  <line x1="958" y1="748" x2="995" y2="748" stroke="#2563eb" stroke-width="2" marker-end="url(#arrowData)"/>
+  <text x="1008" y="752" class="legend">data path</text>
+  <line x1="958" y1="773" x2="995" y2="773" stroke="#ea580c" stroke-width="2" marker-end="url(#arrowControl)"/>
+  <text x="1008" y="777" class="legend">auth / control</text>
+  <line x1="958" y1="798" x2="995" y2="798" stroke="#16a34a" stroke-width="2" marker-end="url(#arrowStore)"/>
+  <text x="1008" y="802" class="legend">durable write</text>
+  <line x1="958" y1="823" x2="995" y2="823" stroke="#9333ea" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrowRecovery)"/>
+  <text x="1008" y="827" class="legend">resume / reconcile</text>
+  <text x="72" y="842" class="label" font-size="14">Hard contract</text>
+  <rect x="184" y="824" width="148" height="28" rx="14" fill="#dcfce7" stroke="#9bd7ad" stroke-width="1"/>
+  <text x="258.0" y="842" text-anchor="middle" class="chip">200 MiB file cap</text>
+  <rect x="342" y="824" width="126" height="28" rx="14" fill="#dcfce7" stroke="#9bd7ad" stroke-width="1"/>
+  <text x="405.0" y="842" text-anchor="middle" class="chip">8 MiB target</text>
+  <rect x="478" y="824" width="146" height="28" rx="14" fill="#dcfce7" stroke="#9bd7ad" stroke-width="1"/>
+  <text x="551.0" y="842" text-anchor="middle" class="chip">16 MiB request</text>
+  <rect x="634" y="824" width="142" height="28" rx="14" fill="#dcfce7" stroke="#9bd7ad" stroke-width="1"/>
+  <text x="705.0" y="842" text-anchor="middle" class="chip">4 → 2 fallback</text>
+  <rect x="786" y="824" width="142" height="28" rx="14" fill="#dcfce7" stroke="#9bd7ad" stroke-width="1"/>
+  <text x="857.0" y="842" text-anchor="middle" class="chip">threshold 3</text>
+  <text x="72" y="865" class="tiny">Cloudflare sees each request separately; the aggregate file is assembled from indexed parts.</text>
+  <!-- orthogonal routes keep arrows outside component interiors -->
+  <path d="M 310 250 L 400 250" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowData)"/>
+  <rect x="299.8" y="224" width="110.4" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="355" y="239" text-anchor="middle" class="arrow-label">create + parts</text>
+  <path d="M 310 396 L 350 396 L 350 282 L 400 282" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowData)"/>
+  <rect x="301.4" y="354" width="97.2" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="350" y="369" text-anchor="middle" class="arrow-label">stream parts</text>
+  <path d="M 520 306 L 520 360" fill="none" stroke="#ea580c" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowControl)"/>
+  <rect x="536.3" y="323" width="77.4" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="575" y="338" text-anchor="middle" class="arrow-label">authorize</text>
+  <path d="M 640 418 L 690 418 L 690 270 L 738 270" fill="none" stroke="#2563eb" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowData)"/>
+  <rect x="644.7" y="386" width="90.6" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="690" y="401" text-anchor="middle" class="arrow-label">bounded PUT</text>
+  <path d="M 520 476 L 520 532" fill="none" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowReject)"/>
+  <rect x="522.2" y="496" width="123.6" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="584" y="511" text-anchor="middle" class="arrow-label">reject 4xx / 429</text>
+  <!-- persistence paths -->
+  <path d="M 856 343 L 856 432" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowStore)"/>
+  <rect x="868.2" y="374" width="123.6" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="930" y="389" text-anchor="middle" class="arrow-label">reserve / commit</text>
+  <path d="M 974 270 L 1076 270" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowStore)"/>
+  <rect x="983.0" y="235" width="84.0" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="1025" y="250" text-anchor="middle" class="arrow-label">fsync part</text>
+  <path d="M 1195 312 L 1195 380" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowStore)"/>
+  <rect x="1201.5" y="336" width="117.0" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="1260" y="351" text-anchor="middle" class="arrow-label">ordered publish</text>
+  <!-- client-side chunking -->
+  <path d="M 193 448 L 193 494" fill="none" stroke="#ea580c" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowControl)"/>
+  <rect x="205.0" y="461" width="84.0" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="247" y="476" text-anchor="middle" class="arrow-label">split file</text>
+  <!-- recovery paths are dashed and routed through the lower band -->
+  <path d="M 738 324 L 700 324 L 700 704 L 700 724" fill="none" stroke="#9333ea" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 5" marker-end="url(#arrowRecovery)"/>
+  <rect x="683.5" y="599" width="117.0" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="742" y="614" text-anchor="middle" class="arrow-label">outcome_unknown</text>
+  <path d="M 420 768 L 350 768 L 350 548 L 310 548" fill="none" stroke="#9333ea" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="7 5" marker-end="url(#arrowRecovery)"/>
+  <rect x="296.6" y="733" width="136.8" height="22" rx="6" fill="#ffffff" fill-opacity="0.96"/>
+  <text x="365" y="748" text-anchor="middle" class="arrow-label">HEAD/status resume</text>
+  <rect x="406" y="606" width="228" height="18" rx="9" fill="#fff1f2" fill-opacity="0.9"/>
+  <text x="520" y="619" text-anchor="middle" class="tiny" fill="#b91c1c">209715201 is rejected before payload allocation</text>
+</svg>

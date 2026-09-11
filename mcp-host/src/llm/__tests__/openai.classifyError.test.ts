@@ -7,7 +7,7 @@ describe('OpenAIProvider.classifyError', () => {
 
   it('classifies 429 as RateLimited, retryable', () => {
     const result = provider.classifyError({ status: 429, message: 'rate limit exceeded' })
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       code: LlmErrorCode.RateLimited,
       retryable: true,
       message: 'rate limit exceeded',
@@ -19,7 +19,7 @@ describe('OpenAIProvider.classifyError', () => {
       status: 429,
       error: { code: 'insufficient_quota', message: 'You exceeded your current quota' },
     }
-    expect(provider.classifyError(err)).toEqual({
+    expect(provider.classifyError(err)).toMatchObject({
       code: LlmErrorCode.InsufficientQuota,
       retryable: false,
       message: 'You exceeded your current quota',

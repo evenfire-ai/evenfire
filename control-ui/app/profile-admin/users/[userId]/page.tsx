@@ -3,25 +3,34 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
+import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
+import { RowActionsMenu } from '@components/RowActionsMenu'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import { TeamRolePermissionEditor } from '@components/TeamRolePermissionEditor'
 import { useToast } from '@components/Toast'
 import { CheckboxField } from '@components/ui'
 import { CONTROL_ROUTES } from '@constants/routes'
 import { partitionVisibleAccess } from '@lib/accessVisibility'
+import {
+  applyAgentAccessCompatibilityUpdate,
+  effectiveAgentNamesForAccess,
+} from '@lib/agentAccessCompatibility'
 import { getAgentDisplayName } from '@lib/agentName'
 import type { DeleteCandidateTeam } from '@lib/profileAdminDelete'
 import { formatTeamNames, getSoloMemberTeamsForUser } from '@lib/profileAdminDelete'
 import { IconUsers } from '../../../../components/Sidebar/icons'
 import { UserApprovalMediumsPanel } from '../../../../components/UserApprovalMediumsPanel'
-import { IconPencil, IconX } from '../../../../components/icons'
+import { IconX } from '../../../../components/icons'
 import {
   AdminUserChannels,
+  ContextResource,
+  DeleteAdminUserRequest,
   HostResource,
   addAdminTeamMember,
   apiGet,
+  createDeleteAdminUserRequest,
   deleteAdminMember,
   deleteAdminTeam,
   deleteAdminUser,
@@ -46,18 +55,11 @@ import { formatTeamRole, permissionsForTeamRole } from '../../../../lib/teamRole
 
 type TeamRole = 'admin' | 'inviter' | 'member'
 
-type UserTab =
-  | 'contact'
-  | 'approval-dms'
-  | 'communication-channels'
-  | 'contexts'
-  | 'teams'
-  | 'agents'
+type UserTab = 'contact' | 'approval-dms' | 'communication-channels' | 'teams' | 'agents'
 const USER_TABS: UserTab[] = [
   'contact',
   'approval-dms',
   'communication-channels',
-  'contexts',
   'teams',
   'agents',
 ]
@@ -66,12 +68,12 @@ const USER_TAB_LABELS: Record<UserTab, string> = {
   contact: 'Contact',
   'approval-dms': 'Approval DMs',
   'communication-channels': 'Communication Channels',
-  contexts: 'Contexts',
   teams: 'Teams',
   agents: 'Agents',
 }
 
 function parseUserTab(value: string | undefined): UserTab {
+  if (value === 'contexts') return 'agents'
   return USER_TABS.includes(value as UserTab) ? (value as UserTab) : 'contact'
 }
 
@@ -82,13 +84,13 @@ export default function UserDetailsPage() {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const deleteUserTeamCheckIdRef = useRef(0)
+  const deleteUserRequestRef = useRef<DeleteAdminUserRequest | null>(null)
 
   const [activeTab, setActiveTab] = useState<UserTab>(() => parseUserTab(params.tab))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [initialLoading, setInitialLoading] = useState(true)
   const [editingContact, setEditingContact] = useState(false)
-  const [showAddContext, setShowAddContext] = useState(false)
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [showAddTeam, setShowAddTeam] = useState(false)
 
@@ -110,9 +112,9 @@ export default function UserDetailsPage() {
   const [newTelegramId, setNewTelegramId] = useState('')
 
   const [availableContextIds, setAvailableContextIds] = useState<string[]>([])
+  const [contextResources, setContextResources] = useState<ContextResource[]>([])
   const [assignedContextIds, setAssignedContextIds] = useState<string[]>([])
   const [deletedContextIds, setDeletedContextIds] = useState<string[]>([])
-  const [selectedContextIdsToAdd, setSelectedContextIdsToAdd] = useState<string[]>([])
   const [hosts, setHosts] = useState<HostResource[]>([])
   const [assignedAgentNames, setAssignedAgentNames] = useState<string[]>([])
   const [observedAgentNames, setObservedAgentNames] = useState<string[]>([])
@@ -142,12 +144,15 @@ export default function UserDetailsPage() {
       ).sort((a, b) => a.localeCompare(b)),
     [hosts]
   )
-  const availableContextOptions = useMemo(
+  const effectiveAgentNames = useMemo(
     () =>
-      availableContextIds
-        .filter(contextId => !assignedContextIds.includes(contextId))
-        .map(contextId => ({ value: contextId, label: contextId })),
-    [assignedContextIds, availableContextIds]
+      effectiveAgentNamesForAccess({
+        assignedAgentNames,
+        assignedContextIds,
+        contexts: contextResources,
+        hosts,
+      }),
+    [assignedAgentNames, assignedContextIds, contextResources, hosts]
   )
   const availableTeamOptions = useMemo(
     () =>
@@ -163,13 +168,13 @@ export default function UserDetailsPage() {
   const availableAgentOptions = useMemo(
     () =>
       hostNameOptions
-        .filter(agentName => !assignedAgentNames.includes(agentName))
+        .filter(agentName => !effectiveAgentNames.includes(agentName))
         .map(agentName => ({
           value: agentName,
-          label: getAgentDisplayName(agentName),
+          label: getAgentDisplayName(agentName, hosts),
           description: agentName,
         })),
-    [assignedAgentNames, hostNameOptions]
+    [effectiveAgentNames, hostNameOptions, hosts]
   )
   const userCommunicationConversations = useMemo(
     () =>
@@ -252,6 +257,9 @@ export default function UserDetailsPage() {
         .map(item => contextIdFromResource(item as never))
         .filter(Boolean)
         .sort((a, b) => a.localeCompare(b))
+      setContextResources(
+        Array.isArray(contexts.items) ? (contexts.items as ContextResource[]) : []
+      )
       const hostNames = Array.from(
         new Set(
           (hostsData.items || [])
@@ -335,43 +343,6 @@ export default function UserDetailsPage() {
     }
   }
 
-  async function saveContexts(next: string[], message: string) {
-    setBusy(true)
-    setError('')
-    try {
-      const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminUserContexts(userId, normalized)
-      const partition = partitionVisibleAccess(
-        updated.contextIds || [],
-        availableContextIds,
-        updated.deletedContextIds || []
-      )
-      setAssignedContextIds(partition.active)
-      setDeletedContextIds(partition.deleted)
-      setSelectedContextIdsToAdd([])
-      showToast(message, { tone: 'success' })
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to update member context access')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function removeContextAccess(contextId: string) {
-    const shouldRemove = await confirm({
-      title: 'Remove Context Access',
-      message: `Remove ${userName || emailDraft || 'this member'}'s access to ${contextId}?`,
-      confirmLabel: 'Remove access',
-      tone: 'danger',
-    })
-    if (!shouldRemove) return
-
-    await saveContexts(
-      assignedContextIds.filter(id => id !== contextId),
-      'Context access updated.'
-    )
-  }
-
   async function addUserToTeams() {
     if (selectedTeamIdsToAdd.length === 0) return
     setBusy(true)
@@ -437,14 +408,34 @@ export default function UserDetailsPage() {
     setError('')
     try {
       const normalized = Array.from(new Set(next.map(v => v.trim()).filter(Boolean)))
-      const updated = await updateAdminUserAgents(userId, normalized, observedAgentNames)
-      const partition = partitionVisibleAccess(
-        updated.agentNames || [],
+      const [updatedAgents, updatedContexts] = await applyAgentAccessCompatibilityUpdate({
+        contexts: contextResources,
+        hosts,
+        loadCurrentContextIds: async () => {
+          const current = await getAdminUserContexts(userId)
+          return Array.isArray(current.contextIds) ? current.contextIds : []
+        },
+        nextGrantedAgentNames: normalized,
+        updateAgents: agentNames => updateAdminUserAgents(userId, agentNames, observedAgentNames),
+        updateContexts: contextIds => updateAdminUserContexts(userId, contextIds),
+      })
+      const agentPartition = partitionVisibleAccess(
+        updatedAgents.agentNames || [],
         hostNameOptions,
-        updated.deletedAgentNames || []
+        updatedAgents.deletedAgentNames || []
       )
-      setAssignedAgentNames(partition.active)
-      setObservedAgentNames([...(updated.agentNames || []), ...(updated.deletedAgentNames || [])])
+      const contextPartition = partitionVisibleAccess(
+        updatedContexts.contextIds || [],
+        availableContextIds,
+        updatedContexts.deletedContextIds || []
+      )
+      setAssignedAgentNames(agentPartition.active)
+      setObservedAgentNames([
+        ...(updatedAgents.agentNames || []),
+        ...(updatedAgents.deletedAgentNames || []),
+      ])
+      setAssignedContextIds(contextPartition.active)
+      setDeletedContextIds(contextPartition.deleted)
       setSelectedAgentNamesToAdd([])
       showToast(message, { tone: 'success' })
     } catch (e) {
@@ -464,7 +455,7 @@ export default function UserDetailsPage() {
     if (!shouldRevoke) return
 
     await saveAgents(
-      assignedAgentNames.filter(name => name !== agentName),
+      effectiveAgentNames.filter(name => name !== agentName),
       'Agent access updated.'
     )
   }
@@ -477,6 +468,7 @@ export default function UserDetailsPage() {
     setDeleteUserSoloTeams([])
     setDeleteEmptyTeamsWithUser(false)
     setDeleteUserTeamCheckLoading(false)
+    deleteUserRequestRef.current = createDeleteAdminUserRequest()
     setShowDeleteUserConfirm(true)
     if (userTeams.length === 0) return
 
@@ -511,7 +503,11 @@ export default function UserDetailsPage() {
     const teamsToDelete = deleteEmptyTeamsWithUser ? deleteUserSoloTeams : []
     setError('')
     try {
-      await deleteAdminUser(userId)
+      await deleteAdminUser(
+        userId,
+        deleteUserRequestRef.current ??
+          (deleteUserRequestRef.current = createDeleteAdminUserRequest())
+      )
       const teamDeleteResults = await Promise.allSettled(
         teamsToDelete.map(team => deleteAdminTeam(team.id))
       )
@@ -520,6 +516,7 @@ export default function UserDetailsPage() {
         return result?.status === 'rejected'
       })
       setShowDeleteUserConfirm(false)
+      deleteUserRequestRef.current = null
       if (failedTeams.length > 0) {
         showToast(
           `Member deleted, but ${failedTeams.length === 1 ? 'team' : 'teams'} could not be deleted: ${formatTeamNames(failedTeams)}.`,
@@ -541,10 +538,33 @@ export default function UserDetailsPage() {
     }
   }
 
+  const activeTabAction =
+    activeTab === 'teams' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddTeam(true)}
+        disabled={busy}
+      >
+        Add to team
+      </button>
+    ) : activeTab === 'agents' ? (
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => setShowAddAgent(true)}
+        disabled={busy}
+      >
+        Grant agent
+      </button>
+    ) : null
+
   return (
     <DetailPageShell<UserTab>
       activeTab={activeTab}
+      actions={activeTabAction}
       backLabel="Back to members"
+      contentMode="plain"
       error={error}
       icon={<IconUsers />}
       onBack={() => router.push(CONTROL_ROUTES.usersAndTeams.users)}
@@ -552,7 +572,7 @@ export default function UserDetailsPage() {
       subtitle={
         initialLoading
           ? 'Loading member details...'
-          : 'Channels, approval DMs, context access, teams, and agents.'
+          : 'Channels, approval DMs, connector access, teams, and agents.'
       }
       tabAriaLabel="Member sections"
       tabs={USER_TABS.map(tab => ({
@@ -884,8 +904,8 @@ export default function UserDetailsPage() {
           ) : userCommunicationConversations.length === 0 ? (
             <div className="cu-empty">No connected communication channel conversations.</div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Communication channel</th>
@@ -919,158 +939,18 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
-          )}
-        </>
-      )}
-
-      {activeTab === 'contexts' && (
-        <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Contexts this member may access.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddContext(true)}
-              disabled={busy}
-            >
-              Add context
-            </button>
-          </div>
-          {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
-                <thead>
-                  <tr>
-                    <th>Context</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[1, 2, 3].map(i => (
-                    <tr key={i}>
-                      <td>
-                        <div
-                          className="cu-skeleton cu-skeleton--cell"
-                          style={{ width: '10rem' }}
-                        ></div>
-                      </td>
-                      <td></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : assignedContextIds.length === 0 ? (
-            <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
-              No contexts assigned.
-            </div>
-          ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
-                <thead>
-                  <tr>
-                    <th>Context</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {assignedContextIds.map(contextId => (
-                    <tr key={contextId}>
-                      <td>
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.contexts.detail(contextId))}
-                        >
-                          {contextId}
-                        </button>
-                      </td>
-                      <td>
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: '0.35rem',
-                            justifyContent: 'flex-end',
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void removeContextAccess(contextId)}
-                            disabled={busy}
-                            title="Remove"
-                            aria-label="Remove context"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {!initialLoading && deletedContextIds.length > 0 && (
-            <>
-              <p className="cu-muted cu-deleted-access-heading">Deleted contexts</p>
-              <div className="cu-table-wrap">
-                <table className="cu-table">
-                  <tbody>
-                    {deletedContextIds.map(contextId => (
-                      <tr key={contextId}>
-                        <td>{contextId}</td>
-                        <td className="cu-muted">Deleted</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
+              </DataTable>
+            </TableViewport>
           )}
         </>
       )}
 
       {activeTab === 'teams' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Team memberships and roles.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddTeam(true)}
-              disabled={busy}
-            >
-              Add to team
-            </button>
-          </div>
+          <p className="cu-muted cu-detail-section-copy">Team memberships and roles.</p>
           {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Team</th>
@@ -1111,15 +991,15 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           ) : userTeams.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               Not a member of any team yet.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Team</th>
@@ -1166,75 +1046,51 @@ export default function UserDetailsPage() {
                             aria-label={`${team.name} can delete members`}
                           />
                         </td>
-                        <td>
-                          <div
-                            style={{
-                              display: 'flex',
-                              gap: '0.35rem',
-                              justifyContent: 'flex-end',
-                            }}
-                          >
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--ghost"
-                              onClick={() => {
-                                setRoleEditTeam(team)
-                                setRoleEditDraft(team.role)
-                              }}
-                              disabled={busy}
-                              aria-label={`Edit permissions for ${team.name}`}
-                            >
-                              <IconPencil width={14} height={14} />
-                            </button>
-                            <button
-                              type="button"
-                              className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                              onClick={() => void removeUserFromTeam(team)}
-                              disabled={busy}
-                              aria-label={`Remove member from ${team.name}`}
-                              title="Remove"
-                            >
-                              <IconX width={16} height={16} />
-                            </button>
-                          </div>
+                        <td className="cu-table__cell-actions">
+                          <RowActionsMenu
+                            ariaLabel={`Actions for ${team.name}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View details',
+                                onClick: () =>
+                                  router.push(CONTROL_ROUTES.usersAndTeams.team(team.id)),
+                              },
+                              {
+                                key: 'edit',
+                                label: 'Edit permissions',
+                                onClick: () => {
+                                  setRoleEditTeam(team)
+                                  setRoleEditDraft(team.role)
+                                },
+                                disabled: busy,
+                              },
+                              {
+                                key: 'remove',
+                                label: 'Remove from team',
+                                onClick: () => void removeUserFromTeam(team),
+                                disabled: busy,
+                                danger: true,
+                              },
+                            ]}
+                          />
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           )}
         </>
       )}
 
       {activeTab === 'agents' && (
         <>
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginBottom: '1rem',
-            }}
-          >
-            <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
-              Agents this member may use.
-            </p>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddAgent(true)}
-              disabled={busy}
-            >
-              Grant agent
-            </button>
-          </div>
+          <p className="cu-muted cu-detail-section-copy">Agents this member may use.</p>
           {initialLoading ? (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Agent</th>
@@ -1254,15 +1110,15 @@ export default function UserDetailsPage() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
-          ) : assignedAgentNames.length === 0 ? (
+              </DataTable>
+            </TableViewport>
+          ) : effectiveAgentNames.length === 0 ? (
             <div className="cu-empty" style={{ padding: '0.5rem 0' }}>
               No agent access yet.
             </div>
           ) : (
-            <div className="cu-table-wrap">
-              <table className="cu-table">
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table">
                 <thead>
                   <tr>
                     <th>Agent</th>
@@ -1270,7 +1126,7 @@ export default function UserDetailsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {assignedAgentNames.map(agentName => (
+                  {effectiveAgentNames.map(agentName => (
                     <tr key={agentName}>
                       <td>
                         <button
@@ -1281,31 +1137,30 @@ export default function UserDetailsPage() {
                           {agentName}
                         </button>
                       </td>
-                      <td>
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: '0.35rem',
-                            justifyContent: 'flex-end',
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="cu-btn cu-btn--icon cu-btn--danger-icon"
-                            onClick={() => void revokeAgentAccess(agentName)}
-                            disabled={busy}
-                            title="Revoke"
-                            aria-label="Revoke agent"
-                          >
-                            <IconX width={16} height={16} />
-                          </button>
-                        </div>
+                      <td className="cu-table__cell-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for ${agentName}`}
+                          actions={[
+                            {
+                              key: 'view',
+                              label: 'View details',
+                              onClick: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                            },
+                            {
+                              key: 'revoke',
+                              label: 'Revoke access',
+                              onClick: () => void revokeAgentAccess(agentName),
+                              disabled: busy,
+                              danger: true,
+                            },
+                          ]}
+                        />
                       </td>
                     </tr>
                   ))}
                 </tbody>
-              </table>
-            </div>
+              </DataTable>
+            </TableViewport>
           )}
         </>
       )}
@@ -1372,90 +1227,6 @@ export default function UserDetailsPage() {
           </section>
         </div>
       ) : null}
-
-      {showAddContext && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            background: 'rgba(0, 0, 0, 0.6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000,
-            padding: '1rem',
-          }}
-          role="presentation"
-          onClick={e => {
-            if (e.target === e.currentTarget && !busy) setShowAddContext(false)
-          }}
-        >
-          <div
-            className="cu-modal-panel cu-modal-panel--selection"
-            role="dialog"
-            aria-labelledby="add-context-title"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="cu-modal-panel__head">
-              <strong id="add-context-title" style={{ fontSize: '1rem', lineHeight: 1.35 }}>
-                Add context
-              </strong>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost"
-                onClick={() => setShowAddContext(false)}
-                disabled={busy}
-                aria-label="Close"
-              >
-                <IconX width={18} height={18} />
-              </button>
-            </div>
-
-            <div className="cu-field">
-              <label htmlFor="member-context-picker">Contexts</label>
-              <SelectionDropdown
-                id="member-context-picker"
-                inline
-                value={selectedContextIdsToAdd}
-                onChange={setSelectedContextIdsToAdd}
-                options={availableContextOptions}
-                placeholder="Select contexts"
-                searchPlaceholder="Search contexts..."
-                selectionLabel="Selected contexts"
-                emptyLabel="No available contexts."
-                disabled={busy}
-              />
-            </div>
-
-            <div className="cu-modal-panel__foot">
-              <button
-                type="button"
-                className="cu-btn cu-btn--ghost cu-btn--sm"
-                onClick={() => setShowAddContext(false)}
-                disabled={busy}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary"
-                onClick={() => {
-                  void saveContexts(
-                    [...assignedContextIds, ...selectedContextIdsToAdd],
-                    selectedContextIdsToAdd.length === 1
-                      ? 'Context access updated.'
-                      : 'Contexts access updated.'
-                  )
-                  setShowAddContext(false)
-                }}
-                disabled={busy || selectedContextIdsToAdd.length === 0}
-              >
-                {selectedContextIdsToAdd.length > 1 ? 'Add contexts' : 'Add context'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {showAddTeam && (
         <div
@@ -1617,7 +1388,7 @@ export default function UserDetailsPage() {
                 className="cu-btn cu-btn--primary"
                 onClick={() => {
                   void saveAgents(
-                    [...assignedAgentNames, ...selectedAgentNamesToAdd],
+                    [...effectiveAgentNames, ...selectedAgentNamesToAdd],
                     selectedAgentNamesToAdd.length === 1
                       ? 'Agent access updated.'
                       : 'Agents access updated.'

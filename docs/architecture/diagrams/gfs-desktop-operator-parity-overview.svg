@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" width="1200" height="900">
+  <style>text{font-family:Helvetica Neue,Helvetica,Arial,sans-serif}.title{font-size:22px;font-weight:600;fill:#111827}.label{font-size:14px;fill:#111827}.small{font-size:12px;fill:#6b7280}.tiny{font-size:11px;fill:#6b7280}.node-title{font-size:14px;font-weight:600;fill:#111827}.node-sub{font-size:11px;fill:#6b7280}</style>
+  <defs>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#2563eb"/></marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#16a34a"/></marker>
+    <marker id="arrow-alert" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#dc2626"/></marker>
+    <marker id="arrow-purple" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#9333ea"/></marker>
+  </defs>
+  <rect width="1200" height="900" fill="#ffffff"/>
+  <text x="40" y="42" class="title">Self-hosted Desktop GFS operator parity</text>
+  <text x="40" y="66" class="small">Explicit setup link · GFS-only authority · governed revoke · generation-aware denial</text>
+  <rect x="34" y="92" width="1132" height="155" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="50" y="116" class="small" font-weight="600" letter-spacing="1">INITIAL SELF-HOSTED SETUP</text>
+  <rect x="70" y="138" width="210" height="76" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="175" y="166" text-anchor="middle" class="node-title">Setup route</text>
+  <text x="175" y="188" text-anchor="middle" class="node-sub">creates admin + Desktop user + link</text>
+  <rect x="390" y="138" width="250" height="76" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="515" y="166" text-anchor="middle" class="node-title">Explicit operator link</text>
+  <text x="515" y="188" text-anchor="middle" class="node-sub">initial_setup · generation 1 pair</text>
+  <rect x="750" y="138" width="350" height="76" rx="8" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="925" y="166" text-anchor="middle" class="node-title">Governed audit event</text>
+  <text x="925" y="188" text-anchor="middle" class="node-sub">IDs + actor/source + request correlation</text>
+  <path d="M280 176 H390" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <path d="M640 176 H750" stroke="#16a34a" stroke-width="2" fill="none" marker-end="url(#arrow-green)"/>
+  <rect x="34" y="274" width="1132" height="226" rx="10" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="50" y="298" class="small" font-weight="600" letter-spacing="1">RUNTIME AUTHORITY PATH</text>
+  <rect x="70" y="328" width="205" height="98" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="172" y="360" text-anchor="middle" class="node-title">Desktop app</text>
+  <text x="172" y="381" text-anchor="middle" class="node-sub">session + GFS request</text>
+  <text x="172" y="400" text-anchor="middle" class="node-sub">operator or ordinary view</text>
+  <polygon points="390,328 420,344 420,410 390,426 360,410 360,344" fill="#fff7ed" stroke="#fdba74" stroke-width="1.5"/>
+  <text x="390" y="370" text-anchor="middle" class="node-title">Control</text>
+  <text x="390" y="389" text-anchor="middle" class="node-title">API</text>
+  <text x="390" y="447" text-anchor="middle" class="node-sub">flag + link resolver</text>
+  <rect x="520" y="328" width="250" height="98" rx="8" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="645" y="360" text-anchor="middle" class="node-title">Brokered authority</text>
+  <text x="645" y="381" text-anchor="middle" class="node-sub">principalType + exact admin/user IDs</text>
+  <text x="645" y="400" text-anchor="middle" class="node-sub">auth/session/link generations</text>
+  <rect x="860" y="328" width="250" height="98" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="985" y="360" text-anchor="middle" class="node-title">GFS controller</text>
+  <text x="985" y="381" text-anchor="middle" class="node-sub">active lifecycle + link checks</text>
+  <text x="985" y="400" text-anchor="middle" class="node-sub">root + grants + shares</text>
+  <path d="M275 377 H356" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="292" y="349" width="76" height="18" rx="4" fill="#ffffff" opacity="0.96"/><text x="330" y="362" text-anchor="middle" class="tiny">request</text>
+  <path d="M420 377 H520" stroke="#9333ea" stroke-width="1.8" fill="none" marker-end="url(#arrow-purple)"/>
+  <rect x="438" y="349" width="80" height="18" rx="4" fill="#ffffff" opacity="0.96"/><text x="478" y="362" text-anchor="middle" class="tiny">resolve</text>
+  <path d="M770 377 H860" stroke="#2563eb" stroke-width="2" fill="none" marker-end="url(#arrow-blue)"/>
+  <rect x="785" y="349" width="78" height="18" rx="4" fill="#ffffff" opacity="0.96"/><text x="824" y="362" text-anchor="middle" class="tiny">broker</text>
+  <rect x="34" y="526" width="1132" height="150" rx="10" fill="#fef2f2" stroke="#fecaca" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="50" y="550" class="small" font-weight="600" letter-spacing="1">VISIBLE CONTROL UI REVOKE</text>
+  <rect x="70" y="574" width="220" height="70" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5"/>
+  <text x="180" y="602" text-anchor="middle" class="node-title">Control UI</text>
+  <text x="180" y="622" text-anchor="middle" class="node-sub">Revoke operator access</text>
+  <rect x="430" y="574" width="275" height="70" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="568" y="602" text-anchor="middle" class="node-title">CAS revoke + tombstone</text>
+  <text x="568" y="622" text-anchor="middle" class="node-sub">tombstone + audit + idempotent CAS</text>
+  <rect x="850" y="574" width="260" height="70" rx="8" fill="#ffffff" stroke="#fecaca" stroke-width="1.5"/>
+  <text x="980" y="602" text-anchor="middle" class="node-title">Immediate denial</text>
+  <text x="980" y="622" text-anchor="middle" class="node-sub">operator root denied; user path remains scoped</text>
+  <path d="M290 609 H430" stroke="#dc2626" stroke-width="2" fill="none" marker-end="url(#arrow-alert)"/>
+  <path d="M705 609 H850" stroke="#dc2626" stroke-width="2" fill="none" marker-end="url(#arrow-alert)"/>
+  <path d="M980 574 C980 492 985 464 985 426" stroke="#dc2626" stroke-width="1.6" fill="none" stroke-dasharray="6,4" marker-end="url(#arrow-alert)"/>
+  <rect x="990" y="468" width="100" height="18" rx="4" fill="#ffffff" opacity="0.96"/><text x="1040" y="481" text-anchor="middle" class="tiny">deny stale token</text>
+  <text x="50" y="716" class="small" font-weight="600" letter-spacing="1">CURRENT SAFEGUARDS AND FOLLOW-UPS</text>
+  <rect x="70" y="734" width="300" height="74" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5"/>
+  <text x="220" y="763" text-anchor="middle" class="node-title">Rate-limit tiers</text>
+  <text x="220" y="784" text-anchor="middle" class="node-sub">edge 600/1200/1800 · API 10/120/30</text>
+  <rect x="450" y="734" width="300" height="74" rx="8" fill="#faf5ff" stroke="#d8b4fe" stroke-width="1.5"/>
+  <text x="600" y="763" text-anchor="middle" class="node-title">Schema 0091–0096</text>
+  <text x="600" y="784" text-anchor="middle" class="node-sub">link · audit · generations · retirement</text>
+  <rect x="830" y="734" width="300" height="74" rx="8" fill="#ffffff" stroke="#d1d5db" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="980" y="763" text-anchor="middle" class="node-title">Global follow-ups</text>
+  <text x="980" y="784" text-anchor="middle" class="node-sub">IPv6 keys + coherent 429 metadata</text>
+  <g transform="translate(54,858)">
+    <line x1="0" y1="8" x2="30" y2="8" stroke="#2563eb" stroke-width="2" marker-end="url(#arrow-blue)"/><text x="38" y="12" class="tiny">request / response</text>
+    <line x1="145" y1="8" x2="175" y2="8" stroke="#16a34a" stroke-width="2" marker-end="url(#arrow-green)"/><text x="183" y="12" class="tiny">persisted setup/audit</text>
+    <line x1="335" y1="8" x2="365" y2="8" stroke="#9333ea" stroke-width="2" marker-end="url(#arrow-purple)"/><text x="373" y="12" class="tiny">authority resolution</text>
+    <line x1="515" y1="8" x2="545" y2="8" stroke="#dc2626" stroke-width="2" marker-end="url(#arrow-alert)"/><text x="553" y="12" class="tiny">revoke / deny</text>
+  </g>
+</svg>

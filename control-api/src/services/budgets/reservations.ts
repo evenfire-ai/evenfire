@@ -36,9 +36,9 @@ import { toNumber } from './definitions.js'
 export const BUDGET_RESERVATION_TTL_SECONDS = config.budgetReservationTtlSeconds
 
 /** Minimal transaction client shape — pg's PoolClient satisfies it. */
-type ReservationTxClient = {
+export type ReservationTxClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
-  release: () => void
+  release?: () => void
 }
 
 /** Minimal connector shape — pg's Pool satisfies it. */
@@ -86,66 +86,22 @@ export type DangerZoneReserveResult =
  */
 export async function reserveInDangerZone(
   input: DangerZoneReserveInput,
-  connector: ReservationConnector = pool
+  connector: ReservationConnector = pool,
+  existingClient?: ReservationTxClient
 ): Promise<DangerZoneReserveResult> {
+  if (existingClient) {
+    return decideDangerZoneReservation(existingClient, input)
+  }
+
   const client = await connector.connect()
   let inTransaction = false
   try {
     await client.query('BEGIN')
     inTransaction = true
-
-    // Serialize concurrent checks of THIS budget. xact-scoped: auto-released on
-    // COMMIT/ROLLBACK. hashtext(uuid::text) → int4, implicitly widened to the
-    // bigint single-arg overload of pg_advisory_xact_lock.
-    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [input.budgetId])
-
-    // Exclude THIS task's own still-active reservation from the pending sum. A
-    // retried check of the same in-flight task (same task_ref) would otherwise
-    // count its previous reservation as a concurrent competitor and over-deny.
-    // Only excludable when we have a task_ref to identify "self": with a null
-    // task_ref we cannot tell our own row from another anonymous task's, so we
-    // must NOT exclude (excluding all null-task rows would under-count → over-
-    // allow). `IS DISTINCT FROM` handles the null-safe comparison.
-    const pendingParams: unknown[] = [input.budgetId]
-    let selfExclusion = ''
-    if (input.taskRef) {
-      pendingParams.push(input.taskRef)
-      selfExclusion = ' AND task_ref IS DISTINCT FROM $2'
-    }
-    const pendingRes = await client.query(
-      `SELECT COALESCE(SUM(est_amount), 0) AS pending
-         FROM budget_pending_reservations
-        WHERE budget_id = $1 AND expires_at > NOW()${selfExclusion}`,
-      pendingParams
-    )
-    const pending = toNumber((pendingRes.rows[0] as { pending?: unknown } | undefined)?.pending)
-    const effectiveRemaining = input.limit - input.spent - pending
-
-    if (effectiveRemaining < input.minStart) {
-      // Another in-flight task already consumed the headroom — deny without
-      // reserving. COMMIT (no writes) releases the advisory lock.
-      await client.query('COMMIT')
-      inTransaction = false
-      return { decision: 'deny' }
-    }
-
-    const insertRes = await client.query(
-      `INSERT INTO budget_pending_reservations (budget_id, est_amount, task_ref, host_ref, expires_at)
-       VALUES ($1, $2, $3, $4, NOW() + ($5::int * INTERVAL '1 second'))
-       RETURNING id`,
-      [
-        input.budgetId,
-        input.estAmount,
-        input.taskRef,
-        input.hostRef,
-        BUDGET_RESERVATION_TTL_SECONDS,
-      ]
-    )
+    const result = await decideDangerZoneReservation(client, input)
     await client.query('COMMIT')
     inTransaction = false
-
-    const reservationId = String((insertRes.rows[0] as { id: unknown }).id)
-    return { decision: 'allow', reservationId }
+    return result
   } catch (err) {
     if (inTransaction) {
       try {
@@ -156,8 +112,58 @@ export async function reserveInDangerZone(
     }
     throw err
   } finally {
-    client.release()
+    client.release?.()
   }
+}
+
+async function decideDangerZoneReservation(
+  client: ReservationTxClient,
+  input: DangerZoneReserveInput
+): Promise<DangerZoneReserveResult> {
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [input.budgetId])
+
+  const pendingParams: unknown[] = [input.budgetId]
+  let selfExclusion = ''
+  if (input.taskRef) {
+    pendingParams.push(input.taskRef)
+    selfExclusion = ' AND task_ref IS DISTINCT FROM $2'
+  }
+  const pendingRes = await client.query(
+    `SELECT COALESCE(SUM(est_amount), 0) AS pending
+       FROM budget_pending_reservations
+      WHERE budget_id = $1 AND expires_at > NOW()${selfExclusion}`,
+    pendingParams
+  )
+  const pending = toNumber((pendingRes.rows[0] as { pending?: unknown } | undefined)?.pending)
+  const effectiveRemaining = input.limit - input.spent - pending
+
+  if (effectiveRemaining < input.minStart) {
+    return { decision: 'deny' }
+  }
+
+  const insertRes = await client.query(
+    `INSERT INTO budget_pending_reservations (budget_id, est_amount, task_ref, host_ref, expires_at)
+     VALUES ($1, $2, $3, $4, NOW() + ($5::int * INTERVAL '1 second'))
+     RETURNING id`,
+    [input.budgetId, input.estAmount, input.taskRef, input.hostRef, BUDGET_RESERVATION_TTL_SECONDS]
+  )
+  const reservationId = String((insertRes.rows[0] as { id: unknown }).id)
+  return { decision: 'allow', reservationId }
+}
+
+export async function getActiveReservation(
+  db: { query: ReservationTxClient['query'] },
+  input: { reservationId: string; hostRef: string }
+): Promise<{ id: string } | null> {
+  const result = await db.query(
+    `SELECT id::text AS id
+       FROM budget_pending_reservations
+      WHERE id = $1 AND host_ref = $2 AND expires_at > NOW()
+      LIMIT 1`,
+    [input.reservationId, input.hostRef]
+  )
+  const row = result.rows[0] as { id?: unknown } | undefined
+  return row?.id ? { id: String(row.id) } : null
 }
 
 export type ReleaseReservationInput = {

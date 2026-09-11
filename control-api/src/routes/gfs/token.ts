@@ -48,6 +48,15 @@ export function registerGfsTokenRoute(router: Router): void {
         res.status(401).json({ error: 'unauthorized' })
         return
       }
+      const authGeneration = req.adminAuth?.sessionVersion
+      if (
+        typeof authGeneration !== 'number' ||
+        !Number.isSafeInteger(authGeneration) ||
+        authGeneration < 1
+      ) {
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
       const body = (req.body ?? {}) as { drive?: unknown; scopes?: unknown }
       const drive =
         typeof body.drive === 'string' && body.drive.length > 0 ? body.drive : GFS_DEFAULT_DRIVE
@@ -61,6 +70,8 @@ export function registerGfsTokenRoute(router: Router): void {
         drive,
         scopes,
         pathBindings: [],
+        authGeneration,
+        principalType: 'control-admin',
       })
       res.status(200).json({ token, expiresInSeconds })
     })

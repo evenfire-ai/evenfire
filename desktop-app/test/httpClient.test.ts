@@ -16,12 +16,13 @@ function okResponse(body?: unknown): Response {
   } as unknown as Response
 }
 
-function errorResponse(status: number, body: string): Response {
+function errorResponse(status: number, body: string, headers?: Record<string, string>): Response {
   return {
     ok: false,
     status,
     statusText: 'Error',
     text: () => Promise.resolve(body),
+    headers: new Headers(headers),
   } as unknown as Response
 }
 
@@ -30,6 +31,46 @@ function transientFetchError(message = 'fetch failed', code = 'ECONNRESET'): Err
   Object.assign(error, { cause: { code } })
   return error
 }
+
+describe('requestJson — error message formatting', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('unpacks an enveloped {code,message} error instead of "[object Object]"', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(
+        403,
+        JSON.stringify({
+          ok: false,
+          error: { code: 'forbidden', message: 'not authorized to read this resource' },
+        })
+      )
+    )
+
+    const error = await requestJson('GET', 'http://localhost/gfs/file').catch(e => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.message).toBe('403 Error: forbidden: not authorized to read this resource')
+    expect(error.bodyText).toContain('not authorized to read this resource')
+  })
+
+  it('keeps a plain-string error and a top-level message field as before', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(409, JSON.stringify({ error: 'version_conflict', message: 'stale write' }))
+    )
+
+    const error = await requestJson('GET', 'http://localhost/x').catch(e => e)
+
+    expect(error.message).toBe('409 Error: version_conflict - stale write')
+  })
+})
 
 describe('requestJson — transient retry', () => {
   beforeEach(() => {
@@ -90,5 +131,17 @@ describe('requestJson — transient retry', () => {
     ).rejects.toBeInstanceOf(ApiError)
 
     expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves Retry-After on HTTP errors for bounded upload lifecycle retries', async () => {
+    const fetchSpy = vi.mocked(global.fetch)
+    fetchSpy.mockResolvedValueOnce(
+      errorResponse(429, '{"error":"quota_exceeded"}', { 'retry-after': '7' })
+    )
+
+    await expect(requestJson('POST', 'http://localhost/upload')).rejects.toMatchObject({
+      status: 429,
+      retryAfter: '7',
+    })
   })
 })

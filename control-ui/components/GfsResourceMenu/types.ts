@@ -4,6 +4,7 @@ export interface GfsResourceMenuProps {
   onDelete: () => void
   onDownload?: () => void
   onManage?: () => void
+  onMove?: () => void
   onPreview?: () => void
   onRename: () => void
   onReplace?: (file: File) => void
