@@ -673,6 +673,13 @@ minikube-t2: ## Full orchestrator: T0, Real PostgreSQL T1, then exact-head T2
 
 .PHONY: minikube-t2-np08-hcc-authorization
 minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
+# Dedicated #604 certification: the bounded health lane runs the real
+# policy lifecycle, business invocation and three watch reconnections.
+.PHONY: minikube-t2-hcc-networkpolicy-lifecycle
+minikube-t2-hcc-networkpolicy-lifecycle: ## Run canonical T2 with the HCC NetworkPolicy lifecycle and watch-reconnection health gate
+	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
+
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
 	@T2_RUN_T0=false T2_RUN_T1=false \

@@ -22,6 +22,7 @@ T2_T0_COMMAND="$T2_T0_COMMAND"
 T2_PLAYWRIGHT_COMMAND="$T2_PLAYWRIGHT_COMMAND"
 T2_HEALTHCHECK_COMMAND="$T2_HEALTHCHECK_COMMAND"
 T2_HEALTHCHECK_TIMEOUT_SECONDS="${T2_HEALTHCHECK_TIMEOUT_SECONDS:-120}"
+T2_HEALTHCHECK_KILL_GRACE_SECONDS="${T2_HEALTHCHECK_KILL_GRACE_SECONDS:-5}"
 T2_DEADLINE_RUNNER="${T2_DEADLINE_RUNNER:-$SCRIPT_DIR/run-with-deadline.mjs}"
 T2_PLAN_TMP=""
 T2_T0_STATUS=NOT_RUN
@@ -352,6 +353,14 @@ run_np08_hcc_authorization() {
 
 validate_healthcheck_contract() {
   T2_HEALTHCHECK_REQUIRED=false
+  if ! [[ "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+    [ "${#T2_HEALTHCHECK_KILL_GRACE_SECONDS}" -gt 3 ] || \
+    [ "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" -gt 300 ]; then
+    T2_NEXT_COMMAND='set T2_HEALTHCHECK_KILL_GRACE_SECONDS to an integer from 1 to 300, then re-run T2'
+    t2_fail DEVELOPMENT_SCOPE_REQUIRED \
+      'T2_HEALTHCHECK_KILL_GRACE_SECONDS must be an integer from 1 to 300'
+    return 1
+  fi
   if ! [[ "$T2_HEALTHCHECK_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
     [ "$T2_HEALTHCHECK_TIMEOUT_SECONDS" -gt 900 ]; then
     T2_NEXT_COMMAND='set T2_HEALTHCHECK_TIMEOUT_SECONDS to an integer from 1 to 900, then re-run T2'
@@ -386,9 +395,13 @@ run_healthcheck_if_requested() {
     t2_evidence_write Health NOT_RUN 'no profile-owned user-facing health command was supplied'
     return 0
   fi
+  # Export the already-validated shell value to the child; the CLI argument
+  # intentionally expands that same existing value before the assignment.
+  # shellcheck disable=SC2097,SC2098
+  T2_HEALTHCHECK_KILL_GRACE_SECONDS="$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
   node "$T2_DEADLINE_RUNNER" \
     --timeout-seconds "$T2_HEALTHCHECK_TIMEOUT_SECONDS" \
-    --heartbeat-seconds 20 --kill-grace-seconds 5 \
+    --heartbeat-seconds 20 --kill-grace-seconds "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
     --label t2-user-facing-health -- \
     bash -c "$T2_HEALTHCHECK_COMMAND" || health_status=$?
   if [ "$health_status" -eq 0 ]; then
