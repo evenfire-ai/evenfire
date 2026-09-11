@@ -35,6 +35,10 @@ vi.mock('./config', () => ({
     nodeLocalDnsCidr: '',
     // kube default Service range — a broker must never be pointed at it.
     clusterInternalEgressCidrs: ['10.96.0.0/12'],
+    // node subnet — present so the node-guard category is configured; none of
+    // the test LAN URLs (192.168.1.x, 10.0.0.x) fall inside it.
+    clusterNodeEgressCidrs: ['192.168.49.0/24'],
+    oaiEgressRequireClusterCidrs: true,
   },
 }))
 

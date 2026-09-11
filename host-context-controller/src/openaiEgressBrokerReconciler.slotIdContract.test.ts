@@ -49,6 +49,7 @@ vi.mock('./config', () => ({
     // so the CIDR guard is CONFIGURED; otherwise validateSlot fails closed and no
     // broker is created (the assertions would then never run).
     clusterInternalEgressCidrs: ['10.96.0.0/12'],
+    clusterNodeEgressCidrs: ['192.168.49.0/24'],
     oaiEgressRequireClusterCidrs: true,
   },
 }))

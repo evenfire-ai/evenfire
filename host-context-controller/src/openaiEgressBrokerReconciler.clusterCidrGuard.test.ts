@@ -39,6 +39,7 @@ vi.mock('./config', () => ({
     k8sApiCidrs: [],
     nodeLocalDnsCidr: '',
     clusterInternalEgressCidrs: [],
+    clusterNodeEgressCidrs: [],
     oaiEgressRequireClusterCidrs: true,
   },
 }))
@@ -80,6 +81,7 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     config.k8sApiCidrs = []
     config.nodeLocalDnsCidr = ''
     config.clusterInternalEgressCidrs = []
+    config.clusterNodeEgressCidrs = []
     config.oaiEgressRequireClusterCidrs = true
     reconciler = new OpenAiEgressBrokerReconciler({} as k8s.KubeConfig, hosts, {
       appsApi: asAppsApi(appsApi),
@@ -134,6 +136,7 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
 
   it('G3: with the guard configured, the zero-config floor still rejects the apiserver ClusterIP', async () => {
     config.clusterInternalEgressCidrs = ['10.244.0.0/16'] // pod CIDR only; no apiserver range
+    config.clusterNodeEgressCidrs = ['192.168.49.0/24'] // node guard category configured
     vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.96.0.1')
 
     // apiserver ClusterIP — covered only by the floor, not by the declared CIDR.
@@ -178,12 +181,64 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     expect(provisioned()).toBe(true)
   })
 
+  it('G5: pod/Service configured but NODE_CIDRS empty provisions NOTHING, condition ClusterNodeGuardUnconfigured (R4-H1)', async () => {
+    // The node-guard category is mandatory on its own: a node IP (192.168.49.2)
+    // is RFC1918 and would classify as a plain LAN, so without NODE_CIDRS a broker
+    // could be pointed at kubelet/apiserver on the node.
+    config.clusterInternalEgressCidrs = ['10.244.0.0/16', '10.96.0.0/12']
+    config.clusterNodeEgressCidrs = []
+    const host = makeHost('g5', 'http://192.168.49.2:8000/v1')
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+    expect(provisioned()).toBe(false)
+    expect(npCreated()).toBe(false)
+    expect(brokersCondition()).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'ClusterNodeGuardUnconfigured',
+    })
+  })
+
+  it('G6: with NODE_CIDRS set, a node IP is denied (cluster_internal) and a real LAN provisions (R4-H1)', async () => {
+    config.clusterInternalEgressCidrs = ['10.244.0.0/16', '10.96.0.0/12']
+    config.clusterNodeEgressCidrs = ['192.168.49.0/24']
+
+    // The node IP is now inside the deny-set union → classifier rejects it.
+    const node = makeHost('g6', 'http://192.168.49.2:8000/v1')
+    hosts.set(node.name, node)
+    await reconciler.reconcileForHost(node)
+    expect(provisioned()).toBe(false)
+    expect(brokersCondition()).toMatchObject({ status: 'False', reason: 'ClusterInternal' })
+
+    // Positive control: a genuine LAN endpoint outside every declared range provisions.
+    const lan = makeHost('g6-lan', 'http://192.168.1.50:8000/v1')
+    hosts.set(lan.name, lan)
+    await reconciler.reconcileForHost(lan)
+    expect(provisioned()).toBe(true)
+  })
+
+  it('G7: with both guards configured, a control-plane port on a clean LAN IP is denied (port_denied) (R4-H1)', async () => {
+    config.clusterInternalEgressCidrs = ['10.244.0.0/16', '10.96.0.0/12']
+    config.clusterNodeEgressCidrs = ['192.168.49.0/24']
+    const host = makeHost('g7', 'http://192.168.1.50:10250/v1')
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+    expect(provisioned()).toBe(false)
+    expect(npCreated()).toBe(false)
+    expect(brokersCondition()).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'PortDenied',
+    })
+  })
+
   it('G8: a malformed configured CIDR fails closed — no provision, condition ClusterCidrInvalid (R4-M7)', async () => {
     // Simulate a caller that set the deny-set directly, bypassing the startup
     // parser (which would have thrown). The classifier cannot check overlap
     // against a prefix-less CIDR, so the baseURL must be refused fail-closed
     // rather than slip through as a plain RFC1918 address.
     config.clusterInternalEgressCidrs = ['10.96.0.0']
+    config.clusterNodeEgressCidrs = ['192.168.49.0/24'] // node guard configured so the classifier runs
     const host = makeHost('g8', 'http://10.96.0.1/v1')
     hosts.set(host.name, host)
     await reconciler.reconcileForHost(host)
@@ -197,21 +252,37 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
   })
 
   describe('resolveClusterInternalCidrs (pure)', () => {
-    it('unions every configured source and marks the guard configured', () => {
+    it('unions every configured source and marks both guard categories configured', () => {
       config.k8sApiCidrs = ['10.96.0.0/12']
       config.nodeLocalDnsCidr = '169.254.20.10/32'
       config.clusterInternalEgressCidrs = ['10.244.0.0/16']
+      config.clusterNodeEgressCidrs = ['192.168.49.0/24']
       vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.96.0.1')
-      const { cidrs, guardConfigured } = resolveClusterInternalCidrs()
-      expect(cidrs).toEqual(['10.96.0.0/12', '169.254.20.10/32', '10.244.0.0/16', '10.96.0.1/32'])
-      expect(guardConfigured).toBe(true)
+      const { cidrs, internalConfigured, nodeConfigured } = resolveClusterInternalCidrs()
+      expect(cidrs).toEqual([
+        '10.96.0.0/12',
+        '169.254.20.10/32',
+        '10.244.0.0/16',
+        '192.168.49.0/24',
+        '10.96.0.1/32',
+      ])
+      expect(internalConfigured).toBe(true)
+      expect(nodeConfigured).toBe(true)
     })
 
-    it('adds only the floor when nothing is configured, and reports guard unconfigured', () => {
+    it('adds only the floor when nothing is configured, and reports both categories unconfigured', () => {
       vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.96.0.1')
-      const { cidrs, guardConfigured } = resolveClusterInternalCidrs()
+      const { cidrs, internalConfigured, nodeConfigured } = resolveClusterInternalCidrs()
       expect(cidrs).toEqual(['10.96.0.1/32'])
-      expect(guardConfigured).toBe(false)
+      expect(internalConfigured).toBe(false)
+      expect(nodeConfigured).toBe(false)
+    })
+
+    it('reports only the node category configured when just NODE_CIDRS is set', () => {
+      config.clusterNodeEgressCidrs = ['192.168.49.0/24']
+      const { internalConfigured, nodeConfigured } = resolveClusterInternalCidrs()
+      expect(internalConfigured).toBe(false)
+      expect(nodeConfigured).toBe(true)
     })
 
     it('emits no floor entry for a non-IPv4 KUBERNETES_SERVICE_HOST', () => {

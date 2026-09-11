@@ -112,6 +112,37 @@ test('classifyLanBaseURL: a malformed clusterInternalCidrs entry fails closed (c
   )
 })
 
+test('classifyLanBaseURL: control-plane / node-agent ports are denied on a clean LAN IP', () => {
+  // kubelet, apiserver, etcd — rejected even though the host is RFC1918.
+  assert.deepEqual(policy.classifyLanBaseURL('http://192.168.1.50:10250/'), {
+    ok: false,
+    reason: 'port_denied',
+  })
+  assert.deepEqual(policy.classifyLanBaseURL('http://192.168.1.50:6443/'), {
+    ok: false,
+    reason: 'port_denied',
+  })
+  assert.deepEqual(policy.classifyLanBaseURL('http://192.168.1.50:2379/'), {
+    ok: false,
+    reason: 'port_denied',
+  })
+  // A non-control-plane port (and the https default 443) stays accepted.
+  assert.deepEqual(policy.classifyLanBaseURL('http://192.168.1.50:8000/v1'), {
+    ok: true,
+    ip: '192.168.1.50',
+  })
+  assert.deepEqual(policy.classifyLanBaseURL('https://192.168.1.50/v1'), {
+    ok: true,
+    ip: '192.168.1.50',
+  })
+})
+
+test('CONTROL_PLANE_DENIED_PORTS covers the documented ports', () => {
+  for (const p of [2379, 2380, 4194, 6443, 8443, 10250, 10259]) {
+    assert.ok(policy.CONTROL_PLANE_DENIED_PORTS.includes(p), `port ${p} must be denied`)
+  }
+})
+
 test('brokerNameFor: deterministic, DNS-safe, per-(host,slot)', () => {
   const name = policy.brokerNameFor('h1', 'primary')
   // Stable across calls (deterministic hash).

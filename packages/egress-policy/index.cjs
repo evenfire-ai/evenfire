@@ -44,6 +44,19 @@ const PRIVATE_LAN_CIDRS = Object.freeze(['10.0.0.0/8', '172.16.0.0/12', '192.168
 const LINK_LOCAL_CIDR = '169.254.0.0/16'
 const CGNAT_CIDR = '100.64.0.0/10'
 
+// Kubernetes control-plane / node-agent ports a local openai-compatible broker
+// must never target, even on an RFC1918 address the IP deny-set missed (e.g. the
+// operator mis-declared CLUSTER_NODE_CIDRS). etcd (2379-2380), cAdvisor (4194),
+// apiserver (6443, 8443) and the kubelet/kube-proxy/kcm/scheduler range
+// (10250-10259). A denylist, not an allowlist: local LLM servers use arbitrary
+// ports (vLLM 8000, Ollama 11434, LM Studio 1234, llama.cpp 8080, 80/443 behind a
+// proxy), so an allowlist would need an operator knob; the threat is the stable,
+// well-known control-plane ports.
+const CONTROL_PLANE_DENIED_PORTS = Object.freeze([
+  2379, 2380, 4194, 6443, 8443, 10250, 10251, 10252, 10253, 10254, 10255, 10256, 10257, 10258,
+  10259,
+])
+
 function ipv4ToInt(ip) {
   const parts = typeof ip === 'string' ? ip.split('.') : []
   if (
@@ -137,6 +150,13 @@ function classifyLanBaseURL(baseURL, options) {
     return { ok: false, reason: 'reserved' }
   }
 
+  // Port belt: reject the well-known control-plane / node-agent ports even on an
+  // otherwise-clean LAN IP. The default port depends on scheme when absent.
+  const effectivePort = url.port ? Number(url.port) : url.protocol === 'https:' ? 443 : 80
+  if (CONTROL_PLANE_DENIED_PORTS.includes(effectivePort)) {
+    return { ok: false, reason: 'port_denied' }
+  }
+
   return { ok: true, ip }
 }
 
@@ -208,6 +228,7 @@ function brokerInternalUrl(hostName, slotId, options) {
 module.exports = {
   NON_PUBLIC_EGRESS_CIDRS,
   PRIVATE_LAN_CIDRS,
+  CONTROL_PLANE_DENIED_PORTS,
   ipv4ToInt,
   parseCidr,
   cidrOverlaps,

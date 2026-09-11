@@ -22,6 +22,7 @@ export const OPENAI_COMPATIBLE_API_KEY_SLOT = 'openai-compatible-api-key'
 /** Machine reason a slot was NOT provisioned (admitSlot drops + provision failure). */
 export type SlotDropReason =
   | 'cluster_internal_guard_unconfigured'
+  | 'cluster_node_guard_unconfigured'
   | LanBaseUrlReason
   | 'url_unparseable'
   | 'scheme_unsupported'
@@ -108,19 +109,28 @@ export function admitSlot(
   credentialDataKey: string,
   denySet: ClusterDenySet
 ): DesiredBroker | { reason: SlotDropReason } {
-  const { cidrs: clusterInternalCidrs, guardConfigured } = denySet
-  // Fail-closed: without operator-declared cluster-internal ranges the
-  // classifier cannot distinguish cluster space (apiserver/pod ClusterIPs) from
-  // a real private LAN, so it would accept a cluster-internal baseURL. Refuse to
-  // provision any slot until the guard is configured. The escape hatch is
-  // CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false, for a deploy that
-  // deliberately runs without it.
-  if (!guardConfigured && config.oaiEgressRequireClusterCidrs) {
-    log.error(
-      'cluster-internal CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
-      { host: hostName, slotId }
-    )
-    return { reason: 'cluster_internal_guard_unconfigured' }
+  const { cidrs: clusterInternalCidrs, internalConfigured, nodeConfigured } = denySet
+  // Fail-closed PER CATEGORY: without the operator-declared pod/Service ranges
+  // the classifier cannot tell cluster space (apiserver/pod ClusterIPs) from a
+  // real private LAN; without the node ranges it cannot tell a node IP
+  // (RFC1918, classifies as a plain LAN) from a real LAN endpoint. Refuse to
+  // provision any slot until BOTH guards are configured. The single escape hatch
+  // is CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false (waives both).
+  if (config.oaiEgressRequireClusterCidrs) {
+    if (!internalConfigured) {
+      log.error(
+        'cluster-internal CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
+        { host: hostName, slotId }
+      )
+      return { reason: 'cluster_internal_guard_unconfigured' }
+    }
+    if (!nodeConfigured) {
+      log.error(
+        'cluster-node CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_NODE_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
+        { host: hostName, slotId }
+      )
+      return { reason: 'cluster_node_guard_unconfigured' }
+    }
   }
   const decision = classifyLanBaseURL(
     baseURL,

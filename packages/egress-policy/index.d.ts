@@ -1,5 +1,6 @@
 export declare const NON_PUBLIC_EGRESS_CIDRS: readonly string[]
 export declare const PRIVATE_LAN_CIDRS: readonly string[]
+export declare const CONTROL_PLANE_DENIED_PORTS: readonly number[]
 
 export declare function ipv4ToInt(ip: string): number | null
 export declare function parseCidr(
@@ -15,6 +16,7 @@ export type LanBaseUrlReason =
   | 'cgnat'
   | 'cluster_internal'
   | 'cluster_cidr_invalid'
+  | 'port_denied'
   | 'reserved'
 export type LanBaseUrlDecision = { ok: true; ip: string } | { ok: false; reason: LanBaseUrlReason }
 export interface ClassifyLanOptions {

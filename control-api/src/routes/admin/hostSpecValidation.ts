@@ -201,6 +201,8 @@ const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
   cluster_internal: 'baseURL host must not target a cluster-internal address',
   cluster_cidr_invalid:
     'baseURL could not be validated because a cluster-internal CIDR is malformed; contact the operator',
+  port_denied:
+    'baseURL port must not be a Kubernetes control-plane or node-agent port (2379-2380, 4194, 6443, 8443, 10250-10259)',
   reserved: 'baseURL host must not be a reserved IPv4 address',
 }
 

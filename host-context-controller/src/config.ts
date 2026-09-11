@@ -57,6 +57,15 @@ export interface Config {
   // when control-api admission was bypassed by a direct cluster write.
   clusterInternalEgressCidrs: string[]
 
+  // Node + control-plane CIDRs (node InternalIPs / node subnet, apiserver
+  // endpoint(s), GKE master CIDR) the egress broker must NOT be pointed at. The
+  // pod/Service range (clusterInternalEgressCidrs) does NOT cover a node IP (e.g.
+  // minikube 192.168.49.2 is RFC1918 and would classify as a plain LAN), so a
+  // broker could be pointed at kubelet/apiserver on a node. Declared separately
+  // because its source differs (node IPs, not pod/Service ranges) and it gates
+  // provisioning on its own (cluster_node_guard_unconfigured).
+  clusterNodeEgressCidrs: string[]
+
   // Fail-closed switch for the openai-compatible egress broker. When true
   // (default), HCC refuses to provision ANY broker unless
   // clusterInternalEgressCidrs is non-empty: without operator-declared
@@ -625,6 +634,11 @@ export const config: Config = {
   clusterInternalEgressCidrs: parseClusterCidrList(
     'CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS',
     getEnv('CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS')
+  ),
+  // Validated at module load, same fail-closed contract as the internal list.
+  clusterNodeEgressCidrs: parseClusterCidrList(
+    'CONTEXT_MAPPER_CLUSTER_NODE_CIDRS',
+    getEnv('CONTEXT_MAPPER_CLUSTER_NODE_CIDRS')
   ),
   oaiEgressRequireClusterCidrs: getEnvBool('CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS', true),
 

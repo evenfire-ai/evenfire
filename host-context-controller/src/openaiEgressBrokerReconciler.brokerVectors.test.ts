@@ -34,6 +34,7 @@ vi.mock('./config', () => ({
     k8sApiCidrs: [],
     nodeLocalDnsCidr: '',
     clusterInternalEgressCidrs: ['10.96.0.0/12'],
+    clusterNodeEgressCidrs: ['192.168.49.0/24'],
     oaiEgressRequireClusterCidrs: true,
   },
 }))

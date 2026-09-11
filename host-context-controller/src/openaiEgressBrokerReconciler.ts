@@ -390,10 +390,18 @@ server {
         proxy_send_timeout 3600s;${
           httpsUpstream
             ? `
-        # Upstream over TLS: the LAN endpoint's certificate is operator-managed
-        # and typically self-signed, so verification is off (the /32 egress
-        # policy is what pins the destination, not PKI).
+        # Upstream over TLS to a LAN endpoint. Certificate verification is OFF by
+        # deliberate design, not oversight: LAN LLM endpoints are self-signed in
+        # practice, and forcing verification with the system CA would push the
+        # operator back to plain http:// (Bearer token in clear over the LAN —
+        # strictly worse). What actually pins the destination is the broker's /32
+        # egress NetworkPolicy (a fixed IP, no DNS), so an attacker cannot redirect
+        # this connection without already controlling that exact LAN host.
+        # Operator-provided CA pinning (spec.model.tlsCaSecretRef) is the correct
+        # long-term fix and is tracked as a follow-up. Floor the protocol at
+        # TLS 1.2 so a downgrade cannot take the session below it.
         proxy_ssl_verify off;
+        proxy_ssl_protocols TLSv1.2 TLSv1.3;
         proxy_ssl_server_name on;`
             : ''
         }
