@@ -651,7 +651,7 @@ export const config: Config = {
   // (llm-egress / 3000); overridable only for canary/test topologies. A mismatch
   // with HCC would make mcp-host dial a broker Service that does not exist.
   llmEgressNamespace: getEnv('CLERUM_LLM_EGRESS_NAMESPACE', 'llm-egress')!,
-  brokerPort: parseInt(getEnv('CLERUM_OAI_EGRESS_BROKER_PORT', '3000')!, 10),
+  brokerPort: getEnvNumber('CLERUM_OAI_EGRESS_BROKER_PORT', 3000),
 
   // LLM allowlist ConfigMap name (R3). CROSS-SERVICE CONTRACT: the default
   // (`clerum-llm-allowed-models`) is the CM produced by control-api
