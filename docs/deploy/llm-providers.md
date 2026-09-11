@@ -250,8 +250,8 @@ Three things to know as an operator:
   - `CONTEXT_MAPPER_CLUSTER_NODE_CIDRS` — the **node + control-plane** ranges
     (node InternalIPs and the apiserver endpoint, each as `/32`, plus node-pool
     subnets). Without this a node IP — which is RFC1918 (e.g. a minikube node at
-    `192.168.49.2`) — would read as a legitimate LAN target, so
-    `https://192.168.49.2:10250/` (the kubelet) would be accepted. The same
+    `192.168.49.2`) — would read as a legitimate LAN target, so the kubelet
+    endpoint (node `192.168.49.2`, port `10250`) would be accepted. The same
     opt-out knob exempts **both** categories.
 
   Even so, HCC always pins the apiserver ClusterIP via a zero-config floor
