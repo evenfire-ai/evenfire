@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import request from 'supertest'
+import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import { createDesktopRouter, handleDesktopUpgrade, parseCookies } from './desktopProxy.js'
 
@@ -9,16 +12,31 @@ const authTokenMock = vi.hoisted(() => ({
   verifyRpcToken: vi.fn(),
 }))
 
+const delegationMock = vi.hoisted(() => ({
+  tokenDeclaresV2: vi.fn((token: string) => token.startsWith('v2.')),
+  verifyUserDelegationV2: vi.fn(),
+}))
+
+const authorityMock = vi.hoisted(() => ({ authorizeActionV2: vi.fn() }))
+const leaseMock = vi.hoisted(() => ({ startActiveViewLease: vi.fn() }))
+const proxyMock = vi.hoisted(() => ({
+  web: vi.fn((_req: unknown, res: express.Response) => res.status(200).end()),
+  ws: vi.fn(),
+  on: vi.fn(),
+}))
+
 vi.mock('../authToken.js', () => authTokenMock)
+vi.mock('../userDelegationV2.js', () => delegationMock)
+vi.mock('../actionAuthorityV2.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../actionAuthorityV2.js')>()),
+  authorizeActionV2: authorityMock.authorizeActionV2,
+}))
+vi.mock('../services/activeViewLease.js', () => leaseMock)
 
 // Mock http-proxy to avoid real proxy connections
 vi.mock('http-proxy', () => ({
   default: {
-    createProxyServer: () => ({
-      web: vi.fn(),
-      ws: vi.fn(),
-      on: vi.fn(),
-    }),
+    createProxyServer: () => proxyMock,
   },
 }))
 
@@ -67,12 +85,47 @@ function signTestJwt(scopes: string[], hostRefs: string[]): string {
   return token
 }
 
+function desktopDelegation() {
+  const resource = canonicalResourceIdentity({
+    environmentId: 'test',
+    type: 'host',
+    logicalId: 'mcp-host/chatllm',
+  })
+  const target = { hostRef: 'mcp-host/chatllm' }
+  return {
+    typ: 'user_delegation' as const,
+    ver: 2 as const,
+    sub: randomUUID(),
+    sid: randomUUID(),
+    sv: 1,
+    jti: randomUUID(),
+    iat: 1,
+    exp: Math.floor(Date.now() / 1000) + 300,
+    operationIds: ['remote_desktop.reconnect'] as const,
+    scopes: ['action:remote_desktop.reconnect'] as const,
+    resource,
+    targets: { 'remote_desktop.reconnect': target },
+    targetHashes: { 'remote_desktop.reconnect': hashActionTarget(target) },
+    accessPathId: `ap1_${'A'.repeat(43)}`,
+    authorizationRevision: `ar1_${'B'.repeat(43)}`,
+    behaviorBindingHash: `bh2_${'C'.repeat(43)}`,
+    pathKind: 'direct' as const,
+    effectiveTeamId: null,
+  }
+}
+
 // ── Setup / Teardown ────────────────────────────────────────────────
 const originalFetch = globalThis.fetch
 
 beforeEach(() => {
   authTokenMock.verifyRpcToken.mockReset()
   authTokenMock.verifyRpcToken.mockReturnValue({ ...VALID_CLAIMS })
+  delegationMock.verifyUserDelegationV2.mockReset()
+  authorityMock.authorizeActionV2.mockReset()
+  leaseMock.startActiveViewLease.mockReset()
+  proxyMock.web.mockClear()
+  proxyMock.ws.mockClear()
+  leaseMock.startActiveViewLease.mockReturnValue({ close: vi.fn() })
   globalThis.fetch = originalFetch
 })
 
@@ -248,6 +301,48 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     expect(res.status).toBe(401)
     expect(res.body.error).toBe('Invalid desktop session')
   })
+
+  it('requires v2 authority and mounts a lease before proxying', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+
+    await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.valid')
+      .expect(200)
+
+    expect(authorityMock.authorizeActionV2).toHaveBeenCalledOnce()
+    expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce()
+  })
+
+  it('destroys an active v2 HTTP view when its mounted lease denies', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+    proxyMock.web.mockImplementationOnce((_req, res) => res)
+
+    const pending = request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.valid')
+      .then(response => response)
+    await vi.waitFor(() => expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce())
+    leaseMock.startActiveViewLease.mock.calls[0]![1].onDenied()
+
+    await expect(pending).rejects.toThrow(/aborted|socket hang up/i)
+  })
 })
 
 describe('handleDesktopUpgrade', () => {
@@ -278,6 +373,32 @@ describe('handleDesktopUpgrade', () => {
     const result = handleDesktopUpgrade(req, socket, Buffer.alloc(0))
     expect(result).toBe(true)
     expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\n\r\n')
+    expect(socket.destroy).toHaveBeenCalled()
+  })
+
+  it('mounts a v2 lease before WebSocket proxying', async () => {
+    const claims = desktopDelegation()
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
+      claims,
+      bound,
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    }))
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer v2.valid',
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(proxyMock.ws).toHaveBeenCalledOnce())
+
+    expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce()
+    leaseMock.startActiveViewLease.mock.calls[0]![1].onDenied()
     expect(socket.destroy).toHaveBeenCalled()
   })
 })
