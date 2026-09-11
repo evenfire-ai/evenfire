@@ -10,6 +10,8 @@ import {
 } from '@clerum/action-context-contracts'
 import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { ActionAuthorityCheckpointError } from '../actionAuthorityV2.js'
+import { config } from '../config.js'
+import { createSandboxUiSession } from '../services/sandboxUiSession.js'
 import type { UserDelegationV2Claims } from '../userDelegationV2.js'
 import { createSandboxUiSessionRouter } from './sandboxUi.js'
 
@@ -181,6 +183,74 @@ describe('Sandbox OAuth v2 authority', () => {
       .expect(401)
 
     expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not fall back to a valid legacy cookie for a malformed v2 view', async () => {
+    auth.verifyUserDelegationV2.mockReturnValue(null)
+    const legacyCookie = createSandboxUiSession('legacy-user', 'sandbox-recipes', 'r1')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    await request(app())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+      .set('Authorization', 'Bearer v2.malformed')
+      .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
+      .expect(401)
+
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(proxy.web).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['stale', new ActionAuthorityCheckpointError(409, 'access_path_stale'), 409],
+    ['unavailable', new ActionAuthorityCheckpointError(503, 'authority_unavailable'), 503],
+  ] as const)(
+    'does not fall back to a valid legacy cookie when v2 view authority is %s',
+    async (_label, error, status) => {
+      auth.verifyUserDelegationV2.mockReturnValue(viewDelegation())
+      authority.authorizeActionV2.mockRejectedValue(error)
+      const legacyCookie = createSandboxUiSession('legacy-user', 'sandbox-recipes', 'r1')
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+      await request(app())
+        .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+        .set('Authorization', 'Bearer v2.invalid-authority')
+        .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
+        .expect(status)
+
+      expect(fetchSpy).not.toHaveBeenCalled()
+      expect(proxy.web).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not fall back to a valid legacy cookie after a v2 view target mismatch', async () => {
+    const claims = viewDelegation()
+    auth.verifyUserDelegationV2.mockReturnValue({
+      ...claims,
+      targets: {
+        'sandbox.reconnect': {
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'other',
+        },
+      },
+      targetHashes: {
+        'sandbox.reconnect': hashActionTarget({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'other',
+        }),
+      },
+    })
+    const legacyCookie = createSandboxUiSession('legacy-user', 'sandbox-recipes', 'r1')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+
+    await request(app())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+      .set('Authorization', 'Bearer v2.wrong-target')
+      .set('Cookie', `${config.sandboxUiCookieName}=${legacyCookie}`)
+      .expect(400)
+
+    expect(authority.authorizeActionV2).not.toHaveBeenCalled()
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(proxy.web).not.toHaveBeenCalled()
   })
 
   it('mounts the active-view lease before a v2 Sandbox view reaches its upstream', async () => {
