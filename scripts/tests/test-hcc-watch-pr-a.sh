@@ -65,6 +65,37 @@ if hcc_pr_a_service_absent; then echo 'FAIL: delete request replaced absence pro
 hcc_pr_a_service_absent
 printf 'PASS: actual absence and new correctly scoped Service are required\n'
 
+# The revocation witness must retain exactly the captured egress object. The
+# fixture invokes the production helpers against API-shaped NetworkPolicy JSON.
+NP604_SERVER=fixture-affected
+policy() {
+  local name=$1 type=$2 uid=$3 cidr=${4:-1.2.3.4/32}
+  jq -cn --arg name "$name" --arg type "$type" --arg uid "$uid" --arg cidr "$cidr" \
+    '{metadata:{namespace:"mcp-server",name:$name,uid:$uid,labels:{"clerum.io/policy-type":$type}},spec:{podSelector:{matchLabels:{"clerum.io/mcpserver":"fixture-affected"}},egress:[{to:[{ipBlock:{cidr:$cidr}}]}]}}'
+}
+egress="$(policy fixture-egress external-egress uid-egress)"
+other="$(policy fixture-deny deny-all uid-deny)"
+np604_kctl() { cat "$tmp/policies"; }
+jq -cn --argjson egress "$egress" --argjson other "$other" '{items:[$egress,$other]}' > "$tmp/policies"
+captured="$(hcc_pr_a_capture_egress_identity)"
+jq -e --argjson egress "$egress" '. == {namespace:"mcp-server",name:"fixture-egress",type:"external-egress",uid:"uid-egress",spec:$egress.spec}' <<< "$captured" >/dev/null
+for variant in exact empty replaced-uid spec-drift stale-allows duplicate; do
+  case "$variant" in
+    exact) jq -cn --argjson egress "$egress" '{items:[$egress]}' ;;
+    empty) jq -cn '{items:[]}' ;;
+    replaced-uid) jq -cn --argjson egress "$(policy fixture-egress external-egress replacement)" '{items:[$egress]}' ;;
+    spec-drift) jq -cn --argjson egress "$(policy fixture-egress external-egress uid-egress 9.9.9.9/32)" '{items:[$egress]}' ;;
+    stale-allows) jq -cn --argjson egress "$egress" --argjson other "$other" '{items:[$egress,$other]}' ;;
+    duplicate) jq -cn --argjson egress "$egress" '{items:[$egress,$egress]}' ;;
+  esac > "$tmp/policies"
+  if hcc_pr_a_only_captured_egress_remains "$captured"; then
+    [[ "$variant" = exact ]] || { echo "FAIL: revocation witness accepted $variant" >&2; exit 1; }
+  else
+    [[ "$variant" != exact ]] || { echo 'FAIL: revocation witness rejected exact egress' >&2; exit 1; }
+  fi
+done
+printf 'PASS: revocation retains exactly one captured egress identity and rejects empty, replacement, drift, stale allows and duplicates\n'
+
 # Execute the scenario until its first arm command with harmless boundary
 # doubles. This proves the selected read is before Service repair, rather
 # than searching a comment or passing through an unexecuted branch.

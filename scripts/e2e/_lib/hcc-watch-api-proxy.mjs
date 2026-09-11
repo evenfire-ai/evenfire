@@ -1,6 +1,7 @@
 // Development-only transport fixture. No fabricated upstream success responses.
 import fs from 'node:fs'
 import https from 'node:https'
+import { createSecureContext } from 'node:tls'
 import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
 export function proxyUpstreamErrorRecord(error) {
@@ -60,6 +61,8 @@ export function createProxy({
   periodMs,
   minAgeMs,
 }) {
+  // CA bytes configure TLS trust only; they never enter the request or destination.
+  const upstreamSecureContext = createSecureContext({ ca: upstreamCa })
   const streams = new Set()
   const bookmarks = createBookmarkObservation()
   let pause = null
@@ -118,7 +121,7 @@ export function createProxy({
           port: upstreamPort,
           method: request.method,
           path: request.url,
-          ca: upstreamCa,
+          secureContext: upstreamSecureContext,
           rejectUnauthorized: true,
           headers: { ...request.headers, host: upstreamHost },
           agent: false,

@@ -8,6 +8,14 @@ export const changedEnvironment = [
   'KUBECONFIG',
 ]
 const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
+
+function environmentNames(env) {
+  const names = env.map(item => item?.name)
+  if (names.some(name => typeof name !== 'string' || !name) || new Set(names).size !== names.length)
+    throw new Error('environment_name_conflict')
+  return names
+}
+
 export function snapshot(deployment) {
   const pod = deployment.spec.template.spec
   const container = pod.containers.find(item => item.name === 'host-context-controller')
@@ -17,10 +25,14 @@ export function snapshot(deployment) {
     (container.volumeMounts ?? []).some(item => item.name === 'hcc-pr-a-config')
   )
     throw new Error('fixture_mount_collision')
+  const env = container.env ?? []
   return {
     uid: deployment.metadata.uid,
     envPresent: own(container, 'env'),
-    env: (container.env ?? []).filter(item => changedEnvironment.includes(item.name)),
+    // The name sequence is public structure. Values remain private unless
+    // this fixture owns the entry.
+    envNames: environmentNames(env),
+    env: env.filter(item => changedEnvironment.includes(item.name)),
     volumesPresent: own(pod, 'volumes'),
     volumes: pod.volumes ?? [],
     mountsPresent: own(container, 'volumeMounts'),
@@ -33,6 +45,25 @@ export function restorePatch(original, deployment) {
   const index = pod.containers.findIndex(item => item.name === 'host-context-controller')
   if (index < 0) throw new Error('deployment_container_missing')
   const container = pod.containers[index]
+  const currentEnv = container.env ?? []
+  const currentEnvNames = environmentNames(currentEnv)
+  const originalEnvNames = original.envNames
+  if (
+    !Array.isArray(originalEnvNames) ||
+    originalEnvNames.some(name => typeof name !== 'string' || !name) ||
+    new Set(originalEnvNames).size !== originalEnvNames.length
+  )
+    throw new Error('environment_snapshot_invalid')
+  const originalUnrelatedNames = originalEnvNames.filter(name => !changedEnvironment.includes(name))
+  const currentUnrelatedNames = currentEnvNames.filter(name => !changedEnvironment.includes(name))
+  if (JSON.stringify(currentUnrelatedNames) !== JSON.stringify(originalUnrelatedNames))
+    throw new Error('unrelated_environment_changed')
+  const originalOwnedNames = originalEnvNames.filter(name => changedEnvironment.includes(name))
+  if (
+    !Array.isArray(original.env) ||
+    JSON.stringify(environmentNames(original.env)) !== JSON.stringify(originalOwnedNames)
+  )
+    throw new Error('environment_snapshot_invalid')
   for (const [current, previous] of [
     [pod.volumes ?? [], original.volumes],
     [container.volumeMounts ?? [], original.mounts],
@@ -58,10 +89,13 @@ export function restorePatch(original, deployment) {
     if (present) patches.push({ op: 'add', path, value })
     else if (existed) patches.push({ op: 'remove', path })
   }
-  const env = [
-    ...(container.env ?? []).filter(item => !changedEnvironment.includes(item.name)),
-    ...original.env,
-  ]
+  const originalEnvironment = new Map(original.env.map(item => [item.name, item]))
+  const currentEnvironment = new Map(currentEnv.map(item => [item.name, item]))
+  const env = originalEnvNames.map(name =>
+    changedEnvironment.includes(name)
+      ? originalEnvironment.get(name)
+      : currentEnvironment.get(name)
+  )
   set(
     `/spec/template/spec/containers/${index}/env`,
     original.envPresent || env.length > 0,
@@ -88,8 +122,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   else if (action === 'verify') {
     const original = JSON.parse(fs.readFileSync(originalPath, 'utf8'))
     const current = snapshot(deployment)
-    // Environment ordering has no semantic meaning; each exact entry does.
-    for (const value of [original, current]) value.env.sort((a, b) => a.name.localeCompare(b.name))
     if (JSON.stringify(current) !== JSON.stringify(original))
       throw new Error('configuration_not_restored')
   } else throw new Error('unknown_configuration_action')

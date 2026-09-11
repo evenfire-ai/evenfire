@@ -205,8 +205,8 @@ hcc_pr_a_run() {
   np604_invoke "$NP604_SERVER" || die 'PR A interrupted runtime business result failed'
   printf 'PR_A_INTERRUPTED_RUNTIME=PASS\n'
 
-  affected_policy="$(np604_snapshot "$NP604_SERVER" | jq -er '[.[]|select(.type=="external-egress")]|if length==1 then .[0].name else error("egress identity ambiguous") end')"
-  hcc_pr_a_command arm "/apis/networking.k8s.io/v1/namespaces/${MCP_NS}/networkpolicies/${affected_policy}"
+  affected_policy="$(hcc_pr_a_capture_egress_identity)" || die 'PR A egress identity ambiguous'
+  hcc_pr_a_command arm "/apis/networking.k8s.io/v1/namespaces/${MCP_NS}/networkpolicies/$(jq -r '.name' <<< "$affected_policy")"
   pause_id=$HCC_PR_A_COMMAND_ID
   wait_until 5 'egress pause armed' hcc_pr_a_ack armed || die 'PR A egress pause not armed'
   np604_kctl patch mcpserver "$NP604_SERVER" -n "$MCP_NS" --type=merge \
@@ -221,7 +221,7 @@ hcc_pr_a_run() {
   hcc_pr_a_command release "$pause_id"
   wait_until 5 'egress pause released' hcc_pr_a_ack released || die 'PR A egress release not acknowledged'
   wait_until 25 'protected API recertifies without revoked server' hcc_pr_a_gate 200 false || die 'PR A protected gate did not reopen with revoked inventory'
-  np604_snapshot "$NP604_SERVER" | jq -e 'all(.[]; .type=="external-egress")' >/dev/null || die 'PR A stale Context allows remained'
+  hcc_pr_a_only_captured_egress_remains "$affected_policy" || die 'PR A revoked policy set differs from captured egress identity'
   np604_kctl patch context "$NP604_CONTEXT" -n "$MCP_NS" --type=merge \
     -p "$(jq -cn --argjson names "$context_servers" '{spec:{mcpServers:$names}}')" >/dev/null
   wait_until 20 'protected API restores desired binding' hcc_pr_a_gate 200 || die 'PR A desired binding not restored'
@@ -299,6 +299,38 @@ hcc_pr_a_service_restored() {
   np604_kctl get service "$NP604_SERVER" -n "$MCP_NS" -o json |
     jq -e --arg uid "$HCC_PR_A_SERVICE_UID" --arg name "$NP604_SERVER" \
       '.metadata.uid!=$uid and .metadata.labels["clerum.io/mcpserver"]==$name and any(.spec.ports[]; .port==3000)' >/dev/null
+}
+
+hcc_pr_a_affected_policy_identities() {
+  np604_kctl get networkpolicy -A \
+    -l "clerum.io/mcpserver=${NP604_SERVER},clerum.io/managed-by=host-context-controller" -o json |
+    jq -Sce '
+      [.items[] | {
+        namespace:.metadata.namespace,
+        name:.metadata.name,
+        type:.metadata.labels["clerum.io/policy-type"],
+        uid:.metadata.uid,
+        spec
+      }] |
+      if all(.[]; (.namespace|type)=="string" and (.namespace|length)>0 and
+                    (.name|type)=="string" and (.name|length)>0 and
+                    (.type|type)=="string" and (.type|length)>0 and
+                    (.uid|type)=="string" and (.uid|length)>0 and
+                    (.spec|type)=="object")
+      then sort_by(.namespace,.name)
+      else error("affected policy identity missing")
+      end'
+}
+
+hcc_pr_a_capture_egress_identity() {
+  hcc_pr_a_affected_policy_identities | jq -Sce '
+    [.[] | select(.type=="external-egress")] |
+    if length==1 then .[0] else error("egress identity ambiguous") end'
+}
+
+hcc_pr_a_only_captured_egress_remains() {
+  local captured=$1
+  hcc_pr_a_affected_policy_identities | jq -Sce --argjson captured "$captured" '. == [$captured]' >/dev/null
 }
 
 hcc_pr_a_remove_service() {

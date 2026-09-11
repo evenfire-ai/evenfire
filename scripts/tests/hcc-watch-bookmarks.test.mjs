@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { generateKeyPairSync } from 'node:crypto'
+import { createFixtureTls } from '../e2e/_lib/hcc-watch-tls.mjs'
 import { once } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs'
 import https from 'node:https'
@@ -121,35 +121,7 @@ test('observation preserves streamed bytes including malformed frames and backpr
 })
 
 test('proxy observes the actual verified HTTPS response and publishes only a bounded summary', async () => {
-  const { privateKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-  })
-  const generated = spawnSync(
-    '/bin/sh',
-    [
-      '-c',
-      "exec 3<&0; trap 'kill \"$signer\" 2>/dev/null; wait \"$signer\" 2>/dev/null; exit 143' TERM; cat <&3 | openssl \"$@\" & signer=$!; exec 3<&-; wait \"$signer\"",
-      'openssl',
-      'req',
-      '-new',
-      '-x509',
-      '-key',
-      '/dev/stdin',
-      '-days',
-      '1',
-      '-subj',
-      '/CN=localhost',
-      '-addext',
-      'subjectAltName=DNS:localhost,IP:127.0.0.1',
-      '-addext',
-      'basicConstraints=critical,CA:TRUE',
-    ],
-    { input: privateKey, encoding: 'utf8', timeout: 15000 }
-  )
-  assert.equal(generated.status, 0, 'in-memory TLS fixture generation')
-  const credentials = { key: privateKey, cert: generated.stdout }
+  const credentials = createFixtureTls('127.0.0.1')
   const controlDir = mkdtempSync(join(tmpdir(), 'hcc-bookmark-observation-'))
   const upstream = https.createServer(credentials, (_request, response) => {
     response.writeHead(200, headers)

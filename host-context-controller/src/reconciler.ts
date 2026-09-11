@@ -440,6 +440,7 @@ export class McpServerReconciler {
   }
 
   private beginStatusTracking(server: McpServerCRD): void {
+    const previousIdentity = this.statusIdentities.get(server.name)
     if (!this.statusIdentityMatches(server)) {
       this.statusMap.delete(server.name)
       // A new CRD identity (uid/generation) retires any poll window armed for
@@ -450,6 +451,9 @@ export class McpServerReconciler {
       if (poll) {
         if (poll.timer !== undefined) clearTimeout(poll.timer)
         this.readinessPolls.delete(server.name)
+      }
+      if (previousIdentity !== undefined && previousIdentity.uid !== server.uid) {
+        this.managedSnapshot.delete(server.name)
       }
     }
     this.statusIdentities.set(server.name, {

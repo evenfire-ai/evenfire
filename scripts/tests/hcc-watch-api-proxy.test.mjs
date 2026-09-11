@@ -1,6 +1,7 @@
+import { createFixtureTls } from '../e2e/_lib/hcc-watch-tls.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { X509Certificate, generateKeyPairSync } from 'node:crypto'
+import { X509Certificate } from 'node:crypto'
 import { once } from 'node:events'
 import {
   existsSync,
@@ -301,40 +302,7 @@ test('projected-file symlink CLI enters startup and fails loud without fixture m
 })
 
 function certificate() {
-  const { privateKey } = generateKeyPairSync('rsa', {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-    publicKeyEncoding: { type: 'spki', format: 'pem' },
-  })
-  const result = spawnSync(
-    '/bin/sh',
-    [
-      '-c',
-      "exec 3<&0; trap 'kill \"$signer\" 2>/dev/null; wait \"$signer\" 2>/dev/null; exit 143' TERM; cat <&3 | openssl \"$@\" & signer=$!; exec 3<&-; wait \"$signer\"",
-      'openssl',
-      'req',
-      '-new',
-      '-x509',
-      '-key',
-      '/dev/stdin',
-      '-days',
-      '1',
-      '-subj',
-      '/CN=localhost',
-      '-addext',
-      'subjectAltName=DNS:localhost,IP:127.0.0.1',
-      '-addext',
-      'basicConstraints=critical,CA:TRUE',
-    ],
-    {
-      input: privateKey,
-      encoding: 'utf8',
-      timeout: 15000,
-      maxBuffer: 1048576,
-    }
-  )
-  assert.equal(result.status, 0, 'in-memory certificate generation succeeds')
-  return { key: privateKey, cert: result.stdout }
+  return createFixtureTls('127.0.0.1')
 }
 
 before(() => {
@@ -423,11 +391,12 @@ function ack(controlDir, id, state, filename = 'ack.json') {
     read()
   })
 }
-async function fixture(run, { wrongCa = false } = {}) {
+async function fixture(run, { wrongCa = false, wrongHostname = false } = {}) {
+  const upstreamCredentials = wrongHostname ? createFixtureTls('other.invalid') : upstreamTls
   const controlDir = mkdtempSync(join(tmpdir(), 'hcc-proxy-test-'))
   const requests = []
   const responses = new Map()
-  const upstream = https.createServer(upstreamTls, (request, response) => {
+  const upstream = https.createServer(upstreamCredentials, (request, response) => {
     requests.push({
       path: request.url,
       method: request.method,
@@ -450,7 +419,7 @@ async function fixture(run, { wrongCa = false } = {}) {
   await new Promise(resolveListen => upstream.listen(0, '127.0.0.1', resolveListen))
   const proxy = createProxy({
     ...front,
-    upstreamCa: wrongCa ? front.cert : upstreamTls.cert,
+    upstreamCa: wrongCa ? front.cert : upstreamCredentials.cert,
     upstreamHost: '127.0.0.1',
     upstreamPort: upstream.address().port,
     allowedPaths: [allowedPath],
@@ -603,6 +572,18 @@ test('wrong upstream CA cannot produce a successful response', { timeout: 10000 
       assert.equal(requests.length, 0)
     },
     { wrongCa: true }
+  )
+})
+test('trusted CA with wrong upstream hostname cannot forward a request', { timeout: 10000 }, async () => {
+  await fixture(
+    async ({ request, requests }) => {
+      await assert.rejects(
+        bounded(request('/status').completed, 'untrusted response did not settle'),
+        { code: 'ECONNRESET' }
+      )
+      assert.equal(requests.length, 0)
+    },
+    { wrongHostname: true }
   )
 })
 test(

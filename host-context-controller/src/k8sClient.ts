@@ -261,6 +261,15 @@ function observeInitialNetworkPolicyPass(
   initialConvergencePassDurationSeconds.observe({ lane: 'NetworkPolicy', result }, seconds)
 }
 
+function isDesiredNetworkPolicyInventoryInterruption(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return (
+      error.errors.length > 0 && error.errors.every(isDesiredNetworkPolicyInventoryInterruption)
+    )
+  }
+  return error instanceof Error && error.message === DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE
+}
+
 type NetworkPolicySafetyCertificate = {
   // VESTIGIAL — retained for record shape only, never read in any decision.
   // The certificate is identified SOLELY by content revision (the PR #382 fix);
@@ -3482,15 +3491,23 @@ export class McpServerWatcher implements McpServerProvider {
           : '[K8s] Initial NetworkPolicy background reconciliation failed:',
         { err: error }
       )
-      const abortedBump =
-        error instanceof Error && error.message === DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE
-      if (abortedBump && safetyCertificate) {
-        hccLogger.warn(
-          '[K8s] pass ended without certifying: desired inventory changed',
-          this.networkPolicyInventoryMovement(safetyCertificate)
-        )
+      const inventoryInterruption =
+        safetyCertificate !== undefined && isDesiredNetworkPolicyInventoryInterruption(error)
+      const movement = safetyCertificate
+        ? this.networkPolicyInventoryMovement(safetyCertificate)
+        : undefined
+      const result: InitialConvergencePassResult =
+        inventoryInterruption && movement
+          ? movement.contextMoved || movement.serverMoved
+            ? 'aborted-bump'
+            : 'aborted-authority'
+          : 'failed'
+      if (result === 'aborted-bump') {
+        hccLogger.warn('[K8s] pass ended without certifying: desired inventory changed', movement)
+      } else if (result === 'aborted-authority') {
+        hccLogger.warn('[K8s] pass ended without certifying: inventory authority lost', movement)
       }
-      observePass(abortedBump ? 'aborted-bump' : 'failed')
+      observePass(result)
       this.networkPolicyRepairPending = true
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
     }

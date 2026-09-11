@@ -828,6 +828,7 @@ describe('WATCH and recovered LIST policy effects', () => {
 
   it('A-T6 regression: interrupted additive policy work cannot be marked complete after identical recovery', async () => {
     const state = await settled()
+    const log = vi.spyOn(hccLogger, 'info')
     const owner = (state as any).netPolReconciler
     const desired = [...fixture.policies.entries()].find(([, policy]) =>
       Object.values(policy.metadata.labels ?? {}).includes('context-allow')
@@ -874,6 +875,12 @@ describe('WATCH and recovered LIST policy effects', () => {
     finish.resolve()
     await pass
     await drain(state)
+    const results = log.mock.calls
+      .map(([, fields]) => fields as { event?: string; result?: string })
+      .filter(fields => fields?.event === 'networkpolicy-pass-result')
+    expect(results).toContainEqual(expect.objectContaining({ result: 'aborted-authority' }))
+    expect(results).not.toContainEqual(expect.objectContaining({ result: 'failed' }))
+    log.mockRestore()
     expect(state.initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
     expect(watcher.getReadinessInventoryDetail().safetyInventoryCertified).toBe(false)
     await vi.advanceTimersByTimeAsync(5000)

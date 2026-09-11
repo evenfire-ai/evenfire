@@ -1,47 +1,13 @@
 // Public configuration and an ephemeral test key go directly to kubectl stdin.
 // Never redirect this program's output to an artifact or log.
-import { spawnSync } from 'node:child_process'
-import { generateKeyPairSync } from 'node:crypto'
+import { createFixtureTls } from './hcc-watch-tls.mjs'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const [name, namespace, run, proxySource] = process.argv.slice(2)
 for (const value of [name, namespace, run])
   if (!/^[a-z0-9][a-z0-9.-]{0,62}$/.test(value ?? '')) throw new Error('invalid_fixture_identity')
-const { privateKey } = generateKeyPairSync('rsa', {
-  modulusLength: 2048,
-  privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-  publicKeyEncoding: { type: 'spki', format: 'pem' },
-})
-// Linux cannot reopen Node's socket-backed stdin through /dev/stdin. A POSIX
-// pipe keeps the ephemeral key in memory and lets OpenSSL read it portably.
-const signed = spawnSync(
-  '/bin/sh',
-  [
-    '-c',
-    "exec 3<&0; trap 'kill \"$signer\" 2>/dev/null; wait \"$signer\" 2>/dev/null; exit 143' TERM; cat <&3 | openssl \"$@\" & signer=$!; exec 3<&-; wait \"$signer\"",
-    'openssl',
-    'req',
-    '-new',
-    '-x509',
-    '-key',
-    '/dev/stdin',
-    '-days',
-    '1',
-    '-subj',
-    `/CN=${name}.${namespace}.svc`,
-    '-addext',
-    `subjectAltName=DNS:${name}.${namespace}.svc`,
-    '-addext',
-    'basicConstraints=critical,CA:TRUE',
-    '-addext',
-    'keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign',
-  ],
-  { input: privateKey, encoding: 'utf8', timeout: 15000, maxBuffer: 1048576 }
-)
-if (signed.status !== 0 || !signed.stdout.includes('BEGIN CERTIFICATE'))
-  throw new Error('fixture_certificate_generation_failed')
-const cert = signed.stdout
+const { key: privateKey, cert } = createFixtureTls(`${name}.${namespace}.svc`)
 const labels = { 'e2e.clerum.io/suite': 'hcc-watch-churn', 'e2e.clerum.io/run': run }
 const metadata = { name, namespace, labels }
 const config = {
