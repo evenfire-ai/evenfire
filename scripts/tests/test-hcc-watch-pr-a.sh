@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Fixture globals are consumed by sourced helpers and the evaluated production wait loop.
+# shellcheck disable=SC2034
 set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 tmp="$(mktemp -d)"
@@ -85,6 +87,11 @@ for mode in 0 1; do
   (
     source "$ROOT/scripts/e2e/_lib/hcc-watch-recovery-fixture.sh"
     E2E_HCC_PR_A=$mode PROXY_NAME=fixture-proxy HCC_NS=control-plane HCC_DEPLOY=host-context-controller
+    if [[ "$mode" = 1 ]]; then
+      wait_until() { shift 2; "$@"; }
+    else
+      unset -f wait_until
+    fi
     kctl() {
       case "$1/$2" in
         get/service) printf '10.0.0.1';;
@@ -107,3 +114,63 @@ for mode in 0 1; do
   fi
 done
 printf 'PASS: PR A verifies its public fixture CA/name; PR B preserves Kubernetes trust\n'
+
+# Exercise the production wait loop with a virtual clock and only the kubectl
+# boundary doubled. TLS failure and HTTP non-200 never count as readiness.
+for mode in 0 1; do
+  for outcome in success transient permanent; do
+    status=0
+    (
+      source "$ROOT/scripts/e2e/_lib/hcc-watch-recovery-fixture.sh"
+      if [[ "$mode" = 1 ]]; then
+        eval "$(sed -n '/^wait_until() {/,/^}/p' "$ROOT/scripts/e2e/e2e-hcc-watch-churn-readiness.sh")"
+      else
+        # CommunicationChannel recovery does not provide this helper at all.
+        unset -f wait_until
+      fi
+      E2E_HCC_PR_A=$mode HCC_PR_A_WORK_DEADLINE=600
+      PROXY_NAME=fixture-proxy HCC_NS=fixture HCC_DEPLOY=fixture HCC_IMAGE=fixture
+      PROBE_NAME=fixture-negative PROBE_EGRESS_NP=fixture-negative-policy
+      clock=0 attempts=0
+      date() { printf '%s' "$clock"; }
+      sleep() { clock=$((clock + 1)); }
+      kctl() {
+        case "$1/$2" in
+          get/service) printf '10.0.0.1';;
+          get/configmap)
+            jq -cn '{data:{"config.json":"{\"clusters\":[{\"cluster\":{\"certificate-authority-data\":\"cHVibGljLXRlc3QtY2E=\"}}]}"}}';;
+          exec/*)
+            attempts=$((attempts + 1))
+            [[ "${10}" == *rejectUnauthorized:true* ]] || exit 9
+            [[ "${10}" == *'response.statusCode===200?0:2'* ]] || exit 9
+            if [[ "$outcome" = success ]]; then return 0; fi
+            if [[ "$outcome" = transient && "$attempts" = 3 ]]; then return 0; fi
+            if [[ "$outcome" = transient && "$attempts" = 2 ]]; then return 2; fi
+            return 3;;
+          apply/*) cat >/dev/null; printf '%s' "$attempts" > "$tmp/attempts-$mode-$outcome"; exit 0;;
+          logs/*) :;;
+          *) exit 9;;
+        esac
+      }
+      die() { printf '%s' "$attempts" > "$tmp/attempts-$mode-$outcome"; exit 1; }
+      verify_hcc_proxy_network_policy
+    ) > "$tmp/readiness-$mode-$outcome" 2>&1 || status=$?
+    attempts="$(cat "$tmp/attempts-$mode-$outcome")"
+    if [[ "$outcome" = success ]]; then
+      [[ "$status" = 0 && "$attempts" = 1 ]]
+    elif [[ "$mode" = 0 ]]; then
+      [[ "$status" = 1 && "$attempts" = 1 ]] || {
+        echo "FAIL: legacy caller without wait_until exited $status after $attempts attempts" >&2; exit 1;
+      }
+    elif [[ "$outcome" = transient ]]; then
+      [[ "$status" = 0 && "$attempts" = 3 ]] || {
+        echo "FAIL: transient readiness exited $status after $attempts attempts (mode $mode)" >&2; exit 1;
+      }
+    else
+      [[ "$status" = 1 && "$attempts" -gt 1 && "$attempts" -le 21 ]] || {
+        echo "FAIL: permanent trust failure exited $status after $attempts attempts (mode $mode)" >&2; exit 1;
+      }
+    fi
+  done
+done
+printf 'PASS: PR A retries within budget; legacy callers without wait_until remain strict and one-shot\n'

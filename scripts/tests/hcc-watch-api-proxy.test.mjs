@@ -106,6 +106,8 @@ verify_hcc_proxy_network_policy
         },
       },
       console: { error: value => records.push(JSON.parse(value)) },
+      setTimeout,
+      clearTimeout,
       Buffer,
     })
     assert.equal(exitCode, 3)
@@ -117,6 +119,41 @@ verify_hcc_proxy_network_policy
     ])
     assert.equal(JSON.stringify(records).includes(marker), false)
   }
+  // A peer that never ends its response cannot extend the five-second wall
+  // deadline through activity; expiration is explicit ETIMEDOUT, never success.
+  let expire
+  let expiredExit
+  const expiredRecords = []
+  const pending = {
+    on() {
+      return pending
+    },
+    end() {},
+  }
+  runInNewContext(code, {
+    require: name =>
+      name === 'fs' ? { readFileSync: () => Buffer.from(marker) } : { request: () => pending },
+    process: {
+      argv: ['node', 'fixture', 'fixture', ''],
+      exit: value => {
+        expiredExit = value
+      },
+    },
+    console: { error: value => expiredRecords.push(JSON.parse(value)) },
+    Buffer,
+    setTimeout(callback, ms) {
+      assert.equal(ms, 5000)
+      expire = callback
+      return 1
+    },
+    clearTimeout() {},
+  })
+  assert.equal(expiredExit, undefined)
+  expire()
+  assert.equal(expiredExit, 3)
+  assert.deepEqual(expiredRecords, [
+    { event: 'hcc-fixture-positive-probe-error', code: 'ETIMEDOUT' },
+  ])
 })
 
 test('failed positive probe collects only bounded safe proxy event/code records before exit', () => {
