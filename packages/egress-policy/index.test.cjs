@@ -147,3 +147,23 @@ test('brokerInternalUrl composes the full dial URL and defaults an empty path to
     `http://${name}.llm-egress.svc.cluster.local:3000/`
   )
 })
+
+test('broker-name contract vectors: slotId + brokerName match the shared scheme', () => {
+  const { vectors } = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, '../../tests/contracts/oai-egress-broker-name-vectors.json'),
+      'utf8'
+    )
+  )
+  assert.ok(Array.isArray(vectors) && vectors.length >= 3)
+  for (const v of vectors) {
+    const slotId =
+      v.slot.kind === 'primary' ? policy.PRIMARY_SLOT_ID : policy.fallbackSlotId(v.slot.index)
+    assert.equal(slotId, v.slotId, `slotId for ${v.label}`)
+    assert.equal(
+      policy.brokerNameFor(v.hostName, slotId),
+      v.brokerName,
+      `brokerName for ${v.label}`
+    )
+  }
+})

@@ -1,0 +1,27 @@
+{
+  "_comment": "Cross-service pin for the (hostName, slot) -> broker-name seam. HCC provisions the per-slot egress broker under `brokerName`; mcp-host must reconstruct the SAME name to dial it, with no handshake. The three consumers (HCC reconciler, mcp-host provider factory, @clerum/egress-policy) each assert against these vectors, so a slotId- or hash-scheme change turns all three red at once instead of drifting silently. Do NOT hand-edit slotId/brokerName — regenerate with the command below.",
+  "_generatedWith": "node -e \"const p=require('./packages/egress-policy'); console.log(JSON.stringify({primary:{slotId:p.PRIMARY_SLOT_ID, name:p.brokerNameFor('acme-bot',p.PRIMARY_SLOT_ID)}, fb0:{slotId:p.fallbackSlotId(0), name:p.brokerNameFor('acme-bot',p.fallbackSlotId(0))}, fb3:{slotId:p.fallbackSlotId(3), name:p.brokerNameFor('acme-bot',p.fallbackSlotId(3))}},null,2))\"",
+  "vectors": [
+    {
+      "label": "primary slot",
+      "hostName": "acme-bot",
+      "slot": { "kind": "primary" },
+      "slotId": "primary",
+      "brokerName": "oai-egress-c67ae273385bbe3c"
+    },
+    {
+      "label": "fallback index 0",
+      "hostName": "acme-bot",
+      "slot": { "kind": "fallback", "index": 0 },
+      "slotId": "fallback-0",
+      "brokerName": "oai-egress-cc1a655a5959b3dc"
+    },
+    {
+      "label": "fallback index 3",
+      "hostName": "acme-bot",
+      "slot": { "kind": "fallback", "index": 3 },
+      "slotId": "fallback-3",
+      "brokerName": "oai-egress-b5171074b304db87"
+    }
+  ]
+}

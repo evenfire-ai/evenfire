@@ -156,6 +156,12 @@ function fallbackSlotId(index) {
  * mcp-host must reconstruct the identical name to dial it (no handshake). The
  * \x1f separator is an unambiguous, non-DNS byte so distinct (host, slot) pairs
  * cannot collide by string concatenation.
+ *
+ * `hostName` is the Host's `metadata.name` verbatim (DNS-1123). Neither side
+ * canonicalizes it; HCC injects it into CLERUM_HOST_NAME untransformed and
+ * mcp-host reads it back the same way. Do not add normalization (case-folding,
+ * trimming) here or in callers — a transform on one side only would make the two
+ * names diverge for the same Host.
  */
 function brokerNameFor(hostName, slotId) {
   // `crypto` is required lazily (not at module load) so control-ui, which bundles
