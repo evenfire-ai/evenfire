@@ -9,6 +9,7 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci
@@ -59,6 +60,7 @@ COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-cont
 COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY --from=builder /app/mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --omit=dev
