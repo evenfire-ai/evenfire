@@ -255,4 +255,28 @@ describe('LlmPolicyEditor (spec §3-R5 / R4.5.6)', () => {
     expect(['gpt-5.4', 'gpt-5.4-mini']).toContain(latest?.fallbacks[0].model)
     expect(latest?.fallbacks[0].credentialSlot).toBeUndefined()
   })
+
+  // R4-M4: the fallback list is capped (CRD maxItems + control-api gate). The
+  // "Add fallback provider" button must be disabled once the cap is reached so
+  // the operator can never compose a spec the backend/CRD would reject.
+  const manyFallbacks = (n: number): LlmPolicy => ({
+    cooldownSeconds: 120,
+    triggerOn: ['auth'],
+    fallbacks: Array.from({ length: n }, () => ({
+      provider: 'claude' as const,
+      model: 'claude-opus-4-8',
+    })),
+  })
+
+  it('disables "Add fallback provider" at the maximum (8) and shows the cap hint', () => {
+    render(<Harness initial={manyFallbacks(8)} />)
+    expect(screen.getByRole('button', { name: 'Add fallback provider' })).toBeDisabled()
+    expect(screen.getByText(/Maximum of 8 fallback providers reached/i)).toBeInTheDocument()
+  })
+
+  it('keeps "Add fallback provider" enabled below the maximum', () => {
+    render(<Harness initial={manyFallbacks(7)} />)
+    expect(screen.getByRole('button', { name: 'Add fallback provider' })).not.toBeDisabled()
+    expect(screen.queryByText(/Maximum of 8 fallback providers reached/i)).not.toBeInTheDocument()
+  })
 })

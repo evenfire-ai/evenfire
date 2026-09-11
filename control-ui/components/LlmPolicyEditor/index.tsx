@@ -22,6 +22,7 @@ import {
   providerSupportsFallbackCredentialSlot,
   resolveDefaultModel,
 } from '@/lib/llm'
+import { MAX_LLM_FALLBACKS } from '@clerum/llm-providers'
 import type { LlmPolicyEditorProps } from './types'
 
 // Empty triggerOn on a fresh policy means "all four" (the CRD default); we seed
@@ -71,7 +72,12 @@ export function LlmPolicyEditor({
     onChange(merged.fallbacks.length === 0 ? undefined : merged)
   }
 
+  const atFallbackLimit = fallbacks.length >= MAX_LLM_FALLBACKS
+
   const addFallback = () => {
+    // Server-side (control-api) and the CRD both cap the list at this bound; the
+    // button is disabled here, but guard the handler too so nothing can exceed it.
+    if (atFallbackLimit) return
     const model = resolveDefaultModel(
       defaultProvider,
       constrainModelOptions(catalog, allowedModels, defaultProvider)
@@ -191,9 +197,20 @@ export function LlmPolicyEditor({
       )}
 
       <div className="cu-llm-policy__actions">
-        <Button type="button" variant="ghost" size="sm" onClick={addFallback} disabled={disabled}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={addFallback}
+          disabled={disabled || atFallbackLimit}
+        >
           Add fallback provider
         </Button>
+        {atFallbackLimit ? (
+          <span className="cu-field__hint">
+            Maximum of {MAX_LLM_FALLBACKS} fallback providers reached.
+          </span>
+        ) : null}
       </div>
     </section>
   )
