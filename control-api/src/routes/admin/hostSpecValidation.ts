@@ -192,6 +192,39 @@ export function collectOpenAiCompatibleBaseUrlTargets(
   return targets
 }
 
+/**
+ * Enumerate LLM targets (`spec.model` + each fallback) that carry a `baseURL`
+ * under a provider that is NOT `openai-compatible`. `baseURL` is exclusive to
+ * local endpoints; the CRD already rejects it for any other provider (CEL
+ * `:63-64` / `:264-265`), but control-api must mirror the REVERSE check so a
+ * misplaced `baseURL` surfaces as a clean 422 here rather than slipping to the
+ * apiserver (503 via the generic catch) — and so binding Codex over a former
+ * local Host is a usable flow (the bind writer drops it; see codexSubscription).
+ *
+ * Kept separate from `collectOpenAiCompatibleBaseUrlTargets` on purpose: that
+ * helper is the single definition of which locations carry a LOCAL baseURL
+ * (regla D4), relied on verbatim by the read-after-write prune guard in
+ * resources.ts. Broadening it to also return non-local targets would falsify
+ * that contract, so the reverse check gets its own enumerator.
+ */
+function collectMisplacedBaseUrlTargets(spec: Record<string, unknown>): Array<{ field: string }> {
+  const targets: Array<{ field: string }> = []
+  if (isPlainObject(spec.model) && spec.model.baseURL !== undefined) {
+    const provider = typeof spec.model.provider === 'string' ? spec.model.provider.trim() : ''
+    if (provider !== 'openai-compatible') targets.push({ field: 'spec.model.baseURL' })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (!isPlainObject(entry) || entry.baseURL === undefined) return
+      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+      if (provider !== 'openai-compatible') {
+        targets.push({ field: `spec.llmPolicy.fallbacks[${i}].baseURL` })
+      }
+    })
+  }
+  return targets
+}
+
 const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
   invalid_url: 'baseURL must be a valid absolute URL',
   not_ip:
@@ -227,6 +260,14 @@ function validateOpenAiCompatibleBaseUrls(
     if (!decision.ok) {
       errors.push({ field: target.field, message: LAN_BASE_URL_REASON_MESSAGE[decision.reason] })
     }
+  }
+  // Reverse direction (R4-M2): a baseURL under any other provider is invalid —
+  // mirror the CRD CEL so control-api answers 422 instead of a generic 503.
+  for (const target of collectMisplacedBaseUrlTargets(spec)) {
+    errors.push({
+      field: target.field,
+      message: `${target.field} is only valid when the provider is 'openai-compatible'`,
+    })
   }
   return errors
 }

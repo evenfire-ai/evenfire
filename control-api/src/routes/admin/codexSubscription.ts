@@ -260,6 +260,11 @@ export function createAdminCodexSubscriptionRouter(
         : {}
     model.provider = 'codex-subscription'
     model.connectionRef = nextConnectionRef
+    // Binding Codex is a provider change. `baseURL` is exclusive to
+    // 'openai-compatible' (the CRD rejects it under any other provider), so
+    // carrying it over from a former local Host would make the write fail
+    // admission; drop it so converting a local Host actually works.
+    delete model.baseURL
     let resolvedModel = typeof model.name === 'string' ? model.name.trim() : ''
     if (nextConnectionRef !== CODEX_UNASSIGNED_CONNECTION_KEY) {
       const offered = await listOfferedCodexModelsForAssignment(dbClient(), nextConnectionRef)

@@ -1032,14 +1032,36 @@ describe('validateHostSpec', () => {
       expect(isModelAllowed).not.toHaveBeenCalled()
     })
 
-    it('does not touch baseURL for non-openai-compatible providers', async () => {
+    it('rejects a baseURL on a non-openai-compatible provider (reverse gate, R4-M2)', async () => {
       const isModelAllowed = vi.fn().mockResolvedValue(true)
-      // A stray baseURL on a claude target is ignored by this gate.
+      // baseURL is exclusive to openai-compatible; a stray one on a real-provider
+      // target is a misplaced field, not ignored (mirrors the CRD CEL reverse).
       const res = await validateHostSpec(
-        { model: { provider: 'claude', name: 'claude-haiku-4-5', baseURL: 'http://8.8.8.8/v1' } },
+        { model: { provider: 'openai', name: 'gpt', baseURL: 'http://192.168.1.50/v1' } },
         { isModelAllowed }
       )
-      expect(res).toBeNull()
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.model.baseURL')
+      expect(res!.errors[0].message).toMatch(/only valid when the provider is 'openai-compatible'/)
+      // Reverse gate runs before the allowlist lookup.
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
+
+    it('rejects a misplaced baseURL on a non-local fallback with the indexed field path (R4-M2)', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const res = await validateHostSpec(
+        {
+          llmPolicy: {
+            fallbacks: [
+              { provider: 'claude', model: 'claude-haiku-4-5', baseURL: 'http://192.168.1.50/v1' },
+            ],
+          },
+        },
+        { isModelAllowed }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[0].baseURL')
+      expect(res!.errors[0].message).toMatch(/only valid when the provider is 'openai-compatible'/)
     })
   })
 })
