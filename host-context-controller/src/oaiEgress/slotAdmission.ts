@@ -25,6 +25,7 @@ export type SlotDropReason =
   | 'cluster_internal_guard_unconfigured'
   | 'cluster_node_guard_unconfigured'
   | 'credential_slot_not_owned'
+  | 'missing_base_url'
   | LanBaseUrlReason
   | 'url_unparseable'
   | 'scheme_unsupported'
@@ -68,9 +69,17 @@ export function deriveDesiredBrokers(
     credentialDataKey: string
   ): void => {
     if (provider?.trim() !== OPENAI_COMPATIBLE_PROVIDER) return
-    if (!baseURL) return
     if (seenSlotIds.has(slotId)) return
     seenSlotIds.add(slotId)
+    // A declared openai-compatible slot with an empty/whitespace baseURL is a
+    // DROP, not a silent skip: otherwise provisioned=0/dropped=[] reports
+    // True/AllSlotsProvisioned "0 broker(s) provisioned" for a slot that asked for
+    // a broker. (A non-empty-but-garbage baseURL falls to invalid_url in admitSlot;
+    // only '' / '   ' / undefined were mute.)
+    if (!baseURL?.trim()) {
+      dropped.push({ slotId, reason: 'missing_base_url' })
+      return
+    }
     // Ownership gate BEFORE admission: a fallback whose credentialSlot is not a
     // key the openai-compatible provider owns (e.g. 'claude-api-key') would have
     // HCC mirror a FOREIGN key from the Host Secret to a LAN IP the admin chose.

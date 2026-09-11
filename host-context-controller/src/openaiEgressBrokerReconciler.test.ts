@@ -638,6 +638,24 @@ describe('OpenAiEgressBrokerReconciler', () => {
     expect(secretBody.data?.['openai-compatible-api-key']).toBe(b64('sk-fb1'))
   })
 
+  it('T17: an empty baseURL on a declared openai-compatible slot drops missing_base_url, not a silent success (R4-M3)', async () => {
+    const host = makeHost({
+      name: 'h17',
+      spec: { model: { provider: 'openai-compatible', baseURL: '' } },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    expect(appsApi.createNamespacedDeployment).not.toHaveBeenCalled()
+    const cond = brokersCondition()
+    expect(cond).toMatchObject({
+      type: OAI_EGRESS_BROKERS_CONDITION_TYPE,
+      status: 'False',
+      reason: 'MissingBaseUrl',
+    })
+    expect(cond?.message).toContain('primary: missing_base_url')
+  })
+
   it('T14: anti-oscillation — a second reconcile against the same status does not re-patch', async () => {
     // Fresh GET reflects the last written condition, so the dirty check on the
     // second reconcile sees an equivalent condition and skips the write.
