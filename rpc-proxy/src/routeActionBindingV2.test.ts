@@ -139,6 +139,74 @@ describe('route action v2 binding', () => {
     })
   })
 
+  it.each([
+    {
+      operationId: 'session.read' as const,
+      target: { hostRef: 'mcp-host/chatllm' },
+      req: request({
+        path: '/rpc/hosts/:hostRef/sessions/search',
+        method: 'GET',
+        params: { hostRef: 'chatllm' },
+      }),
+    },
+    {
+      operationId: 'task.read' as const,
+      target: { hostRef: 'mcp-host/chatllm', taskId: 'task-a' },
+      req: request({
+        path: '/rpc/hosts/:hostRef/tasks/:taskId/result',
+        method: 'GET',
+        params: { hostRef: 'chatllm', taskId: 'task-a' },
+      }),
+    },
+    {
+      operationId: 'task.manage' as const,
+      target: { hostRef: 'mcp-host/chatllm', taskId: 'task-a', action: 'cancel' },
+      req: request({
+        path: '/rpc/hosts/:hostRef/tasks/:taskId/cancel',
+        method: 'POST',
+        params: { hostRef: 'chatllm', taskId: 'task-a' },
+      }),
+    },
+    {
+      operationId: 'model.read' as const,
+      target: { hostRef: 'mcp-host/chatllm', agent: 'agent-a', chatId: 'chat-a' },
+      req: request({
+        path: '/rpc/hosts/:hostRef/models',
+        method: 'GET',
+        params: { hostRef: 'chatllm' },
+        query: { agent: 'agent-a', chatId: 'chat-a' },
+      }),
+    },
+    {
+      operationId: 'model.select' as const,
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        agent: 'agent-a',
+        chatId: 'chat-a',
+        provider: 'openai',
+        model: 'model-a',
+      },
+      req: request({
+        path: '/rpc/hosts/:hostRef/model',
+        method: 'POST',
+        params: { hostRef: 'chatllm' },
+        body: { agent: 'agent-a', chatId: 'chat-a', provider: 'openai', model: 'model-a' },
+      }),
+    },
+  ])(
+    'binds real runtime-session producer shape for $operationId',
+    ({ operationId, target, req }) => {
+      const claims = delegation({
+        operationId,
+        resourceType: 'runtime_session',
+        resourceId: 'session-a',
+        target: target as unknown as Record<string, string>,
+      })
+
+      expect(bindRouteActionV2(req, claims)).toMatchObject({ operationId, target })
+    }
+  )
+
   it('denies unclassified and internal MCP methods', () => {
     const claims = delegation({
       operationId: 'mcp.invoke',

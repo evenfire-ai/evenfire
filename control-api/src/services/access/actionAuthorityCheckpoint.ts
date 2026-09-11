@@ -202,6 +202,7 @@ export async function checkpointActionAuthority(
   const destinationResolver = dependencies.resolveDestination ?? resolveActionDestination
   const destination = await destinationResolver({
     resource: result.context.resource,
+    target: result.context.target,
     gateway: input.gateway,
     budget: input.budget,
   })

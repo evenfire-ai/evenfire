@@ -1,3 +1,4 @@
+import type { CanonicalActionTarget } from '@clerum/action-context-contracts'
 import { config } from '../../config.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { AccessExecutionBudget } from './accessExecutionBudget.js'
@@ -28,9 +29,24 @@ function isNotFound(error: unknown): boolean {
 
 export async function resolveActionDestination(input: {
   resource: CanonicalResourceIdentity
+  target: CanonicalActionTarget
   gateway: Pick<K8sGateway, 'getResourceExact'>
   budget: AccessExecutionBudget
 }): Promise<ActionDestinationResult> {
+  if (input.resource.type === 'runtime_session') {
+    const hostRef = input.target?.hostRef
+    if (typeof hostRef !== 'string') return { status: 'not_found' }
+    const host = scopedRef(hostRef)
+    if (!host || host.namespace !== config.hostsNamespace) return { status: 'not_found' }
+    return {
+      status: 'resolved',
+      destination: Object.freeze({
+        kind: 'host',
+        ref: hostRef,
+        url: `http://${host.name}.${host.namespace}.svc.cluster.local:8080`,
+      }),
+    }
+  }
   if (input.resource.type !== 'host' && input.resource.type !== 'mcp_server') {
     return { status: 'resolved', destination: null }
   }
