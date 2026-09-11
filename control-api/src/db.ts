@@ -3162,6 +3162,18 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
   `)
 }
 
+async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE workflow_authority_bindings
+      DROP CONSTRAINT IF EXISTS workflow_authority_bindings_entity_type_check;
+    ALTER TABLE workflow_authority_bindings
+      ADD CONSTRAINT workflow_authority_bindings_entity_type_check CHECK (entity_type IN (
+        'workflow_trigger', 'workflow_recipe', 'workflow_run',
+        'workflow_approval', 'workflow_artifact'
+      ));
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6195,6 +6207,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0111_pr2_readiness_evidence',
     apply: applyPr2ReadinessEvidenceSchema,
+  },
+  {
+    version: '0113_workflow_recipe_authority_entity',
+    apply: applyWorkflowRecipeAuthorityEntitySchema,
   },
 ]
 

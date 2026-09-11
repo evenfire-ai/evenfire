@@ -15,6 +15,7 @@ export const PR2_MIGRATION_VERSIONS = Object.freeze([
   '010f_workflow_authority_bindings',
   '0110_gfs_upload_authority_bindings',
   '0111_pr2_readiness_evidence',
+  '0113_workflow_recipe_authority_entity',
 ] as const)
 
 const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
