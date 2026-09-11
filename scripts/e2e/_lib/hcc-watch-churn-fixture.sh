@@ -245,6 +245,10 @@ delete_synthetic_fleet() {
 
 # Non-destructive restore: undo the env overrides and hostAliases redirect.
 restore_hcc_after_churn() {
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    hcc_pr_a_restore
+    return $?
+  fi
   local failed=0
   kctl set env deployment/"$HCC_DEPLOY" -n "$HCC_NS" \
     KUBERNETES_SERVICE_HOST- KUBERNETES_SERVICE_PORT- CONTEXT_MAPPER_K8S_API_CIDRS- >/dev/null || failed=1

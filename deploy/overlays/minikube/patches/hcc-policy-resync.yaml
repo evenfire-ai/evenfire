@@ -1,0 +1,15 @@
+# Keep the existing periodic repair active in the owned development lane.
+# The shared base remains unchanged; PR A does not change GKE cadence.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: host-context-controller
+  namespace: control-plane
+spec:
+  template:
+    spec:
+      containers:
+        - name: host-context-controller
+          env:
+            - name: CONTEXT_MAPPER_NETPOL_RESYNC_SEC
+              value: '3600'

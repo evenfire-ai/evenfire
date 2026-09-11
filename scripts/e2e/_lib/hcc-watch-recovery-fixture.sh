@@ -167,6 +167,7 @@ EOF
 verify_hcc_proxy_network_policy() {
   local proxy_dns="${PROXY_NAME}.${HCC_NS}.svc"
   local proxy_ip positive_probe negative_probe probe_status
+  local positive_servername='kubernetes.default.svc' proxy_public_ca=''
 
   proxy_ip="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')" ||
     die "could not resolve the proxy Service ClusterIP"
@@ -175,12 +176,20 @@ verify_hcc_proxy_network_policy() {
   positive_probe="$(cat <<'NODE'
 const fs=require('fs'),https=require('https');
 const root='/var/run/secrets/kubernetes.io/serviceaccount/';
-const request=https.request({host:process.argv[1],port:443,path:'/version',servername:'kubernetes.default.svc',ca:fs.readFileSync(root+'ca.crt'),headers:{authorization:'Bearer '+fs.readFileSync(root+'token','utf8')}},response=>{response.resume();response.on('end',()=>process.exit(response.statusCode===200?0:2))});
+const request=https.request({host:process.argv[1],port:443,path:'/version',servername:process.argv[2]||'kubernetes.default.svc',ca:process.argv[3]?Buffer.from(process.argv[3],'base64'):fs.readFileSync(root+'ca.crt'),rejectUnauthorized:true,headers:{authorization:'Bearer '+fs.readFileSync(root+'token','utf8')}},response=>{response.resume();response.on('end',()=>process.exit(response.statusCode===200?0:2))});
 request.setTimeout(5000,()=>request.destroy(new Error('timeout')));request.on('error',()=>process.exit(3));request.end();
 NODE
 )"
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    # This is the public certificate HCC's temporary kubeconfig will trust.
+    # Authentication still comes from the original mounted service account.
+    proxy_public_ca="$(kctl get configmap "$PROXY_NAME" -n "$HCC_NS" -o json |
+      jq -er '.data["config.json"]|fromjson|.clusters[0].cluster["certificate-authority-data"]')" ||
+      die 'PR A proxy public trust configuration missing'
+    positive_servername=$proxy_dns
+  fi
   kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
-    node -e "$positive_probe" "$proxy_dns" >/dev/null ||
+    node -e "$positive_probe" "$proxy_dns" "$positive_servername" "$proxy_public_ca" >/dev/null ||
     die "HCC cannot reach the Kubernetes API through the isolated proxy"
 
   PROBE_CREATED=1

@@ -680,6 +680,12 @@ minikube-t2-hcc-networkpolicy-lifecycle: ## Run canonical T2 with the HCC Networ
 	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
 		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
 
+.PHONY: minikube-t2-hcc-watch-recovery
+minikube-t2-hcc-watch-recovery: ## Certify PR A recovery omission, runtime repair and API-gate recovery in owned Minikube
+	@bash scripts/tests/test-hcc-watch-api-proxy.sh
+	@bash scripts/tests/test-hcc-watch-pr-a.sh
+	@E2E_HCC_PR_A=1 $(MAKE) minikube-t2-hcc-networkpolicy-lifecycle
+
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
 	@T2_RUN_T0=false T2_RUN_T1=false \

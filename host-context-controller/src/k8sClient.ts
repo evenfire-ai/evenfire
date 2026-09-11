@@ -234,6 +234,17 @@ type HostSnapshot = {
 type HostInventoryRecoveryCause = 'cold-start' | 'watch-recovery'
 type HostWatchEventType = 'ADDED' | 'MODIFIED' | 'DELETED'
 type InitialConvergenceLane = 'McpServer' | 'NetworkPolicy'
+type NetworkPolicyConvergenceCause =
+  | 'mcp-recovery'
+  | 'context-recovery'
+  | 'periodic-resync'
+  | 'startup'
+  | 'retry'
+  | 'mcp-change'
+  | 'context-change'
+  | 'context-reconcile-failure'
+type CompletedInventoryRevision = { contextRevision: number; serverRevision: number }
+
 type InitialConvergencePassResult =
   | 'certified'
   | 'aborted-authority'
@@ -767,6 +778,22 @@ export class McpServerWatcher implements McpServerProvider {
   // the startup role the (now removed) generation equalities used to play.
   private networkPolicyRevocationContextRevision = -1
   private networkPolicyRevocationServerRevision = -1
+  // Safety certification precedes additive policy work and runtime effects.
+  // Only successful, current completions discharge these separate obligations.
+  private completedNetworkPolicyRevision: CompletedInventoryRevision | null = null
+  private completedRuntimeRevision: CompletedInventoryRevision | null = null
+  private networkPolicyRepairPending = false
+  private runtimeRepairPending = false
+  private runtimeInventoryGeneration: number | null = null
+  private readonly pendingNetworkPolicyCauses = new Set<NetworkPolicyConvergenceCause>()
+  private networkPolicyPassSequence = 0
+  private activeNetworkPolicyPass: {
+    passId: number
+    causes: NetworkPolicyConvergenceCause[]
+    trailing: boolean
+    contextRevision: number
+    serverRevision: number
+  } | null = null
   private mcpServerCacheSynced = false
   private contextCacheSynced = false
   private mcpServerCacheRecoveryTimer: ReturnType<typeof setTimeout> | null = null
@@ -1490,6 +1517,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.mcpServerCacheRecoveryInFlight) return this.mcpServerCacheRecoveryInFlight
 
     const recovery = (async () => {
+      const before = this.currentDesiredInventoryRevision()
       try {
         const snapshot = await listMcpServerSnapshot()
         if (this.stopped) return false
@@ -1499,15 +1527,15 @@ export class McpServerWatcher implements McpServerProvider {
         this.mcpServerWatchRecoveryFailures = 0
         this.mcpServerWatchRecoveryRetryAfterMs = undefined
         this.changeCallback?.()
-        if (this.contextCacheSynced) {
-          void this.runInitialNetworkPolicyConvergence()
+        if (this.shouldRequestNetworkPolicyRecovery('McpServer', before)) {
+          void this.runInitialNetworkPolicyConvergence({ cause: 'mcp-recovery' })
         }
         return true
       } catch (error) {
         this.mcpServerCacheSynced = false
         this.mcpServerWatchRecoveryFailures += 1
         this.mcpServerWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
-        console.error('[K8s] McpServer cache recovery failed:', error)
+        hccLogger.error('[K8s] McpServer cache recovery failed:', { err: error })
         return false
       }
     })()
@@ -1526,6 +1554,7 @@ export class McpServerWatcher implements McpServerProvider {
     if (this.contextCacheRecoveryInFlight) return this.contextCacheRecoveryInFlight
 
     const recovery = (async () => {
+      const before = this.currentDesiredInventoryRevision()
       try {
         const snapshot = await listContextSnapshot()
         if (this.stopped) return false
@@ -1535,7 +1564,9 @@ export class McpServerWatcher implements McpServerProvider {
         this.contextWatchRecoveryFailures = 0
         this.contextWatchRecoveryRetryAfterMs = undefined
         this.hostFleetScheduler.bumpInputRevision()
-        void this.runInitialNetworkPolicyConvergence()
+        if (this.shouldRequestNetworkPolicyRecovery('Context', before)) {
+          void this.runInitialNetworkPolicyConvergence({ cause: 'context-recovery' })
+        }
         void this.runInitialSharedFileSystemConvergence()
         if (this.hostCacheSynced) {
           const pendingCcLifecycleGeneration =
@@ -1553,7 +1584,7 @@ export class McpServerWatcher implements McpServerProvider {
         this.contextCacheSynced = false
         this.contextWatchRecoveryFailures += 1
         this.contextWatchRecoveryRetryAfterMs = getRetryAfterMs(error)
-        console.error('[K8s] Context cache recovery failed:', error)
+        hccLogger.error('[K8s] Context cache recovery failed:', { err: error })
         return false
       }
     })()
@@ -2906,7 +2937,10 @@ export class McpServerWatcher implements McpServerProvider {
           netPolResyncTicksSkippedTotal.inc({ reason: 'pass-in-flight' })
           return
         }
-        void this.runInitialNetworkPolicyConvergence({ ensureDefaults: true })
+        void this.runInitialNetworkPolicyConvergence({
+          ensureDefaults: true,
+          cause: 'periodic-resync',
+        })
       }, netPolResyncSec * 1000)
       console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)
     } else {
@@ -2946,7 +2980,7 @@ export class McpServerWatcher implements McpServerProvider {
     // its certification callback, before additive policy convergence completes.
     // This prevents the startup egress refresh from racing or undoing the safety
     // pass while keeping readiness independent from both additive fleets.
-    void this.runInitialNetworkPolicyConvergence()
+    void this.runInitialNetworkPolicyConvergence({ cause: 'startup' })
     void initialSharedFileSystemInventory.then(inventoryComplete => {
       if (inventoryComplete && !this.stopped) {
         void this.runInitialSharedFileSystemConvergence()
@@ -3006,6 +3040,60 @@ export class McpServerWatcher implements McpServerProvider {
     }
   }
 
+  private currentDesiredInventoryRevision(): CompletedInventoryRevision {
+    return {
+      contextRevision: this.contextDesiredRevision,
+      serverRevision: this.mcpServerDesiredRevision,
+    }
+  }
+
+  private matchesCurrentInventory(revision: CompletedInventoryRevision | null): boolean {
+    return (
+      revision !== null &&
+      revision.contextRevision === this.contextDesiredRevision &&
+      revision.serverRevision === this.mcpServerDesiredRevision
+    )
+  }
+
+  private shouldRequestNetworkPolicyRecovery(
+    kind: 'McpServer' | 'Context',
+    before: CompletedInventoryRevision
+  ): boolean {
+    let reason:
+      | 'identical-complete'
+      | 'relevant-change'
+      | 'no-authority'
+      | 'work-pending'
+      | 'resync-disabled'
+    const deferred = kind === 'McpServer' && !this.contextCacheSynced
+    if (deferred) reason = 'no-authority'
+    else if (!this.matchesCurrentInventory(before)) reason = 'relevant-change'
+    else if (this.netPolResyncTimer === null) reason = 'resync-disabled'
+    else if (this.currentNetworkPolicySafetyCertificate() === null) reason = 'no-authority'
+    else if (
+      !this.matchesCurrentInventory(this.completedNetworkPolicyRevision) ||
+      !this.matchesCurrentInventory(this.completedRuntimeRevision) ||
+      this.networkPolicyRepairPending ||
+      this.runtimeRepairPending ||
+      this.reconciler.hasPendingReconciliation() ||
+      (this.runtimeInventoryGeneration !== null &&
+        this.runtimeInventoryGeneration !== this.mcpWatchGeneration) ||
+      this.initialConvergenceRetryTimers.has('NetworkPolicy') ||
+      this.initialConvergenceRetryTimers.has('McpServer')
+    ) {
+      reason = 'work-pending'
+    } else reason = 'identical-complete'
+    const request = !deferred && reason !== 'identical-complete'
+    hccLogger.info('[K8s] NetworkPolicy recovery decision', {
+      event: 'networkpolicy-recovery-decision',
+      kind,
+      decision: deferred ? 'defer' : request ? 'request' : 'skip',
+      reason,
+      ...this.currentDesiredInventoryRevision(),
+    })
+    return request
+  }
+
   private runInitialMcpServerConvergence(): Promise<void> {
     return this.runInitialConvergence('McpServer')
   }
@@ -3063,8 +3151,13 @@ export class McpServerWatcher implements McpServerProvider {
 
   private async runInitialMcpServerConvergenceCore(): Promise<void> {
     const safetyCertificate = this.currentNetworkPolicySafetyCertificate()
+    // A retired run may settle normally without invoking work. Keep its repair
+    // obligation until an authoritative pass actually completes every effect.
+    this.runtimeRepairPending = true
     if (safetyCertificate === null) return
+    let effectsComplete = true
     const inventoryGeneration = this.mcpWatchGeneration
+    this.runtimeInventoryGeneration = inventoryGeneration
     const inventoryAuthoritative = () =>
       this.hasMcpServerInventoryAuthority(inventoryGeneration) &&
       this.isNetworkPolicySafetyCertificateCurrent(safetyCertificate)
@@ -3075,7 +3168,7 @@ export class McpServerWatcher implements McpServerProvider {
         inventoryAuthoritative
       )
       if (this.stopped) return
-      console.log('[K8s] Running initial McpServer background reconciliation...')
+      hccLogger.info('[K8s] Running initial McpServer background reconciliation...')
       await this.reconciler.fullReconcile(initialServers, {
         runEffect: async (serverName, work) => {
           const selected = this.servers.get(serverName)
@@ -3083,29 +3176,58 @@ export class McpServerWatcher implements McpServerProvider {
             name: serverName,
             namespace: config.namespace,
           }
-          if (!(await initialExternalEgressGates.waitFor(laneOwner))) return
-          if (!inventoryAuthoritative()) return
+          if (!(await initialExternalEgressGates.waitFor(laneOwner))) {
+            effectsComplete = false
+            return
+          }
+          if (!inventoryAuthoritative()) {
+            effectsComplete = false
+            return
+          }
           await this.enqueueMcpServerReconciliation(laneOwner, async () => {
-            if (!inventoryAuthoritative()) return
+            if (!inventoryAuthoritative()) {
+              effectsComplete = false
+              return
+            }
             await work()
           })
         },
       })
-      if (!inventoryAuthoritative()) return
+      if (
+        !effectsComplete ||
+        !inventoryAuthoritative() ||
+        this.reconciler.hasIncompleteReconciliation()
+      ) {
+        this.scheduleInitialConvergenceRetry('McpServer')
+        return
+      }
+      this.completedRuntimeRevision = safetyCertificate
+      this.runtimeRepairPending = false
       initialConvergenceLastSuccessTimestampSeconds.set({ lane: 'McpServer' }, Date.now() / 1000)
       this.clearInitialConvergenceRetry('McpServer')
     } catch (error) {
-      console.error('[K8s] Initial McpServer background reconciliation failed:', error)
+      hccLogger.error('[K8s] Initial McpServer background reconciliation failed:', { err: error })
       this.scheduleInitialConvergenceRetry('McpServer')
+    } finally {
+      this.runtimeInventoryGeneration = null
     }
   }
 
-  private runInitialNetworkPolicyConvergence(options?: {
+  private runInitialNetworkPolicyConvergence(options: {
     ensureDefaults?: boolean
+    cause: NetworkPolicyConvergenceCause
   }): Promise<void> {
     if (options?.ensureDefaults) {
       this.netPolConvergenceEnsureDefaults = true
     }
+    const cause = options.cause
+    this.pendingNetworkPolicyCauses.add(cause)
+    hccLogger.info('[K8s] NetworkPolicy convergence requested', {
+      event: 'networkpolicy-request',
+      cause,
+      ...this.currentDesiredInventoryRevision(),
+      admission: this.activeNetworkPolicyPass === null ? 'before-capture' : 'trailing',
+    })
     return this.runInitialConvergence('NetworkPolicy')
   }
 
@@ -3168,13 +3290,31 @@ export class McpServerWatcher implements McpServerProvider {
     this.initialConvergenceRuns.set(lane, run)
     run.promise = Promise.resolve()
       .then(async () => {
+        let trailing = false
         do {
           run.trailingRequested = false
           if (lane === 'McpServer') {
             await this.runInitialMcpServerConvergenceCore()
           } else {
-            await this.runInitialNetworkPolicyConvergenceCore()
+            const pass = {
+              passId: ++this.networkPolicyPassSequence,
+              causes: [...this.pendingNetworkPolicyCauses],
+              trailing,
+              ...this.currentDesiredInventoryRevision(),
+            }
+            this.pendingNetworkPolicyCauses.clear()
+            this.activeNetworkPolicyPass = pass
+            hccLogger.info('[K8s] NetworkPolicy pass started', {
+              event: 'networkpolicy-pass-start',
+              ...pass,
+            })
+            try {
+              await this.runInitialNetworkPolicyConvergenceCore()
+            } finally {
+              this.activeNetworkPolicyPass = null
+            }
           }
+          trailing = true
         } while (!this.stopped && run.trailingRequested)
         // Retire the active slot synchronously before this promise settles.
         // A request arriving in the following settlement microtask must start
@@ -3200,6 +3340,14 @@ export class McpServerWatcher implements McpServerProvider {
     // full convergence nor safe evidence of success. Recovery of either
     // missing LIST -> WATCH pair schedules a fresh current-cache pass.
     const startedAtMs = Date.now()
+    const observePass = (result: InitialConvergencePassResult) => {
+      observeInitialNetworkPolicyPass(startedAtMs, result)
+      hccLogger.info('[K8s] NetworkPolicy pass finished', {
+        event: 'networkpolicy-pass-result',
+        ...this.activeNetworkPolicyPass,
+        result,
+      })
+    }
     if (!this.contextCacheSynced || !this.mcpServerCacheSynced) {
       const unsynced = [
         !this.contextCacheSynced ? 'Context' : undefined,
@@ -3207,17 +3355,19 @@ export class McpServerWatcher implements McpServerProvider {
       ]
         .filter((name): name is string => name !== undefined)
         .join(' and ')
-      console.warn(
+      hccLogger.warn(
         `[K8s] NetworkPolicy convergence request deferred: caches unsynced (${unsynced})`
       )
       initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'unsynced' })
-      observeInitialNetworkPolicyPass(startedAtMs, 'deferred-unsynced')
+      observePass('deferred-unsynced')
+      this.networkPolicyRepairPending = true
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
       // A timer tick may have requested defaults. This path never reached
       // fullReconcile, so drop the flag: event/retry entry stays false.
       this.netPolConvergenceEnsureDefaults = false
       return
     }
+    let effectsComplete = true
     let authoritativeRevocationCompleted = false
     let safetyCertificate: NetworkPolicySafetyCertificate | undefined
     try {
@@ -3239,7 +3389,7 @@ export class McpServerWatcher implements McpServerProvider {
       const serverInventoryAuthoritative = () =>
         this.mcpServerCacheSynced &&
         this.mcpServerDesiredRevision === capturedSafetyCertificate.serverRevision
-      console.log('[K8s] Running initial NetworkPolicy background reconciliation...')
+      hccLogger.info('[K8s] Running initial NetworkPolicy background reconciliation...')
       const ensureDefaults = this.netPolConvergenceEnsureDefaults
       this.netPolConvergenceEnsureDefaults = false
       await this.netPolReconciler.fullReconcile(initialContexts, initialServers, {
@@ -3250,6 +3400,8 @@ export class McpServerWatcher implements McpServerProvider {
         runContextEffect: (contextId, work) =>
           this.enqueueContextReconciliation(contextId, async () => {
             if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
+              effectsComplete = false
+              this.networkPolicyRepairPending = true
               initialConvergenceEffectsDroppedTotal.inc({
                 lane: 'NetworkPolicy',
                 kind: 'context',
@@ -3264,6 +3416,8 @@ export class McpServerWatcher implements McpServerProvider {
             selected ?? { name: serverName, namespace: config.namespace },
             async () => {
               if (!serverInventoryAuthoritative()) {
+                effectsComplete = false
+                this.networkPolicyRepairPending = true
                 initialConvergenceEffectsDroppedTotal.inc({
                   lane: 'NetworkPolicy',
                   kind: 'server',
@@ -3297,38 +3451,47 @@ export class McpServerWatcher implements McpServerProvider {
           void this.runInitialMcpServerConvergence()
         },
       })
-      if (!contextInventoryAuthoritative() || !serverInventoryAuthoritative()) {
-        console.warn(
+      if (
+        !effectsComplete ||
+        !authoritativeRevocationCompleted ||
+        !contextInventoryAuthoritative() ||
+        !serverInventoryAuthoritative()
+      ) {
+        hccLogger.warn(
           '[K8s] pass ended without certifying: inventory authority lost',
           this.networkPolicyInventoryMovement(capturedSafetyCertificate)
         )
         initialConvergenceSwallowedTotal.inc({ lane: 'NetworkPolicy', sink: 'authority-lost' })
-        observeInitialNetworkPolicyPass(startedAtMs, 'aborted-authority')
+        observePass('aborted-authority')
+        this.networkPolicyRepairPending = true
         this.scheduleInitialConvergenceRetry('NetworkPolicy')
         return
       }
+      this.completedNetworkPolicyRevision = capturedSafetyCertificate
+      this.networkPolicyRepairPending = false
       initialConvergenceLastSuccessTimestampSeconds.set(
         { lane: 'NetworkPolicy' },
         Date.now() / 1000
       )
       this.clearInitialConvergenceRetry('NetworkPolicy')
-      observeInitialNetworkPolicyPass(startedAtMs, 'certified')
+      observePass('certified')
     } catch (error) {
-      console.error(
+      hccLogger.error(
         authoritativeRevocationCompleted
           ? '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:'
           : '[K8s] Initial NetworkPolicy background reconciliation failed:',
-        error
+        { err: error }
       )
       const abortedBump =
         error instanceof Error && error.message === DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE
       if (abortedBump && safetyCertificate) {
-        console.warn(
+        hccLogger.warn(
           '[K8s] pass ended without certifying: desired inventory changed',
           this.networkPolicyInventoryMovement(safetyCertificate)
         )
       }
-      observeInitialNetworkPolicyPass(startedAtMs, abortedBump ? 'aborted-bump' : 'failed')
+      observePass(abortedBump ? 'aborted-bump' : 'failed')
+      this.networkPolicyRepairPending = true
       this.scheduleInitialConvergenceRetry('NetworkPolicy')
     }
   }
@@ -3377,7 +3540,7 @@ export class McpServerWatcher implements McpServerProvider {
         void this.runInitialMcpServerConvergence()
         return
       }
-      void this.runInitialNetworkPolicyConvergence()
+      void this.runInitialNetworkPolicyConvergence({ cause: 'retry' })
     }, delayMs)
     this.initialConvergenceRetryTimers.set(lane, timer)
   }
@@ -3427,6 +3590,7 @@ export class McpServerWatcher implements McpServerProvider {
       type: string,
       apiObj: { metadata: { name: string; namespace?: string }; spec: SharedFileSystemSpec }
     ) => {
+      if (type === 'BOOKMARK') return
       const sfs: SharedFileSystemCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.hostNamespace,
@@ -3511,6 +3675,7 @@ export class McpServerWatcher implements McpServerProvider {
         status?: GlobalFileSystemCRD['status']
       }
     ) => {
+      if (type === 'BOOKMARK') return
       const gfs: GlobalFileSystemCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || namespace,
@@ -3575,6 +3740,7 @@ export class McpServerWatcher implements McpServerProvider {
     }
   ) => Promise<void> {
     return async (type, apiObj) => {
+      if (type === 'BOOKMARK') return
       const cc: CommunicationChannelCRD = {
         name: apiObj.metadata.name,
         namespace: apiObj.metadata.namespace || config.channelsNamespace,
@@ -3902,6 +4068,7 @@ export class McpServerWatcher implements McpServerProvider {
     watchGeneration = this.mcpWatchGeneration
   ): (type: string, apiObj: McpServerWatchObject) => Promise<void> {
     return async (type, apiObj) => {
+      if (type === 'BOOKMARK') return
       if (this.stopped || watchGeneration !== this.mcpWatchGeneration) return
       const server: McpServerCRD = {
         name: apiObj.metadata.name,
@@ -3931,7 +4098,7 @@ export class McpServerWatcher implements McpServerProvider {
       }
       if (desiredStateChanged) {
         this.mcpServerDesiredRevision += 1
-        void this.runInitialNetworkPolicyConvergence()
+        void this.runInitialNetworkPolicyConvergence({ cause: 'mcp-change' })
       }
 
       // Most status writes do not change desired state. A runtime eligibility
@@ -4172,7 +4339,12 @@ export class McpServerWatcher implements McpServerProvider {
       this.attemptMcpServerCacheRecovery()
     }
 
-    const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)
+    const request = await this.watch.watch(
+      path,
+      { resourceVersion, allowWatchBookmarks: true },
+      watchCallback,
+      doneCallback
+    )
     if (this.stopped || watchGeneration !== this.mcpWatchGeneration || watchEnded) {
       request.abort()
       return watchGeneration
@@ -4340,6 +4512,7 @@ export class McpServerWatcher implements McpServerProvider {
         spec: ContextSpec
       }
     ) => {
+      if (type === 'BOOKMARK') return
       if (this.stopped || watchGeneration !== this.contextWatchGeneration) return
       const context: ContextCRD = {
         name: apiObj.metadata.name,
@@ -4399,7 +4572,7 @@ export class McpServerWatcher implements McpServerProvider {
             serverRevision: previousSafetyCertificate.serverRevision,
           }
         }
-        void this.runInitialNetworkPolicyConvergence()
+        void this.runInitialNetworkPolicyConvergence({ cause: 'context-change' })
       }
 
       // Metadata-only Context MODIFIED (label ping-pong, annotation churn)
@@ -4512,7 +4685,7 @@ export class McpServerWatcher implements McpServerProvider {
             `[K8s] NetworkPolicy reconciliation failed for context ${context.name}:`,
             error
           )
-          void this.runInitialNetworkPolicyConvergence()
+          void this.runInitialNetworkPolicyConvergence({ cause: 'context-reconcile-failure' })
           return
         }
 
@@ -4545,7 +4718,12 @@ export class McpServerWatcher implements McpServerProvider {
       this.attemptContextCacheRecovery()
     }
 
-    const request = await this.watch.watch(path, { resourceVersion }, watchCallback, doneCallback)
+    const request = await this.watch.watch(
+      path,
+      { resourceVersion, allowWatchBookmarks: true },
+      watchCallback,
+      doneCallback
+    )
     if (this.stopped || watchGeneration !== this.contextWatchGeneration || watchEnded) {
       request.abort()
       return watchGeneration
