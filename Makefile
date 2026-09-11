@@ -74,7 +74,8 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
-	packages/llm-provider-attempt-contract
+	packages/llm-provider-attempt-contract \
+	packages/egress-policy
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra

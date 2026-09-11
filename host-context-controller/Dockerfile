@@ -12,6 +12,9 @@ COPY packages/network-policy-core ./packages/network-policy-core
 # host-context-controller's npm ci because it resolves the provider set from it
 # (R4).
 COPY packages/llm-providers ./packages/llm-providers
+# Shared prebuilt egress-policy package (no build step) — same file: dependency
+# the npm ci below resolves; the LAN baseURL classifier lives here.
+COPY packages/egress-policy ./packages/egress-policy
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller
@@ -40,6 +43,9 @@ COPY packages/network-policy-core ./packages/network-policy-core
 # Shared prebuilt data-only providers package (no build step) — same file:
 # dependency the production npm ci below resolves against (R4).
 COPY packages/llm-providers ./packages/llm-providers
+# Shared prebuilt egress-policy package (no build step) — the production npm ci
+# below resolves this file: dependency too.
+COPY packages/egress-policy ./packages/egress-policy
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY host-context-controller/package*.json ./host-context-controller/
 WORKDIR /app/host-context-controller

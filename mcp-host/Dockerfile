@@ -14,6 +14,7 @@ WORKDIR /app
 
 # Shared prebuilt data-only package (no build step — ships index.cjs + .d.ts).
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/egress-policy ./packages/egress-policy
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 
@@ -37,6 +38,7 @@ WORKDIR /app
 
 # Copy the shared package + package files, install production dependencies only
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/egress-policy ./packages/egress-policy
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
 COPY mcp-host/package*.json ./mcp-host/
