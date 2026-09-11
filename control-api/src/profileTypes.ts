@@ -44,9 +44,17 @@ export type AuthClaims = {
   email: string
   teamId: string | null
   role: TeamRole
-  /** Authoritative users.lifecycle_version captured when the session was issued. */
-  authGeneration: number
+  /** Legacy-v1 lifecycle snapshot; v2 authority remains server-side. */
+  authGeneration?: number
   exp: number
+  iat?: number
+  sessionContract?: 'v2'
+  sid?: string
+  jti?: string
+  sv?: number
+  ver?: 2
+  authTime?: number
+  amr?: string[]
 }
 
 export type RpcAccessClaims = {

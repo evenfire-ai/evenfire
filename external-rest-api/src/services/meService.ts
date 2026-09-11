@@ -1,4 +1,4 @@
-import { controlApiRequest } from '../controlApiClient.js'
+import { ControlApiError, controlApiRequest } from '../controlApiClient.js'
 import { ChannelMapping, TeamDirectoryResult, TeamRole, UserAgentsResponse } from '../types.js'
 
 export function normalizeChannels(input: unknown): ChannelMapping {
@@ -73,7 +73,8 @@ export async function switchTeam(
   userId: string,
   email: string,
   nextTeamId: string,
-  sessionToken: string
+  sessionToken: string,
+  clientIp?: string
 ) {
   let membership: { team_id: string; role: TeamRole; team_name: string }
   try {
@@ -82,8 +83,9 @@ export async function switchTeam(
       `/external/users/${userId}/memberships/${nextTeamId}`,
       { userSessionToken: sessionToken }
     )
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 404) return null
+    throw error
   }
 
   const role = membership.role as TeamRole
@@ -97,9 +99,10 @@ export async function switchTeam(
         teamId: membership.team_id,
         role,
       },
+      userSessionToken: sessionToken,
+      ...(clientIp ? { extraHeaders: { 'x-evenfire-client-ip': clientIp } } : {}),
     }
   )
-
   return {
     token,
     team: {
@@ -129,8 +132,9 @@ export async function getMe(userId: string, teamId: string, sessionToken: string
         channels: normalizeChannels(result.profile.channels),
       },
     }
-  } catch {
-    return null
+  } catch (error) {
+    if (error instanceof ControlApiError && error.status === 404) return null
+    throw error
   }
 }
 

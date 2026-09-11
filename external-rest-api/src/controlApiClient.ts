@@ -11,41 +11,57 @@ function addExternalClientIdentity(headers: Record<string, string>): void {
 // Response headers are an API contract only where a caller can safely act on
 // them. In particular, never relay Set-Cookie, server identity, CORS, or
 // arbitrary proxy headers from the internal control-api boundary.
-const FORWARDABLE_RESPONSE_HEADERS = [
-  'retry-after',
-  'ratelimit',
-  'ratelimit-policy',
-  'x-ratelimit-limit',
-  'x-ratelimit-remaining',
-  'x-ratelimit-reset',
-  'x-request-id',
-] as const
-
 export class ControlApiError extends Error {
   status: number
   body: unknown
+  responseHeaders: Record<string, string>
   headers: Record<string, string>
   constructor(
     message: string,
     status: number,
     body: unknown,
-    headers: Record<string, string> = {}
+    responseHeaders: Record<string, string> = {}
   ) {
     super(message)
     this.name = 'ControlApiError'
     this.status = status
     this.body = body
-    this.headers = headers
+    this.responseHeaders = responseHeaders
+    this.headers = responseHeaders
   }
 }
 
-function forwardableResponseHeaders(response: Response): Record<string, string> {
-  const headers: Record<string, string> = {}
-  for (const name of FORWARDABLE_RESPONSE_HEADERS) {
-    const value = response.headers.get(name)
-    if (value) headers[name] = value
+const SAFE_RATE_LIMIT_RESPONSE_HEADERS = [
+  'retry-after',
+  'x-ratelimit-limit',
+  'x-ratelimit-remaining',
+  'x-ratelimit-reset',
+] as const
+
+function safeForwardableResponseHeaders(headers: Headers, status: number): Record<string, string> {
+  const result: Record<string, string> = {}
+  for (const name of SAFE_RATE_LIMIT_RESPONSE_HEADERS) {
+    const raw = headers.get(name)
+    if (!raw || !/^\d{1,10}$/.test(raw)) continue
+    const value = Number(raw)
+    if (!Number.isSafeInteger(value) || value < 0) continue
+    if (name === 'retry-after' && (value < 1 || value > 86_400)) continue
+    result[name] = String(value)
   }
-  return headers
+  const requestId = headers.get('x-request-id')
+  if (requestId && /^[A-Za-z0-9_-]{1,128}$/.test(requestId)) {
+    result['x-request-id'] = requestId
+  }
+  if (status === 413) {
+    const rawUploadLength = headers.get('upload-length')
+    if (rawUploadLength && /^\d{1,16}$/.test(rawUploadLength)) {
+      const uploadLength = Number(rawUploadLength)
+      if (Number.isSafeInteger(uploadLength) && uploadLength >= 0) {
+        result['upload-length'] = String(uploadLength)
+      }
+    }
+  }
+  return result
 }
 
 function buildUrl(path: string, query?: Record<string, string | undefined>): string {
@@ -127,7 +143,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} returned non-JSON body (status=${response.status})`,
       502,
       { error: 'Upstream returned non-JSON body', status: response.status },
-      forwardableResponseHeaders(response)
+      safeForwardableResponseHeaders(response.headers, 502)
     )
   }
 
@@ -140,7 +156,7 @@ export async function controlApiRequestWithStatus<T>(
       `Control API ${method} ${path} failed (${response.status}): ${errorMessage}`,
       response.status,
       parsed,
-      forwardableResponseHeaders(response)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -195,7 +211,7 @@ export async function controlApiBinaryRequestWithStatus(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      forwardableResponseHeaders(response)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
 
@@ -260,7 +276,7 @@ export async function controlApiStreamRequest(
       `Control API ${method} ${path} failed (${response.status})`,
       response.status,
       parsed,
-      forwardableResponseHeaders(response)
+      safeForwardableResponseHeaders(response.headers, response.status)
     )
   }
   return response

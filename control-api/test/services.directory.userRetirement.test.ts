@@ -77,6 +77,7 @@ describe('retireDesktopUser', () => {
 
   it('retires an active linked user atomically with exact control-admin actor and audit correlation', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
+    const authorize = vi.fn(async () => undefined)
     mocks.txQuery
       .mockResolvedValueOnce({ rows: [{ id: OPERATION_ID }], rowCount: 1 })
       .mockResolvedValueOnce(activeUser())
@@ -91,7 +92,8 @@ describe('retireDesktopUser', () => {
         USER_ID,
         'policy retirement',
         'idem-admin-1',
-        'request-admin-1'
+        'request-admin-1',
+        { authorize }
       )
     ).resolves.toEqual({
       id: USER_ID,
@@ -100,6 +102,7 @@ describe('retireDesktopUser', () => {
       lifecycleVersion: 2,
       replayed: false,
     })
+    expect(authorize).toHaveBeenCalledOnce()
 
     expect(mocks.retireParentInTransaction).toHaveBeenCalledWith(
       expect.anything(),
@@ -168,6 +171,7 @@ describe('retireDesktopUser', () => {
   it('returns the stored terminal outcome for an identical idempotency retry without re-emitting events', async () => {
     const { retireDesktopUser } = await import('../src/services/directory/users.js')
     const actor = { kind: 'control_admin' as const, controlAdminId: ADMIN_ID }
+    const authorize = vi.fn(async () => undefined)
     mocks.txQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
       rows: [
         {
@@ -182,7 +186,9 @@ describe('retireDesktopUser', () => {
     })
 
     await expect(
-      retireDesktopUser(actor, USER_ID, 'policy retirement', 'idem-retry-1', 'request-retry-2')
+      retireDesktopUser(actor, USER_ID, 'policy retirement', 'idem-retry-1', 'request-retry-2', {
+        authorize,
+      })
     ).resolves.toEqual({
       id: USER_ID,
       outcome: 'retired',
@@ -191,6 +197,7 @@ describe('retireDesktopUser', () => {
       replayed: true,
     })
     expect(mocks.retireParentInTransaction).not.toHaveBeenCalled()
+    expect(authorize).not.toHaveBeenCalled()
     expect(String(mocks.txQuery.mock.calls[0]?.[0])).toContain('ON CONFLICT DO NOTHING')
     expect(String(mocks.txQuery.mock.calls[1]?.[0])).toContain('FOR UPDATE')
   })

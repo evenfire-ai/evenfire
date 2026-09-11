@@ -51,6 +51,43 @@ export class K8sConflictError extends Error {
   }
 }
 
+export type ResourceListPage = Readonly<{
+  items: readonly unknown[]
+  continueToken: string | null
+  resourceVersion: string
+}>
+
+type BoundedKubernetesRequest = Readonly<{
+  signal: AbortSignal
+  timeoutSeconds: number
+}>
+
+type KubernetesCallOptions = k8s.ConfigurationOptions<k8s.ObservableMiddleware>
+
+function kubernetesAbortOptions(signal: AbortSignal): KubernetesCallOptions {
+  const middleware: k8s.ObservableMiddleware = {
+    pre: context => {
+      context.setSignal(signal)
+      return new k8s.Observable(Promise.resolve(context))
+    },
+    post: context => new k8s.Observable(Promise.resolve(context)),
+  }
+  return {
+    middleware: [middleware],
+    middlewareMergeStrategy: 'append',
+  }
+}
+
+async function runKubernetesTransportCall<T>(
+  signal: AbortSignal,
+  invoke: (options: KubernetesCallOptions) => Promise<T>
+): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  const result = await invoke(kubernetesAbortOptions(signal))
+  if (signal.aborted) throw signal.reason ?? new Error('request aborted')
+  return result
+}
+
 export type MutableResourceSnapshot = {
   metadata?: {
     annotations?: Record<string, string>
@@ -160,6 +197,12 @@ export class ResourceService {
     return primary || this.defaultNamespace
   }
 
+  assertNamespaceAllowed(namespace: string): void {
+    if (!this.allowedNamespaces.has(namespace)) {
+      throw new Error(`Namespace not allowed: ${namespace}`)
+    }
+  }
+
   private listNamespacesForPlural(plural: ClerumResourceType): string[] {
     const namespaces = new Set<string>()
     addNonEmpty(namespaces, this.defaultNamespaces[plural])
@@ -194,6 +237,85 @@ export class ResourceService {
       plural,
     })) as unknown as ResourceListResponse
     return res.items || []
+  }
+
+  async listResourcePage(
+    plural: ClerumResourceType,
+    namespace: string,
+    options: BoundedKubernetesRequest & {
+      limit: number
+      continueToken?: string
+      resourceVersion?: string
+    }
+  ): Promise<ResourceListPage> {
+    if (!Number.isSafeInteger(options.limit) || options.limit < 1 || options.limit > 100) {
+      throw new Error('Kubernetes list limit must be between 1 and 100')
+    }
+    if (
+      !Number.isSafeInteger(options.timeoutSeconds) ||
+      options.timeoutSeconds < 1 ||
+      options.timeoutSeconds > 60
+    ) {
+      throw new Error('Kubernetes request timeout must be between 1 and 60 seconds')
+    }
+    const resolvedNamespace = this.resolveNamespace(plural, namespace)
+    const response = (await runKubernetesTransportCall(options.signal, callOptions =>
+      this.customApi.listNamespacedCustomObject(
+        {
+          group: CLERUM_GROUP,
+          version: CLERUM_VERSION,
+          namespace: resolvedNamespace,
+          plural,
+          limit: options.limit,
+          _continue: options.continueToken,
+          resourceVersion: options.resourceVersion,
+          timeoutSeconds: options.timeoutSeconds,
+        },
+        callOptions
+      )
+    )) as ResourceListResponse
+    const resourceVersion = String(response.metadata?.resourceVersion || '').trim()
+    if (!resourceVersion) throw new Error('Kubernetes list response omitted resourceVersion')
+    return Object.freeze({
+      items: Object.freeze([...(response.items ?? [])]),
+      continueToken: String(response.metadata?.continue || '').trim() || null,
+      resourceVersion,
+    })
+  }
+
+  async getResourceExact(
+    plural: ClerumResourceType,
+    name: string,
+    namespace: string,
+    options: BoundedKubernetesRequest
+  ): Promise<unknown> {
+    if (
+      !Number.isSafeInteger(options.timeoutSeconds) ||
+      options.timeoutSeconds < 1 ||
+      options.timeoutSeconds > 60
+    ) {
+      throw new Error('Kubernetes request timeout must be between 1 and 60 seconds')
+    }
+    const resolvedNamespace = this.resolveNamespace(plural, namespace)
+    try {
+      return await runKubernetesTransportCall(options.signal, callOptions =>
+        this.customApi.getNamespacedCustomObject(
+          {
+            group: CLERUM_GROUP,
+            version: CLERUM_VERSION,
+            namespace: resolvedNamespace,
+            plural,
+            name,
+          },
+          callOptions
+        )
+      )
+    } catch (error) {
+      if (extractK8sStatus(error) === 404) {
+        throw new K8sNotFoundError(`${plural}/${name} not found in namespace ${resolvedNamespace}`)
+      }
+      throw error
+    }
   }
 
   async getResource(

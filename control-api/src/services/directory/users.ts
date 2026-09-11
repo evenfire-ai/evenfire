@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { pool, withTransaction } from '../../db.js'
+import { type DbClient, pool, withTransaction } from '../../db.js'
 import {
   type GfsDesktopOperatorLifecycleActor,
   GfsDesktopOperatorLinkError,
@@ -349,7 +349,8 @@ export async function retireDesktopUser(
   userIdInput: string,
   reasonInput: string,
   idempotencyKeyInput: string,
-  requestIdInput: string | null | undefined
+  requestIdInput: string | null | undefined,
+  options: { db?: DbClient; authorize?: (db: DbClient) => Promise<void> } = {}
 ): Promise<RetireDesktopUserResult> {
   const actor = normalizeRetirementActor(actorInput)
   const targetUserId = requireUuid(userIdInput, 'userId')
@@ -370,7 +371,7 @@ export async function retireDesktopUser(
   const actorColumn =
     actor.kind === 'control_admin' ? 'actor_control_admin_id' : 'actor_desktop_user_id'
 
-  return withTransaction(async db => {
+  const work = async (db: DbClient): Promise<RetireDesktopUserResult> => {
     const claim = await db.query(
       `INSERT INTO desktop_user_retirement_operations(
          operation,
@@ -467,6 +468,7 @@ export async function retireDesktopUser(
       )
     }
     const lifecycleVersion = requireLifecycleVersion(user.lifecycle_version)
+    await options.authorize?.(db)
 
     const history = await db.query(
       `SELECT EXISTS(
@@ -620,7 +622,8 @@ export async function retireDesktopUser(
       lifecycleVersion: nextLifecycleVersion,
       replayed: false,
     }
-  })
+  }
+  return options.db ? work(options.db) : withTransaction(work)
 }
 
 /**
@@ -628,50 +631,55 @@ export async function retireDesktopUser(
  * Teams are retained even when this leaves them with zero active members.
  * Accounts with retained operator-link history are intentionally not purged.
  */
-export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
-  return withTransaction(async db => {
-    const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
-    if ((exists.rowCount ?? 0) === 0) {
-      return { error: 'not_found' }
-    }
+export async function adminDeleteUserInTransaction(
+  db: DbClient,
+  userId: string
+): Promise<AdminDeleteUserResult> {
+  const exists = await db.query(`SELECT 1 FROM users WHERE id = $1 LIMIT 1`, [userId])
+  if ((exists.rowCount ?? 0) === 0) {
+    return { error: 'not_found' }
+  }
 
-    // Operator-link generations are retained for audit and are protected by
-    // ON DELETE RESTRICT. Refuse the legacy hard-delete operation explicitly
-    // rather than relying on a late FK error or silently erasing the lifecycle
-    // history. A future actor-aware account-retirement flow must revoke the
-    // active generation and use the governed retention process before purge.
-    const operatorLinkHistory = await db.query(
-      `SELECT 1
-         FROM gfs_desktop_operator_links
-        WHERE user_id = $1
-        LIMIT 1`,
-      [userId]
-    )
-    if ((operatorLinkHistory.rowCount ?? 0) > 0) {
-      return { error: 'gfs_operator_link_history_retained' }
-    }
+  // Operator-link generations are retained for audit and are protected by
+  // ON DELETE RESTRICT. Refuse the legacy hard-delete operation explicitly
+  // rather than relying on a late FK error or silently erasing lifecycle history.
+  const operatorLinkHistory = await db.query(
+    `SELECT 1
+       FROM gfs_desktop_operator_links
+      WHERE user_id = $1
+      LIMIT 1`,
+    [userId]
+  )
+  if ((operatorLinkHistory.rowCount ?? 0) > 0) {
+    return { error: 'gfs_operator_link_history_retained' }
+  }
 
-    await db.query(
-      `UPDATE workflow_approval_medium_accounts
+  await db.query(
+    `UPDATE workflow_approval_medium_accounts
           SET disabled_at = COALESCE(disabled_at, NOW()),
               updated_at = NOW()
         WHERE user_id = $1
           AND disabled_at IS NULL`,
-      [userId]
-    )
-    await db.query(
-      `UPDATE workflow_approval_medium_challenges
+    [userId]
+  )
+  await db.query(
+    `UPDATE workflow_approval_medium_challenges
           SET consumed_at = COALESCE(consumed_at, NOW()),
               expires_at = LEAST(expires_at, NOW())
         WHERE user_id = $1
           AND consumed_at IS NULL`,
-      [userId]
-    )
+    [userId]
+  )
 
-    const del = await db.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [userId])
-    if ((del.rowCount ?? 0) === 0) {
-      return { error: 'not_found' }
-    }
-    return { ok: true, id: userId }
+  const del = await db.query(`DELETE FROM users WHERE id = $1 RETURNING id`, [userId])
+  if ((del.rowCount ?? 0) === 0) {
+    return { error: 'not_found' }
+  }
+  return { ok: true, id: userId }
+}
+
+export async function adminDeleteUser(userId: string): Promise<AdminDeleteUserResult> {
+  return withTransaction(async db => {
+    return adminDeleteUserInTransaction(db, userId)
   })
 }

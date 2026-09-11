@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { once } from 'node:events'
 import request from 'supertest'
 // The MOCKED config object (defined below); mutating gfscProxyTimeoutMs drives a
 // real deadline abort in the read-proxy timeout test.
@@ -21,8 +22,8 @@ const mockWithTransaction = vi.hoisted(() => vi.fn())
 const mockResolveActiveLink = vi.hoisted(() => vi.fn())
 const mockIsDesktopUserActive = vi.hoisted(() => vi.fn())
 
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
+vi.mock('../src/services/auth/externalSessionAuthentication.js', () => ({
+  authenticateExternalUserSession: (...a: unknown[]) => mockVerifyExternalSessionToken(...a),
 }))
 vi.mock('../src/auth/gfsToken.js', () => ({
   GFS_DELETE_SCOPE: 'gfs.delete',
@@ -134,6 +135,29 @@ async function buildApp() {
   return app
 }
 
+async function withExternalGfsApp(
+  run: (client: ReturnType<typeof request>) => Promise<void>,
+  app?: express.Express
+) {
+  const server = (app ?? (await buildApp())).listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const client = request(server)
+  try {
+    await run(client)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => {
+        if (err) {
+          reject(err)
+          return
+        }
+        resolve()
+      })
+    })
+  }
+}
+
 async function buildOperatorShareApp() {
   const { registerGfsShareRoutes } = await import('../src/routes/gfs/shares.js')
   const app = express()
@@ -196,7 +220,12 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
-const auth = () => mockVerifyExternalSessionToken.mockReturnValue(SESSION)
+const auth = () =>
+  mockVerifyExternalSessionToken.mockResolvedValue({
+    status: 'authenticated',
+    contract: 'v1',
+    claims: SESSION,
+  })
 
 function activeSessionLifecycleResult(
   text: string
@@ -275,23 +304,35 @@ function dbReturning(
 }
 
 describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)', () => {
+  it('rate limits token issuance before minting a GFS token', async () => {
+    auth()
+    dbReturning([], { rateLimitCount: 11 })
+    const response = await request(await buildApp())
+      .post('/external/gfs/token')
+      .set('x-user-session-token', 'sess')
+      .send({ scopes: ['gfs.read'] })
+
+    expect(response.status).toBe(429)
+    expect(mockSignGfsToken).not.toHaveBeenCalled()
+    const bucketCall = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )
+    expect(bucketCall?.[1]?.[0]).toBe(`gfs-ext:pre:token:user:${U1}`)
+  })
+
   it('allows a mixed GFS journey beyond the former 30/min ingress cap', async () => {
     auth()
-    const app = await buildApp()
-
-    for (let attempt = 0; attempt < 31; attempt += 1) {
-      const response = await request(app)
-        .post('/external/gfs/not-classified')
-        .set('x-user-session-token', 'sess')
-      expect(response.status).toBe(404)
-    }
+    await withExternalGfsApp(async client => {
+      for (let attempt = 0; attempt < 31; attempt += 1) {
+        const response = await client
+          .post('/external/gfs/not-classified')
+          .set('x-user-session-token', 'sess')
+        expect(response.status).toBe(404)
+      }
+    })
 
     expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(31)
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
-    expect(mockQuery.mock.calls).toHaveLength(31)
-    expect(mockQuery.mock.calls.every(call => String(call[0]).includes('lifecycle_state'))).toBe(
-      true
-    )
   })
 
   it('enforces the configurable ingress backstop before session or authority work', async () => {
@@ -300,26 +341,22 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin = 3
     try {
       auth()
-      const app = await buildApp()
+      await withExternalGfsApp(async client => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const response = await client
+            .post('/external/gfs/not-classified')
+            .set('x-user-session-token', 'sess')
+          expect(response.status).toBe(404)
+        }
 
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        const response = await request(app)
+        const exhausted = await client
           .post('/external/gfs/not-classified')
           .set('x-user-session-token', 'sess')
-        expect(response.status).toBe(404)
-      }
 
-      const exhausted = await request(app)
-        .post('/external/gfs/not-classified')
-        .set('x-user-session-token', 'sess')
-
-      expect(exhausted.status).toBe(429)
-      expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(3)
-      expect(mockResolveActiveLink).not.toHaveBeenCalled()
-      expect(mockQuery.mock.calls).toHaveLength(3)
-      expect(mockQuery.mock.calls.every(call => String(call[0]).includes('lifecycle_state'))).toBe(
-        true
-      )
+        expect(exhausted.status).toBe(429)
+        expect(mockVerifyExternalSessionToken).toHaveBeenCalledTimes(3)
+        expect(mockResolveActiveLink).not.toHaveBeenCalled()
+      })
     } finally {
       ;(config as { externalGfsIngressRlPerMin: number }).externalGfsIngressRlPerMin =
         previousIngressLimit
@@ -328,22 +365,22 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
 
   it('enforces the recognised 10/min token route limit per authenticated user', async () => {
     auth()
-    const app = await buildApp()
+    await withExternalGfsApp(async client => {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        await client
+          .post('/external/gfs/token')
+          .set('x-user-session-token', 'sess')
+          .send({})
+          .expect(200)
+      }
 
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      await request(app)
+      const exhausted = await client
         .post('/external/gfs/token')
         .set('x-user-session-token', 'sess')
         .send({})
-        .expect(200)
-    }
 
-    const exhausted = await request(app)
-      .post('/external/gfs/token')
-      .set('x-user-session-token', 'sess')
-      .send({})
-
-    expect(exhausted.status).toBe(429)
+      expect(exhausted.status).toBe(429)
+    })
     expect(mockSignGfsToken).toHaveBeenCalledTimes(10)
   })
 
@@ -357,28 +394,28 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
     try {
       auth()
       dbReturning([])
-      const app = await buildApp()
-
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        await request(app)
+      await withExternalGfsApp(async client => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await client
+            .get('/external/gfs/resources')
+            .set('x-user-session-token', 'read-session')
+            .expect(200)
+        }
+        const exhaustedRead = await client
           .get('/external/gfs/resources')
           .set('x-user-session-token', 'read-session')
-          .expect(200)
-      }
-      const exhaustedRead = await request(app)
-        .get('/external/gfs/resources')
-        .set('x-user-session-token', 'read-session')
-      expect(exhaustedRead.status).toBe(429)
-      expect(
-        exhaustedRead.headers['ratelimit-limit'] ?? exhaustedRead.headers['x-ratelimit-limit']
-      ).toBe('2')
+        expect(exhaustedRead.status).toBe(429)
+        expect(
+          exhaustedRead.headers['ratelimit-limit'] ?? exhaustedRead.headers['x-ratelimit-limit']
+        ).toBe('2')
 
-      // A mutation has its own class budget; exhausting reads must not consume it.
-      const mutation = await request(app)
-        .patch(`/external/gfs/resources/${R}`)
-        .set('x-user-session-token', 'mutation-0')
-        .send({ name: 'rename' })
-      expect(mutation.status).not.toBe(429)
+        // A mutation has its own class budget; exhausting reads must not consume it.
+        const mutation = await client
+          .patch(`/external/gfs/resources/${R}`)
+          .set('x-user-session-token', 'mutation-0')
+          .send({ name: 'rename' })
+        expect(mutation.status).not.toBe(429)
+      })
     } finally {
       ;(config as { externalGfsReadRlPerMin: number }).externalGfsReadRlPerMin = previousReadLimit
       ;(config as { externalGfsOperationRlPerMin: number }).externalGfsOperationRlPerMin =
@@ -443,7 +480,10 @@ describe('POST /external/gfs/token (user mint — existing signer, sub=users.id)
   })
 
   it('401 without a session token (Session-JWT plane gate)', async () => {
-    mockVerifyExternalSessionToken.mockReturnValue(null)
+    mockVerifyExternalSessionToken.mockResolvedValue({
+      status: 'invalid',
+      reason: 'invalid_representation',
+    })
     const app = await buildApp()
     const res = await request(app).post('/external/gfs/token').send({})
     expect(res.status).toBe(401)
@@ -672,8 +712,6 @@ describe('linked Desktop operator authority contract', () => {
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'Not Found' })
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
-    expect(mockQuery.mock.calls).toHaveLength(1)
-    expect(mockQuery.mock.calls[0]?.[0]).toContain('lifecycle_state')
   })
 
   it('returns a bounded retry body and header when the express edge backstop is exhausted', async () => {
@@ -681,19 +719,20 @@ describe('linked Desktop operator authority contract', () => {
     config.externalGfsIngressRlPerMin = 1
     try {
       auth()
-      const app = await buildApp()
-      await request(app)
-        .get('/external/gfs/not-classified')
-        .set('x-user-session-token', 'sess')
-        .expect(404)
-      const res = await request(app)
-        .get('/external/gfs/not-classified')
-        .set('x-user-session-token', 'sess')
-      expect(res.status).toBe(429)
-      expect(res.headers['retry-after']).toMatch(/^\d+$/)
-      expect(res.body).toEqual({
-        error: 'Too Many Requests',
-        retryAfterSeconds: expect.any(Number),
+      await withExternalGfsApp(async client => {
+        await client
+          .get('/external/gfs/not-classified')
+          .set('x-user-session-token', 'sess')
+          .expect(404)
+        const res = await client
+          .get('/external/gfs/not-classified')
+          .set('x-user-session-token', 'sess')
+        expect(res.status).toBe(429)
+        expect(res.headers['retry-after']).toMatch(/^\d+$/)
+        expect(res.body).toEqual({
+          error: 'Too Many Requests',
+          retryAfterSeconds: expect.any(Number),
+        })
       })
     } finally {
       config.externalGfsIngressRlPerMin = previous
@@ -721,9 +760,8 @@ describe('linked Desktop operator authority contract', () => {
     expect(res.headers['x-ratelimit-limit']).toBe('120')
     expect(mockResolveActiveLink).not.toHaveBeenCalled()
     expect(mockSignGfsToken).not.toHaveBeenCalled()
-    expect(mockQuery.mock.calls).toHaveLength(2)
-    expect(mockQuery.mock.calls[0]?.[0]).toContain('lifecycle_state')
-    expect(mockQuery.mock.calls[1]?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
+    expect(mockQuery.mock.calls).toHaveLength(1)
+    expect(mockQuery.mock.calls[0]?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
   })
 
   it('does not resolve or elevate when the feature flag is off', async () => {
@@ -754,20 +792,20 @@ describe('indexed upload relay canonical drive', () => {
         })
     )
     vi.stubGlobal('fetch', fetchMock)
-    const app = await buildApp()
+    await withExternalGfsApp(async client => {
+      const missing = await client
+        .get('/external/gfs/capabilities')
+        .set('x-user-session-token', 'sess')
+      const mismatched = await client
+        .post('/external/gfs/uploads?drive=archive')
+        .set('x-user-session-token', 'sess')
+        .send({ drive: 'main', operation: 'create' })
 
-    const missing = await request(app)
-      .get('/external/gfs/capabilities')
-      .set('x-user-session-token', 'sess')
-    const mismatched = await request(app)
-      .post('/external/gfs/uploads?drive=archive')
-      .set('x-user-session-token', 'sess')
-      .send({ drive: 'main', operation: 'create' })
-
-    expect(missing.status).toBe(200)
-    expect(missing.body).toMatchObject({ upload: { resumableV2: { enabled: true } } })
-    expect(mismatched.status).toBe(400)
-    expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+      expect(missing.status).toBe(200)
+      expect(missing.body).toMatchObject({ upload: { resumableV2: { enabled: true } } })
+      expect(mismatched.status).toBe(400)
+      expect(mismatched.body).toEqual({ error: 'drive_mismatch' })
+    })
     expect(mockSignGfsToken).toHaveBeenCalledWith({
       subject: U1,
       drive: 'main',
@@ -815,36 +853,35 @@ describe('indexed upload relay canonical drive', () => {
       })
     })
     vi.stubGlobal('fetch', fetchMock)
-    const app = await buildApp()
-    const withAuth = (builder: request.Test) => builder.set('x-user-session-token', 'sess')
+    await withExternalGfsApp(async client => {
+      const withAuth = (builder: request.Test) => builder.set('x-user-session-token', 'sess')
 
-    await withAuth(request(app).get('/external/gfs/capabilities?drive=archive')).expect(200)
-    await withAuth(request(app).post('/external/gfs/uploads?drive=archive'))
-      .send({ drive: 'archive', operation: 'create' })
-      .expect(200)
-    await withAuth(request(app).head(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
-    await withAuth(
-      request(app).get(`/external/gfs/uploads/${uploadId}/status?drive=archive&limit=256`)
-    ).expect(200)
-    await withAuth(
-      request(app)
-        .put(`/external/gfs/uploads/${uploadId}/parts/0?drive=archive`)
-        .set('content-type', 'application/offset+octet-stream')
-        .set('upload-part-number', '0')
-        .set('upload-offset', '0')
-        .set('upload-chunk-length', '4')
-        .set('upload-checksum', 'sha256 dGVzdA==')
-    )
-      .send(Buffer.from('test'))
-      .expect(200)
-    for (const action of ['pause', 'resume', 'complete']) {
-      await withAuth(request(app).post(`/external/gfs/uploads/${uploadId}/${action}?drive=archive`))
-        .send({})
+      await withAuth(client.get('/external/gfs/capabilities?drive=archive')).expect(200)
+      await withAuth(client.post('/external/gfs/uploads?drive=archive'))
+        .send({ drive: 'archive', operation: 'create' })
         .expect(200)
-    }
-    await withAuth(request(app).delete(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(
-      200
-    )
+      await withAuth(client.head(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+      await withAuth(
+        client.get(`/external/gfs/uploads/${uploadId}/status?drive=archive&limit=256`)
+      ).expect(200)
+      await withAuth(
+        client
+          .put(`/external/gfs/uploads/${uploadId}/parts/0?drive=archive`)
+          .set('content-type', 'application/offset+octet-stream')
+          .set('upload-part-number', '0')
+          .set('upload-offset', '0')
+          .set('upload-chunk-length', '4')
+          .set('upload-checksum', 'sha256 dGVzdA==')
+      )
+        .send(Buffer.from('test'))
+        .expect(200)
+      for (const action of ['pause', 'resume', 'complete']) {
+        await withAuth(client.post(`/external/gfs/uploads/${uploadId}/${action}?drive=archive`))
+          .send({})
+          .expect(200)
+      }
+      await withAuth(client.delete(`/external/gfs/uploads/${uploadId}?drive=archive`)).expect(200)
+    })
 
     expect(fetchMock).toHaveBeenCalledTimes(9)
     expect(mockSignGfsToken).toHaveBeenCalledTimes(9)
@@ -967,6 +1004,44 @@ describe('PUT /external/gfs/grants (user delegation via existing engine)', () =>
     expect(res.status).toBe(200)
     const insert = mockQuery.mock.calls.find(c => String(c[0]).includes('INSERT INTO gfs_grants'))
     expect(insert?.[1]?.[6]).toBe(`user:${U1}`)
+  })
+
+  it('does not honor a stale team carried only by the user session token', async () => {
+    auth()
+    const staleTeamGrants = [
+      {
+        subject_type: 'team',
+        subject_id: T1,
+        resource_id: R,
+        permissions: ['manage_acl', 'read'],
+        inherit: false,
+      },
+    ]
+    mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {
+      if (text.includes('FROM team_members')) return { rows: [] }
+      if (text.includes('authority_grants AS') && text.includes('authority_shares AS')) {
+        return combinedAuthorityRow(staleTeamGrants, values)
+      }
+      if (text.includes('INSERT INTO gfs_audit')) return { rows: [{ id: 'audit-stale-team' }] }
+      return { rows: [] }
+    })
+
+    const app = await buildApp()
+    const res = await request(app)
+      .put('/external/gfs/grants')
+      .set('x-user-session-token', 'sess')
+      .send({
+        resourceId: R,
+        subject: { type: 'user', id: U2 },
+        permissions: ['read'],
+        inherit: false,
+      })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('not_manager')
+    expect(
+      mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_grants'))
+    ).toBe(false)
   })
 
   it('rejects a non-UUID user subject id → 400 subject_invalid', async () => {
@@ -1097,17 +1172,17 @@ describe('POST /external/gfs/shares (user delegation via existing engine)', () =
     dbReturning([])
     const app = await buildOperatorShareApp()
 
-    const res = await request(app)
-      .post('/gfs/shares')
-      .send({
+    await withExternalGfsApp(async client => {
+      const res = await client.post('/gfs/shares').send({
         resourceId: R,
         subject,
         permissions: ['read'],
         includeDescendants: false,
       })
 
-    expect(res.status).toBe(200)
-    expect(res.body).toEqual({ ok: true, resourceId: R, updated: [subject], count: 1 })
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ ok: true, resourceId: R, updated: [subject], count: 1 })
+    }, app)
     const mutations = mockQuery.mock.calls.filter(call =>
       String(call[0]).includes('INSERT INTO gfs_shares')
     )
@@ -1120,20 +1195,20 @@ describe('POST /external/gfs/shares (user delegation via existing engine)', () =
     dbReturning([])
     const app = await buildOperatorShareApp()
 
-    const res = await request(app)
-      .post('/gfs/shares')
-      .send({
+    await withExternalGfsApp(async client => {
+      const res = await client.post('/gfs/shares').send({
         resourceId: R,
         subject: { type: 'host', id: H1 },
         permissions: ['read'],
         includeDescendants: false,
       })
 
-    expect(res.status).toBe(403)
-    expect(res.body).toEqual({
-      error: 'share_to_agent_forbidden',
-      message: 'share_to_agent_forbidden',
-    })
+      expect(res.status).toBe(403)
+      expect(res.body).toEqual({
+        error: 'share_to_agent_forbidden',
+        message: 'share_to_agent_forbidden',
+      })
+    }, app)
     expect(
       mockQuery.mock.calls.some(call => String(call[0]).includes('INSERT INTO gfs_shares'))
     ).toBe(false)
@@ -1674,7 +1749,10 @@ describe('GET /external/gfs/resources/:id/affordances', () => {
 
 describe('user resource mutations via gfsc proxy', () => {
   it('rejects non-session tokens on external mutation routes before minting a GFS token', async () => {
-    mockVerifyExternalSessionToken.mockReturnValue(null)
+    mockVerifyExternalSessionToken.mockResolvedValue({
+      status: 'invalid',
+      reason: 'invalid_representation',
+    })
     const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
     const app = await buildApp()
@@ -1838,6 +1916,21 @@ describe('user resource mutations via gfsc proxy', () => {
 })
 
 describe('GET /external/gfs/resources', () => {
+  it('rate limits resource reads before querying accessible resources', async () => {
+    auth()
+    dbReturning([], { rateLimitCount: 121 })
+    const response = await request(await buildApp())
+      .get('/external/gfs/resources')
+      .set('x-user-session-token', 'sess')
+
+    expect(response.status).toBe(429)
+    expect(response.headers['retry-after']).toBeDefined()
+    const bucketCall = mockQuery.mock.calls.find(call =>
+      String(call[0]).includes('rate_limit_buckets')
+    )
+    expect(bucketCall?.[1]?.[0]).toMatch(/^gfs-ext:pre:resource:session:[0-9a-f]{64}$/)
+  })
+
   it('lists readable direct user resources and active-team resources as Desktop entry points', async () => {
     auth()
     mockQuery.mockImplementation(async (text: string, values?: unknown[]) => {

@@ -1,0 +1,11 @@
+{
+  "lockTimeoutMs": 10000,
+  "ordinaryStatementTimeoutMs": 15000,
+  "onlineIndexStatementTimeoutMs": 120000,
+  "idleInTransactionTimeoutMs": 15000,
+  "jobActiveDeadlineSeconds": 300,
+  "clientWaitSeconds": 360,
+  "terminationProofSeconds": 60,
+  "backoffLimit": 2,
+  "ttlSecondsAfterFinished": 600
+}
