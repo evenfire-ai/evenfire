@@ -10,6 +10,7 @@ import {
   mapStepPhase,
   mapWorkflowExecutionPhase,
 } from './dbRunProcessor.js'
+import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
 
 /**
  * Tests for `createDbRunProcessor` — the DB-first replacement for
@@ -245,7 +246,7 @@ describe('createDbRunProcessor', () => {
     expect(order).toEqual(['checkpoint', 'child'])
   })
 
-  it('rolls back without creating a child when the live checkpoint fails', async () => {
+  it('terminalizes permanent authority denial without creating a child', async () => {
     const run = baseRun({
       authority_binding: {
         userId: '11111111-1111-4111-8111-111111111111',
@@ -261,26 +262,34 @@ describe('createDbRunProcessor', () => {
         behaviorBindingHash: 'bh2_test',
       },
     })
-    const client = makeClient(async sql =>
-      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
-        ? { rows: [run], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
-    )
+    let phase: 'Pending' | 'Failed' = 'Pending'
+    const client = makeClient(async sql => {
+      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+        return phase === 'Pending' ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
+      }
+      if (/SET phase = 'Failed'/.test(sql)) phase = 'Failed'
+      return { rows: [], rowCount: 0 }
+    })
     const createChildRecipe = vi.fn()
+    const checkpointAuthority = vi.fn(async () => {
+      throw new WorkflowAuthorityCheckpointError('denied', false)
+    })
     const proc = spawn({
       instanceId: 'wrc-1',
       pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
       runPollMs: 30_000,
-      checkpointAuthority: vi.fn(async () => {
-        throw new Error('workflow_authority_denied')
-      }),
+      checkpointAuthority,
       createChildRecipe,
       logger: silentLogger(),
     })
 
-    await expect(proc.processPending(run.run_id)).rejects.toThrow('workflow_authority_denied')
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
     expect(createChildRecipe).not.toHaveBeenCalled()
-    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
+    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+    expect(checkpointAuthority).toHaveBeenCalledOnce()
+    expect(phase).toBe('Failed')
   })
 
   it('retries an unavailable checkpoint without duplicating the protected effect', async () => {
