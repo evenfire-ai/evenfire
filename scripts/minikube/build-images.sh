@@ -1155,8 +1155,9 @@ build_image "external-rest-api" \
   "clerum/external-rest-api:test"
 
 build_image "rpc-proxy" \
-  "${PROJECT_DIR}/rpc-proxy" \
-  "clerum/rpc-proxy:test"
+  "${PROJECT_DIR}" \
+  "clerum/rpc-proxy:test" \
+  "${PROJECT_DIR}/rpc-proxy/Dockerfile"
 
 build_image "webhook-proxy" \
   "${PROJECT_DIR}/webhook-proxy" \

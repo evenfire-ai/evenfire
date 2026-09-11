@@ -1,5 +1,7 @@
 **
 !packages/
+!packages/action-context-contracts/
+!packages/action-context-contracts/**
 !packages/workflow-recipe-capability-policy/
 !packages/workflow-recipe-capability-policy/**
 !packages/image-policy/

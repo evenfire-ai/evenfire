@@ -16,6 +16,7 @@ WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -41,6 +42,7 @@ WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
