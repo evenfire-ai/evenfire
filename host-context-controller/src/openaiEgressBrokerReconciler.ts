@@ -35,16 +35,7 @@
  */
 import * as k8s from '@kubernetes/client-node'
 import { IntOrString } from '@kubernetes/client-node/dist/types.js'
-import { createHash } from 'crypto'
-import {
-  type LanBaseUrlReason,
-  OAI_EGRESS_BROKERS_CONDITION_TYPE,
-  PRIMARY_SLOT_ID,
-  brokerNameFor,
-  classifyLanBaseURL,
-  fallbackSlotId,
-  ipv4ToInt,
-} from '@clerum/egress-policy'
+import { OAI_EGRESS_BROKERS_CONDITION_TYPE, brokerNameFor } from '@clerum/egress-policy'
 import { config } from './config'
 import {
   HOST_LABEL,
@@ -55,6 +46,14 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { hccLogger } from './logger'
+import { credentialsRevision } from './oaiEgress/brokerRevision'
+import { resolveClusterInternalCidrs } from './oaiEgress/clusterDenySet'
+import {
+  type DesiredBroker,
+  OPENAI_COMPATIBLE_API_KEY_SLOT,
+  OPENAI_COMPATIBLE_PROVIDER,
+  deriveDesiredBrokers,
+} from './oaiEgress/slotAdmission'
 import {
   type SlotOutcome,
   buildBrokersCondition,
@@ -80,12 +79,9 @@ const log = hccLogger.child({ module: 'oai-egress-broker' })
 const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
 const COMPONENT_LABEL = 'clerum.io/component'
 const SLOT_ANNOTATION = 'clerum.io/oai-egress-source'
-const OPENAI_COMPATIBLE_PROVIDER = 'openai-compatible'
-// The single credential slot for the openai-compatible provider (canonical key
-// inside the Host LLM Secret and inside the mirror Secret). Env var the nginx
-// image reads at startup via envsubst. Kept in sync with
-// @clerum/llm-providers PROVIDER_CREDENTIAL_SLOTS['openai-compatible'][0].
-const OPENAI_COMPATIBLE_API_KEY_SLOT = 'openai-compatible-api-key'
+// Env var the nginx image reads at startup via envsubst. The provider id and the
+// canonical credential slot (OPENAI_COMPATIBLE_PROVIDER /
+// OPENAI_COMPATIBLE_API_KEY_SLOT) live in ./oaiEgress/slotAdmission.
 const OPENAI_COMPATIBLE_API_KEY_ENV = 'OPENAI_COMPATIBLE_API_KEY'
 
 /**
@@ -114,28 +110,6 @@ type OpenAiEgressBrokerReconcilerDeps = {
   hostInventoryAuthoritative?: () => boolean
 }
 
-/** Machine reason a slot was NOT provisioned (validateSlot drops + provision failure). */
-type SlotDropReason =
-  | 'cluster_internal_guard_unconfigured'
-  | LanBaseUrlReason
-  | 'url_unparseable'
-  | 'scheme_unsupported'
-  | 'port_invalid'
-  | 'path_unsafe'
-  | 'provision_failed'
-
-/** A validated local slot that must have a broker. */
-type DesiredBroker = {
-  slotId: string
-  brokerName: string
-  ip: string
-  lanPort: number
-  scheme: 'http:' | 'https:'
-  path: string
-  /** Data key to read from the Host's own Secret for this slot's credential. */
-  credentialDataKey: string
-}
-
 // The slotId constants, the deterministic broker name and the in-cluster FQDN
 // all live in @clerum/egress-policy (PRIMARY_SLOT_ID / fallbackSlotId /
 // brokerNameFor / brokerServiceHost / brokerInternalUrl) so mcp-host (phase 5)
@@ -143,6 +117,11 @@ type DesiredBroker = {
 // nor the drift-critical hash is duplicated here. brokerNameFor is re-exported
 // so existing importers of this module keep working.
 export { brokerNameFor }
+
+// The slot-admission decision (deriveDesiredBrokers/admitSlot) and the
+// cluster-internal deny-set resolution live in ./oaiEgress; resolveClusterInternalCidrs
+// is re-exported so its existing test importer keeps working.
+export { resolveClusterInternalCidrs }
 
 /**
  * True when a Host declares an openai-compatible provider on its primary model
@@ -157,31 +136,6 @@ export function hostDeclaresOpenAiCompatible(host: HostCRD | undefined): boolean
   return (host.spec.llmPolicy?.fallbacks ?? []).some(
     fb => fb.provider?.trim() === OPENAI_COMPATIBLE_PROVIDER
   )
-}
-
-/**
- * The cluster-internal CIDR set the LAN classifier rejects a baseURL against,
- * plus whether the operator actually configured the guard. `cidrs` unions every
- * source HCC knows — the apiserver CIDRs, the nodelocal DNS CIDR, the
- * operator-declared cluster-internal ranges — and a zero-config FLOOR: the
- * apiserver ClusterIP as a /32 from KUBERNETES_SERVICE_HOST (the same expression
- * the k8s-api egress NetworkPolicy uses). The floor is IPv4-only (an IPv6 or
- * malformed value yields no floor entry rather than a CIDR the classifier would
- * ignore). `guardConfigured` reflects ONLY the operator's explicit
- * clusterInternalEgressCidrs — the floor is a safety net, not evidence the guard
- * was set — so the fail-closed check still trips when only the floor is present.
- */
-export function resolveClusterInternalCidrs(): { cidrs: string[]; guardConfigured: boolean } {
-  const floor: string[] = []
-  const apiHost = process.env.KUBERNETES_SERVICE_HOST
-  if (apiHost && ipv4ToInt(apiHost) !== null) floor.push(`${apiHost}/32`)
-  const cidrs = [
-    ...config.k8sApiCidrs,
-    ...(config.nodeLocalDnsCidr ? [config.nodeLocalDnsCidr] : []),
-    ...config.clusterInternalEgressCidrs,
-    ...floor,
-  ]
-  return { cidrs, guardConfigured: config.clusterInternalEgressCidrs.length > 0 }
 }
 
 export class OpenAiEgressBrokerReconciler {
@@ -261,132 +215,12 @@ export class OpenAiEgressBrokerReconciler {
 
   /**
    * Every local openai-compatible slot of a Host that survives fail-closed
-   * re-validation. A slot whose baseURL is not a clean RFC1918 IP-literal (per
-   * classifyLanBaseURL) or whose path/port cannot be parsed safely is DROPPED —
-   * no broker is provisioned for it. control-api admission (phase 3) already
-   * guarantees the shape; this is defense-in-depth against a direct cluster
-   * write that bypassed control-api.
+   * re-validation, resolved against the current cluster-internal deny-set. The
+   * decision itself (admitSlot/deriveDesiredBrokers) lives in ./oaiEgress; this
+   * wrapper binds it to the live config.
    */
   private buildDesiredBrokers(host: HostCRD): { desired: DesiredBroker[]; dropped: SlotOutcome[] } {
-    const desired: DesiredBroker[] = []
-    const dropped: SlotOutcome[] = []
-    const seenSlotIds = new Set<string>()
-
-    const consider = (
-      slotId: string,
-      provider: string | undefined,
-      baseURL: string | undefined,
-      credentialDataKey: string
-    ): void => {
-      if (provider?.trim() !== OPENAI_COMPATIBLE_PROVIDER) return
-      if (!baseURL) return
-      if (seenSlotIds.has(slotId)) return
-      seenSlotIds.add(slotId)
-      const result = this.validateSlot(host.name, slotId, baseURL, credentialDataKey)
-      if ('reason' in result) {
-        dropped.push({ slotId, reason: result.reason })
-      } else {
-        desired.push(result)
-      }
-    }
-
-    consider(
-      PRIMARY_SLOT_ID,
-      host.spec.model?.provider,
-      host.spec.model?.baseURL,
-      OPENAI_COMPATIBLE_API_KEY_SLOT
-    )
-
-    const fallbacks = host.spec.llmPolicy?.fallbacks ?? []
-    fallbacks.forEach((fb, i) => {
-      // credentialSlot (when set) is the literal Secret data key that feeds this
-      // fallback's key — mirroring mcp-host's fallback resolution. Absent ⇒ the
-      // provider's canonical slot key.
-      const dataKey = fb.credentialSlot?.trim() || OPENAI_COMPATIBLE_API_KEY_SLOT
-      consider(fallbackSlotId(i), fb.provider, fb.baseURL, dataKey)
-    })
-
-    return { desired, dropped }
-  }
-
-  private validateSlot(
-    hostName: string,
-    slotId: string,
-    baseURL: string,
-    credentialDataKey: string
-  ): DesiredBroker | { reason: SlotDropReason } {
-    // Cluster-internal ranges HCC rejects a baseURL against (see
-    // resolveClusterInternalCidrs). The floor pins the apiserver ClusterIP even
-    // with zero config, but the floor alone is NOT a configured guard.
-    const { cidrs: clusterInternalCidrs, guardConfigured } = resolveClusterInternalCidrs()
-    // Fail-closed: without operator-declared cluster-internal ranges the
-    // classifier cannot distinguish cluster space (apiserver/pod ClusterIPs) from
-    // a real private LAN, so it would accept a cluster-internal baseURL. Refuse to
-    // provision any slot until the guard is configured. The escape hatch is
-    // CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false, for a deploy that
-    // deliberately runs without it.
-    if (!guardConfigured && config.oaiEgressRequireClusterCidrs) {
-      log.error(
-        'cluster-internal CIDR guard unconfigured — refusing to provision broker; set CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (or opt out with CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS=false)',
-        { host: hostName, slotId }
-      )
-      return { reason: 'cluster_internal_guard_unconfigured' }
-    }
-    const decision = classifyLanBaseURL(
-      baseURL,
-      clusterInternalCidrs.length ? { clusterInternalCidrs } : undefined
-    )
-    if (!decision.ok) {
-      log.warn('baseURL failed fail-closed LAN validation — slot not provisioned', {
-        host: hostName,
-        slotId,
-        reason: decision.reason,
-      })
-      return { reason: decision.reason }
-    }
-    let parsed: URL
-    try {
-      parsed = new URL(baseURL)
-    } catch {
-      log.warn('baseURL is not a parseable URL — slot not provisioned', { host: hostName, slotId })
-      return { reason: 'url_unparseable' }
-    }
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      log.warn('baseURL scheme unsupported — slot not provisioned', {
-        host: hostName,
-        slotId,
-        scheme: parsed.protocol,
-      })
-      return { reason: 'scheme_unsupported' }
-    }
-    // Take the LAN address from the classifier (validated RFC1918 IPv4 literal),
-    // never from the raw string. Port + path come from the parsed URL components,
-    // never from string slicing — anti-injection for the generated nginx config.
-    const lanPort = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80
-    if (!Number.isInteger(lanPort) || lanPort < 1 || lanPort > 65535) {
-      log.warn('baseURL port invalid — slot not provisioned', { host: hostName, slotId })
-      return { reason: 'port_invalid' }
-    }
-    const path = parsed.pathname || '/'
-    // Reject anything that could break the nginx quoted/directive context. URL
-    // parsing already percent-encodes CR/LF/space, but reject defensively so a
-    // path can never carry a newline, quote, backslash, NUL, whitespace — or the
-    // metacharacters that survive URL parsing and are meaningful in nginx: `$`
-    // (proxy_pass runtime variable interpolation — `.../v1$request_uri` would
-    // rewrite the upstream), `#` (starts a comment), and backtick.
-    if (/[\r\n\t "'\\;{}$#`\0]/.test(path) || path.length > 1024) {
-      log.warn('baseURL path unsafe — slot not provisioned', { host: hostName, slotId })
-      return { reason: 'path_unsafe' }
-    }
-    return {
-      slotId,
-      brokerName: brokerNameFor(hostName, slotId),
-      ip: decision.ip,
-      lanPort,
-      scheme: parsed.protocol,
-      path,
-      credentialDataKey,
-    }
+    return deriveDesiredBrokers(host, resolveClusterInternalCidrs())
   }
 
   // ─── Per-host reconcile ─────────────────────────────────────────────
@@ -403,7 +237,7 @@ export class OpenAiEgressBrokerReconciler {
     for (const broker of desired) {
       try {
         const credentialB64 = await this.readHostCredential(host, broker.credentialDataKey)
-        const revision = createHash('sha256').update(credentialB64).digest('hex')
+        const revision = credentialsRevision(credentialB64)
         await this.ensureSecret(host, broker, credentialB64)
         await this.ensureConfigMap(host, broker)
         await this.ensureDeployment(host, broker, revision)
