@@ -3936,8 +3936,9 @@ export class McpServerWatcher implements McpServerProvider {
 
       // Most status writes do not change desired state. A runtime eligibility
       // edge does change policy intent: propagate it without re-entering the
-      // runtime owner merely because it published status. Discovery still
-      // receives every update; UID/spec/annotation/label changes remain live.
+      // runtime owner inline. The scheduled replay also retries runtime
+      // reconciliation. Discovery receives every update; UID/spec/annotation/
+      // label changes remain live.
       if (type === 'MODIFIED' && previous && isMcpServerStatusOnlyUpdate(previous, server)) {
         if (runtimeDesired(previous) !== runtimeDesired(server)) {
           // The revision bump above retires old policy work and requests a
@@ -3993,6 +3994,11 @@ export class McpServerWatcher implements McpServerProvider {
           !current.spec.mcpServers?.includes(server.name)
         )
           return
+        hccLogger.debug('Reconciling Context policies after McpServer change', {
+          serverName: server.name,
+          contextName: current.name,
+          contextId,
+        })
         const completed = await this.netPolReconciler.reconcileContext(current, {
           isCurrent: () => isCurrent() && this.contexts.get(current.name) === current,
         })

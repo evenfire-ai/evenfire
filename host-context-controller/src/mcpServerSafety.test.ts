@@ -339,6 +339,18 @@ describe('runtimeDesired policy contract (#604)', () => {
     }
   })
 
+  it.each(['True', 'Unknown'] as const)(
+    'keeps a known failure reason fail-closed despite contradictory %s status',
+    status => {
+      // A future or malformed writer must not turn a known failure into an allow.
+      for (const reason of ['SecretNotFound', 'SecretMissingKey', 'SecretAccessDenied']) {
+        const server = withVerdict(reason)
+        server.status = { conditions: [{ type: 'SecretResolved', status, reason }] }
+        expect(runtimeDesired(server)).toBe(false)
+      }
+    }
+  )
+
   it('recovers when the reference is removed despite a stale negative condition', () => {
     const server = withVerdict('SecretNotFound')
     expect(runtimeDesired(server)).toBe(false)

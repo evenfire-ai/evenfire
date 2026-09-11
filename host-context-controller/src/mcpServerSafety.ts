@@ -111,6 +111,9 @@ export function runtimeDesired(server: McpServerCRD): boolean {
   if (server.spec.enabled === false) return false
   if (server.spec.managed === false || !server.spec.envSecret) return true
   const condition = server.status?.conditions?.find(item => item.type === 'SecretResolved')
+  // The runtime owner publishes False with a validation failure reason and
+  // True with SecretFound. Share its reason-based fail-closed predicate: a
+  // contradictory status must not override a known validation failure.
   return !shouldFailClosedForSecretFailure(condition?.reason)
 }
 

@@ -145,8 +145,10 @@ if [[ "${SIGNAL_AT_CLEANUP_HANDOFF:-0}" = 1 ]]; then
   # explicitly makes DEBUG observable even where Bash suppresses it in EXIT.
   set -T
   HANDOFF_ARMED=1
-  HANDOFF_PARENT=$BASHPID
-  trap 'if [[ "$HANDOFF_ARMED" = 1 && "$BASH_COMMAND" = "trap - EXIT" ]] && { [[ "$HANDOFF_TARGET" = parent && "$BASHPID" = "$HANDOFF_PARENT" ]] || [[ "$HANDOFF_TARGET" = helper && "$BASHPID" != "$HANDOFF_PARENT" ]]; }; then HANDOFF_ARMED=0; echo "handoff-injected:$HANDOFF_TARGET" >> "$TRACE"; kill -TERM "$BASHPID"; fi' DEBUG
+  # BASH_SUBSHELL also exists in macOS Bash 3.2. Signal the current shell
+  # via a direct child so the helper receives TERM, not the top-level $$ PID.
+  HANDOFF_PARENT=$BASH_SUBSHELL
+  trap 'if [[ "$HANDOFF_ARMED" = 1 && "$BASH_COMMAND" = "trap - EXIT" ]] && { [[ "$HANDOFF_TARGET" = parent && "$BASH_SUBSHELL" = "$HANDOFF_PARENT" ]] || [[ "$HANDOFF_TARGET" = helper && "$BASH_SUBSHELL" != "$HANDOFF_PARENT" ]]; }; then HANDOFF_ARMED=0; echo "handoff-injected:$HANDOFF_TARGET" >> "$TRACE"; python3 -c "import os, signal; os.kill(os.getppid(), signal.SIGTERM)"; fi' DEBUG
   set +e
   status_before_cleanup() { return "$DIRECT_EXIT"; }
   status_before_cleanup

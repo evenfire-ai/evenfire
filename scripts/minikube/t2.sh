@@ -395,6 +395,9 @@ run_healthcheck_if_requested() {
     t2_evidence_write Health NOT_RUN 'no profile-owned user-facing health command was supplied'
     return 0
   fi
+  # Export the already-validated shell value to the child; the CLI argument
+  # intentionally expands that same existing value before the assignment.
+  # shellcheck disable=SC2097,SC2098
   T2_HEALTHCHECK_KILL_GRACE_SECONDS="$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
   node "$T2_DEADLINE_RUNNER" \
     --timeout-seconds "$T2_HEALTHCHECK_TIMEOUT_SECONDS" \
