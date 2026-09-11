@@ -225,6 +225,13 @@ describe('openai-compatible — dials the per-Host egress broker (never the LAN 
   // same hash HCC uses), not hand-written.
   const LAN_BASEURL = 'http://10.0.0.5:8000/v1'
 
+  // The exact operator-facing line createLLMProvider emits when it refuses to
+  // construct an openai-compatible provider (llm/index.ts). The fail-closed
+  // tests below assert this verbatim so "returned null" can't be confused with
+  // "null for some OTHER reason" — the per-test liveness witness (R4-M5).
+  const CANNOT_DERIVE_BROKER_MSG =
+    '[LLM] openai-compatible: cannot derive egress-broker URL (missing host name or invalid baseURL) — not constructing'
+
   it('primary: effective baseURL is the broker URL derived with the shared hash', () => {
     const provider = createLLMProvider(
       { 'openai-compatible': { 'openai-compatible-api-key': 'k' } },
@@ -283,8 +290,10 @@ describe('openai-compatible — dials the per-Host egress broker (never the LAN 
       { 'openai-compatible': { 'openai-compatible-api-key': 'k' } },
       { provider: 'openai-compatible', name: 'm', baseURL: 'not a url' }
     )
-    spy.mockRestore()
     expect(provider).toBeNull()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0]).toBe(CANNOT_DERIVE_BROKER_MSG)
+    spy.mockRestore()
   })
 
   it('fail-closed: a missing LAN baseURL builds NO provider', () => {
@@ -293,8 +302,10 @@ describe('openai-compatible — dials the per-Host egress broker (never the LAN 
       { 'openai-compatible': { 'openai-compatible-api-key': 'k' } },
       { provider: 'openai-compatible', name: 'm' }
     )
-    spy.mockRestore()
     expect(provider).toBeNull()
+    expect(spy).toHaveBeenCalledTimes(1)
+    expect(spy.mock.calls[0][0]).toBe(CANNOT_DERIVE_BROKER_MSG)
+    spy.mockRestore()
   })
 
   it('fail-closed: a missing Host name builds NO provider (cannot derive broker)', () => {
@@ -307,6 +318,8 @@ describe('openai-compatible — dials the per-Host egress broker (never the LAN 
         { provider: 'openai-compatible', name: 'm', baseURL: LAN_BASEURL }
       )
       expect(provider).toBeNull()
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0][0]).toBe(CANNOT_DERIVE_BROKER_MSG)
     } finally {
       ;(config as { hostName: string }).hostName = saved
       spy.mockRestore()
