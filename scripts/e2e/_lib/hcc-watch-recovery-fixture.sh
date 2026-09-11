@@ -164,6 +164,18 @@ EOF
     die "Kubernetes API proxy did not become ready"
 }
 
+hcc_proxy_safe_error_records() {
+  # Reconstruct only finite event/code pairs. Raw logs and extra fields never
+  # reach the terminal or an artifact, including on a failed initial probe.
+  kctl logs "deployment/$PROXY_NAME" -n "$HCC_NS" -c proxy --tail=100 --limit-bytes=32768 2>/dev/null |
+    jq -Rrc 'fromjson? | select(.event=="hcc-fixture-upstream-error") | .code as $code |
+      select(["ECONNREFUSED","ECONNRESET","ETIMEDOUT","ENOTFOUND","EAI_AGAIN",
+        "EHOSTUNREACH","ENETUNREACH","EPROTO","CERT_HAS_EXPIRED","CERT_NOT_YET_VALID",
+        "DEPTH_ZERO_SELF_SIGNED_CERT","SELF_SIGNED_CERT_IN_CHAIN","UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY","ERR_TLS_CERT_ALTNAME_INVALID","ERR_TLS_HANDSHAKE_TIMEOUT","UNKNOWN"] | index($code)) |
+      {event,code}'
+}
+
 verify_hcc_proxy_network_policy() {
   local proxy_dns="${PROXY_NAME}.${HCC_NS}.svc"
   local proxy_ip positive_probe negative_probe probe_status
@@ -176,8 +188,9 @@ verify_hcc_proxy_network_policy() {
   positive_probe="$(cat <<'NODE'
 const fs=require('fs'),https=require('https');
 const root='/var/run/secrets/kubernetes.io/serviceaccount/';
+const safeCodes=['ECONNREFUSED','ECONNRESET','ETIMEDOUT','ENOTFOUND','EAI_AGAIN','EHOSTUNREACH','ENETUNREACH','EPROTO','CERT_HAS_EXPIRED','CERT_NOT_YET_VALID','DEPTH_ZERO_SELF_SIGNED_CERT','SELF_SIGNED_CERT_IN_CHAIN','UNABLE_TO_VERIFY_LEAF_SIGNATURE','UNABLE_TO_GET_ISSUER_CERT_LOCALLY','ERR_TLS_CERT_ALTNAME_INVALID','ERR_TLS_HANDSHAKE_TIMEOUT'];
 const request=https.request({host:process.argv[1],port:443,path:'/version',servername:process.argv[2]||'kubernetes.default.svc',ca:process.argv[3]?Buffer.from(process.argv[3],'base64'):fs.readFileSync(root+'ca.crt'),rejectUnauthorized:true,headers:{authorization:'Bearer '+fs.readFileSync(root+'token','utf8')}},response=>{response.resume();response.on('end',()=>process.exit(response.statusCode===200?0:2))});
-request.setTimeout(5000,()=>request.destroy(new Error('timeout')));request.on('error',()=>process.exit(3));request.end();
+request.setTimeout(5000,()=>request.destroy(Object.assign(new Error(),{code:'ETIMEDOUT'})));request.on('error',error=>{const code=error?.code;console.error(JSON.stringify({event:'hcc-fixture-positive-probe-error',code:safeCodes.includes(code)?code:'UNKNOWN'}));process.exit(3)});request.end();
 NODE
 )"
   if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
@@ -188,9 +201,11 @@ NODE
       die 'PR A proxy public trust configuration missing'
     positive_servername=$proxy_dns
   fi
-  kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
-    node -e "$positive_probe" "$proxy_dns" "$positive_servername" "$proxy_public_ca" >/dev/null ||
+  if ! kctl exec deployment/"$HCC_DEPLOY" -n "$HCC_NS" -c host-context-controller -- \
+    node -e "$positive_probe" "$proxy_dns" "$positive_servername" "$proxy_public_ca" >/dev/null; then
+    hcc_proxy_safe_error_records || true
     die "HCC cannot reach the Kubernetes API through the isolated proxy"
+  fi
 
   PROBE_CREATED=1
   kctl apply -f - >/dev/null <<EOF

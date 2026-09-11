@@ -16,7 +16,12 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createProxy, validateCommand } from '../e2e/_lib/hcc-watch-api-proxy.mjs'
+import { runInNewContext } from 'node:vm'
+import {
+  createProxy,
+  proxyUpstreamErrorRecord,
+  validateCommand,
+} from '../e2e/_lib/hcc-watch-api-proxy.mjs'
 import { changedEnvironment, restorePatch, snapshot } from '../e2e/_lib/hcc-watch-config.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
@@ -27,6 +32,149 @@ const otherPath = '/api/v1/namespaces/mcp-server/pods?watch=true'
 let front
 let upstreamTls
 let publicConfig
+
+test('upstream error records discard messages, headers, bodies and unrecognised codes', () => {
+  const marker = 'synthetic-sensitive-material-must-not-appear'
+  for (const code of ['ECONNRESET', 'ERR_TLS_CERT_ALTNAME_INVALID', marker, undefined]) {
+    const record = proxyUpstreamErrorRecord(
+      Object.assign(new Error(marker), {
+        code,
+        headers: { authorization: marker },
+        body: marker,
+        certificate: marker,
+      })
+    )
+    assert.deepEqual(record, {
+      event: 'hcc-fixture-upstream-error',
+      code: code === 'ECONNRESET' || code === 'ERR_TLS_CERT_ALTNAME_INVALID' ? code : 'UNKNOWN',
+    })
+    assert.equal(JSON.stringify(record).includes(marker), false)
+  }
+})
+
+test('actual positive probe emits only an allowed error code even with sensitive error fields', () => {
+  const captured = spawnSync(
+    '/bin/bash',
+    [
+      '-c',
+      `
+source "$HELPER"
+E2E_HCC_PR_A=0 PROXY_NAME=fixture-proxy HCC_NS=fixture HCC_DEPLOY=fixture
+kctl() { case "$1" in get) printf '10.0.0.1';; exec) shift 9; printf '%s' "$1" >&3; exit 0;; *) exit 1;; esac; }
+verify_hcc_proxy_network_policy
+`,
+    ],
+    {
+      env: { ...process.env, HELPER: join(root, 'scripts/e2e/_lib/hcc-watch-recovery-fixture.sh') },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+      timeout: 5000,
+    }
+  )
+  assert.equal(captured.status, 0)
+  const code = captured.output[3]
+  assert.ok(code.includes('hcc-fixture-positive-probe-error'))
+  const marker = 'synthetic-sensitive-material-must-not-appear'
+  for (const failureCode of ['CERT_HAS_EXPIRED', marker]) {
+    const records = []
+    let exitCode
+    let errorHandler
+    const request = {
+      setTimeout() {
+        return request
+      },
+      on(event, handler) {
+        if (event === 'error') errorHandler = handler
+        return request
+      },
+      end() {
+        errorHandler({
+          code: failureCode,
+          message: marker,
+          headers: { authorization: marker },
+          body: marker,
+        })
+      },
+    }
+    runInNewContext(code, {
+      require: name =>
+        name === 'fs' ? { readFileSync: () => Buffer.from(marker) } : { request: () => request },
+      process: {
+        argv: ['node', 'fixture-proxy', 'fixture-proxy', ''],
+        exit: value => {
+          exitCode = value
+        },
+      },
+      console: { error: value => records.push(JSON.parse(value)) },
+      Buffer,
+    })
+    assert.equal(exitCode, 3)
+    assert.deepEqual(records, [
+      {
+        event: 'hcc-fixture-positive-probe-error',
+        code: failureCode === 'CERT_HAS_EXPIRED' ? failureCode : 'UNKNOWN',
+      },
+    ])
+    assert.equal(JSON.stringify(records).includes(marker), false)
+  }
+})
+
+test('failed positive probe collects only bounded safe proxy event/code records before exit', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hcc-proxy-diagnostics-'))
+  const marker = 'synthetic-sensitive-material-must-not-appear'
+  try {
+    const logs = join(directory, 'synthetic-logs')
+    writeFileSync(
+      logs,
+      [
+        marker,
+        JSON.stringify({
+          event: 'hcc-fixture-upstream-error',
+          code: 'ECONNRESET',
+          message: marker,
+          body: marker,
+        }),
+        JSON.stringify({ event: 'hcc-fixture-upstream-error', code: marker }),
+        JSON.stringify({ event: 'unrelated', code: 'ECONNRESET', message: marker }),
+      ].join('\n')
+    )
+    const result = spawnSync(
+      '/bin/bash',
+      [
+        '-c',
+        `
+set -euo pipefail
+source "$HELPER"
+E2E_HCC_PR_A=0 PROXY_NAME=fixture-proxy HCC_NS=fixture HCC_DEPLOY=fixture
+kctl() { case "$1" in
+  get) printf '10.0.0.1';;
+  exec) return 3;;
+  logs) [[ "$*" == *--tail=100* && "$*" == *--limit-bytes=32768* ]] || exit 9; cat "$FAKE_LOGS";;
+  *) exit 1;; esac; }
+die() { exit 1; }
+verify_hcc_proxy_network_policy
+`,
+      ],
+      {
+        env: {
+          ...process.env,
+          HELPER: join(root, 'scripts/e2e/_lib/hcc-watch-recovery-fixture.sh'),
+          FAKE_LOGS: logs,
+        },
+        encoding: 'utf8',
+        timeout: 5000,
+      }
+    )
+    assert.equal(result.status, 1)
+    assert.deepEqual(JSON.parse(result.stdout), {
+      event: 'hcc-fixture-upstream-error',
+      code: 'ECONNRESET',
+    })
+    assert.equal((result.stdout + result.stderr).includes(marker), false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
 
 test('projected-file symlink CLI enters startup and fails loud without fixture mounts', () => {
   // ConfigMap projection resolves import.meta.url to a timestamped real path,

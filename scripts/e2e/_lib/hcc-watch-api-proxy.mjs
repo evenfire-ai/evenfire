@@ -3,6 +3,29 @@ import fs from 'node:fs'
 import https from 'node:https'
 import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
 
+export function proxyUpstreamErrorRecord(error) {
+  const codes = [
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EPROTO',
+    'CERT_HAS_EXPIRED',
+    'CERT_NOT_YET_VALID',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'ERR_TLS_HANDSHAKE_TIMEOUT',
+  ]
+  const code = error?.code
+  return { event: 'hcc-fixture-upstream-error', code: codes.includes(code) ? code : 'UNKNOWN' }
+}
+
 export function validateCommand(command, allowedPaths) {
   if (!command || typeof command.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.id))
     throw new Error('invalid_control_id')
@@ -111,7 +134,10 @@ export function createProxy({
           incoming.pipe(response)
         }
       )
-      upstream.on('error', () => stream.close())
+      upstream.on('error', error => {
+        console.error(JSON.stringify(proxyUpstreamErrorRecord(error)))
+        stream.close()
+      })
       request.pipe(upstream)
     }
     if (
