@@ -8,9 +8,8 @@ const SYSTEM_CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chr
 
 type HeaderGeometry = {
   appsPaddingRight: number
-  mountedPaddingRight: number
+  embedPaddingRight: number
   pagePaddingRight: number
-  searchInsideContentPanel: boolean
 }
 
 let browser: Browser | undefined
@@ -22,38 +21,33 @@ function launchOptions() {
   return { headless: true }
 }
 
+// The command-center (global-search) now lives in the window title bar on every
+// route, so the content panel and its headers reserve NO base gutter for it —
+// that fixture is deliberately absent here. The mounted-app actions also moved to
+// the title bar, so the mounted view's layout now anchors on the embed slot
+// (`.sandbox-ui-embed-slot`) rather than a header row. The only horizontal
+// reservation left in the panel is the apps notification drawer's rail, applied
+// to the page while the drawer is open, which is what this geometry measures.
 async function headerGeometry(width: number, drawerOpen = false): Promise<HeaderGeometry> {
   if (!browser) throw new Error('Browser must launch before measuring responsive utility geometry')
   const page = await browser.newPage({ viewport: { width, height: 800 } })
   await page.setContent(`
-    <div class="app-frame">
-      <header class="window-titlebar">
-        <div class="window-titlebar__actions">
-          <div class="top-bar top-bar--titlebar">
-            <div class="header-left"><div class="global-search global-search--titlebar is-open"></div></div>
-          </div>
-        </div>
-      </header>
-      <div class="app-root">
-        <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
-          <section class="page">
-            <header class="apps-page-header">Apps</header>
-            <header class="sandbox-ui-mounted-header"><button>Back</button></header>
-          </section>
-        </div>
-      </div>
+    <div class="content-panel${drawerOpen ? ' content-panel--app-notification-drawer-open' : ''}">
+      <section class="page">
+        <header class="apps-page-header">Apps</header>
+        <div class="sandbox-ui-embed-slot"></div>
+      </section>
     </div>
   `)
   await page.addStyleTag({ path: path.join(UI_ROOT, 'styles/tokens.css') })
   await page.addStyleTag({ path: path.join(UI_ROOT, 'styles.css') })
   const geometry = await page.evaluate(() => {
-    const number = (selector: string, property: 'paddingRight' | 'width') =>
-      Number.parseFloat(getComputedStyle(document.querySelector(selector)!)[property])
+    const number = (selector: string) =>
+      Number.parseFloat(getComputedStyle(document.querySelector(selector)!).paddingRight)
     return {
-      appsPaddingRight: number('.apps-page-header', 'paddingRight'),
-      mountedPaddingRight: number('.sandbox-ui-mounted-header', 'paddingRight'),
-      pagePaddingRight: number('.page', 'paddingRight'),
-      searchInsideContentPanel: Boolean(document.querySelector('.content-panel .global-search')),
+      appsPaddingRight: number('.apps-page-header'),
+      embedPaddingRight: number('.sandbox-ui-embed-slot'),
+      pagePaddingRight: number('.page'),
     }
   })
   await page.close()
@@ -95,28 +89,33 @@ describe('responsive utility gutter', () => {
     await browser?.close()
   })
 
-  it('keeps the mounted-app notification rail stable at tablet widths', async () => {
+  it('reserves the apps notification-drawer rail only while open, never a base gutter', async () => {
     const closed = await headerGeometry(1100)
     const open = await headerGeometry(1100, true)
 
-    // Search is now portalled into the titlebar. The embedded app therefore
-    // reserves the notification drawer rail, not the removed in-panel search.
-    expect(closed.searchInsideContentPanel).toBe(false)
-    expect(closed.mountedPaddingRight).toBe(438)
-    expect(open.mountedPaddingRight).toBe(0)
+    // Closed: no base gutter on the mounted embed (search is in the title bar).
+    // Open: the page reserves the drawer rail and the embed sits flush against it
+    // (the embed slot's own padding stays 0 — the page pads, not the slot). The
+    // rail is `--app-notification-drawer-width` (420px) + `--space-4` (18px) = 438px;
+    // the window-controls term was dropped once those controls moved to the titlebar.
+    expect(closed.embedPaddingRight).toBe(0)
+    expect(open.embedPaddingRight).toBe(0)
     expect(open.pagePaddingRight).toBe(438)
   })
 
-  it('retains mobile zero-reservation and the wide desktop utility budget', async () => {
+  it('reserves no base utility gutter at any width, mobile or wide desktop', async () => {
     const mobile = await headerGeometry(900)
     const desktop = await headerGeometry(1221)
 
+    // With search in the title bar, neither the apps picker header nor the
+    // mounted embed pads a base gutter at any width — the responsive "utility
+    // budget" that reserved space for the floating in-panel search is retired.
+    // Regression guard: re-introducing a floating in-panel search would make one
+    // of these non-zero again.
     expect(mobile.appsPaddingRight).toBe(0)
-    expect(mobile.mountedPaddingRight).toBe(0)
-    // The titlebar owns the window controls, so the mounted app only reserves
-    // the 420px notification rail plus its 18px outer inset.
-    expect(desktop.appsPaddingRight).toBe(438)
-    expect(desktop.mountedPaddingRight).toBe(438)
+    expect(mobile.embedPaddingRight).toBe(0)
+    expect(desktop.appsPaddingRight).toBe(0)
+    expect(desktop.embedPaddingRight).toBe(0)
   })
 
   it('fills the measured embedded-app rail when the chat drawer is closed', async () => {

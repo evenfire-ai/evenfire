@@ -314,6 +314,7 @@ export function App() {
   const [notificationOpenRequestId, setNotificationOpenRequestId] = React.useState(0)
   const [sidebarToggleRequestId, setSidebarToggleRequestId] = React.useState(0)
   const [titlebarActionsRoot, setTitlebarActionsRoot] = React.useState<HTMLDivElement | null>(null)
+  const [titlebarLeadingRoot, setTitlebarLeadingRoot] = React.useState<HTMLDivElement | null>(null)
   const [chatLocalSearchOpen, setChatLocalSearchOpen] = React.useState(false)
   const [chatLocalSearchState, setChatLocalSearchState] = React.useState<{
     query: string
@@ -2016,8 +2017,8 @@ export function App() {
 
   return (
     <AuthContext.Provider value={authValue}>
-      <div className="app-frame">
-        <WindowTitleBar actionsRef={setTitlebarActionsRoot} />
+      <div className="app-frame" data-sidebar-collapsed={sidebarCollapsed || undefined}>
+        <WindowTitleBar actionsRef={setTitlebarActionsRoot} leadingRef={setTitlebarLeadingRoot} />
         <div className="app-root" inert={bootSplashLoading || undefined}>
           {vm.isAuthenticated ? (
             <NavigationContext.Provider value={navValue}>
@@ -2050,11 +2051,7 @@ export function App() {
                                 ref={contentPanelRef}
                                 className={`content-panel glass-card${
                                   isAgentChatView ? ' content-panel--agent-chat' : ''
-                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''}${
-                                  vm.navItem === DESKTOP_ROUTES.chat
-                                    ? ' content-panel--titlebar-actions'
-                                    : ''
-                                }${
+                                }${vm.navItem === DESKTOP_ROUTES.settings ? ' content-panel--settings' : ''} content-panel--titlebar-actions${
                                   appNotificationDrawerOpen
                                     ? ' content-panel--app-notification-drawer-open'
                                     : ''
@@ -2074,6 +2071,10 @@ export function App() {
                                     : undefined
                                 }
                               >
+                                {/* Every route mounts the command-center header in the
+                                    window title bar via the same portal — the search
+                                    pill and notification bell live in the title bar on
+                                    all routes, never floating inline over the panel. */}
                                 <TitlebarActionsPortal container={titlebarActionsRoot}>
                                   <AppHeader
                                     placement="titlebar"
@@ -2140,6 +2141,7 @@ export function App() {
                                       shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
                                       localSearchRequestId={sandboxLocalSearchRequestId}
                                       chatDrawerOpen={chatDrawerVisible}
+                                      titlebarLeadingContainer={titlebarLeadingRoot}
                                       onToggleChatDrawer={toggleChatDrawer}
                                       onBackToConversation={handleSandboxUiBackToConversation}
                                       onEmbeddedAppOpening={handleSandboxUiOpening}
