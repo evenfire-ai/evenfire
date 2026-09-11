@@ -46,7 +46,7 @@ import {
   POLICY_TYPE_LABEL,
 } from './constants'
 import { hccLogger } from './logger'
-import { credentialsRevision } from './oaiEgress/brokerRevision'
+import { type BrokerRevisions, brokerRevisions } from './oaiEgress/brokerRevision'
 import { resolveClusterInternalCidrs } from './oaiEgress/clusterDenySet'
 import {
   type DesiredBroker,
@@ -77,6 +77,10 @@ import {
 const log = hccLogger.child({ module: 'oai-egress-broker' })
 
 const CREDENTIALS_REVISION_ANNOTATION = 'clerum.io/credentials-revision'
+// Pod-template annotation carrying the sha256 of the FULL nginx ConfigMap render.
+// Editing ip/port/scheme/path changes only the ConfigMap; without this annotation
+// the Deployment stays byte-identical and never rolls onto the new upstream.
+const CONFIG_REVISION_ANNOTATION = 'clerum.io/config-revision'
 const COMPONENT_LABEL = 'clerum.io/component'
 const SLOT_ANNOTATION = 'clerum.io/oai-egress-source'
 // Env var the nginx image reads at startup via envsubst. The provider id and the
@@ -237,10 +241,14 @@ export class OpenAiEgressBrokerReconciler {
     for (const broker of desired) {
       try {
         const credentialB64 = await this.readHostCredential(host, broker.credentialDataKey)
-        const revision = credentialsRevision(credentialB64)
+        // Build the ConfigMap ONCE so the config-revision hashes exactly what the
+        // pod mounts. The ConfigMap is ensured before the Deployment, so on a roll
+        // the pod picks up the new conf.
+        const cm = this.buildNginxConfigMap(host, broker)
+        const revisions = brokerRevisions(cm.data!['default.conf.template']!, credentialB64)
         await this.ensureSecret(host, broker, credentialB64)
-        await this.ensureConfigMap(host, broker)
-        await this.ensureDeployment(host, broker, revision)
+        await this.ensureConfigMap(host, broker, cm)
+        await this.ensureDeployment(host, broker, revisions)
         await this.ensureService(host, broker)
         await this.ensureBrokerIngressPolicy(host, broker)
         await this.ensureBrokerLanEgressPolicy(host, broker)
@@ -424,7 +432,7 @@ server {
   private buildDeployment(
     host: HostCRD,
     broker: DesiredBroker,
-    credentialsRevision: string
+    revisions: BrokerRevisions
   ): k8s.V1Deployment {
     const port = config.openaiEgressBrokerPort
     const labels = this.brokerLabels(host, broker)
@@ -443,9 +451,14 @@ server {
         template: {
           metadata: {
             labels,
-            // Rotating the credential changes this digest → pod template →
-            // rolling restart onto the new key.
-            annotations: { [CREDENTIALS_REVISION_ANNOTATION]: credentialsRevision },
+            // Two revisions stamp the pod template so a change to EITHER rolls the
+            // pod: the credential (rotation) and the full nginx render (ip/port/
+            // scheme/path or any template change). kubectl describe then shows
+            // which one moved.
+            annotations: {
+              [CREDENTIALS_REVISION_ANNOTATION]: revisions.credentialsRevision,
+              [CONFIG_REVISION_ANNOTATION]: revisions.configRevision,
+            },
           },
           spec: {
             automountServiceAccountToken: false,
@@ -663,8 +676,11 @@ server {
     })
   }
 
-  private async ensureConfigMap(host: HostCRD, broker: DesiredBroker): Promise<void> {
-    const cm = this.buildNginxConfigMap(host, broker)
+  private async ensureConfigMap(
+    host: HostCRD,
+    broker: DesiredBroker,
+    cm: k8s.V1ConfigMap
+  ): Promise<void> {
     const name = cm.metadata!.name!
     const namespace = config.llmEgressNamespace
     try {
@@ -693,9 +709,9 @@ server {
   private async ensureDeployment(
     host: HostCRD,
     broker: DesiredBroker,
-    credentialsRevision: string
+    revisions: BrokerRevisions
   ): Promise<void> {
-    const deployment = this.buildDeployment(host, broker, credentialsRevision)
+    const deployment = this.buildDeployment(host, broker, revisions)
     const name = deployment.metadata!.name!
     const namespace = config.llmEgressNamespace
     try {

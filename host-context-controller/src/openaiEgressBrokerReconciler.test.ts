@@ -638,6 +638,76 @@ describe('OpenAiEgressBrokerReconciler', () => {
     expect(secretBody.data?.['openai-compatible-api-key']).toBe(b64('sk-fb1'))
   })
 
+  it('T16: the config-revision annotation tracks the full render so an ip/port/scheme edit rolls the pod (R4-H3)', async () => {
+    // Fresh, isolated reconcile for a baseURL; returns the created Deployment's
+    // config-revision pod-template annotation.
+    async function configRevFor(baseURL: string): Promise<string | undefined> {
+      const apps = createMockAppsApi()
+      const core = createMockCoreApi()
+      const net = createMockNetworkingApi()
+      const cust = createMockCustomApi()
+      cust.getNamespacedCustomObject.mockImplementation(({ name }: { name?: string } = {}) =>
+        Promise.resolve({
+          metadata: { name: name ?? 'h', namespace: 'mcp-host', uid: 'u', resourceVersion: '1' },
+          spec: { host: name ?? 'h', contextRef: 'ctx', secretRef: 'host-secret' },
+          status: {},
+        })
+      )
+      const h = new Map<string, HostCRD>()
+      const r = new OpenAiEgressBrokerReconciler({} as k8s.KubeConfig, h, {
+        appsApi: asAppsApi(apps),
+        coreApi: asCoreApi(core),
+        networkingApi: asNetworkingApi(net),
+        customApi: asCustomApi(cust),
+        hostInventoryAuthoritative: () => true,
+      })
+      const host = makeHost({
+        name: 'h16',
+        spec: { model: { provider: 'openai-compatible', baseURL } },
+      })
+      h.set(host.name, host)
+      await r.reconcileForHost(host)
+      return deploymentCreates(apps)[0]?.spec?.template?.metadata?.annotations?.[
+        'clerum.io/config-revision'
+      ]
+    }
+
+    const rev8000 = await configRevFor('http://192.168.1.50:8000/v1')
+    const rev8001 = await configRevFor('http://192.168.1.50:8001/v1')
+    const rev8000again = await configRevFor('http://192.168.1.50:8000/v1')
+    const revHttps = await configRevFor('https://192.168.1.50:8000/v1')
+
+    expect(rev8000).toBeTruthy()
+    // Idempotent: the same render yields the same digest → no spurious rollout.
+    expect(rev8000).toBe(rev8000again)
+    // A port change rolls the pod (the render, not just the ConfigMap, changed).
+    expect(rev8000).not.toBe(rev8001)
+    // A scheme change rolls too — the render covers scheme, not just ip:port.
+    expect(rev8000).not.toBe(revHttps)
+  })
+
+  it('T16c: each local slot gets its own config-revision from its own render (R4-H3)', async () => {
+    const host = makeHost({
+      name: 'h16c',
+      spec: {
+        model: { provider: 'openai-compatible', baseURL: 'http://192.168.1.50:8000/v1' },
+        llmPolicy: {
+          fallbacks: [{ provider: 'openai-compatible', baseURL: 'http://192.168.1.51:8000/v1' }],
+        },
+      },
+    })
+    hosts.set(host.name, host)
+    await reconciler.reconcileForHost(host)
+
+    const revs = deploymentCreates(appsApi).map(
+      d => d.spec?.template?.metadata?.annotations?.['clerum.io/config-revision']
+    )
+    expect(revs).toHaveLength(2)
+    expect(revs[0]).toBeTruthy()
+    expect(revs[1]).toBeTruthy()
+    expect(revs[0]).not.toBe(revs[1])
+  })
+
   it('T17: an empty baseURL on a declared openai-compatible slot drops missing_base_url, not a silent success (R4-M3)', async () => {
     const host = makeHost({
       name: 'h17',
