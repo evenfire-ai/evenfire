@@ -934,7 +934,7 @@ test('TLS fixture timeout terminates its signer', { timeout: 25000 }, () => {
     writeFileSync(signerPath,
       `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.stdin.resume(); setTimeout(() => {}, 30000)`)
     writeFileSync(join(directory, 'openssl'),
-      `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(signerPath)}\n`, { mode: 0o700 })
+      `#!/bin/sh\nif [ "$1" = version ]; then printf "OpenSSL 3.0.0\\n"; exit 0; fi\nexec ${quote(process.execPath)} ${quote(signerPath)}\n`, { mode: 0o700 })
     const result = spawnSync(process.execPath, [
       join(root, 'scripts/e2e/_lib/hcc-watch-tls-manifest.mjs'),
       'timeout-fixture', 'test-fixture', 'run-fixture',

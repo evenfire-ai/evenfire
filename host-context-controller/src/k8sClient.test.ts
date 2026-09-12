@@ -5848,7 +5848,7 @@ describe('McpServerWatcher startup', () => {
     errorSpy.mockRestore()
   })
 
-  it('retains repair and invalidates authority after a post-revocation additive failure', async () => {
+  it('retains pending repair and schedules retry after a post-revocation additive failure', async () => {
     vi.useFakeTimers()
     const additiveFailure = new AggregateError(
       [new Error('Context policy API unavailable')],
@@ -5861,7 +5861,6 @@ describe('McpServerWatcher startup', () => {
         options?: { onAuthoritativeRevocationComplete?: () => void }
       ) => {
         options?.onAuthoritativeRevocationComplete?.()
-        mocks.hasCertifiedSafetyInventory.mockReturnValue(false)
         throw additiveFailure
       }
     )
@@ -5873,10 +5872,11 @@ describe('McpServerWatcher startup', () => {
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
 
+    expect((watcher as any).networkPolicyRepairPending).toBe(false)
     await watcher.start()
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(watcher.isReadinessInventoryAuthoritative()).toBe(false)
+    expect((watcher as any).networkPolicyRepairPending).toBe(true)
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:',
       { err: additiveFailure }
@@ -5886,6 +5886,10 @@ describe('McpServerWatcher startup', () => {
       { err: additiveFailure }
     )
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect((watcher as any).networkPolicyRepairPending).toBe(false)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(false)
 
     await watcher.stop()
     errorSpy.mockRestore()
@@ -12106,7 +12110,7 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
   it('M5: unset/0 interval warns, registers no timer, and still runs startup once', async () => {
     vi.useFakeTimers()
     mockConfig.netPolResyncIntervalSec = 0
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const watcher = await startWatcherForNetPolResync()
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
     expect(

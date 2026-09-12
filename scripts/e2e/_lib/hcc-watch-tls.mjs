@@ -3,12 +3,23 @@ import { spawnSync } from 'node:child_process'
 import { createPrivateKey, X509Certificate } from 'node:crypto'
 import { isIP } from 'node:net'
 
+export function requireFixtureOpenSsl() {
+  const version = spawnSync('openssl', ['version'], {
+    encoding: 'utf8', timeout: 5000, maxBuffer: 4096, shell: false,
+  })
+  // LibreSSL treats -keyout - as a literal file, violating the memory-only fixture.
+  if (version.status !== 0 || !/^OpenSSL /.test(version.stdout ?? '')) {
+    throw new Error('fixture_openssl_required: put OpenSSL on PATH; LibreSSL is unsupported')
+  }
+}
+
 export function createFixtureTls(hostname) {
   const ip = typeof hostname === 'string' && isIP(hostname)
   if (!ip && (typeof hostname !== 'string' ||
     !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(hostname))) {
     throw new Error('invalid_fixture_hostname')
   }
+  requireFixtureOpenSsl()
   // Direct argv avoids a shell and Node's socket-backed stdin on Linux.
   // OpenSSL writes both PEM blocks to captured stdout; no key file is created.
   const generated = spawnSync('openssl', [
@@ -35,3 +46,5 @@ export function createFixtureTls(hostname) {
     throw new Error('fixture_certificate_generation_failed')
   }
 }
+
+if (import.meta.main) requireFixtureOpenSsl()

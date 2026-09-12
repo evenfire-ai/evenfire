@@ -2951,9 +2951,11 @@ export class McpServerWatcher implements McpServerProvider {
           cause: 'periodic-resync',
         })
       }, netPolResyncSec * 1000)
-      console.log(`[K8s] NetworkPolicy periodic resync enabled (every ${netPolResyncSec}s)`)
+      hccLogger.info('[K8s] NetworkPolicy periodic resync enabled', {
+        intervalSeconds: netPolResyncSec,
+      })
     } else {
-      console.warn(
+      hccLogger.warn(
         '[K8s] NetworkPolicy periodic resync disabled; dropped watch events will not self-heal stale NetworkPolicy allows through controller-driven convergence until another Context or McpServer event triggers reconciliation.'
       )
     }
@@ -4698,10 +4700,10 @@ export class McpServerWatcher implements McpServerProvider {
             )
           }
         } catch (error) {
-          console.error(
-            `[K8s] NetworkPolicy reconciliation failed for context ${context.name}:`,
-            error
-          )
+          hccLogger.error('[K8s] NetworkPolicy reconciliation failed for context', {
+            contextName: context.name,
+            err: error,
+          })
           void this.runInitialNetworkPolicyConvergence({ cause: 'context-reconcile-failure' })
           return
         }

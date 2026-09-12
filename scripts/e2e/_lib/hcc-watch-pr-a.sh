@@ -356,6 +356,7 @@ hcc_pr_a_preflight() {
     command -v "$command_name" >/dev/null || die "PR A requires installed ${command_name}"
   done
   [ "$(node -p 'process.versions.node.split(".")[0]')" = 24 ] || die 'PR A requires Node 24'
+  node "$HCC_PR_A_LIB/hcc-watch-tls.mjs" || die 'PR A requires OpenSSL on PATH; LibreSSL is unsupported'
   openssl req -help 2>&1 | grep -q -- '-addext' || die 'PR A requires openssl req -addext'
   HCC_PR_A_CONFIG_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/hcc-pr-a-public-config.XXXXXX")"
   chmod 600 "$HCC_PR_A_CONFIG_SNAPSHOT"
