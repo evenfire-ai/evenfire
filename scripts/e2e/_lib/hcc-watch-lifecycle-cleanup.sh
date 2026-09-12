@@ -75,6 +75,11 @@ hcc_lifecycle_fixture_absent() {
     remaining="$(kctl get pod -n "$HCC_NS" -l "app=${PROXY_NAME}" -o name)" || return 1
     [ -z "$remaining" ] || return 1
   fi
+  if [ "${HCC_PR_A_TLS_CREATED:-0}" = 1 ]; then
+    remaining="$(kctl get secret,configmap -n "$HCC_NS" \
+      -l "e2e.clerum.io/suite=hcc-watch-churn,e2e.clerum.io/run=${RUN_ID}" -o name)" || return 1
+    [ -z "$remaining" ] || return 1
+  fi
   if [ "$PROBE_CREATED" = 1 ]; then
     remaining="$(kctl get pod "$PROBE_NAME" -n "$HCC_NS" --ignore-not-found -o name)" || return 1
     [ -z "$remaining" ] || return 1
@@ -103,10 +108,15 @@ cleanup_hcc_lifecycle() (
   [ -z "${HCC_LOG_STREAM_PID:-}" ] || kill "$HCC_LOG_STREAM_PID" 2>/dev/null
   [ -z "${NP604_WATCH_PID:-}" ] || kill "$NP604_WATCH_PID" 2>/dev/null
   NP604_WATCH_PID=''
-  if [ "$HCC_PATCHED" = 1 ]; then
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ] &&
+    { [ "$HCC_PATCHED" = 1 ] || [ "$HCC_SCALED_DOWN" = 1 ]; } && ! hcc_pr_a_identity_current; then
+    restore_ok=0
+  fi
+  if [ "$HCC_PATCHED" = 1 ] && { [ "${E2E_HCC_PR_A:-0}" != 1 ] || [ "$restore_ok" = 1 ]; }; then
     restore_hcc_after_churn || restore_ok=0
   fi
-  if [ "$HCC_SCALED_DOWN" = 1 ] || [ "$HCC_PATCHED" = 1 ]; then
+  if { [ "$HCC_SCALED_DOWN" = 1 ] || [ "$HCC_PATCHED" = 1 ]; } &&
+    { [ "${E2E_HCC_PR_A:-0}" != 1 ] || [ "$restore_ok" = 1 ]; }; then
     kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" \
       --replicas="${ORIGINAL_REPLICAS:-1}" >/dev/null 2>&1 || restore_ok=0
     kctl rollout status deployment "$HCC_DEPLOY" -n "$HCC_NS" \
@@ -133,13 +143,29 @@ cleanup_hcc_lifecycle() (
       kctl delete networkpolicy "$PROXY_EGRESS_NP" "$HCC_PROXY_NP" "$PROBE_EGRESS_NP" \
         -n "$HCC_NS" --ignore-not-found >/dev/null 2>&1 || cleanup_failed=1
     fi
+    if [ "${HCC_PR_A_TLS_CREATED:-0}" = 1 ]; then
+      kctl delete secret,configmap -n "$HCC_NS" \
+        -l "e2e.clerum.io/suite=hcc-watch-churn,e2e.clerum.io/run=${RUN_ID}" \
+        --ignore-not-found >/dev/null 2>&1 || cleanup_failed=1
+    fi
     wait_until 100 'lifecycle fixture resources removed' hcc_lifecycle_fixture_absent || cleanup_failed=1
   fi
 
   HCC_CLEANUP_PHASE_DEADLINE=$((started + 270))
+  if { [ "$status" != 0 ] || [ "$cleanup_failed" != 0 ]; } &&
+    [ "${E2E_HCC_PR_A:-0}" = 1 ] && [ "${NP604_CREATED:-0}" = 1 ] &&
+    [ -d "${NP604_EVIDENCE:-}" ] && [ -r "$HCC_LOG_BUFFER" ]; then
+    # Keep structured evidence for later phases too, before deleting the raw
+    # buffer. Diagnostics do not replace or change the existing failure verdict.
+    hcc_pr_a_recovery_checkpoint 0 "$NP604_EVIDENCE/failure-recovery-observation.jsonl" ||
+      printf 'PR_A_FAILURE_CHECKPOINT=UNAVAILABLE\n' >&2
+  fi
   finalize_hcc_watch_gate_lock "$cleanup_failed" "$restore_ok" || cleanup_failed=1
   print_results || cleanup_failed=1
   if [ "$status" -eq 0 ] && [ "$cleanup_failed" != 0 ]; then status=1; fi
+  if [ "$cleanup_failed" = 0 ] && [ -n "${HCC_PR_A_CONFIG_SNAPSHOT:-}" ]; then
+    rm -f "$HCC_PR_A_CONFIG_SNAPSHOT"
+  fi
   rm -f "$HCC_LOG_BUFFER" "$READY_SERIES"
   return "$status"
 )

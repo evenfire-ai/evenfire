@@ -615,7 +615,7 @@ describe('lost delete fence: per-request 503 while /ready stays 200', () => {
     })
     mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
 
-    await w.runInitialNetworkPolicyConvergence()
+    await w.runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(lists).toBeGreaterThan(0)
     expect(w.contextWatchGeneration).toBe(generationBefore.context + 2)

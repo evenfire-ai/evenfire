@@ -50,6 +50,24 @@ case "${E2E_HCC_POLICY_LIFECYCLE:-0}" in
   *) echo "E2E_HCC_POLICY_LIFECYCLE must be 0 or 1" >&2; exit 2 ;;
 esac
 
+case "${E2E_HCC_PR_A:-0}" in
+  0) ;;
+  1)
+    [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ] || { echo 'PR A requires lifecycle mode' >&2; exit 2; }
+    source "${SCRIPT_DIR}/_lib/hcc-watch-pr-a.sh"
+    # Work600 + cleanup270 leaves30 seconds within the normal900 runner budget.
+    HCC_PR_A_WORK_DEADLINE=600
+    kctl() {
+      local remaining=$((HCC_PR_A_WORK_DEADLINE - SECONDS))
+      [ "$remaining" -gt 0 ] || return 124
+      [ "$remaining" -le 90 ] || remaining=90
+      node "${SCRIPT_DIR}/_lib/hcc-cleanup-command.mjs" "$remaining" "$KUBECTL_BIN" \
+        --context "$E2E_KUBECONTEXT" --request-timeout=30s "$@"
+    }
+    ;;
+  *) echo 'E2E_HCC_PR_A must be 0 or 1' >&2; exit 2 ;;
+esac
+
 # ── Fail-closed guards (identical contract to the sibling HCC gates) ──
 [ -n "$E2E_KUBECONTEXT" ] || {
   echo "KUBECONTEXT/E2E_K8S_CONTEXT must select a branch-scoped minikube context." >&2
@@ -163,6 +181,11 @@ wait_until() {
   local timeout=$1 description=$2
   shift 2
   local deadline now
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    local remaining=$((HCC_PR_A_WORK_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || return 124
+    [ "$timeout" -le "$remaining" ] || timeout=$remaining
+  fi
   deadline=$(($(date +%s) + timeout))
   while :; do
     "$@" && return 0
@@ -211,6 +234,11 @@ hcc_restart_count() {
 sample_ready_series() {
   local duration=$1 phase=$2 stop_on_ready=$3
   local s_deadline t0 now pod status
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    local remaining=$((HCC_PR_A_WORK_DEADLINE - SECONDS))
+    [ "$remaining" -gt 0 ] || return 124
+    [ "$duration" -le "$remaining" ] || duration=$remaining
+  fi
   s_deadline=$(($(date +%s) + duration))
   while t0="$(date +%s)"; [ "$t0" -lt "$s_deadline" ]; do
     status=503
@@ -265,6 +293,11 @@ first_200_epoch() {
 }
 
 print_repair_instructions() {
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    printf 'PR A cleanup failed; lock and dependent fixtures retained.\nContext: %s\nHCC: %s/%s\nExact public restoration snapshot: %s\nInspect identity and restore from this snapshot; do not remove environment entries blindly.\n' \
+      "$E2E_KUBECONTEXT" "$HCC_NS" "$HCC_DEPLOY" "${HCC_PR_A_CONFIG_SNAPSHOT:-missing}" >&2
+    return
+  fi
   cat >&2 <<EOF
 HCC watch-churn gate cleanup could not restore a verified clean state.
 Context: ${E2E_KUBECONTEXT}
@@ -351,9 +384,10 @@ trap 'exit 131' QUIT
 # ── FASE A: guards + snapshot ──
 require_branch_owned_hcc_gate "$HCC_NS"
 acquire_hcc_watch_gate_lock
+if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then hcc_pr_a_preflight; fi
 ORIGINAL_REPLICAS="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.replicas}')"
 [ "$ORIGINAL_REPLICAS" = 1 ] || die "expected exactly one HCC replica, found ${ORIGINAL_REPLICAS:-unknown}"
-[ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" ] ||
+[ "${E2E_HCC_PR_A:-0}" = 1 ] || [ -z "$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" -o jsonpath='{.spec.template.spec.hostAliases}')" ] ||
   die "HCC already has hostAliases; refusing a non-restorable injection"
 HCC_IMAGE="$(kctl get deployment "$HCC_DEPLOY" -n "$HCC_NS" \
   -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].image}')"
@@ -365,6 +399,7 @@ K8S_API_CIDR="${api_ip}/32"
 # ── FASE B: redirect through the self-flapping proxy (HCC still healthy) ──
 log "Creating self-flapping API proxy (period=${CHURN_PERIOD_MS}ms, min-age=${CHURN_MIN_AGE_MS}ms)"
 create_hcc_churn_proxy "$CHURN_PERIOD_MS" "$CHURN_MIN_AGE_MS"
+if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then hcc_pr_a_enable_proxy; fi
 verify_hcc_proxy_network_policy
 proxy_ip="$(kctl get service "$PROXY_NAME" -n "$HCC_NS" -o jsonpath='{.spec.clusterIP}')"
 [ -n "$proxy_ip" ] || die "proxy Service has no ClusterIP"
@@ -388,6 +423,7 @@ patch="$(jq -cn --arg ip "$proxy_ip" --arg cidr "$K8S_API_CIDR" '{spec:{template
     {name:"KUBERNETES_SERVICE_HOST",value:"kubernetes.default.svc"},
     {name:"KUBERNETES_SERVICE_PORT",value:"443"},
     {name:"CONTEXT_MAPPER_K8S_API_CIDRS",value:$cidr}]}]}}}}')"
+if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then patch="$(hcc_pr_a_redirect_patch)"; fi
 HCC_PATCHED=1
 kctl patch deployment "$HCC_DEPLOY" -n "$HCC_NS" --type=strategic -p "$patch" >/dev/null
 kctl scale deployment "$HCC_DEPLOY" -n "$HCC_NS" --replicas=1 >/dev/null
@@ -493,7 +529,7 @@ fi
 # consumed READINESS_BUDGET_SEC of churn.
 require_hcc_recovery_log_stream ||
   warn "HCC log stream ended before the verdict; counting the frozen buffer (fail-closed: an undercount can only turn this gate RED)"
-stop_hcc_recovery_log_stream
+[ "${E2E_HCC_PR_A:-0}" = 1 ] || stop_hcc_recovery_log_stream
 recount_churn_evidence
 read -r churn_total churn_200 churn_503 churn_maxstreak churn_transitions <<<"$(series_metrics churn)"
 read -r hold_total _ hold_503 _ _ <<<"$(series_metrics post-hold)"
@@ -551,6 +587,10 @@ fi
 if [ "${E2E_HCC_POLICY_LIFECYCLE:-0}" = 1 ]; then
   [ -n "$first_ready" ] || die 'NP604 cannot run without a ready controller'
   np604_recover
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    hcc_pr_a_run
+    stop_hcc_recovery_log_stream
+  fi
 fi
 log "Evidence artifact: ${LOG_ARTIFACT}"
 # cleanup() (EXIT trap) restores HCC, deletes the fleet, and runs print_results.

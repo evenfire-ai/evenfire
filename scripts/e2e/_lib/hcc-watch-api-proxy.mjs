@@ -1,0 +1,241 @@
+// Development-only transport fixture. No fabricated upstream success responses.
+import fs from 'node:fs'
+import https from 'node:https'
+import { createSecureContext } from 'node:tls'
+import { createBookmarkObservation } from './hcc-watch-bookmarks.mjs'
+
+export function proxyUpstreamErrorRecord(error) {
+  const codes = [
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'EPROTO',
+    'CERT_HAS_EXPIRED',
+    'CERT_NOT_YET_VALID',
+    'DEPTH_ZERO_SELF_SIGNED_CERT',
+    'SELF_SIGNED_CERT_IN_CHAIN',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+    'ERR_TLS_CERT_ALTNAME_INVALID',
+    'ERR_TLS_HANDSHAKE_TIMEOUT',
+  ]
+  const code = error?.code
+  return { event: 'hcc-fixture-upstream-error', code: codes.includes(code) ? code : 'UNKNOWN' }
+}
+
+export function validateCommand(command, allowedPaths) {
+  if (!command || typeof command.id !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.id))
+    throw new Error('invalid_control_id')
+  if (command.action === 'arm') {
+    if (
+      !allowedPaths.includes(command.path) ||
+      command.method !== 'GET' ||
+      !Number.isInteger(command.durationMs) ||
+      command.durationMs < 1000 ||
+      command.durationMs > 25000
+    ) {
+      throw new Error('invalid_pause_scope')
+    }
+  } else if (command.action === 'cut') {
+    if (!['McpServer', 'Context', 'both'].includes(command.kind))
+      throw new Error('invalid_cut_scope')
+  } else if (command.action === 'release') {
+    if (typeof command.pauseId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(command.pauseId))
+      throw new Error('invalid_pause_id')
+  } else if (command.action !== 'observe-bookmarks') throw new Error('invalid_control_action')
+  return command
+}
+
+export function createProxy({
+  key,
+  cert,
+  upstreamCa,
+  upstreamHost = 'kubernetes.default.svc',
+  upstreamPort = 443,
+  allowedPaths,
+  controlDir,
+  periodMs,
+  minAgeMs,
+}) {
+  // CA bytes configure TLS trust only; they never enter the request or destination.
+  const upstreamSecureContext = createSecureContext({ ca: upstreamCa })
+  const streams = new Set()
+  const bookmarks = createBookmarkObservation()
+  let pause = null
+  let commandId = null
+  let commandContent = null
+  const writeRecord = (name, fields) => {
+    fs.writeFileSync(`${controlDir}/${name}.next`, JSON.stringify(fields), { mode: 0o600 })
+    fs.renameSync(`${controlDir}/${name}.next`, `${controlDir}/${name}.json`)
+  }
+  const acknowledge = fields => writeRecord('ack', fields)
+  const recordPause = (id, state) => writeRecord('pause', { id, state, at: Date.now() })
+  const finishPause = reason => {
+    if (!pause) return
+    const old = pause
+    pause = null
+    clearTimeout(old.timer)
+    recordPause(old.id, reason)
+    old.resume?.()
+    acknowledge({ id: old.id, state: reason })
+  }
+  const server = https.createServer({ key, cert }, (request, response) => {
+    const url = new URL(request.url, 'https://fixture.invalid')
+    if (!request.url.startsWith('/') || request.url.startsWith('//')) {
+      response.destroy()
+      return
+    }
+    const watch = url.searchParams.get('watch') === 'true'
+    const kind = url.pathname.endsWith('/mcpservers')
+      ? 'McpServer'
+      : url.pathname.endsWith('/contexts')
+        ? 'Context'
+        : 'other'
+    let upstream
+    const stream = {
+      request,
+      response,
+      kind,
+      watch,
+      born: Date.now(),
+      close: () => {
+        upstream?.destroy()
+        response.destroy()
+        request.destroy()
+      },
+    }
+    streams.add(stream)
+    response.once('close', () => {
+      streams.delete(stream)
+      upstream?.destroy()
+    })
+    const forward = () => {
+      if (response.destroyed) return
+      // Authentication is forwarded only in process memory to the verified API.
+      upstream = https.request(
+        {
+          hostname: upstreamHost,
+          port: upstreamPort,
+          method: request.method,
+          path: request.url,
+          secureContext: upstreamSecureContext,
+          rejectUnauthorized: true,
+          headers: { ...request.headers, host: upstreamHost },
+          agent: false,
+        },
+        incoming => {
+          response.writeHead(incoming.statusCode, incoming.headers)
+          // A quiet watch must establish before its first event, or the
+          // client's LIST-to-WATCH pairing remains blocked until a churn cut.
+          response.flushHeaders()
+          if (watch && request.method === 'GET') {
+            const observer = bookmarks.open(kind, incoming.headers, incoming.statusCode)
+            incoming.on('data', chunk => observer.write(chunk))
+            incoming.once('end', () => observer.end())
+            incoming.once('close', () => observer.close())
+          }
+          incoming.pipe(response)
+        }
+      )
+      upstream.on('error', error => {
+        console.error(JSON.stringify(proxyUpstreamErrorRecord(error)))
+        stream.close()
+      })
+      request.pipe(upstream)
+    }
+    if (
+      pause &&
+      !pause.intercepted &&
+      request.method === 'GET' &&
+      !watch &&
+      url.pathname === pause.path
+    ) {
+      pause.intercepted = true
+      pause.resume = forward
+      recordPause(pause.id, 'intercepted')
+      acknowledge({ id: pause.id, state: 'intercepted', method: 'GET', path: pause.path })
+    } else forward()
+  })
+  const poll = setInterval(() => {
+    let observedId = null
+    try {
+      if (!fs.existsSync(`${controlDir}/command.json`)) return
+      const content = fs.readFileSync(`${controlDir}/command.json`, 'utf8')
+      if (content === commandContent) return
+      // Remember rejected input too: one file publication produces one verdict.
+      commandContent = content
+      const candidate = JSON.parse(content)
+      observedId = typeof candidate?.id === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(candidate.id)
+        ? candidate.id : null
+      if (observedId !== null && observedId === commandId) return
+      if (observedId !== null) commandId = observedId
+      const command = validateCommand(candidate, allowedPaths)
+      if (command.action === 'arm') {
+        if (pause) throw new Error('pause_already_active')
+        pause = {
+          ...command,
+          intercepted: false,
+          timer: setTimeout(() => finishPause('expired'), command.durationMs),
+        }
+        recordPause(command.id, 'armed')
+        acknowledge({ id: command.id, state: 'armed' })
+      } else if (command.action === 'release') {
+        if (!pause || pause.id !== command.pauseId || !pause.intercepted)
+          throw new Error('pause_not_held')
+        finishPause('released')
+        acknowledge({ id: command.id, state: 'released' })
+      } else if (command.action === 'observe-bookmarks') {
+        writeRecord('bookmarks', bookmarks.finish())
+        acknowledge({ id: command.id, state: 'observed' })
+      } else {
+        let count = 0
+        for (const stream of streams) {
+          if (
+            stream.watch &&
+            (command.kind === 'both'
+              ? ['McpServer', 'Context'].includes(stream.kind)
+              : stream.kind === command.kind)
+          ) {
+            stream.close()
+            count++
+          }
+        }
+        acknowledge({ id: command.id, state: 'cut', count })
+      }
+    } catch {
+      acknowledge({ id: observedId, state: 'rejected' })
+    }
+  }, 100)
+  const churn = setInterval(() => {
+    if (fs.existsSync(`${controlDir}/paused`)) return
+    for (const stream of streams)
+      if (stream.watch && Date.now() - stream.born >= minAgeMs) stream.close()
+  }, periodMs)
+  const close = () => {
+    clearInterval(poll)
+    clearInterval(churn)
+    finishPause('shutdown')
+    for (const stream of streams) stream.close()
+    server.close()
+  }
+  return { server, close }
+}
+
+// Node 24's native entry marker also handles Kubernetes projected symlinks.
+if (import.meta.main) {
+  const proxy = createProxy({
+    key: fs.readFileSync('/fixture-tls/tls.key'),
+    cert: fs.readFileSync('/fixture-tls/tls.crt'),
+    upstreamCa: fs.readFileSync('/upstream-ca/ca.crt'),
+    allowedPaths: JSON.parse(process.env.PAUSE_PATHS),
+    controlDir: '/churn-ctl',
+    periodMs: Number(process.env.CHURN_PERIOD_MS),
+    minAgeMs: Number(process.env.CHURN_MIN_AGE_MS),
+  })
+  proxy.server.listen(8443, '0.0.0.0')
+  process.on('SIGTERM', proxy.close)
+}

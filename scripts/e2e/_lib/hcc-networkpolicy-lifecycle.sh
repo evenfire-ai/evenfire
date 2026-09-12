@@ -144,11 +144,19 @@ np604_before_observation() {
   np604_kctl annotate networkpolicy "ctx-${NP604_CONTEXT}-${NP604_CONTROL}" -n "$MCP_NS" \
     "e2e.clerum.io/observer=${RUN_ID}" --overwrite >/dev/null
   wait_until 15 'NP604 policy observer positive witness' np604_observer_witness || die 'NP604 observer is not live'
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    # Consumed by the checkpoint helper in hcc-watch-pr-a.sh.
+    # shellcheck disable=SC2034
+    HCC_PR_A_OBSERVATION_LOG_LINE_BASE="$(wc -l < "$HCC_LOG_BUFFER" | tr -d ' ')"
+  fi
   NP604_CUT_BASE="$(count_buffer '\[K8s\] Context watch ended; recovering authoritative inventory')"
 }
 
 np604_after_observation() {
   np604_observer_alive || die 'NP604 observer stopped before completing observation'
+  if [ "${E2E_HCC_PR_A:-0}" = 1 ]; then
+    hcc_pr_a_recovery_checkpoint
+  fi
   local current_cuts
   current_cuts="$(count_buffer '\[K8s\] Context watch ended; recovering authoritative inventory')"
   [ "$((current_cuts - NP604_CUT_BASE))" -ge 3 ] || die 'NP604 needs three complete reconnect cycles in stable failed state'

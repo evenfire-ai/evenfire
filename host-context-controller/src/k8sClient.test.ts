@@ -13,6 +13,7 @@ import {
   listAllHosts,
   listAllSharedFileSystems,
 } from './k8sClient'
+import { hccLogger } from './logger'
 import { registry } from './metrics'
 import {
   DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE,
@@ -370,6 +371,12 @@ vi.mock('@kubernetes/client-node', () => {
 
 vi.mock('./reconciler', () => ({
   McpServerReconciler: class {
+    hasPendingReconciliation() {
+      return false
+    }
+    hasIncompleteReconciliation() {
+      return false
+    }
     fullReconcile = mocks.serverFullReconcile
     reconcile = vi.fn()
     reconcileDelete = vi.fn()
@@ -1015,7 +1022,10 @@ describe('McpServerWatcher startup', () => {
             if (failureBoundary === 'LIST' && contextListAttempts === 1) {
               throw new Error('context discovery temporarily unavailable')
             }
-            return { metadata: { resourceVersion: 'context-recovery-rv' }, items: [] }
+            return {
+              metadata: { resourceVersion: 'context-recovery-rv', allowWatchBookmarks: true },
+              items: [],
+            }
           }
           if (plural === 'hosts') {
             return { metadata: { resourceVersion: 'host-rv' }, items: [] }
@@ -1246,14 +1256,14 @@ describe('McpServerWatcher startup', () => {
     expect(mocks.watch).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining('/mcpservers'),
-      { resourceVersion: 'mcp-inventory-rv' },
+      { resourceVersion: 'mcp-inventory-rv', allowWatchBookmarks: true },
       expect.any(Function),
       expect.any(Function)
     )
     expect(mocks.watch).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('/contexts'),
-      { resourceVersion: 'context-inventory-rv' },
+      { resourceVersion: 'context-inventory-rv', allowWatchBookmarks: true },
       expect.any(Function),
       expect.any(Function)
     )
@@ -1413,10 +1423,16 @@ describe('McpServerWatcher startup', () => {
     }
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'mcpservers') {
-        return { metadata: { resourceVersion: 'opaque/mcp:101' }, items: [staleServer] }
+        return {
+          metadata: { resourceVersion: 'opaque/mcp:101', allowWatchBookmarks: true },
+          items: [staleServer],
+        }
       }
       if (plural === 'contexts') {
-        return { metadata: { resourceVersion: 'opaque/context:202' }, items: [staleContext] }
+        return {
+          metadata: { resourceVersion: 'opaque/context:202', allowWatchBookmarks: true },
+          items: [staleContext],
+        }
       }
       if (plural === 'communicationchannels') {
         return { metadata: { resourceVersion: 'cc-rv' }, items: [] }
@@ -1425,11 +1441,14 @@ describe('McpServerWatcher startup', () => {
     })
     mocks.watch.mockImplementation(async (path, options, callback) => {
       if (path.endsWith('/mcpservers')) {
-        expect(options).toEqual({ resourceVersion: 'opaque/mcp:101' })
+        expect(options).toEqual({ resourceVersion: 'opaque/mcp:101', allowWatchBookmarks: true })
         await callback('DELETED', staleServer)
       }
       if (path.endsWith('/contexts')) {
-        expect(options).toEqual({ resourceVersion: 'opaque/context:202' })
+        expect(options).toEqual({
+          resourceVersion: 'opaque/context:202',
+          allowWatchBookmarks: true,
+        })
         await callback('MODIFIED', currentContext)
       }
       return { abort: vi.fn() }
@@ -1475,7 +1494,7 @@ describe('McpServerWatcher startup', () => {
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'mcpservers') {
         return {
-          metadata: { resourceVersion: 'mcp-recovery-rv' },
+          metadata: { resourceVersion: 'mcp-recovery-rv', allowWatchBookmarks: true },
           items: [
             {
               metadata: {
@@ -1511,8 +1530,8 @@ describe('McpServerWatcher startup', () => {
     await vi.waitFor(() => expect(watchQueries).toHaveLength(2))
 
     expect(watchQueries).toEqual([
-      { resourceVersion: 'mcp-start-rv' },
-      { resourceVersion: 'mcp-recovery-rv' },
+      { resourceVersion: 'mcp-start-rv', allowWatchBookmarks: true },
+      { resourceVersion: 'mcp-recovery-rv', allowWatchBookmarks: true },
     ])
     expect(watcher.getAllServers()).toEqual([expect.objectContaining({ name: 'recovered-server' })])
     expect(callbacks).toHaveLength(2)
@@ -1685,7 +1704,7 @@ describe('McpServerWatcher startup', () => {
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'contexts') {
         return {
-          metadata: { resourceVersion: 'context-recovery-rv' },
+          metadata: { resourceVersion: 'context-recovery-rv', allowWatchBookmarks: true },
           items: [
             {
               metadata: { name: 'recovered-context', namespace: 'mcp-server' },
@@ -1708,8 +1727,8 @@ describe('McpServerWatcher startup', () => {
     await vi.waitFor(() => expect(watchQueries).toHaveLength(2))
 
     expect(watchQueries).toEqual([
-      { resourceVersion: 'context-start-rv' },
-      { resourceVersion: 'context-recovery-rv' },
+      { resourceVersion: 'context-start-rv', allowWatchBookmarks: true },
+      { resourceVersion: 'context-recovery-rv', allowWatchBookmarks: true },
     ])
     expect((watcher as any).contexts.get('recovered-context')).toEqual(
       expect.objectContaining({ name: 'recovered-context' })
@@ -1848,7 +1867,9 @@ describe('McpServerWatcher startup', () => {
     )
     await server.start()
     server.setReady(true)
-    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence({
+      cause: 'startup',
+    }) as Promise<void>
     ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
       () => currentDeltaSafety.promise
     )
@@ -1925,7 +1946,9 @@ describe('McpServerWatcher startup', () => {
     )
     await server.start()
     server.setReady(true)
-    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence({
+      cause: 'startup',
+    }) as Promise<void>
     // `reconcileContext` reports that its authority fence broke, so the scoped
     // revocation never finished deleting this Context's stale allows.
     ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
@@ -2005,7 +2028,9 @@ describe('McpServerWatcher startup', () => {
     )
     await server.start()
     server.setReady(true)
-    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence() as Promise<void>
+    const initialPass = (watcher as any).runInitialNetworkPolicyConvergence({
+      cause: 'startup',
+    }) as Promise<void>
     ;(watcher as any).netPolReconciler.reconcileContext.mockImplementationOnce(
       () => uncertifiedDelta.promise
     )
@@ -3422,7 +3447,7 @@ describe('McpServerWatcher startup', () => {
     })
     await (watcher as any).startContextWatch('recreated-context-rv')
 
-    const convergence = (watcher as any).runInitialNetworkPolicyConvergence()
+    const convergence = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await orphanCleanupStarted.promise
     const recreation = contextWatchCallback!('ADDED', recreatedContext)
     await flushMicrotasks()
@@ -4127,15 +4152,15 @@ describe('McpServerWatcher startup', () => {
         snapshots.push(contexts.map(context => context.name))
       })
 
-    const first = (watcher as any).runInitialNetworkPolicyConvergence()
+    const first = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     ;(watcher as any).contexts.set('second-context', {
       name: 'second-context',
       namespace: 'mcp-server',
       spec: { contextId: 'second-context', mcpServers: [] },
     })
-    const second = (watcher as any).runInitialNetworkPolicyConvergence()
-    const third = (watcher as any).runInitialNetworkPolicyConvergence()
+    const second = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
+    const third = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
     releaseFirstPass.resolve(undefined)
@@ -4277,7 +4302,7 @@ describe('McpServerWatcher startup', () => {
     await Promise.all([stalePass, trailing])
 
     expect(reconciler.reconcile).not.toHaveBeenCalled()
-    expect((watcher as any).initialConvergenceRetryAttempts.get('McpServer')).toBe(3)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('McpServer')).toBe(4)
     ;(watcher as any).servers.set('stale-server', {
       name: 'stale-server',
       namespace: 'mcp-server',
@@ -4355,7 +4380,7 @@ describe('McpServerWatcher startup', () => {
       )
     })
 
-    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     const revisionBefore = (watcher as any).contextDesiredRevision
     ;(watcher as any).retireContextWatch()
@@ -4418,6 +4443,7 @@ describe('McpServerWatcher startup', () => {
       { lane: 'NetworkPolicy', kind: 'context' }
     )
     mocks.netPolFullReconcile.mockImplementation(async (contexts, servers, options) => {
+      options.onAuthoritativeRevocationComplete?.()
       pass += 1
       if (pass === 1) {
         firstPassStarted.resolve(undefined)
@@ -4439,13 +4465,13 @@ describe('McpServerWatcher startup', () => {
       )
     })
 
-    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const stalePass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     ;(watcher as any).contextCacheSynced = false
     ;(watcher as any).mcpServerCacheSynced = false
     ;(watcher as any).contextWatchGeneration = 12
     ;(watcher as any).mcpWatchGeneration = 14
-    const trailing = (watcher as any).runInitialNetworkPolicyConvergence()
+    const trailing = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     releaseFirstPass.resolve(undefined)
     await Promise.all([stalePass, trailing])
 
@@ -4531,7 +4557,7 @@ describe('McpServerWatcher startup', () => {
     })
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = true
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(appliedContexts).toEqual(['current-context'])
     expect(appliedServers).toEqual(['current-server'])
@@ -4593,7 +4619,7 @@ describe('McpServerWatcher startup', () => {
       ])
     })
 
-    const pass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     const contextRevision = (watcher as any).contextDesiredRevision
     const serverRevision = (watcher as any).mcpServerDesiredRevision
@@ -4651,7 +4677,7 @@ describe('McpServerWatcher startup', () => {
     const watcher = new McpServerWatcher()
     seedNetworkPolicyPassInventory(watcher)
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 4)
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const successTimestampBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
@@ -4670,7 +4696,7 @@ describe('McpServerWatcher startup', () => {
       options.onAuthoritativeRevocationComplete?.()
     })
 
-    const pass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     const generationBefore = (watcher as any).contextWatchGeneration
     ;(watcher as any).contextDesiredRevision += 1
@@ -4717,7 +4743,7 @@ describe('McpServerWatcher startup', () => {
     const watcher = new McpServerWatcher()
     seedNetworkPolicyPassInventory(watcher)
     ;(watcher as any).initialConvergenceRetryAttempts.set('NetworkPolicy', 4)
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const successTimestampBefore = await readInitialConvergenceMetric(
       'clerum_hcc_initial_convergence_last_success_timestamp_seconds',
       'NetworkPolicy'
@@ -4736,7 +4762,7 @@ describe('McpServerWatcher startup', () => {
       options.onAuthoritativeRevocationComplete?.()
     })
 
-    const pass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await firstPassStarted.promise
     const generationBefore = (watcher as any).mcpWatchGeneration
     ;(watcher as any).mcpServerDesiredRevision += 1
@@ -4830,7 +4856,7 @@ describe('McpServerWatcher startup', () => {
       await Promise.all(pending)
     })
 
-    const pass = (watcher as any).runInitialNetworkPolicyConvergence()
+    const pass = (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await effectsOffered.promise
     expect(passes).toBeGreaterThan(0)
     expect(offeredContextEffects).toBeGreaterThanOrEqual(1)
@@ -4871,7 +4897,7 @@ describe('McpServerWatcher startup', () => {
       options.onAuthoritativeRevocationComplete()
     })
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     // Authority lost at the callback boundary (contextCacheSynced=false) → record
     // refuses, so the content-identity revocation counters stay at the "never
@@ -4907,7 +4933,7 @@ describe('McpServerWatcher startup', () => {
       }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(captured?.onExternalEgressRevoked).toBeTypeOf('function')
     captured!.onExternalEgressRevoked!(server)
@@ -4925,7 +4951,7 @@ describe('McpServerWatcher startup', () => {
     await (watcher as any).runInitialMcpServerConvergence()
     expect(mocks.serverFullReconcile).not.toHaveBeenCalled()
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     await vi.waitFor(() => expect(mocks.serverFullReconcile).toHaveBeenCalledOnce())
 
     await watcher.stop()
@@ -5207,7 +5233,10 @@ describe('McpServerWatcher startup', () => {
       { lane: 'NetworkPolicy', result: 'deferred-unsynced' }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence({ ensureDefaults: true })
+    await (watcher as any).runInitialNetworkPolicyConvergence({
+      ensureDefaults: true,
+      cause: 'periodic-resync',
+    })
 
     expect((watcher as any).netPolConvergenceEnsureDefaults).toBe(false)
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
@@ -5233,7 +5262,7 @@ describe('McpServerWatcher startup', () => {
       )
     ).toBe(successTimestampBefore)
     ;(watcher as any).mcpServerCacheSynced = true
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(mocks.netPolFullReconcile).toHaveBeenCalledOnce()
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
@@ -5272,7 +5301,7 @@ describe('McpServerWatcher startup', () => {
       { lane: 'NetworkPolicy', result: 'certified' }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
@@ -5303,7 +5332,7 @@ describe('McpServerWatcher startup', () => {
 
     mocks.netPolFullReconcile.mockClear()
     ;(watcher as any).mcpServerCacheSynced = false
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
     expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
     await vi.advanceTimersByTimeAsync(5000)
@@ -5373,7 +5402,7 @@ describe('McpServerWatcher startup', () => {
     server.setReady(true)
 
     try {
-      await (watcher as any).runInitialNetworkPolicyConvergence()
+      await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
       expect(mocks.netPolFullReconcile).not.toHaveBeenCalled()
       expect((await requestReadyOverHttp(server)).statusCode).toBe(503)
       const deferredScrape = await requestMetricsOverHttp(server)
@@ -5490,7 +5519,7 @@ describe('McpServerWatcher startup', () => {
       { lane: 'NetworkPolicy', result: 'aborted-bump' }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(
       await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
@@ -5510,20 +5539,21 @@ describe('McpServerWatcher startup', () => {
   })
 
   it('names the inventory-changed throw aborted-bump', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     ;(watcher as any).contextCacheSynced = true
     ;(watcher as any).mcpServerCacheSynced = true
-    mocks.netPolFullReconcile.mockRejectedValueOnce(
-      new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
-    )
+    mocks.netPolFullReconcile.mockImplementationOnce(async () => {
+      ;(watcher as any).contextDesiredRevision += 1
+      throw new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
+    })
     const bumpBefore = await readLabeledConvergenceMetric(
       'clerum_hcc_initial_convergence_pass_results_total',
       { lane: 'NetworkPolicy', result: 'aborted-bump' }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(
       await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
@@ -5535,7 +5565,7 @@ describe('McpServerWatcher startup', () => {
     expect(warnSpy).toHaveBeenCalledWith(
       '[K8s] pass ended without certifying: desired inventory changed',
       expect.objectContaining({
-        contextMoved: false,
+        contextMoved: true,
         serverMoved: false,
         contextCacheSynced: true,
         mcpServerCacheSynced: true,
@@ -5543,6 +5573,83 @@ describe('McpServerWatcher startup', () => {
     )
     errorSpy.mockRestore()
     warnSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it('names a nested all-inventory-changed AggregateError aborted-bump', async () => {
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    mocks.netPolFullReconcile.mockImplementationOnce(async () => {
+      ;(watcher as any).mcpServerDesiredRevision += 1
+      throw new AggregateError(
+        [
+          new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE),
+          new AggregateError([new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)]),
+        ],
+        'nested inventory interruption'
+      )
+    })
+    const bumpBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-bump' }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
+
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-bump',
+      })
+    ).toBe(bumpBefore + 1)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    errorSpy.mockRestore()
+    await watcher.stop()
+  })
+
+  it.each([
+    [
+      'a mixed AggregateError',
+      () =>
+        new AggregateError([
+          new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE),
+          new Error('apiserver 5xx'),
+        ]),
+    ],
+    ['an empty AggregateError', () => new AggregateError([])],
+  ])('names %s failed instead of aborted-bump', async (_name, createError) => {
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
+    const watcher = new McpServerWatcher()
+    ;(watcher as any).contextCacheSynced = true
+    ;(watcher as any).mcpServerCacheSynced = true
+    mocks.netPolFullReconcile.mockRejectedValueOnce(createError())
+    const failedBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'failed' }
+    )
+    const bumpBefore = await readLabeledConvergenceMetric(
+      'clerum_hcc_initial_convergence_pass_results_total',
+      { lane: 'NetworkPolicy', result: 'aborted-bump' }
+    )
+
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
+
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'failed',
+      })
+    ).toBe(failedBefore + 1)
+    expect(
+      await readLabeledConvergenceMetric('clerum_hcc_initial_convergence_pass_results_total', {
+        lane: 'NetworkPolicy',
+        result: 'aborted-bump',
+      })
+    ).toBe(bumpBefore)
+    expect((watcher as any).initialConvergenceRetryAttempts.get('NetworkPolicy')).toBe(1)
+    errorSpy.mockRestore()
     await watcher.stop()
   })
 
@@ -5571,7 +5678,7 @@ describe('McpServerWatcher startup', () => {
       }
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(options?.contextInventoryAuthoritative()).toBe(true)
     expect(options?.serverInventoryAuthoritative()).toBe(true)
@@ -5741,7 +5848,7 @@ describe('McpServerWatcher startup', () => {
     errorSpy.mockRestore()
   })
 
-  it('does not report a post-certification additive failure as a readiness safety failure', async () => {
+  it('retains pending repair and schedules retry after a post-revocation additive failure', async () => {
     vi.useFakeTimers()
     const additiveFailure = new AggregateError(
       [new Error('Context policy API unavailable')],
@@ -5757,7 +5864,7 @@ describe('McpServerWatcher startup', () => {
         throw additiveFailure
       }
     )
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(hccLogger, 'error').mockImplementation(() => {})
     const watcher = new McpServerWatcher()
     stubAuthoritativeInventoryWatch(watcher, 'McpServer')
     stubAuthoritativeInventoryWatch(watcher, 'Context')
@@ -5765,19 +5872,24 @@ describe('McpServerWatcher startup', () => {
     vi.spyOn(watcher as any, 'startGlobalFileSystemWatch').mockResolvedValue(undefined)
     vi.spyOn(watcher as any, 'startCommunicationChannelWatch').mockResolvedValue(undefined)
 
+    expect((watcher as any).networkPolicyRepairPending).toBe(false)
     await watcher.start()
     await vi.advanceTimersByTimeAsync(0)
 
-    expect(watcher.isReadinessInventoryAuthoritative()).toBe(true)
+    expect((watcher as any).networkPolicyRepairPending).toBe(true)
     expect(errorSpy).toHaveBeenCalledWith(
       '[K8s] Initial NetworkPolicy post-certification additive reconciliation failed:',
-      additiveFailure
+      { err: additiveFailure }
     )
     expect(errorSpy).not.toHaveBeenCalledWith(
       '[K8s] Initial NetworkPolicy background reconciliation failed:',
-      additiveFailure
+      { err: additiveFailure }
     )
     expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(true)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
+    expect((watcher as any).networkPolicyRepairPending).toBe(false)
+    expect((watcher as any).initialConvergenceRetryTimers.has('NetworkPolicy')).toBe(false)
 
     await watcher.stop()
     errorSpy.mockRestore()
@@ -10792,7 +10904,7 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       // unmistakable, and the fix must hold readiness through all of it.
       const CHURN_PASSES = 5
       for (let i = 0; i < CHURN_PASSES; i += 1) {
-        await (watcher as any).runInitialNetworkPolicyConvergence()
+        await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
         await flushMicrotasks()
       }
 
@@ -10866,7 +10978,7 @@ describe('McpServerWatcher readiness under sustained watch churn (GKE Premature-
       server.setReady(true)
       const CHURN_PASSES = 5
       for (let i = 0; i < CHURN_PASSES; i += 1) {
-        await (watcher as any).runInitialNetworkPolicyConvergence()
+        await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
         await flushMicrotasks()
       }
       expect(passes).toBeGreaterThanOrEqual(CHURN_PASSES)
@@ -11250,7 +11362,7 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
       const watcher = new McpServerWatcher()
       ;(watcher as any)[lane.peerSyncedField] = true
       await (watcher as any)[lane.restartMethod](lane.startSnapshot)
-      expect(watchQueries).toEqual([{ resourceVersion: lane.startRv }])
+      expect(watchQueries).toEqual([{ resourceVersion: lane.startRv, allowWatchBookmarks: true }])
 
       doneCallbacks[0](Object.assign(new Error('Premature close'), { statusCode: 500 }))
       await flushMicrotasks(20)
@@ -11259,8 +11371,8 @@ describe('McpServerWatcher watch-close recovery latency (immediate first attempt
       // any timer. Under the old contract this stayed at 0 until +5000ms.
       expect(listCalls).toBe(1)
       expect(watchQueries).toEqual([
-        { resourceVersion: lane.startRv },
-        { resourceVersion: `${lane.recoveryRvPrefix}-1` },
+        { resourceVersion: lane.startRv, allowWatchBookmarks: true },
+        { resourceVersion: `${lane.recoveryRvPrefix}-1`, allowWatchBookmarks: true },
       ])
       expect((watcher as any)[lane.syncedField]).toBe(true)
       expect((watcher as any)[lane.timerField]).toBeNull()
@@ -11874,7 +11986,11 @@ describe('McpServerWatcher watch-recovery retry backoff (exponential, jittered, 
 
 describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
   async function startWatcherForNetPolResync(): Promise<McpServerWatcher> {
-    mocks.netPolFullReconcile.mockClear()
+    mocks.netPolFullReconcile
+      .mockClear()
+      .mockImplementation(async (_contexts, _servers, options) => {
+        options?.onAuthoritativeRevocationComplete?.()
+      })
     mocks.watch.mockReset().mockResolvedValue({ abort: vi.fn() })
     mocks.listNamespacedCustomObject.mockImplementation(async ({ plural }: { plural: string }) => {
       if (plural === 'communicationchannels') {
@@ -11941,7 +12057,7 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
       expect.objectContaining({ ensureDefaults: true })
     )
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(3)
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       expect.any(Array),
@@ -11994,7 +12110,7 @@ describe('McpServerWatcher NetworkPolicy periodic resync (#478)', () => {
   it('M5: unset/0 interval warns, registers no timer, and still runs startup once', async () => {
     vi.useFakeTimers()
     mockConfig.netPolResyncIntervalSec = 0
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(hccLogger, 'warn').mockImplementation(() => {})
     const watcher = await startWatcherForNetPolResync()
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(1)
     expect(
@@ -12291,7 +12407,7 @@ describe('McpServerWatcher NetworkPolicy defaults-only tick (#488)', () => {
     expect(mocks.ensureDefaultPolicies).toHaveBeenCalledTimes(2)
     expect((watcher as any).netPolConvergenceEnsureDefaults).toBe(false)
 
-    await (watcher as any).runInitialNetworkPolicyConvergence()
+    await (watcher as any).runInitialNetworkPolicyConvergence({ cause: 'startup' })
     expect(mocks.netPolFullReconcile).toHaveBeenCalledTimes(2)
     expect(mocks.netPolFullReconcile).toHaveBeenLastCalledWith(
       expect.any(Array),
