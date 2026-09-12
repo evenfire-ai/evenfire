@@ -98,20 +98,16 @@ describe('GfsBrowser Upload v2 conflict retry — T3 historical reproduction', (
     vi.stubGlobal('fetch', fetchMock)
     mockCreateGfsUploadJob.mockImplementation(input => {
       const job = actualUpload.createGfsUploadJob(input)
-      return {
-        start: async () => {
-          try {
-            return await job.start()
-          } catch (error) {
-            producerErrors.push(error)
-            throw error
-          }
-        },
-        pause: job.pause.bind(job),
-        resume: job.resume.bind(job),
-        cancel: job.cancel.bind(job),
-        snapshot: job.snapshot.bind(job),
+      const start = job.start.bind(job)
+      job.start = async () => {
+        try {
+          return await start()
+        } catch (error) {
+          producerErrors.push(error)
+          throw error
+        }
       }
+      return job
     })
 
     render(
