@@ -4700,10 +4700,13 @@ export class McpServerWatcher implements McpServerProvider {
             )
           }
         } catch (error) {
-          hccLogger.error('[K8s] NetworkPolicy reconciliation failed for context', {
-            contextName: context.name,
-            err: error,
-          })
+          hccLogger.error(
+            `[K8s] NetworkPolicy reconciliation failed for context ${context.name}:`,
+            {
+              contextName: context.name,
+              err: error,
+            }
+          )
           void this.runInitialNetworkPolicyConvergence({ cause: 'context-reconcile-failure' })
           return
         }
