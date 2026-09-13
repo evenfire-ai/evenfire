@@ -576,6 +576,17 @@ declare global {
           model: string,
           hostRefs?: string[]
         ) => Promise<SetHostModelResult>
+        /**
+         * Spec 15 Fase B — explicit user rename, propagated to the server. Rejects
+         * with an error whose message carries the HTTP status `(NNN)` so the
+         * renderer's pending-rename queue can branch on 404 / 400·403 / 5xx.
+         */
+        renameSession: (
+          hostRef: string,
+          agent: string,
+          chatId: string,
+          title: string
+        ) => Promise<{ title: string }>
         getTokenMetadata: () => Promise<TokenMetadata>
         // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
         // suspended with `connect_required`. Host-bound to that conversation.

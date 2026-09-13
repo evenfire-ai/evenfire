@@ -10,6 +10,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:session:write'
   | 'host:model:write'
   | 'desktop:view'
   | 'sandbox:ui:view'

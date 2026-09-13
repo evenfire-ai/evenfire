@@ -206,6 +206,81 @@ describe('RpcProxyClient — openTaskProgressStream()', () => {
   })
 })
 
+describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
+  it('PATCHes the name route with the title and returns the (re-sanitized) server title', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, title: 'Clean name' }), { status: 200 })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new RpcProxyClient()
+    const result = await client.renameSession(
+      'rpc-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'Clean name'
+    )
+
+    expect(result).toEqual({ title: 'Clean name' })
+    const [requestUrl, init] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(String(requestUrl)).toContain('/hosts/chatllm/sessions/chatllm/chat-1/name')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ title: 'Clean name' })
+  })
+
+  it('re-sanitizes a hostile echoed title on read (bidi override stripped)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ ok: true, title: 'Safe‮name' }), { status: 200 })
+        )
+    )
+    const client = new RpcProxyClient()
+    const result = await client.renameSession(
+      'rpc-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'Safe name'
+    )
+    expect(result.title).toBe('Safename')
+    expect(result.title).not.toContain('‮')
+  })
+
+  it('preserves the HTTP status in the thrown error message (404 / 400 / 403 / 5xx)', async () => {
+    const client = new RpcProxyClient()
+    for (const status of [404, 400, 403, 502]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status })))
+      await expect(
+        client.renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'x')
+      ).rejects.toThrow(`(${status})`)
+    }
+  })
+
+  it('never puts the raw title in the error message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad', { status: 400 })))
+    const client = new RpcProxyClient()
+    await expect(
+      client.renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'super-secret-title')
+    ).rejects.toThrow(/^Rename session failed \(400\)$/)
+  })
+
+  it('rejects an unsafe chatId segment before any fetch', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new RpcProxyClient()
+    await expect(
+      client.renameSession('rpc-token', 'chatllm', 'chatllm', '../evil', 'x')
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('parseSessionsListResult — title parse + sanitize on read (spec 15 §2.2/A14)', () => {
   const baseItem = {
     agent: 'chatllm',

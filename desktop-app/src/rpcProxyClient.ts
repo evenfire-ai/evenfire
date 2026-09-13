@@ -1165,6 +1165,50 @@ export class RpcProxyClient {
     return response.json() as Promise<SetHostModelResult>
   }
 
+  /**
+   * Spec 15 Fase B — renames a session (explicit user rename) via
+   * `PATCH …/hosts/:hostRef/sessions/:agent/:chatId/name`. Keyed by
+   * `(agent, chatId)` like {@link loadSessionMessages}; the server derives the
+   * owning `userSub` from the verified token and validates/sanitizes the title.
+   *
+   * The status is preserved in the thrown {@link ApiError} message (the caller's
+   * pending-rename queue keys off it: 404 = not materialized server-side yet →
+   * keep pending; 400/403 = real rejection → rollback; 5xx/network → offline
+   * retry). The raw title is NEVER put in the error message (user content, §5).
+   */
+  async renameSession(
+    rpcToken: string,
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    title: string
+  ): Promise<{ title: string }> {
+    assertSafeRouteSegment('hostRef', hostRef)
+    assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+    assertSafeRouteSegment('chatId', chatId)
+    const response = await fetch(
+      url(
+        `/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(chatId)}/name`
+      ),
+      {
+        method: 'PATCH',
+        headers: { authorization: `Bearer ${rpcToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ title }),
+        signal: withTimeout(),
+      }
+    )
+    if (!response.ok) {
+      // Body may echo the invalid title; read it for the ApiError payload but
+      // keep the raw title out of the human-facing message.
+      const body = await readErrorBody(response)
+      throw new ApiError(`Rename session failed (${response.status})`, response.status, body)
+    }
+    const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
+    // Re-sanitize the server's echoed title on read (defense in depth, A14 rule).
+    const sanitized = typeof parsed.title === 'string' ? sanitizeWireTitle(parsed.title) : undefined
+    return { title: sanitized ?? title }
+  }
+
   async getDesktopStatus(
     rpcAccessToken: string,
     hostRef: string

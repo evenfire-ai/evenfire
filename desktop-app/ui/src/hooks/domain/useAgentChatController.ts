@@ -933,6 +933,7 @@ export function useAgentChatController({
     handleCreateChat,
     handleRenameChat,
     handleRenameChatForAgent,
+    applyLocalTitleOnly,
     handleDeleteChat,
     handleDeleteChatForAgent,
   } = chatListCtl
@@ -948,6 +949,7 @@ export function useAgentChatController({
         autoSelectedChatIdRef.current = chatId
       },
       shouldAutoSelectLatest: () => navItem === DESKTOP_ROUTES.chat,
+      pushToast,
     }
   })
 
@@ -2503,7 +2505,11 @@ export function useAgentChatController({
                 : '')
           const autoTitle = truncateTitle(autoTitleSeed)
           if (autoTitle) {
-            void handleRenameChat(sendChatId, autoTitle)
+            // spec 15 §2.5/B19: the client-derived auto-title stays LOCAL only —
+            // it must not be pushed by RPC (un-redacted, and it would race the
+            // server's own COALESCE auto-title). Only an explicit user rename
+            // syncs. The server materializes the authoritative title on turn 1.
+            void applyLocalTitleOnly(selectedAgent, sendChatId, autoTitle)
           }
         }
       }
@@ -2738,7 +2744,7 @@ export function useAgentChatController({
       chatStore,
       clearComposerAfterSend,
       fsm,
-      handleRenameChat,
+      applyLocalTitleOnly,
       pushToast,
       tracker,
       ensureAgentActivityStream,
@@ -2952,6 +2958,7 @@ export function useAgentChatController({
     handleCreateChat,
     handleRenameChat,
     handleRenameChatForAgent,
+    applyLocalTitleOnly,
     handleDeleteChat,
     handleDeleteChatForAgent,
     handleSelectChat,
