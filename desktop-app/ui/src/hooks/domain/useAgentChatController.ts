@@ -10,6 +10,7 @@ import {
   buildChatMessageAttachments,
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
+import { truncateTitle } from '@lib/chatTitle'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
 import {
   mergeAuthoritativeServerMessages,
@@ -1534,17 +1535,17 @@ export function useAgentChatController({
       }
       loadedLocalMessageCountRef.current = rendered.length
       // Auto-title a fresh hydration (empty cache) from the first user turn, so a
-      // server-only chat doesn't keep its "Chat <id>" placeholder (A.4.4 / S4).
+      // server-only chat shows a meaningful name at open instead of "New Chat".
+      // spec 15 §2.2/A19: this is EPHEMERAL (sidebar state only) — NOT persisted
+      // via renameChat. The server title is authoritative (case C), so persisting
+      // a client-derived title would only (a) diverge from the server's own
+      // auto-title and (b) linger as a stale case-D fallback. On the next catalog
+      // load the §2.2 merge shows the server title when the host reports one.
       let title = meta.title
       if (localMessages.length === 0 && (resp.oldestTurnNumber ?? resp.turns[0]?.number) === 1) {
         const firstUserInput = resp.turns.find(t => t.user_input?.trim())?.user_input?.trim() || ''
-        const hydratedTitle =
-          firstUserInput.length > 60
-            ? firstUserInput.substring(0, firstUserInput.lastIndexOf(' ', 60) || 60) + '...'
-            : firstUserInput
+        const hydratedTitle = truncateTitle(firstUserInput)
         if (hydratedTitle) {
-          await chatStore.renameChat(agentRef, chatId, hydratedTitle)
-          if (!stillRelevant()) return staleResult(rendered)
           title = hydratedTitle
           applyLatestTitle(agentRef, chatId, hydratedTitle)
         }
@@ -1559,7 +1560,6 @@ export function useAgentChatController({
       chatStore.loadMessages,
       chatStore.createChat,
       chatStore.replaceMessages,
-      chatStore.renameChat,
       applyLatestTitle,
       upsertHydratedEntry,
     ]
@@ -2501,10 +2501,7 @@ export function useAgentChatController({
               : effectiveReferences.length > 0
                 ? `Context: ${effectiveReferences.map(ref => ref.label).join(', ')}`
                 : '')
-          const autoTitle =
-            autoTitleSeed.length > 60
-              ? autoTitleSeed.substring(0, autoTitleSeed.lastIndexOf(' ', 60) || 60) + '...'
-              : autoTitleSeed
+          const autoTitle = truncateTitle(autoTitleSeed)
           if (autoTitle) {
             void handleRenameChat(sendChatId, autoTitle)
           }

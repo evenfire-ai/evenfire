@@ -1,5 +1,7 @@
 import { type MutableRefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext'
+import { agentChatPlaceholder, remotePlaceholder } from '@lib/chatTitle'
+import { resolveSessionTitle } from '@lib/resolveSessionTitle'
 import type { ChatIndex, ChatMetadata, SessionsListResult } from '../../../../src/types'
 import { scheduleAfterFirstPaint } from '../scheduleAfterFirstPaint'
 import type { useChatStore } from '../useChatStore'
@@ -231,12 +233,35 @@ export function useChatListController({
         // hydrates them.
         setChatList(previous => {
           const dedupedPrevious = dedupeSidebarChats(previous)
+          const serverById = new Map(serverSessions.map(s => [s.chatId, s]))
           const knownIds = new Set(dedupedPrevious.map(c => c.id))
+          // Cases C/D (§2.2): the server is authoritative for a cached chat's
+          // title when it reports one; otherwise the cached local title stays.
+          // Fase A has no pending renames, so pendingRename is always 'none'.
+          const reconciled = dedupedPrevious.map(chat => {
+            const server = serverById.get(chat.id)
+            if (!server) return chat
+            const { title } = resolveSessionTitle({
+              inCache: true,
+              localTitle: chat.title,
+              serverTitle: server.title,
+              pendingRename: 'none',
+              placeholder: agentChatPlaceholder(chat.id),
+            })
+            return title === chat.title ? chat : { ...chat, title }
+          })
+          // Cases A/B (§2.2): a server-only chat shows the server title when the
+          // host reports one, else the "Chat <id>" placeholder.
           const fromServerOnly: SidebarChatEntry[] = serverSessions
             .filter(s => !knownIds.has(s.chatId))
             .map(s => ({
               id: s.chatId,
-              title: `Chat ${s.chatId.slice(0, 8)}`,
+              title: resolveSessionTitle({
+                inCache: false,
+                serverTitle: s.title,
+                pendingRename: 'none',
+                placeholder: agentChatPlaceholder(s.chatId),
+              }).title,
               createdAt: s.lastActivityAt,
               updatedAt: s.lastActivityAt,
               // Older hosts omit messageCount. Keep that unknown value at zero
@@ -245,7 +270,7 @@ export function useChatListController({
               messageCount: knownServerMessageCount(s),
               remote: true,
             }))
-          return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+          return [...reconciled, ...fromServerOnly].sort(byUpdatedDesc)
         })
 
         const latestServerSession = serverSessions[0]
@@ -342,18 +367,39 @@ export function useChatListController({
       seedSessionSnapshots(fsm, agentRef, serverSessions)
       setChatList(previous => {
         const dedupedPrevious = dedupeSidebarChats(previous)
+        const serverById = new Map(serverSessions.map(s => [s.chatId, s]))
         const knownIds = new Set(dedupedPrevious.map(c => c.id))
+        // Cases C/D (§2.2): reconcile the title of any cached chat this page
+        // also reports; server wins when it has a title, else keep local.
+        const reconciled = dedupedPrevious.map(chat => {
+          const server = serverById.get(chat.id)
+          if (!server) return chat
+          const { title } = resolveSessionTitle({
+            inCache: true,
+            localTitle: chat.title,
+            serverTitle: server.title,
+            pendingRename: 'none',
+            placeholder: agentChatPlaceholder(chat.id),
+          })
+          return title === chat.title ? chat : { ...chat, title }
+        })
+        // Cases A/B (§2.2): server-only page entries.
         const fromServerOnly: SidebarChatEntry[] = serverSessions
           .filter(s => !knownIds.has(s.chatId))
           .map(s => ({
             id: s.chatId,
-            title: `Chat ${s.chatId.slice(0, 8)}`,
+            title: resolveSessionTitle({
+              inCache: false,
+              serverTitle: s.title,
+              pendingRename: 'none',
+              placeholder: agentChatPlaceholder(s.chatId),
+            }).title,
             createdAt: s.lastActivityAt,
             updatedAt: s.lastActivityAt,
             messageCount: knownServerMessageCount(s),
             remote: true,
           }))
-        return [...dedupedPrevious, ...fromServerOnly].sort(byUpdatedDesc)
+        return [...reconciled, ...fromServerOnly].sort(byUpdatedDesc)
       })
 
       try {
@@ -716,6 +762,25 @@ export function useChatListController({
           seedSessionSnapshots(fsm, group.agentRef, group.sessions)
         }
         setLatestChatSessions(previous => {
+          const serverByKey = new Map<string, SessionsListResult['items'][number]>()
+          for (const group of sessionGroups) {
+            for (const session of group.sessions) {
+              serverByKey.set(`${group.agentRef}:${session.chatId}`, session)
+            }
+          }
+          // Cases C/D (§2.2): server-authoritative title for cached entries.
+          const reconciled = previous.map(item => {
+            const server = serverByKey.get(`${item.agentRef}:${item.id}`)
+            if (!server) return item
+            const { title } = resolveSessionTitle({
+              inCache: true,
+              localTitle: item.title,
+              serverTitle: server.title,
+              pendingRename: 'none',
+              placeholder: remotePlaceholder(item.id),
+            })
+            return title === item.title ? item : { ...item, title }
+          })
           const knownKeys = new Set(previous.map(item => `${item.agentRef}:${item.id}`))
           const remoteOnly: LatestSidebarChatEntry[] = []
           for (const group of sessionGroups) {
@@ -723,9 +788,15 @@ export function useChatListController({
               const key = `${group.agentRef}:${session.chatId}`
               if (knownKeys.has(key)) continue
               knownKeys.add(key)
+              // Cases A/B (§2.2): server title, else "Remote · <id>" placeholder.
               remoteOnly.push({
                 id: session.chatId,
-                title: `Remote · ${session.chatId.slice(0, 8)}`,
+                title: resolveSessionTitle({
+                  inCache: false,
+                  serverTitle: session.title,
+                  pendingRename: 'none',
+                  placeholder: remotePlaceholder(session.chatId),
+                }).title,
                 createdAt: session.lastActivityAt,
                 updatedAt: session.lastActivityAt,
                 messageCount: knownServerMessageCount(session),
@@ -734,7 +805,7 @@ export function useChatListController({
               })
             }
           }
-          return [...previous, ...remoteOnly].sort(byUpdatedDesc)
+          return [...reconciled, ...remoteOnly].sort(byUpdatedDesc)
         })
       } finally {
         if (!cancelled) {

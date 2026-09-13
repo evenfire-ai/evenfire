@@ -52,6 +52,26 @@ function optionalWireString(value: unknown, label: string): string | undefined {
   return wireString(value, label)
 }
 
+/**
+ * Strip everything that would let a title read off the wire misrender or spoof,
+ * then trim (spec 15 §2.2/§5, A14). Removes the whole Unicode "Other" category
+ * `\p{C}` (control, format — bidi overrides, zero-width joiners/marks, BOM — and
+ * surrogate/private-use/unassigned) plus line/paragraph separators `\p{Zl}`/
+ * `\p{Zp}` (U+2028/U+2029). This aligns with the server-side writer (which
+ * strips `\p{C}` and collapses whitespace) and guarantees a single-line title in
+ * the sidebar and the destructive rename dialog. A session title is authored on
+ * one device and read on another; a stale host or a malicious device could ship
+ * a bidi-override that spoofs the dialog, so the reader never trusts the value —
+ * this is defense in depth on read (ZWJ is stripped too: anti-spoofing wins over
+ * emoji fidelity for a value that gates a destructive dialog). Returns
+ * `undefined` when nothing legible remains, so the caller falls back to the
+ * local cache or a placeholder instead of rendering a blank title.
+ */
+function sanitizeWireTitle(value: string): string | undefined {
+  const cleaned = value.replace(/[\p{C}\p{Zl}\p{Zp}]/gu, '').trim()
+  return cleaned.length > 0 ? cleaned : undefined
+}
+
 function wireSafeInteger(
   value: unknown,
   label: string,
@@ -135,7 +155,9 @@ function parseToolSteps(value: unknown, label: string): MessageToolStep[] {
   })
 }
 
-function parseSessionsListResult(value: unknown): SessionsListResult {
+// Exported for tests: renderer/parser tests derive their fixtures from the real
+// producer (pr-discipline T1) instead of hand-mocking the parsed shape.
+export function parseSessionsListResult(value: unknown): SessionsListResult {
   const record = wireObject(value, 'sessions response')
   if (!Array.isArray(record.items)) throw new Error('Invalid sessions response.items')
   let firstItemError: unknown
@@ -162,6 +184,16 @@ function parseSessionsListResult(value: unknown): SessionsListResult {
                 )!,
               }
             : {}),
+          ...(() => {
+            // A malformed optional title must not drop a real conversation: a
+            // present-but-non-string value falls to "no title" (the session
+            // survives, untitled), consistent with how null/absent/empty-after-
+            // sanitize are handled here. Only mandatory fields (agent, chatId,
+            // lastActivityAt) throw and drop the item.
+            const title =
+              typeof entry.title === 'string' ? sanitizeWireTitle(entry.title) : undefined
+            return title !== undefined ? { title } : {}
+          })(),
           lastActivityAt: wireString(
             entry.lastActivityAt,
             `sessions response.items[${index}].lastActivityAt`

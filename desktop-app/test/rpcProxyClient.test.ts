@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RpcProxyClient } from '../src/rpcProxyClient.js'
+import { RpcProxyClient, parseSessionsListResult } from '../src/rpcProxyClient.js'
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -203,5 +203,83 @@ describe('RpcProxyClient — openTaskProgressStream()', () => {
     // renderer's watchdog can reset on it.
     expect(events).toContain('heartbeat')
     expect(events).toEqual(['open', 'heartbeat', 'done'])
+  })
+})
+
+describe('parseSessionsListResult — title parse + sanitize on read (spec 15 §2.2/A14)', () => {
+  const baseItem = {
+    agent: 'chatllm',
+    chatId: 'c1',
+    turnCount: 1,
+    lastActivityAt: '2026-09-12T00:00:00.000Z',
+  }
+
+  it('parses a clean server title verbatim', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'Deploy the staging cluster' }],
+    })
+    expect(result.items[0]?.title).toBe('Deploy the staging cluster')
+  })
+
+  it('omits the title when the host does not report one', () => {
+    const result = parseSessionsListResult({ items: [baseItem] })
+    expect(result.items[0]).not.toHaveProperty('title')
+  })
+
+  it('strips bidi-override and zero-width characters (spoofing defense)', () => {
+    // A title crafted to spoof the destructive rename dialog with an RLO
+    // override + zero-width joiner. The client must not trust it.
+    const hostile = 'Safe‮erongi​ name'
+    const result = parseSessionsListResult({ items: [{ ...baseItem, title: hostile }] })
+    expect(result.items[0]?.title).toBe('Safeerongi name')
+    expect(result.items[0]?.title).not.toContain('‮')
+    expect(result.items[0]?.title).not.toContain('​')
+  })
+
+  it('strips control characters (newlines, tabs, NUL)', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'line1\n\tline2 ' }],
+    })
+    expect(result.items[0]?.title).toBe('line1line2')
+  })
+
+  it('drops a title that is empty after sanitization', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: '‮​ ' }],
+    })
+    expect(result.items[0]).not.toHaveProperty('title')
+  })
+
+  it('keeps a session whose optional title is a non-string, just untitled (not dropped)', () => {
+    // A malformed cosmetic field must not make a real conversation disappear.
+    // T4: assert the resulting item (present, untitled), not a drop count.
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, chatId: 'keep', title: 123 }],
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]?.chatId).toBe('keep')
+    expect(result.items[0]).not.toHaveProperty('title')
+    expect(result.droppedItemCount).toBeUndefined()
+  })
+
+  it('still drops an item whose MANDATORY field is malformed (title fix does not mask this)', () => {
+    const result = parseSessionsListResult({
+      items: [
+        { ...baseItem, chatId: 'good', title: 'fine' },
+        { ...baseItem, chatId: 'bad', lastActivityAt: 123 },
+      ],
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]?.chatId).toBe('good')
+    expect(result.droppedItemCount).toBe(1)
+  })
+
+  it('strips line/paragraph separators (U+2028/U+2029) — single-line title', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'line1\u2028line2\u2029end' }],
+    })
+    expect(result.items[0]?.title).toBe('line1line2end')
+    expect(result.items[0]?.title).not.toContain('\u2028')
+    expect(result.items[0]?.title).not.toContain('\u2029')
   })
 })
