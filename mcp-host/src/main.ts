@@ -2575,10 +2575,19 @@ async function startRPCServer(): Promise<void> {
   const toolErrorSafety = new BasicSafety(() => configStore?.listSecretEntries() ?? [])
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
+  // spec 15 — re-redact a session title before it hits the list wire (defense in
+  // depth §5). Uses the non-logging redaction primitive so a 100-item page does
+  // not emit 100 log lines, and skips `sanitizeError` (which would truncate a
+  // legit title). Same operator secret list as the tool-error path.
+  const redactTitle = (rawTitle: string): string =>
+    toolErrorSafety.sanitizeFreeformContent(rawTitle, {
+      secretWarning: 'Potential secret detected in session title',
+    }).content
 
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => agent!.getConversationManager(),
     redactToolError,
+    redactTitle,
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {

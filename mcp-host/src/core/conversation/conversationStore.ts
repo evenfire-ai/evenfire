@@ -98,8 +98,15 @@ export interface ConversationSessionSummary {
   cache_read_tokens?: number
   cache_write_tokens?: number
   cacheTokensReported?: boolean
+  /** Server-authoritative session title (spec 15). `undefined` until turn 1. */
+  title?: string
 }
 
+// NOTE (spec 15 debt): `ConversationSessionMessages` inherits `title?` from the
+// summary via Omit, but the messages projections (`getSessionMessagesByKey`) do
+// NOT populate it and the `/messages` wire does not emit it — Fase A only
+// projects `title` on the LIST endpoint. Left unpopulated on purpose; threading
+// it through the two messages paths would add surface with no observable effect.
 export interface ConversationSessionMessages extends Omit<
   ConversationSessionSummary,
   'lastActivityAt' | 'turnCount' | 'messageCount'
@@ -421,6 +428,8 @@ export class InMemoryConversationStore implements ConversationStore {
         cache_read_tokens: conversation.cache_read_tokens,
         cache_write_tokens: conversation.cache_write_tokens,
         cacheTokensReported: conversation.cacheTokensReported,
+        // Auto-title (spec 15) — hot/memory projection.
+        title: conversation.title,
       })
     }
 

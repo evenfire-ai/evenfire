@@ -508,6 +508,8 @@ export type SessionsListItem = {
   turnCount: number
   messageCount?: number
   lastActivityAt: string
+  /** Server-authoritative session title (spec 15); omitted when unset. */
+  title?: string
 } & SessionStateWire
 
 export type SessionsListQuery = {

@@ -241,6 +241,12 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** Same keep/set/clear semantics as update_session_state. */
       activeTraceContext?: string | null
+      /**
+       * Server-authoritative auto-title (spec 15). Present only on turn 1; the
+       * dispatcher runs `setSessionTitleIfAbsent` (COALESCE) so a retried turn 1
+       * never overwrites, and a rename set earlier wins.
+       */
+      title?: string
     }
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
   | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }

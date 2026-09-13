@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { buildConnectRequiredApproval } from '../../core/extensions/mcpApprovalGateController'
+import { BasicSafety } from '../../core/safety/safety'
 import { createSessionRouteHandlers } from '../sessionRouteHandlers'
 
 function makeHandlersUnderTest() {
@@ -8,6 +9,7 @@ function makeHandlersUnderTest() {
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => convManager,
     redactToolError: (_toolName, rawError) => rawError,
+    redactTitle: rawTitle => rawTitle,
   })
   return { convManager, handleSessionsList, handleSessionMessages }
 }
@@ -107,5 +109,59 @@ describe('createSessionRouteHandlers — handleSessionsList (R1-L2)', () => {
     // prefix treated '' as falsy (unscoped) while the store query received ''
     // (agent scope), which fail-closed to an empty catalog — so the two diverged.
     expect(empty).toEqual(absent)
+  })
+})
+
+describe('createSessionRouteHandlers — handleSessionsList title projection (spec 15 A12)', () => {
+  async function seedWithTitle(
+    convManager: ConversationManager,
+    key: string,
+    title: string
+  ): Promise<void> {
+    const conv = await convManager.getOrCreate(key)
+    await convManager.startTurn(conv, 'first message', 'task', null, title)
+    await convManager.completeTurn(conv, 'a')
+  }
+
+  it('includes the session title in the list payload', async () => {
+    const { convManager, handleSessionsList } = makeHandlersUnderTest()
+    await seedWithTitle(convManager, 'user-A:rpc:agent-x:chat-1', 'Plan a trip to Japan')
+
+    const res = await handleSessionsList('user-A', {})
+    expect(res.items[0]).toMatchObject({ chatId: 'chat-1', title: 'Plan a trip to Japan' })
+  })
+
+  it('omits the title field entirely when the session has none', async () => {
+    const { convManager, handleSessionsList } = makeHandlersUnderTest()
+    const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
+    await convManager.startTurn(conv, 'q', 'task') // no autoTitle
+    await convManager.completeTurn(conv, 'a')
+
+    const res = await handleSessionsList('user-A', {})
+    expect(res.items[0]).not.toHaveProperty('title')
+  })
+
+  it('re-redacts a secret in the title at projection time (defense in depth §5)', async () => {
+    // Build handlers with the REAL BasicSafety redaction primitive (T1), matching
+    // the main.ts wiring. Simulates a title that was materialized before the
+    // operator marked the value secret (rotation) — the read path must still scrub it.
+    const secret = 'S3cretRotatedInLater1234567890'
+    const convManager = new ConversationManager()
+    const safety = new BasicSafety(() => [{ name: 'API_KEY', value: secret }])
+    const { handleSessionsList } = createSessionRouteHandlers({
+      getConversationManager: () => convManager,
+      redactToolError: (_t, e) => e,
+      redactTitle: raw =>
+        safety.sanitizeFreeformContent(raw, { secretWarning: 'secret in title' }).content,
+    })
+
+    const conv = await convManager.getOrCreate('user-A:rpc:agent-x:chat-1')
+    // Title stored raw (redaction at materialization ran with an empty secret list).
+    await convManager.startTurn(conv, 'msg', 'task', null, `key ${secret}`)
+    await convManager.completeTurn(conv, 'a')
+
+    const res = await handleSessionsList('user-A', {})
+    expect(res.items[0]?.title).toBe('key [REDACTED:API_KEY]')
+    expect(res.items[0]?.title).not.toContain(secret)
   })
 })
