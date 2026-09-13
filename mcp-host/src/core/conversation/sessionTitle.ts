@@ -29,6 +29,39 @@ export const AUTO_TITLE_SUFFIX = '…' // … (U+2026 HORIZONTAL ELLIPSIS)
  */
 export const AUTO_TITLE_MAX_CODE_POINTS = 60
 
+/** Rename caps (spec 15 §5). Code-point cap for BMP text; byte cap binds first
+ *  for astral-heavy titles (up to 4 bytes/code point). */
+export const MAX_TITLE_CODE_POINTS = 120
+export const MAX_TITLE_BYTES = 512
+
+/**
+ * Shared text-sanitization core for BOTH the auto-title derivation and the
+ * user rename (spec 15 §5, D4 — one implementation of the rule). Normalizes
+ * and folds whitespace, strips invisible control/format code points, and
+ * collapses/trims. Does NOT truncate and does NOT redact (the caller owns
+ * redaction and any length policy).
+ *
+ * Order matters: fold `\s+` → space BEFORE stripping `\p{C}`, because `\n`/`\t`
+ * are themselves `\p{C}` — a strip-before-collapse order would delete them and
+ * glue two words together. A second collapse removes a double space left when a
+ * stripped format char sat between two spaces.
+ */
+export function normalizeTitleText(input: string): string {
+  return (
+    input
+      .normalize('NFC')
+      // Fold every whitespace variant (newline, tab, NBSP, line/para separators).
+      .replace(/\s+/g, ' ')
+      // Strip bidi overrides, zero-width, and any other invisible control/format
+      // code point (`\p{C}`) that `\s` does not cover. Spaces are `\p{Zs}`, not
+      // `\p{C}`, so word boundaries survive; valid astral chars (emoji) are their
+      // own category, so only lone surrogates are dropped.
+      .replace(/\p{C}/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+  )
+}
+
 /**
  * Derive a short session title from a (already-redacted) user input.
  *
@@ -41,21 +74,7 @@ export const AUTO_TITLE_MAX_CODE_POINTS = 60
  *      is no space, cut at 60 hard. Append the suffix in both cases.
  */
 export function deriveAutoTitle(userInput: string): string {
-  const collapsed = userInput
-    .normalize('NFC')
-    // Fold every whitespace variant (newline, tab, NBSP, line/para separators)
-    // to a single space FIRST, so the control-char strip below never joins two
-    // words across a newline — `\n` is itself a `\p{C}` control char, so a
-    // strip-before-collapse order would delete it and glue the words together.
-    .replace(/\s+/g, ' ')
-    // Strip bidi overrides, zero-width, and any other invisible control/format
-    // code point (`\p{C}`) that `\s` does not cover. Spaces are `\p{Zs}`, not
-    // `\p{C}`, so word boundaries survive; valid astral chars (emoji) are their
-    // own category, so only lone surrogates are dropped.
-    .replace(/\p{C}/gu, '')
-    // A stripped format char sitting between two spaces leaves a double space.
-    .replace(/\s+/g, ' ')
-    .trim()
+  const collapsed = normalizeTitleText(userInput)
   // Code points, not UTF-16 units — Array.from iterates by code point.
   const codePoints = Array.from(collapsed)
   if (codePoints.length <= AUTO_TITLE_MAX_CODE_POINTS) return collapsed

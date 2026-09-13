@@ -659,6 +659,19 @@ export class ConversationManager {
   }
 
   /**
+   * Spec 15 Fase B — overwrite the session title from an explicit user rename
+   * and write it through to the durable `sessions.title` column. Unlike the
+   * auto-title (`??=` on turn 1), a rename always wins. Caller
+   * (`applySessionTitle`) has already sanitized + validated `title`. Does NOT
+   * bump `updated_at`: a rename must not reorder the catalog (mirrors
+   * `setModelSelection`).
+   */
+  setTitle(conversation: Conversation, title: string): void {
+    conversation.title = title
+    void Promise.resolve(this.store.persistTitle?.(conversation))
+  }
+
+  /**
    * Build the ChatMessage[] history from conversation turns.
    * Used to reconstruct messages for the ReasoningPort.
    *

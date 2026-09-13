@@ -425,6 +425,16 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return { ok: true }
       })
 
+    case 'update_session_title':
+      // Spec 15 Fase B — unconditional overwrite (rename wins over the auto-title).
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          s.updateSessionTitle.run({ id: op.sessionId, title: op.title })
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
     case 'insert_message':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {

@@ -26,6 +26,7 @@ export interface PreparedStatements {
   updateSessionPromptStableHash: Statement
   updateSessionModelSelections: Statement
   setSessionTitleIfAbsent: Statement
+  updateSessionTitle: Statement
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
   selectSessionSummariesByPrefix: Statement
@@ -182,6 +183,14 @@ export function prepareStatements(db: Database): PreparedStatements {
     setSessionTitleIfAbsent: db.prepare(`
       UPDATE sessions
          SET title = COALESCE(title, @title)
+       WHERE id = @id
+    `),
+    // Spec 15 Fase B — unconditional overwrite of the user-set title (rename).
+    // Independent of `setSessionTitleIfAbsent` (COALESCE, auto-title) and of
+    // `updateSessionState` (shared with persistTurnFail; must not gain @title).
+    updateSessionTitle: db.prepare(`
+      UPDATE sessions
+         SET title = @title
        WHERE id = @id
     `),
     updateSessionCounters: db.prepare(`

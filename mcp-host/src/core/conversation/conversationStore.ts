@@ -324,6 +324,14 @@ export interface ConversationStore {
   persistModelSelections?(conv: Conversation): Promise<void> | void
 
   /**
+   * Spec 15 Fase B — persist a user rename (`sessions.title` overwrite). Async
+   * (enqueued via the worker), keyed by sessionKey. In-memory stores no-op (the
+   * title already lives on the Conversation object). Optional so legacy stores
+   * don't have to implement it.
+   */
+  persistTitle?(conv: Conversation): Promise<void> | void
+
+  /**
    * Accumulate the token usage of ONE LLM call into the durable per-session
    * counters. Additive (`col = col + delta`). Async (enqueued via the worker);
    * a slow DB never blocks the LLM path. In-memory stores no-op. Optional so
@@ -498,6 +506,10 @@ export class InMemoryConversationStore implements ConversationStore {
 
   persistModelSelections(_conv: Conversation): void {
     /* no-op — RAM-only store keeps the selection on the Conversation object */
+  }
+
+  persistTitle(_conv: Conversation): void {
+    /* no-op — RAM-only store keeps the title on the Conversation object */
   }
 
   persistSessionUsage(_conv: Conversation, _usage: SessionTokenUsage): void {

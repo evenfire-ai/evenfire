@@ -220,6 +220,14 @@ export type WorkerOp =
       sessionId: string
       modelSelections: string
     }
+  | {
+      /** Spec 15 Fase B — overwrite the user-set session title (rename). Unlike
+       *  the Fase A auto-title (COALESCE, turn 1 only), this UNCONDITIONALLY
+       *  overwrites: an explicit rename always wins. */
+      kind: 'update_session_title'
+      sessionId: string
+      title: string
+    }
   | { kind: 'insert_message'; payload: MessageRow }
   | {
       /**
@@ -331,6 +339,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
     case 'update_session_model_selections':
+    case 'update_session_title':
     case 'insert_message':
     case 'persist_turn_boundary':
     case 'replace_messages':

@@ -998,6 +998,22 @@ export class SqliteConversationStore implements ConversationStore {
     })
   }
 
+  /**
+   * Spec 15 Fase B — persist a user rename. Enqueued (async) and keyed by
+   * sessionKey so it chains AFTER the session's own writes on the FIFO chain.
+   * `ConversationManager.setTitle` sets `conv.title` (a validated non-empty
+   * string) before calling this; the op overwrites `sessions.title` verbatim.
+   */
+  persistTitle(conv: Conversation): void {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) return
+    this.persistQueue.enqueueAsync(sessionKey, {
+      kind: 'update_session_title',
+      sessionId: conv.id,
+      title: conv.title ?? '',
+    })
+  }
+
   async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
