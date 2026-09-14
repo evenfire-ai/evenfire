@@ -323,6 +323,52 @@ export async function putMcpSecret(
   )
 }
 
+export async function deleteMcpSecret(
+  name: string,
+  session: string
+): Promise<{ status: number; data: unknown }> {
+  return deleteJson(
+    `${CONTROL_API_URL}/api/v1/admin/mcp-secrets/${encodeURIComponent(name)}`,
+    adminSessionHeader(session)
+  )
+}
+
+export async function postMcpSecret(
+  name: string,
+  data: Record<string, string>,
+  session: string
+): Promise<{ status: number; data: unknown }> {
+  return postJson(
+    `${CONTROL_API_URL}/api/v1/admin/mcp-secrets`,
+    { name, data },
+    adminSessionHeader(session)
+  )
+}
+
+export async function putMcpServer(
+  name: string,
+  body: { metadata?: { resourceVersion?: string }; spec: Record<string, unknown> },
+  session: string
+): Promise<{ status: number; data: unknown }> {
+  return putJson(
+    `${CONTROL_API_URL}/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`,
+    body,
+    adminSessionHeader(session)
+  )
+}
+
+/** Fail loud when HCC is running with the Secret informer disabled. */
+export function requireHccDevModeUnset(): void {
+  const value = kubectlSafe(
+    `-n control-plane get deploy host-context-controller -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CLERUM_DEV_MODE")].value}'`
+  )
+  if (value === 'true') {
+    throw new Error(
+      'HCC pod has CLERUM_DEV_MODE=true; the Secret informer is off. Stop and fix the profile before running runtime-condition e2e.'
+    )
+  }
+}
+
 export async function getMcpServerResource(
   name: string,
   session: string
@@ -346,29 +392,38 @@ export function deploymentReadyCondition(
 }
 
 /**
- * Poll GET /admin/mcp-servers/:name until DeploymentReady reaches
- * `expectStatus` with a `lastTransitionTime` strictly after `sinceMs`.
+ * Poll GET /admin/mcp-servers/:name until a status condition reaches
+ * `expectStatus` (and optional `expectReason`) with a `lastTransitionTime`
+ * strictly after `sinceMs`.
  *
  * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
  * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would
  * satisfy the predicate instantly, before the rollout under test even began.
  */
-export async function waitForRolloutCondition(
+export async function waitForStatusCondition(
   name: string,
   token: string,
-  opts: { expectStatus: 'True' | 'False'; sinceMs: number; timeoutMs: number }
+  opts: {
+    type: string
+    expectStatus: 'True' | 'False'
+    expectReason?: string
+    sinceMs: number
+    timeoutMs: number
+  }
 ): Promise<McpServerCondition> {
+  const reasonLabel = opts.expectReason ? ` reason=${opts.expectReason}` : ''
   return waitFor(
-    `McpServer "${name}" DeploymentReady=${opts.expectStatus} with lastTransitionTime after ${new Date(
+    `McpServer "${name}" ${opts.type}=${opts.expectStatus}${reasonLabel} with lastTransitionTime after ${new Date(
       opts.sinceMs
     ).toISOString()}`,
     async () => {
       const resource = await getMcpServerResource(name, token)
-      const cond = deploymentReadyCondition(resource)
+      const cond = resource.status?.conditions?.find(c => c.type === opts.type)
       if (!cond) return null
       const transitionMs = Date.parse(cond.lastTransitionTime)
       if (Number.isNaN(transitionMs) || transitionMs < opts.sinceMs) return null
       if (cond.status !== opts.expectStatus) return null
+      if (opts.expectReason !== undefined && cond.reason !== opts.expectReason) return null
       return cond
     },
     opts.timeoutMs,
@@ -380,6 +435,27 @@ export async function waitForRolloutCondition(
         ]),
     }
   )
+}
+
+/**
+ * Poll GET /admin/mcp-servers/:name until DeploymentReady reaches
+ * `expectStatus` with a `lastTransitionTime` strictly after `sinceMs`.
+ *
+ * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
+ * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would
+ * satisfy the predicate instantly, before the rollout under test even began.
+ */
+export async function waitForRolloutCondition(
+  name: string,
+  token: string,
+  opts: {
+    expectStatus: 'True' | 'False'
+    expectReason?: string
+    sinceMs: number
+    timeoutMs: number
+  }
+): Promise<McpServerCondition> {
+  return waitForStatusCondition(name, token, { type: 'DeploymentReady', ...opts })
 }
 
 /**

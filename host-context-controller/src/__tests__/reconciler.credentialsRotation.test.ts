@@ -867,7 +867,7 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
       )
     ).toBe(false)
     expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
-    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 
   it('in-flight exhaustion tick cannot write RolloutIncomplete after retirement', async () => {
@@ -922,10 +922,12 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     ).toBe(true)
     const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
     expect(readinessPollsOf(reconciler).has('linear')).toBe(false)
+    const readsAfterRetract = appsApi.readNamespacedDeployment.mock.calls.length
 
     held.release()
     await vi.advanceTimersByTimeAsync(24 * 5000)
     expect(held.resolved()).toBe(1)
+    expect(appsApi.readNamespacedDeployment.mock.calls.length).toBe(readsAfterRetract)
 
     const leaked = laterConditionWrites(customApi, afterRetirement)
     expect(
@@ -936,7 +938,7 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
       )
     ).toBe(false)
     expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
-    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 })
 

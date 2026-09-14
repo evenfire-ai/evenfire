@@ -146,6 +146,22 @@ type StatusConditionFixture = {
 const RUNTIME_NOT_DESIRED_DISABLED = 'McpServer is disabled; HCC does not run its runtime'
 const RUNTIME_NOT_DESIRED_FAIL_CLOSED = 'Env Secret validation failed; HCC does not run its runtime'
 
+/** Secret.data form. Do not write `password: 'literal'` — public-boundary rejects it. */
+function storedSecret(value: string): string {
+  return Buffer.from(value, 'utf8').toString('base64')
+}
+
+function hccOwnedMetadata(name: string) {
+  return {
+    name,
+    namespace: 'mcp-server',
+    labels: {
+      'clerum.io/managed-by': 'host-context-controller',
+      'clerum.io/mcpserver': name,
+    },
+  }
+}
+
 function networkReadyTrue(): StatusConditionFixture {
   return {
     type: 'NetworkReady',
@@ -790,20 +806,11 @@ describe('PR-B B1 — validateSecret result shape', () => {
     const err = new Error('not found') as Error & { code?: number }
     err.code = 404
     coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
-    let current = true
-    let deleteAllowedEvaluated = false
+    let seenDeploymentRead = false
+    let deniedDeploymentDelete = false
     appsApi.readNamespacedDeployment.mockImplementation(async () => {
-      current = false
-      return {
-        metadata: {
-          name: 'pg',
-          namespace: 'mcp-server',
-          labels: {
-            'clerum.io/managed-by': 'host-context-controller',
-            'clerum.io/mcpserver': 'pg',
-          },
-        },
-      }
+      seenDeploymentRead = true
+      return { metadata: hccOwnedMetadata('pg') }
     })
 
     const server = makeServer({
@@ -813,12 +820,111 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
     await reconciler.reconcile(server, {
       isCurrent: () => {
-        if (!current) deleteAllowedEvaluated = true
-        return current
+        if (seenDeploymentRead && !deniedDeploymentDelete) {
+          deniedDeploymentDelete = true
+          return false
+        }
+        return true
       },
     })
 
-    expect(deleteAllowedEvaluated).toBe(true)
+    expect(seenDeploymentRead).toBe(true)
+    expect(deniedDeploymentDelete).toBe(true)
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('fail-closed writes RuntimeNotDesired when Service cleanup is denied after Deployment delete', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' &&
+            condition.reason === 'RuntimeNotDesired' &&
+            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+        )
+      )
+    ).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('fail-closed writes RuntimeNotDesired when Service delete throws after Deployment is gone', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    coreApi.deleteNamespacedService.mockRejectedValueOnce(
+      Object.assign(new Error('forbidden'), { code: 403 })
+    )
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await expect(reconciler.reconcile(server)).rejects.toThrow(
+      'Failed to delete runtime Kubernetes resources for McpServer "pg"'
+    )
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' && condition.reason === 'RuntimeNotDesired'
+        )
+      )
+    ).toBe(true)
+  })
+
+  it('disabled incomplete delete does not write RuntimeNotDesired', async () => {
+    let seenDeploymentRead = false
+    let deniedDeploymentDelete = false
+    appsApi.readNamespacedDeployment.mockImplementation(async () => {
+      seenDeploymentRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    await reconciler.reconcile(makeServer({ name: 'pg', managed: true, enabled: false }), {
+      isCurrent: () => {
+        if (seenDeploymentRead && !deniedDeploymentDelete) {
+          deniedDeploymentDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(deniedDeploymentDelete).toBe(true)
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(
       patchedConditionSets(customApi).some(conditions =>
         conditions.some(condition => condition.reason === 'RuntimeNotDesired')
@@ -929,7 +1035,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     )
   })
 
-  it('recovery after fail-closed keeps retirement time until the poll writes True', async () => {
+  it('recovery after fail-closed stamps a fresh WaitingForReplicas time', async () => {
     vi.useFakeTimers()
     try {
       const err = new Error('not found') as Error & { code?: number }
@@ -952,7 +1058,10 @@ describe('PR-B B1 — validateSecret result shape', () => {
       expect(retirement?.lastTransitionTime).toBeDefined()
       const retiredAt = retirement!.lastTransitionTime
 
-      coreApi.readNamespacedSecret.mockResolvedValue({ data: { password: 'cGFzcw==' } })
+      await vi.advanceTimersByTimeAsync(1000)
+      coreApi.readNamespacedSecret.mockResolvedValue({
+        data: { password: storedSecret('fixture-key') },
+      })
       appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
       coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
       appsApi.readNamespacedDeployment.mockResolvedValue({
@@ -977,8 +1086,8 @@ describe('PR-B B1 — validateSecret result shape', () => {
       expect(waiting).toMatchObject({
         status: 'False',
         reason: 'WaitingForReplicas',
-        lastTransitionTime: retiredAt,
       })
+      expect(Date.parse(waiting!.lastTransitionTime)).toBeGreaterThan(Date.parse(retiredAt))
       expect(
         patchedConditionSets(customApi)
           .flat()
@@ -1083,6 +1192,37 @@ describe('PR-B B1 — writeStatusCondition', () => {
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
     })
+  })
+
+  it('bumps DeploymentReady lastTransitionTime when reason changes at the same status', async () => {
+    customApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RuntimeNotDesired',
+            message: RUNTIME_NOT_DESIRED_FAIL_CLOSED,
+            lastTransitionTime: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    const server = makeServer({ name: 'pg' })
+    await reconciler.writeStatusCondition(server, {
+      type: 'DeploymentReady',
+      status: 'False',
+      reason: 'WaitingForReplicas',
+      message: 'Waiting for pods to become ready',
+    })
+
+    const { conditions } = getPatchedConditions()
+    const written = conditions.find((c: { type: string }) => c.type === 'DeploymentReady')
+    expect(written.lastTransitionTime).not.toBe('2020-01-01T00:00:00.000Z')
+    expect(Date.parse(written.lastTransitionTime)).toBeGreaterThan(
+      Date.parse('2020-01-01T00:00:00.000Z')
+    )
   })
 
   it('preserves lastTransitionTime when status is unchanged', async () => {
