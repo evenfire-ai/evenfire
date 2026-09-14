@@ -151,7 +151,12 @@ application guidance that must be combined with this shared document.
   `GroupedTableBody.summaryCells` and mirror the visible header `colSpan`
   values. Native table cells own alignment for every valid column count; do
   not reproduce header lanes with app-specific flex/grid widths or positional
-  selectors.
+  selectors. When expanded rows expose a different column schema, use the
+  grouped `DataTable` variant and `GroupedTableBody.nestedChildTable`; do not
+  force summary and child schemas into one physical column grid. The grouped
+  parent shares available width across its non-action columns and reserves a
+  fixed, right-aligned final Actions lane. Domain-specific child widths belong
+  to the nested table through `childTableClassName`.
 - Keep standard rows compact and consistent. Use `TableViewport` for horizontal
   overflow and for long-list body scrolling so the page title, toolbar, tabs,
   and semantic sticky table header remain visible. Embedded/diagnostic views

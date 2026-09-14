@@ -2,12 +2,14 @@
 
 import { Fragment, useId } from 'react'
 import type { ReactNode } from 'react'
+import { DataTable } from './primitives'
 import type { GroupedTableBodyProps } from './types'
 import { classNames } from './utils'
 
 export function GroupedTableBody({
   childBodyClassName,
   childHeader,
+  childTableClassName,
   children,
   className,
   colSpan,
@@ -15,6 +17,7 @@ export function GroupedTableBody({
   disclosureLabel,
   expanded,
   groupId,
+  nestedChildTable = false,
   onExpandedChange,
   summary,
   summaryCells,
@@ -81,10 +84,22 @@ export function GroupedTableBody({
       </tbody>
       <tbody
         aria-labelledby={disclosureId}
-        className={classNames('eft-table-group__children', childBodyClassName)}
+        className={classNames('eft-table-group__children', !nestedChildTable && childBodyClassName)}
         id={childRowsId}
       >
-        {expanded ? (
+        {expanded && nestedChildTable ? (
+          <tr className="eft-table-group__child-row">
+            <td className="eft-table-group__child-cell" colSpan={colSpan}>
+              <DataTable
+                aria-labelledby={disclosureId}
+                className={classNames('eft-table-group__child-table', childTableClassName)}
+              >
+                {childHeader ? <thead>{childHeader}</thead> : null}
+                <tbody className={childBodyClassName}>{children}</tbody>
+              </DataTable>
+            </td>
+          </tr>
+        ) : expanded ? (
           <>
             {childHeader}
             {children}

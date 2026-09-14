@@ -11248,7 +11248,12 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
-.cu-llm-model-table {
+.cu-llm-model-table,
+.cu-llm-review-table {
+  min-width: 48rem;
+}
+
+.cu-llm-model-table__children {
   min-width: 68rem;
 }
 
@@ -11267,7 +11272,7 @@ td.cu-registry-description {
   margin-bottom: 0;
 }
 
-.cu-llm-review-table {
+.cu-llm-review-table__children {
   min-width: 48rem;
 }
 
@@ -11406,6 +11411,7 @@ td.cu-registry-description {
 
 .cu-llm-model-group__count {
   display: inline-flex;
+  margin-left: calc((var(--cu-space-2) + 1px) * -1);
   padding: calc(var(--cu-space-1) / 2) var(--cu-space-2);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);

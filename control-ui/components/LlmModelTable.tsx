@@ -263,8 +263,8 @@ export function LlmModelTable({
   const providerColumns: TableHeaderColumn[] = [
     { key: 'provider', label: 'Provider' },
     { key: 'models', label: 'Models' },
-    { key: 'availability', label: 'Availability', colSpan: 4 },
-    { key: 'actions', label: 'Actions', align: 'right', colSpan: 2 },
+    { key: 'availability', label: 'Availability' },
+    { key: 'actions', label: 'Actions', align: 'right' },
   ]
 
   return (
@@ -348,14 +348,17 @@ export function LlmModelTable({
       />
       {navigation}
       <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
-        <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
+        <DataTable
+          className="eft-table cu-table cu-table--header-band cu-llm-model-table"
+          variant="grouped"
+        >
           <thead>
             <TableHeaderRow columns={providerColumns} />
           </thead>
           {isInitialLoad ? (
             <tbody>
               <TableStateRow
-                colSpan={modelColumns.length}
+                colSpan={providerColumns.length}
                 kind="loading"
                 message="Loading models…"
               />
@@ -363,7 +366,7 @@ export function LlmModelTable({
           ) : filteredItems.length === 0 ? (
             <tbody>
               <TableStateRow
-                colSpan={modelColumns.length}
+                colSpan={providerColumns.length}
                 message={
                   hasActiveFilter
                     ? 'No models match this filter.'
@@ -387,8 +390,9 @@ export function LlmModelTable({
                 <GroupedTableBody
                   childBodyClassName="cu-llm-model-group__children"
                   childHeader={<TableHeaderRow columns={modelColumns} />}
+                  childTableClassName="cu-llm-model-table__children"
                   className="cu-llm-model-group"
-                  colSpan={modelColumns.length}
+                  colSpan={providerColumns.length}
                   disclosureClassName="cu-llm-model-group__toggle"
                   disclosureLabel={isExpanded =>
                     `${isExpanded ? 'Collapse' : 'Expand'} ${providerLabel} models`
@@ -396,6 +400,7 @@ export function LlmModelTable({
                   expanded={expanded}
                   groupId={provider}
                   key={provider}
+                  nestedChildTable
                   onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
                   summaryCells={[
                     {
@@ -417,7 +422,6 @@ export function LlmModelTable({
                     },
                     {
                       key: 'availability',
-                      colSpan: 4,
                       content: (
                         <span className="cu-llm-model-group__summary">
                           {enabledCount} enabled
@@ -428,7 +432,6 @@ export function LlmModelTable({
                     },
                     {
                       key: 'actions',
-                      colSpan: 2,
                       className: 'cu-llm-model-group__action-cell',
                       content: (
                         <span className="cu-llm-model-group__action" aria-hidden="true">

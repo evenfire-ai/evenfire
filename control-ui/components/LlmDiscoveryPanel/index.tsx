@@ -300,7 +300,7 @@ export function LlmDiscoveryPanel({
   )
 
   const providerColumns: TableHeaderColumn[] = [
-    { key: 'provider', label: 'Provider', colSpan: 2 },
+    { key: 'provider', label: 'Provider' },
     { key: 'models', label: 'Models' },
     { key: 'details', label: 'Details' },
     { key: 'actions', label: 'Actions', align: 'right' },
@@ -389,14 +389,17 @@ export function LlmDiscoveryPanel({
         ) : null}
 
         <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
+          <DataTable
+            className="eft-table cu-table cu-table--header-band cu-llm-review-table"
+            variant="grouped"
+          >
             <thead>
               <TableHeaderRow columns={providerColumns} />
             </thead>
             {isInitialLoad ? (
               <tbody>
                 <TableStateRow
-                  colSpan={reviewColumns.length}
+                  colSpan={providerColumns.length}
                   kind="loading"
                   message="Loading discovery review…"
                 />
@@ -404,7 +407,7 @@ export function LlmDiscoveryPanel({
             ) : reviewQueue.length === 0 ? (
               <tbody>
                 <TableStateRow
-                  colSpan={reviewColumns.length}
+                  colSpan={providerColumns.length}
                   message="No models awaiting review. Sync the catalog to pull newly released models."
                 />
               </tbody>
@@ -417,8 +420,9 @@ export function LlmDiscoveryPanel({
                   <GroupedTableBody
                     childBodyClassName="cu-llm-model-group__children"
                     childHeader={<TableHeaderRow columns={reviewColumns} />}
+                    childTableClassName="cu-llm-review-table__children"
                     className="cu-llm-model-group"
-                    colSpan={reviewColumns.length}
+                    colSpan={providerColumns.length}
                     disclosureClassName="cu-llm-model-group__toggle"
                     disclosureLabel={isExpanded =>
                       `${isExpanded ? 'Collapse' : 'Expand'} ${providerLabel} review models`
@@ -426,11 +430,11 @@ export function LlmDiscoveryPanel({
                     expanded={expanded}
                     groupId={provider}
                     key={provider}
+                    nestedChildTable
                     onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
                     summaryCells={[
                       {
                         key: 'provider',
-                        colSpan: 2,
                         content: (
                           <>
                             <LlmProviderIcon provider={provider} label={providerLabel} />

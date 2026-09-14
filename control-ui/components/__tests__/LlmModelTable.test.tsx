@@ -372,13 +372,16 @@ describe('LlmModelTable provider groups', () => {
       'false'
     )
     const summaryRow = screen.getByRole('button', { name: 'Expand Anthropic models' }).closest('tr')
-    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([1, 1, 4, 2])
+    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([1, 1, 1, 1])
     expect(screen.queryByText('claude-sonnet-4-6')).toBeNull()
     expect(screen.queryByText('gpt-5')).toBeNull()
 
     expandAnthropicModels()
 
     expect(screen.getByRole('columnheader', { name: 'Credential' })).toBeInTheDocument()
+    const childTable = screen.getByText('claude-sonnet-4-6').closest('table')
+    expect(childTable).toHaveClass('cu-llm-model-table__children')
+    expect(childTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(8)
     expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
     expect(screen.queryByText('gpt-5')).toBeNull()
     expect(screen.getByRole('button', { name: 'Collapse Anthropic models' })).toHaveAttribute(

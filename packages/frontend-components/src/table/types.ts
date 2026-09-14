@@ -2,7 +2,7 @@ import type { ReactNode, ThHTMLAttributes } from 'react'
 
 export type SortDirection = 'asc' | 'desc'
 export type SortValue = string | number | boolean | Date | null | undefined
-export type TableVariant = 'standard' | 'selection' | 'hierarchy' | 'embedded'
+export type TableVariant = 'standard' | 'selection' | 'hierarchy' | 'embedded' | 'grouped'
 export type CellKind = 'text' | 'numeric' | 'fixed' | 'selection' | 'actions'
 
 export type DataViewHeaderProps = {
@@ -33,6 +33,7 @@ export type TableStateRowProps = {
 type GroupedTableBodyBaseProps = {
   childBodyClassName?: string
   childHeader?: ReactNode
+  childTableClassName?: string
   children: ReactNode
   className?: string
   colSpan: number
@@ -40,6 +41,7 @@ type GroupedTableBodyBaseProps = {
   disclosureLabel: (expanded: boolean) => string
   expanded: boolean
   groupId: string
+  nestedChildTable?: boolean
   onExpandedChange: (expanded: boolean) => void
 }
 

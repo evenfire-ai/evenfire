@@ -101,8 +101,11 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     const summaryRow = screen
       .getByRole('button', { name: 'Expand OpenAI review models' })
       .closest('tr')
-    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([2, 1, 1, 1])
+    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([1, 1, 1, 1])
     fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    const childTable = screen.getByText('gpt-5').closest('table')
+    expect(childTable).toHaveClass('cu-llm-review-table__children')
+    expect(childTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(5)
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByText('claude-retired')).toBeNull()
 
