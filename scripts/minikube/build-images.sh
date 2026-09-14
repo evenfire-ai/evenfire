@@ -351,6 +351,17 @@ KNOWN_BUILD_NAMES=(
   workspace-files-controller
 )
 
+# These isolated test images are opt-in only. Their acquisition must happen
+# before T2 reconciliation, never inside the final Playwright command.
+if [ "$ONLY_SVC" = codex-approved-tools-mcp-e2e ]; then
+  ALL_IMAGES+=("clerum/codex-approved-tools-mcp-e2e:test")
+  KNOWN_BUILD_NAMES+=(codex-approved-tools-mcp-e2e)
+fi
+if [ "$ONLY_SVC" = codex-approved-tools-proxy-e2e ]; then
+  ALL_IMAGES+=("clerum/codex-approved-tools-proxy-e2e:test")
+  KNOWN_BUILD_NAMES+=(codex-approved-tools-proxy-e2e)
+fi
+
 if [ "$MINIKUBE_BUILD_DESKTOP_IMAGE" = "true" ]; then
   ALL_IMAGES+=("clerum/mcp-host-desktop:test")
   KNOWN_BUILD_NAMES+=(mcp-host-desktop)
@@ -939,6 +950,11 @@ build_image() {
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
+  if [ "$name" = codex-approved-tools-proxy-e2e ]; then
+    # The public target builds this production tag immediately beforehand under
+    # the same profile lease. The test image never replaces that tag.
+    docker_args+=(--build-arg CODEX_PROXY_IMAGE=clerum/codex-llm-proxy:test)
+  fi
   local build_cmd=(docker build "${docker_args[@]}" "$dir")
   local build_status=0
   docker_cli_run_public "build-${name}" "$MINIKUBE_DOCKER_BUILD_TIMEOUT_SECONDS" \
@@ -1137,6 +1153,17 @@ build_image "codex-llm-proxy" \
   "${PROJECT_DIR}" \
   "clerum/codex-llm-proxy:test" \
   "${PROJECT_DIR}/codex-llm-proxy/Dockerfile"
+
+if [ "$ONLY_SVC" = codex-approved-tools-mcp-e2e ]; then
+  build_image codex-approved-tools-mcp-e2e "${PROJECT_DIR}" \
+    clerum/codex-approved-tools-mcp-e2e:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/codex-subscription/approved-tools/Dockerfile"
+fi
+if [ "$ONLY_SVC" = codex-approved-tools-proxy-e2e ]; then
+  build_image codex-approved-tools-proxy-e2e "${PROJECT_DIR}" \
+    clerum/codex-approved-tools-proxy-e2e:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/codex-subscription/approved-tools-proxy/Dockerfile"
+fi
 
 build_image "webhook-gateway" \
   "${PROJECT_DIR}/webhook-gateway" \

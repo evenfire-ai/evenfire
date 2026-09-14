@@ -19,6 +19,17 @@ describe('mcp-host structured logger redaction', () => {
     delete process.env.MCP_HOST_LOGGER_PROBE
   })
 
+  it('retains Error classification without non-enumerable private messages or stacks', () => {
+    const err = Object.assign(new Error('sensitive diagnostic content'), {
+      code: 'ECONNRESET',
+      status: 503,
+    })
+    expect(redactUnknown({ err })).toEqual({
+      err: { name: 'Error', code: 'ECONNRESET', status: 503 },
+    })
+    expect(JSON.stringify(redactUnknown({ err }))).not.toContain('sensitive diagnostic content')
+  })
+
   it('drops prototype-polluting keys instead of writing them onto the clone', () => {
     const input = { ok: true, constructor: { evil: true }, prototype: { evil: true } }
     expect(redactUnknown(input)).toEqual({ ok: true })

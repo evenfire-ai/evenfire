@@ -12,23 +12,17 @@
  * or a bare `DefaultLoopController` for cron) keeps owning approval and text
  * gating. We only post-process the tool LIST returned by `refreshTools`.
  *
- * LOCKED #6 (CRITICAL) — the `bridgeActive` decision is LATCHED once and frozen
- * for the whole SESSION (not just a single task). MCP servers connect
- * asynchronously; recomputing the threshold per turn would let a
- * late-connecting server flip `tools[]` mid session and re-introduce the cache
- * invalidation this design exists to avoid. A new `TaskExecutor` (and thus a
- * new controller instance) is built per task/turn, so the latch must live on a
- * SESSION-SCOPED store, not on the controller instance. We read it through a
- * `LatchStore` bound to the `Conversation`: the FIRST `refreshTools` of the
- * session computes `deferrable.length > threshold` and writes it; every later
- * task reads the same frozen value → the advertised set is deterministic and
- * session-invariant → `tools[]` byte-stable.
+ * Other providers retain the legacy session latch. Codex evaluates its live
+ * catalog on every refresh: a cold connection or provider switch must not keep
+ * an obsolete threshold decision. Discovery never promotes schemas to tools[].
  *
  * `isNative` membership is decided by the exact `nativeNames` set (Critical:
  * `clerum__*` tools contain `__` but are native), NEVER by a string heuristic.
  */
+import { logger } from '../../logger'
 import { LoopController } from '../interfaces'
 import { ChatMessage, PendingApproval, ToolDefinition } from '../types'
+import type { CodexToolPresentation } from './toolPresentationPolicy'
 
 /**
  * Session-scoped read/write of the latched `bridgeActive` decision. Bound to the
@@ -46,11 +40,19 @@ export class DeferrableToolController implements LoopController {
   private readonly enabled: boolean
   private readonly threshold: number
   private readonly latch: LatchStore
+  private readonly codexMode?: CodexToolPresentation
+  private readonly discoveryBytes: number
+  private lastPresentation: string | undefined
 
   constructor(
     delegate: LoopController,
     nativeNames: Set<string>,
-    config: { dynamicToolsEnabled: boolean; dynamicToolsThreshold: number },
+    config: {
+      dynamicToolsEnabled: boolean
+      dynamicToolsThreshold: number
+      codexMode?: CodexToolPresentation
+      codexToolDiscoveryBytes?: number
+    },
     latch: LatchStore
   ) {
     this.delegate = delegate
@@ -58,6 +60,8 @@ export class DeferrableToolController implements LoopController {
     this.enabled = config.dynamicToolsEnabled
     this.threshold = config.dynamicToolsThreshold
     this.latch = latch
+    this.codexMode = config.codexMode
+    this.discoveryBytes = config.codexToolDiscoveryBytes ?? 32_768
   }
 
   shouldAccept(content: string, iteration: number): boolean {
@@ -84,6 +88,35 @@ export class DeferrableToolController implements LoopController {
     // through, but never assume — the inner chain owns the upstream list).
     const upstream = await this.delegate.refreshTools(currentTools)
 
+    // Codex must reevaluate the live catalog after late connections and provider
+    // switches. Never reuse another provider's session latch or promote schemas.
+    if (this.codexMode) {
+      if (this.codexMode === 'direct') return upstream
+      const deferred = upstream.filter(t => !this.nativeNames.has(t.name))
+      const discover =
+        this.codexMode === 'discovery' ||
+        deferred.length > this.threshold ||
+        Buffer.byteLength(JSON.stringify(deferred), 'utf8') > this.discoveryBytes
+      const presented = discover ? upstream.filter(t => this.nativeNames.has(t.name)) : upstream
+      const measurement = {
+        mode: this.codexMode,
+        strategy: discover ? 'discovery' : 'direct',
+        nativeCount: upstream.length - deferred.length,
+        mcpCount: deferred.length,
+        presentedCount: presented.length,
+        deferredCount: discover ? deferred.length : 0,
+      }
+      const key = JSON.stringify(measurement)
+      if (key !== this.lastPresentation) {
+        logger.info(
+          { component: 'tool-presentation', ...measurement },
+          'Tool presentation selected'
+        )
+        this.lastPresentation = key
+      }
+      return presented
+    }
+
     // LATCH (LOCKED #6): compute the bridge decision exactly once per SESSION,
     // from the FIRST observed upstream tool set, and freeze it on the
     // session-scoped store. Later tasks read the same value.
@@ -97,8 +130,9 @@ export class DeferrableToolController implements LoopController {
       // NOT on every turn. Surfaces the cold-load decision (whether the bridge
       // engaged, the observed deferrable count, and the threshold) so we can see
       // recomputation visibility.
-      console.log(
-        `[deferrable-tools] latch set: bridgeActive=${bridgeActive} deferrableCount=${deferrableCount} threshold=${this.threshold}`
+      logger.info(
+        { component: 'deferrable-tools', bridgeActive, deferrableCount, threshold: this.threshold },
+        'Legacy session presentation selected'
       )
     }
 

@@ -302,12 +302,23 @@
       "name": "codex-llm-proxy",
       "path": "codex-llm-proxy",
       "rooted": true,
-      "source_paths": [
-        "codex-llm-proxy/**",
-        "packages/llm-provider-attempt-contract/**"
-      ],
+      "source_paths": ["codex-llm-proxy/**", "packages/llm-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": true
+    },
+    {
+      "name": "codex-approved-tools-mcp-e2e",
+      "path": "tests/e2e/fixtures/codex-subscription/approved-tools",
+      "rooted": true,
+      "published": false,
+      "deployed_to_minikube": false
+    },
+    {
+      "name": "codex-approved-tools-proxy-e2e",
+      "path": "tests/e2e/fixtures/codex-subscription/approved-tools-proxy",
+      "rooted": true,
+      "published": false,
+      "deployed_to_minikube": false
     },
     {
       "name": "workflow-custom-sdk-e2e",

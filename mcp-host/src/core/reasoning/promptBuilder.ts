@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { logger } from '../../logger'
 import { PromptBuilder } from '../interfaces'
 import { ChatMessage, ToolDefinition } from '../types'
 import type { BuilderInput, SystemPromptParts } from './systemPrompt'
@@ -119,7 +120,11 @@ export const TOOL_DISCOVERY_TEXT =
   'You have access to a large catalog of tools that are not all listed directly. ' +
   'Use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
   "see one's schema, and `clerum__tool_call` to invoke it. Native tools are " +
-  'already available directly.'
+  'already available directly. Search narrowly for the current task; refine or page ' +
+  'only when needed rather than loading the whole catalog. Describe only the chosen ' +
+  'tool and reuse its schema from the conversation when available. Each invocation ' +
+  'still checks current permissions and arguments. Do not call tools for tasks that ' +
+  'do not require them.'
 
 /**
  * Default prompt builder.
@@ -216,8 +221,14 @@ export class DefaultPromptBuilder implements PromptBuilder {
 
     const content = sections.join('\n\n')
     const metaKeys = metadata ? Object.keys(metadata).filter(k => metadata[k] != null) : []
-    console.log(
-      `[NewCore:PromptBuilder] buildSystemPrompt → tools=${tools.length}, promptLength=${content.length}, metadata=[${metaKeys.join(',')}]`
+    logger.debug(
+      {
+        component: 'PromptBuilder',
+        toolCount: tools.length,
+        promptLength: content.length,
+        metadataKeys: metaKeys,
+      },
+      'System prompt built'
     )
     return {
       role: 'system',

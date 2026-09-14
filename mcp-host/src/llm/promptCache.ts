@@ -39,6 +39,8 @@ export interface PromptCacheEntry {
    * changing the sessionKey-indexed map (eviction/invalidation stay intact).
    */
   model?: string
+  provider?: string
+  toolGuidanceKey?: string
 }
 
 export interface PromptCacheObserver {

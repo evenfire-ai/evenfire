@@ -197,6 +197,7 @@ run_group "control-api" "control-api" \
   "test/routes.usageEvents.test.ts"
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
+  "test/approvedToolsUpstream.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
   "test/originPolicy.test.ts" \
@@ -204,6 +205,15 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/server.security.test.ts"
 
 run_group "mcp-host" "mcp-host" \
+  "src/capabilities/toolCatalogTools.test.ts" \
+  "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
+  "src/mcp/__tests__/managerDelimiterDispatch.test.ts" \
+  "src/logger.test.ts" \
+  "src/core/orchestration/__tests__/toolPresentationPolicy.test.ts" \
+  "src/core/orchestration/__tests__/deferrableToolController.test.ts" \
+  "src/core/orchestration/__tests__/toolCallBridge.test.ts" \
+  "src/core/orchestration/__tests__/toolUseLoop.test.ts" \
+  "src/agent/__tests__/taskExecutor.test.ts" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \

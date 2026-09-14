@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
-import { LlmErrorCode } from '../../core/errors'
-import { CodexProxyError } from '../codexLlmProxyClient'
 import {
-  CodexSubscriptionProvider,
-  isCodexNativeToolName,
-  selectCodexAdvertisedTools,
-} from '../codexSubscription'
+  buildToolDescribeResponse,
+  buildToolSearchResponse,
+  createToolCallTool,
+  createToolDescribeTool,
+  createToolSearchTool,
+} from '../../capabilities/toolCatalogTools'
+import { LlmErrorCode } from '../../core/errors'
+import { DeferrableToolController } from '../../core/orchestration/deferrableToolController'
+import { DefaultLoopController } from '../../core/orchestration/loopConfig'
+import { CodexProxyError } from '../codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
@@ -45,6 +50,45 @@ function deps(overrides?: {
 }
 
 describe('CodexSubscriptionProvider', () => {
+  it.each(['unknown', 'canceled', 'error'])(
+    'never returns executable calls from a %s batch',
+    async outcome => {
+      const wired = deps({
+        stream: vi.fn().mockResolvedValue({
+          text: 'partial',
+          outcome,
+          toolCalls: [{ id: 'partial', name: 'echo', arguments: {} }],
+        }),
+      })
+      const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+      await expect(
+        provider.completeSingleTurnWithTools(
+          [{ role: 'user', content: 'hi' }],
+          [{ name: 'echo', description: 'echo', parameters: {} }]
+        )
+      ).rejects.toThrow(/successful terminal outcome/)
+    }
+  )
+  it('rejects an oversized successful proxy batch before returning any executable tools', async () => {
+    const wired = deps({
+      stream: vi.fn().mockResolvedValue({
+        text: '',
+        outcome: 'success',
+        toolCalls: Array.from({ length: 33 }, (_, index) => ({
+          id: `call-${index}`,
+          name: 'echo',
+          arguments: {},
+        })),
+      }),
+    })
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    await expect(
+      provider.completeSingleTurnWithTools(
+        [{ role: 'user', content: 'hi' }],
+        [{ name: 'echo', description: 'echo', parameters: {} }]
+      )
+    ).rejects.toThrow(/tool calls exceed 32/)
+  })
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
     expect(() => makeProvider('codex-subscription', {})).toThrow(/explicit model and runtime/)
@@ -167,61 +211,122 @@ describe('CodexSubscriptionProvider', () => {
     expect(result.providerAttemptIndex).toBe(1)
   })
 
-  it('omits MCP tools and caps natives at the Codex maxTools limit', () => {
-    const tools = [
-      { name: 'file_read', description: 'read', parameters: {} },
-      {
-        name: 'mongodb-mcp-stack-mongodb-mcp-server__find',
-        description: 'find',
-        parameters: {},
-      },
-      { name: 'clerum__gfs_read', description: 'gfs', parameters: {} },
-      {
-        name: 'mongodb-mcp-stack-mongodb-mcp-server__aggregate',
-        description: 'agg',
-        parameters: {},
-      },
-    ]
-    expect(isCodexNativeToolName('file_read')).toBe(true)
-    expect(isCodexNativeToolName('clerum__gfs_read')).toBe(true)
-    expect(isCodexNativeToolName('mongodb-mcp-stack-mongodb-mcp-server__find')).toBe(false)
-    expect(selectCodexAdvertisedTools(tools).map(tool => tool.name)).toEqual([
-      'file_read',
-      'clerum__gfs_read',
-    ])
+  it.each([1, 33, 83, 150, 250])(
+    'preserves all %i approved MCP definitions through authorization and dispatch',
+    async count => {
+      const wired = deps()
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+      const tools = [
+        ...Array.from({ length: 36 }, (_, i) => ({
+          name: `native_${i}`,
+          description: 'native',
+          parameters: { type: 'object' },
+        })),
+        ...Array.from({ length: count }, (_, i) => ({
+          name: `eventasks__read_${i}`,
+          description: 'read task',
+          parameters: { type: 'object', properties: { key: { type: 'string' } } },
+        })),
+        { name: 'clerum__tool_search', description: 'search', parameters: { type: 'object' } },
+      ]
+      await provider.completeSingleTurnWithTools([{ role: 'user', content: 'Find a task' }], tools)
+      const authorized = wired.authorize.mock.calls[0][0]
+      expect(authorized.request.tools).toEqual(tools)
+      expect(wired.stream.mock.calls[0][0].request).toEqual(authorized.request)
+      expect(authorized.request.tools.at(-2).name).toBe(`eventasks__read_${count - 1}`)
+    }
+  )
 
-    const overflow = Array.from({ length: 40 }, (_, i) => ({
-      name: i < 36 ? `native_${i}` : `mongo-server__tool_${i}`,
-      description: 't',
-      parameters: {},
-    }))
-    const advertised = selectCodexAdvertisedTools(overflow)
-    expect(advertised).toHaveLength(32)
-    expect(advertised.every(tool => isCodexNativeToolName(tool.name))).toBe(true)
-    expect(advertised[0]?.name).toBe('native_0')
-    expect(advertised[31]?.name).toBe('native_31')
+  it('can advertise a single MCP tool without native tools', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+    const tools = [
+      { name: 'eventasks__workitem_get', description: 'read', parameters: { type: 'object' } },
+    ]
+    await provider.completeSingleTurnWithTools([{ role: 'user', content: 'Read' }], tools)
+    expect(wired.authorize.mock.calls[0][0].request.tools).toEqual(tools)
   })
 
-  it('authorizes with native tools only when MCP tools are also offered', async () => {
-    const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
-    await provider.completeSingleTurnWithTools(
-      [{ role: 'user', content: 'hi' }],
-      [
-        { name: 'file_read', description: 'read', parameters: {} },
+  it('keeps the same advertised schemas for 83, 150 and 250 tools and describes only the selected target', async () => {
+    let baseline: string | undefined
+    for (const count of [83, 150, 250]) {
+      const catalog = Array.from({ length: count }, (_, i) => ({
+        name: `eventasks__read_${i}`,
+        serverName: 'eventasks',
+        description: `Read record ${i}`,
+        inputSchema: { type: 'object', properties: { key: { type: 'string' } } },
+      }))
+      const nativeTools = [
+        createToolSearchTool(() => catalog),
+        createToolDescribeTool(() => catalog),
+        createToolCallTool(),
+      ].map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }))
+      const controller = new DeferrableToolController(
+        new DefaultLoopController(),
+        new Set(nativeTools.map(t => t.name)),
+        { dynamicToolsEnabled: true, dynamicToolsThreshold: 60, codexMode: 'auto' },
         {
-          name: 'mongodb-mcp-stack-mongodb-mcp-server__find',
-          description: 'find',
-          parameters: {},
-        },
-        { name: 'clerum__tool_search', description: 'search', parameters: {} },
+          get: () => false,
+          set: () => {
+            throw new Error('Codex must not use a stale legacy latch')
+          },
+        }
+      )
+      const all = [
+        ...nativeTools,
+        ...catalog.map(t => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.inputSchema,
+        })),
       ]
-    )
-    const authorizedBody = wired.authorize.mock.calls[0][0]
-    expect(authorizedBody.request.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      'file_read',
-      'clerum__tool_search',
-    ])
+      const presented = await controller.refreshTools(all)
+      const wired = deps()
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+      await provider.completeSingleTurnWithTools(
+        [{ role: 'user', content: 'Find a record' }],
+        presented
+      )
+      const first = wired.authorize.mock.calls[0][0].request
+      const serialized = JSON.stringify(first.tools)
+      baseline ??= serialized
+      expect(serialized).toBe(baseline)
+      expect(first.tools.map((t: { name: string }) => t.name)).toEqual(nativeTools.map(t => t.name))
+      const chosen = catalog[count - 1]
+      const search = buildToolSearchResponse(catalog, chosen.name, { limit: 1 })
+      expect(search.results[0].name).toBe(chosen.name)
+      expect(JSON.stringify(search)).not.toContain('parameters')
+      const described = buildToolDescribeResponse(catalog, chosen.name)
+      expect(described.found).toBe(true)
+      await provider.completeSingleTurnWithTools(
+        [
+          { role: 'user', content: 'Find a record' },
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [
+              { id: 'describe-1', name: 'clerum__tool_describe', arguments: { name: chosen.name } },
+            ],
+          },
+          {
+            role: 'tool',
+            name: 'clerum__tool_describe',
+            tool_call_id: 'describe-1',
+            content: JSON.stringify(described),
+          },
+        ],
+        await controller.refreshTools(all)
+      )
+      const second = wired.authorize.mock.calls[1][0].request
+      expect(JSON.stringify(second.tools)).toBe(baseline)
+      expect(second.messages[2].toolCallId).toBe('describe-1')
+      expect(second.messages[2].content).toBe(JSON.stringify(described))
+      expect(wired.stream.mock.calls[1][0].request).toEqual(second)
+    }
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {

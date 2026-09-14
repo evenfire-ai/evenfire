@@ -15,7 +15,8 @@ const TICKET_TYP = 'codex-execution-ticket'
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
   maxMessages: 128,
-  maxTools: 32,
+  // Bound calls in each assistant message independently of advertised definitions.
+  maxToolCalls: 32,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
@@ -189,8 +190,8 @@ function parseMessages(raw) {
       if (!Array.isArray(item.toolCalls) || item.toolCalls.length === 0) {
         return fail('invalid', `messages[${i}].toolCalls must be a non-empty array`)
       }
-      if (item.toolCalls.length > LIMITS.maxTools) {
-        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxTools}`)
+      if (item.toolCalls.length > LIMITS.maxToolCalls) {
+        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxToolCalls}`)
       }
       const toolCalls = []
       for (let j = 0; j < item.toolCalls.length; j++) {
@@ -227,7 +228,8 @@ function parseTools(raw) {
   if (raw === undefined) return ok(undefined)
   if (!Array.isArray(raw)) return fail('invalid', 'tools must be an array')
   if (raw.length === 0) return ok(undefined)
-  if (raw.length > LIMITS.maxTools) return fail('limit', `tools exceed ${LIMITS.maxTools}`)
+  // The complete request is byte-bounded before parsing; definition count is
+  // not an access limit for an approved connector catalog.
   const tools = []
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i]

@@ -249,3 +249,65 @@ test('authorize response is metadata-only; redeem type is documented but not par
   assert.equal('accountId' in authorize.value, false)
   assert.equal(typeof contract.RedeemAttemptResponseSensitive, 'undefined')
 })
+
+function catalog(count) {
+  return Array.from({ length: count }, (_, index) => ({
+    name: `eventasks__read_${index}`,
+    description: 'Read an approved development record',
+    parameters: { type: 'object', properties: { id: { type: 'string' } } },
+  }))
+}
+
+for (const count of [1, 32, 33, 83, 150, 250]) {
+  test(`preserves every definition in a ${count}-tool approved catalog`, () => {
+    const tools = catalog(count)
+    const parsed = contract.parseCodexCompletionRequestV1({ ...BASE, tools })
+    assert.equal(parsed.ok, true, parsed.message)
+    assert.deepEqual(parsed.value.tools, tools)
+    const reordered = tools.map(({ name, description, parameters }) => ({ parameters, description, name }))
+    const equivalent = contract.parseCodexCompletionRequestV1({ ...BASE, tools: reordered })
+    assert.equal(equivalent.ok, true)
+    assert.equal(contract.hashCodexCompletionRequestV1(parsed.value), contract.hashCodexCompletionRequestV1(equivalent.value))
+    const changed = contract.parseCodexCompletionRequestV1({ ...BASE, tools: [...tools.slice(0, -1), { ...tools.at(-1), description: 'Changed capability' }] })
+    assert.equal(changed.ok, true)
+    assert.notEqual(contract.hashCodexCompletionRequestV1(parsed.value), contract.hashCodexCompletionRequestV1(changed.value))
+  })
+}
+
+test('tool definition count never widens the independent assistant call limit', () => {
+  assert.equal(contract.LIMITS.maxToolCalls, 32)
+  assert.equal(Object.hasOwn(contract.LIMITS, 'maxTools'), false)
+  for (const count of [32, 33]) {
+    const parsed = contract.parseCodexCompletionRequestV1({
+      ...BASE,
+      tools: catalog(250),
+      messages: [{ role: 'assistant', content: '', toolCalls: Array.from({ length: count }, (_, index) => ({
+        id: `call-${index}`, name: `eventasks__read_${index}`, arguments: {},
+      })) }],
+    })
+    assert.equal(parsed.ok, count === 32)
+    if (!parsed.ok) assert.equal(parsed.message, 'messages[0].toolCalls exceed 32')
+  }
+})
+
+test('large catalogs remain bounded by serialized request bytes including UTF-8', () => {
+  const request = { ...BASE, tools: catalog(250) }
+  const originalBytes = Buffer.byteLength(JSON.stringify(request), 'utf8')
+  request.tools[249].description += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - originalBytes)
+  assert.equal(Buffer.byteLength(JSON.stringify(request), 'utf8'), contract.LIMITS.maxRequestBodyBytes)
+  assert.equal(contract.parseCodexCompletionRequestV1(request).ok, true)
+  request.tools[249].description += 'é'
+  assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
+    ok: false, code: 'limit', message: 'request exceeds maxRequestBodyBytes',
+  })
+})
+
+test('validates the last definition beyond the former count boundary', () => {
+  for (const invalid of [{ name: 'invalid name' }, { parameters: { value: Infinity } }, { headers: {} }]) {
+    const tools = catalog(250)
+    tools[249] = { ...tools[249], ...invalid }
+    const parsed = contract.parseCodexCompletionRequestV1({ ...BASE, tools })
+    assert.equal(parsed.ok, false)
+    assert.match(parsed.message, /tools\[249\]/)
+  }
+})

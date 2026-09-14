@@ -33,6 +33,20 @@ function cloneRedacted(value: unknown, key?: string): unknown {
   if (key && SENSITIVE_KEY_RE.test(key)) return '[Redacted]'
   if (value === undefined) return undefined
   if (typeof value !== 'object' || value === null) return value
+  // Error.message/stack may contain provider payloads or connection material.
+  // Preserve bounded classification fields, not arbitrary error text.
+  if (value instanceof Error) {
+    const error = value as Error & { code?: unknown; status?: unknown }
+    const summary: Record<string, unknown> = {
+      name: /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.name) ? error.name : 'Error',
+    }
+    if (typeof error.code === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(error.code)) {
+      summary.code = error.code
+    }
+    if (typeof error.status === 'number' && Number.isInteger(error.status))
+      summary.status = error.status
+    return summary
+  }
   if (Array.isArray(value)) return value.map(item => cloneRedacted(item))
   const out: Record<string, unknown> = Object.create(null)
   for (const nextKey of Object.keys(value as object)) {
@@ -94,3 +108,33 @@ function emit(level: string, args: unknown[]): void {
 console.log = (...args: unknown[]) => emit('info', args)
 console.error = (...args: unknown[]) => emit('error', args)
 console.warn = (...args: unknown[]) => emit('warn', args)
+
+/** Explicit structured entry point for service code, sharing redaction and sinks. */
+function writeStructured(
+  level: 'debug' | 'info' | 'warn' | 'error',
+  fields: Record<string, unknown>,
+  msg: string
+): void {
+  const levels = { debug: 10, info: 20, warn: 30, error: 40, silent: 100 }
+  const configured = process.env.LOG_LEVEL as keyof typeof levels | undefined
+  if (
+    levels[level] <
+    (configured && levels[configured] !== undefined ? levels[configured] : levels.info)
+  )
+    return
+  const entry = {
+    ...(redactUnknown(fields) as Record<string, unknown>),
+    timestamp: new Date().toISOString(),
+    level,
+    msg: msg.replace(/[\r\n\u2028\u2029]/g, ' ').trim(),
+  }
+  const writer = level === 'error' ? originalError : level === 'warn' ? originalWarn : originalLog
+  writer(JSON.stringify(entry))
+}
+
+export const logger = {
+  debug: (fields: Record<string, unknown>, msg: string) => writeStructured('debug', fields, msg),
+  info: (fields: Record<string, unknown>, msg: string) => writeStructured('info', fields, msg),
+  warn: (fields: Record<string, unknown>, msg: string) => writeStructured('warn', fields, msg),
+  error: (fields: Record<string, unknown>, msg: string) => writeStructured('error', fields, msg),
+}

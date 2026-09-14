@@ -53,13 +53,49 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | --- | --- |
 | maxRequestBodyBytes | 1048576 |
 | maxMessages | 128 |
-| maxTools | 32 |
+| maxToolCalls | 32 |
 | maxOutputTokens | 16384 |
 | maxStreamDurationMs | 300000 |
 | maxDeadlineMs | 300000 |
 | maxConcurrentStreams | 8 |
 | maxQueuedRequests | 16 |
 | maxRetriesPerAttempt | 1 |
+
+Tool definitions have no independent count ceiling in the Evenfire request
+contract. The entire serialized request, including all definitions, remains
+bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
+name, schema, finite-value and unknown-field validation. `maxToolCalls` bounds
+calls in each assistant history message and each newly returned response. The proxy buffers tool calls until successful completion and validates the bound before publishing any executable call; the Host validates it again before returning the batch. It is not a catalog size limit and
+does not widen execution concurrency. This preserves the existing call bound.
+
+The former `maxTools: 32` definition limit was imposed by Evenfire, not a
+verified Codex Subscription limit. Remote endpoint limits remain separately
+subject to authorized interoperability testing; local acceptance does not
+certify that the endpoint accepts any particular count. Discovery optimizes
+which schemas are sent, without changing the approved catalog or permissions.
+An oversized explicit direct request fails before authorization rather than
+silently truncating tools or changing presentation.
+
+### Compatibility and deployment order
+
+The V1 wire fields and canonical hash projection are unchanged. Previously
+accepted requests retain their hashes; every newly advertised definition is
+included in the hash. Tickets and receipts keep their existing binding.
+This is a validator relaxation, not a new wire format. No version negotiation
+or fallback to a truncated catalog is introduced.
+
+| Sender | Validator | Result within all other limits |
+| --- | --- | --- |
+| Old (at most 32 definitions) | New | Accepted; unchanged hash |
+| New (at most 32 definitions) | Old | Accepted; unchanged hash |
+| New (more than 32 definitions) | Old | Explicit count-limit rejection |
+| New (more than 32 definitions) | New | Accepted locally; upstream capability is tested separately |
+
+Deploy updated Control API and proxy consumers before the updated MCP Host
+sender. Verify that both consumers use the updated shared package; rebuilding
+only the sender is insufficient. For rollback, restore the old sender first,
+drain outstanding incompatible attempts, then restore older validators. An old
+sender reintroduces the known connector exclusion and is not a correction.
 
 ## Errors
 
@@ -83,3 +119,21 @@ Phase 2 grant binding hashes `{ catalogRevision, connectionKey,
 credentialRevision, model, provider }` so two named subscriptions with the
 same integer revisions do not collide. Host `spec.model.connectionRef` selects
 the grant; revoke of one key fail-closes only that assignment.
+
+## Tool presentation in the agent
+
+`CODEX_TOOL_PRESENTATION=auto|direct|discovery` controls presentation, not access.
+Auto is the default when the primary or an allowed fallback uses Codex: it
+uses discovery above the existing `CLERUM_DYNAMIC_TOOLS_THRESHOLD` (60) or
+`CODEX_TOOL_DISCOVERY_BYTES` (32768 serialized MCP definition bytes). These
+are optimization thresholds; no tools are discarded from the local registry.
+Direct retains all definitions subject to the bounded request contract.
+Discovery exposes the stable native set and search/describe/call bridge.
+The same presentation is usable across a configured failover chain.
+
+Search results contain bounded compact descriptions and no schemas. Follow
+`nextOffset` with the same query/filter to continue; explicit `enumerate`
+permits full traversal. Describe returns the exact selected schema, never a
+truncated schema. Existing output spillover (enabled by default) handles
+large results; transport/context limits still apply and no unbounded-schema
+support or measured subscription-quota reduction is claimed.
