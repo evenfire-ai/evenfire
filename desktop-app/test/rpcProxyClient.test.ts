@@ -349,6 +349,17 @@ describe('parseSessionsListResult — title parse + sanitize on read (spec 15 §
     expect(result.droppedItemCount).toBe(1)
   })
 
+  it('truncates an oversized title from a stale/hostile host to the server cap (120 code points)', () => {
+    // The server rejects >120 code points with a 400, so a legit stored title is
+    // always within the cap; a host that returns more is not trusted. Emoji so a
+    // naive .length (UTF-16 units) would miscount vs the code-point cap.
+    const oversized = '😀'.repeat(200)
+    const result = parseSessionsListResult({ items: [{ ...baseItem, title: oversized }] })
+    const title = result.items[0]?.title as string
+    expect(Array.from(title)).toHaveLength(120)
+    expect(title).toBe('😀'.repeat(120))
+  })
+
   it('strips line/paragraph separators (U+2028/U+2029) — single-line title', () => {
     const result = parseSessionsListResult({
       items: [{ ...baseItem, title: 'line1\u2028line2\u2029end' }],

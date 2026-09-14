@@ -67,9 +67,19 @@ function optionalWireString(value: unknown, label: string): string | undefined {
  * `undefined` when nothing legible remains, so the caller falls back to the
  * local cache or a placeholder instead of rendering a blank title.
  */
+// Mirror the server-side cap so a stale or hostile host cannot ship an oversized
+// title past the reader's trust boundary. The server rejects >120 code points with
+// a 400, so a legitimately stored title is always within this; on read we truncate
+// (a parser must not drop the whole session over a too-long title) rather than reject.
+const MAX_WIRE_TITLE_CODEPOINTS = 120
+
 function sanitizeWireTitle(value: string): string | undefined {
   const cleaned = value.replace(/[\p{C}\p{Zl}\p{Zp}]/gu, '').trim()
-  return cleaned.length > 0 ? cleaned : undefined
+  if (cleaned.length === 0) return undefined
+  const points = Array.from(cleaned)
+  return points.length > MAX_WIRE_TITLE_CODEPOINTS
+    ? points.slice(0, MAX_WIRE_TITLE_CODEPOINTS).join('')
+    : cleaned
 }
 
 function wireSafeInteger(
@@ -1206,7 +1216,9 @@ export class RpcProxyClient {
     const parsed = (await response.json().catch(() => ({}))) as { title?: unknown }
     // Re-sanitize the server's echoed title on read (defense in depth, A14 rule).
     const sanitized = typeof parsed.title === 'string' ? sanitizeWireTitle(parsed.title) : undefined
-    return { title: sanitized ?? title }
+    // Fall back to the requested title if the server echo is missing/illegible,
+    // but sanitize that too so the same read-side normalization applies on every path.
+    return { title: sanitized ?? sanitizeWireTitle(title) ?? title }
   }
 
   async getDesktopStatus(
