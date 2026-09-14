@@ -415,6 +415,10 @@ export class SqliteConversationStore implements ConversationStore {
         cache_read_tokens: row.session.cache_read_tokens,
         cache_write_tokens: row.session.cache_write_tokens,
         cacheTokensReported: row.session.cache_tokens_reported === 1,
+        // Auto-title (spec 15) — cold projection. `?? undefined` (never null) so
+        // `normalizeParityValue` treats a missing title identically to the memory
+        // store (which yields undefined); a null would survive and break parity.
+        title: cached ? cached.title : (row.session.title ?? undefined),
       })
     }
     return out
@@ -734,6 +738,10 @@ export class SqliteConversationStore implements ConversationStore {
         // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
         activeTaskId: conv.activeTaskId ?? null,
         activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+        // Auto-title (spec 15): materialize only on turn 1, gated on the durable
+        // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
+        // runs a COALESCE write so a retried turn 1 is idempotent.
+        title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
       },
       sessionKey
     )
@@ -987,6 +995,22 @@ export class SqliteConversationStore implements ConversationStore {
       kind: 'update_session_model_selections',
       sessionId: conv.id,
       modelSelections: JSON.stringify(conv.modelSelections ?? {}),
+    })
+  }
+
+  /**
+   * Spec 15 Fase B — persist a user rename. Enqueued (async) and keyed by
+   * sessionKey so it chains AFTER the session's own writes on the FIFO chain.
+   * `ConversationManager.setTitle` sets `conv.title` (a validated non-empty
+   * string) before calling this; the op overwrites `sessions.title` verbatim.
+   */
+  persistTitle(conv: Conversation): void {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) return
+    this.persistQueue.enqueueAsync(sessionKey, {
+      kind: 'update_session_title',
+      sessionId: conv.id,
+      title: conv.title ?? '',
     })
   }
 

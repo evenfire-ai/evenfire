@@ -319,6 +319,42 @@ describe('routes/profile', () => {
       })
   })
 
+  it('accepts a host:session:write-only token on the mcp-hosts access endpoint (session rename)', async () => {
+    // The desktop mints an rpc token scoped to ONLY `host:session:write` for the
+    // session-rename flow (rpc-proxy PATCH /rpc/hosts/:hostRef/sessions/.../name
+    // resolves host access via THIS endpoint). If the scope were missing from the
+    // requireValidRpcAccessTokenAny allow-list, control-api would return 403 and
+    // the rename would be silently dropped. Uses the REAL middleware + a REAL
+    // signed token so the scope gate is genuinely exercised (not mocked).
+    const sessionWriteToken = signRpcAccessToken({
+      sub: 'u1',
+      typ: 'user',
+      teamId: 't1',
+      role: 'member',
+      scopes: ['host:session:write'],
+      hostRefs: ['agent-a'],
+      jti: 'rpc-jti-session-write',
+    })
+
+    svc.getUserAgents.mockResolvedValue({ userId: 'u1', agentNames: ['agent-a'] })
+
+    const app = express()
+    app.use(express.json())
+    mountInternalRoutes(app, accessCatalogGateway())
+
+    await withInternalServiceAuth(
+      request(app)
+        .get('/rpc/access/users/u1/mcp-hosts/agent-a')
+        .set('x-rpc-access-token', sessionWriteToken)
+    )
+      .expect(200)
+      .expect({
+        userId: 'u1',
+        hostRef: 'agent-a',
+        url: 'http://agent-a.mcp-host.svc.cluster.local:8080',
+      })
+  })
+
   it('rejects a token whose scopes are all outside the mcp-hosts allow-list (gate still closed)', async () => {
     // Negative half of the allow-list contract: `mcp:servers:list` is NOT an
     // accepted scope for the host-access endpoint, so a token carrying only it
