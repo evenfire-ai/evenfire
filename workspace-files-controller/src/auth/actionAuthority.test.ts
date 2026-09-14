@@ -245,4 +245,22 @@ describe('workspace filesystem v2 live authority', () => {
       })(value, { operationId: value.binding.operationId, target: value.binding.target })
     ).rejects.toMatchObject({ code: 'not_mounted' })
   })
+
+  it('maps a DOM abort timeout to authority unavailable', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw new DOMException('checkpoint timed out', 'AbortError')
+      })
+    )
+    const value = authority()
+
+    await expect(
+      createWfcAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'wfc-service-token',
+        timeoutMs: 1000,
+      })(value, { operationId: value.binding.operationId, target: value.binding.target })
+    ).rejects.toMatchObject({ status: 503, code: 'not_mounted' })
+  })
 })
