@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   DataTable,
+  GroupedTableBody,
   RowActionMenu,
   TableHeaderCell,
   TableRow,
@@ -21,6 +22,98 @@ function cssRule(css: string, selector: string) {
 }
 
 describe('shared frontend components', () => {
+  it('controls independent accessible grouped table disclosures with semantic rows', () => {
+    const onAlphaExpandedChange = vi.fn()
+    const { rerender } = render(
+      <DataTable>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Alpha records`}
+          expanded={false}
+          groupId="alpha"
+          onExpandedChange={onAlphaExpandedChange}
+          summary="Alpha"
+        >
+          <tr>
+            <td>Alpha child action</td>
+            <td>
+              <button type="button">Edit Alpha</button>
+            </td>
+          </tr>
+        </GroupedTableBody>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Beta records`}
+          expanded={false}
+          groupId="beta"
+          onExpandedChange={vi.fn()}
+          summary="Beta"
+        >
+          <tr>
+            <td>Beta child</td>
+            <td />
+          </tr>
+        </GroupedTableBody>
+      </DataTable>
+    )
+
+    const alphaDisclosure = screen.getByRole('button', { name: 'Expand Alpha records' })
+    expect(alphaDisclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(alphaDisclosure).toHaveAttribute('aria-controls', 'eft-table-group-alpha-rows')
+    expect(document.querySelectorAll('table > tbody > tr')).toHaveLength(2)
+    expect(screen.queryByText('Alpha child action')).toBeNull()
+    expect(screen.queryByText('Beta child')).toBeNull()
+
+    fireEvent.click(alphaDisclosure)
+    expect(onAlphaExpandedChange).toHaveBeenCalledWith(true)
+
+    rerender(
+      <DataTable>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Alpha records`}
+          expanded
+          groupId="alpha"
+          onExpandedChange={onAlphaExpandedChange}
+          summary="Alpha"
+        >
+          <tr>
+            <td>Alpha child action</td>
+            <td>
+              <button type="button">Edit Alpha</button>
+            </td>
+          </tr>
+        </GroupedTableBody>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Beta records`}
+          expanded={false}
+          groupId="beta"
+          onExpandedChange={vi.fn()}
+          summary="Beta"
+        >
+          <tr>
+            <td>Beta child</td>
+            <td />
+          </tr>
+        </GroupedTableBody>
+      </DataTable>
+    )
+
+    expect(screen.getByRole('button', { name: 'Collapse Alpha records' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    expect(screen.getByText('Alpha child action').closest('tr')?.parentElement).toHaveAttribute(
+      'id',
+      'eft-table-group-alpha-rows'
+    )
+    expect(screen.queryByText('Beta child')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Alpha' }))
+    expect(onAlphaExpandedChange).toHaveBeenCalledTimes(1)
+  })
+
   it('owns the canonical viewport class and preserves semantic modifiers', () => {
     render(
       <TableViewport aria-label="Embedded results" className="cu-table-wrap" embedded>

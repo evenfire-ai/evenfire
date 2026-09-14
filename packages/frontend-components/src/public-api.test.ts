@@ -1,6 +1,7 @@
 import {
   DataTable,
   DataViewHeader,
+  GroupedTableBody,
   RecordList,
   RecordListRow,
   RowActionMenu,
@@ -18,6 +19,7 @@ import {
 import type {
   CellKind,
   DataViewHeaderProps,
+  GroupedTableBodyProps,
   RowAction,
   SortDirection,
   SortValue,
@@ -29,6 +31,7 @@ import type {
 export const publicRuntimeApi = {
   DataTable,
   DataViewHeader,
+  GroupedTableBody,
   RecordList,
   RecordListRow,
   RowActionMenu,
@@ -47,6 +50,7 @@ export const publicRuntimeApi = {
 export type PublicTypeApi = {
   cellKind: CellKind
   dataViewHeader: DataViewHeaderProps
+  groupedTableBody: GroupedTableBodyProps
   rowAction: RowAction
   sortDirection: SortDirection
   sortValue: SortValue

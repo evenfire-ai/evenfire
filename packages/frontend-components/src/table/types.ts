@@ -30,6 +30,19 @@ export type TableStateRowProps = {
   message?: ReactNode
 }
 
+export type GroupedTableBodyProps = {
+  childBodyClassName?: string
+  children: ReactNode
+  className?: string
+  colSpan: number
+  disclosureClassName?: string
+  disclosureLabel: (expanded: boolean) => string
+  expanded: boolean
+  groupId: string
+  onExpandedChange: (expanded: boolean) => void
+  summary: ReactNode
+}
+
 export type RowAction = {
   key: string
   label: string

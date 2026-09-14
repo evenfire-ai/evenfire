@@ -1,4 +1,5 @@
 export * from './primitives'
+export * from './grouped'
 export * from './row-actions'
 export * from './shell'
 export * from './sorting'
