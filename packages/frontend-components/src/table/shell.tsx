@@ -1,8 +1,8 @@
 'use client'
 
 import type { HTMLAttributes, InputHTMLAttributes } from 'react'
-import { classNames } from './utils'
 import type { DataViewHeaderProps } from './types'
+import { classNames } from './utils'
 
 export function DataViewHeader({
   actions,

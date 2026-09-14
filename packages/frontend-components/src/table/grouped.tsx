@@ -42,7 +42,10 @@ export function GroupedTableBody({
           </td>
         </tr>
       </tbody>
-      <tbody className={classNames('eft-table-group__children', childBodyClassName)} id={childRowsId}>
+      <tbody
+        className={classNames('eft-table-group__children', childBodyClassName)}
+        id={childRowsId}
+      >
         {expanded ? children : null}
       </tbody>
     </Fragment>
