@@ -325,6 +325,40 @@ assert_branch_scoped_minikube_context_is_supported() {
   fi
 }
 
+# The extracted production block invokes these stubs and assigns all_ready.
+# shellcheck disable=SC2034,SC2329,SC2154
+assert_mcp_proxy_bootstrap_wait_is_bounded_and_fail_closed() {
+  local block outcome result
+  block="$(sed -n '/^CORE_DEPLOYS=(/,/^done$/p' scripts/minikube/full-setup.sh)"
+  for outcome in ready unavailable; do
+    result="$(
+      KC=fixture_kubectl
+      proxy_waits=0
+      log() { :; }
+      ok() { :; }
+      warn() { :; }
+      err() { :; }
+      postgres_has_invalid_checkpoint() { return 1; }
+      fixture_kubectl() {
+        if [[ "$*" == 'rollout status deployment/mcp-proxy -n mcp-server --timeout=180s' ]]; then
+          proxy_waits=$((proxy_waits + 1))
+          [[ "$outcome" == ready ]]
+          return
+        fi
+        return 0
+      }
+      eval "$block"
+      printf '%s %s' "$proxy_waits" "$all_ready"
+    )"
+    if [[ "$outcome" == ready && "$result" != '1 true' ]] || \
+       [[ "$outcome" == unavailable && "$result" != '1 false' ]]; then
+      fail "mcp-proxy bootstrap wait must run once with a finite deadline and block completion on failure ($outcome: $result)"
+      return
+    fi
+  done
+  pass "mcp-proxy bootstrap wait is bounded and failure blocks setup completion"
+}
+
 assert_gfs_provisioning_follows_migrations_and_core_readiness() {
   local overlay_line ensure_line migration_line reconcile_after_migration control_ready_line core_block reset_block wal_block
   local reset_boundary reset_overlay reset_pg_ready reset_converge
@@ -1517,6 +1551,7 @@ assert_branch_profile_deploy_dir_is_used
 assert_member_registration_hmac_is_patched
 assert_branch_scoped_minikube_context_is_supported
 assert_gfs_provisioning_follows_migrations_and_core_readiness
+assert_mcp_proxy_bootstrap_wait_is_bounded_and_fail_closed
 assert_full_setup_defaults_to_db_rebuild
 assert_makefile_passes_reuse_db
 assert_reuse_db_normalizer_precedes_flag_loop

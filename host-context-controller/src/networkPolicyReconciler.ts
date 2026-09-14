@@ -1807,7 +1807,10 @@ export class NetworkPolicyReconciler {
             const latest = options.resolveCurrentContext(current.name)
             return latest !== undefined && sameContextDesiredRevision(current, latest)
           }
-          await this.reconcileContext(current, { isCurrent: contextEffectIsCurrent })
+          const completed = await this.reconcileContext(current, {
+            isCurrent: contextEffectIsCurrent,
+          })
+          if (!completed) throw new Error(DESIRED_NETWORKPOLICY_INVENTORY_CHANGED_MESSAGE)
         })
       } catch (error) {
         contextAdditiveFailures.push(error)
