@@ -21,6 +21,8 @@ const mockVerifyInternalControlJwt = vi.fn()
 const mockIsAdminTokenRevoked = vi.fn()
 const mockVerifyUserDelegationV2 = vi.fn()
 const mockCheckpointActionAuthority = vi.fn()
+const mockCaptureWorkflowTriggerAuthorityFence = vi.fn()
+const mockRequireCurrentWorkflowTriggerAuthority = vi.fn()
 
 vi.mock('../src/db.js', () => ({
   pool: {
@@ -69,6 +71,16 @@ vi.mock('../src/utils/auth/userDelegationV2Token.js', () => ({
 
 vi.mock('../src/services/access/actionAuthorityCheckpoint.js', () => ({
   checkpointActionAuthority: (...args: unknown[]) => mockCheckpointActionAuthority(...args),
+}))
+
+vi.mock('../src/services/workflows/workflowAuthorityBindingService.js', async importOriginal => ({
+  ...(await importOriginal<
+    typeof import('../src/services/workflows/workflowAuthorityBindingService.js')
+  >()),
+  captureWorkflowTriggerAuthorityFence: (...args: unknown[]) =>
+    mockCaptureWorkflowTriggerAuthorityFence(...args),
+  requireCurrentWorkflowTriggerAuthority: (...args: unknown[]) =>
+    mockRequireCurrentWorkflowTriggerAuthority(...args),
 }))
 
 vi.mock('../src/utils/auth/delegationToken.js', () => ({
@@ -153,6 +165,8 @@ describe('routes/external/workflows', () => {
     mockIsAdminTokenRevoked.mockReset()
     mockVerifyUserDelegationV2.mockReset()
     mockCheckpointActionAuthority.mockReset()
+    mockCaptureWorkflowTriggerAuthorityFence.mockReset()
+    mockRequireCurrentWorkflowTriggerAuthority.mockReset()
     gateway = new MockGateway(RECIPE_NS)
 
     mockIssueWorkflowControlToken.mockReturnValue({
@@ -261,6 +275,10 @@ describe('routes/external/workflows', () => {
       },
       destination: null,
     })
+    mockRequireCurrentWorkflowTriggerAuthority.mockImplementation(
+      async ({ authority }: { authority: unknown }) => authority
+    )
+    mockCaptureWorkflowTriggerAuthorityFence.mockResolvedValue({ fingerprint: 'current-fence' })
   })
 
   describe('Caller-kind gate (allowedCallerKinds: ["user-session"])', () => {
@@ -523,6 +541,8 @@ describe('routes/external/workflows', () => {
       }
       mockPoolQuery
         .mockResolvedValueOnce({ rows: [{ '1': 1 }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [{ id: 'binding-1' }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [dbRow], rowCount: 1 })
 

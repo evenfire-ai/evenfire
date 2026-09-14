@@ -1,3 +1,4 @@
+import type { DbClient } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import { getMcpHostCallerKey } from '../../utils/auth/mcpHostJwtToken.js'
 import {
@@ -228,6 +229,10 @@ export async function triggerWorkflow(params: {
   correlationId?: string
   authority?: WorkflowAuthorityBinding | null
   reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction?: (
+    db: DbClient,
+    authority: WorkflowAuthorityBinding
+  ) => Promise<WorkflowAuthorityBinding>
 }): Promise<WorkflowTriggerResult> {
   const { gateway, caller, recipeNamespace: ns, recipeName: name, body } = params
   const idempotencyKey = params.idempotencyKey.trim()
@@ -375,6 +380,7 @@ export async function triggerWorkflow(params: {
       },
       authority: params.authority,
       reauthorize: params.reauthorize,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
 
     if (approval.kind === 'mismatch') {
@@ -476,6 +482,7 @@ export async function triggerWorkflow(params: {
       ttl_seconds_after_finished: ttlSecondsAfterFinished,
       authority: params.authority,
       reauthorize: params.reauthorize,
+      validateCurrentInTransaction: params.validateCurrentInTransaction,
     })
     return { kind: 'run', ...result }
   } catch (err) {

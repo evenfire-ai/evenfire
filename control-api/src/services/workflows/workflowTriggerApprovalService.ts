@@ -1,5 +1,5 @@
 import { config } from '../../config.js'
-import { withTransaction } from '../../db.js'
+import { type DbClient, withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
 import { emitNotification } from '../notificationEmitter.js'
 import { ApprovalPromptHistoryService } from '../tracing/approvalPromptHistoryService.js'
@@ -63,6 +63,10 @@ export async function createWorkflowTriggerApprovalRequest(params: {
   runIntent: WorkflowTriggerApprovalRunIntent
   authority?: WorkflowAuthorityBinding | null
   reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction?: (
+    db: DbClient,
+    authority: WorkflowAuthorityBinding
+  ) => Promise<WorkflowAuthorityBinding>
 }): Promise<WorkflowTriggerApprovalRequestResult> {
   const ttlSeconds = config.userApprovalRequestDefaultTtlSec
   const payloadHash = computePayloadHash({
@@ -73,29 +77,55 @@ export async function createWorkflowTriggerApprovalRequest(params: {
     ttlSeconds,
   })
 
+  const phaseOneAuthority = params.reauthorize ? await params.reauthorize() : params.authority
+  if (params.authority && phaseOneAuthority?.bindingHash !== params.authority.bindingHash) {
+    throw new Error('workflow_trigger_authority_changed')
+  }
+  if (params.reauthorize && phaseOneAuthority && !params.validateCurrentInTransaction) {
+    throw new Error('workflow_trigger_current_authority_validator_required')
+  }
+
   const result = await withTransaction(async db => {
-    const authority = params.reauthorize ? await params.reauthorize() : params.authority
-    if (params.authority && authority?.bindingHash !== params.authority.bindingHash) {
-      throw new Error('workflow_trigger_authority_changed')
+    let existingBeforeFence = { rowCount: 0 as number | null }
+    if (phaseOneAuthority) {
+      await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+        `workflow_approval:${params.recipeNamespace}:${params.recipeName}:${params.idempotencyKey}`,
+      ])
+      existingBeforeFence = await db.query(
+        `SELECT id FROM workflow_approval_requests
+          WHERE recipe_namespace = $1 AND recipe_name = $2 AND idempotency_key = $3`,
+        [params.recipeNamespace, params.recipeName, params.idempotencyKey]
+      )
     }
-    const inserted = await db.query(
-      `INSERT INTO workflow_approval_requests
+    let authority = phaseOneAuthority
+    let inserted: { rows: unknown[]; rowCount: number | null } = { rows: [], rowCount: 0 }
+    if ((existingBeforeFence.rowCount ?? 0) === 0) {
+      authority =
+        phaseOneAuthority && params.validateCurrentInTransaction
+          ? await params.validateCurrentInTransaction(db, phaseOneAuthority)
+          : phaseOneAuthority
+      if (phaseOneAuthority && authority?.bindingHash !== phaseOneAuthority.bindingHash) {
+        throw new Error('workflow_trigger_authority_changed')
+      }
+      inserted = await db.query(
+        `INSERT INTO workflow_approval_requests
          (recipe_namespace, recipe_name, expires_at, status, target_user_id, target_team_id, payload, idempotency_key, correlation, payload_hash)
        VALUES ($1, $2, NOW() + interval '1 second' * $3, 'pending', $4, $5, $6::jsonb, $7, $8::jsonb, $9)
        ON CONFLICT (recipe_namespace, recipe_name, idempotency_key) DO NOTHING
        RETURNING id, expires_at, status`,
-      [
-        params.recipeNamespace,
-        params.recipeName,
-        ttlSeconds,
-        params.targetUserId ?? null,
-        params.targetTeamId ?? null,
-        JSON.stringify(params.payload),
-        params.idempotencyKey,
-        params.correlation ? JSON.stringify(params.correlation) : null,
-        payloadHash,
-      ]
-    )
+        [
+          params.recipeNamespace,
+          params.recipeName,
+          ttlSeconds,
+          params.targetUserId ?? null,
+          params.targetTeamId ?? null,
+          JSON.stringify(params.payload),
+          params.idempotencyKey,
+          params.correlation ? JSON.stringify(params.correlation) : null,
+          payloadHash,
+        ]
+      )
+    }
 
     if ((inserted.rowCount ?? 0) === 0) {
       const existing = await db.query(

@@ -349,13 +349,10 @@ describe('services/workflowRunService.createRun authority idempotency', () => {
 
   it('rejects a v2 retry of an existing legacy run', async () => {
     const db = { query: vi.fn() }
-    db.query
-      .mockResolvedValueOnce({ rows: [{ id: 'binding-1' }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({
-        rows: [{ ...input, initiating_authority_binding_id: null }],
-        rowCount: 1,
-      })
+    db.query.mockResolvedValueOnce({ rows: [], rowCount: 1 }).mockResolvedValueOnce({
+      rows: [{ ...input, initiating_authority_binding_id: null, authorityBindingHash: null }],
+      rowCount: 1,
+    })
 
     await expect(createRun({ ...input, authority }, db as never)).rejects.toBeInstanceOf(
       WorkflowRunIdempotencyConflictError
@@ -372,5 +369,23 @@ describe('services/workflowRunService.createRun authority idempotency', () => {
     await expect(createRun(input, db as never)).rejects.toBeInstanceOf(
       WorkflowRunIdempotencyConflictError
     )
+  })
+
+  it('does not persist a run when the final authority fence is unavailable', async () => {
+    const db = { query: vi.fn() }
+    db.query
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    const validateCurrentInTransaction = vi
+      .fn()
+      .mockRejectedValue(
+        Object.assign(new Error('authority_unavailable'), { code: 'authority_unavailable' })
+      )
+
+    await expect(
+      createRun({ ...input, authority, validateCurrentInTransaction }, db as never)
+    ).rejects.toMatchObject({ code: 'authority_unavailable' })
+    expect(db.query).toHaveBeenCalledTimes(2)
+    expect(validateCurrentInTransaction).toHaveBeenCalledTimes(1)
   })
 })
