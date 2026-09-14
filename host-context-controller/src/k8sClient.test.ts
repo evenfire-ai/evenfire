@@ -4637,8 +4637,8 @@ describe('McpServerWatcher startup', () => {
     expect(appliedContexts).toEqual(['stale-context'])
     expect(appliedServers).toEqual(['stale-server'])
     expect(
-      warnSpy.mock.calls.some(
-        call => String(call[0]) === '[K8s] pass ended without certifying: inventory authority lost'
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('pass ended without certifying: inventory authority lost')
       )
     ).toBe(false)
     expect((watcher as any).initialConvergenceRetryAttempts.has('NetworkPolicy')).toBe(false)
