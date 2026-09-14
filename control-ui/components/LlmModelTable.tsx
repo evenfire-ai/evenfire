@@ -260,6 +260,13 @@ export function LlmModelTable({
         }
   )
 
+  const providerColumns: TableHeaderColumn[] = [
+    { key: 'provider', label: 'Provider' },
+    { key: 'models', label: 'Models' },
+    { key: 'availability', label: 'Availability', colSpan: 4 },
+    { key: 'actions', label: 'Actions', align: 'right', colSpan: 2 },
+  ]
+
   return (
     <div className="cu-card cu-card--viewport-fill cu-section-card">
       <TablePanelHeader
@@ -343,7 +350,7 @@ export function LlmModelTable({
       <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
         <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
           <thead>
-            <TableHeaderRow columns={modelColumns} />
+            <TableHeaderRow columns={providerColumns} />
           </thead>
           {isInitialLoad ? (
             <tbody>
@@ -379,6 +386,7 @@ export function LlmModelTable({
               return (
                 <GroupedTableBody
                   childBodyClassName="cu-llm-model-group__children"
+                  childHeader={<TableHeaderRow columns={modelColumns} />}
                   className="cu-llm-model-group"
                   colSpan={modelColumns.length}
                   disclosureClassName="cu-llm-model-group__toggle"

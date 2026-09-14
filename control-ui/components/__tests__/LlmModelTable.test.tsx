@@ -358,6 +358,11 @@ describe('LlmModelTable provider groups', () => {
   it('renders one collapsed summary per provider family and expands independently', () => {
     renderTable([baseModel, openAiModel])
 
+    expect(screen.getByRole('columnheader', { name: 'Provider' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Models' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Availability' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Credential' })).toBeNull()
+
     expect(screen.getByRole('button', { name: 'Expand Anthropic models' })).toHaveAttribute(
       'aria-expanded',
       'false'
@@ -371,6 +376,7 @@ describe('LlmModelTable provider groups', () => {
 
     expandAnthropicModels()
 
+    expect(screen.getByRole('columnheader', { name: 'Credential' })).toBeInTheDocument()
     expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
     expect(screen.queryByText('gpt-5')).toBeNull()
     expect(screen.getByRole('button', { name: 'Collapse Anthropic models' })).toHaveAttribute(

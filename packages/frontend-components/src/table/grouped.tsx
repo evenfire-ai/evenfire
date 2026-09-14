@@ -6,6 +6,7 @@ import { classNames } from './utils'
 
 export function GroupedTableBody({
   childBodyClassName,
+  childHeader,
   children,
   className,
   colSpan,
@@ -51,7 +52,12 @@ export function GroupedTableBody({
         className={classNames('eft-table-group__children', childBodyClassName)}
         id={childRowsId}
       >
-        {expanded ? children : null}
+        {expanded ? (
+          <>
+            {childHeader}
+            {children}
+          </>
+        ) : null}
       </tbody>
     </Fragment>
   )

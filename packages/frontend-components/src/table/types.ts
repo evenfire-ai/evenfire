@@ -32,6 +32,7 @@ export type TableStateRowProps = {
 
 export type GroupedTableBodyProps = {
   childBodyClassName?: string
+  childHeader?: ReactNode
   children: ReactNode
   className?: string
   colSpan: number
