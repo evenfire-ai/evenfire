@@ -424,7 +424,6 @@ export class AgentStateMachine extends EventEmitter {
 
   setActionAuthorityCheckpoint(checkpoint: RuntimeActionCheckpoint): void {
     this.actionAuthorityCheckpoint = checkpoint
-    console.log('[Agent] Runtime action authority checkpoint set')
   }
 
   /**
