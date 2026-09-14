@@ -17,6 +17,12 @@ export function candidateForRequest(req: any): object {
   if (method === "POST" && path === "/safe-pr2") {
     return { operationId: "chat.message.invoke" };
   }
+  if (path === "/safe-v2-only-view") {
+    return { operationId: "sandbox.view" };
+  }
+  if (path === "/unsafe-v2-legacy-pass-through") {
+    return { operationId: "sandbox.view" };
+  }
   if (method === "GET" && path === "/unsafe-wrong-method") {
     return { operationId: "chat.message.invoke" };
   }

@@ -267,6 +267,84 @@ private predicate functionOccursWithin(Function inner, Function outer) {
   outer.getLocation().getEndLine() >= inner.getLocation().getEndLine()
 }
 
+private predicate isLiteral4xx(Expr status) {
+  exists(int value | value = status.getIntValue() and value >= 400 and value <= 499)
+}
+
+private predicate isFixed4xxReturn(ReturnStmt ret) {
+  exists(MethodCallExpr response |
+    response.getMethodName() = "sendStatus" and
+    isLiteral4xx(response.getArgument(0)) and
+    response.getParentExpr*() = ret.getExpr()
+  )
+  or
+  exists(MethodCallExpr status |
+    status.getMethodName() = "status" and
+    isLiteral4xx(status.getArgument(0)) and
+    status.getParentExpr*() = ret.getExpr()
+  )
+}
+
+private predicate isFixed4xxResponseCall(CallExpr call) {
+  exists(MethodCallExpr response |
+    response.getMethodName() in ["sendStatus", "status"] and
+    isLiteral4xx(response.getArgument(0)) and
+    response.getParentExpr*() = call
+  )
+}
+
+private predicate isFixed4xxBranch(Stmt branch) {
+  exists(ReturnStmt ret |
+    (branch = ret or ret.nestedIn(branch)) and isFixed4xxReturn(ret)
+  )
+  or
+  exists(BlockStmt block, ExprStmt response, ReturnStmt ret |
+    branch = block and
+    response = block.getStmt(0) and
+    isFixed4xxResponseCall(response.getExpr().(CallExpr)) and
+    ret = block.getStmt(1) and
+    not exists(ret.getExpr())
+  )
+}
+
+private predicate isCanonicalOauthBindingValidator(CallExpr call) {
+  exists(Function validator, CallExpr parse, CallExpr targetValidation, CallExpr targetHash |
+    call.getCallee().(VarAccess).getVariable() = validator.getVariable() and
+    validator.getName() = "hasExpectedV2OAuthContext" and
+    validator.getFile().getRelativePath() = "control-api/src/routes/internal/oauth.ts" and
+    validator.getNumParameter() = 2 and
+    parse.getCalleeName() = "parse" and
+    parse.getEnclosingFunction() = validator and
+    targetValidation.getCalleeName() = "validateActionOperationTarget" and
+    targetValidation.getEnclosingFunction() = validator and
+    targetHash.getCalleeName() = "hashActionTarget" and
+    targetHash.getEnclosingFunction() = validator
+  )
+}
+
+private predicate isTerminatingOauthBindingGuard(CallExpr binding, Function handler) {
+  exists(IfStmt guard, LogNotExpr denied |
+    guard.getCondition() = denied and
+    denied.getOperand() = binding and
+    guard.getCondition().getEnclosingFunction() = handler and
+    isFixed4xxBranch(guard.getThen())
+  )
+}
+
+private predicate isV2OnlyGuard(Function guard) {
+  exists(IfStmt denied, LogNotExpr missingV2, CallExpr classifier, CallExpr next |
+    guard.getName() = "requireV2Delegation" and
+    denied.getCondition() = missingV2 and
+    missingV2.getOperand() = classifier and
+    classifier.getCalleeName() = "isV2ViewRequest" and
+    classifier.getEnclosingFunction() = guard and
+    isFixed4xxBranch(denied.getThen()) and
+    next.getCalleeName() = "next" and
+    next.getEnclosingFunction() = guard and
+    denied.getLocation().getEndLine() < next.getLocation().getStartLine()
+  )
+}
+
 private predicate importedGuardAtIndex(
   MethodCallExpr registration, int index, string path, string importedName
 ) {
@@ -298,17 +376,24 @@ private predicate hasRpcProxyDelegationConsumer(Routing::Node useSite) {
   )
   or
   exists(
-    MethodCallExpr registration, VarAccess middleware, Function authority, Function handler,
-    int authorityIndex, int handlerIndex, int useIndex
+    MethodCallExpr registration, VarAccess middleware, Function authority, VarAccess v2Only,
+    Function v2OnlyGuard, Function handler, int authorityIndex, int v2OnlyIndex, int handlerIndex,
+    int useIndex
   |
     registeredRouteContainsNodeAtIndex(registration, useSite, useIndex) and
     middleware = registration.getArgument(authorityIndex) and
     handler = registration.getArgument(handlerIndex) and
+    v2Only = registration.getArgument(v2OnlyIndex) and
     authorityIndex < handlerIndex and
-    (useIndex = authorityIndex or useIndex = handlerIndex) and
+    authorityIndex < v2OnlyIndex and
+    v2OnlyIndex < handlerIndex and
+    (useIndex = authorityIndex or useIndex = v2OnlyIndex or useIndex = handlerIndex) and
     middleware.getName() = "v2ViewAuthority" and
     authority.getName() = middleware.getName() and
     authority.getFile() = registration.getFile() and
+    v2OnlyGuard.getVariable() = v2Only.getVariable() and
+    v2OnlyGuard.getFile() = registration.getFile() and
+    isV2OnlyGuard(v2OnlyGuard) and
     canonicalBinderAcceptsRoute(registration) and
     exists(CallExpr declaredV2, CallExpr rpcAuth, CallExpr scope |
       functionOccursWithin(declaredV2.getEnclosingFunction(), authority) and
@@ -416,14 +501,18 @@ private predicate hasControlApiRpcProxyOauthConsumer(Routing::Node useSite, Data
     isImportedCall(serviceGuard, "control-api/src/middleware/internalServiceAuth.ts",
       "requireInternalService") and
     serviceGuard.getArgument(0).getStringValue() = "rpc-proxy" and
-    binding.getCalleeName() = "hasExpectedV2OAuthContext" and
+    isCanonicalOauthBindingValidator(binding) and
     binding.getEnclosingFunction() = handler and
+    isTerminatingOauthBindingGuard(binding, handler) and
     (
       useIndex = guardIndex
       or
       reference.asExpr() = binding
       or
-      binding.getLocation().getEndLine() < reference.getLocation().getStartLine()
+      exists(IfStmt bindingGuard |
+        binding.getParentExpr*() = bindingGuard.getCondition() and
+        bindingGuard.getLocation().getEndLine() < reference.getLocation().getStartLine()
+      )
     )
   )
 }
@@ -474,6 +563,7 @@ private predicate hasWorkspaceFilesystemConsumer(Routing::Node useSite, DataFlow
     liveCheckpoint.getEnclosingFunction() = checkpoint and
     routeCheckpoint.getCalleeName() = "checkpoint" and
     routeCheckpoint.getEnclosingFunction() = handler and
+    exists(AwaitExpr awaited | awaited.getOperand() = routeCheckpoint) and
     (
       useIndex = scopeIndex or
       routeCheckpoint.getLocation().getEndLine() < reference.getLocation().getStartLine()
