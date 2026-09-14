@@ -132,6 +132,33 @@ run_group() {
   rm -f "$log"
 }
 
+# Protocol fixtures and runner guards use node:test rather than a package's Vitest script.
+run_node_group() {
+  local name="$1" rel log
+  shift
+  local files=()
+  for rel in "$@"; do
+    require_file "$rel" || return 1
+    files+=("${ROOT}/$rel")
+  done
+  [[ ${#files[@]} -gt 0 ]] || { fail "$name: group listed no suite files"; return 1; }
+  log="$(mktemp)"
+  echo "── ${name} ──"
+  if ! node --test --test-reporter=tap "${files[@]}" >"$log" 2>&1; then
+    fail "$name: command failed"
+    cat "$log"
+    rm -f "$log"
+    return 1
+  fi
+  if ! assert_executed_counts "$name" "$log"; then
+    rm -f "$log"
+    return 1
+  fi
+  rm -f "$log"
+  GROUPS_RUN=$((GROUPS_RUN + 1))
+  pass "$name"
+}
+
 require_ci_matrix_entry() {
   local entry="$1"
   if ! grep -Eq "^[[:space:]]+- ${entry}$" "${ROOT}/.github/workflows/ci-public.yml"; then
@@ -168,6 +195,12 @@ fi
 
 run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test.cjs"
 run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
+
+run_node_group "approved-tools-fixtures-and-runner" \
+  "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
+  "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
+  "scripts/e2e/run-codex-approved-tools.test.mjs"
+
 
 run_group "control-api" "control-api" \
   "test/codexSubscriptionRedirectUri.test.ts" \
@@ -275,8 +308,8 @@ else
   fi
 fi
 
-if [[ "${GROUPS_RUN}" -lt 8 ]]; then
-  fail "expected 8 T0 groups, ran ${GROUPS_RUN}"
+if [[ "${GROUPS_RUN}" -ne 11 ]]; then
+  fail "expected all 11 T0 groups, ran ${GROUPS_RUN}"
 fi
 
 if [[ "${FAIL}" -ne 0 ]]; then

@@ -109,19 +109,351 @@ export function assertResourceRoundTrip(expected, observed) {
     throw new Error('Fixture field was not preserved by the API server')
 }
 
-function command(executable, args, { input, timeout = 60_000, inherit = false } = {}) {
-  const result = spawnSync(executable, args, {
+// All reads and state writes use the opened descriptor, not a path reopened
+// after a check. Nonblocking open lets us reject FIFOs without hanging.
+export function openOwnedFile(
+  root,
+  name,
+  { create = false, writable = false, maxBytes = 4 * 1024 * 1024 } = {}
+) {
+  if (path.basename(name) !== name || !name || name === '.' || name === '..')
+    throw new Error('Expected a single owned filename')
+  const directory = fs.openSync(
+    root,
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+  )
+  try {
+    const parent = fs.fstatSync(directory)
+    if (!parent.isDirectory() || parent.uid !== process.getuid() || parent.mode & 0o022)
+      throw new Error('Unsafe owner directory')
+    const fd = fs.openSync(
+      path.join(root, name),
+      (writable || create ? fs.constants.O_RDWR : fs.constants.O_RDONLY) |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_NONBLOCK |
+        (create ? fs.constants.O_CREAT | fs.constants.O_EXCL : 0),
+      0o600
+    )
+    try {
+      const stat = fs.fstatSync(fd)
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== parent.uid ||
+        stat.mode & 0o022 ||
+        stat.size > maxBytes
+      )
+        throw new Error('Unsafe or oversized owned file')
+      return { fd, dev: stat.dev, ino: stat.ino, maxBytes }
+    } catch (error) {
+      fs.closeSync(fd)
+      throw error
+    }
+  } finally {
+    fs.closeSync(directory)
+  }
+}
+
+export function readOwnedDescriptor(file) {
+  const before = fs.fstatSync(file.fd)
+  if (
+    !before.isFile() ||
+    before.nlink !== 1 ||
+    before.dev !== file.dev ||
+    before.ino !== file.ino ||
+    before.size > file.maxBytes
+  )
+    throw new Error('Owned file changed')
+  const buffer = Buffer.alloc(file.maxBytes + 1)
+  let offset = 0
+  while (offset < buffer.length) {
+    const count = fs.readSync(file.fd, buffer, offset, buffer.length - offset, offset)
+    if (!count) break
+    offset += count
+  }
+  const after = fs.fstatSync(file.fd)
+  if (
+    offset > file.maxBytes ||
+    before.size !== after.size ||
+    before.mtimeMs !== after.mtimeMs ||
+    after.nlink !== 1
+  )
+    throw new Error('Owned file changed or exceeds its byte budget')
+  return buffer.subarray(0, offset).toString('utf8')
+}
+
+export function readOwnedFile(root, name, maxBytes) {
+  const file = openOwnedFile(root, name, { maxBytes })
+  try {
+    return readOwnedDescriptor(file)
+  } finally {
+    fs.closeSync(file.fd)
+  }
+}
+
+export function validateProfile(profile) {
+  if (
+    typeof profile !== 'string' ||
+    !/^clerum-[a-z0-9-]+-[a-f0-9]{7,8}$/.test(profile) ||
+    profile.length > 100
+  )
+    throw new Error('Invalid owned profile')
+  return profile
+}
+
+export function validateOwnerArgs(args, recording, profile, pidDirectory) {
+  validateProfile(profile)
+  if (args.length !== (recording ? 9 : 8)) throw new Error('Invalid owner argument count')
+  const [record, ...tail] = args
+  if (recording && !/^[1-9][0-9]{0,9}$/.test(tail.shift())) throw new Error('Invalid child PID')
+  const [target, context, worktree, namespace, service, localPort, remotePort] = tail
+  if (
+    target !== profile ||
+    context !== profile ||
+    worktree !== repo ||
+    !['control-plane', 'mcp-server'].includes(namespace) ||
+    !/^(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250))$/.test(service)
+  )
+    throw new Error('Invalid owner binding')
+  if (
+    !/^[0-9]{4,5}$/.test(localPort) ||
+    Number(localPort) < 1024 ||
+    Number(localPort) > 65535 ||
+    remotePort !== (namespace === 'control-plane' ? '9090' : '8080')
+  )
+    throw new Error('Invalid owner port')
+  if (
+    path.dirname(record) !== pidDirectory ||
+    !/^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250))\.pid$/.test(
+      path.basename(record)
+    )
+  )
+    throw new Error('Invalid owner record path')
+  return args
+}
+
+export function validateKubectlArgs(args, profile) {
+  if (args[0] !== `--context=${validateProfile(profile)}` || args[1] !== '--request-timeout=30s')
+    throw new Error('Invalid kubectl context or timeout')
+  const operation = args.slice(2)
+  const exact = allowed => JSON.stringify(operation) === JSON.stringify(allowed)
+  if (
+    exact(['create', '--dry-run=server', '-f', '-', '-o', 'json']) ||
+    exact(['create', '-f', '-', '-o', 'json'])
+  )
+    return args
+  const [flag, namespace, verb, resource] = operation
+  if (flag !== '-n' || !['control-plane', 'mcp-host', 'mcp-server'].includes(namespace))
+    throw new Error('Unsupported namespace')
+  if (
+    verb === 'get' &&
+    operation.length === 6 &&
+    operation[4] === '-o' &&
+    operation[5] === 'json' &&
+    ((namespace === 'control-plane' &&
+      ['deployment/codex-llm-proxy', 'service/codex-llm-proxy'].includes(resource)) ||
+      (namespace === 'mcp-host' && resource === 'configmap/mcp-host-config'))
+  )
+    return args
+  if (
+    operation.length === 6 &&
+    operation[5] === '--timeout=180s' &&
+    ((verb === 'rollout' && resource === 'status') ||
+      (verb === 'wait' && resource === '--for=create')) &&
+    ((namespace === 'control-plane' && operation[4] === 'deployment/codex-llm-proxy') ||
+      (namespace === 'mcp-server' &&
+        /^deployment\/approved-tools-[a-f0-9]{12}-mcp-(83|150|250)$/.test(operation[4])))
+  )
+    return args
+  if (
+    namespace === 'control-plane' &&
+    verb === 'patch' &&
+    resource === 'deployment/codex-llm-proxy' &&
+    operation.length === 7 &&
+    operation[4] === '--type=strategic' &&
+    operation[5] === '-p'
+  ) {
+    const patch = JSON.parse(operation[6])
+    const entries = patch?.spec?.template?.spec?.containers
+    if (!Array.isArray(entries) || entries.length !== 1) throw new Error('Invalid proxy patch')
+    const c = entries[0]
+    if (
+      c.name !== 'codex-llm-proxy' ||
+      !/^(clerum\/codex-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/codex-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/.test(
+        c.image
+      ) ||
+      !['Always', 'IfNotPresent', 'Never'].includes(c.imagePullPolicy)
+    )
+      throw new Error('Invalid proxy image')
+    if (
+      !Array.isArray(c.env) ||
+      c.env.length !== 3 ||
+      new Set(c.env.map(e => e.name)).size !== 3 ||
+      c.env.some(
+        e =>
+          !proxyFlags.includes(e.name) ||
+          Object.keys(e).length !== 2 ||
+          (e.$patch !== 'delete' &&
+            !(e.name === 'NODE_ENV'
+              ? ['production', 'development', 'test'].includes(e.value)
+              : e.name === 'CODEX_APPROVED_TOOLS_TEST_ONLY'
+                ? e.value === '1'
+                : e.value === profile))
+      )
+    )
+      throw new Error('Invalid proxy environment')
+    const normalized = {
+      spec: {
+        template: {
+          spec: {
+            containers: [
+              { name: c.name, image: c.image, imagePullPolicy: c.imagePullPolicy, env: c.env },
+            ],
+          },
+        },
+      },
+    }
+    if (JSON.stringify(normalized) !== JSON.stringify(patch))
+      throw new Error('Unexpected proxy patch fields')
+    return args
+  }
+  // Remote Node programs are fixed feature probes or the bounded repository
+  // seed, never selected through environment variables or an arbitrary path.
+  if (namespace === 'control-plane' && verb === 'exec') {
+    if (
+      operation.length === 8 &&
+      operation[4] === '--' &&
+      operation[5] === 'node' &&
+      operation[6] === '-e'
+    ) {
+      const keys =
+        resource === 'deployment/control-api'
+          ? ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED']
+          : resource === 'deployment/codex-llm-proxy'
+            ? ['CODEX_LLM_PROXY_EXECUTION_ENABLED']
+            : null
+      if (
+        keys &&
+        operation[7] ===
+          `process.stdout.write(JSON.stringify(${JSON.stringify(keys)}.every(key => process.env[key] === 'true')))`
+      )
+        return args
+    }
+    if (
+      operation.length === 10 &&
+      resource === '-i' &&
+      operation[4] === 'deployment/control-api' &&
+      operation[5] === '--' &&
+      operation[6] === 'node' &&
+      operation[7] === '--input-type=module' &&
+      operation[8] === '--eval' &&
+      operation[9] ===
+        readOwnedFile(
+          path.join(repo, 'tests/e2e/fixtures/codex-subscription/approved-tools-setup'),
+          'seed.mjs',
+          128 * 1024
+        )
+    )
+      return args
+  }
+  throw new Error('Unsupported kubectl operation')
+}
+
+function command(operation, args, { input, timeout = 60_000, inherit = false } = {}) {
+  const env = { ...process.env }
+  for (const key of Object.keys(env))
+    if (
+      ['BASH_ENV', 'ENV', 'SHELLOPTS', 'CDPATH', 'NODE_OPTIONS', 'NODE_PATH'].includes(key) ||
+      key.startsWith('BASH_FUNC_')
+    )
+      delete env[key]
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 25 * 60_000)
+    throw new Error('Invalid deadline')
+  const options = {
     cwd: repo,
+    env,
     input,
     encoding: 'utf8',
     timeout,
     maxBuffer: 4 * 1024 * 1024,
     stdio: inherit ? 'inherit' : ['pipe', 'pipe', 'pipe'],
-  })
+  }
+  let result
+  switch (operation) {
+    case 'lease':
+      result = spawnSync('bash', ['scripts/minikube/require-t2-mutation-lock.sh'], options)
+      break
+    case 'head':
+      result = spawnSync('git', ['rev-parse', 'HEAD'], options)
+      break
+    case 'kubectl':
+      result = spawnSync(
+        'kubectl',
+        validateKubectlArgs(args, required('MINIKUBE_PROFILE')),
+        options
+      )
+      break
+    case 'pf_owner_record_process':
+      result = spawnSync(
+        'bash',
+        [
+          '-c',
+          'source scripts/minikube/port-forward-owner.sh; pf_owner_record_process "$@"',
+          'pf-owner',
+          ...args,
+        ],
+        options
+      )
+      break
+    case 'pf_owner_record_process_matches':
+      result = spawnSync(
+        'bash',
+        [
+          '-c',
+          'source scripts/minikube/port-forward-owner.sh; pf_owner_record_process_matches "$@"',
+          'pf-owner',
+          ...args,
+        ],
+        options
+      )
+      break
+    case 'pf_owner_cleanup_record':
+      result = spawnSync(
+        'bash',
+        [
+          '-c',
+          'source scripts/minikube/port-forward-owner.sh; pf_owner_cleanup_record "$@"',
+          'pf-owner',
+          ...args,
+        ],
+        options
+      )
+      break
+    case 'runner':
+      result = spawnSync(
+        process.execPath,
+        [
+          'scripts/minikube/run-with-deadline.mjs',
+          '--timeout-seconds',
+          '1500',
+          '--kill-grace-seconds',
+          '5',
+          '--label',
+          'approved-tools-runner',
+          '--',
+          process.execPath,
+          'scripts/e2e/run-codex-approved-tools.mjs',
+        ],
+        { ...options, timeout: 1_520_000 }
+      )
+      break
+    default:
+      throw new Error('Unsupported fixture process')
+  }
   // Subprocess output can include runtime state. Only callers parse their
   // specific safe result; never embed raw stderr/stdout in an exception.
   if (result.error || result.signal || result.status !== 0)
-    throw new Error(`${path.basename(executable)} operation failed`)
+    throw new Error('Bounded fixture operation failed')
   return result.stdout ?? ''
 }
 
@@ -178,25 +510,31 @@ async function main() {
     !/^clerum-.+-[a-f0-9]{7,8}$/.test(profile)
   )
     throw new Error('Owned branch Minikube context required')
-  command('bash', ['scripts/minikube/require-t2-mutation-lock.sh'])
+  command('lease', [])
   const evidence = validateRunDirectory(
     required('APPROVED_TOOLS_CANONICAL_ROOT'),
     required('APPROVED_TOOLS_EVIDENCE_DIR')
   )
-  const statePath = path.join(evidence, 'fixture-state.json')
   const kc = args => ['--context=' + profile, '--request-timeout=30s', ...args]
   const kubectl = (args, options) => command('kubectl', kc(args), options)
-  const head = command('git', ['rev-parse', 'HEAD']).trim()
-  const ownerLibrary = path.join(repo, 'scripts/minikube/port-forward-owner.sh')
-  const owner = (fn, args) =>
-    command('bash', [
-      '-c',
-      'source "$1"; shift; fn="$1"; shift; "$fn" "$@"',
-      'pf-owner',
-      ownerLibrary,
+  const head = command('head', []).trim()
+  const profilePidDirectory = fs.realpathSync(
+    path.join(required('T2_PROFILE_ROOT'), profile, 'pids')
+  )
+  const owner = (fn, args) => {
+    if (
+      ![
+        'pf_owner_record_process',
+        'pf_owner_record_process_matches',
+        'pf_owner_cleanup_record',
+      ].includes(fn)
+    )
+      throw new Error('Invalid owner function')
+    return command(
       fn,
-      ...args,
-    ])
+      validateOwnerArgs(args, fn === 'pf_owner_record_process', profile, profilePidDirectory)
+    )
+  }
   const validateForward = binding => {
     owner('pf_owner_record_process_matches', [
       binding.record,
@@ -210,8 +548,18 @@ async function main() {
     ])
   }
   let state
-  const save = () =>
-    fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 })
+  let stateFile
+  const save = () => {
+    // An interrupted in-place write may be incomplete. Restoration then fails
+    // JSON validation; it never guesses the previous image or deletes records.
+    // The existing descriptor prevents a replacement path redirecting writes.
+    const data = Buffer.from(JSON.stringify(state, null, 2) + '\n')
+    if (data.length > stateFile.maxBytes || fs.fstatSync(stateFile.fd).nlink !== 1)
+      throw new Error('Invalid state write')
+    fs.ftruncateSync(stateFile.fd, 0)
+    fs.writeSync(stateFile.fd, data, 0, data.length, 0)
+    fs.fsyncSync(stateFile.fd)
+  }
   async function restore() {
     if (!state || state.profile !== profile || state.worktree !== repo || state.head !== head)
       throw new Error('Fixture ownership mismatch')
@@ -279,22 +627,24 @@ async function main() {
     save()
   }
   if (action === 'restore') {
-    if (fs.lstatSync(statePath).isSymbolicLink()) throw new Error('Unsafe state file')
-    state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-    await restore()
+    stateFile = openOwnedFile(evidence, 'fixture-state.json', { writable: true })
+    try {
+      state = JSON.parse(readOwnedDescriptor(stateFile))
+      await restore()
+    } finally {
+      fs.closeSync(stateFile.fd)
+    }
     return
   }
   if (required('APPROVED_TOOLS_UPSTREAM_MODE') !== 'deterministic')
     throw new Error(
       'Synthetic preparation is deterministic-only; real accounts require separate authorized preconditions'
     )
-  if (fs.existsSync(statePath))
-    throw new Error('Fresh fixture run required; restore previous run explicitly')
   const seedFile = path.join(
     repo,
     'tests/e2e/fixtures/codex-subscription/approved-tools-setup/seed.mjs'
   )
-  const seedSource = fs.readFileSync(seedFile, 'utf8')
+  const seedSource = readOwnedFile(path.dirname(seedFile), path.basename(seedFile), 128 * 1024)
   for (const name of [
     'TEST_ADMIN_USERNAME',
     'TEST_ADMIN_PASSWORD',
@@ -331,9 +681,6 @@ async function main() {
   )
   if (hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
     throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
-  const profilePidDirectory = fs.realpathSync(
-    path.join(required('T2_PROFILE_ROOT'), profile, 'pids')
-  )
   const run = 'approved-tools-' + randomBytes(6).toString('hex')
   const ports = []
   while (ports.length < 4) {
@@ -385,14 +732,21 @@ async function main() {
     proxyUid: deployment.metadata.uid,
     restored: false,
   }
-  fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+  stateFile = openOwnedFile(evidence, 'fixture-state.json', { create: true })
+  save()
   async function startForward(namespace, service, localPort, remotePort, health, accept) {
     const record = path.join(profilePidDirectory, `${run}-${service}.pid`)
+    validateOwnerArgs(
+      [record, profile, profile, repo, namespace, service, String(localPort), String(remotePort)],
+      false,
+      profile,
+      profilePidDirectory
+    )
     const log = fs.openSync(path.join(evidence, `pf-${service}.log`), 'wx', 0o600)
     const child = spawn(
       'kubectl',
       [
-        `--context=${profile}`,
+        `--context=${validateProfile(profile)}`,
         '-n',
         namespace,
         'port-forward',
@@ -544,7 +898,7 @@ async function main() {
     save()
     if (action === 'run') {
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
-      command(process.execPath, ['scripts/e2e/run-codex-approved-tools.mjs'], {
+      command('runner', [], {
         timeout: 25 * 60_000,
         inherit: true,
       })
@@ -562,6 +916,8 @@ async function main() {
       )
     }
     throw error
+  } finally {
+    fs.closeSync(stateFile.fd)
   }
 }
 

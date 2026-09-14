@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
+import { openOwnedFile, readOwnedDescriptor } from './prepare-codex-approved-tools.mjs'
 import { expectedTitles, validateReport } from './run-codex-approved-tools.mjs'
 
 // Synthetic reporter records exercise false-green rejection, not product data.
@@ -66,3 +70,18 @@ for (const [name, corrupt] of Object.entries(corruptions)) {
     assert.throws(() => validateReport(report))
   })
 }
+
+test('report verification reads only the reserved reporter inode, never a replacement green report', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'approved-report-'))
+  const file = openOwnedFile(root, 'report.json', { create: true })
+  try {
+    fs.renameSync(path.join(root, 'report.json'), path.join(root, 'reserved.json'))
+    fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(greenReport()), { mode: 0o600 })
+    assert.throws(() => validateReport(JSON.parse(readOwnedDescriptor(file))))
+    fs.writeSync(file.fd, JSON.stringify(greenReport()))
+    assert.equal(validateReport(JSON.parse(readOwnedDescriptor(file))).tests, 4)
+  } finally {
+    fs.closeSync(file.fd)
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})

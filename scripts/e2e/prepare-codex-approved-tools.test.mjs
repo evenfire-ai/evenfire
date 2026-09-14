@@ -13,6 +13,12 @@ import {
   assertResourceRoundTrip,
   makeResources,
   makeScenarios,
+  openOwnedFile,
+  readOwnedDescriptor,
+  readOwnedFile,
+  validateKubectlArgs,
+  validateOwnerArgs,
+  validateProfile,
   validateRunDirectory,
 } from './prepare-codex-approved-tools.mjs'
 
@@ -118,12 +124,107 @@ test('missing seed and lease fail before first cluster mutation; no image acquis
     'utf8'
   )
   const mutation = source.indexOf("kubectl(['create'")
-  assert.ok(
-    source.indexOf("command('bash', ['scripts/minikube/require-t2-mutation-lock.sh'])") < mutation
-  )
-  assert.ok(source.indexOf("fs.readFileSync(seedFile, 'utf8')") < mutation)
+  const lease = source.indexOf("command('lease', [])")
+  const seedRead = source.indexOf('const seedSource = readOwnedFile(')
+  assert.ok(lease >= 0 && lease < mutation)
+  assert.ok(seedRead >= 0 && seedRead < mutation)
   assert.equal(source.includes('build-images.sh'), false)
   assert.ok(source.includes("owner('pf_owner_record_process_matches'"))
   assert.ok(source.includes('state.originalImagePullPolicy'))
   assert.ok(source.includes('container.image !== state.originalProxyImage'))
+})
+
+test('owned descriptors reject links, nonregular files, oversized data and unsafe directories', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'owned-fixture-file-'))
+  try {
+    fs.writeFileSync(path.join(root, 'data.json'), 'valid', { mode: 0o600 })
+    fs.symlinkSync('data.json', path.join(root, 'link.json'))
+    assert.throws(() => readOwnedFile(root, 'link.json', 100))
+    assert.throws(() => readOwnedFile(root, 'data.json', 4))
+    assert.throws(() => readOwnedFile(root, '../outside', 100))
+    fs.mkdirSync(path.join(root, 'directory'))
+    assert.throws(() => readOwnedFile(root, 'directory', 100))
+    fs.linkSync(path.join(root, 'data.json'), path.join(root, 'hardlink'))
+    assert.throws(() => readOwnedFile(root, 'hardlink', 100))
+    fs.unlinkSync(path.join(root, 'hardlink'))
+    fs.chmodSync(root, 0o777)
+    assert.throws(() => readOwnedFile(root, 'data.json', 100))
+    fs.chmodSync(root, 0o700)
+    assert.equal(readOwnedFile(root, 'data.json', 100), 'valid')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('path replacement after opening cannot redirect reads or state writes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'owned-fixture-race-'))
+  const file = openOwnedFile(root, 'state.json', { create: true, maxBytes: 100 })
+  try {
+    fs.writeSync(file.fd, 'original')
+    fs.renameSync(path.join(root, 'state.json'), path.join(root, 'retained.json'))
+    fs.writeFileSync(path.join(root, 'unrelated'), 'untouched', { mode: 0o600 })
+    fs.symlinkSync('unrelated', path.join(root, 'state.json'))
+    assert.equal(readOwnedDescriptor(file), 'original')
+    fs.writeSync(file.fd, Buffer.from('updated!'), 0, 8, 0)
+    assert.equal(fs.readFileSync(path.join(root, 'unrelated'), 'utf8'), 'untouched')
+    assert.throws(() => openOwnedFile(root, 'state.json', { create: true }))
+    fs.unlinkSync(path.join(root, 'retained.json'))
+    assert.throws(() => readOwnedDescriptor(file))
+  } finally {
+    fs.closeSync(file.fd)
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('rejects hostile profile, kubectl operation and owner arguments before subprocesses', () => {
+  const profile = 'clerum-fix-tools-1234abcd'
+  for (const value of [
+    'clerum-dev',
+    'clerum-$(echo bad)-1234abcd',
+    'clerum-a;echo-b-1234abcd',
+    '--context=other',
+    '../clerum-a-1234abcd',
+  ])
+    assert.throws(() => validateProfile(value))
+  const prefix = [`--context=${profile}`, '--request-timeout=30s']
+  assert.doesNotThrow(() =>
+    validateKubectlArgs(
+      [...prefix, '-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'],
+      profile
+    )
+  )
+  for (const suffix of [
+    ['delete', 'namespace/default'],
+    ['-n', 'default', 'get', 'secret/all'],
+    ['-n', 'control-plane', 'exec', 'deployment/control-api', '--', 'sh', '-c', 'anything'],
+  ])
+    assert.throws(() => validateKubectlArgs([...prefix, ...suffix], profile))
+  const worktree = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..')
+  const pidDirectory = '/tmp/owned-profile/pids'
+  const record = `${pidDirectory}/approved-tools-a1b2c3d4e5f6-codex-llm-proxy.pid`
+  const args = [
+    record,
+    profile,
+    profile,
+    worktree,
+    'control-plane',
+    'codex-llm-proxy',
+    '43101',
+    '9090',
+  ]
+  assert.doesNotThrow(() => validateOwnerArgs(args, false, profile, pidDirectory))
+  for (const [index, value] of [
+    [0, '/tmp/unrelated.pid'],
+    [2, 'other-context'],
+    [5, '--anything'],
+    [6, '80'],
+    [7, '8090'],
+  ]) {
+    const invalid = [...args]
+    invalid[index] = value
+    assert.throws(() => validateOwnerArgs(invalid, false, profile, pidDirectory))
+  }
+  assert.throws(() =>
+    validateOwnerArgs([record, '1;echo', ...args.slice(1)], true, profile, pidDirectory)
+  )
 })
