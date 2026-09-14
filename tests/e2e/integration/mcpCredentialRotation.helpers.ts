@@ -394,7 +394,7 @@ export function deploymentReadyCondition(
 /**
  * Poll GET /admin/mcp-servers/:name until a status condition reaches
  * `expectStatus` (and optional `expectReason`) with a `lastTransitionTime`
- * strictly after `sinceMs`.
+ * at or after `sinceMs`.
  *
  * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
  * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would
@@ -439,7 +439,7 @@ export async function waitForStatusCondition(
 
 /**
  * Poll GET /admin/mcp-servers/:name until DeploymentReady reaches
- * `expectStatus` with a `lastTransitionTime` strictly after `sinceMs`.
+ * `expectStatus` with a `lastTransitionTime` at or after `sinceMs`.
  *
  * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
  * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would

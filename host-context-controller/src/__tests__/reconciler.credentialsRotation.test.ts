@@ -940,6 +940,31 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
     expect(reconciler.hasIncompleteReconciliation()).toBe(false)
   })
+
+  it('in-flight ready tick records obligation when the revision fence flips without retirement', async () => {
+    let current = true
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer(), { isCurrent: () => current })
+
+    const held = holdNextStatusRead(customApi)
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(held.isHeld()).toBe(true)
+    const writesWhileHeld = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+    current = false
+    held.release()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(held.resolved()).toBe(1)
+    expect(
+      laterConditionWrites(customApi, writesWhileHeld).some(
+        condition =>
+          (condition.type === 'DeploymentReady' && condition.status === 'True') ||
+          (condition.type === 'Ready' && condition.status === 'True')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
 })
 
 describe('poll-window fence survives a superseding reconcile (F1, watch-recovery race)', () => {

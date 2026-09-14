@@ -150,6 +150,8 @@ function isRetiredStatusConditionType(type: string): boolean {
 }
 
 type StatusWriteDecline = 'record-obligation' | 'silent'
+type StatusWriteDeclineArg = StatusWriteDecline | (() => StatusWriteDecline)
+type StatusWriteOutcome = 'wrote' | 'unchanged' | 'declined'
 type RuntimeWithdrawKind = 'disabled' | 'fail-closed'
 type DeploymentDeleteOutcome = 'gone' | 'denied' | 'foreign'
 
@@ -400,7 +402,9 @@ export class McpServerReconciler {
    * pending timer. Does not record an incomplete-publication obligation — a
    * retired in-flight tick must pass `onDecline: 'silent'` into
    * `writeStatusCondition` so a deliberate withdraw does not look like work
-   * pending.
+   * pending. Poll ticks pass a decline factory so that decision is made at
+   * decline time: silent only when `retiredNow()` is true, otherwise the
+   * revision fence still records an obligation.
    */
   private retireReadinessWindow(name: string): void {
     this.readinessRetirements.set(name, (this.readinessRetirements.get(name) ?? 0) + 1)
@@ -696,6 +700,8 @@ export class McpServerReconciler {
       const retiredNow = (): boolean =>
         (this.readinessRetirements.get(name) ?? 0) !== state.retirementEpoch
       const publishIfCurrent = (): boolean => state.isCurrent() && !retiredNow()
+      const pollWriteDecline = (): StatusWriteDecline =>
+        retiredNow() ? 'silent' : 'record-obligation'
       // Mutation fencing: a superseded reconcile (desired-revision or
       // inventory-authority change) must not keep observing — or writing
       // status — on behalf of a stale desired state. End the window quietly;
@@ -762,7 +768,13 @@ export class McpServerReconciler {
         // recorded — without it every successful credential rotation would sit
         // at DeploymentReady=False forever and the UI would report a timeout.
         if (retiredNow()) return
-        await this.updateStatusConditions(state.server, true, undefined, publishIfCurrent, 'silent')
+        await this.updateStatusConditions(
+          state.server,
+          true,
+          undefined,
+          publishIfCurrent,
+          pollWriteDecline
+        )
         // Readiness is decoupled from fleet convergence: the poll also
         // upgrades the persisted, generation-matched Ready condition so a
         // controller restart can trust the recorded readiness (see getStatus).
@@ -776,7 +788,7 @@ export class McpServerReconciler {
             message: 'Deployment created',
           },
           publishIfCurrent,
-          'silent'
+          pollWriteDecline
         )
         return
       }
@@ -803,7 +815,7 @@ export class McpServerReconciler {
           false,
           rollout.detail,
           publishIfCurrent,
-          'silent'
+          pollWriteDecline
         )
         return
       }
@@ -1851,7 +1863,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
-    const wrote = await this.writeStatusCondition(
+    const retractWrite = await this.writeStatusCondition(
       server,
       {
         type: 'DeploymentReady',
@@ -1866,10 +1878,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       name,
       kind,
       epoch: this.readinessRetirements.get(name) ?? 0,
-      wrote,
+      wrote: retractWrite === 'wrote',
     })
 
     await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
+    if (retractWrite === 'declined') {
+      return { retracted: false, cleanupComplete: false, foreignRuntime: false }
+    }
     return {
       retracted: true,
       cleanupComplete: cleanupComplete && isCurrent(),
@@ -2032,7 +2047,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
      */
     rolloutDetail?: string,
     isCurrent: () => boolean = () => true,
-    onDecline: StatusWriteDecline = 'record-obligation'
+    onDecline: StatusWriteDeclineArg = 'record-obligation'
   ): Promise<void> {
     try {
       const deploymentWrote = await this.writeStatusCondition(
@@ -2054,7 +2069,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         isCurrent,
         onDecline
       )
-      if (deploymentWrote) {
+      if (deploymentWrote === 'wrote') {
         hccLogger.info('Updated status conditions', {
           name: server.name,
           deploymentReady,
@@ -2091,10 +2106,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     server: McpServerCRD,
     condition: Omit<McpServerCondition, 'lastTransitionTime'>,
     isCurrent: () => boolean = () => true,
-    onDecline: StatusWriteDecline = 'record-obligation'
-  ): Promise<boolean> {
-    const decline = (): false =>
-      onDecline === 'silent' ? false : this.recordIncompletePublication(server)
+    onDecline: StatusWriteDeclineArg = 'record-obligation'
+  ): Promise<StatusWriteOutcome> {
+    const resolveDecline = (): StatusWriteDecline =>
+      typeof onDecline === 'function' ? onDecline() : onDecline
+    const decline = (): StatusWriteOutcome =>
+      resolveDecline() === 'silent' ? 'declined' : this.recordIncompletePublication(server)
     if (!isCurrent()) return decline()
     const now = new Date().toISOString()
 
@@ -2172,7 +2189,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       // reconcile — a tight self-loop that also amplifies NetworkPolicy
       // optimistic-lock contention downstream.
       if (unchanged) {
-        return false
+        return 'unchanged'
       }
 
       const refreshDeploymentReadyTime =
@@ -2247,7 +2264,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           name: server.name,
           body: statusPatch,
         })
-        return true
+        return 'wrote'
       } catch (error) {
         const errorCode = getErrorCode(error)
         if (errorCode === 404) {
@@ -2276,12 +2293,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     return this.recordIncompletePublication(server)
   }
 
-  private recordIncompletePublication(server: McpServerCRD): false {
-    // Keep the changed-boolean API: an unchanged condition is successful but
-    // returns false. Only a failed/retired write replaces the obligation, so
-    // an enclosing reconcile cannot clear that failure on normal return.
+  private recordIncompletePublication(server: McpServerCRD): 'declined' {
+    // A declined or failed write replaces the obligation so an enclosing
+    // reconcile cannot clear that failure on a later successful sibling write.
     this.pendingReconciliations.set(server.name, { namespace: server.namespace })
-    return false
+    return 'declined'
   }
 
   // ─── Public API ─────────────────────────────────────────────────────

@@ -1600,7 +1600,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
         reason: 'ok',
         message: 'ok',
       })
-    ).resolves.toBe(false)
+    ).resolves.toBe('declined')
 
     expect(customApi.patchNamespacedCustomObjectStatus).not.toHaveBeenCalled()
   })
@@ -2047,6 +2047,49 @@ describe('ownership-safe fail-closed cleanup', () => {
       )
     ).toBe(false)
     expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('fail-closed status write failure after Deployment delete keeps an obligation and skips Ready', async () => {
+    const err = new Error('not found') as Error & { code?: number }
+    err.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(err)
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    const livePatch = customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async req => {
+      const body = (req as { body: Array<{ op?: string; path?: string; value?: unknown }> }).body
+      const op = body.find(
+        candidate =>
+          candidate.op === 'add' &&
+          (candidate.path === '/status' || candidate.path === '/status/conditions')
+      )
+      const conditions = (
+        Array.isArray(op?.value)
+          ? op.value
+          : ((op?.value as { conditions?: Array<{ reason?: string }> }).conditions ?? [])
+      ) as Array<{ reason?: string }>
+      if (conditions.some(condition => condition.reason === 'RuntimeNotDesired')) {
+        throw Object.assign(new Error('status write failed'), { code: 500 })
+      }
+      if (livePatch) return livePatch(req)
+      return {}
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server)
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'Ready' && condition.reason === 'SecretValidationFailed'
+        )
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 })
 
