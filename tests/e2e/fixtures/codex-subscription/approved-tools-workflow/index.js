@@ -5,6 +5,30 @@ const { randomUUID } = require('node:crypto')
 const ARTIFACT_NAME = 'approved-tools-workflow-result.json'
 const ARTIFACT_PATH = `/output/${ARTIFACT_NAME}`
 
+function validatedReceipt(value, selected) {
+  const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/
+  if (
+    !value ||
+    value.tool !== selected ||
+    typeof value.tool !== 'string' ||
+    !/^[a-zA-Z0-9_]{1,128}$/.test(value.tool) ||
+    typeof value.businessId !== 'string' ||
+    !uuid.test(value.businessId) ||
+    typeof value.callId !== 'string' ||
+    !uuid.test(value.callId) ||
+    typeof value.runId !== 'string' ||
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(value.runId)
+  )
+    throw new Error('receipt_binding_missing')
+  // Persist only the bounded receipt contract, never arbitrary remote fields.
+  return {
+    runId: value.runId,
+    tool: value.tool,
+    callId: value.callId,
+    businessId: value.businessId,
+  }
+}
+
 function receiptEndpoint(spec) {
   if (!Array.isArray(spec.mcpServers) || spec.mcpServers.length !== 1) {
     throw new Error('exactly_one_declared_receipt_service_required')
@@ -76,15 +100,7 @@ async function readReceipt(endpoint, fetchImpl = fetch) {
     result.content[0].type !== 'text'
   )
     throw new Error('invalid_receipt_result')
-  const receipt = JSON.parse(result.content[0].text)
-  if (
-    receipt.tool !== selected ||
-    typeof receipt.businessId !== 'string' ||
-    typeof receipt.runId !== 'string' ||
-    typeof receipt.callId !== 'string'
-  )
-    throw new Error('receipt_binding_missing')
-  return receipt
+  return validatedReceipt(JSON.parse(result.content[0].text), selected)
 }
 
 async function main() {
@@ -104,10 +120,18 @@ async function main() {
       executor: 'custom',
       startedAt: new Date().toISOString(),
     })
-    const receipt = await readReceipt(endpoint)
     await fs.mkdir('/output', { recursive: true })
-    await fs.writeFile(ARTIFACT_PATH, JSON.stringify(receipt), { flag: 'wx' })
-    const { size } = await fs.stat(ARTIFACT_PATH)
+    // Reserve the fixed artifact before the business call. An existing output
+    // stops a duplicate run before execution; the same handle owns write/stat.
+    const artifact = await fs.open(ARTIFACT_PATH, 'wx', 0o600)
+    let size
+    try {
+      const receipt = await readReceipt(endpoint)
+      await artifact.writeFile(JSON.stringify(receipt))
+      size = (await artifact.stat()).size
+    } finally {
+      await artifact.close()
+    }
     const output = {
       artifacts: [
         {
@@ -139,7 +163,7 @@ async function main() {
   }
 }
 
-module.exports = { receiptEndpoint, readReceipt }
+module.exports = { receiptEndpoint, readReceipt, validatedReceipt }
 if (require.main === module)
   main().catch(() => {
     process.exitCode = 1

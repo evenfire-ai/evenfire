@@ -6,6 +6,28 @@ import { fileURLToPath } from 'node:url'
 import { createApprovedToolsFixture } from '../approved-tools/server.mjs'
 import coordinator from './index.js'
 
+test('receipt artifacts contain only bounded validated business fields', () => {
+  const receipt = {
+    runId: 'workflow-fixture',
+    tool: 'workitem_read_receipt',
+    callId: '12345678-1234-4234-8234-123456789abc',
+    businessId: 'abcdef12-1234-4234-8234-123456789abc',
+  }
+  assert.deepEqual(
+    coordinator.validatedReceipt({ ...receipt, remoteExtra: 'must not persist' }, receipt.tool),
+    receipt
+  )
+  for (const invalid of [
+    { ...receipt, tool: 'other_tool' },
+    { ...receipt, businessId: 'not-a-business-id' },
+    { ...receipt, callId: '' },
+    { ...receipt, runId: '../other-artifact' },
+    { ...receipt, runId: 'x'.repeat(129) },
+  ]) {
+    assert.throws(() => coordinator.validatedReceipt(invalid, receipt.tool))
+  }
+})
+
 test('coordinator refuses eager execution without a triggered workflow run', () => {
   const result = spawnSync(
     process.execPath,
