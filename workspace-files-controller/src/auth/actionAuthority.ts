@@ -1,4 +1,4 @@
-import { err } from '../errors'
+import { HttpError, err } from '../errors'
 
 export type WfcOperation = 'shared_filesystem.read' | 'shared_filesystem.write'
 export type WfcTarget = Readonly<Record<string, string>>
@@ -227,7 +227,7 @@ export function createWfcAuthorityCheckpointer(config: {
         throw err('forbidden', 'live filesystem authority denied')
       }
     } catch (error) {
-      if (error instanceof Error && 'code' in error) throw error
+      if (error instanceof HttpError) throw error
       throw err('not_mounted', 'live filesystem authority is unavailable')
     } finally {
       clearTimeout(timer)
