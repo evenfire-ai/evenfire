@@ -36,5 +36,11 @@ export function createFilesRouter(opts: any) {
     res.sendStatus(204);
   });
 
+  router.get("/unsafe-checkpoint-unawaited", requireRead, async (_req, res) => {
+    void checkpoint(res.locals.authority);
+    fs.writeFileSync("/tmp/evenfire-codeql-unsafe-checkpoint-unawaited", "protected");
+    res.sendStatus(204);
+  });
+
   return router;
 }
