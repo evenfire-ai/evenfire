@@ -255,6 +255,10 @@ minikube-build-custom-coordinator-fixture-body:
 
 .PHONY: minikube-build-e2e-fixtures minikube-build-e2e-fixtures-body
 
+.PHONY: minikube-install-627-real-tools
+minikube-install-627-real-tools: ## Install real Worktracker and Wikipedia baseline under the owned profile lease
+	@bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/install-627-real-tools.mjs
+
 .PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
 minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
@@ -267,6 +271,8 @@ minikube-build-codex-approved-tools-fixtures-body:
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-llm-proxy
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-proxy-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-workflow-e2e
 
 .PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
 minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
