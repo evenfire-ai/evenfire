@@ -216,6 +216,21 @@ assert_root_build_context() {
   fi
 }
 
+assert_publish_root_build_context() {
+  local selector="$1"
+  local output
+  output="$(node -e '
+    const manifest = require(process.argv[1]);
+    const selector = process.argv[2];
+    const image = manifest.images.find(candidate => candidate.name === selector);
+    if (!image) process.exit(2);
+    process.stdout.write(image.rooted === true ? "rooted" : "service");
+  ' "$REPO_ROOT/deploy/images.json" "$selector")"
+  if [[ "$output" != "rooted" ]]; then
+    fail "$selector publish must use the repository-root Docker build context"
+  fi
+}
+
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
@@ -237,6 +252,7 @@ assert_declared_local_packages rpc-proxy rpc-proxy/Dockerfile
 assert_declared_local_packages mcp-host \
   mcp-host/Dockerfile mcp-host/Dockerfile.desktop mcp-host/Dockerfile.full mcp-host/Dockerfile.slim
 assert_root_build_context rpc-proxy
+assert_publish_root_build_context rpc-proxy
 
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install

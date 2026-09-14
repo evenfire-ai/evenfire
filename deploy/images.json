@@ -151,6 +151,7 @@
     {
       "name": "rpc-proxy",
       "path": "rpc-proxy",
+      "rooted": true,
       "source_paths": ["rpc-proxy/**"],
       "published": true,
       "deployed_to_minikube": true

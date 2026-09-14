@@ -298,6 +298,7 @@ jobs:
             changed: ${{ needs.detect.outputs.profile-ui }}
           - image: rpc-proxy
             path: rpc-proxy
+            rooted: true
             changed: ${{ needs.detect.outputs.rpc-proxy }}
           - image: workflow-recipes
             path: workflow-recipes
