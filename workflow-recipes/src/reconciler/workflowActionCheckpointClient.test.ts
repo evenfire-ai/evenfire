@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
 import { createWorkflowRunAuthorityCheckpointer } from './workflowActionCheckpointClient'
 
@@ -38,33 +40,36 @@ const run = {
 } as never
 
 function allowedCheckpoint(overrides: Record<string, unknown> = {}) {
-  return {
-    version: 2,
-    status: 'allowed',
-    authorizationRevision,
-    behaviorBindingHash,
-    behavior: {
-      budget: { state: 'known', value: null },
-      credentialPolicy: { state: 'known', value: null },
-      approvalPolicy: { state: 'known', value: null },
-      filesystemScope: { state: 'known', value: null },
-      runtime: { state: 'known', value: null },
-      providerModelPolicy: { state: 'known', value: null },
-      audit: { state: 'known', value: `user:${userId}` },
-    },
-    checkedAt: new Date().toISOString(),
-    validUntil: new Date(Date.now() + 30_000).toISOString(),
-    attribution: {
-      userId,
-      sid,
-      sessionVersion: 3,
-      accessPathId,
-      pathKind: 'direct',
-      effectiveTeamId: null,
-    },
-    destination: null,
-    ...overrides,
-  }
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: userId, sid, sessionVersion: 3 },
+          delegationJti: run.authority_binding.delegationJti,
+          resource,
+          operationId: 'workflow.trigger',
+          target,
+          targetHash: hashActionTarget(target),
+          accessPathId,
+          authorizationRevision,
+          behaviorBindingHash,
+          domain: { service: 'workflow-recipes', resource, targetHash: hashActionTarget(target) },
+        },
+        destination: null,
+        checkedAt: new Date().toISOString(),
+        validUntil: new Date(Date.now() + 30_000).toISOString(),
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return { ...JSON.parse(output), ...overrides }
 }
 
 describe('workflow action checkpoint client', () => {

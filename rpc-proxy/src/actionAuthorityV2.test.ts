@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { resolve } from 'node:path'
 import {
   canonicalResourceIdentity,
   hashActionTarget,
@@ -77,6 +79,42 @@ const behavior = {
   audit: { state: 'known' as const, value: 'audit-1' },
 }
 
+function producerCheckpoint(delegation: UserDelegationV2Claims) {
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: delegation.sub, sid: delegation.sid, sessionVersion: delegation.sv },
+          delegationJti: delegation.jti,
+          resource,
+          operationId: bound.operationId,
+          target: bound.target,
+          targetHash: bound.targetHash,
+          accessPathId: delegation.accessPathId,
+          authorizationRevision: delegation.authorizationRevision,
+          behaviorBindingHash: delegation.behaviorBindingHash,
+          domain: { service: 'rpc-proxy', resource, targetHash: bound.targetHash },
+        },
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+        checkedAt: new Date().toISOString(),
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return JSON.parse(output)
+}
+
 describe('action authority checkpoint and cache isolation', () => {
   it('uses every authority-relevant path dimension in the cache key', () => {
     const direct = claims('direct', null)
@@ -91,34 +129,12 @@ describe('action authority checkpoint and cache isolation', () => {
 
   it('posts the exact delegation binding and emits trusted server context', async () => {
     const delegation = claims('direct', null)
-    const now = new Date()
     const fetchImpl = vi.fn(
       async () =>
-        new Response(
-          JSON.stringify({
-            version: 2,
-            status: 'allowed',
-            authorizationRevision: delegation.authorizationRevision,
-            behaviorBindingHash: delegation.behaviorBindingHash,
-            behavior,
-            checkedAt: now.toISOString(),
-            validUntil: new Date(now.getTime() + 30_000).toISOString(),
-            attribution: {
-              userId: delegation.sub,
-              sid: delegation.sid,
-              sessionVersion: delegation.sv,
-              accessPathId: delegation.accessPathId,
-              pathKind: delegation.pathKind,
-              effectiveTeamId: delegation.effectiveTeamId,
-            },
-            destination: {
-              kind: 'host',
-              ref: 'mcp-host/chatllm',
-              url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-            },
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        )
+        new Response(JSON.stringify(producerCheckpoint(delegation)), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
     )
     const authorized = await authorizeActionV2(delegation, bound, { fetchImpl })
     const call = fetchImpl.mock.calls[0] as unknown as [string, RequestInit]
