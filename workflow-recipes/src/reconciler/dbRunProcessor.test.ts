@@ -250,6 +250,44 @@ describe('createDbRunProcessor', () => {
     expect(order).toEqual(['checkpoint', 'child'])
   })
 
+  it('fails a bound run closed when no authority checkpointer is mounted', async () => {
+    const run = baseRun({
+      authority_binding: {
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'workflow.trigger',
+        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+        target: { recipeNamespace: 'demo', recipeName: 'echo' },
+        targetHash: 'ath2_test',
+        accessPathId: 'ap1_test',
+        authorizationRevision: 'ar1_test',
+        behaviorBindingHash: 'bh2_test',
+      },
+    })
+    const client = makeClient(async sql =>
+      /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+        ? { rows: [run], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
+    )
+    const createChildRecipe = vi.fn()
+    const proc = spawn({
+      instanceId: 'wrc-1',
+      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+      runPollMs: 30_000,
+      createChildRecipe,
+      logger: silentLogger(),
+    })
+
+    await expect(proc.processPending(run.run_id)).rejects.toThrow(
+      'workflow_authority_checkpointer_unavailable'
+    )
+    expect(createChildRecipe).not.toHaveBeenCalled()
+    expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+    expect(client.calls.some(call => /SET phase = 'Running'/.test(call.sql))).toBe(false)
+  })
+
   it('terminalizes permanent authority denial without creating a child', async () => {
     const run = baseRun({
       authority_binding: {
