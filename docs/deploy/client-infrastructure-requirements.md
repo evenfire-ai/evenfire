@@ -3,10 +3,18 @@
 **Audience:** platform / infrastructure / security teams evaluating a self-hosted
 Evenfire deployment.
 
-Evenfire is a Kubernetes-native platform. It runs **entirely inside your own
-cluster**, under your own network and identity controls. There is no Evenfire
-SaaS in the request path: your prompts, files, and data go only to the model
-provider whose key you supply.
+Evenfire is a Kubernetes-native platform. The platform services, agents,
+connectors, and data run **inside your own cluster**, under your own network and
+identity controls. Prompts and files go to the model provider whose key you
+supply.
+
+Two optional features call Evenfire-hosted services, and you decide whether to
+use them:
+
+- **Hosted member invitations and admin password-reset emails** use
+  `registration.evenfire.ai`. The recipient's email address and the link
+  metadata leave your cluster.
+- **The connector and workflow-recipe registry** is `registry.evenfire.ai`.
 
 This document has two parts:
 
@@ -38,8 +46,8 @@ This document has two parts:
 
 ### 2. Compute
 
-The whole platform runs on **6 vCPU / 10 GB RAM** — that is the documented minimum
-for the full stack, and it is enough for evaluation and small pilots.
+The full stack has run on **6 vCPU / 10 GB RAM** in a single-node local evaluation.
+Treat that as the floor for a smoke test, not as a sizing for real users.
 
 Beyond that, capacity scales with usage: **each agent and each connector runs as its
 own pod**. The platform services themselves are small; the variable cost is agents,
@@ -53,18 +61,22 @@ connectors, and workflows, which you control through configuration.
 
 ### 3. Storage
 
-- A **standard block StorageClass** for the platform database.
-- A **shared (ReadWriteMany) StorageClass** for workflow output volumes — NFS, EFS,
-  Azure Files, Filestore, CephFS, or Longhorn all work. This is the most common gap:
-  many clusters ship only block storage.
+- A **block (ReadWriteOnce) StorageClass marked as the cluster default**. The
+  platform database, agent workspaces, the global file drive, and per-workflow
+  output volumes all use it. Workflow output volumes request no class, so a
+  default StorageClass is required.
+- A shared (ReadWriteMany) class such as EFS or NFS is **not** required for a new
+  install.
 - Your usual backup policy applied to those volumes.
 
 ### 4. Database
 
-PostgreSQL 16. A ready-to-run instance ships with the install, which is fine for
-evaluation and small deployments. For production we recommend your **managed
-PostgreSQL** (RDS, Cloud SQL, Azure Database, or your own HA cluster) — Evenfire
-takes a connection string, so that is a configuration change, not a code change.
+PostgreSQL 16. A single-instance in-cluster database ships with the install and
+is suitable for evaluation and pilots, backed up through your volume snapshot
+policy. Running on a managed PostgreSQL (RDS, Cloud SQL, Azure Database) is
+possible but needs a reviewed migration and provisioning procedure: today's
+install scripts provision database roles from inside the in-cluster instance.
+Tell us early if a managed database is a requirement.
 
 ### 5. How users reach the platform
 
@@ -73,11 +85,13 @@ profile page, and the endpoint the Desktop App connects to. Two supported patter
 
 1. **Cloudflare Tunnel** — ships with the install; no inbound firewall holes and no
    public load balancer. Needs a Cloudflare account.
-2. **Your own ingress controller and load balancer**, with your certificates.
+2. **Your own ingress controller and load balancer**, with your certificates. The
+   shipped NetworkPolicies only admit the tunnel by default, so the install adds
+   policies for your load balancer's source ranges or controller pods.
 
 The platform can be public, VPN-only, or internal — your choice. One caveat: the
-zero-config invitation email path needs the console and profile URLs to be real,
-publicly resolvable domains.
+hosted invitation email path (`registration.evenfire.ai`) needs the console and
+profile URLs to be real, publicly resolvable domains.
 
 ### 6. Outbound access
 
@@ -88,12 +102,16 @@ explicitly. Please confirm you can allow:
 | ----------- | ------- |
 | Your LLM provider endpoint(s) | Model calls — or nothing at all, if you point at a self-hosted model |
 | `ghcr.io` | Pulling the platform images (all public on GitHub Container Registry) |
+| Docker Hub | Pulling the pinned third-party images the install uses (PostgreSQL, nginx, busybox, cloudflared) — or mirror them |
 | `registry.evenfire.ai` | Installing connectors and workflow recipes from the registry (optional) |
+| `registration.evenfire.ai` | Hosted member invitations and admin password-reset emails (optional) |
 | Channel APIs — Telegram, Slack, your IMAP/SMTP host | Only the channels you enable |
-| Per-connector SaaS hosts | Each connector declares its own hosts; egress is pinned to those, never the open internet |
+| Per-connector SaaS hosts | Allowed as port/CIDR egress rules derived from each connector's declared hosts, with documented FQDN limits (hostnames resolve to IP addresses; they are not a per-domain allowlist) |
 
-A corporate egress proxy is fine — connector traffic already routes through a pinned
-proxy and can be chained. Fully air-gapped installs are possible; tell us early.
+Tell us early if the cluster's outbound traffic must go through a corporate HTTP
+proxy or if the environment is air-gapped. Neither is a supported install path
+today, and both need a specific assessment (image mirroring, registry access,
+model endpoint reachability).
 
 ### 7. Secrets and keys
 
@@ -108,8 +126,10 @@ decide where that private key lives and who can rotate it.
 Mistral, Groq, DeepSeek, xAI, OpenRouter, Gemini and more are supported
 ([full list](llm-providers.md)) — or point at a self-hosted, OpenAI-compatible
 endpoint so nothing leaves your environment at all. You need an account, a key with
-adequate rate limits, and a budget owner; Evenfire meters spend and can hard-block on
-budget.
+adequate rate limits, and a budget owner. Evenfire meters token spend and can block
+on budget, but budgets are cost control, not a security boundary: if the budget
+service is unreachable, requests are allowed (fail-open). Keep provider-side
+spend limits as well.
 
 ### 9. Desktop app distribution
 
@@ -119,8 +139,9 @@ certificates and an MDM or software-distribution channel.
 
 ### 10. Operations
 
-Optional Grafana + Loki logging ships with the platform; if you already run
-Prometheus, Datadog, or Splunk, we wire into those instead. Plan for log retention —
+The repository includes Helm values and dashboards for an optional Grafana + Loki
+logging stack that you install and operate; if you already run Prometheus,
+Datadog, or Splunk, plan to collect container logs with those instead. Plan for log retention —
 approvals and file access are audited, and that audit trail is usually what your
 compliance team asks for.
 
@@ -138,13 +159,13 @@ Ten questions. Partial answers are fine — "don't know yet" tells us where to h
 | - | -------- | ---------- |
 | 1 | **Kubernetes**: do you run it in production today? Which distribution and version, and will Evenfire get a dedicated cluster or a namespace set on a shared one? | Confirms the 1.30+ floor and whether we share capacity and policies with your other workloads. |
 | 2 | **Networking policy**: which CNI, and are NetworkPolicies actually enforced? Do you run a policy engine (Kyverno, Gatekeeper, restricted Pod Security) or a service mesh? | Default-deny isolation is the primary security control; a non-enforcing CNI removes it, and existing admission rules can block the install. |
-| 3 | **Storage and database**: which StorageClasses exist, is there a **ReadWriteMany** option, and do you want the in-cluster PostgreSQL or a managed instance? | RWX is the most common gap. Managed Postgres is a config change, but we need to know up front. |
+| 3 | **Storage and database**: which StorageClasses exist, which one is the **default**, and is a managed PostgreSQL a hard requirement? | A default block StorageClass is required. A managed database needs a separate reviewed procedure, so we need to know up front. |
 | 4 | **Scale**: how many agents and concurrent users in the first 3 months, and which connectors (databases, SaaS, internal APIs) do you need? | Each agent and connector is its own pod — this is what sizing is computed from. |
 | 5 | **Exposure**: should users reach the platform over your internal network, VPN, or the public internet? Who owns DNS and TLS, and do you prefer Cloudflare Tunnel (shipped) or your own ingress controller? | Determines the entire edge design and what we need from your network team. |
-| 6 | **Egress**: is outbound internet allowed from the cluster, through a proxy, or are you air-gapped? What is the allowlisting process and lead time? | Model APIs, image pulls, and connector hosts all need explicit allowlisting; air-gapped changes registry and update strategy. |
+| 6 | **Egress**: is outbound internet allowed from the cluster, only through a proxy, or not at all? What is the allowlisting process and lead time? | Model APIs, image pulls (GHCR and Docker Hub), and connector hosts all need explicit allowlisting; proxy-only and air-gapped environments need a specific assessment. |
 | 7 | **Models**: which LLM provider(s) will you use, do you already hold keys, and is there a requirement to stay in-region or self-hosted (Bedrock, Vertex, Azure OpenAI, vLLM)? Who owns the budget? | You bring your own keys; residency constraints decide provider and region. |
 | 8 | **Channels**: which do you want live at launch — Desktop App, Slack, Microsoft Teams, Telegram, email — and who approves the bot/app installation? | App approval is usually the longest lead-time item in a rollout. |
-| 9 | **Security and compliance**: how do you manage secrets, do you need SSO for admins, which compliance regimes apply, and which agent actions must always require human approval? | Shapes the secrets integration, the approval policy, and the audit/SIEM export. |
+| 9 | **Security and compliance**: how do you manage secrets, what identity requirements apply to administrators (Control UI admins sign in with local username and password today), which compliance regimes apply, and which agent actions must always require human approval? | Shapes the secrets integration, the admin access model, the approval policy, and the audit/SIEM export. |
 | 10 | **Deployment ownership**: if we run the deployment, what access can you provide (kubeconfig, jump host, screen-share only)? Which environments do you need, what is the target go-live, and who operates it day to day afterwards? | Defines the engagement model, change process, and handover. |
 
 ---

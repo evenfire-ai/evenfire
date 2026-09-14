@@ -1,145 +1,179 @@
 # Fail-closed quirks (agents get these wrong)
 
-These are verified production failures, not style nits. Read this before
-applying anything.
+Each item below is a real failure mode, checked against the scripts and
+manifests at the guide's validated release. Read this before writing the
+overlay or running Phase 5.
 
-## Secrets vs `kubectl apply -k`
+## Admin setup is first-come
 
-Base ships empty canary Secrets (`stringData: {}`). Real tokens and keys are
-written with `kubectl patch --type=merge` so they sit **outside** the apply
-last-applied envelope.
+`POST /api/v1/admin/auth/setup` needs no login. It sets the admin credentials
+while the single bootstrap admin has never logged in. Setting
+`ADMIN_BOOTSTRAP_PASSWORD_HASH` or updating `control_admin_users` does not close
+it (neither sets `last_login_at`), and it also skips the Desktop identity and
+GFS operator link that setup creates. The human claims the account through a
+port-forward **before** any ingress exists (guide Phase 6). A 409 on a fresh
+install means someone else got there first.
 
-If you put token values in a kustomize patch and then `kubectl apply -k`, the
-next apply three-way-merges against the empty canary and **wipes the tokens**.
-That is why `deploy/scripts/apply-inter-service-tokens.sh` exists.
+## Script context guards reject EKS names unless told
 
-Re-running that script must **preserve** existing Secret values unless the
-human asked to rotate (`FORCE_REGEN` / explicit env overrides).
+| Script | Needs on EKS |
+| --- | --- |
+| `apply-inter-service-tokens.sh` | `CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET` on first run (fails closed outside minikube) |
+| `run-control-api-db-migration.sh`, `provision-control-api-runtime-roles.sh` | `CONTEXT` and `ALLOWED_CONTEXTS` (exact match) |
+| `provision-gfs-runtime.sh` | `ALLOWED_CONTEXTS="$CONTEXT"` (or `--allow-prod`); refuses every name that is not `minikube` / `clerum-*` |
+| `scripts/minikube/sync-auth-key.sh` | do not call directly; without `GFS_REMOTE_RECONCILE_AUTHORIZED=true` + `ALLOWED_CONTEXTS` it takes the local lease path and dies ("cannot resolve the current branch") on a tag checkout. `provision-gfs-runtime.sh` calls it correctly |
+| `np-enforce-preflight.sh` | `OVERLAY=aws-eks`, or it guesses GKE overlays/namespaces |
+| `bootstrap-rbac.sh` | the `ingress` namespace must exist; contexts containing `clerum` also need `CONFIRM=yes` |
 
-Never commit Secret YAML with real values.
+## Missing install steps break silently
 
-## JWT keys
+- `provision-control-api-runtime-roles.sh` after the migration: base ships
+  `control-api-postgres-runtime` (and the workflow-recipes and trace-maintenance
+  runtime Secrets) empty. Without it those Deployments sit in
+  `CreateContainerConfigError`.
+- `apply-inter-service-tokens.sh` again after **every** overlay apply: base
+  declares `webhook-proxy-secrets` with a `replace-with-*` token, so the apply
+  overwrites the real one.
 
-Use `deploy/scripts/gen-jwt-keys.sh` with `CONTEXT=` set. It works on any
-cluster. `scripts/minikube/generate-keys.sh` is minikube-shaped (writes into
-the minikube overlay).
+## Secrets vs `kubectl apply`
 
-If `control-api-secrets` already exists, do **not** regenerate. Regeneration
-invalidates every session and admin token.
+Base ships empty canary Secrets (`stringData: {}`). Real tokens are written with
+`kubectl patch --type=merge`, outside the last-applied envelope. A token placed
+in a kustomize patch is wiped by the next apply's three-way merge. Never put
+Secret values in the overlay, and never pass them on a command line: build a
+patch file in `$WORK` under `umask 077`, use `--patch-file`, delete the file.
 
-After keys exist, run `scripts/minikube/sync-auth-key.sh --context "$CONTEXT"`.
-That copies the RPC **public** key from `rpc-proxy-secrets` into live
-`mcp-host-config` and `gfs-config`. The public key is not in the key manifest.
+## `gen-jwt-keys.sh` rotates everything, every time
 
-## Admin login placeholder
+It has no skip flag and no `FORCE_REGEN` (that flag belongs to the minikube
+`generate-keys.sh`). Each run:
 
-`gen-jwt-keys.sh` writes a **placeholder bcrypt** unless
-`ADMIN_BOOTSTRAP_PASSWORD_HASH` is set. That hash cannot log anyone in.
+- rotates every key, which invalidates all sessions;
+- writes a placeholder admin hash;
+- resets `control-postgres` to `postgres/postgres`.
 
-On a fresh cluster you must either:
+Run it only when `control-api-secrets` is absent. Then replace the Postgres
+superuser password before Postgres first starts (guide 5.5).
 
-1. Pass `ADMIN_BOOTSTRAP_PASSWORD_HASH` (bcrypt of a password the human chose) into gen-keys, or
-2. After Postgres is up, UPDATE `control_admin_users.password_hash` for `admin` with a real bcrypt and give the human the password once.
+## `mcp-host-config` public key is overwritten by apply
 
-Do not leave the placeholder and tell them to log in with `admin123!`.
+`provision-gfs-runtime.sh` syncs `CLERUM_AUTH_JWT_PUBLIC_KEY` from
+`rpc-proxy-secrets` into `mcp-host-config` and `gfs-config`. The overlay's
+`mcp-host-config` template carries a placeholder, so re-run that script after
+any apply.
+
+## NetworkPolicy enforcement is not what `kubectl get` shows
+
+- The VPC CNI ships its policy agent with `--enable-network-policy=false`.
+- In standard mode, new pods start allow-all until policies are programmed.
+- AWS documents that enforcement "might not work reliably" for pods without
+  `ownerReferences`, and WRC coordinator and snippet-runner pods are bare pods.
+
+Require strict mode on the VPC CNI, and always run `np-deny-probe.sh`, which
+tests an owned pod and a bare pod.
+
+WRC `CLERUM_NETWORK_POLICY_ENFORCEMENT_MODE=warn` logs and deploys anyway. Keep
+`required`, and flip `CONFIRMED=true` only after the probe passes and the
+preflight has no FAIL.
 
 ## Kubernetes API CIDR (already took a cluster down)
 
-A NetworkPolicy that allows only `kubernetes` Service ClusterIP can still drop
-apiserver traffic: kube-proxy DNATs to the control-plane endpoint, and some
-CNIs (GKE legacy Calico) evaluate the **post-DNAT IP**.
+kube-proxy DNATs the `kubernetes` ClusterIP to the endpoint addresses, and some
+CNIs (Calico, Cilium) evaluate the post-DNAT address. A policy with only the
+ClusterIP then drops operator traffic, and HCC/WRC crash-loop in a way that looks
+like a product bug. Include the ClusterIP **and** every endpoint (generated by
+`write-network-patches.sh`).
 
-Operators then crash-loop, looking like a product bug. Detect ClusterIP **and**
-endpoint IPs. Patch static policies **and** `CONTEXT_MAPPER_K8S_API_CIDRS`.
-HCC fail-closes (process crash) on a CIDR wider than `/24` IPv4 or `/120` IPv6.
+HCC fail-closes on any CIDR wider than IPv4 `/24` or IPv6 `/120`, and reads the
+list only at startup.
 
-`verify-networkpolicies.sh` forbids leftover `10.109.0.1/32` (base DigitalOcean
-placeholder).
+EKS replaces the endpoint network interfaces on every Kubernetes version upgrade.
+Re-generate, re-apply, and restart HCC after each upgrade.
 
-## Official release images, not `latest`
+## Load balancer ingress is denied by default
 
-Customer EKS installs the **last official public release**: git tag `v0.8.0`
-and `ghcr.io/evenfire-ai/<image>:v0.8.0`. Mixing `main` manifests with older
-images, or using `latest` / `sha-*` / Artifact Registry, is how you get CRD
-prune and ImagePullBackOff. `MINIKUBE_IMAGE_TAG=latest` is not an EKS escape
-hatch.
+Base public-ingress policies only admit `app: cloudflared` from the `ingress`
+namespace. An ALB/NLB or in-cluster ingress controller needs the
+`alb-ingress-*` patches, or every hostname times out.
 
-## Dynamic images
+The Tunnel variant needs the `replacements` block for `allow-cloudflared-egress`.
+Otherwise it renders `0.0.0.0/0` with no exceptions and fails the lint.
 
-Kustomize `images:` does not see env vars unless a FieldSpec is installed (the
-GHCR component does that for values starting with `clerum/`). Base HCC defaults
-are **not** `clerum/*`. Unpatched clusters pull the wrong registry and fail.
-Patch those env vars to `ghcr.io/evenfire-ai/…:v0.8.0`, not a private SHA.
+## Images: unset env vars resolve to Docker Hub
 
-## `rpc-proxy-config` / `mcp-host-config`
+The GHCR component rewrites images and env values that base sets to `clerum/*`.
+HCC env vars base does **not** set fall back to code defaults:
 
-Not in `deploy/base`. Every overlay must supply them. Missing →
-`CreateContainerConfigError`.
+| Env var | Code default |
+| --- | --- |
+| `CONTEXT_MAPPER_DESKTOP_IMAGE` | `clerum/mcp-host-desktop:latest` |
+| `CONTEXT_MAPPER_CHANNEL_READER_IMAGE` | `clerum/channel-reader:0.9.5` |
+| `CONTEXT_MAPPER_GFSC_IMAGE` | `clerum/gfs-controller:test` |
 
-## Inter-service tokens vs member-registration HMAC
+Those are unqualified Docker Hub names in a namespace Evenfire does not own. Set
+all three explicitly, including `mcp-host-desktop` (published on GHCR though
+absent from the component). Remove `clerum/` from the image allowlists.
+`image-gate.rb` enforces this.
 
-`apply-inter-service-tokens.sh` generates most tokens if absent. **Member
-registration HMAC is stricter:** outside minikube it fail-closes unless
-`CONTROL_API_MEMBER_REGISTRATION_HMAC_SECRET` is set or the Secret already has
-a value.
+Base also pulls `postgres:16-alpine`, `nginx:1.30.1-alpine`, `busybox:1.36`, and
+(with the Tunnel) `cloudflare/cloudflared@sha256:…` from Docker Hub. Egress
+allowlists that only open `ghcr.io` cause `ImagePullBackOff`.
 
-For self-hosters using **hosted** invitation mode
-(`CONTROL_API_MEMBER_REGISTRATION_MODE=hosted`), do **not** also set
-`CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` /
-`CONTROL_API_MEMBER_REGISTRATION_TENANT_ID` — control-api refuses to start.
-See `docs/how-to/member-invitations-self-hosted.md`.
+## Release pin check
+
+`deploy/components/ghcr-images/kustomization.yaml` contains a comment line with
+the word `newTag`. Use `grep -E '^[[:space:]]+newTag:'`; a bare `grep newTag`
+counts two values and the pin check always fails.
+
+## Storage defaults that do not exist on EKS
+
+- The GlobalFileSystem CRD defaults `storageClassName` to `standard-rwo`.
+  `provision-gfs-runtime.sh` then waits forever for `Ready`.
+- HCC's workspace class defaults to `do-block-storage-retain`.
+- WRC per-recipe output PVCs have no class, so they need a default StorageClass.
+- Base `clerum-workflow-output` is a legacy RWX PVC that EBS cannot provision.
+  Patch it to RWO. EFS is not required.
 
 ## CRDs
 
-Helm 3 does **not** upgrade CRDs on `helm upgrade`. Always
-`kubectl apply -f ./charts/clerum-crds/crds/` after the Helm install.
-Apply CRDs **before** control-api, then UIs. An old CRD silently prunes new
-fields with HTTP 200.
+Helm 3 does not upgrade CRDs on `helm upgrade`. Always run
+`kubectl apply -f ./charts/clerum-crds/crds/` too. An old CRD silently prunes
+new fields while returning HTTP 200.
 
-## DB migration before apply
+## Rollout order
 
-`run-control-api-db-migration.sh` requires `CONTEXT` and `ALLOWED_CONTEXTS`
-(exact comma-separated allowlist — set both to the customer context). It runs
-the schema Job **before** the rest of the overlay. Skipping it can leave
-control-api on an empty or drifted schema.
+WorkflowRecipe external egress waits for HCC `ExternalEgressReady` at the
+current generation. Roll HCC to Ready, then WRC. Roll control-api and control-ui
+from the same render; a version mix between them breaks recipe-secret namespace
+routing.
 
-## GFS after apply
+## Member registration
 
-`provision-gfs-runtime.sh` is post-overlay. Production-like context names need
-`--allow-prod` **and** a human yes. Do not skip auth-key sync unless the script
-flag says so.
-
-## HCC before WRC
-
-WorkflowRecipe external egress waits on HCC `ExternalEgressReady` at the
-current generation. Roll HCC to Ready, then WRC. Mixed-version
-`control-api` + `control-ui` breaks recipe-secret namespace routing — roll
-those two together.
+In hosted mode (`CONTROL_API_MEMBER_REGISTRATION_MODE=hosted`), do not set
+`CONTROL_API_MEMBER_REGISTRATION_HMAC_KID` or `…_TENANT_ID`: control-api refuses
+to start. The HMAC secret is ignored in hosted mode, but the token script still
+requires one on first run.
 
 ## `CLERUM_DEV_MODE`
 
-Never `true` on a real cluster. It weakens the security model and is not "easier
-install".
+Never `true` on a real cluster. It weakens the security model and is not an
+"easier install".
 
 ## WorkflowRecipe `spec.dryRun`
 
-Unimplemented. Kubernetes `kubectl apply --dry-run=server` is the only dry-run.
-`spec.dryRun` on a recipe would deploy for real if it were honored later — do
-not tell the customer it is a safe no-op.
+The CRD has no such field; the API server prunes it and the recipe deploys for
+real. `kubectl apply --dry-run=server` is the only dry run.
 
 ## Bedrock / AWS identity
 
-Documented Bedrock credentials are static `aws-access-key-id` +
-`aws-secret-access-key` in a Secret, plus `AWS_REGION`. IRSA / Pod Identity for
-platform ServiceAccounts is **not** a documented Evenfire install path. Do not
-invent it as required.
+Documented Bedrock credentials are static `aws-access-key-id` and
+`aws-secret-access-key` in the Host's LLM Secret, plus `AWS_REGION` under Host →
+Environment. IRSA / Pod Identity for platform ServiceAccounts is not a
+documented Evenfire path. The human enters the keys in Control UI.
 
-## Do not copy these from Evenfire's GKE overlay
+## Do not copy from Evenfire's GKE overlays
 
-- Artifact Registry `us-central1-docker.pkg.dev/...` image names
-- GKE `standard-rwo` unless that class exists on this EKS cluster
-- NodeLocal DNS CIDR from another cluster
-- Tunnel UUID, HMAC key id, tenant id
-- gcp-dev HCC netpol resync intervals
-- GFS Upload v2 enabled (prod keeps it off until a separate review)
-- `WEBHOOK_PUBLIC_BASE_URL` pointing at someone else's domain
+- Artifact Registry `*-docker.pkg.dev/...` images
+- `standard-rwo`, NodeLocal DNS CIDRs, tunnel UUIDs, HMAC key ids, tenant ids
+- gcp-dev HCC resync intervals, or GFS Upload v2 enabled
+- `WEBHOOK_PUBLIC_BASE_URL` (no code reads it)
