@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -227,4 +228,71 @@ test('rejects hostile profile, kubectl operation and owner arguments before subp
   assert.throws(() =>
     validateOwnerArgs([record, '1;echo', ...args.slice(1)], true, profile, pidDirectory)
   )
+})
+
+test('fixed ownership CLI rejects invalid operations and bindings without touching unrelated files', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'approved-tools-owner-cli-'))
+  const profile = 'clerum-fixture-owner-1234abcd'
+  const worktree = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..')
+  const pidDirectory = path.join(root, profile, 'pids')
+  fs.mkdirSync(pidDirectory, { recursive: true })
+  const canonicalPidDirectory = fs.realpathSync(pidDirectory)
+  const record = path.join(canonicalPidDirectory, 'approved-tools-a1b2c3d4e5f6-codex-llm-proxy.pid')
+  const sentinel = path.join(root, 'unrelated')
+  fs.writeFileSync(sentinel, 'untouched')
+  const args = [
+    record,
+    profile,
+    profile,
+    worktree,
+    'control-plane',
+    'codex-llm-proxy',
+    '43101',
+    '9090',
+  ]
+  const env = {
+    PATH: process.env.PATH,
+    MINIKUBE_PROFILE: profile,
+    CONTROL_API_REAL_PG_CONTEXT: profile,
+    T2_PROFILE_ROOT: root,
+  }
+  const run = (operation, values = args) =>
+    spawnSync('bash', ['scripts/e2e/codex-approved-tools-pf-owner.sh', operation, ...values], {
+      cwd: worktree,
+      env,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+  try {
+    // The canonical library's valid missing-record cleanup is a harmless no-op.
+    assert.equal(run('cleanup').status, 0)
+    for (const operation of ['unknown', 'cleanup;echo', '--help', 'pf_owner_cleanup_record'])
+      assert.equal(run(operation).status, 2)
+    for (const [index, value] of [
+      [0, sentinel],
+      [1, 'clerum-dev'],
+      [2, 'other-context'],
+      [3, root],
+      [4, 'default'],
+      [5, '--service'],
+      [6, '80'],
+      [7, '8080'],
+    ]) {
+      const invalid = [...args]
+      invalid[index] = value
+      assert.equal(run('cleanup', invalid).status, 2)
+    }
+    assert.equal(run('record', [record, 'bad-pid', ...args.slice(1)]).status, 2)
+    assert.equal(run('cleanup', args.slice(1)).status, 2)
+    const mismatch = [...args]
+    mismatch[0] = path.join(
+      canonicalPidDirectory,
+      'approved-tools-a1b2c3d4e5f6-approved-tools-a1b2c3d4e5f6-mcp-83.pid'
+    )
+    assert.equal(run('cleanup', mismatch).status, 2)
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), 'untouched')
+    assert.deepEqual(fs.readdirSync(pidDirectory), [])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

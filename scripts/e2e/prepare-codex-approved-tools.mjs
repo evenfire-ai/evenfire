@@ -396,36 +396,21 @@ function command(operation, args, { input, timeout = 60_000, inherit = false } =
     case 'pf_owner_record_process':
       result = spawnSync(
         'bash',
-        [
-          '-c',
-          'source scripts/minikube/port-forward-owner.sh; pf_owner_record_process "$@"',
-          'pf-owner',
-          ...args,
-        ],
+        ['scripts/e2e/codex-approved-tools-pf-owner.sh', 'record', ...args],
         options
       )
       break
     case 'pf_owner_record_process_matches':
       result = spawnSync(
         'bash',
-        [
-          '-c',
-          'source scripts/minikube/port-forward-owner.sh; pf_owner_record_process_matches "$@"',
-          'pf-owner',
-          ...args,
-        ],
+        ['scripts/e2e/codex-approved-tools-pf-owner.sh', 'matches', ...args],
         options
       )
       break
     case 'pf_owner_cleanup_record':
       result = spawnSync(
         'bash',
-        [
-          '-c',
-          'source scripts/minikube/port-forward-owner.sh; pf_owner_cleanup_record "$@"',
-          'pf-owner',
-          ...args,
-        ],
+        ['scripts/e2e/codex-approved-tools-pf-owner.sh', 'cleanup', ...args],
         options
       )
       break
