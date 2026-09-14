@@ -106,6 +106,7 @@ describe('v2 activity visibility', () => {
     expect(captured.body().items.map((item: HostActivityEvent) => item.eventId)).toEqual([
       'evt_0000000001',
     ])
+    expect(captured.body().items[0]).not.toHaveProperty('authorityV2')
     expect(captured.body().nextCursor).toBe('evt_0000000001')
   })
 
@@ -234,6 +235,9 @@ describe('v2 activity visibility', () => {
       'evt_0000000001',
       'evt_0000000002',
     ])
+    expect(captured.body().items.every((item: HostActivityEvent) => !('authorityV2' in item))).toBe(
+      true
+    )
   })
 
   it('filters streamed activity across both user and selected-path boundaries', async () => {
@@ -287,6 +291,8 @@ describe('v2 activity visibility', () => {
       const activityWrites = writes.filter(value => value.startsWith('data: {"version"'))
       expect(activityWrites).toHaveLength(1)
       expect(activityWrites[0]).toContain('evt_0000000001')
+      expect(activityWrites[0]).not.toContain('authorityV2')
+      expect(activityWrites[0]).not.toContain('delegationJti')
       expect(activityWrites.join('')).not.toContain('evt_0000000002')
       expect(activityWrites.join('')).not.toContain('evt_0000000003')
     } finally {
