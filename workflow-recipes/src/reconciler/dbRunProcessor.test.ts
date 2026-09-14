@@ -288,51 +288,105 @@ describe('createDbRunProcessor', () => {
     expect(client.calls.some(call => /SET phase = 'Running'/.test(call.sql))).toBe(false)
   })
 
-  it('terminalizes permanent authority denial without creating a child', async () => {
-    const run = baseRun({
-      authority_binding: {
-        userId: '11111111-1111-4111-8111-111111111111',
-        sid: '22222222-2222-4222-8222-222222222222',
-        sessionVersion: 1,
-        delegationJti: '33333333-3333-4333-8333-333333333333',
-        operationId: 'workflow.trigger',
-        resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
-        target: { recipeNamespace: 'demo', recipeName: 'echo' },
-        targetHash: 'ath2_test',
-        accessPathId: 'ap1_test',
-        authorizationRevision: 'ar1_test',
-        behaviorBindingHash: 'bh2_test',
-      },
-    })
-    let phase: 'Pending' | 'Failed' = 'Pending'
-    const client = makeClient(async sql => {
-      if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
-        return phase === 'Pending' ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
-      }
-      if (/SET phase = 'Failed'/.test(sql)) phase = 'Failed'
-      return { rows: [], rowCount: 0 }
-    })
-    const createChildRecipe = vi.fn()
-    const checkpointAuthority = vi.fn(async () => {
-      throw new WorkflowAuthorityCheckpointError('denied', false)
-    })
-    const proc = spawn({
-      instanceId: 'wrc-1',
-      pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
-      runPollMs: 30_000,
-      checkpointAuthority,
-      createChildRecipe,
-      logger: silentLogger(),
-    })
+  it.each([
+    ['denied', 'workflow_authority_denied'],
+    ['not_found', 'workflow_authority_not_found'],
+    ['access_path_stale', 'workflow_authority_access_path_stale'],
+    ['invalid_binding', 'workflow_authority_invalid_binding'],
+  ] as const)(
+    'terminalizes permanent authority %s with the typed reason',
+    async (failure, failureReason) => {
+      const run = baseRun({
+        authority_binding: {
+          userId: '11111111-1111-4111-8111-111111111111',
+          sid: '22222222-2222-4222-8222-222222222222',
+          sessionVersion: 1,
+          delegationJti: '33333333-3333-4333-8333-333333333333',
+          operationId: 'workflow.trigger',
+          resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+          target: { recipeNamespace: 'demo', recipeName: 'echo' },
+          targetHash: 'ath2_test',
+          accessPathId: 'ap1_test',
+          authorizationRevision: 'ar1_test',
+          behaviorBindingHash: 'bh2_test',
+        },
+      })
+      let phase: 'Pending' | 'Failed' = 'Pending'
+      const client = makeClient(async sql => {
+        if (/FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)) {
+          return phase === 'Pending' ? { rows: [run], rowCount: 1 } : { rows: [], rowCount: 0 }
+        }
+        if (/SET phase = 'Failed'/.test(sql)) phase = 'Failed'
+        return { rows: [], rowCount: 0 }
+      })
+      const createChildRecipe = vi.fn()
+      const checkpointAuthority = vi.fn(async () => {
+        throw new WorkflowAuthorityCheckpointError(failure, false)
+      })
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+        runPollMs: 30_000,
+        checkpointAuthority,
+        createChildRecipe,
+        logger: silentLogger(),
+      })
 
-    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
-    expect(createChildRecipe).not.toHaveBeenCalled()
-    expect(client.calls.some(call => /SET phase = 'Failed'/.test(call.sql))).toBe(true)
-    expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
-    await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
-    expect(checkpointAuthority).toHaveBeenCalledOnce()
-    expect(phase).toBe('Failed')
-  })
+      await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+      expect(createChildRecipe).not.toHaveBeenCalled()
+      const terminal = client.calls.find(call => /SET phase = 'Failed'/.test(call.sql))
+      expect(terminal?.sql).toContain('failure_reason = $2')
+      expect(terminal?.params).toEqual([run.run_id, failureReason])
+      expect(terminal?.params).not.toContain('Bearer sensitive-token')
+      expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
+      await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
+      expect(checkpointAuthority).toHaveBeenCalledOnce()
+      expect(phase).toBe('Failed')
+    }
+  )
+
+  it.each(['authority_unavailable', 'invalid_response', 'timeout'] as const)(
+    'rolls back retryable authority %s without persisting a failure reason',
+    async failure => {
+      const run = baseRun({
+        authority_binding: {
+          version: 2,
+          userId: '11111111-1111-4111-8111-111111111111',
+          sid: '22222222-2222-4222-8222-222222222222',
+          sessionVersion: 1,
+          delegationJti: '33333333-3333-4333-8333-333333333333',
+          operationId: 'workflow.trigger',
+          resource: { type: 'workflow_recipe', logicalId: 'demo/echo' },
+          target: { recipeNamespace: 'demo', recipeName: 'echo' },
+          targetHash: 'ath2_test',
+          accessPathId: 'ap1_test',
+          authorizationRevision: 'ar1_test',
+          behaviorBindingHash: 'bh2_test',
+          pathKind: 'direct',
+          effectiveTeamId: null,
+        },
+      })
+      const client = makeClient(async sql =>
+        /FROM workflow_runs run[\s\S]*FOR UPDATE OF run/i.test(sql)
+          ? { rows: [run], rowCount: 1 }
+          : { rows: [], rowCount: 0 }
+      )
+      const proc = spawn({
+        instanceId: 'wrc-1',
+        pool: { connect: vi.fn(async () => client as unknown as PoolClient) } as unknown as Pool,
+        runPollMs: 30_000,
+        checkpointAuthority: vi.fn(async () => {
+          throw new WorkflowAuthorityCheckpointError(failure, true)
+        }),
+        createChildRecipe: vi.fn(),
+        logger: silentLogger(),
+      })
+
+      await expect(proc.processPending(run.run_id)).rejects.toThrow()
+      expect(client.calls.some(call => /^ROLLBACK$/i.test(call.sql))).toBe(true)
+      expect(client.calls.some(call => /failure_reason\s*=/.test(call.sql))).toBe(false)
+    }
+  )
 
   it('mounts the real checkpoint client and retries authority outages before child creation', async () => {
     vi.stubEnv('INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET', 'round-five-workflow-checkpoint-test-secret')

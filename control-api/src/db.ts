@@ -3183,6 +3183,24 @@ async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<v
   `)
 }
 
+async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE workflow_runs
+      ADD COLUMN IF NOT EXISTS failure_reason TEXT NULL;
+    ALTER TABLE workflow_runs
+      DROP CONSTRAINT IF EXISTS workflow_runs_failure_reason_check;
+    ALTER TABLE workflow_runs
+      ADD CONSTRAINT workflow_runs_failure_reason_check CHECK (
+        failure_reason IS NULL OR failure_reason IN (
+          'workflow_authority_denied',
+          'workflow_authority_not_found',
+          'workflow_authority_access_path_stale',
+          'workflow_authority_invalid_binding'
+        )
+      );
+  `)
+}
+
 // Exported (read-only) so the migration-order invariant test can assert the
 // array is monotonic by version-string. Applied strictly in array order and
 // tracked by full version-string in `schema_migrations`, so a non-monotonic
@@ -6224,6 +6242,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0113_workflow_recipe_authority_entity',
     apply: applyWorkflowRecipeAuthorityEntitySchema,
+  },
+  {
+    version: '0114_workflow_run_failure_reason',
+    apply: applyWorkflowRunFailureReasonSchema,
   },
 ]
 

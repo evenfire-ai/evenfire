@@ -23,6 +23,23 @@ import { type Logger, createLogger } from '../observability/logger.js'
 import type { WorkflowRecipeCRD } from '../types.js'
 import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
 
+const AUTHORITY_FAILURE_REASON = Object.freeze({
+  denied: 'workflow_authority_denied',
+  not_found: 'workflow_authority_not_found',
+  access_path_stale: 'workflow_authority_access_path_stale',
+  invalid_binding: 'workflow_authority_invalid_binding',
+} as const)
+
+function terminalAuthorityFailureReason(
+  failure: WorkflowAuthorityCheckpointError['failure']
+): (typeof AUTHORITY_FAILURE_REASON)[keyof typeof AUTHORITY_FAILURE_REASON] | null {
+  if (failure === 'denied') return AUTHORITY_FAILURE_REASON.denied
+  if (failure === 'not_found') return AUTHORITY_FAILURE_REASON.not_found
+  if (failure === 'access_path_stale') return AUTHORITY_FAILURE_REASON.access_path_stale
+  if (failure === 'invalid_binding') return AUTHORITY_FAILURE_REASON.invalid_binding
+  return null
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────
 
 export type WorkflowRunPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled'
@@ -157,6 +174,7 @@ const CLAIM_PENDING = `
 const FAIL_PENDING_AUTHORITY = `
   UPDATE workflow_runs
      SET phase = 'Failed',
+         failure_reason = $2,
          completed_at = now(),
          last_reconciled_at = now(),
          updated_at = now()
@@ -497,7 +515,9 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
           await opts.checkpointAuthority(run)
         } catch (error) {
           if (error instanceof WorkflowAuthorityCheckpointError && !error.retryable) {
-            await client.query(FAIL_PENDING_AUTHORITY, [run.run_id])
+            const failureReason = terminalAuthorityFailureReason(error.failure)
+            if (!failureReason) throw error
+            await client.query(FAIL_PENDING_AUTHORITY, [run.run_id, failureReason])
             await client.query('COMMIT')
             committed = true
             log.warn('pending run failed after permanent authority rejection', {
