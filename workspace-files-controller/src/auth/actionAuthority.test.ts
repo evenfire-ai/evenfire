@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { hashActionTarget } from '../../../packages/action-context-contracts/index.cjs'
+import { hashActionTarget } from '../../../packages/action-context-contracts'
 import { createWfcAuthorityCheckpointer, parseWfcActionAuthority } from './actionAuthority'
 
 const USER = '11111111-1111-4111-8111-111111111111'
