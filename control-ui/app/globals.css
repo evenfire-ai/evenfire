@@ -1828,6 +1828,15 @@ textarea.cu-input {
   margin-inline-start: var(--cu-space-4);
 }
 
+.cu-marketplace-tab-body {
+  padding: 0;
+}
+
+.cu-marketplace-tab-body > .cu-banner,
+.cu-marketplace-tab-body > .cu-muted-note {
+  margin: var(--cu-space-3) var(--cu-space-4);
+}
+
 .cu-table-wrap {
   overflow-x: auto;
 }
