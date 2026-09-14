@@ -193,6 +193,7 @@ export default function HostDetailsPage() {
   const [showDeleteAgentConfirm, setShowDeleteAgentConfirm] = useState(false)
   const [deletingAgent, setDeletingAgent] = useState(false)
   const [deleteAgentDialogError, setDeleteAgentDialogError] = useState('')
+  const [sectionActions, setSectionActions] = useState<React.ReactNode>(null)
 
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
@@ -392,6 +393,10 @@ export default function HostDetailsPage() {
     setActiveTab(tab)
     router.replace(hostTabHref(tab))
   }
+
+  const handleSectionActionsChange = useCallback((actions: React.ReactNode | null) => {
+    setSectionActions(actions)
+  }, [])
 
   useEffect(() => {
     mountedRef.current = true
@@ -1050,21 +1055,49 @@ export default function HostDetailsPage() {
       subtitle="Configuration and access for this agent."
       tabAriaLabel="Agent sections"
       tabClassName="cu-tabs--compact"
-      contentClassName={activeTab === 'advanced' ? 'cu-agent-detail-card' : undefined}
+      contentClassName={
+        activeTab === 'advanced' || activeTab === 'identity' ? 'cu-agent-detail-card' : undefined
+      }
       tabs={HOST_TABS.map(tab => ({
         value: tab,
         label: TAB_LABELS[tab],
         href: hostTabHref(tab),
       }))}
       title={`Agent: ${routeName}`}
-      titleActions={
-        <AgentActionsMenu
-          busy={busy || deletingAgent}
-          onDelete={() => {
-            setDeleteAgentDialogError('')
-            setShowDeleteAgentConfirm(true)
-          }}
-        />
+      actions={
+        <>
+          {activeTab === 'model' && !editingModel ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--ghost cu-btn--sm"
+              onClick={() => {
+                setError('')
+                setEditingModel(true)
+              }}
+              disabled={busy}
+            >
+              Edit
+            </button>
+          ) : null}
+          {activeTab === 'connectors' ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => void openAddConnectorDialog()}
+              disabled={busy || !agentContext}
+            >
+              Add connector
+            </button>
+          ) : null}
+          {sectionActions}
+          <AgentActionsMenu
+            busy={busy || deletingAgent}
+            onDelete={() => {
+              setDeleteAgentDialogError('')
+              setShowDeleteAgentConfirm(true)
+            }}
+          />
+        </>
       }
     >
       <div className="cu-agent-detail-scroll">
@@ -1107,21 +1140,6 @@ export default function HostDetailsPage() {
                 Provider, current model, allowed models, fallback policy, and credentials for this
                 agent.
               </p>
-              <div className="cu-agent-detail-heading__actions">
-                {!editingModel ? (
-                  <button
-                    type="button"
-                    className="cu-btn cu-btn--ghost cu-btn--sm"
-                    onClick={() => {
-                      setError('')
-                      setEditingModel(true)
-                    }}
-                    disabled={busy}
-                  >
-                    Edit
-                  </button>
-                ) : null}
-              </div>
             </div>
 
             <div className="cu-form-stack cu-form-stack--wide">
@@ -1302,6 +1320,7 @@ export default function HostDetailsPage() {
             initialTools={approvalToolsData}
             onSaveApprovalTools={persistApprovalTools}
             onSaveGuardrails={persistGuardrails}
+            onActionsChange={handleSectionActionsChange}
           />
         )}
 
@@ -1311,16 +1330,6 @@ export default function HostDetailsPage() {
               <p className="cu-muted" style={{ fontSize: '0.875rem', margin: 0 }}>
                 Connectors available to this agent.
               </p>
-              <div className="cu-agent-detail-heading__actions">
-                <button
-                  type="button"
-                  className="cu-btn cu-btn--primary cu-btn--sm"
-                  onClick={() => void openAddConnectorDialog()}
-                  disabled={busy || !agentContext}
-                >
-                  Add connector
-                </button>
-              </div>
             </div>
             <TableViewport className="cu-table-wrap">
               <DataTable className="eft-table cu-table cu-table--header-band cu-table--static-rows cu-agent-connectors-table">
@@ -1474,9 +1483,13 @@ export default function HostDetailsPage() {
           </div>
         )}
 
-        {activeTab === 'identity' && <HostIdentityTab hostName={routeName} />}
+        {activeTab === 'identity' && (
+          <HostIdentityTab hostName={routeName} onActionsChange={handleSectionActionsChange} />
+        )}
 
-        {activeTab === 'access' && <HostAccessTab hostName={routeName} />}
+        {activeTab === 'access' && (
+          <HostAccessTab hostName={routeName} onActionsChange={handleSectionActionsChange} />
+        )}
       </div>
       {showDeleteAgentConfirm && (
         <div

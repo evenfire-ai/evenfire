@@ -8875,8 +8875,23 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
+.cu-identity-panel__local-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-3) var(--cu-space-5) 0;
+}
+
 .cu-identity-tabs {
-  margin-block: 0;
+  margin: 0;
+  padding: var(--cu-space-2) var(--cu-space-5) 0;
+  background: var(--cu-bg-elevated);
+  border-bottom: 1px solid var(--cu-border-subtle);
+}
+
+.cu-identity-tabs .cu-tab[data-active='true'] {
+  background: var(--cu-surface);
+  border-bottom-color: var(--cu-surface);
 }
 
 .cu-identity-section {
@@ -8885,10 +8900,10 @@ td.cu-registry-description {
   grid-template-rows: auto auto minmax(0, 1fr);
   flex: 1;
   min-height: 0;
-  border: 1px solid var(--cu-border-subtle);
-  border-radius: var(--cu-radius-sm);
-  background: var(--cu-bg-elevated);
-  padding: var(--cu-space-4);
+  border: 0;
+  border-radius: 0;
+  background: var(--cu-surface);
+  padding: var(--cu-space-5);
 }
 
 .cu-identity-section__header {
@@ -8945,6 +8960,12 @@ td.cu-registry-description {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  gap: 0;
+  background: var(--cu-bg-elevated);
+}
+
+.cu-agent-detail-scroll:has(> .cu-identity-panel) {
+  padding: 0;
 }
 
 .cu-markdown-editor {

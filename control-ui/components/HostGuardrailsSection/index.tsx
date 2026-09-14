@@ -11,13 +11,6 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
 import type { GuardrailHookRow, HostGuardrails, HostGuardrailsSectionProps } from './types'
 
-// Add hook lands on the org marketplace entries list, narrowed to guardrail
-// hooks — the unfiltered list mixes in every connector and plugin the org has
-// published, which is not what someone adding a hook is looking for.
-const ADD_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({
-  type: GUARDRAIL_ENTRY_TYPE,
-})
-
 // Every field this section does not edit rides along untouched — dropping
 // `builtins` or `limits` here would silently wipe them from the Host spec.
 function withHooks(
@@ -27,11 +20,14 @@ function withHooks(
   return { ...source, hooks }
 }
 
+const ADD_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE })
+
 export function HostGuardrailsSection({
   initialGuardrails,
   onSave,
   busy,
   canWrite,
+  showAddAction = true,
 }: HostGuardrailsSectionProps) {
   const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
@@ -94,7 +90,7 @@ export function HostGuardrailsSection({
           <p className="cu-muted cu-access-section__description">
             Guardrail hooks installed on the cluster and referenced by this agent.
           </p>
-          {canWrite ? (
+          {canWrite && showAddAction ? (
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
