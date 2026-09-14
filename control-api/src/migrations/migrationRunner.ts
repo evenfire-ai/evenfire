@@ -1,6 +1,6 @@
 import type { DbClient } from '../db.js'
 import { migrationSessionBoundsSql } from './migrationExecutionPolicy.js'
-import { preparePr1Migration } from './pr1OnlineIndexPlan.js'
+import { hasPostSchemaOnlineIndexes, preparePr1Migration } from './pr1OnlineIndexPlan.js'
 
 export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '0109_user_access_foundation',
@@ -94,8 +94,17 @@ export async function applyPendingPr1Migrations({
     const acceptedLegacyVersion = migration.legacyVersions?.find(alias =>
       appliedVersions.has(alias)
     )
-    if (isPr1Migration && !acceptedLegacyVersion) {
+    const hasPostSchemaIndexes = hasPostSchemaOnlineIndexes(version)
+    if (isPr1Migration && !acceptedLegacyVersion && !hasPostSchemaIndexes) {
       await preparePr1Migration(db, version)
+    }
+
+    if (isPr1Migration && !acceptedLegacyVersion && hasPostSchemaIndexes) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => recordMigration(db, version))
+      appliedVersions.add(version)
+      continue
     }
 
     await runBoundedTransaction(db, async () => {

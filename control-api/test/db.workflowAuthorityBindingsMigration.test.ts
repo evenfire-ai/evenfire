@@ -35,6 +35,9 @@ describe('workflow authority bindings migration', () => {
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS decision_authority_binding_id')
     expect(sql).toContain('ADD COLUMN IF NOT EXISTS consume_authority_binding_id')
     expect(sql).toContain('REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT')
+    expect(sql).not.toContain(
+      'CREATE INDEX IF NOT EXISTS workflow_runs_initiating_authority_binding'
+    )
     expect(sql).toContain('GRANT SELECT ON TABLE workflow_authority_bindings')
     expect(sql).not.toMatch(/UPDATE\s+workflow_(?:runs|approval_requests)/i)
     expect(sql).not.toMatch(/DROP\s+(?:TABLE|COLUMN)/i)

@@ -50,15 +50,23 @@ describe('D34 migration execution policy', () => {
     })
   })
 
-  it('classifies exactly 25 existing-table indexes and no fresh-table index', () => {
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
+  it('classifies exactly 26 existing-table indexes and no fresh-table index', () => {
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
+    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(26)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
     ).toHaveLength(18)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010b'))
     ).toHaveLength(7)
+    expect(
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010f'))
+    ).toEqual([
+      expect.objectContaining({
+        name: 'workflow_runs_initiating_authority_binding',
+        phase: 'after-schema',
+      }),
+    ])
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
     ).toBe(false)
@@ -106,10 +114,10 @@ describe('D34 migration execution policy', () => {
         )
       )
     )
-    const classified = [
-      ...PR1_ONLINE_INDEX_PLAN.map(index => index.name),
-      ...FRESH_TABLE_INDEXES,
-    ].sort()
+    const historicalPlan = PR1_ONLINE_INDEX_PLAN.filter(index =>
+      ['0109_user_access_foundation', '010b_catalog_utf8_ordering'].includes(index.migrationVersion)
+    )
+    const classified = [...historicalPlan.map(index => index.name), ...FRESH_TABLE_INDEXES].sort()
 
     expect(historicalNames).toHaveLength(39)
     expect(classified).toEqual(historicalNames)
@@ -121,7 +129,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s+/g, ' ')
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
-    for (const index of PR1_ONLINE_INDEX_PLAN) {
+    for (const index of historicalPlan) {
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -197,6 +205,62 @@ describe('D34 migration execution policy', () => {
 })
 
 describe('D34 PR1 migration runner', () => {
+  it('commits PR2 schema before its concurrent index and records the version afterward', async () => {
+    const order: string[] = []
+    const entry = PR1_ONLINE_INDEX_PLAN.find(
+      index => index.name === 'workflow_runs_initiating_authority_binding'
+    )!
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        order.push(sql)
+        if (sql.includes('FROM pg_class index_rel')) {
+          const created = order.includes(entry.createSql)
+          return {
+            rows: created
+              ? [
+                  {
+                    table_name: entry.table,
+                    indisunique: false,
+                    indisvalid: true,
+                    definition: entry.createSql,
+                  },
+                ]
+              : [],
+            rowCount: created ? 1 : 0,
+          }
+        }
+        return { rows: [], rowCount: 0, values }
+      }),
+    }
+    const allVersions = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ]
+    const target = '010f_workflow_authority_bindings'
+    const migrations = allVersions.map(version => ({
+      version,
+      apply: vi.fn(async (client: typeof db) => {
+        if (version === target) await client.query('APPLY 010f SCHEMA')
+      }),
+    }))
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions: new Set(allVersions.filter(version => version !== target)),
+      recordMigration: async client => {
+        await client.query('RECORD 010f VERSION')
+      },
+    })
+
+    expect(order.indexOf('APPLY 010f SCHEMA')).toBeLessThan(order.indexOf(entry.createSql))
+    expect(order.indexOf(entry.createSql)).toBeLessThan(order.indexOf('RECORD 010f VERSION'))
+    expect(order[order.indexOf(entry.createSql) - 1]).toContain('statement_timeout')
+    expect(order.filter(sql => sql === 'BEGIN')).toHaveLength(2)
+    expect(order.filter(sql => sql === 'COMMIT')).toHaveLength(2)
+  })
+
   it('commits and records each PR1 version independently in order', async () => {
     const queries: Array<{ sql: string; values?: unknown[] }> = []
     const db = {
@@ -264,7 +328,7 @@ describe('D34 PR1 migration runner', () => {
       DEV_POST_0106_MIGRATION_VERSIONS.length +
       PR1_MIGRATION_VERSIONS.length +
       PR2_MIGRATION_VERSIONS.length +
-      1
+      2
     expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(expectedTransactions)
     expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(expectedTransactions)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)

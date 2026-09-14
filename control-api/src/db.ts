@@ -3147,10 +3147,6 @@ async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void>
     ALTER TABLE workflow_approval_requests
       ADD COLUMN IF NOT EXISTS consume_authority_binding_id UUID NULL
       REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
-    CREATE INDEX IF NOT EXISTS workflow_runs_initiating_authority_binding
-      ON workflow_runs (initiating_authority_binding_id)
-      WHERE initiating_authority_binding_id IS NOT NULL;
-
     DO $$
     BEGIN
       IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_recipes_runtime') THEN
