@@ -1,5 +1,6 @@
 import {
   type ActionAuthorityCheckpointResponseV2,
+  canonicalActionTarget,
   validateActionAuthorityCheckpointResponse,
 } from '@clerum/action-context-contracts'
 import { signInternalControlJwt } from '../utils/internalControlSigner'
@@ -20,7 +21,7 @@ function checkpointRequest(binding: WorkflowRunAuthorityBinding) {
     delegationJti: binding.delegationJti,
     resource: binding.resource,
     operationId: binding.operationId,
-    target: binding.target,
+    target: canonicalActionTarget(binding.target),
     targetHash: binding.targetHash,
     accessPathId: binding.accessPathId,
     authorizationRevision: binding.authorizationRevision,
