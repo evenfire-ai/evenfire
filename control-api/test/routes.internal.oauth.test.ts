@@ -62,7 +62,11 @@ function seedRecipeWithOAuth(
   )
 }
 
-function v2ContextHeader(input: { oauthClientId: string; userId?: string }): string {
+function v2ContextHeader(input: {
+  oauthClientId: string
+  userId?: string
+  expiresAt?: string
+}): string {
   const resource = canonicalResourceIdentity({
     environmentId: 'test',
     type: 'sandbox_app',
@@ -82,7 +86,7 @@ function v2ContextHeader(input: { oauthClientId: string; userId?: string }): str
       resource,
       target,
       targetHash: hashActionTarget(target),
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      expiresAt: input.expiresAt ?? new Date(Date.now() + 60_000).toISOString(),
     })
   ).toString('base64url')
 }
@@ -223,6 +227,32 @@ describe('POST /api/v1/internal/sandbox-ui/oauth/authorize-url (deferred credent
       .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)
       .set('x-service-token', 'rpc-proxy')
       .set('x-clerum-edge-action-context', v2ContextHeader({ oauthClientId: 'other' }))
+      .send({
+        recipeNs: config.sandboxNamespace,
+        recipeName: 'sales-crm',
+        oauthClientId: 'microsoft',
+        userId: 'u-1',
+        redirectUri: 'http://localhost:8090/oauth-callback/microsoft',
+      })
+      .expect(400)
+
+    expect(res.body).toEqual({ error: 'invalid_binding' })
+    expect(getSecret).not.toHaveBeenCalled()
+  })
+
+  it('rejects a malformed v2 expiry before reading secrets', async () => {
+    const gateway = new MockGateway()
+    seedRecipeWithOAuth(gateway, { recipeName: 'sales-crm' })
+    const getSecret = vi.spyOn(gateway, 'getSecret')
+
+    const res = await request(createApp(gateway as never))
+      .post('/api/v1/internal/sandbox-ui/oauth/authorize-url')
+      .set('Authorization', `Bearer ${RPC_PROXY_TOKEN}`)
+      .set('x-service-token', 'rpc-proxy')
+      .set(
+        'x-clerum-edge-action-context',
+        v2ContextHeader({ oauthClientId: 'microsoft', expiresAt: 'not-a-date' })
+      )
       .send({
         recipeNs: config.sandboxNamespace,
         recipeName: 'sales-crm',
