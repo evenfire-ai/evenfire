@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { verifyRpcToken } from './authToken.js'
 import type { AuthedRequest } from './middleware/auth.js'
 import { bindRouteActionV2 } from './routeActionBindingV2.js'
 import { verifyUserDelegationV2 } from './userDelegationV2.js'
@@ -112,6 +113,7 @@ describe('Control API delegation producer to rpc-proxy verifier interoperability
       authorizationRevision: `ar1_${'b'.repeat(43)}`,
       behaviorBindingHash: `bh2_${'c'.repeat(43)}`,
     })
+    expect(verifyRpcToken(fixture.token)).toBeNull()
   })
 
   it.each(['sandbox.open', 'sandbox.reconnect', 'remote_desktop.open', 'remote_desktop.reconnect'])(
