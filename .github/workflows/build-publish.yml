@@ -121,11 +121,13 @@ jobs:
               - 'workflow-approval-request-reader/**'
             control-api:
               - 'control-api/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/image-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
             control-ui:
               - 'control-ui/**'
@@ -133,6 +135,7 @@ jobs:
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
               - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
@@ -142,10 +145,13 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
             mcp-host:
               - 'mcp-host/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
             mcp-proxy:
               - 'mcp-proxy/**'
@@ -159,8 +165,10 @@ jobs:
               - 'packages/frontend-components/**'
             rpc-proxy:
               - 'rpc-proxy/**'
+              - 'packages/action-context-contracts/**'
             workflow-recipes:
               - 'workflow-recipes/**'
+              - 'packages/action-context-contracts/**'
               - 'packages/workflow-runtime-core/**'
               - 'packages/workflow-sdk/**'
               - 'packages/workflow-recipe-capability-policy/**'
@@ -168,6 +176,7 @@ jobs:
               - 'packages/network-policy-core/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
               - 'packages/grok-provider-attempt-contract/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
