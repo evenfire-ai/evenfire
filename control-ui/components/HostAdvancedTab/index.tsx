@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
@@ -30,6 +30,8 @@ export function HostAdvancedTab({
   onActionsChange,
 }: HostAdvancedTabProps) {
   const router = useRouter()
+  const routerRef = useRef(router)
+  routerRef.current = router
   const [subTab, setSubTab] = useState<AdvancedSubTab>(DEFAULT_SUB_TAB)
 
   useEffect(() => {
@@ -39,7 +41,9 @@ export function HostAdvancedTab({
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
         onClick={() =>
-          router.push(CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE }))
+          routerRef.current.push(
+            CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE })
+          )
         }
         disabled={busy}
       >
@@ -47,7 +51,7 @@ export function HostAdvancedTab({
       </button>
     )
     return () => onActionsChange(null)
-  }, [busy, onActionsChange, router, subTab])
+  }, [busy, onActionsChange, subTab])
 
   return (
     <section className="cu-advanced-tab" aria-label="Advanced">
