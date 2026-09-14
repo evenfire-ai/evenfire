@@ -2,6 +2,7 @@
 
 import { DataViewHeader } from '@clerum/frontend-components'
 import { cn } from '@lib/cn'
+import { ClampedDescription } from './ClampedDescription'
 import type { TablePanelHeaderProps } from './types'
 
 /** Control UI compatibility adapter for the shared list header. */
@@ -28,10 +29,10 @@ export function TablePanelHeader({
         ) : undefined
       }
       className="cu-table-panel__head"
-      description={subtitle}
+      description={subtitle ? <ClampedDescription>{subtitle}</ClampedDescription> : undefined}
       title={
         <span className="cu-panel-title cu-table-panel__title-row">
-          {title}
+          <span className="cu-table-panel__title-text">{title}</span>
           {titleActions}
         </span>
       }

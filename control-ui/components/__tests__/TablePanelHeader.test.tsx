@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -44,29 +44,51 @@ describe('TablePanelHeader', () => {
       )
     ).toEqual(['Import agents', 'Search agents', 'Refresh agents', 'Create agent'])
     expect(css).not.toMatch(/\.cu-table-panel__actions[^{}]*\{[^}]*\border\s*:/)
-    expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*flex-wrap:\s*wrap/)
-    expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*width:\s*100%/)
+    expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*flex-wrap:\s*nowrap/)
+    expect(css).toMatch(/\.cu-table-panel__actions\s*\{[^}]*width:\s*auto/)
     expect(css).toMatch(
-      /\.cu-table-panel__head\s*>\s*\.eft-data-view-header__main\s*\{[^}]*flex-wrap:\s*wrap/
+      /\.cu-table-panel__head\s*>\s*\.eft-data-view-header__main\s*\{[^}]*flex-wrap:\s*nowrap/
     )
     expect(css).toMatch(
-      /\.cu-table-panel__head\s+\.eft-data-view-header__actions\s*\{[^}]*flex:\s*1\s+1\s+42rem/
+      /\.cu-table-panel__head\s+\.eft-data-view-header__actions\s*\{[^}]*flex:\s*0\s+0\s+auto/
     )
-    expect(css).toMatch(
-      /@media\s*\(max-width:\s*768px\)[\s\S]*\.cu-table-panel__head\s+\.eft-data-view-header__actions\s*\{[^}]*flex:\s*none/
-    )
+    expect(css).toMatch(/\.cu-table-panel__title-text\s*\{[^}]*text-overflow:\s*ellipsis/)
+    expect(css).toMatch(/\.cu-table-panel__description-value\s*\{[^}]*-webkit-line-clamp:\s*2/)
+    expect(css).toMatch(/\.cu-table-panel__description-tooltip\s*\{[^}]*inset-inline:\s*0/)
     expect(css).not.toMatch(
       /\.cu-table-panel__actions\s*>\s*\.cu-section-search\s*\{[^}]*flex:\s*1\s+1\s+100%/
     )
-    const narrowLayoutStart = css.lastIndexOf('@media (max-width: 768px)')
-    const narrowSearchStart = css.indexOf(
-      '.cu-table-panel__actions > .cu-section-search {',
-      narrowLayoutStart
-    )
-    expect(narrowSearchStart).toBeGreaterThan(narrowLayoutStart)
-    const narrowSearchBlock = css.slice(narrowSearchStart, css.indexOf('}', narrowSearchStart) + 1)
-    expect(narrowSearchBlock).toMatch(/flex:\s*0\s+1\s+13rem/)
-    expect(narrowSearchBlock).toMatch(/width:\s*min\(13rem,\s*100%\)/)
     expect(css).toMatch(/\.cu-table-panel__actions\s*>\s*select\.cu-input\s*\{[^}]*width:\s*auto/)
+  })
+
+  it('makes a two-line-clamped description available in a full-width tooltip', () => {
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function () {
+        return this.classList.contains('cu-table-panel__description-value') ? 48 : 0
+      })
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockImplementation(function () {
+        return this.classList.contains('cu-table-panel__description-value') ? 32 : 0
+      })
+
+    try {
+      render(
+        <TablePanelHeader
+          subtitle="A longer description that cannot fit within two lines."
+          title="Agents"
+        />
+      )
+
+      const description = document.querySelector('.cu-table-panel__description')
+      expect(description).toHaveAttribute('tabindex', '0')
+      expect(screen.getByRole('tooltip')).toHaveTextContent(
+        'A longer description that cannot fit within two lines.'
+      )
+    } finally {
+      scrollHeight.mockRestore()
+      clientHeight.mockRestore()
+    }
   })
 })
