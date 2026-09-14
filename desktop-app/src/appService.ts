@@ -4422,8 +4422,7 @@ export class AppService {
     hostRef: string,
     agent: string,
     chatId: string,
-    title: string,
-    hostRefs?: string[]
+    title: string
   ): Promise<{ title: string }> {
     const targetHostRef = String(hostRef || '').trim()
     const targetAgent = String(agent || '').trim()
@@ -4431,7 +4430,10 @@ export class AppService {
     if (!targetHostRef || !targetAgent || !targetChatId) {
       throw new Error('hostRef, agent, and chatId are required')
     }
-    const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
+    // A rename always targets exactly one host, so the write-scope token is minted
+    // for that single hostRef only — never a caller-supplied fleet list, which would
+    // widen an intentionally narrow token. (Unlike setHostModel, which is multi-host.)
+    const effectiveHostRefs = [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_TITLE_SCOPES, effectiveHostRefs)
     try {
       return await this.rpcClient.renameSession(
