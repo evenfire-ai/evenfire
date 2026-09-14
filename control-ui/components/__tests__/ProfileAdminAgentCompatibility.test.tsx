@@ -171,6 +171,35 @@ describe('profile-admin agent compatibility access', () => {
     expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
   })
 
+  // Same rename propagation on the team Agents tab.
+  it('shows agent display names in the team Agents tab, falling back to the identifier', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-alpha' },
+          spec: { contextRef: 'ctx-alpha', host: 'Alpha Bot' },
+        },
+        { metadata: { name: 'agent-beta' }, spec: { contextRef: 'ctx-beta' } },
+      ],
+    })
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-alpha', 'agent-beta'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+
+    renderTeamDetails()
+
+    expect(await screen.findByRole('button', { name: 'Alpha Bot' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'agent-beta' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
+  })
+
   it('removes only owned Context grants when a member loses final agent access', async () => {
     vi.mocked(api.getAdminUserContexts)
       .mockResolvedValueOnce({ userId: 'user-1', contextIds: ['ctx-alpha', 'ctx-unrelated'] })
