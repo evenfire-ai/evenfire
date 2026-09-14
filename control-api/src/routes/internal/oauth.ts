@@ -61,13 +61,15 @@ function hasExpectedV2OAuthContext(
       string,
       unknown
     >
+    const expiresAt =
+      typeof decoded.expiresAt === 'string' ? Date.parse(decoded.expiresAt) : Number.NaN
     if (
       decoded.version !== 2 ||
       decoded.userId !== expected.userId ||
       decoded.operationId !== expected.operationId ||
       typeof decoded.targetHash !== 'string' ||
-      typeof decoded.expiresAt !== 'string' ||
-      Date.parse(decoded.expiresAt) <= Date.now()
+      !Number.isFinite(expiresAt) ||
+      expiresAt <= Date.now()
     ) {
       return false
     }
