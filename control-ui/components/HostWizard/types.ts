@@ -40,12 +40,15 @@ export type CreatedResource = {
 // and omits spec.secretRef; mixed/static chains still require an exact Secret.
 export type HostLlmSecretMode = 'existing' | 'new'
 
+// TASK-229: onCreated receives the created agent's identifier (metadata.name)
+// so page hosts can route to the new agent's detail view. Optional payload
+// keeps older no-arg consumers (tests, modal hosts) source-compatible.
 export type HostWizardProps = {
   existingSecrets: SecretMeta[]
   mcpServers: McpServer[]
   mode?: 'modal' | 'page'
   onClose: () => void
-  onCreated: () => Promise<void>
+  onCreated: (created?: { name: string }) => Promise<void>
   pageHeader?: ReactNode
 }
 

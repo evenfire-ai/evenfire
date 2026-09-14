@@ -1056,7 +1056,11 @@ export default function HostDetailsPage() {
         label: TAB_LABELS[tab],
         href: hostTabHref(tab),
       }))}
-      title={`Agent: ${routeName}`}
+      // TASK-229 / rename propagation: the header leads with the agent's
+      // display name (spec.host, editable on Overview) and carries the route
+      // URL built from the immutable slug so both identities are visible.
+      title={`Agent: ${hostDisplaySaved || routeName}`}
+      eyebrow={CONTROL_ROUTES.agents.detail(routeName)}
       titleActions={
         <AgentActionsMenu
           busy={busy || deletingAgent}

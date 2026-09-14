@@ -765,7 +765,9 @@ export function HostWizard({
 
       if (!mountedRef.current) return
       showToast('Agent created successfully.', { tone: 'success' })
-      await onCreated()
+      // TASK-229: hand the created agent's identifier back so the host page can
+      // route straight to the new agent's detail view (name + route URL header).
+      await onCreated({ name: normalizedHostName })
       if (!mountedRef.current) return
       onClose()
     } catch (e) {

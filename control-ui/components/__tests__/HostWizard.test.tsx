@@ -637,6 +637,19 @@ describe('HostWizard — free-text agent name with derived identifier (TASK-230)
   })
 })
 
+describe('HostWizard — created-agent handoff (TASK-229)', () => {
+  it('hands the created agent identifier to onCreated so hosts can route to the detail page', async () => {
+    const { onCreated } = await renderWizard()
+    await walkToAccessStep({ agentName: 'Support Bot' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(onCreated).toHaveBeenCalledWith({ name: 'support-bot' })
+    })
+  })
+})
+
 describe('HostWizard — submit path uses the atomic agent-centric endpoints', () => {
   it('creates an agent without access grants when no users or teams are selected', async () => {
     await renderWizard()
