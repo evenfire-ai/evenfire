@@ -69,23 +69,25 @@ test('optional QA recorder: Desktop apps journey', async ({}, testInfo) => {
 
       // The embedded app is a native WebContentsView floated above the DOM, so
       // assert the mounted chrome OR the minting loader OR the parked preview
-      // image. The "Back to apps" button is rendered for both the `minting`
-      // and `mounted` launch states, so it is the most reliable signal that the
-      // open flow actually ran.
-      const backButton = page.getByRole('button', { name: 'Back to apps' })
+      // image. The `sandbox-ui-mounted` section is rendered for both the
+      // `minting` and `mounted` launch states, so it is the most reliable signal
+      // that the open flow actually ran (it replaced the old "Back to apps"
+      // button, which was removed).
+      const mountedSignal = page.getByTestId('sandbox-ui-mounted')
       const loadingApp = page.getByText('Loading app')
       const embedPreview = page.getByTestId('sandbox-ui-embed-preview')
-      const mounted = backButton.or(loadingApp).or(embedPreview).first()
+      const mounted = mountedSignal.or(loadingApp).or(embedPreview).first()
       await expect(mounted).toBeVisible({ timeout: 20_000 })
 
       await screenshotAndLog(page, testInfo, 'desktop-apps-embedded')
 
-      // (3) Back action returns to the catalog. The Back button is part of the
-      // mounted union above, so only click it when it is the visible signal —
-      // if the open surfaced an error banner instead, the catalog is already
-      // showing and there is nothing to return from.
-      if (await backButton.isVisible().catch(() => false)) {
-        await backButton.click()
+      // (3) Return to the catalog via the sidebar Apps nav ("Back to apps" was
+      // removed; the sidebar owns the return now, same channel as
+      // app.backToApps). Only when the app actually mounted — if the open
+      // surfaced an error banner instead, the catalog is already showing and
+      // there is nothing to return from.
+      if (await mountedSignal.isVisible().catch(() => false)) {
+        await page.getByTestId('nav-sandbox-ui').click()
         await expect(appsHeading).toBeVisible({ timeout: 20_000 })
         await expect(catalogBody).toBeVisible({ timeout: 20_000 })
         await screenshotAndLog(page, testInfo, 'desktop-apps-back')
