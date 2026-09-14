@@ -371,12 +371,17 @@ describe('LlmModelTable provider groups', () => {
       'aria-expanded',
       'false'
     )
+    const summaryRow = screen.getByRole('button', { name: 'Expand Anthropic models' }).closest('tr')
+    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([1, 1, 1, 1])
     expect(screen.queryByText('claude-sonnet-4-6')).toBeNull()
     expect(screen.queryByText('gpt-5')).toBeNull()
 
     expandAnthropicModels()
 
     expect(screen.getByRole('columnheader', { name: 'Credential' })).toBeInTheDocument()
+    const childTable = screen.getByText('claude-sonnet-4-6').closest('table')
+    expect(childTable).toHaveClass('cu-llm-model-table__children')
+    expect(childTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(8)
     expect(screen.getByText('claude-sonnet-4-6')).toBeInTheDocument()
     expect(screen.queryByText('gpt-5')).toBeNull()
     expect(screen.getByRole('button', { name: 'Collapse Anthropic models' })).toHaveAttribute(
@@ -391,15 +396,16 @@ describe('LlmModelTable provider groups', () => {
       { ...baseModel, id: 'disabled-model', model: 'claude-haiku', enabled: false },
     ])
 
-    const summary = screen.getByRole('button', { name: 'Expand Anthropic models' })
+    const summary = screen.getByRole('button', { name: 'Expand Anthropic models' }).closest('tr')
+    expect(summary).not.toBeNull()
     expect(summary).toHaveTextContent('2 models')
     expect(summary).toHaveTextContent('1 enabled')
     expect(summary).toHaveTextContent('1 stale')
 
     fireEvent.change(screen.getByLabelText('Search models'), { target: { value: 'haiku' } })
-    expect(screen.getByRole('button', { name: 'Collapse Anthropic models' })).toHaveTextContent(
-      '1 matching'
-    )
+    expect(
+      screen.getByRole('button', { name: 'Collapse Anthropic models' }).closest('tr')
+    ).toHaveTextContent('1 matching')
     expect(screen.getByText('claude-haiku')).toBeInTheDocument()
   })
 
@@ -421,9 +427,9 @@ describe('LlmModelTable provider groups', () => {
 
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Anthropic models/ })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Collapse OpenAI models' })).toHaveTextContent(
-      '1 matching'
-    )
+    expect(
+      screen.getByRole('button', { name: 'Collapse OpenAI models' }).closest('tr')
+    ).toHaveTextContent('1 matching')
 
     fireEvent.change(screen.getByLabelText('Search models'), { target: { value: '' } })
     expect(screen.getByRole('button', { name: 'Collapse OpenAI models' })).toBeInTheDocument()

@@ -300,7 +300,7 @@ export function LlmDiscoveryPanel({
   )
 
   const providerColumns: TableHeaderColumn[] = [
-    { key: 'provider', label: 'Provider', colSpan: 2 },
+    { key: 'provider', label: 'Provider' },
     { key: 'models', label: 'Models' },
     { key: 'details', label: 'Details' },
     { key: 'actions', label: 'Actions', align: 'right' },
@@ -389,14 +389,17 @@ export function LlmDiscoveryPanel({
         ) : null}
 
         <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
-          <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
+          <DataTable
+            className="eft-table cu-table cu-table--header-band cu-llm-review-table"
+            variant="grouped"
+          >
             <thead>
               <TableHeaderRow columns={providerColumns} />
             </thead>
             {isInitialLoad ? (
               <tbody>
                 <TableStateRow
-                  colSpan={reviewColumns.length}
+                  colSpan={providerColumns.length}
                   kind="loading"
                   message="Loading discovery review…"
                 />
@@ -404,7 +407,7 @@ export function LlmDiscoveryPanel({
             ) : reviewQueue.length === 0 ? (
               <tbody>
                 <TableStateRow
-                  colSpan={reviewColumns.length}
+                  colSpan={providerColumns.length}
                   message="No models awaiting review. Sync the catalog to pull newly released models."
                 />
               </tbody>
@@ -417,8 +420,9 @@ export function LlmDiscoveryPanel({
                   <GroupedTableBody
                     childBodyClassName="cu-llm-model-group__children"
                     childHeader={<TableHeaderRow columns={reviewColumns} />}
+                    childTableClassName="cu-llm-review-table__children"
                     className="cu-llm-model-group"
-                    colSpan={reviewColumns.length}
+                    colSpan={providerColumns.length}
                     disclosureClassName="cu-llm-model-group__toggle"
                     disclosureLabel={isExpanded =>
                       `${isExpanded ? 'Collapse' : 'Expand'} ${providerLabel} review models`
@@ -426,20 +430,42 @@ export function LlmDiscoveryPanel({
                     expanded={expanded}
                     groupId={provider}
                     key={provider}
+                    nestedChildTable
                     onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
-                    summary={
-                      <>
-                        <LlmProviderIcon provider={provider} label={providerLabel} />
-                        <span className="cu-llm-model-group__provider">{providerLabel}</span>
-                        <span className="cu-llm-model-group__count">
-                          {models.length} model{models.length === 1 ? '' : 's'}
-                        </span>
-                        <span className="cu-llm-model-group__summary">Awaiting review</span>
-                        <span className="cu-llm-model-group__action" aria-hidden="true">
-                          {expanded ? 'Hide models' : 'Show models'}
-                        </span>
-                      </>
-                    }
+                    summaryCells={[
+                      {
+                        key: 'provider',
+                        content: (
+                          <>
+                            <LlmProviderIcon provider={provider} label={providerLabel} />
+                            <span className="cu-llm-model-group__provider">{providerLabel}</span>
+                          </>
+                        ),
+                      },
+                      {
+                        key: 'models',
+                        content: (
+                          <span className="cu-llm-model-group__count">
+                            {models.length} model{models.length === 1 ? '' : 's'}
+                          </span>
+                        ),
+                      },
+                      {
+                        key: 'details',
+                        content: (
+                          <span className="cu-llm-model-group__summary">Awaiting review</span>
+                        ),
+                      },
+                      {
+                        key: 'actions',
+                        className: 'cu-llm-model-group__action-cell',
+                        content: (
+                          <span className="cu-llm-model-group__action" aria-hidden="true">
+                            {expanded ? 'Hide models' : 'Show models'}
+                          </span>
+                        ),
+                      },
+                    ]}
                   >
                     {models.map(model => (
                       <tr key={model.id} className="cu-table__row cu-llm-model-row">

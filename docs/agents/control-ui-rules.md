@@ -90,8 +90,11 @@ leaning on either behaviour.
   ordinary table row-expansion presentations. Both datasets repeat provider
   identity across many models, so they render one provider/provider-family
   summary row with expandable model child rows through the shared
-  domain-neutral grouped table primitive. This exception does not apply to any
-  other table without a separately recorded owner decision.
+  domain-neutral grouped table primitive. Each summary uses four balanced
+  Provider, Models, Availability/Details, and Actions cells. The expanded model
+  header and rows use a nested child table because their schemas differ from
+  the provider summary. This exception does not apply to any other table
+  without a separately recorded owner decision.
 
 ## Routing
 

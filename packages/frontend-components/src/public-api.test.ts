@@ -20,6 +20,7 @@ import type {
   CellKind,
   DataViewHeaderProps,
   GroupedTableBodyProps,
+  GroupedTableSummaryCell,
   RowAction,
   SortDirection,
   SortValue,
@@ -51,6 +52,7 @@ export type PublicTypeApi = {
   cellKind: CellKind
   dataViewHeader: DataViewHeaderProps
   groupedTableBody: GroupedTableBodyProps
+  groupedTableSummaryCell: GroupedTableSummaryCell
   rowAction: RowAction
   sortDirection: SortDirection
   sortValue: SortValue
