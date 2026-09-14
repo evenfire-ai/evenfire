@@ -81,9 +81,9 @@ function renderUserDetails() {
 }
 
 const contextItems = [
-  { metadata: { name: 'ctx-alpha' }, spec: { contextId: 'ctx-alpha' } },
-  { metadata: { name: 'ctx-unrelated' }, spec: { contextId: 'ctx-unrelated' } },
-  { metadata: { name: 'ctx-beta' }, spec: { contextId: 'ctx-beta' } },
+  { metadata: { name: 'ctx-alpha' }, spec: { contextId: 'ctx-alpha', mcpServers: [] } },
+  { metadata: { name: 'ctx-unrelated' }, spec: { contextId: 'ctx-unrelated', mcpServers: [] } },
+  { metadata: { name: 'ctx-beta' }, spec: { contextId: 'ctx-beta', mcpServers: [] } },
 ]
 
 const hostItems = [
@@ -107,14 +107,17 @@ beforeEach(() => {
         id: 'user-1',
         email: 'member@example.com',
         name: 'Member One',
+        picture: null,
         displayName: 'Member One',
         activeTeamCount: 1,
       },
     ],
   })
   vi.mocked(api.getAdminUserContext).mockResolvedValue({
+    id: 'user-1',
     email: 'member@example.com',
     name: 'Member One',
+    picture: null,
     displayName: 'Member One',
     channels: { emails: [], slackUserNames: [], telegramIds: [] },
   })

@@ -139,7 +139,7 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
     await expect(appCard).toHaveCount(1)
     await expect(appCard).toBeVisible({ timeout: 30_000 })
     await appCard.click()
-    await expect(page.getByRole('button', { name: 'Back to apps' })).toBeVisible({
+    await expect(page.getByTestId('sandbox-ui-mounted')).toBeVisible({
       timeout: 30_000,
     })
     let embedded: EmbeddedContents | null = null
@@ -170,7 +170,9 @@ test('Desktop Apps refuses a Codex prompt when the execution binding is missing'
     if (after > before) {
       expect(latestSdkInvocationStatus(fixture, 'promptBridge')).not.toBe('complete')
     }
-    await page.getByRole('button', { name: 'Back to apps' }).click()
+    // "Back to apps" was removed; the sidebar Apps nav owns the return to the
+    // picker now (same channel as app.backToApps).
+    await page.getByTestId('nav-sandbox-ui').click()
     await expect(page.getByRole('heading', { name: 'Apps', exact: true })).toBeVisible()
   } finally {
     await finalizeRecording(app, page)

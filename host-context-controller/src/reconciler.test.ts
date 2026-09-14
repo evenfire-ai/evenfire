@@ -493,12 +493,15 @@ describe('PR-B B1 — validateSecret result shape', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
-    reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
+    const kubeConfig = new k8s.KubeConfig()
+    // Keep the forbidden API reachable: reintroducing the old optional
+    // NetworkingApi client must not pass by observing an unrelated mock.
+    vi.spyOn(kubeConfig, 'makeApiClient').mockReturnValue(asNetworkingApi(networkingApi))
+    reconciler = new McpServerReconciler(kubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
       coreApi: asCoreApi(coreApi),
       customApi: asCustomApi(customApi),
-      networkingApi: asNetworkingApi(networkingApi),
     })
   })
 
@@ -630,16 +633,24 @@ describe('PR-B B1 — validateSecret result shape', () => {
       name: 'pg',
       namespace: 'mcp-server',
     })
-    for (const namespace of ['mcp-server', 'mcp-host', 'rpc-proxy']) {
-      expect(networkingApi.deleteNamespacedNetworkPolicy).toHaveBeenCalledWith({
-        name: `np-${namespace}-pg`,
-        namespace,
+    expect(networkingApi.listNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        body: expect.arrayContaining([
+          expect.objectContaining({
+            path: '/status/conditions',
+            value: expect.arrayContaining([
+              expect.objectContaining({
+                type: 'SecretResolved',
+                status: 'False',
+                reason: 'SecretNotFound',
+              }),
+            ]),
+          }),
+        ]),
       })
-      expect(networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalledWith({
-        name: `np-${namespace}-other`,
-        namespace,
-      })
-    }
+    )
     expect(reconciler.getStatus('pg')).toMatchObject({ deployed: false, ready: false })
   })
 
@@ -657,7 +668,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
     })
 
     await expect(reconciler.reconcile(server)).rejects.toThrow(
-      'Failed to delete runtime resources for McpServer "pg"'
+      'Failed to delete runtime Kubernetes resources for McpServer "pg"'
     )
     expect(coreApi.deleteNamespacedService).toHaveBeenCalledWith({
       name: 'pg',
@@ -1531,6 +1542,31 @@ describe('full reconciliation inventory authority', () => {
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('inventory authority'))
     warn.mockRestore()
+  })
+
+  it('limits a scoped pass to its names without treating out-of-scope servers as orphans', async () => {
+    reconciler.setInventoryAuthority(() => ({ known: true, generation: 31 }))
+    const failed = makeServer({ name: 'failed-server' })
+    const healthy = makeServer({ name: 'healthy-server' })
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockResolvedValue(undefined)
+    appsApi.listNamespacedDeployment.mockResolvedValueOnce({
+      items: [
+        { metadata: { name: 'healthy-server', namespace: 'mcp-server' } },
+        { metadata: { name: 'scoped-orphan', namespace: 'mcp-server' } },
+        { metadata: { name: 'unscoped-orphan', namespace: 'mcp-server' } },
+      ],
+    })
+
+    await reconciler.fullReconcile([failed, healthy], {
+      scope: new Set(['failed-server', 'scoped-orphan']),
+    })
+
+    expect(reconcile.mock.calls.map(([server]) => server.name)).toEqual(['failed-server'])
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'scoped-orphan',
+      namespace: 'mcp-server',
+    })
   })
 
   it('deletes an orphan when inventory authority remains known and stable', async () => {
