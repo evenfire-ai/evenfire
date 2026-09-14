@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import {
   type AuthorityBindingV2,
   canonicalResourceIdentity,
@@ -50,36 +52,26 @@ function auth(): McpHostRuntimeAuth {
 }
 
 function allowed() {
-  return {
-    version: 2,
-    status: 'allowed',
-    authorizationRevision: binding.authorizationRevision,
-    behaviorBindingHash: binding.behaviorBindingHash,
-    behavior: {
-      budget: { state: 'known', value: null },
-      credentialPolicy: { state: 'known', value: null },
-      approvalPolicy: { state: 'known', value: null },
-      filesystemScope: { state: 'known', value: null },
-      runtime: { state: 'known', value: null },
-      providerModelPolicy: { state: 'known', value: null },
-      audit: { state: 'known', value: binding.userId },
-    },
-    checkedAt: '2026-08-18T12:00:00.000Z',
-    validUntil: null,
-    attribution: {
-      userId: binding.userId,
-      sid: binding.sid,
-      sessionVersion: binding.sessionVersion,
-      accessPathId: binding.accessPathId,
-      pathKind: binding.pathKind,
-      effectiveTeamId: binding.effectiveTeamId,
-    },
-    destination: {
-      kind: 'host',
-      ref: resource.logicalId,
-      url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-    },
-  }
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: mcpHostActionAuthorityCheckpointRequest(binding),
+        destination: {
+          kind: 'host',
+          ref: resource.logicalId,
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return JSON.parse(output)
 }
 
 describe('mcp-host action-authority checkpoint client', () => {
@@ -96,7 +88,11 @@ describe('mcp-host action-authority checkpoint client', () => {
 
     await expect(
       checkpointMcpHostActionAuthority(binding, credential, fetchImpl)
-    ).resolves.toMatchObject({ status: 'allowed' })
+    ).resolves.toMatchObject({
+      status: 'allowed',
+      authorizationRevision: binding.authorizationRevision,
+      behaviorBindingHash: binding.behaviorBindingHash,
+    })
 
     const [url, init] = fetchImpl.mock.calls[0]
     expect(url).toBe('http://control-api.test:8090/api/v1/internal/action-authority/checkpoint')

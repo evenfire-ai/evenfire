@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { hashActionTarget } from '../../../packages/action-context-contracts/index.cjs'
 import {
   createGfsAuthorityCheckpointer,
   parseGfsActionAuthority,
@@ -8,6 +9,7 @@ import {
 const USER = '11111111-1111-4111-8111-111111111111'
 const SID = '22222222-2222-4222-8222-222222222222'
 const JTI = '33333333-3333-4333-8333-333333333333'
+const TARGET = { drive: 'main', resourceId: JTI }
 
 function authority() {
   return parseGfsActionAuthority(
@@ -26,13 +28,13 @@ function authority() {
           logicalId: JTI,
           displayName: JTI,
         },
-        target: { drive: 'main', resourceId: JTI },
-        targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        target: TARGET,
+        targetHash: hashActionTarget(TARGET),
         accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         pathKind: 'direct',
         effectiveTeamId: null,
-        behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       },
       sourceIssuedAt: 90,
       sourceExpiresAt: 200,
