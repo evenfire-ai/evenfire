@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { config } from '../../config.js'
 import { type DbClient, withTransaction } from '../../db.js'
 import { approvalsCreatedTotal } from '../../observability/metrics.js'
+import { stableStringify } from '../../utils/stableStringify.js'
 import { emitNotification } from '../notificationEmitter.js'
 import { ApprovalPromptHistoryService } from '../tracing/approvalPromptHistoryService.js'
 import {
@@ -17,6 +19,23 @@ import {
   type WorkflowAuthorityBinding,
   persistWorkflowAuthorityBinding,
 } from './workflowAuthorityBindingService.js'
+
+function matchesPersistedAuthorityIgnoringDelegationIdentity(
+  authority: WorkflowAuthorityBinding,
+  persistedBindingHash: string,
+  persistedDelegationJti: string | null | undefined
+): boolean {
+  if (authority.bindingHash === persistedBindingHash) return true
+  if (!persistedDelegationJti) return false
+  const persistedShape = {
+    ...authority.binding,
+    delegationJti: persistedDelegationJti,
+  }
+  return (
+    createHash('sha256').update(stableStringify(persistedShape)).digest('hex') ===
+    persistedBindingHash
+  )
+}
 
 export type WorkflowTriggerApprovalRunIntent = {
   actorType: WorkflowRunActorType
@@ -160,6 +179,7 @@ export async function createWorkflowTriggerApprovalRequest(params: {
                 wr.created_at,
                 wr.updated_at
                 , binding.binding_hash AS "authorityBindingHash"
+                , binding.delegation_jti AS "authorityDelegationJti"
            FROM workflow_approval_requests war
       LEFT JOIN workflow_approval_trigger_run_intents watri
              ON watri.approval_request_id = war.id
@@ -187,12 +207,19 @@ export async function createWorkflowTriggerApprovalRequest(params: {
         runIntentApprovalRequestId?: string | null
         run_id?: string | null
         authorityBindingHash?: string | null
+        authorityDelegationJti?: string | null
       } & Partial<WorkflowRunRow>
 
       if (
         (row.payloadHash && row.payloadHash !== payloadHash) ||
         Boolean(row.authorityBindingHash) !== Boolean(authority) ||
-        (authority && row.authorityBindingHash !== authority.bindingHash)
+        (authority &&
+          row.authorityBindingHash &&
+          !matchesPersistedAuthorityIgnoringDelegationIdentity(
+            authority,
+            row.authorityBindingHash,
+            row.authorityDelegationJti
+          ))
       ) {
         return {
           kind: 'mismatch' as const,
