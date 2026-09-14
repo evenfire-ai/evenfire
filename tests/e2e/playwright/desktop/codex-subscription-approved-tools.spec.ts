@@ -17,6 +17,7 @@ import {
   required,
   scenarios,
 } from '../helpers/approved-tools-scenarios'
+import { workflowJourney } from '../helpers/approved-tools-workflow'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
@@ -70,12 +71,30 @@ async function saveConnector(page: Page, scenario: Scenario, remove: boolean) {
   else await expect(row).toBeVisible()
 }
 
+test('native workflow: visible approval, trigger, status and result artifact', async ({
+  page,
+}, testInfo) => {
+  await workflowJourney(page, testInfo)
+})
+
 async function send(page: Page, prompt: string) {
   await expect(page.getByTestId('chat-input')).toBeVisible()
   await page.getByTestId('chat-input').fill(prompt)
   await expect(page.getByTestId('send-button')).toBeEnabled()
   await page.getByTestId('send-button').click()
   await expect(page.getByTestId('message-list').getByText(prompt, { exact: true })).toBeVisible()
+}
+
+async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
+  const pending = page
+    .getByTestId('progress-stepper')
+    .filter({ has: page.getByTestId('approval-approve-btn') })
+  await expect(pending).toHaveCount(1)
+  await expect(pending).toContainText('workitem_read_receipt')
+  await expect(pending).toContainText('requires approval')
+  await expect(pending).not.toContainText('clerum__tool_call requires approval')
+  expect((await readEvidence(scenario)).calls).toHaveLength(previousCalls)
+  return pending
 }
 
 test('unauthenticated agent route guard prevents connector use', async ({ page }) => {
@@ -90,8 +109,37 @@ test('unauthenticated agent route guard prevents connector use', async ({ page }
   expect((await readEvidence(scenario)).calls).toEqual(before.calls)
 })
 
+test('authenticated user without agent access cannot select the protected agents', async () => {
+  const before = await Promise.all(cases.map(readEvidence))
+  const app = await launchDesktopApp()
+  try {
+    const page = await app.firstWindow()
+    await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
+    await page
+      .getByLabel('Email', { exact: true })
+      .fill(required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL'))
+    await page
+      .getByLabel('Password', { exact: true })
+      .fill(required('APPROVED_TOOLS_UNAUTHORIZED_PASSWORD'))
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+    await expect(page.getByTestId('nav-agents')).toBeVisible()
+    await page.getByTestId('nav-agents').click()
+    await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'No agents', exact: true })).toBeVisible()
+    for (const scenario of cases) {
+      await expect(page.getByText(scenario.agentDisplayName, { exact: true })).toHaveCount(0)
+    }
+    await page.getByTestId('nav-chat').click()
+    await expect(page.getByTestId('chat-input')).toHaveCount(0)
+    await expect(page.getByTestId('send-button')).toHaveCount(0)
+    expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
+  } finally {
+    await app.close()
+  }
+})
+
 for (const scenario of cases) {
-  test(`approved tools ${scenario.catalogSize}: selective receipt and revoked connector`, async ({
+  test(`approved tools ${scenario.catalogSize}: ordinary discovery, reuse, approval decisions and revocation`, async ({
     page,
   }, testInfo) => {
     testInfo.annotations.push({ type: 'upstream', description: mode })
@@ -135,6 +183,9 @@ for (const scenario of cases) {
       await saveConnector(page, scenario, false)
     })
     const app = await launchDesktopApp()
+    const corpusStarted = Date.now()
+    const completedTasks: string[] = []
+    let corpusOutcome = 'failed'
     try {
       const desktop = await app.firstWindow()
       await test.step('Sign in visibly to Desktop and start a chat with the same agent', async () => {
@@ -170,10 +221,10 @@ for (const scenario of cases) {
         const upstreamBefore =
           mode === 'deterministic' ? await readUpstreamEvidence(scenario) : undefined
         const started = Date.now()
-        await send(
-          desktop,
-          'Find the verification receipt tool in my approved connectors. Describe only that tool, call it once, and report its exact businessId. Do not call other business tools or invent a receipt.'
-        )
+        await send(desktop, 'Show my verification receipt and its business ID.')
+        const pending = await receiptApproval(desktop, scenario, 0)
+        await pending.getByTestId('approval-approve-btn').click()
+        await expect(pending).toHaveCount(0)
         await expect
           .poll(async () => (await readEvidence(scenario)).calls.length, { timeout: 120_000 })
           .toBe(1)
@@ -235,7 +286,88 @@ for (const scenario of cases) {
           body: JSON.stringify(evidence),
           contentType: 'application/json',
         })
+        completedTasks.push('ordinary-receipt')
       })
+      await test.step('Repeat an ordinary request using the current schema without rediscovering it', async () => {
+        const before = await readEvidence(scenario)
+        const upstreamBefore =
+          mode === 'deterministic' ? await readUpstreamEvidence(scenario) : undefined
+        const started = Date.now()
+        await send(desktop, 'Show my verification receipt again.')
+        const pending = await receiptApproval(desktop, scenario, 1)
+        await pending.getByTestId('approval-approve-btn').click()
+        await expect(pending).toHaveCount(0)
+        await expect
+          .poll(async () => (await readEvidence(scenario)).calls.length, { timeout: 120_000 })
+          .toBe(2)
+        const after = await readEvidence(scenario)
+        expect(after.calls.map(call => call.tool)).toEqual([
+          'workitem_read_receipt',
+          'workitem_read_receipt',
+        ])
+        // MCP JSON-RPC ids are connection-local and may be reused after reconnect;
+        // the two separately completed turns and exact call count prove reuse.
+        await expect(
+          desktop.getByTestId('agent-response').filter({ hasText: before.calls[0]!.businessId })
+        ).toHaveCount(2)
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+        let requests = null
+        if (upstreamBefore) {
+          const after = await readUpstreamEvidence(scenario)
+          expect(after.rejected).toBe(upstreamBefore.rejected)
+          expect(after.describeCalls).toBe(upstreamBefore.describeCalls)
+          expect(after.searchCalls).toBe(upstreamBefore.searchCalls)
+          expect(after.businessCalls - upstreamBefore.businessCalls).toBe(1)
+          requests = after.requests.slice(upstreamBefore.requests.length)
+          expect(requests.map(request => request.stage)).toEqual(['clerum__tool_call', 'final'])
+          for (const request of requests) {
+            expect(request.connectorDefinitionCount).toBe(0)
+            expect(request.leakedSchema).toBe(false)
+          }
+        }
+        await testInfo.attach('repeat-task-metrics', {
+          body: JSON.stringify({
+            mode,
+            catalogSize: scenario.catalogSize,
+            outcome: 'receipt-read',
+            businessCalls: 1,
+            requests,
+            elapsedMs: Date.now() - started,
+            inputTokens: null,
+            outputTokens: null,
+          }),
+          contentType: 'application/json',
+        })
+        completedTasks.push('repeat-receipt')
+      })
+      for (const decision of ['deny', 'cancel'] as const) {
+        await test.step(`${decision} the real tool approval without executing the connector`, async () => {
+          const before = await readEvidence(scenario)
+          const cancelled = desktop.getByTestId('progress-stepper').filter({ hasText: 'Cancelled' })
+          const cancelledBefore = await cancelled.count()
+          await send(
+            desktop,
+            decision === 'deny'
+              ? 'Please read my verification receipt once more.'
+              : 'Please fetch my verification receipt now.'
+          )
+          const pending = await receiptApproval(desktop, scenario, 2)
+          await pending
+            .getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn')
+            .click()
+          await expect(pending).toHaveCount(0)
+          await expect(cancelled).toHaveCount(cancelledBefore + 1)
+          await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+            'aria-label',
+            'Send message'
+          )
+          expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+          completedTasks.push(decision)
+        })
+      }
       await test.step('Revoke through Control UI and deny the next call in the existing chat', async () => {
         const before = await readEvidence(scenario)
         const upstreamBefore =
@@ -251,11 +383,11 @@ for (const scenario of cases) {
           page.getByRole('alertdialog', { name: 'Remove connector from this agent?' })
         ).toBeVisible()
         await saveConnector(page, scenario, true)
-        await send(
-          desktop,
-          'Try reading the verification receipt again using the same tool. If access has been revoked or the tool is unavailable, reply exactly CONNECTOR_UNAVAILABLE. Never reuse the earlier receipt as a new result.'
-        )
-        const denied = mode === 'real' ? 'CONNECTOR_UNAVAILABLE' : '"found":0'
+        await send(desktop, 'Show my verification receipt again, please.')
+        const denied =
+          mode === 'real'
+            ? /unavailable|not available|no longer|cannot access|could not find|not found/i
+            : /"found"\s*:\s*0/
         await expect(desktop.getByTestId('agent-response').filter({ hasText: denied })).toBeVisible(
           { timeout: 120_000 }
         )
@@ -280,8 +412,28 @@ for (const scenario of cases) {
             contentType: 'application/json',
           })
         }
+        completedTasks.push('revoked-receipt')
       })
+      corpusOutcome = 'passed'
     } finally {
+      const desktop = await app.firstWindow()
+      // Read-only measurement snapshot, not a readiness or correctness assertion.
+      // Preserve exact provider-reported UI figures; never infer tokens from bytes.
+      const reportedTokenLabels = await desktop
+        .getByLabel(/^Turn token usage/)
+        .evaluateAll(elements => elements.map(element => element.getAttribute('aria-label')))
+      await testInfo.attach('provider-parity-corpus', {
+        body: JSON.stringify({
+          mode,
+          catalogSize: scenario.catalogSize,
+          outcome: corpusOutcome,
+          completedTasks,
+          elapsedMs: Date.now() - corpusStarted,
+          reportedTokenLabels,
+          subscriptionUsage: null,
+        }),
+        contentType: 'application/json',
+      })
       await app.close()
     }
   })

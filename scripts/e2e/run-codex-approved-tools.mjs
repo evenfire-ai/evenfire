@@ -13,7 +13,11 @@ const playwright = path.join(repo, 'tests/e2e/playwright')
 const specFile = 'codex-subscription-approved-tools.spec.ts'
 export const expectedTitles = [
   'unauthenticated agent route guard prevents connector use',
-  ...[83, 150, 250].map(size => `approved tools ${size}: selective receipt and revoked connector`),
+  'authenticated user without agent access cannot select the protected agents',
+  'native workflow: visible approval, trigger, status and result artifact',
+  ...[83, 150, 250].map(
+    size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
+  ),
 ]
 
 export function validateReport(report) {
@@ -68,7 +72,7 @@ function required(name) {
 }
 
 function runNode(args, cwd, env, timeout) {
-  if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 22 * 60_000)
+  if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 35 * 60_000)
     throw new Error('Invalid browser deadline')
   const result = spawnSync(
     process.execPath,
@@ -106,6 +110,9 @@ function main() {
     'EXTERNAL_REST_API_BASE_URL',
     'RPC_PROXY_BASE_URL',
     'APPROVED_TOOLS_SCENARIOS',
+    'APPROVED_TOOLS_WORKFLOW_SCENARIO',
+    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
+    'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
   ])
     required(key)
   const mode = required('APPROVED_TOOLS_UPSTREAM_MODE')
@@ -152,6 +159,7 @@ function main() {
         'tools/e2e_static_audit.py',
         `tests/e2e/playwright/desktop/${specFile}`,
         'tests/e2e/playwright/helpers/approved-tools-scenarios.ts',
+        'tests/e2e/playwright/helpers/approved-tools-workflow.ts',
       ],
       { cwd: repo, env, stdio: 'inherit', timeout: 30_000 }
     )
@@ -165,7 +173,7 @@ function main() {
       ],
       playwright,
       env,
-      22 * 60_000
+      35 * 60_000
     )
     const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)))
     process.stdout.write(

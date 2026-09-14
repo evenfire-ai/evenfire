@@ -10,7 +10,7 @@ import { expectedTitles, validateReport } from './run-codex-approved-tools.mjs'
 function greenReport() {
   return {
     errors: [],
-    stats: { expected: 4, unexpected: 0, skipped: 0, flaky: 0 },
+    stats: { expected: expectedTitles.length, unexpected: 0, skipped: 0, flaky: 0 },
     suites: [
       {
         specs: expectedTitles.map(title => ({
@@ -30,8 +30,12 @@ function greenReport() {
     ],
   }
 }
-test('accepts exactly the required four green cases', () => {
-  assert.deepEqual(validateReport(greenReport()), { tests: 4, skipped: 0, failed: 0 })
+test('accepts exactly all mandatory green cases', () => {
+  assert.deepEqual(validateReport(greenReport()), {
+    tests: expectedTitles.length,
+    skipped: 0,
+    failed: 0,
+  })
 })
 const corruptions = {
   'missing case': report => report.suites[0].specs.pop(),
@@ -79,7 +83,7 @@ test('report verification reads only the reserved reporter inode, never a replac
     fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(greenReport()), { mode: 0o600 })
     assert.throws(() => validateReport(JSON.parse(readOwnedDescriptor(file))))
     fs.writeSync(file.fd, JSON.stringify(greenReport()))
-    assert.equal(validateReport(JSON.parse(readOwnedDescriptor(file))).tests, 4)
+    assert.equal(validateReport(JSON.parse(readOwnedDescriptor(file))).tests, expectedTitles.length)
   } finally {
     fs.closeSync(file.fd)
     fs.rmSync(root, { recursive: true, force: true })
