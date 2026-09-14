@@ -470,6 +470,50 @@ private predicate hasCanonicalRpcProxyDelegationVerifier() {
   hasCanonicalRpcProxyAuthentication() and hasCanonicalRpcProxyScopeAuthorization()
 }
 
+private predicate assignsReadinessWriterBeforeNext(
+  Function writerGuard, string service, CallExpr next
+) {
+  exists(AssignExpr assignment, PropAccess writer, StringLiteral value |
+    functionOccursWithin(assignment.getEnclosingFunction(), writerGuard) and
+    assignment.getLhs() = writer and
+    writer.getPropertyName() = "pr2RuntimeReadinessWriter" and
+    assignment.getRhs() = value and
+    value.getStringValue() = service and
+    next.getCalleeName() = "next" and
+    next.getEnclosingFunction().getFile() = writerGuard.getFile() and
+    assignment.getLocation().getEndLine() < next.getLocation().getStartLine()
+  )
+}
+
+private predicate hasCanonicalPr2ReadinessWriterGuard() {
+  exists(
+    Function writerGuard, MethodCallExpr serviceHeader, CallExpr staticAuth,
+    CallExpr controlAuth, CallExpr mcpAuth, IfStmt unknownService, CallExpr staticNext,
+    CallExpr controlNext, CallExpr mcpNext
+  |
+    writerGuard.getName() = "requirePr2RuntimeReadinessWriter" and
+    writerGuard.getFile().getRelativePath() =
+      "control-api/src/middleware/pr2ReadinessWriterAuth.ts" and
+    serviceHeader.getMethodName() = "header" and
+    serviceHeader.getArgument(0).getStringValue() = "x-service-token" and
+    serviceHeader.getEnclosingFunction() = writerGuard and
+    isImportedCall(staticAuth, "control-api/src/middleware/internalServiceAuth.ts",
+      "requireInternalToken") and
+    functionOccursWithin(staticAuth.getEnclosingFunction(), writerGuard) and
+    isImportedCall(controlAuth, "control-api/src/middleware/internalControlJwt.ts",
+      "requireInternalControlJwt") and
+    functionOccursWithin(controlAuth.getEnclosingFunction(), writerGuard) and
+    isImportedCall(mcpAuth, "control-api/src/middleware/mcpHostJwtAuth.ts", "requireMcpHostJwt") and
+    functionOccursWithin(mcpAuth.getEnclosingFunction(), writerGuard) and
+    unknownService.getCondition().(VarAccess).getName() = "service" and
+    unknownService.getCondition().getEnclosingFunction() = writerGuard and
+    isFixed4xxBranch(unknownService.getThen()) and
+    assignsReadinessWriterBeforeNext(writerGuard, "external-rest-api", staticNext) and
+    assignsReadinessWriterBeforeNext(writerGuard, "workflow-recipes", controlNext) and
+    assignsReadinessWriterBeforeNext(writerGuard, "mcp-host", mcpNext)
+  )
+}
+
 private predicate hasControlApiCheckpointConsumer(Routing::Node useSite) {
   exists(
     MethodCallExpr registration, Function handler, int guardIndex, int handlerIndex, int useIndex
@@ -483,7 +527,8 @@ private predicate hasControlApiCheckpointConsumer(Routing::Node useSite) {
         "control-api/src/middleware/actionCheckpointCaller.ts", "requireActionCheckpointCaller")
       or
       importedGuardAtIndex(registration, guardIndex,
-        "control-api/src/middleware/pr2ReadinessWriterAuth.ts", "requirePr2RuntimeReadinessWriter")
+        "control-api/src/middleware/pr2ReadinessWriterAuth.ts", "requirePr2RuntimeReadinessWriter") and
+      hasCanonicalPr2ReadinessWriterGuard()
     )
   )
 }
