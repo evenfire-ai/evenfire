@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { validateDisplayField } from '@clerum/display-field'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -149,9 +150,23 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
   }
 }
 
+// Step 0 collects a free-text display name (`spec.host`) and derives the
+// immutable identifier (`metadata.name`) from it. Two validations apply:
+//  - the DISPLAY name passes the shared display-field rule (control chars +
+//    trimmed length, D4: same validator as control-api's write gate — the field
+//    label is passed in so the issue text reads as wizard copy);
+//  - the DERIVED slug passes the RFC1123 agent-name rule (3–63 chars, lowercase
+//    alphanumerics + hyphens), because the slug is what reaches metadata.name.
+function agentStepError(displayName: string): string {
+  if (!displayName.trim()) return 'Agent name is required.'
+  const displayIssue = validateDisplayField(displayName, 'Agent name')
+  if (displayIssue) return displayIssue.message
+  return getAgentNameError(toKebabCase(displayName))
+}
+
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
   if (stepIndex === 0)
-    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
+    return state.hostName.trim().length > 0 && agentStepError(state.hostName) === ''
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
     if (
@@ -221,7 +236,11 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
-  const agentNameError = getAgentNameError(hostName)
+  // TASK-230: the operator types a free-text display name; the immutable
+  // metadata.name slug is derived from it (shown live under the field) instead
+  // of being force-lowercased into the input while typing.
+  const derivedHostName = toKebabCase(hostName)
+  const agentNameError = agentStepError(hostName)
 
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
 
@@ -530,7 +549,7 @@ export function HostWizard({
 
   const validationMessage = useMemo(() => {
     if (step === 0) {
-      const agentNameError = getAgentNameError(hostName)
+      const agentNameError = agentStepError(hostName)
       if (agentNameError) return agentNameError
     }
     if (step === 1 && !modelName.trim()) return 'Model name is required.'
@@ -695,7 +714,10 @@ export function HostWizard({
               : ''
 
       const hostSpec: Record<string, unknown> = {
-        host: normalizedHostName,
+        // Display name: the free text the operator typed (falls back to the
+        // slug only when the trimmed name is somehow empty). The slug lives in
+        // metadata.name below — the two are intentionally distinct now.
+        host: hostName.trim() || normalizedHostName,
         contextRef: generatedContextName,
         ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
@@ -801,15 +823,17 @@ export function HostWizard({
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <Field
-              description="Automatically formatted to lowercase with hyphens."
-              label="Agent metadata name"
+              description="The name members see. The identifier used in URLs is derived automatically."
+              htmlFor="wizard-agent-name"
+              label="Agent name"
               required
             >
               <span className="cu-agent-input-shell">
                 <TextInput
+                  id="wizard-agent-name"
                   value={hostName}
-                  onChange={e => setHostName(toKebabInput(e.target.value))}
-                  placeholder="agent-name"
+                  onChange={e => setHostName(e.target.value)}
+                  placeholder="e.g. Support Bot"
                   autoFocus
                 />
                 {hostName.trim() ? (
@@ -828,6 +852,18 @@ export function HostWizard({
                 ) : null}
               </span>
             </Field>
+            <div
+              className="cu-agent-slug-hint"
+              data-state={hostName.trim() ? (agentNameError ? 'invalid' : 'ready') : 'empty'}
+            >
+              <span className="cu-agent-slug-hint__label">Identifier</span>
+              <span className="cu-agent-slug-hint__value">{derivedHostName || 'agent-name'}</span>
+              <span className="cu-agent-slug-hint__note">
+                {hostName.trim() && agentNameError
+                  ? agentNameError
+                  : 'Used in URLs, CLI, and grants. Lowercase letters, numbers, and hyphens.'}
+              </span>
+            </div>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
             {SHOW_STATELESS_AGENT_SELECTOR ? (
               <div className="cu-agent-access-section">

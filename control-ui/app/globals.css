@@ -6199,6 +6199,45 @@ td.cu-registry-description {
   font-size: 0.8125rem;
 }
 
+/* TASK-230: live preview of the identifier derived from the free-text agent
+ * name. Sits directly under the Agent name field in the create wizard. */
+.cu-agent-slug-hint {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem var(--cu-space-2);
+  align-items: baseline;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-agent-slug-hint__label {
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.cu-agent-slug-hint__value {
+  color: var(--cu-text);
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.cu-agent-slug-hint__note {
+  grid-column: 1 / -1;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-agent-slug-hint[data-state='invalid'] .cu-agent-slug-hint__note {
+  color: var(--cu-warning);
+}
+
 .cu-agent-section-label {
   color: var(--cu-text-muted);
   font-size: 0.8125rem;

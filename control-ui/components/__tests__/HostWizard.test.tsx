@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import * as api from '../../lib/api'
 import {
   buildHostReferencesForContext,
@@ -173,7 +173,7 @@ async function walkToAccessStep(opts?: { agentName?: string }) {
   })
 
   // Step 0: Agent name
-  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+  fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
     target: { value: name },
   })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -207,7 +207,9 @@ async function walkToAccessStepNewSecret(opts?: { agentName?: string }) {
   })
 
   // Step 0: Agent name
-  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+    target: { value: name },
+  })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
   // Step 1: New LLM Secret → make the OpenAI primary usable; its internal name auto-derives.
@@ -263,7 +265,9 @@ describe('HostWizard — credential draft is projected onto the active provider 
     })
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: 'testagent' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     fireEvent.click(screen.getByLabelText(/Use an existing LLM Secret/i))
     fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
@@ -284,7 +288,9 @@ describe('HostWizard — credential draft is projected onto the active provider 
     })
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: 'testagent' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
@@ -304,7 +310,9 @@ describe('HostWizard — credential draft is projected onto the active provider 
     await renderWizard()
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: 'testagent' } })
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: 'testagent' },
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
 
     const existingCard = screen.getByLabelText(/Use an existing LLM Secret/i).closest('label')
@@ -330,7 +338,7 @@ describe('HostWizard — credential draft is projected onto the active provider 
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
     // Step 0: name.
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
       target: { value: 'bedrock-orphan' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -574,6 +582,61 @@ describe('HostWizard — Access precedes connector selection', () => {
   })
 })
 
+describe('HostWizard — free-text agent name with derived identifier (TASK-230)', () => {
+  it('preserves mixed case while typing and derives the RFC1123 identifier live', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    const input = screen.getByLabelText(/^Agent name/, { selector: 'input' })
+    fireEvent.change(input, { target: { value: 'Support Bot' } })
+
+    expect(input).toHaveValue('Support Bot')
+    expect(
+      screen.getByText('support-bot', { selector: '.cu-agent-slug-hint__value' })
+    ).toBeInTheDocument()
+  })
+
+  it('blocks Next when the derived identifier is not a valid RFC1123 slug', async () => {
+    await renderWizard()
+    await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
+
+    // No [a-z0-9] characters survive kebab-casing — the slug is empty.
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: '###' },
+    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    // A slug under the 3-character minimum is equally invalid.
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: 'ab' },
+    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+      target: { value: 'Support Bot' },
+    })
+    expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+  })
+
+  it('writes the display name to spec.host and the derived slug to metadata.name', async () => {
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'Support Bot' })
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'support-bot' },
+          spec: expect.objectContaining({ host: 'Support Bot' }),
+        })
+      )
+    })
+  })
+})
+
 describe('HostWizard — submit path uses the atomic agent-centric endpoints', () => {
   it('creates an agent without access grants when no users or teams are selected', async () => {
     await renderWizard()
@@ -701,15 +764,15 @@ describe('HostWizard — baseline render', () => {
     expect(screen.getByText(/Create Agent/i)).toBeInTheDocument()
   })
 
-  it('starts on Step 0 (Agent metadata name)', async () => {
+  it('starts on Step 0 (Agent name)', async () => {
     await renderWizard()
-    expect(screen.getByPlaceholderText(/agent-name/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/^Agent name/, { selector: 'input' })).toBeInTheDocument()
   })
 
   it('shows Default model without Allowed models in Model & Credentials', async () => {
     await renderWizard()
 
-    fireEvent.change(screen.getByPlaceholderText(/agent-name/i), {
+    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
       target: { value: 'default-model-agent' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Next' }))
@@ -918,7 +981,9 @@ async function walkToModelStep(opts?: { agentName?: string }) {
   await waitFor(() => {
     expect(api.getAdminUsers).toHaveBeenCalled()
   })
-  fireEvent.change(screen.getByPlaceholderText(/agent-name/i), { target: { value: name } })
+  fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
+    target: { value: name },
+  })
   fireEvent.click(screen.getByRole('button', { name: 'Next' }))
   await waitFor(() => {
     expect(
