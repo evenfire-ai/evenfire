@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { resolve } from 'node:path'
 import request from 'supertest'
 import {
   actionOperationScope,
@@ -55,41 +57,41 @@ const claims: UserDelegationV2Claims = {
   effectiveTeamId: null,
 }
 
-function behavior() {
-  return {
-    budget: { state: 'known' as const, value: null },
-    credentialPolicy: { state: 'known' as const, value: null },
-    approvalPolicy: { state: 'known' as const, value: null },
-    filesystemScope: { state: 'known' as const, value: null },
-    runtime: { state: 'known' as const, value: null },
-    providerModelPolicy: { state: 'known' as const, value: null },
-    audit: { state: 'known' as const, value: userId },
-  }
-}
-
 function checkpointAllowed() {
-  return {
-    version: 2,
-    status: 'allowed',
-    authorizationRevision: claims.authorizationRevision,
-    behaviorBindingHash: claims.behaviorBindingHash,
-    behavior: behavior(),
-    checkedAt: new Date().toISOString(),
-    validUntil: new Date(Date.now() + 60_000).toISOString(),
-    attribution: {
-      userId,
-      sid,
-      sessionVersion: claims.sv,
-      accessPathId: claims.accessPathId,
-      pathKind: claims.pathKind,
-      effectiveTeamId: claims.effectiveTeamId,
-    },
-    destination: {
-      kind: 'host',
-      ref: 'mcp-host/chatllm',
-      url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
-    },
-  }
+  const repositoryRoot = resolve(process.cwd(), '..')
+  const output = execFileSync(
+    resolve(repositoryRoot, 'rpc-proxy/node_modules/.bin/tsx'),
+    [
+      resolve(
+        repositoryRoot,
+        'control-api/test/fixtures/emitActionAuthorityCheckpointV2Fixture.ts'
+      ),
+      JSON.stringify({
+        request: {
+          version: 2,
+          principal: { sub: userId, sid, sessionVersion: claims.sv },
+          delegationJti: claims.jti,
+          resource,
+          operationId: 'session.read',
+          target,
+          targetHash,
+          accessPathId: claims.accessPathId,
+          authorizationRevision: claims.authorizationRevision,
+          behaviorBindingHash: claims.behaviorBindingHash,
+          domain: { service: 'rpc-proxy', resource, targetHash },
+        },
+        destination: {
+          kind: 'host',
+          ref: 'mcp-host/chatllm',
+          url: 'http://chatllm.mcp-host.svc.cluster.local:8080',
+        },
+        checkedAt: new Date().toISOString(),
+        validUntil: new Date(Date.now() + 60_000).toISOString(),
+      }),
+    ],
+    { cwd: repositoryRoot, encoding: 'utf8' }
+  )
+  return JSON.parse(output)
 }
 
 function makeApp() {
