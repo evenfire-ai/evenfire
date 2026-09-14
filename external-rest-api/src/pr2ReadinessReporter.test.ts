@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { resolve } from 'node:path'
 import { startPr2ReadinessReporter } from './pr2ReadinessReporter.js'
 
 vi.mock('./config.js', () => ({
@@ -9,6 +11,21 @@ vi.mock('./config.js', () => ({
 }))
 
 const SOURCE = 'a'.repeat(40)
+
+function parseByControlApi(payload: unknown) {
+  const root = resolve(process.cwd(), '..')
+  return JSON.parse(
+    execFileSync(
+      resolve(root, 'rpc-proxy/node_modules/.bin/tsx'),
+      [
+        resolve(root, 'control-api/test/fixtures/parsePr2ReadinessEvidenceFixture.ts'),
+        'external-rest-api',
+        JSON.stringify(payload),
+      ],
+      { cwd: root, encoding: 'utf8' }
+    )
+  )
+}
 
 describe('PR2 readiness reporter', () => {
   beforeEach(() => {
@@ -45,6 +62,9 @@ describe('PR2 readiness reporter', () => {
       expect(url).toBe('http://control-api.test/api/v1/internal/pr2-readiness/runtime-evidence')
       expect(new Headers(init.headers).get('authorization')).toBe('Bearer service-token')
       expect(new Headers(init.headers).get('x-service-token')).toBe('external-rest-api')
+      expect(parseByControlApi(JSON.parse(String(init.body)))).toMatchObject({
+        writer: 'external-rest-api',
+      })
     }
   })
 })

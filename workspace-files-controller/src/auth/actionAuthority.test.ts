@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { hashActionTarget } from '../../../packages/action-context-contracts/index.cjs'
 import { createWfcAuthorityCheckpointer, parseWfcActionAuthority } from './actionAuthority'
 
 const USER = '11111111-1111-4111-8111-111111111111'
 const SID = '22222222-2222-4222-8222-222222222222'
 const JTI = '33333333-3333-4333-8333-333333333333'
 const NOW = Math.floor(Date.now() / 1000)
+const TARGET = {
+  sharedFileSystemNamespace: 'mcp-host',
+  sharedFileSystemName: 'mission',
+  relationshipInstanceId: 'rel1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  canonicalRelativePath: 'docs/plan.md',
+}
 
 function authority() {
   return parseWfcActionAuthority(
@@ -23,18 +30,13 @@ function authority() {
           logicalId: 'mcp-host/mission',
           displayName: 'mission',
         },
-        target: {
-          sharedFileSystemNamespace: 'mcp-host',
-          sharedFileSystemName: 'mission',
-          relationshipInstanceId: 'rel1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-          canonicalRelativePath: 'docs/plan.md',
-        },
-        targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        target: TARGET,
+        targetHash: hashActionTarget(TARGET),
         accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
         pathKind: 'direct',
         effectiveTeamId: null,
-        behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       },
       sourceIssuedAt: NOW - 1,
       sourceExpiresAt: NOW + 300,
