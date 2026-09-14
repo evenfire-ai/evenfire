@@ -459,6 +459,28 @@ describe('handleDesktopUpgrade', () => {
     expect(socket.destroy).toHaveBeenCalled()
   })
 
+  it('proxies a valid legacy WebSocket without forwarding edge credentials', () => {
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: {
+        authorization: 'Bearer legacy-token',
+        cookie: `clerum_desktop_session=${cookie}`,
+        'x-evenfire-action-delegation': 'must-not-forward',
+        'x-clerum-edge-action-context': 'must-not-forward',
+      },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+
+    expect(proxyMock.ws).toHaveBeenCalledOnce()
+    expect(req.headers.authorization).toBeUndefined()
+    expect(req.headers.cookie).toBeUndefined()
+    expect(req.headers['x-evenfire-action-delegation']).toBeUndefined()
+    expect(req.headers['x-clerum-edge-action-context']).toBeUndefined()
+  })
+
   it('mounts a v2 lease and strips edge credentials before WebSocket proxying', async () => {
     const claims = desktopDelegation()
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
