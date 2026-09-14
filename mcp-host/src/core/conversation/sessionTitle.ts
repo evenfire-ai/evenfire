@@ -56,6 +56,10 @@ export function normalizeTitleText(input: string): string {
       // code point (`\p{C}`) that `\s` does not cover. Spaces are `\p{Zs}`, not
       // `\p{C}`, so word boundaries survive; valid astral chars (emoji) are their
       // own category, so only lone surrogates are dropped.
+      // Tradeoff: U+200D (ZWJ) is `\p{C}` too, so a ZWJ emoji sequence
+      // (e.g. 👨‍💻) splits into its base emoji. Accepted: a title gates a
+      // destructive rename dialog, so anti-spoofing (no hidden joiners) wins over
+      // emoji fidelity — same call the read-side sanitizer makes.
       .replace(/\p{C}/gu, '')
       .replace(/\s+/g, ' ')
       .trim()
