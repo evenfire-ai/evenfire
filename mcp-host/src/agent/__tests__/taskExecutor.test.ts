@@ -309,6 +309,56 @@ describe('TaskExecutor', () => {
     )
   })
 
+  it('rechecks v2 authority before continuing after suspended tool results', async () => {
+    const providerCall = vi.fn().mockResolvedValue({
+      content: 'provider response',
+      tool_calls: null,
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.reasoning.respondWithTools({ messages: [], available_tools: [] })
+      await config.reasoning.continueWithToolResults({ messages: [], available_tools: [] }, [
+        {
+          tool_call_id: 'tool-1',
+          name: 'suspended-tool',
+          content: 'approved result',
+          is_error: false,
+        },
+      ])
+      return { type: 'response', content: 'must not be returned' }
+    })
+    const checkpoint = vi
+      .fn()
+      .mockResolvedValueOnce('allowed' as const)
+      .mockResolvedValueOnce('denied' as const)
+    const task = createTask('Hello', runtimeAuthority().userId)
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const deps = createDeps({
+      llmProvider: {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: providerCall,
+        getProviderType: () => 'openai' as const,
+      } as any,
+      actionAuthorityCheckpoint: checkpoint,
+    })
+
+    await new TaskExecutor(task, deps).run()
+
+    expect(checkpoint).toHaveBeenCalledTimes(2)
+    expect(checkpoint).toHaveBeenNthCalledWith(1, runtimeAuthority())
+    expect(checkpoint).toHaveBeenNthCalledWith(2, runtimeAuthority())
+    expect(providerCall).toHaveBeenCalledTimes(1)
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({
+        code: 'access_path_stale',
+        retryable: false,
+      })
+    )
+  })
+
   it('checkpoints again before a fallback provider attempt', async () => {
     const primaryCall = vi
       .fn()
