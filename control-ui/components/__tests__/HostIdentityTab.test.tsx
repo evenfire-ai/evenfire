@@ -1,6 +1,6 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import * as api from '../../lib/api'
 import { HostIdentityTab } from '../HostIdentityTab'
 import { ToastProvider } from '../Toast'
@@ -125,7 +125,7 @@ describe('HostIdentityTab', () => {
     await waitFor(() => expect(screen.getByText(/^Identity files saved\.?$/i)).toBeInTheDocument())
   })
 
-  it('discards pending edits across identity files', async () => {
+  it('requires discarding or saving before changing identity files', async () => {
     ;(api.getHostPersonalization as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
       agents: 'agents old',
       identity: 'identity old',
@@ -137,12 +137,11 @@ describe('HostIdentityTab', () => {
     const identityEditor = await findMarkdownEditor(/Identity markdown/i)
     fireEvent.change(identityEditor, { target: { value: 'identity new' } })
     fireEvent.click(screen.getByRole('tab', { name: 'Soul' }))
-    fireEvent.change(await findMarkdownEditor(/Soul markdown/i), {
-      target: { value: 'soul new' },
-    })
 
-    expect(screen.getByText(/unsaved edits/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /discard/i }))
+    const dialog = screen.getByRole('alertdialog', { name: /unsaved identity edits/i })
+    expect(dialog).toBeInTheDocument()
+    expect(screen.getByText(/save or discard your identity edits/i)).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Discard all' }))
 
     await expectMarkdownEditorValue(/Soul markdown/i, 'soul old')
     fireEvent.click(screen.getByRole('tab', { name: 'Identity' }))

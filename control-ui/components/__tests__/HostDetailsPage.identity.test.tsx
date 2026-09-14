@@ -123,7 +123,7 @@ describe('HostDetailsPage identity integration', () => {
     mockParams = { name: 'foo', tab: 'identity' }
     const { container } = render(<HostDetailsPage />)
     expect(await screen.findByTestId('identity-tab')).toHaveTextContent('Identity editor for foo')
-    expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
+    expect(container.querySelector('.cu-agent-detail-card')).not.toBeNull()
   })
 
   it('renders the agent detail tabs in order', async () => {

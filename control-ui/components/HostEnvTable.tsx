@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import { DataTable } from '@clerum/frontend-components'
 import {
   HostEnvEntry,
@@ -43,7 +44,13 @@ function validateKey(name: string): string | null {
   return null
 }
 
-export function HostEnvTable({ hostRef }: { hostRef: string }) {
+export function HostEnvTable({
+  hostRef,
+  onActionsChange,
+}: {
+  hostRef: string
+  onActionsChange?: (actions: ReactNode | null) => void
+}) {
   const { showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
   const [items, setItems] = useState<HostEnvEntry[]>([])
@@ -69,34 +76,60 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
 
   const sortedItems = useMemo(() => [...items].sort((a, b) => a.key.localeCompare(b.key)), [items])
 
-  async function load(opts: { refresh?: boolean } = {}) {
-    if (opts.refresh) setRefreshing(true)
-    else setLoading(true)
-    setError('')
-    try {
-      const res = await listHostEnv(hostRef)
-      setItems(res.items || [])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-      setRefreshing(false)
-    }
-  }
+  const load = useCallback(
+    async (opts: { refresh?: boolean } = {}) => {
+      if (opts.refresh) setRefreshing(true)
+      else setLoading(true)
+      setError('')
+      try {
+        const res = await listHostEnv(hostRef)
+        setItems(res.items || [])
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setLoading(false)
+        setRefreshing(false)
+      }
+    },
+    [hostRef]
+  )
 
   useEffect(() => {
     void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hostRef])
 
-  function openCreate() {
+  const openCreate = useCallback(() => {
     setEditingKey(null)
     setKeyDraft('')
     setValueDraft('')
     setSecretDraft(false)
     setKeyDraftError(null)
     setOpen(true)
-  }
+  }, [])
+
+  useEffect(() => {
+    if (!onActionsChange) return
+    onActionsChange(
+      <>
+        <button
+          type="button"
+          className="cu-btn cu-btn--icon cu-btn--toolbar"
+          onClick={() => void load({ refresh: true })}
+          disabled={refreshing}
+          aria-label={
+            refreshing ? 'Refreshing environment variables' : 'Refresh environment variables'
+          }
+        >
+          <IconRefresh className={refreshing ? 'cu-spin' : undefined} />
+        </button>
+        <button type="button" className="cu-btn cu-btn--primary cu-btn--sm" onClick={openCreate}>
+          Add variable
+        </button>
+      </>
+    )
+    return () => onActionsChange(null)
+  }, [load, onActionsChange, openCreate, refreshing])
 
   function openEdit(entry: HostEnvEntry) {
     setEditingKey(entry.key)
@@ -189,35 +222,12 @@ export function HostEnvTable({ hostRef }: { hostRef: string }) {
 
   return (
     <section className="cu-host-env-tab">
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          gap: '0.5rem',
-        }}
-      >
+      <div className="cu-host-env-tab__header">
         <div>
           <p className="cu-muted" style={{ margin: 0, fontSize: '0.85rem' }}>
             Operator-managed env vars for this Host. Applied within ~1 second; no pod restart.
             Provider keys live in the LLM Secrets tab.
           </p>
-        </div>
-        <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <button
-            type="button"
-            className="cu-btn cu-btn--icon cu-btn--toolbar"
-            onClick={() => load({ refresh: true })}
-            disabled={refreshing}
-            aria-label={
-              refreshing ? 'Refreshing environment variables' : 'Refresh environment variables'
-            }
-          >
-            <IconRefresh className={refreshing ? 'cu-spin' : undefined} />
-          </button>
-          <button type="button" className="cu-btn cu-btn--primary" onClick={openCreate}>
-            + Add variable
-          </button>
         </div>
       </div>
 

@@ -1,11 +1,14 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'
 import { TabBar } from '@components/TabBar'
+import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
+import { CONTROL_ROUTES } from '@constants/routes'
 import type { AdvancedSubTab, HostAdvancedTabProps } from './types'
 
 const ADVANCED_SUB_TABS: { key: AdvancedSubTab; label: string }[] = [
@@ -24,8 +27,31 @@ export function HostAdvancedTab({
   initialTools,
   onSaveApprovalTools,
   onSaveGuardrails,
+  onActionsChange,
 }: HostAdvancedTabProps) {
+  const router = useRouter()
+  const routerRef = useRef(router)
+  routerRef.current = router
   const [subTab, setSubTab] = useState<AdvancedSubTab>(DEFAULT_SUB_TAB)
+
+  useEffect(() => {
+    if (!onActionsChange || subTab !== 'hooks') return
+    onActionsChange(
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() =>
+          routerRef.current.push(
+            CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE })
+          )
+        }
+        disabled={busy}
+      >
+        Add hook
+      </button>
+    )
+    return () => onActionsChange(null)
+  }, [busy, onActionsChange, subTab])
 
   return (
     <section className="cu-advanced-tab" aria-label="Advanced">
@@ -51,6 +77,7 @@ export function HostAdvancedTab({
               }
               initialGuardrails={initialGuardrails}
               onSave={onSaveGuardrails}
+              showAddAction={false}
             />
           ))}
 
@@ -67,7 +94,7 @@ export function HostAdvancedTab({
             />
           ))}
 
-        {subTab === 'env' && <HostEnvTable hostRef={hostName} />}
+        {subTab === 'env' && <HostEnvTable hostRef={hostName} onActionsChange={onActionsChange} />}
       </div>
     </section>
   )
