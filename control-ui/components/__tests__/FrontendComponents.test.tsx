@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
   DataTable,
+  GroupedTableBody,
   RowActionMenu,
   TableHeaderCell,
   TableRow,
@@ -21,6 +22,281 @@ function cssRule(css: string, selector: string) {
 }
 
 describe('shared frontend components', () => {
+  it('controls independent accessible grouped table disclosures with semantic rows', () => {
+    const onAlphaExpandedChange = vi.fn()
+    const { rerender } = render(
+      <DataTable>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Alpha records`}
+          expanded={false}
+          groupId="alpha"
+          onExpandedChange={onAlphaExpandedChange}
+          summary="Alpha"
+        >
+          <tr>
+            <td>Alpha child action</td>
+            <td>
+              <button type="button">Edit Alpha</button>
+            </td>
+          </tr>
+        </GroupedTableBody>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Beta records`}
+          expanded={false}
+          groupId="beta"
+          onExpandedChange={vi.fn()}
+          summary="Beta"
+        >
+          <tr>
+            <td>Beta child</td>
+            <td />
+          </tr>
+        </GroupedTableBody>
+      </DataTable>
+    )
+
+    const alphaDisclosure = screen.getByRole('button', { name: 'Expand Alpha records' })
+    expect(alphaDisclosure).toHaveAttribute('aria-expanded', 'false')
+    expect(alphaDisclosure.getAttribute('aria-controls')).toMatch(/alpha-rows$/)
+    expect(document.querySelectorAll('table > tbody > tr')).toHaveLength(2)
+    expect(screen.queryByText('Alpha child action')).toBeNull()
+    expect(screen.queryByText('Beta child')).toBeNull()
+
+    fireEvent.click(alphaDisclosure)
+    expect(onAlphaExpandedChange).toHaveBeenCalledWith(true)
+
+    rerender(
+      <DataTable>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Alpha records`}
+          expanded
+          groupId="alpha"
+          onExpandedChange={onAlphaExpandedChange}
+          summary="Alpha"
+        >
+          <tr>
+            <td>Alpha child action</td>
+            <td>
+              <button type="button">Edit Alpha</button>
+            </td>
+          </tr>
+        </GroupedTableBody>
+        <GroupedTableBody
+          colSpan={2}
+          disclosureLabel={expanded => `${expanded ? 'Collapse' : 'Expand'} Beta records`}
+          expanded={false}
+          groupId="beta"
+          onExpandedChange={vi.fn()}
+          summary="Beta"
+        >
+          <tr>
+            <td>Beta child</td>
+            <td />
+          </tr>
+        </GroupedTableBody>
+      </DataTable>
+    )
+
+    expect(screen.getByRole('button', { name: 'Collapse Alpha records' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    )
+    const alphaChildBody = screen.getByText('Alpha child action').closest('tr')?.parentElement
+    const collapseAlpha = screen.getByRole('button', { name: 'Collapse Alpha records' })
+    expect(alphaChildBody).toHaveAttribute('id', collapseAlpha.getAttribute('aria-controls'))
+    expect(alphaChildBody).toHaveAttribute('aria-labelledby', collapseAlpha.id)
+    expect(screen.queryByText('Beta child')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Alpha' }))
+    expect(onAlphaExpandedChange).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(collapseAlpha)
+    expect(onAlphaExpandedChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it.each([
+    { label: 'five columns', colSpan: 5, spans: [2, 1, 2] },
+    { label: 'seven columns', colSpan: 7, spans: [1, 2, 1, 3] },
+  ])(
+    'aligns grouped summaries with arbitrary $label through native cells',
+    ({ colSpan, spans }) => {
+      const onExpandedChange = vi.fn()
+      render(
+        <DataTable>
+          <thead>
+            <tr>
+              {spans.map((span, index) => (
+                <TableHeaderCell
+                  colSpan={span}
+                  key={`header-${index}`}
+                  label={`Header ${index + 1}`}
+                />
+              ))}
+            </tr>
+          </thead>
+          <GroupedTableBody
+            colSpan={colSpan}
+            disclosureLabel={() => 'Expand provider records'}
+            expanded={false}
+            groupId={`provider-${colSpan}`}
+            onExpandedChange={onExpandedChange}
+            summaryCells={spans.map((span, index) => ({
+              key: `cell-${index}`,
+              colSpan: span,
+              content:
+                index === spans.length - 1 ? (
+                  <button type="button">Inspect provider</button>
+                ) : (
+                  `Summary ${index + 1}`
+                ),
+            }))}
+          >
+            <tr>
+              <td colSpan={colSpan}>Provider child</td>
+            </tr>
+          </GroupedTableBody>
+        </DataTable>
+      )
+
+      const disclosure = screen.getByRole('button', { name: 'Expand provider records' })
+      const summaryRow = disclosure.closest('tr')
+      expect(summaryRow).not.toBeNull()
+      expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual(spans)
+
+      fireEvent.click(screen.getByText('Summary 2'))
+      expect(onExpandedChange).not.toHaveBeenCalled()
+
+      fireEvent.click(disclosure)
+      expect(onExpandedChange).toHaveBeenCalledOnce()
+      expect(onExpandedChange).toHaveBeenLastCalledWith(true)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Inspect provider' }))
+      expect(onExpandedChange).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('keeps grouped summary and nested child column schemas independent', () => {
+    render(
+      <DataTable variant="grouped">
+        <thead>
+          <tr>
+            {['Provider', 'Models', 'Details', 'Actions'].map(label => (
+              <TableHeaderCell key={label} label={label} />
+            ))}
+          </tr>
+        </thead>
+        <GroupedTableBody
+          childHeader={
+            <tr>
+              {['Select', 'Model', 'Vendor', 'Context', 'Enabled', 'Actions'].map(label => (
+                <TableHeaderCell key={label} label={label} />
+              ))}
+            </tr>
+          }
+          childTableClassName="test-child-table"
+          colSpan={4}
+          disclosureLabel={() => 'Collapse provider records'}
+          expanded
+          groupId="provider"
+          nestedChildTable
+          onExpandedChange={() => undefined}
+          summaryCells={['Provider', 'Models', 'Details', 'Actions'].map(label => ({
+            key: label,
+            content: `${label} summary`,
+          }))}
+        >
+          <tr>
+            <td>Select value</td>
+            <td>Model value</td>
+            <td>Vendor value</td>
+            <td>Context value</td>
+            <td>Enabled value</td>
+            <td>Action value</td>
+          </tr>
+        </GroupedTableBody>
+      </DataTable>
+    )
+
+    const outerTable = document.querySelector<HTMLTableElement>('.eft-table--grouped')
+    const childTable = document.querySelector<HTMLTableElement>('.test-child-table')
+    expect(outerTable).not.toBeNull()
+    expect(outerTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(4)
+    expect(childTable).not.toBeNull()
+    expect(childTable).not.toBe(outerTable)
+    expect(childTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(6)
+    expect(childTable?.querySelectorAll(':scope > tbody > tr > td')).toHaveLength(6)
+    expect(childTable?.closest('.eft-table-group__child-cell')).toHaveAttribute('colspan', '4')
+  })
+
+  it('rejects grouped summary-cell spans that cannot match the table columns', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const preventReportedError = (event: ErrorEvent) => event.preventDefault()
+    window.addEventListener('error', preventReportedError)
+    try {
+      expect(() =>
+        render(
+          <DataTable>
+            <GroupedTableBody
+              colSpan={4}
+              disclosureLabel={() => 'Expand invalid records'}
+              expanded={false}
+              groupId="invalid"
+              onExpandedChange={() => undefined}
+              summaryCells={[
+                { key: 'provider', content: 'Provider' },
+                { key: 'details', colSpan: 2, content: 'Details' },
+              ]}
+            >
+              <tr>
+                <td colSpan={4}>Invalid child</td>
+              </tr>
+            </GroupedTableBody>
+          </DataTable>
+        )
+      ).toThrow('GroupedTableBody summary cell spans (3) must equal colSpan (4).')
+    } finally {
+      window.removeEventListener('error', preventReportedError)
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('uses unique, labelled rowgroup relationships across table instances', () => {
+    render(
+      <>
+        {[1, 2].map(instance => (
+          <DataTable key={instance}>
+            <GroupedTableBody
+              colSpan={1}
+              disclosureLabel={() => 'Collapse Shared records'}
+              expanded
+              groupId="shared"
+              onExpandedChange={() => undefined}
+              summary={`Shared ${instance}`}
+            >
+              <tr>
+                <td>Child {instance}</td>
+              </tr>
+            </GroupedTableBody>
+          </DataTable>
+        ))}
+      </>
+    )
+
+    const disclosures = screen.getAllByRole('button', { name: 'Collapse Shared records' })
+    const rowgroups = screen.getAllByRole('rowgroup', { name: 'Collapse Shared records' })
+    const controlledIds = disclosures.map(disclosure => disclosure.getAttribute('aria-controls'))
+
+    expect(new Set(controlledIds).size).toBe(2)
+    expect(rowgroups).toHaveLength(2)
+    disclosures.forEach((disclosure, index) => {
+      expect(rowgroups[index]).toHaveAttribute('id', controlledIds[index])
+      expect(rowgroups[index]).toHaveAttribute('aria-labelledby', disclosure.id)
+    })
+  })
+
   it('owns the canonical viewport class and preserves semantic modifiers', () => {
     render(
       <TableViewport aria-label="Embedded results" className="cu-table-wrap" embedded>
@@ -146,6 +422,12 @@ describe('shared frontend components', () => {
     const tableHeaderPaintRule = cssRule(frontendStyles, '.eft-table thead th::before')
     const disabledActionTriggerRule = cssRule(frontendStyles, '.eft-row-actions__trigger:disabled')
     const descriptionCellRule = cssRule(controlStyles, 'td.cu-registry-description')
+    const groupedTableRule = cssRule(frontendStyles, '.eft-table--grouped')
+    const groupedActionsRule = cssRule(
+      frontendStyles,
+      '.eft-table--grouped > thead > tr > th:last-child'
+    )
+    const groupedCountRule = cssRule(controlStyles, '.cu-llm-model-group__count')
 
     expect(frontendStyles).not.toContain(':has(')
     expect(tableHeaderRule).toContain('background-clip: border-box;')
@@ -158,6 +440,10 @@ describe('shared frontend components', () => {
     expect(descriptionCellRule).toContain('overflow: visible;')
     expect(descriptionCellRule).toContain('-webkit-line-clamp: unset;')
     expect(descriptionCellRule).toContain('line-clamp: unset;')
+    expect(groupedTableRule).toContain('table-layout: fixed;')
+    expect(groupedActionsRule).toContain('text-align: right;')
+    expect(groupedActionsRule).toContain('width: var(--eft-table-group-actions-width, 8rem);')
+    expect(groupedCountRule).toContain('margin-left: calc((var(--cu-space-2) + 1px) * -1);')
 
     const seamShadow = '0 -0.375rem 0 var(--eft-surface-muted), inset 0 -1px 0 var(--eft-border)'
     const { unmount } = render(

@@ -94,9 +94,20 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
 
     expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Expand OpenAI review models' })).toHaveAttribute(
+      'aria-expanded',
+      'false'
+    )
+    const summaryRow = screen
+      .getByRole('button', { name: 'Expand OpenAI review models' })
+      .closest('tr')
+    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([1, 1, 1, 1])
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    const childTable = screen.getByText('gpt-5').closest('table')
+    expect(childTable).toHaveClass('cu-llm-review-table__children')
+    expect(childTable?.querySelectorAll(':scope > thead > tr > th')).toHaveLength(5)
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByText('claude-retired')).toBeNull()
-    expect(screen.queryByRole('button', { name: /Expand .* review models/ })).toBeNull()
 
     await waitFor(() => expect(screen.getByText('Live catalog')).toBeInTheDocument())
     expect(screen.getByText('+3 new')).toBeInTheDocument()
@@ -108,6 +119,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     const onRefresh = vi.fn().mockResolvedValue(undefined)
     render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
 
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
 
     await waitFor(() =>
@@ -125,6 +137,7 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       />
     )
 
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     const actionCell = screen.getByRole('button', { name: 'Enable' }).closest('td')
     expect(actionCell).toHaveClass('cu-px-actions')
     expect(actionCell).not.toHaveClass('cu-table__cell-actions')
@@ -189,7 +202,7 @@ describe('LlmDiscoveryPanel sorting', () => {
   }
 
   function expandOpenAi() {
-    // Review rows are always visible; retained as a no-op for the sorting tests.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
   }
 
   const discoveryModel = (overrides: Partial<LlmAllowedModel>): LlmAllowedModel => ({
