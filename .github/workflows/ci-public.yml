@@ -449,6 +449,11 @@ jobs:
       - name: Test HCC watch-recovery gate coordination
         run: bash scripts/tests/test-hcc-watch-recovery-gate.sh
 
+      - name: Test HCC watch recovery TLS proxy and configuration restoration
+        run: |
+          bash scripts/tests/test-hcc-watch-api-proxy.sh
+          bash scripts/tests/test-hcc-watch-pr-a.sh
+
       - name: Test HCC watch-churn readiness gate contract
         run: bash scripts/tests/test-hcc-watch-churn-readiness-gate.sh
 

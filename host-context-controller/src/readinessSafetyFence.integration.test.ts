@@ -615,7 +615,7 @@ describe('lost delete fence: per-request 503 while /ready stays 200', () => {
     })
     mocks.deleteNamespacedNetworkPolicy.mockResolvedValue({})
 
-    await w.runInitialNetworkPolicyConvergence()
+    await w.runInitialNetworkPolicyConvergence({ cause: 'startup' })
 
     expect(lists).toBeGreaterThan(0)
     expect(w.contextWatchGeneration).toBe(generationBefore.context + 2)
@@ -623,8 +623,8 @@ describe('lost delete fence: per-request 503 while /ready stays 200', () => {
     expect(w.contextDesiredRevision).toBe(revisionBefore.context)
     expect(w.mcpServerDesiredRevision).toBe(revisionBefore.server)
     expect(
-      warnSpy.mock.calls.some(
-        call => String(call[0]) === '[K8s] pass ended without certifying: inventory authority lost'
+      warnSpy.mock.calls.some(call =>
+        String(call[0]).includes('pass ended without certifying: inventory authority lost')
       )
     ).toBe(false)
     expect(
