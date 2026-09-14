@@ -349,6 +349,30 @@ describe('approved catalog across presentation and lifecycle', () => {
     }
   )
 
+  it.each([
+    'https://json-schema.org/draft/2019-09/schema',
+    'https://json-schema.org/draft/2019-09/schema#',
+    'https://json-schema.org/draft/2020-12/schema',
+    'https://json-schema.org/draft/2020-12/schema#',
+  ])('accepts a supported dialect including its equivalent empty fragment: %s', async dialect => {
+    const { manager, registry, config } = await setup()
+    remote.catalogs.get('alpha')![0].inputSchema = {
+      $schema: dialect,
+      type: 'object',
+      properties: { recordId: { type: 'string' } },
+      required: ['recordId'],
+    }
+    await manager.replaceServer(serverInfo('alpha'))
+    registry.listDefinitions()
+    const result = await executeToolCalls(
+      [bridgeCall('alpha__record__read_000', 'dialect-call', { recordId: 'record-1' })],
+      config,
+      0
+    )
+    expect(result.toolResults[0].is_error).toBe(false)
+    expect(remote.calls).toHaveBeenCalledTimes(1)
+  })
+
   it('a captured adapter rechecks an in-place changed schema immediately before execution', async () => {
     const { manager, registry } = await setup()
     const target = 'alpha__record__read_000'

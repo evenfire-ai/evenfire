@@ -21,10 +21,13 @@ function selectedSchemaValidator(schema: Record<string, unknown>): ValidateFunct
   if (cached?.serialized === serialized) return cached.validate
   let validate: ValidateFunction | null = null
   try {
+    // An empty fragment denotes the same JSON Schema meta-schema URI.
+    const dialect =
+      typeof schema.$schema === 'string' ? schema.$schema.replace(/#$/, '') : undefined
     const Constructor =
-      schema.$schema === 'https://json-schema.org/draft/2020-12/schema'
+      dialect === 'https://json-schema.org/draft/2020-12/schema'
         ? Ajv2020
-        : schema.$schema === 'https://json-schema.org/draft/2019-09/schema'
+        : dialect === 'https://json-schema.org/draft/2019-09/schema'
           ? Ajv2019
           : Ajv
     // Isolate each schema's $id namespace. Synchronous compile has no remote
