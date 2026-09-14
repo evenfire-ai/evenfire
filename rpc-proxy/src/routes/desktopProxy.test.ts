@@ -5,6 +5,7 @@ import { EventEmitter } from 'node:events'
 import request from 'supertest'
 import { canonicalResourceIdentity, hashActionTarget } from '@clerum/action-context-contracts'
 import { ActionAuthorityCheckpointError } from '../actionAuthorityV2.js'
+import { config } from '../config.js'
 import { DesktopSessionService } from '../services/desktopSessionService.js'
 import {
   createDesktopRouter,
@@ -60,9 +61,9 @@ const VALID_CLAIMS = {
 }
 
 const sessionService = new DesktopSessionService(
-  'test-secret-32-chars-minimum!!',
-  60_000,
-  'clerum_desktop_session'
+  config.desktopCookieSecret,
+  config.desktopCookieMaxAgeMs,
+  config.desktopCookieName
 )
 
 function makeApp() {
@@ -282,6 +283,17 @@ describe('POST /desktop/:hostRef/session (JWT-only)', () => {
 })
 
 describe('ALL /desktop/:hostRef/view/*', () => {
+  it('proxies a valid legacy-only desktop session', async () => {
+    const cookie = sessionService.createSession('chatllm', 'user-123')
+
+    const res = await request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Cookie', `clerum_desktop_session=${cookie}`)
+
+    expect(res.status).toBe(200)
+    expect(proxyMock.web).toHaveBeenCalledOnce()
+  })
+
   it('returns 401 without session cookie', async () => {
     const app = makeApp()
     const res = await request(app).get('/desktop/chatllm/view/index.html')
@@ -360,12 +372,13 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     delegationMock.verifyUserDelegationV2.mockReturnValue(null)
     const cookie = sessionService.createSession('chatllm', 'user-123')
 
-    await request(makeApp())
+    const res = await request(makeApp())
       .get('/desktop/chatllm/view/index.html')
       .set('Authorization', 'Bearer v2.invalid')
       .set('Cookie', `clerum_desktop_session=${cookie}`)
-      .expect(401)
 
+    expect(res.status).toBe(401)
+    expect(res.body).toEqual({ error: 'Unauthorized' })
     expect(proxyMock.web).not.toHaveBeenCalled()
     expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
   })
@@ -380,12 +393,13 @@ describe('ALL /desktop/:hostRef/view/*', () => {
       authorityMock.authorizeActionV2.mockRejectedValue(error)
       const cookie = sessionService.createSession('chatllm', 'user-123')
 
-      await request(makeApp())
+      const res = await request(makeApp())
         .get('/desktop/chatllm/view/index.html')
         .set('Authorization', 'Bearer v2.invalid-authority')
         .set('Cookie', `clerum_desktop_session=${cookie}`)
-        .expect(status)
 
+      expect(res.status).toBe(status)
+      expect(res.body).toEqual({ error: error.code })
       expect(proxyMock.web).not.toHaveBeenCalled()
       expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
     }
@@ -402,12 +416,13 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     })
     const cookie = sessionService.createSession('chatllm', 'user-123')
 
-    await request(makeApp())
+    const res = await request(makeApp())
       .get('/desktop/chatllm/view/index.html')
       .set('Authorization', 'Bearer v2.wrong-target')
       .set('Cookie', `clerum_desktop_session=${cookie}`)
-      .expect(400)
 
+    expect(res.status).toBe(400)
+    expect(res.body).toEqual({ error: 'invalid_binding' })
     expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
     expect(proxyMock.web).not.toHaveBeenCalled()
   })
@@ -490,6 +505,7 @@ describe('handleDesktopUpgrade', () => {
     expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
     await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
 
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 401 Unauthorized\r\n\r\n')
     expect(proxyMock.ws).not.toHaveBeenCalled()
     expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
   })
@@ -515,6 +531,7 @@ describe('handleDesktopUpgrade', () => {
       expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
       await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
 
+      expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 403 Unauthorized\r\n\r\n')
       expect(proxyMock.ws).not.toHaveBeenCalled()
       expect(leaseMock.startActiveViewLease).not.toHaveBeenCalled()
     }
@@ -542,6 +559,7 @@ describe('handleDesktopUpgrade', () => {
     expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
     await vi.waitFor(() => expect(socket.destroy).toHaveBeenCalled())
 
+    expect(socket.write).toHaveBeenCalledWith('HTTP/1.1 403 Unauthorized\r\n\r\n')
     expect(authorityMock.authorizeActionV2).not.toHaveBeenCalled()
     expect(proxyMock.ws).not.toHaveBeenCalled()
   })
