@@ -245,6 +245,7 @@ export function createGfsAuthorityCheckpointer(config: GfsCheckpointConfig) {
     const timer = setTimeout(() => controller.abort(), config.timeoutMs)
     timer.unref()
     let response: Response
+    let result: Record<string, unknown>
     try {
       response = await fetch(
         `${config.baseUrl.replace(/\/+$/, '')}/api/v1/internal/action-authority/checkpoint`,
@@ -279,16 +280,19 @@ export function createGfsAuthorityCheckpointer(config: GfsCheckpointConfig) {
           signal: controller.signal,
         }
       )
-    } catch {
+      try {
+        result = record(await response.json(), 'checkpoint response')
+      } catch {
+        if (controller.signal.aborted) {
+          throw new GfsError('not_mounted', 'live filesystem authority is unavailable')
+        }
+        throw new GfsError('not_mounted', 'live filesystem authority returned an invalid response')
+      }
+    } catch (error) {
+      if (error instanceof GfsError) throw error
       throw new GfsError('not_mounted', 'live filesystem authority is unavailable')
     } finally {
       clearTimeout(timer)
-    }
-    let result: Record<string, unknown>
-    try {
-      result = record(await response.json(), 'checkpoint response')
-    } catch {
-      throw new GfsError('not_mounted', 'live filesystem authority returned an invalid response')
     }
     const attribution =
       result.attribution && typeof result.attribution === 'object'
