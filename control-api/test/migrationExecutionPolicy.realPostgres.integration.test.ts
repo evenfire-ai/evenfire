@@ -85,11 +85,11 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
 
   it('classifies, creates, and reruns all PR1 indexes without replay', async () => {
     const firstVersions = await versions(databasePool)
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
     expect(FRESH_TABLE_INDEXES).toHaveLength(14)
 
     const allNames = [...PR1_ONLINE_INDEX_PLAN.map(index => index.name), ...FRESH_TABLE_INDEXES]
-    expect(new Set(allNames)).toHaveLength(39)
+    expect(new Set(allNames)).toHaveLength(40)
     const indexes = await databasePool.query<{ relname: string; indisvalid: boolean }>(
       `SELECT relation.relname, index.indisvalid
          FROM pg_class relation
@@ -97,7 +97,7 @@ describeRealPostgres('D34 migration execution on real PostgreSQL', () => {
         WHERE relation.relname = ANY($1::text[])`,
       [allNames]
     )
-    expect(indexes.rows).toHaveLength(39)
+    expect(indexes.rows).toHaveLength(40)
     expect(indexes.rows.every(row => row.indisvalid)).toBe(true)
 
     await initDb({ connect: () => databasePool.connect() })
