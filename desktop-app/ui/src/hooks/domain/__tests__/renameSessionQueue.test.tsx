@@ -12,6 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
@@ -96,8 +97,10 @@ function wireStatefulIndex(c: MockClerum, chats: Array<{ id: string; title: stri
   })
 }
 
+/** Parse a raw wire payload through the real producer parser (T1), matching the
+ *  shape listSessions actually resolves to in production. */
 function reportedSessions(chats: Array<{ chatId: string; title?: string }>) {
-  return {
+  return parseSessionsListResult({
     items: chats.map(c => ({
       agent: 'agent-x',
       chatId: c.chatId,
@@ -105,7 +108,7 @@ function reportedSessions(chats: Array<{ chatId: string; title?: string }>) {
       lastActivityAt: NOW,
       ...(c.title !== undefined ? { title: c.title } : {}),
     })),
-  }
+  })
 }
 
 describe('rename pending queue (spec 15 §2.5)', () => {
