@@ -200,6 +200,7 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
   "scripts/e2e/run-codex-approved-tools.test.mjs" \
+  "scripts/e2e/desktop-login-seed.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"
 
 

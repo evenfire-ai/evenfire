@@ -184,7 +184,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
         .poll(async () => (await readEvidence(scenario)).calls.length, { timeout: 120_000 })
         .toBe(1)
       const receipt = (await readEvidence(scenario)).calls[0]!
-      expect(receipt.tool).toBe('workitem_read_receipt')
+      expect(receipt).toMatchObject({ runId: scenario.runId, tool: 'workitem_read_receipt' })
       expect(receipt.businessId).toMatch(/^[0-9a-f-]{36}$/)
       await expect(
         desktop.getByTestId('agent-response').filter({ hasText: receipt.businessId })

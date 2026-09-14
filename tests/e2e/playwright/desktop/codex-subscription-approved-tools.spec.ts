@@ -86,6 +86,20 @@ async function send(page: Page, prompt: string) {
   await expect(page.getByTestId('message-list').getByText(prompt, { exact: true })).toBeVisible()
 }
 
+async function newAgentResponses(page: Page) {
+  const responses = page.getByTestId('agent-response')
+  // Snapshot stable message identities before sending; previous turns must not
+  // satisfy the new turn's result, even when their visible text is identical.
+  const previousIds = await responses.evaluateAll(elements =>
+    elements.map(element => element.getAttribute('data-chat-message-id'))
+  )
+  expect(previousIds.every(id => typeof id === 'string' && id.length > 0)).toBe(true)
+  const exclusions = previousIds
+    .map(id => `:not([data-chat-message-id=${JSON.stringify(id)}])`)
+    .join('')
+  return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
+}
+
 async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
   const pending = page
     .getByTestId('progress-stepper')
@@ -350,6 +364,7 @@ for (const scenario of cases) {
           const before = await readEvidence(scenario)
           const cancelled = desktop.getByTestId('progress-stepper').filter({ hasText: 'Cancelled' })
           const cancelledBefore = await cancelled.count()
+          const responses = await newAgentResponses(desktop)
           await send(
             desktop,
             decision === 'deny'
@@ -361,7 +376,19 @@ for (const scenario of cases) {
             .getByTestId(decision === 'deny' ? 'approval-deny-btn' : 'progress-cancel-btn')
             .click()
           await expect(pending).toHaveCount(0)
-          await expect(cancelled).toHaveCount(cancelledBefore + 1)
+          if (decision === 'deny') {
+            // Deny completes the turn locally; it does not cancel or request a
+            // follow-up response from the upstream model.
+            await expect(responses).toHaveCount(1)
+            await expect(responses).toBeVisible()
+            await expect(responses).toContainText('workitem_read_receipt')
+            await expect(responses).toContainText(
+              'was denied by the user. The operation was not performed.'
+            )
+            await expect(cancelled).toHaveCount(cancelledBefore)
+          } else {
+            await expect(cancelled).toHaveCount(cancelledBefore + 1)
+          }
           await expect(desktop.getByTestId('send-button')).toHaveAttribute(
             'aria-label',
             'Send message'
@@ -385,14 +412,39 @@ for (const scenario of cases) {
           page.getByRole('alertdialog', { name: 'Remove connector from this agent?' })
         ).toBeVisible()
         await saveConnector(page, scenario, true)
+        // Reopen through navigation so an optimistic PUT echo cannot stand in
+        // for persisted removal from this agent's exact context binding.
+        await new ControlUiShell(page).openAgents()
+        const persistedDetail = page.waitForResponse(
+          response =>
+            new URL(response.url()).pathname ===
+              `/api/v1/admin/hosts/${scenario.agentName}/detail` &&
+            response.request().method() === 'GET'
+        )
+        await new AgentListPage(page).openNamed(scenario.agentName)
+        const detailResponse = await persistedDetail
+        expect(detailResponse.ok()).toBe(true)
+        const detail = await detailResponse.json()
+        expect(detail.host.metadata.name).toBe(scenario.agentName)
+        expect(detail.host.spec.contextRef).toBe(scenario.contextName)
+        const boundContexts = detail.contexts.filter(
+          (context: { metadata: { name: string } }) =>
+            context.metadata.name === scenario.contextName
+        )
+        expect(boundContexts).toHaveLength(1)
+        expect(boundContexts[0].spec.mcpServers).not.toContain(scenario.connectorName)
+        await page.getByRole('tab', { name: 'Connectors', exact: true }).click()
+        await expect(page).toHaveURL(new RegExp(`/agents/${scenario.agentName}/connectors$`))
+        await expect(page.getByText('No connectors attached yet.', { exact: true })).toBeVisible()
+        const responses = await newAgentResponses(desktop)
         await send(desktop, 'Show my verification receipt again, please.')
         const denied =
           mode === 'real'
             ? /unavailable|not available|no longer|cannot access|could not find|not found/i
             : /"found"\s*:\s*0/
-        await expect(desktop.getByTestId('agent-response').filter({ hasText: denied })).toBeVisible(
-          { timeout: 120_000 }
-        )
+        await expect(responses).toHaveCount(1, { timeout: 120_000 })
+        await expect(responses).toBeVisible()
+        await expect(responses).toContainText(denied, { timeout: 120_000 })
         await expect(desktop.getByTestId('send-button')).toHaveAttribute(
           'aria-label',
           'Send message'

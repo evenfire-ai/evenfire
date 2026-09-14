@@ -127,6 +127,18 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm test
 
+      # These node:test suites live outside service packages and resolve the MCP
+      # SDK from mcp-host's installed dependencies.
+      - name: Test Codex approved-tools fixtures and runner
+        if: matrix.service == 'mcp-host'
+        run: |
+          node --test --test-reporter=tap \
+            tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs \
+            scripts/e2e/prepare-codex-approved-tools.test.mjs \
+            scripts/e2e/run-codex-approved-tools.test.mjs \
+            scripts/e2e/desktop-login-seed.test.mjs \
+            tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs
+
       # Typecheck against the base tsconfig (covers src + test dirs).
       # This catches errors in test files that tsconfig.build.json may exclude.
       #

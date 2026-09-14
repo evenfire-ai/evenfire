@@ -17,10 +17,11 @@ business results. Those actions belong to the visible browser journey.
 All commands use the verified `MINIKUBE_PROFILE`, matching explicit
 `CONTROL_API_REAL_PG_CONTEXT` and the canonical branch mutation lease. Use Node24.
 
-1. `make minikube-build-codex-approved-tools-fixtures` builds the current normal
-   proxy and two additional unpublished fixture images. Their tags never replace
-   production image tags. Run before reconcile because image acquisition updates
-   the manifest timestamp.
+1. `make minikube-build-codex-approved-tools-fixtures` performs five image builds:
+   the normal Codex proxy, the deterministic proxy fixture, the MCP fixture,
+   the custom-coordinator SDK base, and the approved-tools workflow variant.
+   Fixture tags do not replace production image tags. Run before reconcile
+   because image acquisition updates the manifest timestamp.
 2. Complete the supported profile reconcile and exact-HEAD validation sequence.
 3. `make minikube-run-codex-approved-tools` prepares isolated resources, runs the
    visible Playwright runner and restores the original proxy image/environment.

@@ -25,20 +25,30 @@ function kubectl(args, value) {
 }
 function read(resource, namespace, name) {
   const result = kubectl(['-n', namespace, 'get', resource, name, '--ignore-not-found', '-o', 'json'])
-  return result.trim() ? JSON.parse(result) : undefined
+  return result.trim() ? parseJson(result, 'Invalid Kubernetes JSON response') : undefined
 }
-function source(repository, file) {
-  const commit = JSON.parse(run('gh', ['api', `repos/keyper-labs/${repository}/commits/HEAD`])).sha
-  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid source revision')
-  const entry = JSON.parse(run('gh', ['api', `repos/keyper-labs/${repository}/contents/${file}?ref=${commit}`]))
-  return { commit, value: JSON.parse(Buffer.from(entry.content, 'base64').toString('utf8')) }
+function parseJson(value, message) {
+  try { return JSON.parse(value) } catch { throw new Error(message) }
+}
+function source(repository, file, commit) {
+  const entry = parseJson(run('gh', ['api', `repos/keyper-labs/${repository}/contents/${file}?ref=${commit}`]), 'Invalid source response JSON')
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+      entry.encoding !== 'base64' || typeof entry.content !== 'string')
+    throw new Error('Invalid source content envelope')
+  // GitHub wraps base64 in lines; require canonical encoding after removing only line breaks.
+  const content = entry.content.replace(/[\r\n]/g, '')
+  const decoded = Buffer.from(content, 'base64')
+  if (decoded.toString('base64') !== content)
+    throw new Error('Invalid source base64 content')
+  return { commit, value: parseJson(decoded.toString('utf8'), 'Invalid source document JSON') }
 }
 
 const host = read('hosts', 'mcp-host', 'chatllm')
 if (host?.spec?.model?.provider !== 'codex-subscription' || !host.spec.contextRef)
   throw new Error('chatllm must already use the approved Codex subscription')
-const pluginSource = source('worktracker-plugin', 'recipe/worktracker.json')
-const wikiSource = source('mcp-servers-collection', 'mcp-wikipedia/registry.json')
+// Install only the reviewed revisions; upstream HEAD is not an approved baseline.
+const pluginSource = source('worktracker-plugin', 'recipe/worktracker.json', '2b2dbd403d817fcfc20b0051a6d8ef637ee072c5')
+const wikiSource = source('mcp-servers-collection', 'mcp-wikipedia/registry.json', 'addf570cfcc8b2270b577f446fdb4c5d9d7b2d28')
 const recipe = pluginSource.value
 const expectedImages = new Set([
   'postgres:16-alpine',
@@ -46,12 +56,13 @@ const expectedImages = new Set([
   'registry.evenfire.ai/evenfire/worktracker-mcp:2.2.5',
   'registry.evenfire.ai/evenfire/worktracker-ui:2.2.5',
 ])
-const workloads = recipe.spec?.workloads
-if (recipe.kind !== 'WorkflowRecipe' || recipe.metadata?.name !== 'worktracker' ||
+const workloads = recipe?.spec?.workloads
+if (recipe?.kind !== 'WorkflowRecipe' || recipe.metadata?.name !== 'worktracker' ||
     !Array.isArray(workloads) || workloads.length !== 4 ||
-    workloads.some(workload => !expectedImages.has(workload.image)))
+    workloads.some(workload => !expectedImages.has(workload?.image)) ||
+    new Set(workloads.map(workload => workload.image)).size !== expectedImages.size)
   throw new Error('Worktracker source changed; review its images before installation')
-if (wikiSource.value.version !== '1.0.0' || wikiSource.value.tools?.length !== 11)
+if (wikiSource.value?.version !== '1.0.0' || !Array.isArray(wikiSource.value.tools) || wikiSource.value.tools.length !== 11)
   throw new Error('Wikipedia catalog changed; review baseline before installation')
 
 const labels = { 'evenfire.ai/e2e-suite': 'issue-627-real-baseline' }
