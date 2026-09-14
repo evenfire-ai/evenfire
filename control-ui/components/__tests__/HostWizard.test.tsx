@@ -600,21 +600,28 @@ describe('HostWizard — free-text agent name with derived identifier (TASK-230)
     await renderWizard()
     await waitFor(() => expect(api.getAdminUsers).toHaveBeenCalled())
 
-    // No [a-z0-9] characters survive kebab-casing — the slug is empty.
-    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
-      target: { value: '###' },
-    })
+    // No [a-z0-9] characters survive kebab-casing — the slug is empty. Review
+    // P2: a non-empty name must NOT read as "required"; it gets its own copy,
+    // surfaced through the aria-described slug note with aria-invalid set.
+    const input = screen.getByLabelText(/^Agent name/, { selector: 'input' })
+    fireEvent.change(input, { target: { value: '###' } })
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(
+      screen.getByText(/add at least one letter or number so an identifier can be derived/i, {
+        selector: '.cu-agent-slug-hint__note',
+      })
+    ).toBeInTheDocument()
+    expect(input).toHaveAttribute('aria-invalid', 'true')
 
     // A slug under the 3-character minimum is equally invalid.
-    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
-      target: { value: 'ab' },
-    })
+    fireEvent.change(input, { target: { value: 'ab' } })
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(
+      screen.getByText(/at least 3 characters/i, { selector: '.cu-agent-slug-hint__note' })
+    ).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText(/^Agent name/, { selector: 'input' }), {
-      target: { value: 'Support Bot' },
-    })
+    fireEvent.change(input, { target: { value: 'Support Bot' } })
+    expect(input).toHaveAttribute('aria-invalid', 'false')
     expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
   })
 

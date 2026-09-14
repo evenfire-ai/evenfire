@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { validateDisplayField } from '@clerum/display-field'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
@@ -176,7 +176,12 @@ function agentStepError(displayName: string): string {
   if (!displayName.trim()) return 'Agent name is required.'
   const displayIssue = validateDisplayField(displayName, 'Agent name')
   if (displayIssue) return displayIssue.message
-  return getAgentNameError(toKebabCase(displayName))
+  const slug = toKebabCase(displayName)
+  // A non-empty name whose characters all strip out (e.g. "###" or a name with
+  // no Latin letters/digits) derives an empty slug — a distinct problem from a
+  // missing name, so it gets distinct copy instead of "is required".
+  if (!slug) return 'Add at least one letter or number so an identifier can be derived.'
+  return getAgentNameError(slug)
 }
 
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
@@ -256,6 +261,9 @@ export function HostWizard({
   // of being force-lowercased into the input while typing.
   const derivedHostName = toKebabCase(hostName)
   const agentNameError = agentStepError(hostName)
+  // Stable id for the slug-hint note so the input can point at it with
+  // aria-describedby (the note carries the error copy when invalid).
+  const slugNoteId = useId()
 
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
 
@@ -856,6 +864,8 @@ export function HostWizard({
                   onChange={e => setHostName(e.target.value)}
                   placeholder="e.g. Support Bot"
                   autoFocus
+                  aria-describedby={slugNoteId}
+                  aria-invalid={hostName.trim() ? Boolean(agentNameError) : undefined}
                 />
                 {hostName.trim() ? (
                   agentNameError ? (
@@ -879,7 +889,7 @@ export function HostWizard({
             >
               <span className="cu-agent-slug-hint__label">Identifier</span>
               <span className="cu-agent-slug-hint__value">{derivedHostName || 'agent-name'}</span>
-              <span className="cu-agent-slug-hint__note">
+              <span id={slugNoteId} className="cu-agent-slug-hint__note" aria-live="polite">
                 {hostName.trim() && agentNameError
                   ? agentNameError
                   : 'Used in URLs, CLI, and grants. Lowercase letters, numbers, and hyphens.'}
