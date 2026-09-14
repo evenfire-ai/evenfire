@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment } from 'react'
+import { Fragment, useId } from 'react'
 import type { GroupedTableBodyProps } from './types'
 import { classNames } from './utils'
 
@@ -16,7 +16,10 @@ export function GroupedTableBody({
   onExpandedChange,
   summary,
 }: GroupedTableBodyProps) {
-  const childRowsId = `eft-table-group-${groupId}-rows`
+  const instanceId = useId().replaceAll(':', '')
+  const idBase = `eft-table-group-${instanceId}-${encodeURIComponent(groupId)}`
+  const disclosureId = `${idBase}-disclosure`
+  const childRowsId = `${idBase}-rows`
 
   return (
     <Fragment>
@@ -28,6 +31,7 @@ export function GroupedTableBody({
               aria-expanded={expanded}
               aria-label={disclosureLabel(expanded)}
               className={classNames('eft-table-group__disclosure', disclosureClassName)}
+              id={disclosureId}
               onClick={event => {
                 event.stopPropagation()
                 onExpandedChange(!expanded)
@@ -43,6 +47,7 @@ export function GroupedTableBody({
         </tr>
       </tbody>
       <tbody
+        aria-labelledby={disclosureId}
         className={classNames('eft-table-group__children', childBodyClassName)}
         id={childRowsId}
       >

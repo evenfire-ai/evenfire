@@ -59,7 +59,7 @@ describe('shared frontend components', () => {
 
     const alphaDisclosure = screen.getByRole('button', { name: 'Expand Alpha records' })
     expect(alphaDisclosure).toHaveAttribute('aria-expanded', 'false')
-    expect(alphaDisclosure).toHaveAttribute('aria-controls', 'eft-table-group-alpha-rows')
+    expect(alphaDisclosure.getAttribute('aria-controls')).toMatch(/alpha-rows$/)
     expect(document.querySelectorAll('table > tbody > tr')).toHaveLength(2)
     expect(screen.queryByText('Alpha child action')).toBeNull()
     expect(screen.queryByText('Beta child')).toBeNull()
@@ -104,14 +104,51 @@ describe('shared frontend components', () => {
       'aria-expanded',
       'true'
     )
-    expect(screen.getByText('Alpha child action').closest('tr')?.parentElement).toHaveAttribute(
-      'id',
-      'eft-table-group-alpha-rows'
-    )
+    const alphaChildBody = screen.getByText('Alpha child action').closest('tr')?.parentElement
+    const collapseAlpha = screen.getByRole('button', { name: 'Collapse Alpha records' })
+    expect(alphaChildBody).toHaveAttribute('id', collapseAlpha.getAttribute('aria-controls'))
+    expect(alphaChildBody).toHaveAttribute('aria-labelledby', collapseAlpha.id)
     expect(screen.queryByText('Beta child')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit Alpha' }))
     expect(onAlphaExpandedChange).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(collapseAlpha)
+    expect(onAlphaExpandedChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('uses unique, labelled rowgroup relationships across table instances', () => {
+    render(
+      <>
+        {[1, 2].map(instance => (
+          <DataTable key={instance}>
+            <GroupedTableBody
+              colSpan={1}
+              disclosureLabel={() => 'Collapse Shared records'}
+              expanded
+              groupId="shared"
+              onExpandedChange={() => undefined}
+              summary={`Shared ${instance}`}
+            >
+              <tr>
+                <td>Child {instance}</td>
+              </tr>
+            </GroupedTableBody>
+          </DataTable>
+        ))}
+      </>
+    )
+
+    const disclosures = screen.getAllByRole('button', { name: 'Collapse Shared records' })
+    const rowgroups = screen.getAllByRole('rowgroup', { name: 'Collapse Shared records' })
+    const controlledIds = disclosures.map(disclosure => disclosure.getAttribute('aria-controls'))
+
+    expect(new Set(controlledIds).size).toBe(2)
+    expect(rowgroups).toHaveLength(2)
+    disclosures.forEach((disclosure, index) => {
+      expect(rowgroups[index]).toHaveAttribute('id', controlledIds[index])
+      expect(rowgroups[index]).toHaveAttribute('aria-labelledby', disclosure.id)
+    })
   })
 
   it('owns the canonical viewport class and preserves semantic modifiers', () => {
