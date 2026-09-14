@@ -2001,6 +2001,52 @@ describe('ownership-safe fail-closed cleanup', () => {
     expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedConfigMap).not.toHaveBeenCalled()
     expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'SecretResolved' && condition.reason === 'SecretNotFound'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition => condition.type === 'Ready' && condition.reason === 'SecretValidationFailed'
+        )
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('disabled managed server still writes Disabled when the runtime is WRC-owned', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce({
+      metadata: {
+        labels: {
+          [MANAGED_BY_LABEL]: WRC_MANAGED_BY_VALUE,
+          [MCPSERVER_LABEL]: 'pg',
+        },
+      },
+    })
+
+    await reconciler.reconcile(makeServer({ name: 'pg', managed: true, enabled: false }))
+
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.type === 'Ready' && condition.reason === 'Disabled')
+      )
+    ).toBe(true)
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 })
 

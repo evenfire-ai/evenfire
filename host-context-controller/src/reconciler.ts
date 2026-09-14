@@ -151,7 +151,13 @@ function isRetiredStatusConditionType(type: string): boolean {
 
 type StatusWriteDecline = 'record-obligation' | 'silent'
 type RuntimeWithdrawKind = 'disabled' | 'fail-closed'
-type DeploymentDeleteOutcome = 'gone' | 'present'
+type DeploymentDeleteOutcome = 'gone' | 'denied' | 'foreign'
+
+type RetractManagedRuntimeResult = {
+  retracted: boolean
+  cleanupComplete: boolean
+  foreignRuntime: boolean
+}
 
 function runtimeNotDesiredMessage(kind: RuntimeWithdrawKind): string {
   switch (kind) {
@@ -1745,9 +1751,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
     if (!this.isHccOwnedMcpResource(deployment, name)) {
       console.warn(`[Reconciler] Skipping Deployment "${name}" delete — not HCC-owned`)
-      return 'present'
+      return 'foreign'
     }
-    if (deleteAllowed && !(await deleteAllowed())) return 'present'
+    if (deleteAllowed && !(await deleteAllowed())) return 'denied'
 
     try {
       await this.appsApi.deleteNamespacedDeployment({ name, namespace })
@@ -1768,11 +1774,33 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * once the Deployment is confirmed gone, then retire the poll, then finish
    * sibling deletes. Sibling failure does not roll back the retract.
    */
+  private async deleteHccOwnedRuntimeSiblings(
+    name: string,
+    namespace: string,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
+    const siblingFailures: unknown[] = []
+    for (const cleanup of [
+      () => this.deleteConfigMapIfHccOwned(`${name}-nginx-conf`, namespace, name, deleteAllowed),
+      () => this.deleteServiceIfHccOwned(name, namespace, deleteAllowed),
+    ]) {
+      try {
+        await cleanup()
+      } catch (error) {
+        siblingFailures.push(error)
+      }
+    }
+    throwCleanupFailures(
+      siblingFailures,
+      `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
+    )
+  }
+
   private async retractManagedRuntime(
     server: McpServerCRD,
     kind: RuntimeWithdrawKind,
     isCurrent: () => boolean
-  ): Promise<{ retracted: boolean; cleanupComplete: boolean }> {
+  ): Promise<RetractManagedRuntimeResult> {
     const name = server.name
     const namespace = server.namespace
     const deleteAllowed = async (): Promise<boolean> => isCurrent()
@@ -1783,10 +1811,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       return allowed
     }
 
-    let deploymentGone = false
+    let deploymentOutcome: DeploymentDeleteOutcome
     try {
-      deploymentGone =
-        (await this.deleteDeploymentIfHccOwned(name, namespace, deleteAllowed)) === 'gone'
+      deploymentOutcome = await this.deleteDeploymentIfHccOwned(name, namespace, deleteAllowed)
     } catch (error) {
       const failures: unknown[] = [error]
       for (const cleanup of [
@@ -1803,11 +1830,25 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         failures,
         `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
       )
-      return { retracted: false, cleanupComplete: false }
+      return { retracted: false, cleanupComplete: false, foreignRuntime: false }
     }
 
-    if (!deploymentGone) {
-      return { retracted: false, cleanupComplete: false }
+    switch (deploymentOutcome) {
+      case 'denied':
+        return { retracted: false, cleanupComplete: false, foreignRuntime: false }
+      case 'foreign':
+        await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
+        return {
+          retracted: false,
+          cleanupComplete: cleanupComplete && isCurrent(),
+          foreignRuntime: true,
+        }
+      case 'gone':
+        break
+      default: {
+        const _exhaustive: never = deploymentOutcome
+        return _exhaustive
+      }
     }
 
     const wrote = await this.writeStatusCondition(
@@ -1828,25 +1869,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       wrote,
     })
 
-    const siblingFailures: unknown[] = []
-    for (const cleanup of [
-      () =>
-        this.deleteConfigMapIfHccOwned(`${name}-nginx-conf`, namespace, name, gatedDeleteAllowed),
-      () => this.deleteServiceIfHccOwned(name, namespace, gatedDeleteAllowed),
-    ]) {
-      try {
-        await cleanup()
-      } catch (error) {
-        siblingFailures.push(error)
-      }
+    await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
+    return {
+      retracted: true,
+      cleanupComplete: cleanupComplete && isCurrent(),
+      foreignRuntime: false,
     }
-    if (siblingFailures.length > 0) {
-      throwCleanupFailures(
-        siblingFailures,
-        `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
-      )
-    }
-    return { retracted: true, cleanupComplete: cleanupComplete && isCurrent() }
   }
 
   private async deleteConfigMapIfHccOwned(
@@ -2332,7 +2360,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
         )
         const retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
-        if (!retract.retracted) return false
+        if (!retract.retracted && !retract.foreignRuntime) return false
         cleanupComplete = retract.cleanupComplete
       } else {
         console.log(
@@ -2369,7 +2397,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       let cleanupComplete = true
       if (withdrawRuntime) {
         const retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
-        if (!retract.retracted) return false
+        if (!retract.retracted && !retract.foreignRuntime) return false
         cleanupComplete = retract.cleanupComplete
       } else {
         console.warn(
