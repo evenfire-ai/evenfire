@@ -3,6 +3,7 @@ import { hashActionTarget } from '@clerum/action-context-contracts'
 import { canonicalResourceIdentity } from '../src/services/access/resourceIdentity.js'
 import {
   WORKFLOW_ACTION_DELEGATION_HEADER,
+  persistWorkflowAuthorityBinding,
   requireWorkflowActionAuthority,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
 
@@ -240,5 +241,29 @@ describe('workflow authority binding ingress', () => {
         gateway: {} as never,
       })
     ).rejects.toMatchObject({ status: 400 })
+  })
+
+  it('rejects invalid source expiry ordering before persistence', async () => {
+    const authority = await requireWorkflowActionAuthority({
+      req: request(),
+      caller: caller as never,
+      operationId: 'workflow.trigger',
+      resourceType: 'workflow_recipe',
+      resourceLogicalId: 'sandbox-recipes/demo',
+      target,
+      gateway: {} as never,
+    })
+    if (!authority) throw new Error('expected v2 workflow authority')
+    const db = { query: vi.fn() }
+
+    await expect(
+      persistWorkflowAuthorityBinding(db as never, {
+        authority: { ...authority, sourceExpiresAt: authority.sourceIssuedAt },
+        kind: 'trigger',
+        entityType: 'workflow_run',
+        entityId: 'run-1',
+      })
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_action_delegation' })
+    expect(db.query).not.toHaveBeenCalled()
   })
 })

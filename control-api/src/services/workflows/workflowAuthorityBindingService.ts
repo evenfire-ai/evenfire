@@ -539,6 +539,13 @@ export async function persistWorkflowAuthorityBinding(
     transitionId?: string | null
   }
 ): Promise<string> {
+  if (
+    !Number.isSafeInteger(input.authority.sourceIssuedAt) ||
+    !Number.isSafeInteger(input.authority.sourceExpiresAt) ||
+    input.authority.sourceExpiresAt <= input.authority.sourceIssuedAt
+  ) {
+    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+  }
   const binding = input.authority.binding
   const inserted = await db.query(
     `INSERT INTO workflow_authority_bindings (
