@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import Ajv from 'ajv'
+import Ajv2020 from 'ajv/dist/2020'
 import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor'
 import { config as appConfig } from '../../../config'
 import { TaskLifecycle } from '../../../lifecycle/taskLifecycle'
@@ -289,7 +289,7 @@ describe('approved catalog across presentation and lifecycle', () => {
   it.each([83, 250])(
     'compiles only the selected schema out of %i and reuses validation without mutating arguments',
     async count => {
-      const compile = vi.spyOn(Ajv.prototype, 'compile')
+      const compile = vi.spyOn(Ajv2020.prototype, 'compile')
       try {
         const { manager, registry, config } = await setup(count)
         const target = 'alpha__record__read_000'
@@ -372,6 +372,48 @@ describe('approved catalog across presentation and lifecycle', () => {
     expect(result.toolResults[0].is_error).toBe(false)
     expect(remote.calls).toHaveBeenCalledTimes(1)
   })
+
+  for (const mode of ['direct', 'discovery'] as const) {
+    it.each(['default', '2020-12', 'draft-07'] as const)(
+      `${mode}: validates tuple arguments using the declared or MCP-default dialect: %s`,
+      async dialect => {
+        const { manager, registry, config } = await setup()
+        const target = 'alpha__record__read_000'
+        const tuple =
+          dialect === 'draft-07'
+            ? { items: [{ type: 'string' }], additionalItems: false }
+            : { prefixItems: [{ type: 'string' }], items: false }
+        remote.catalogs.get('alpha')![0].inputSchema = {
+          ...(dialect === 'default'
+            ? {}
+            : {
+                $schema:
+                  dialect === 'draft-07'
+                    ? 'http://json-schema.org/draft-07/schema#'
+                    : 'https://json-schema.org/draft/2020-12/schema',
+              }),
+          type: 'object',
+          properties: { tuple: { type: 'array', ...tuple, minItems: 1 } },
+          required: ['tuple'],
+          additionalProperties: false,
+        }
+        await manager.replaceServer(serverInfo('alpha'))
+        registry.listDefinitions()
+        const call = (id: string, args: Record<string, unknown>): ToolCall =>
+          mode === 'direct' ? { id, name: target, arguments: args } : bridgeCall(target, id, args)
+        const valid = { tuple: ['example'] }
+        const accepted = await executeToolCalls([call('valid-tuple', valid)], config, 0)
+        expect(accepted.toolResults[0].is_error).toBe(false)
+        expect(valid).toEqual({ tuple: ['example'] })
+        expect(remote.calls).toHaveBeenCalledTimes(1)
+        for (const args of [{ tuple: [] }, { tuple: [1] }, { tuple: ['a', 'b'] }]) {
+          const rejected = await executeToolCalls([call('invalid-tuple', args)], config, 1)
+          expect(rejected.toolResults[0].is_error).toBe(true)
+          expect(remote.calls).toHaveBeenCalledTimes(1)
+        }
+      }
+    )
+  }
 
   it('a captured adapter rechecks an in-place changed schema immediately before execution', async () => {
     const { manager, registry } = await setup()

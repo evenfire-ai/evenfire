@@ -24,8 +24,9 @@ function selectedSchemaValidator(schema: Record<string, unknown>): ValidateFunct
     // An empty fragment denotes the same JSON Schema meta-schema URI.
     const dialect =
       typeof schema.$schema === 'string' ? schema.$schema.replace(/#$/, '') : undefined
+    // MCP defines an omitted $schema as JSON Schema 2020-12.
     const Constructor =
-      dialect === 'https://json-schema.org/draft/2020-12/schema'
+      dialect === undefined || dialect === 'https://json-schema.org/draft/2020-12/schema'
         ? Ajv2020
         : dialect === 'https://json-schema.org/draft/2019-09/schema'
           ? Ajv2019
