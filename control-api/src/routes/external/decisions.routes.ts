@@ -11,6 +11,7 @@ import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   ApprovalConsumeError,
   ApprovalTriggerRunIdempotencyConflictError,
+  WorkflowApprovalAuthorityRequiredError,
   WorkflowApprovalAuthorityStaleError,
   listPendingApprovalsForUser,
   recordDecision,
@@ -187,6 +188,9 @@ export function createExternalUserApprovalDecisionsRouter(gateway: K8sGateway): 
         } catch (err) {
           if (err instanceof WorkflowAuthorityError) {
             return res.status(err.status).json({ error: err.code })
+          }
+          if (err instanceof WorkflowApprovalAuthorityRequiredError) {
+            return res.status(403).json({ error: 'workflow_approval_authority_required' })
           }
           if (err instanceof WorkflowApprovalAuthorityStaleError) {
             return res.status(409).json({ error: 'access_path_stale' })

@@ -317,6 +317,36 @@ describe('Security: External /decide endpoint', () => {
     })
   })
 
+  it('returns a typed conflict when decision authority becomes unavailable', async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: APPROVAL_ID,
+          status: 'pending',
+          target_user_id: USER_ID,
+          target_team_id: null,
+          recipe_namespace: NS,
+          recipe_name: RECIPE,
+        },
+      ],
+      rowCount: 1,
+    })
+    vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
+    vi.mocked(userApprovalRequestService.recordDecision).mockRejectedValueOnce(
+      new userApprovalRequestService.WorkflowApprovalAuthorityRequiredError()
+    )
+
+    const res = await withInternalAuth(
+      request(app)
+        .post(`/api/v1/external/workflow-approvals/${APPROVAL_ID}/decide`)
+        .set('x-user-session-token', sessionToken)
+        .send({ decision: 'approve' })
+    )
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'workflow_approval_authority_required' })
+  })
+
   it('rejects malformed approval ids before any DB lookup', async () => {
     const res = await withInternalAuth(
       request(app)
