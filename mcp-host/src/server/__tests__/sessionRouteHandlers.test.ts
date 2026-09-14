@@ -145,7 +145,7 @@ describe('createSessionRouteHandlers — handleSessionsList title projection (sp
     // Build handlers with the REAL BasicSafety redaction primitive (T1), matching
     // the main.ts wiring. Simulates a title that was materialized before the
     // operator marked the value secret (rotation) — the read path must still scrub it.
-    const secret = 'S3cretRotatedInLater1234567890'
+    const secret = 'syntheticS3cretRotatedInLater1234567890'
     const convManager = new ConversationManager()
     const safety = new BasicSafety(() => [{ name: 'API_KEY', value: secret }])
     const { handleSessionsList } = createSessionRouteHandlers({

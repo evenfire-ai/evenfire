@@ -85,7 +85,7 @@ describe('auto-title orchestration — redact BEFORE truncate (spec 15 §5)', ()
   }
 
   it('redacts a secret that straddles the 60-code-point cut so it never survives into the title', () => {
-    const secret = 'S3cretValueThatIsQuiteLongAndSpansTheBoundary1234567890'
+    const secret = 'syntheticS3cretValueThatIsQuiteLongAndSpansTheBoundary1234567890'
     // Position the secret so it crosses index 60 of the raw input.
     const prefix = 'my api key is '.padEnd(40, 'z') + ' '
     const input = `${prefix}${secret} and more trailing text here`

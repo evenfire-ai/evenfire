@@ -11,7 +11,7 @@ vi.mock('../chatStoreBinding.js', () => ({
 function renameService() {
   const issueRpcTokenForHostRefs = vi
     .fn()
-    .mockResolvedValue({ token: 'rpc-token', scopes: [], hostRefs: [] })
+    .mockResolvedValue({ token: 'fake-rpc-token', scopes: [], hostRefs: [] })
   const rpcClient = { renameSession: vi.fn() }
   const service = new AppService() as unknown as {
     issueRpcTokenForHostRefs: typeof issueRpcTokenForHostRefs
@@ -38,7 +38,7 @@ describe('AppService.renameSession (spec 15 Fase B)', () => {
     expect(issueRpcTokenForHostRefs).toHaveBeenCalledWith(['host:session:write'], ['chatllm'])
     expect(issueRpcTokenForHostRefs.mock.calls[0]?.[0]).not.toContain('host:wake:write')
     expect(rpcClient.renameSession).toHaveBeenCalledWith(
-      'rpc-token',
+      'fake-rpc-token',
       'chatllm',
       'chatllm',
       'chat-1',

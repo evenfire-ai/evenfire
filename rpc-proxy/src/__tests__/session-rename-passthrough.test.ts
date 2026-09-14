@@ -206,7 +206,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
     } as unknown as Response)
     globalThis.fetch = fetchMock as unknown as typeof fetch
 
-    const secret = 'super-secret-title-value'
+    const secret = 'synthetic-secret-title-value'
     await request(makeApp())
       .patch('/rpc/hosts/chatllm/sessions/chatllm/c1/name')
       .set('authorization', 'Bearer user-token')
