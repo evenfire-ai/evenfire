@@ -81,6 +81,7 @@ images:
     newTag: test
 
 patchesStrategicMerge:
+  - patches/hcc-policy-resync.yaml
   - patches/resource-limits.yaml
   - patches/dynamic-images.yaml
   # Minikube is the owned T2/dev activation environment for GFS Upload v2.
