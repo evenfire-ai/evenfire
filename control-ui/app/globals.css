@@ -11332,8 +11332,10 @@ td.cu-registry-description {
   min-width: 0;
   flex-direction: column;
   gap: var(--cu-space-3);
+  height: 100%;
+  min-height: 100%;
   overflow-y: auto;
-  padding: var(--cu-space-3) var(--cu-space-3) var(--cu-space-3) 0;
+  padding: 0;
 }
 
 .cu-llm-models-layout > .cu-section-card {
