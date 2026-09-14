@@ -56,6 +56,10 @@ export interface CreateRunInput {
   ttl_seconds_after_finished?: number | null
   authority?: WorkflowAuthorityBinding | null
   reauthorize?: () => Promise<WorkflowAuthorityBinding | null>
+  validateCurrentInTransaction?: (
+    db: DbClient,
+    authority: WorkflowAuthorityBinding
+  ) => Promise<WorkflowAuthorityBinding>
 }
 
 export interface CreateApprovedRunInput extends CreateRunInput {
@@ -202,10 +206,45 @@ export function computeWorkflowRunPayloadHash(params: {
  */
 export async function createRun(input: CreateRunInput, db?: DbClient): Promise<CreateRunResult> {
   if ((input.authority || input.reauthorize) && !db) {
-    return withTransaction(transaction => createRun(input, transaction))
+    const authority = input.reauthorize ? await input.reauthorize() : input.authority
+    if (input.authority && authority?.bindingHash !== input.authority.bindingHash) {
+      throw new WorkflowRunIdempotencyConflictError()
+    }
+    if (input.reauthorize && authority && !input.validateCurrentInTransaction) {
+      throw new Error('workflow_trigger_current_authority_validator_required')
+    }
+    return withTransaction(transaction =>
+      createRun({ ...input, authority, reauthorize: undefined }, transaction)
+    )
   }
   const client = getDb(db)
-  const authority = input.reauthorize ? await input.reauthorize() : input.authority
+  if (input.reauthorize) {
+    throw new Error('workflow_trigger_reauthorization_must_precede_transaction')
+  }
+  if (input.authority && input.idempotency_key) {
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [
+      `workflow_run:${input.recipe_namespace}:${input.recipe_name}:${input.idempotency_key}`,
+    ])
+    const existing = await client.query(
+      `SELECT wr.*, binding.binding_hash AS "authorityBindingHash"
+         FROM workflow_runs wr
+         LEFT JOIN workflow_authority_bindings binding
+           ON binding.id = wr.initiating_authority_binding_id
+        WHERE wr.recipe_namespace = $1 AND wr.recipe_name = $2 AND wr.idempotency_key = $3`,
+      [input.recipe_namespace, input.recipe_name, input.idempotency_key]
+    )
+    if ((existing.rowCount ?? 0) > 0) {
+      const row = existing.rows[0] as WorkflowRunRow & { authorityBindingHash?: string | null }
+      if (row.authorityBindingHash !== input.authority.bindingHash) {
+        throw new WorkflowRunIdempotencyConflictError()
+      }
+      return { row, created: false }
+    }
+  }
+  const authority =
+    input.authority && input.validateCurrentInTransaction
+      ? await input.validateCurrentInTransaction(client, input.authority)
+      : input.authority
   if (input.authority && authority?.bindingHash !== input.authority.bindingHash) {
     throw new WorkflowRunIdempotencyConflictError()
   }
