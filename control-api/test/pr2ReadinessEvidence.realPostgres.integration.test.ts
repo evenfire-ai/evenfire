@@ -191,38 +191,49 @@ describeRealPostgres('PR2 readiness evidence on real PostgreSQL', () => {
 
   it('expires and restores one required runtime hop at the configured max age', async () => {
     const hop = 'rpc_proxy_trusted_edge' as const
+    for (const requiredHop of PR2_READINESS_HOPS) {
+      await writeCompleteHop(requiredHop, new Date())
+    }
+    const clock = await databasePool.query<{ now: Date }>('SELECT clock_timestamp() AS now')
+    const serverNow = new Date(clock.rows[0]!.now)
     await databasePool.query(
       `UPDATE pr2_readiness_activations
-          SET updated_at = clock_timestamp() - interval '120 seconds'
+          SET updated_at = $2::timestamptz - interval '120 seconds'
         WHERE environment_id = $1`,
-      ['test.cluster']
-    )
-    await databasePool.query(
-      `UPDATE pr2_readiness_evidence
-          SET observed_at = clock_timestamp() - interval '61 seconds'
-        WHERE environment_id = $1
-          AND source_revision = $2
-          AND hop = $3
-          AND evidence_class = 'runtime'
-          AND evidence_kind = 'service_runtime'`,
-      ['test.cluster', SHA, hop]
+      ['test.cluster', serverNow]
     )
 
-    const expired = await assemblePr2Readiness(databasePool, 'test.cluster', undefined, SHA)
+    const setRuntimeAgeSeconds = async (seconds: number): Promise<void> => {
+      await databasePool.query(
+        `UPDATE pr2_readiness_evidence
+            SET observed_at = $4::timestamptz - ($5::text || ' seconds')::interval
+          WHERE environment_id = $1
+            AND source_revision = $2
+            AND hop = $3
+            AND evidence_class = 'runtime'
+            AND evidence_kind = 'service_runtime'`,
+        ['test.cluster', SHA, hop, serverNow, seconds]
+      )
+    }
+
+    await setRuntimeAgeSeconds(30)
+    const withinBound = await assemblePr2Readiness(databasePool, 'test.cluster', serverNow, SHA)
+    expect(withinBound[hop]).toBe('ready')
+
+    await setRuntimeAgeSeconds(60)
+    const atBoundary = await assemblePr2Readiness(databasePool, 'test.cluster', serverNow, SHA)
+    expect(atBoundary[hop]).toBe('ready')
+
+    await setRuntimeAgeSeconds(61)
+    const expired = await assemblePr2Readiness(databasePool, 'test.cluster', serverNow, SHA)
     expect(expired[hop]).toBe('unavailable')
 
-    await databasePool.query(
-      `UPDATE pr2_readiness_evidence
-          SET observed_at = clock_timestamp()
-        WHERE environment_id = $1
-          AND source_revision = $2
-          AND hop = $3
-          AND evidence_class = 'runtime'
-          AND evidence_kind = 'service_runtime'`,
-      ['test.cluster', SHA, hop]
-    )
+    await setRuntimeAgeSeconds(-1)
+    const futureDated = await assemblePr2Readiness(databasePool, 'test.cluster', serverNow, SHA)
+    expect(futureDated[hop]).toBe('unavailable')
 
-    const refreshed = await assemblePr2Readiness(databasePool, 'test.cluster', undefined, SHA)
+    await setRuntimeAgeSeconds(0)
+    const refreshed = await assemblePr2Readiness(databasePool, 'test.cluster', serverNow, SHA)
     expect(refreshed[hop]).toBe('ready')
   })
 
