@@ -25,10 +25,18 @@ import {
 export interface SessionRouteHandlerDeps {
   getConversationManager: () => ConversationManager
   redactToolError: (toolName: string, rawError: string) => string
+  /**
+   * Defense-in-depth redaction of a session title at projection time (spec 15
+   * §5). The title is already redacted when materialized, but re-redacting on
+   * read covers a secret rotated in after materialization and a mis-wired
+   * secret provider that returned `[]` at write time. Owned by `main.ts` (closes
+   * over the operator secret list). Non-logging (unlike `redactToolError`).
+   */
+  redactTitle: (rawTitle: string) => string
 }
 
 export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
-  const { getConversationManager, redactToolError } = deps
+  const { getConversationManager, redactToolError, redactTitle } = deps
 
   // Common projection: state + active task + pending approval + lifetime token
   // totals, shared by the list and messages handlers (RPC token exposure
@@ -103,6 +111,8 @@ export function createSessionRouteHandlers(deps: SessionRouteHandlerDeps) {
         turnCount: summary.turnCount,
         messageCount: summary.messageCount,
         lastActivityAt: summary.lastActivityAt.toISOString(),
+        // spec 15 — omit when unset; re-redact on read (defense in depth §5).
+        ...(summary.title !== undefined ? { title: redactTitle(summary.title) } : {}),
         ...sessionStateView(summary),
       })),
       ...(nextCursor ? { nextCursor } : {}),
