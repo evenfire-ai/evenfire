@@ -26,7 +26,7 @@ import {
   resolveLiveActionAuthorization,
 } from './liveAuthorizationResolver.js'
 import { actionOperationTargetHash } from './operationTarget.js'
-import type { CanonicalResourceIdentity } from './resourceIdentity.js'
+import { type CanonicalResourceIdentity, canonicalResourceIdentity } from './resourceIdentity.js'
 
 export type ActionAuthorizationV2Result =
   | Readonly<{
@@ -59,6 +59,20 @@ type Resolver = typeof resolveLiveActionAuthorization
 
 function unavailable(): Extract<ActionAuthorizationV2Result, { status: 'authority_unavailable' }> {
   return { status: 'authority_unavailable', code: 'authority_unavailable', retryable: true }
+}
+
+function authorizationResourceForAction(
+  resource: CanonicalResourceIdentity,
+  target: PreparedActionOperationTarget['target']
+): CanonicalResourceIdentity {
+  if (resource.type !== 'runtime_session' && resource.type !== 'chat') return resource
+  const hostRef = target && 'hostRef' in target ? target.hostRef : null
+  if (typeof hostRef !== 'string') return resource
+  return canonicalResourceIdentity({
+    environmentId: resource.environmentId,
+    type: 'host',
+    logicalId: hostRef,
+  })
 }
 
 function mapResolverOutcome(
@@ -130,11 +144,15 @@ export async function authorizeActionV2(
   const budget = input.budget ?? ownedBudget!
   try {
     const resolve = dependencies.resolve ?? resolveLiveActionAuthorization
+    const authorizationResource = authorizationResourceForAction(
+      input.resource,
+      preparedTarget.target
+    )
     const result = await resolve(
       {
         session: input.session,
         operationId: input.operationId,
-        resource: input.resource,
+        resource: authorizationResource,
         operationTarget: preparedTarget.target,
         ...(input.requested.requestedAccessPathId
           ? { requestedAccessPathId: input.requested.requestedAccessPathId }

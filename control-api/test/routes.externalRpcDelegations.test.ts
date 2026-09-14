@@ -207,6 +207,114 @@ describe('POST /external/rpc/delegations', () => {
     )
   })
 
+  it.each([
+    [
+      'chat.read',
+      'chat',
+      'chat-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a' },
+    ],
+    ['task.read', 'runtime_session', 'task-a', { hostRef: 'default/chatllm', taskId: 'task-a' }],
+    [
+      'task.manage',
+      'runtime_session',
+      'task-a',
+      { hostRef: 'default/chatllm', taskId: 'task-a', action: 'cancel' },
+    ],
+    [
+      'model.read',
+      'runtime_session',
+      'session-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a' },
+    ],
+    [
+      'model.select',
+      'runtime_session',
+      'session-a',
+      {
+        hostRef: 'default/chatllm',
+        agent: 'main',
+        chatId: 'chat-a',
+        provider: 'openai',
+        model: 'gpt-test',
+      },
+    ],
+    ['session.read', 'runtime_session', 'session-a', { hostRef: 'default/chatllm' }],
+    [
+      'session.manage',
+      'runtime_session',
+      'session-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a', action: 'delete' },
+    ],
+  ] as const)(
+    'admits the real public producer shape for %s',
+    async (operationId, resourceType, logicalId, target) => {
+      const requestedResource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: resourceType,
+        logicalId,
+      })
+      const operationPrepared = prepareActionOperationTarget({
+        operationId,
+        resource: requestedResource,
+        operationTarget: target,
+        allocateMessageId: () => {
+          throw new Error('runtime operation must not allocate a message ID')
+        },
+      })
+      mocks.authorize.mockResolvedValueOnce({
+        status: 'allowed',
+        context: {
+          version: 2,
+          principal: { userId, sid, sessionVersion: 1 },
+          operationId,
+          resource: requestedResource,
+          target: operationPrepared.target,
+          targetHash: operationPrepared.targetHash,
+          accessPathId,
+          authorizationRevision,
+          behaviorBindingHash,
+          pathKind: 'direct',
+          effectiveTeamId: null,
+          selectedPathCapabilities: [operationId],
+          behavior: {
+            capabilities: [operationId],
+            budget: knownBehavior(null),
+            credentialPolicy: knownBehavior(null),
+            approvalPolicy: knownBehavior(null),
+            filesystemScope: knownBehavior(null),
+            runtime: knownBehavior(null),
+            providerModelPolicy: knownBehavior(null),
+            audit: knownBehavior(null),
+          },
+          validUntil: null,
+        },
+        behaviorBindingHash,
+        preparedTarget: operationPrepared,
+        operation: {},
+      })
+
+      const response = await request(app())
+        .post('/external/rpc/delegations')
+        .set('x-user-session-token', 'session-v2')
+        .set('x-evenfire-access-path-id', accessPathId)
+        .set('x-evenfire-authorization-revision', authorizationRevision)
+        .send({
+          version: 2,
+          operationId,
+          resource: { type: resourceType, logicalId },
+          target,
+        })
+
+      expect(response.status).toBe(200)
+      expect(verifyUserDelegationV2(response.body.delegationToken)).toMatchObject({
+        operationIds: [operationId],
+        resource: requestedResource,
+        targets: { [operationId]: target },
+      })
+    }
+  )
+
   it('blocks public delegation work when the pre-auth limiter denies', async () => {
     rateLimiter.checkAndIncrement.mockResolvedValueOnce({
       allowed: false,
