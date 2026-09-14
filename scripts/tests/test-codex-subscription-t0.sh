@@ -199,7 +199,8 @@ run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.
 run_node_group "approved-tools-fixtures-and-runner" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
-  "scripts/e2e/run-codex-approved-tools.test.mjs"
+  "scripts/e2e/run-codex-approved-tools.test.mjs" \
+  "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"
 
 
 run_group "control-api" "control-api" \
@@ -239,6 +240,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
 
 run_group "mcp-host" "mcp-host" \
   "src/capabilities/toolCatalogTools.test.ts" \
+  "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
   "src/mcp/__tests__/managerDelimiterDispatch.test.ts" \
   "src/logger.test.ts" \

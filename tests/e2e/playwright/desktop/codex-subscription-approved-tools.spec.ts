@@ -17,6 +17,7 @@ import {
   required,
   scenarios,
 } from '../helpers/approved-tools-scenarios'
+import { prepareSubscriptionVisible } from '../helpers/approved-tools-subscription'
 import { workflowJourney } from '../helpers/approved-tools-workflow'
 import { launchDesktopApp } from '../helpers/launch-desktop'
 import { loginControlUiVisible } from '../helpers/visible-login'
@@ -147,6 +148,7 @@ for (const scenario of cases) {
       expect((await readEvidence(scenario)).calls).toEqual([])
       await page.goto('/')
       await loginControlUiVisible(page)
+      scenario.connectionKey = await prepareSubscriptionVisible(page, scenario)
       await new ControlUiShell(page).openAgents()
       await new AgentListPage(page).openNamed(scenario.agentName)
       await expect(page.getByText(`Agent: ${scenario.agentName}`, { exact: true })).toBeVisible()

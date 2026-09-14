@@ -9,6 +9,8 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const sizes = [83, 150, 250]
 const fixtureImage = 'clerum/codex-approved-tools-mcp-e2e:test'
 const proxyImage = 'clerum/codex-approved-tools-proxy-e2e:test'
+const workflowImage = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
+const workflowFeatureCheck = `process.stdout.write(JSON.stringify(process.env.WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE === 'true' && process.env.WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST === 'false' && (process.env.WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES || '').split(',').some(prefix => prefix.trim() && '${workflowImage}'.startsWith(prefix.trim()))))`
 const proxyFlags = [
   'CODEX_APPROVED_TOOLS_TEST_ONLY',
   'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
@@ -23,20 +25,129 @@ export function makeScenarios(run, ports, probePort) {
     [...ports, probePort].some(p => !Number.isInteger(p) || p < 1024 || p > 65535)
   )
     throw new Error('Invalid fixture ports')
-  return sizes.map((catalogSize, index) => ({
+  return sizes.map((catalogSize, index) =>
+    scenarioMetadata(run, String(catalogSize), catalogSize, ports[index], probePort)
+  )
+}
+
+function scenarioMetadata(run, label, catalogSize, port, probePort) {
+  return {
     catalogSize,
-    runId: `${run}-${catalogSize}`,
-    agentName: `${run}-agent-${catalogSize}`,
-    agentDisplayName: `Codex tools ${catalogSize} ${run}`,
-    contextName: `${run}-context-${catalogSize}`,
-    connectorName: `${run}-mcp-${catalogSize}`,
-    subscriptionName: `Codex fixture ${catalogSize} ${run}`,
-    connectionKey: `${run}-grant-${catalogSize}`,
+    runId: `${run}-${label}`,
+    agentName: `${run}-agent-${label}`,
+    agentDisplayName: `Codex tools ${label} ${run}`,
+    contextName: `${run}-context-${label}`,
+    connectorName: `${run}-mcp-${label}`,
+    subscriptionName: `Codex fixture ${label} ${run}`,
+    connectionKey: `${run}-grant-${label}`,
     modelName: 'gpt-5.3-codex',
     modelLabel: 'Codex isolated tool test',
-    fixtureUrl: `http://127.0.0.1:${ports[index]}`,
+    fixtureUrl: `http://127.0.0.1:${port}`,
     upstreamEvidenceUrl: `http://127.0.0.1:${probePort}`,
-  }))
+  }
+}
+
+export function makeWorkflowScenario(run, port, probePort) {
+  if (
+    !/^approved-tools-[a-f0-9]{12}$/.test(run) ||
+    port === probePort ||
+    [port, probePort].some(p => !Number.isInteger(p) || p < 1024 || p > 65535)
+  )
+    throw new Error('Invalid workflow fixture identity or ports')
+  return {
+    ...scenarioMetadata(run, 'workflow', 83, port, probePort),
+    workflowName: `${run}-recipe`,
+    workflowNamespace: 'sandbox-recipes',
+  }
+}
+
+export function makeWorkflowResources(scenario) {
+  const labels = {
+    'evenfire.ai/e2e-suite': 'codex-approved-tools',
+    'evenfire.ai/e2e-run': scenario.runId,
+  }
+  // Output scope is the parent recipe for both its runtime and triggered child
+  // runs. The component selector excludes every other pod in that lineage.
+  const coordinator = {
+    matchLabels: {
+      'clerum.io/workflow-output-scope': scenario.workflowName,
+      'clerum.io/component': 'workflow-coordinator',
+    },
+  }
+  const backend = { matchLabels: { 'clerum.io/mcpserver': scenario.connectorName } }
+  const namespace = name => ({ matchLabels: { 'kubernetes.io/metadata.name': name } })
+  return [
+    {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: {
+        name: scenario.workflowName,
+        namespace: scenario.workflowNamespace,
+        labels,
+        annotations: { 'clerum.io/codex-connection-ref': scenario.connectionKey },
+      },
+      spec: {
+        coordinatorImage: workflowImage,
+        // WRC requires a broker agent for declared MCP dependencies. The fixture
+        // coordinator never requests a model; the binding remains explicit.
+        agent: { provider: 'codex-subscription', model: scenario.modelName },
+        // Actual MCP dependency makes WRC defer the parent until a triggered run;
+        // a bare id-only custom step would otherwise start eagerly.
+        steps: [{ id: 'receipt', mcpServers: ['receipt'] }],
+        mcpServers: [
+          {
+            id: 'receipt',
+            endpoint: `http://${scenario.connectorName}.mcp-server.svc.cluster.local:8080/mcp`,
+          },
+        ],
+        output: { destination: 'pvc', format: 'json' },
+        triggers: { onDemand: { requiresApproval: true, allowedActors: ['user'] } },
+      },
+    },
+    {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: `${scenario.workflowName}-receipt-egress`,
+        namespace: scenario.workflowNamespace,
+        labels,
+      },
+      spec: {
+        podSelector: coordinator,
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [{ namespaceSelector: namespace('mcp-server'), podSelector: backend }],
+            ports: [{ protocol: 'TCP', port: 8080 }],
+          },
+        ],
+      },
+    },
+    {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: `${scenario.workflowName}-receipt-ingress`,
+        namespace: 'mcp-server',
+        labels,
+      },
+      spec: {
+        podSelector: backend,
+        policyTypes: ['Ingress'],
+        ingress: [
+          {
+            from: [
+              {
+                namespaceSelector: namespace(scenario.workflowNamespace),
+                podSelector: coordinator,
+              },
+            ],
+            ports: [{ protocol: 'TCP', port: 8080 }],
+          },
+        ],
+      },
+    },
+  ]
 }
 
 export function makeResources(scenarios) {
@@ -61,6 +172,19 @@ export function makeResources(scenarios) {
           contextRef: s.contextName,
           model: { provider: 'codex-subscription', name: s.modelName, connectionRef: 'unassigned' },
           channels: [],
+          ...(s.workflowName
+            ? {
+                workflowControl: {
+                  scopes: [
+                    'workflow:list',
+                    'workflow:read',
+                    'workflow:trigger',
+                    'workflow:approval:resolve',
+                    'workflow:approval:decide',
+                  ],
+                },
+              }
+            : {}),
         },
       },
       {
@@ -212,7 +336,7 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
     context !== profile ||
     worktree !== repo ||
     !['control-plane', 'mcp-server'].includes(namespace) ||
-    !/^(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250))$/.test(service)
+    !/^(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))$/.test(service)
   )
     throw new Error('Invalid owner binding')
   if (
@@ -224,7 +348,7 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
     throw new Error('Invalid owner port')
   if (
     path.dirname(record) !== pidDirectory ||
-    !/^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250))\.pid$/.test(
+    !/^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))\.pid$/.test(
       path.basename(record)
     )
   )
@@ -262,7 +386,7 @@ export function validateKubectlArgs(args, profile) {
       (verb === 'wait' && resource === '--for=create')) &&
     ((namespace === 'control-plane' && operation[4] === 'deployment/codex-llm-proxy') ||
       (namespace === 'mcp-server' &&
-        /^deployment\/approved-tools-[a-f0-9]{12}-mcp-(83|150|250)$/.test(operation[4])))
+        /^deployment\/approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow)$/.test(operation[4])))
   )
     return args
   if (
@@ -326,6 +450,8 @@ export function validateKubectlArgs(args, profile) {
       operation[5] === 'node' &&
       operation[6] === '-e'
     ) {
+      if (resource === 'deployment/workflow-recipes' && operation[7] === workflowFeatureCheck)
+        return args
       const keys =
         resource === 'deployment/control-api'
           ? ['CONTROL_API_CODEX_SUBSCRIPTION_ENABLED', 'CODEX_LLM_PROXY_EXECUTION_ENABLED']
@@ -635,8 +761,15 @@ async function main() {
     'TEST_ADMIN_PASSWORD',
     'TEST_USER_EMAIL',
     'TEST_USER_PASSWORD',
+    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
+    'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
   ])
     required(name)
+  if (
+    required('TEST_USER_EMAIL').trim().toLowerCase() ===
+    required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL').trim().toLowerCase()
+  )
+    throw new Error('Unauthorized login fixture must be a distinct fresh identity')
   // The supported Minikube overlays enable these already. Refuse a stale or
   // differently configured runtime; fixture setup must not weaken feature gates.
   for (const [deploymentName, keys] of [
@@ -666,14 +799,31 @@ async function main() {
   )
   if (hostFlags.data?.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED !== 'true')
     throw new Error('Host Codex feature gate is not enabled by the Minikube overlay')
+  if (
+    kubectl([
+      '-n',
+      'control-plane',
+      'exec',
+      'deployment/workflow-recipes',
+      '--',
+      'node',
+      '-e',
+      workflowFeatureCheck,
+    ]).trim() !== 'true'
+  )
+    throw new Error(
+      'Workflow fixture image is not permitted by the running Minikube coordinator policy'
+    )
   const run = 'approved-tools-' + randomBytes(6).toString('hex')
   const ports = []
-  while (ports.length < 4) {
+  while (ports.length < 5) {
     const port = await freePort()
     if (!ports.includes(port)) ports.push(port)
   }
-  const scenarios = makeScenarios(run, ports.slice(0, 3), ports[3])
-  const resources = makeResources(scenarios)
+  const scenarios = makeScenarios(run, ports.slice(0, 3), ports[4])
+  const workflowScenario = makeWorkflowScenario(run, ports[3], ports[4])
+  const allScenarios = [...scenarios, workflowScenario]
+  const resources = [...makeResources(allScenarios), ...makeWorkflowResources(workflowScenario)]
   const proposed = { apiVersion: 'v1', kind: 'List', items: resources }
   const validated = JSON.parse(
     kubectl(['create', '--dry-run=server', '-f', '-', '-o', 'json'], {
@@ -705,6 +855,7 @@ async function main() {
     head,
     run,
     scenarios,
+    workflowScenario,
     forwards: [],
     resources: resources.map(r => ({
       kind: r.kind,
@@ -809,12 +960,12 @@ async function main() {
     await startForward(
       'control-plane',
       'codex-llm-proxy',
-      ports[3],
+      ports[4],
       9090,
       `${scenarios[0].upstreamEvidenceUrl}/approved-tools/evidence`,
       value => Array.isArray(value.requests)
     )
-    for (const [index, scenario] of scenarios.entries()) {
+    for (const [index, scenario] of allScenarios.entries()) {
       kubectl(
         [
           '-n',
@@ -852,12 +1003,15 @@ async function main() {
     const seedInput = {
       mode: 'deterministic',
       profile,
-      scenarios,
+      scenarios: allScenarios,
+      workflowScenario,
       userDisplayName: run,
       adminUsername: required('TEST_ADMIN_USERNAME'),
       adminPassword: required('TEST_ADMIN_PASSWORD'),
       userEmail: required('TEST_USER_EMAIL'),
       userPassword: required('TEST_USER_PASSWORD'),
+      unauthorizedEmail: required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL'),
+      unauthorizedPassword: required('APPROVED_TOOLS_UNAUTHORIZED_PASSWORD'),
     }
     kubectl(
       [
@@ -879,10 +1033,16 @@ async function main() {
       JSON.stringify(scenarios, null, 2) + '\n',
       { flag: 'wx', mode: 0o600 }
     )
+    fs.writeFileSync(
+      path.join(evidence, 'workflow-scenario.json'),
+      JSON.stringify(workflowScenario, null, 2) + '\n',
+      { flag: 'wx', mode: 0o600 }
+    )
     state.ready = true
     save()
     if (action === 'run') {
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
+      process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
       command('runner', [], {
         timeout: 25 * 60_000,
         inherit: true,
@@ -890,7 +1050,7 @@ async function main() {
       await restore()
     }
     process.stdout.write(
-      `${JSON.stringify({ fixture: 'ready', mode: 'deterministic', scenariosFile: path.join(evidence, 'scenarios.json'), restored: state.restored })}\n`
+      `${JSON.stringify({ fixture: 'ready', mode: 'deterministic', scenariosFile: path.join(evidence, 'scenarios.json'), workflowScenarioFile: path.join(evidence, 'workflow-scenario.json'), restored: state.restored })}\n`
     )
   } catch (error) {
     try {

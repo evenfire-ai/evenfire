@@ -14,6 +14,7 @@ import {
   required,
   scenarios,
 } from './approved-tools-scenarios'
+import { prepareSubscriptionVisible } from './approved-tools-subscription'
 import { launchDesktopApp } from './launch-desktop'
 import { loginControlUiVisible } from './visible-login'
 
@@ -56,7 +57,9 @@ function workflowScenario(): WorkflowScenario {
       row =>
         row.agentName === value.agentName ||
         row.runId === value.runId ||
-        row.fixtureUrl === value.fixtureUrl
+        row.fixtureUrl === value.fixtureUrl ||
+        (required('APPROVED_TOOLS_UPSTREAM_MODE') === 'deterministic' &&
+          row.subscriptionName === value.subscriptionName)
     )
   )
     throw new Error('Workflow fixture must be isolated from receipt scenarios')
@@ -70,6 +73,7 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
   await test.step('Select the isolated workflow agent and bind its subscription visibly', async () => {
     await page.goto('/')
     await loginControlUiVisible(page)
+    scenario.connectionKey = await prepareSubscriptionVisible(page, scenario)
     await new ControlUiShell(page).openAgents()
     await new AgentListPage(page).openNamed(scenario.agentName)
     const model = new AgentModelPage(page)

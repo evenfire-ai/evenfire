@@ -31,7 +31,7 @@ local_port="$6" remote_port="$7"
    "$context" == "${CONTROL_API_REAL_PG_CONTEXT:-}" && "$worktree" == "$WORKTREE" ]] || fail
 case "$namespace" in
   control-plane) [[ "$service" == codex-llm-proxy && "$remote_port" == 9090 ]] || fail ;;
-  mcp-server) [[ "$service" =~ ^approved-tools-[a-f0-9]{12}-mcp-(83|150|250)$ && "$remote_port" == 8080 ]] || fail ;;
+  mcp-server) [[ "$service" =~ ^approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow)$ && "$remote_port" == 8080 ]] || fail ;;
   *) fail ;;
 esac
 [[ "$local_port" =~ ^[0-9]{4,5}$ ]] || fail
@@ -40,7 +40,7 @@ esac
 pid_directory="$(cd -- "${T2_PROFILE_ROOT}/${profile}/pids" && pwd -P)" || fail
 [[ "${record%/*}" == "$pid_directory" ]] || fail
 filename="${record##*/}"
-[[ "$filename" =~ ^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250))\.pid$ ]] || fail
+[[ "$filename" =~ ^approved-tools-[a-f0-9]{12}-(codex-llm-proxy|approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow))\.pid$ ]] || fail
 [[ "$filename" == *"-${service}.pid" ]] || fail
 
 # shellcheck source=scripts/minikube/port-forward-owner.sh

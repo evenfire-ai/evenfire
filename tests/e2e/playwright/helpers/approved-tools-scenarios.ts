@@ -90,6 +90,11 @@ export function scenarios(): Scenario[] {
     if (new Set(rows.map(row => row[key])).size !== 3)
       throw new Error(`Scenarios must isolate ${key}`)
   }
+  if (
+    process.env.APPROVED_TOOLS_UPSTREAM_MODE === 'deterministic' &&
+    new Set(rows.map(row => row.subscriptionName)).size !== 3
+  )
+    throw new Error('Deterministic UI-created subscriptions require unique names')
   return rows.sort((a, b) => a.catalogSize - b.catalogSize)
 }
 export async function readEvidence(scenario: Scenario): Promise<Evidence> {

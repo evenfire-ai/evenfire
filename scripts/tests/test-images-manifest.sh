@@ -212,7 +212,7 @@ assert_unpublished_images_are_exactly_the_known_fixtures() {
   # otherwise was missing its Accept header). doc-generator-mcp used to be the
   # third; it has no manifest row at all now (see
   # assert_doc_generator_mcp_has_been_removed_from_the_image_system).
-  local want="codex-approved-tools-mcp-e2e,codex-approved-tools-proxy-e2e,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
+  local want="codex-approved-tools-mcp-e2e,codex-approved-tools-proxy-e2e,codex-approved-tools-workflow-e2e,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
   if [ "$got" = "$want" ]; then
     pass "the unpublished set is exactly the known fixtures"
   else

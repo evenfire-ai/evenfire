@@ -6,6 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import {
   IMAGES,
+  localRef,
   minikubeVerifyRefs,
   publishedImages,
   pullInGhcrMode,
@@ -14,6 +15,8 @@ import {
   assertResourceRoundTrip,
   makeResources,
   makeScenarios,
+  makeWorkflowResources,
+  makeWorkflowScenario,
   openOwnedFile,
   readOwnedDescriptor,
   readOwnedFile,
@@ -26,8 +29,13 @@ import {
 const scenarios = makeScenarios('approved-tools-a1b2c3d4e5f6', [43101, 43102, 43103], 43104)
 
 test('explicit tools fixtures never enter default publish, acquisition or verification sets', () => {
-  for (const name of ['codex-approved-tools-mcp-e2e', 'codex-approved-tools-proxy-e2e']) {
-    assert.ok(IMAGES.some(image => image.name === name))
+  for (const name of [
+    'codex-approved-tools-mcp-e2e',
+    'codex-approved-tools-proxy-e2e',
+    'codex-approved-tools-workflow-e2e',
+  ]) {
+    const image = IMAGES.find(image => image.name === name)
+    assert.ok(image)
     assert.equal(
       publishedImages().some(image => image.name === name),
       false
@@ -41,12 +49,70 @@ test('explicit tools fixtures never enter default publish, acquisition or verifi
       { mode: 'ghcr', tag: 'test' },
       { mode: 'ghcr', tag: 'test', includeE2eFixtures: true },
     ]) {
-      assert.equal(
-        minikubeVerifyRefs(options).some(ref => ref.includes(name)),
-        false
-      )
+      assert.equal(minikubeVerifyRefs(options).includes(localRef(image)), false)
     }
   }
+})
+
+test('fourth workflow scenario has separate backend, explicit grant and two retained approval gates', () => {
+  const workflow = makeWorkflowScenario('approved-tools-a1b2c3d4e5f6', 43105, 43104)
+  for (const field of [
+    'runId',
+    'agentName',
+    'contextName',
+    'connectorName',
+    'connectionKey',
+    'fixtureUrl',
+  ])
+    assert.ok(scenarios.every(s => s[field] !== workflow[field]))
+  assert.equal(workflow.catalogSize, 83)
+  const host = makeResources([workflow]).find(r => r.kind === 'Host')
+  assert.equal(host.spec.model.connectionRef, 'unassigned')
+  assert.equal(host.spec.approval, undefined)
+  assert.ok(host.spec.workflowControl.scopes.includes('workflow:trigger'))
+  const [recipe, egress, ingress] = makeWorkflowResources(workflow)
+  assert.deepEqual(recipe.spec.steps, [{ id: 'receipt', mcpServers: ['receipt'] }])
+  assert.deepEqual(recipe.spec.triggers.onDemand, {
+    requiresApproval: true,
+    allowedActors: ['user'],
+  })
+  assert.deepEqual(recipe.spec.agent, { provider: 'codex-subscription', model: workflow.modelName })
+  assert.equal(
+    recipe.metadata.annotations['clerum.io/codex-connection-ref'],
+    workflow.connectionKey
+  )
+  assert.equal(recipe.spec.coordinatorImage, 'clerum/workflow-custom-sdk-e2e:approved-tools-test')
+  assert.deepEqual(recipe.spec.output, { destination: 'pvc', format: 'json' })
+  assert.deepEqual(recipe.spec.mcpServers, [
+    {
+      id: 'receipt',
+      endpoint: `http://${workflow.connectorName}.mcp-server.svc.cluster.local:8080/mcp`,
+    },
+  ])
+  assert.deepEqual(egress.spec.podSelector, {
+    matchLabels: {
+      'clerum.io/workflow-output-scope': workflow.workflowName,
+      'clerum.io/component': 'workflow-coordinator',
+    },
+  })
+  assert.equal(egress.spec.egress.length, 1)
+  assert.deepEqual(egress.spec.egress[0].to, [
+    {
+      namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'mcp-server' } },
+      podSelector: { matchLabels: { 'clerum.io/mcpserver': workflow.connectorName } },
+    },
+  ])
+  assert.deepEqual(egress.spec.egress[0].ports, [{ protocol: 'TCP', port: 8080 }])
+  assert.deepEqual(ingress.spec.podSelector, egress.spec.egress[0].to[0].podSelector)
+  assert.deepEqual(ingress.spec.ingress[0].from, [
+    {
+      namespaceSelector: {
+        matchLabels: { 'kubernetes.io/metadata.name': workflow.workflowNamespace },
+      },
+      podSelector: egress.spec.podSelector,
+    },
+  ])
+  assert.deepEqual(ingress.spec.ingress[0].ports, [{ protocol: 'TCP', port: 8080 }])
 })
 
 test('all three isolated catalogs start without connector grants or subscription bindings', () => {
@@ -266,6 +332,25 @@ test('fixed ownership CLI rejects invalid operations and bindings without touchi
   try {
     // The canonical library's valid missing-record cleanup is a harmless no-op.
     assert.equal(run('cleanup').status, 0)
+    const workflowService = 'approved-tools-a1b2c3d4e5f6-mcp-workflow'
+    const workflowRecord = path.join(
+      canonicalPidDirectory,
+      `approved-tools-a1b2c3d4e5f6-${workflowService}.pid`
+    )
+    const workflowArgs = [
+      workflowRecord,
+      profile,
+      profile,
+      worktree,
+      'mcp-server',
+      workflowService,
+      '43105',
+      '8080',
+    ]
+    assert.equal(run('cleanup', workflowArgs).status, 0)
+    const invalidWorkflow = [...workflowArgs]
+    invalidWorkflow[5] += '-other'
+    assert.equal(run('cleanup', invalidWorkflow).status, 2)
     for (const operation of ['unknown', 'cleanup;echo', '--help', 'pf_owner_cleanup_record'])
       assert.equal(run(operation).status, 2)
     for (const [index, value] of [

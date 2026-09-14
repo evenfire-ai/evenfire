@@ -160,6 +160,7 @@ function main() {
         `tests/e2e/playwright/desktop/${specFile}`,
         'tests/e2e/playwright/helpers/approved-tools-scenarios.ts',
         'tests/e2e/playwright/helpers/approved-tools-workflow.ts',
+        'tests/e2e/playwright/helpers/approved-tools-subscription.ts',
       ],
       { cwd: repo, env, stdio: 'inherit', timeout: 30_000 }
     )

@@ -321,6 +321,15 @@
       "deployed_to_minikube": false
     },
     {
+      "name": "codex-approved-tools-workflow-e2e",
+      "path": "tests/e2e/fixtures/codex-subscription/approved-tools-workflow",
+      "local_name": "workflow-custom-sdk-e2e",
+      "local_tag": "approved-tools-test",
+      "rooted": true,
+      "published": false,
+      "deployed_to_minikube": false
+    },
+    {
       "name": "workflow-custom-sdk-e2e",
       "path": "tests/e2e/fixtures/custom-workflow-coordinator",
       "published": false,
