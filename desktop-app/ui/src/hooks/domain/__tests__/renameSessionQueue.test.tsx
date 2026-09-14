@@ -11,7 +11,7 @@
  * is never called and there is no rollback/pending behavior to assert).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, waitFor } from '@testing-library/react'
+import { act, cleanup, waitFor } from '@testing-library/react'
 import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex } from '../../../../../src/types'
 import { renderController } from './__fixtures__/controllerHarness'
@@ -26,6 +26,11 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  // Unmount every controller first: without it a prior test's mounted controller
+  // keeps its `window 'online'` listener alive, and a later test that dispatches
+  // that global event flushes the stale controller's queue too (a phantom PATCH
+  // on the shared clerum mock). This file otherwise has no auto-cleanup.
+  cleanup()
   vi.restoreAllMocks()
   uninstallMockClerum()
 })
@@ -425,5 +430,84 @@ describe('rename pending queue — concurrency (spec 15 §2.5)', () => {
     // The optimistic title was applied; on the 4xx we must NOT blank it.
     expect(titleInList(result.current, 'c1')).not.toBe('')
     expect(spies.pushToast).toHaveBeenCalledWith(expect.any(String), 'error')
+  })
+})
+
+describe('rename pending queue — user-identity teardown (spec 15 §2.5 / R1-H1)', () => {
+  // R1-H1 repro (fails at be421da6): sessions are per-USER server-side, so a
+  // pending rename queued by user-1 must NOT survive a switch to user-2 — a later
+  // reconnect/poll would PATCH user-1's rename under user-2's token. Assert the
+  // observable: after the identity change, no further renameSession fires.
+  it('drops the pending queue on a user-identity change — no PATCH under the new token', async () => {
+    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
+    // Deterministic network failure → the rename queues offline (retried on reconnect).
+    clerum.rpc.renameSession.mockRejectedValue(new Error('fetch failed'))
+
+    const { result, rerender } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+      currentUserId: 'user-1',
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+
+    await act(async () => {
+      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+    })
+    // Optimistic title applied, one PATCH attempted, entry queued offline.
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    // The user identity changes (logout → login as a different user).
+    await act(async () => {
+      rerender({ currentUserId: 'user-2' })
+      await flushMicrotasks()
+    })
+
+    // A reconnect fires under the new identity. The obsolete entry was dropped, so
+    // NO PATCH is issued under user-2's token.
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await flushMicrotasks()
+    })
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+  })
+
+  // Anti-regression guard (passes at be421da6, must keep passing after R1-H1):
+  // a TEAM-switch of the SAME user must PRESERVE the queue and keep syncing —
+  // clearing it here would let the server title revert the user's own rename
+  // (resolveSessionTitle case C).
+  it('preserves the pending queue across a team-switch of the same user and keeps syncing', async () => {
+    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
+    // Server reports a DIFFERENT title — it must never win while a rename is pending.
+    clerum.rpc.listSessions.mockResolvedValue(reportedSessions([{ chatId: 'c1', title: 'server' }]))
+    // First attempt fails offline; the retry after the team-switch succeeds.
+    clerum.rpc.renameSession
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValue({ title: 'renamed' })
+
+    const { result, rerender } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+      currentUserId: 'user-1',
+      currentTeamId: 'team-1',
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('server'))
+
+    await act(async () => {
+      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+    })
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    // Same user, different team: the queue survives and the offline entry retries.
+    await act(async () => {
+      rerender({ currentTeamId: 'team-2' })
+      await flushMicrotasks()
+    })
+    await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2))
+
+    // The user's optimistic rename survived the team-switch — the server title did
+    // NOT overwrite it.
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
   })
 })

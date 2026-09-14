@@ -386,6 +386,9 @@ export function useAgentChatController({
     agentNames,
     isAuthenticated,
     scopeKey: authenticatedScope,
+    // User portion of the scope only (NOT the combined user:team scopeKey): the
+    // pending-rename queue is per-user and must survive a team-switch (R1-H1).
+    authUserKey: currentUserId ?? 'unknown-user',
     loadMenuData,
     chatStore,
     fsm,

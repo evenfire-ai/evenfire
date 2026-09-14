@@ -75,6 +75,14 @@ interface UseChatListControllerParams {
   agentNames: string[]
   isAuthenticated: boolean
   scopeKey: string
+  /**
+   * The USER portion of the scope (`currentUserId ?? 'unknown-user'`), passed
+   * explicitly rather than split from `scopeKey` (which is `${userId}:${teamId}`).
+   * The pending-rename queue is per-user (sessions are keyed by userId server-side),
+   * so it must be dropped when the user identity changes but PRESERVED across a
+   * team-switch of the same user — see the teardown effect below.
+   */
+  authUserKey: string
   loadMenuData: boolean
   chatStore: ReturnType<typeof useChatStore>
   fsm: SessionFsmStore
@@ -136,6 +144,7 @@ export function useChatListController({
   agentNames,
   isAuthenticated,
   scopeKey,
+  authUserKey,
   loadMenuData,
   chatStore,
   fsm,
@@ -199,6 +208,23 @@ export function useChatListController({
   useEffect(() => {
     requestGenerationRef.current += 1
   }, [isAuthenticated, scopeKey])
+
+  // R1-H1 — the pending-rename queue is per-USER identity. mcp-host keys a chat
+  // session by userId (`${userSub}:rpc:${agent}:${chatId}`) and filters by
+  // `conversation.user_id === userId`, so a queued rename stays legitimate across
+  // a TEAM-switch of the same user and must keep syncing. Only a change of user
+  // identity (logout, or login as someone else) makes the queued renames belong to
+  // a foreign identity — drop them so a later flush/poll/online never PATCHes them
+  // under the new user's token. Keyed on the user portion ONLY, never the combined
+  // `scopeKey`: clearing on a team-switch would strip the pending marker and let
+  // the server title overwrite the user's own optimistic rename on the next poll
+  // (resolveSessionTitle case C). This hook is never unmounted on logout/team-switch
+  // (it lives at App's root), so this effect is the queue's only identity teardown.
+  // A PATCH still in flight when this runs no-ops on completion without re-inserting
+  // (attemptRenameRpc's `pendingRenamesRef.current.get(key) !== entry` guard).
+  useEffect(() => {
+    pendingRenamesRef.current.clear()
+  }, [authUserKey])
 
   // Live `selectedAgent` for the stable callbacks below (they gate a chatList
   // write on "is this the selected agent"). A ref keeps the callbacks stable
