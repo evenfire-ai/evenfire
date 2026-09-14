@@ -8,7 +8,7 @@ import {
   type CanonicalActionTarget,
   hashActionTarget,
 } from '@clerum/action-context-contracts'
-import type { DbClient } from '../../db.js'
+import { type DbClient, withTransaction } from '../../db.js'
 import type { K8sGateway } from '../../k8s.js'
 import type { ExternalAuthedRequest } from '../../middleware/externalSessionAuth.js'
 import {
@@ -337,6 +337,192 @@ export async function requireCurrentWorkflowApprovalAuthority(input: {
     | { delegationCurrent?: unknown; pathCurrent?: unknown }
     | undefined
   if (current?.delegationCurrent !== true || current.pathCurrent !== true) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  return input.authority
+}
+
+export type WorkflowTriggerAuthorityFence = Readonly<{
+  fingerprint: string
+}>
+
+function workflowTriggerIdentity(authority: WorkflowAuthorityBinding): {
+  recipeNamespace: string
+  recipeName: string
+} {
+  const { binding } = authority
+  const target = binding.target as Readonly<Record<string, unknown>>
+  const recipeNamespace = String(target.recipeNamespace ?? '')
+  const recipeName = String(target.recipeName ?? '')
+  if (
+    binding.operationId !== 'workflow.trigger' ||
+    binding.resource.type !== 'workflow_recipe' ||
+    binding.resource.logicalId !== `${recipeNamespace}/${recipeName}` ||
+    !recipeNamespace ||
+    !recipeName
+  ) {
+    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+  }
+  return { recipeNamespace, recipeName }
+}
+
+async function readWorkflowTriggerAuthorityFence(input: {
+  db: DbClient
+  authority: WorkflowAuthorityBinding
+  lock: boolean
+}): Promise<WorkflowTriggerAuthorityFence> {
+  const { binding } = input.authority
+  const { recipeNamespace, recipeName } = workflowTriggerIdentity(input.authority)
+  const lock = input.lock ? ' FOR SHARE' : ''
+  const session = await input.db.query(
+    `SELECT u.lifecycle_state, s.session_version, s.current_jti, s.revoked_at,
+            s.idle_expires_at, s.absolute_expires_at, aur.revision AS user_revision
+       FROM users u
+       JOIN external_user_sessions s ON s.user_id = u.id AND s.sid = $2
+       JOIN authorization_user_revisions aur ON aur.user_id = u.id
+      WHERE u.id = $1 AND s.session_version = $3${lock}`,
+    [binding.userId, binding.sid, binding.sessionVersion]
+  )
+  const sessionRow = session.rows[0] as
+    | {
+        lifecycle_state?: unknown
+        revoked_at?: unknown
+        idle_expires_at?: unknown
+        absolute_expires_at?: unknown
+      }
+    | undefined
+  if (
+    !sessionRow ||
+    sessionRow.lifecycle_state !== 'active' ||
+    sessionRow.revoked_at !== null ||
+    new Date(String(sessionRow.idle_expires_at)).getTime() <= Date.now() ||
+    new Date(String(sessionRow.absolute_expires_at)).getTime() <= Date.now()
+  ) {
+    throw new WorkflowAuthorityError(401, 'invalid_session')
+  }
+
+  const memberships = await input.db.query(
+    `SELECT tm.team_id, tm.role, tm.status, tm.updated_at, atr.revision AS team_revision
+       FROM team_members tm
+       JOIN authorization_team_revisions atr ON atr.team_id = tm.team_id
+      WHERE tm.user_id = $1 AND tm.status = 'active'
+      ORDER BY tm.team_id${lock}`,
+    [binding.userId]
+  )
+  const resourceRevision = await input.db.query(
+    `SELECT revision
+       FROM authorization_resource_revisions
+      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND resource_id = $2${lock}`,
+    [binding.resource.environmentId, binding.resource.logicalId]
+  )
+  if ((resourceRevision.rowCount ?? 0) !== 1) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+
+  const sourceState = await input.db.query(
+    `SELECT generation, resource_version, status, safe_error_code
+       FROM operational_catalog_source_state
+      WHERE environment_id = $1 AND source_family = 'workflow_recipe'${lock}`,
+    [binding.resource.environmentId]
+  )
+  const resource = await input.db.query(
+    `SELECT source_generation, provider_uid, provider_resource_version, enabled, deleted_at
+       FROM operational_resource_index
+      WHERE environment_id = $1 AND resource_type = 'workflow_recipe' AND logical_id = $2${lock}`,
+    [binding.resource.environmentId, binding.resource.logicalId]
+  )
+  const sourceStateRow = sourceState.rows[0] as { status?: unknown } | undefined
+  const resourceRow = resource.rows[0] as { enabled?: unknown; deleted_at?: unknown } | undefined
+  if (
+    (sourceState.rowCount ?? 0) !== 1 ||
+    sourceStateRow?.status !== 'current' ||
+    (resource.rowCount ?? 0) !== 1 ||
+    resourceRow?.enabled !== true ||
+    resourceRow?.deleted_at !== null
+  ) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  const relationships = await input.db.query(
+    `SELECT source_type, source_id, relationship_type, target_type, target_id,
+            relationship_instance_id, behavior_attributes, source_provider_uid,
+            source_resource_version, source_generation
+       FROM operational_resource_relationships
+      WHERE environment_id = $1
+        AND ((source_type = 'workflow_recipe' AND source_id = $2)
+          OR (target_type = 'workflow_recipe' AND target_id = $2))
+      ORDER BY source_type, source_id, relationship_type, target_type, target_id,
+               relationship_instance_id${lock}`,
+    [binding.resource.environmentId, binding.resource.logicalId]
+  )
+
+  let grant
+  if (binding.pathKind === 'direct' && binding.effectiveTeamId === null) {
+    grant = await input.db.query(
+      `SELECT user_id, recipe_namespace, recipe_name
+         FROM user_workflow_triggers
+        WHERE user_id = $1 AND recipe_namespace = $2 AND recipe_name = $3${lock}`,
+      [binding.userId, recipeNamespace, recipeName]
+    )
+  } else if (binding.pathKind === 'team' && binding.effectiveTeamId) {
+    grant = await input.db.query(
+      `SELECT twt.team_id, twt.recipe_namespace, twt.recipe_name, tm.role, tm.status,
+              tm.updated_at
+         FROM team_workflow_triggers twt
+         JOIN team_members tm ON tm.team_id = twt.team_id AND tm.user_id = $1
+        WHERE twt.team_id = $2 AND twt.recipe_namespace = $3 AND twt.recipe_name = $4
+          AND tm.status = 'active'${lock}`,
+      [binding.userId, binding.effectiveTeamId, recipeNamespace, recipeName]
+    )
+  } else {
+    throw new WorkflowAuthorityError(400, 'invalid_action_delegation')
+  }
+  if ((grant.rowCount ?? 0) !== 1) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+
+  const snapshot = JSON.parse(
+    JSON.stringify({
+      session: session.rows,
+      memberships: memberships.rows,
+      resourceRevision: resourceRevision.rows,
+      sourceState: sourceState.rows,
+      resource: resource.rows,
+      relationships: relationships.rows,
+      grant: grant.rows,
+    })
+  )
+  return Object.freeze({
+    fingerprint: createHash('sha256').update(stableStringify(snapshot)).digest('hex'),
+  })
+}
+
+export function captureWorkflowTriggerAuthorityFence(input: {
+  authority: WorkflowAuthorityBinding
+}): Promise<WorkflowTriggerAuthorityFence> {
+  return withTransaction(db =>
+    readWorkflowTriggerAuthorityFence({ db, authority: input.authority, lock: false })
+  )
+}
+
+export async function requireCurrentWorkflowTriggerAuthority(input: {
+  db: DbClient
+  authority: WorkflowAuthorityBinding
+  expectedFence: WorkflowTriggerAuthorityFence
+}): Promise<WorkflowAuthorityBinding> {
+  const currentTime = await input.db.query(
+    `SELECT clock_timestamp() < to_timestamp($1) AS "delegationCurrent"`,
+    [input.authority.sourceExpiresAt]
+  )
+  const currentTimeRow = currentTime.rows[0] as { delegationCurrent?: unknown } | undefined
+  if (currentTimeRow?.delegationCurrent !== true) {
+    throw new WorkflowAuthorityError(409, 'access_path_stale')
+  }
+  const current = await readWorkflowTriggerAuthorityFence({
+    db: input.db,
+    authority: input.authority,
+    lock: true,
+  })
+  if (current.fingerprint !== input.expectedFence.fingerprint) {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }
   return input.authority

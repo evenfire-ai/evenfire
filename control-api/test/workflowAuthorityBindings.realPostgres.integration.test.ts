@@ -15,8 +15,10 @@ import { createRun } from '../src/services/workflowRunService.js'
 import { deriveApprovalConsumeAuthority } from '../src/services/workflows/workflowActionTransition.js'
 import {
   type WorkflowAuthorityBinding,
+  captureWorkflowTriggerAuthorityFence,
   persistWorkflowAuthorityBinding,
   requireCurrentWorkflowApprovalAuthority,
+  requireCurrentWorkflowTriggerAuthority,
   workflowAuthorityBindingFromClaims,
 } from '../src/services/workflows/workflowAuthorityBindingService.js'
 import { createWorkflowTriggerApprovalRequest } from '../src/services/workflows/workflowTriggerApprovalService.js'
@@ -222,6 +224,66 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     return workflowAuthorityBindingFromClaims(claims)
   }
 
+  async function currentTriggerAuthority(recipeName: string): Promise<WorkflowAuthorityBinding> {
+    const environmentId = canonicalEnvironmentId()
+    await databasePool.query(
+      `INSERT INTO operational_catalog_source_state(
+         environment_id, source_family, generation, resource_version, status, last_success_at
+       ) VALUES ($1, 'workflow_recipe', 1, '1', 'current', clock_timestamp())
+       ON CONFLICT (environment_id, source_family) DO NOTHING`,
+      [environmentId]
+    )
+    await databasePool.query(
+      `INSERT INTO operational_resource_index(
+         environment_id, resource_type, logical_id, source_family, source_generation,
+         provider_uid, provider_resource_version, display_name, enabled, content_bytes
+       ) VALUES ($1, 'workflow_recipe', $2, 'workflow_recipe', 1, $3, '1', $2, TRUE, 64)
+       ON CONFLICT (environment_id, resource_type, logical_id) DO NOTHING`,
+      [environmentId, `sandbox-recipes/${recipeName}`, `workflow-recipe:${recipeName}`]
+    )
+    await databasePool.query(
+      `INSERT INTO user_workflow_triggers(user_id, recipe_namespace, recipe_name)
+       VALUES ($1, 'sandbox-recipes', $2)
+       ON CONFLICT DO NOTHING`,
+      [userId, recipeName]
+    )
+    const target = Object.freeze({ recipeNamespace: 'sandbox-recipes', recipeName })
+    return authority({
+      operationId: 'workflow.trigger',
+      resourceType: 'workflow_recipe',
+      resourceLogicalId: `sandbox-recipes/${recipeName}`,
+      target,
+    })
+  }
+
+  function triggerReauthorizer(
+    initial: WorkflowAuthorityBinding,
+    budget: AccessExecutionBudget,
+    afterPhaseOne?: () => Promise<void>
+  ) {
+    let phaseOneFence: Awaited<ReturnType<typeof captureWorkflowTriggerAuthorityFence>> | null =
+      null
+    return {
+      reauthorize: async () => {
+        const before = await captureWorkflowTriggerAuthorityFence({ authority: initial })
+        const current = initial
+        const after = await captureWorkflowTriggerAuthorityFence({ authority: current })
+        expect(after).toEqual(before)
+        phaseOneFence = after
+        await afterPhaseOne?.()
+        return current
+      },
+      validateCurrentInTransaction: (db: Parameters<typeof createRun>[1]) => {
+        if (!phaseOneFence) throw new Error('test phase-one trigger fence missing')
+        return requireCurrentWorkflowTriggerAuthority({
+          db: db!,
+          authority: initial,
+          expectedFence: phaseOneFence,
+        })
+      },
+    }
+  }
+
   function decisionReauthorizer(
     initial: WorkflowAuthorityBinding,
     budget: AccessExecutionBudget,
@@ -285,7 +347,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
-      reauthorize: async () => triggerAuthority,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
@@ -327,6 +388,214 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         bounded: true,
       }),
     ])
+  })
+
+  it('creates trigger runs and approvals with one shared pool connection', async () => {
+    const runAuthority = await currentTriggerAuthority('pool-one-run')
+    const approvalAuthority = await currentTriggerAuthority('pool-one-approval')
+    const limitedPool = new Pool({ connectionString, max: 1 })
+    const runBudget = AccessExecutionBudget.create('action')
+    const approvalBudget = AccessExecutionBudget.create('action')
+    corePoolConnectSpy.mockImplementation((() => limitedPool.connect()) as typeof pool.connect)
+    try {
+      const run = await createRun({
+        recipe_namespace: 'sandbox-recipes',
+        recipe_name: 'pool-one-run',
+        actor_type: 'user',
+        actor_id: userId,
+        idempotency_key: `pool-one-run-${randomUUID()}`,
+        trigger_source: 'onDemand',
+        ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+        authority: runAuthority,
+        ...triggerReauthorizer(runAuthority, runBudget),
+      })
+      expect(run.created).toBe(true)
+
+      const approval = await createWorkflowTriggerApprovalRequest({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'pool-one-approval',
+        callerKey: 'external-rest-api',
+        targetUserId: userId,
+        payload: { message: 'Approve one-pool workflow trigger' },
+        idempotencyKey: `pool-one-approval-${randomUUID()}`,
+        runIntent: {
+          actorType: 'user',
+          actorId: userId,
+          triggerSource: 'onDemand',
+        },
+        authority: approvalAuthority,
+        ...triggerReauthorizer(approvalAuthority, approvalBudget),
+      })
+      expect(approval.kind).toBe('approval')
+      expect(limitedPool.waitingCount).toBe(0)
+    } finally {
+      runBudget.close()
+      approvalBudget.close()
+      corePoolConnectSpy.mockImplementation((() => databasePool.connect()) as typeof pool.connect)
+      await limitedPool.end()
+    }
+  })
+
+  it('serializes reauthorized trigger runs to one idempotent winner', async () => {
+    const recipeName = 'reauthorized-concurrency'
+    const currentAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `reauthorized-${randomUUID()}`
+    const budgets = Array.from({ length: 6 }, () => AccessExecutionBudget.create('action'))
+    try {
+      const results = await Promise.all(
+        budgets.map(budget =>
+          createRun({
+            recipe_namespace: 'sandbox-recipes',
+            recipe_name: recipeName,
+            actor_type: 'user',
+            actor_id: userId,
+            idempotency_key: idempotencyKey,
+            trigger_source: 'onDemand',
+            ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+            authority: currentAuthority,
+            ...triggerReauthorizer(currentAuthority, budget),
+          })
+        )
+      )
+      expect(new Set(results.map(result => result.row.run_id))).toHaveLength(1)
+      expect(results.filter(result => result.created)).toHaveLength(1)
+      expect(results.filter(result => !result.created)).toHaveLength(5)
+    } finally {
+      budgets.forEach(budget => budget.close())
+    }
+  })
+
+  it('serializes reauthorized trigger approvals to one idempotent winner', async () => {
+    const recipeName = 'reauthorized-approval-concurrency'
+    const currentAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `reauthorized-approval-${randomUUID()}`
+    const budgets = Array.from({ length: 6 }, () => AccessExecutionBudget.create('action'))
+    try {
+      const results = await Promise.all(
+        budgets.map(budget =>
+          createWorkflowTriggerApprovalRequest({
+            recipeNamespace: 'sandbox-recipes',
+            recipeName,
+            callerKey: 'external-rest-api',
+            targetUserId: userId,
+            payload: { message: 'Approve concurrent workflow trigger' },
+            idempotencyKey,
+            runIntent: {
+              actorType: 'user',
+              actorId: userId,
+              triggerSource: 'onDemand',
+            },
+            authority: currentAuthority,
+            ...triggerReauthorizer(currentAuthority, budget),
+          })
+        )
+      )
+      expect(results.every(result => result.kind === 'approval')).toBe(true)
+      expect(new Set(results.map(result => result.approvalRequestId))).toHaveLength(1)
+      expect(results.filter(result => result.kind === 'approval' && !result.existing)).toHaveLength(
+        1
+      )
+      expect(results.filter(result => result.kind === 'approval' && result.existing)).toHaveLength(
+        5
+      )
+    } finally {
+      budgets.forEach(budget => budget.close())
+    }
+  })
+
+  it('rejects a trigger grant revision race and allows a fresh caller retry', async () => {
+    const recipeName = 'trigger-revision-race'
+    const staleAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `revision-race-${randomUUID()}`
+    const staleBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        createRun({
+          recipe_namespace: 'sandbox-recipes',
+          recipe_name: recipeName,
+          actor_type: 'user',
+          actor_id: userId,
+          idempotency_key: idempotencyKey,
+          trigger_source: 'onDemand',
+          ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+          authority: staleAuthority,
+          ...triggerReauthorizer(staleAuthority, staleBudget, async () => {
+            await databasePool.query(
+              `DELETE FROM user_workflow_triggers
+                WHERE user_id = $1 AND recipe_namespace = 'sandbox-recipes' AND recipe_name = $2`,
+              [userId, recipeName]
+            )
+          }),
+        })
+      ).rejects.toMatchObject({ code: 'access_path_stale' })
+    } finally {
+      staleBudget.close()
+    }
+    const missing = await databasePool.query(
+      `SELECT run_id FROM workflow_runs
+        WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1 AND idempotency_key = $2`,
+      [recipeName, idempotencyKey]
+    )
+    expect(missing.rowCount).toBe(0)
+
+    const freshAuthority = await currentTriggerAuthority(recipeName)
+    const freshBudget = AccessExecutionBudget.create('action')
+    try {
+      const retried = await createRun({
+        recipe_namespace: 'sandbox-recipes',
+        recipe_name: recipeName,
+        actor_type: 'user',
+        actor_id: userId,
+        idempotency_key: idempotencyKey,
+        trigger_source: 'onDemand',
+        ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+        authority: freshAuthority,
+        ...triggerReauthorizer(freshAuthority, freshBudget),
+      })
+      expect(retried.created).toBe(true)
+    } finally {
+      freshBudget.close()
+    }
+  })
+
+  it('rejects an operational recipe snapshot race before creating a trigger run', async () => {
+    const recipeName = 'trigger-resource-race'
+    const staleAuthority = await currentTriggerAuthority(recipeName)
+    const idempotencyKey = `resource-race-${randomUUID()}`
+    const staleBudget = AccessExecutionBudget.create('action')
+    try {
+      await expect(
+        createRun({
+          recipe_namespace: 'sandbox-recipes',
+          recipe_name: recipeName,
+          actor_type: 'user',
+          actor_id: userId,
+          idempotency_key: idempotencyKey,
+          trigger_source: 'onDemand',
+          ttl_seconds_after_finished: defaultTtlSecondsAfterFinished,
+          authority: staleAuthority,
+          ...triggerReauthorizer(staleAuthority, staleBudget, async () => {
+            await databasePool.query(
+              `UPDATE operational_resource_index
+                  SET provider_resource_version = '2'
+                WHERE environment_id = $1 AND resource_type = 'workflow_recipe'
+                  AND logical_id = $2`,
+              [canonicalEnvironmentId(), `sandbox-recipes/${recipeName}`]
+            )
+          }),
+        })
+      ).rejects.toMatchObject({ code: 'access_path_stale' })
+    } finally {
+      staleBudget.close()
+    }
+    await expect(
+      databasePool.query(
+        `SELECT run_id FROM workflow_runs
+          WHERE recipe_namespace = 'sandbox-recipes' AND recipe_name = $1
+            AND idempotency_key = $2`,
+        [recipeName, idempotencyKey]
+      )
+    ).resolves.toMatchObject({ rowCount: 0 })
   })
 
   it('preserves legacy runs without inventing workflow authority', async () => {
@@ -702,7 +971,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
-      reauthorize: async () => triggerAuthority,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
@@ -805,7 +1073,6 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
         ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
       },
       authority: triggerAuthority,
-      reauthorize: async () => triggerAuthority,
     })
     expect(approval.kind).toBe('approval')
     if (approval.kind !== 'approval') throw new Error('expected approval request')
