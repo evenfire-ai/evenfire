@@ -1,9 +1,12 @@
 # Production deployment (notes)
 
 This repository ships **Kubernetes manifests**, operators, and a Helm chart for
-CRDs. A single turnkey “one cloud vendor” guide is not published in this OSS
-tree yet; use this page as the production checklist and link into in-repo
-assets.
+CRDs. There is no certified in-tree `deploy/overlays/aws` (or GKE) overlay;
+production cloud overlays are customer-local (or private) patches on
+`deploy/base`. For an **existing Amazon EKS** cluster, give your coding agent
+the [EKS agent how-to](aws-eks-agent-guide.md) (skill:
+`.agents/skills/evenfire-aws-eks`). Use this page as the production checklist
+and link into in-repo assets.
 
 ## What “production” means here
 
@@ -88,6 +91,8 @@ modified MPL-licensed files. See [LICENSE](../../LICENSE).
 
 ## Related
 
+- [Evenfire on existing Amazon EKS (agent how-to)](aws-eks-agent-guide.md)
+- [Infrastructure questionnaire](client-infrastructure-requirements.md)
 - [WorkflowRecipes operations](workflow-recipes-guide.md)
 - [Plugin Workload SDK upgrade and policy migration](plugin-workload-sdk-upgrade.md)
 - [Member invitations on self-hosted](../how-to/member-invitations-self-hosted.md)
