@@ -1,0 +1,14 @@
+edges
+| mcp-host/src/llm/systemPromptInjection.ts:8:9:8:15 | persona | mcp-host/src/llm/systemPromptInjection.ts:12:73:12:79 | persona | provenance |  |
+| mcp-host/src/llm/systemPromptInjection.ts:8:19:8:49 | String( ...  \|\| '') | mcp-host/src/llm/systemPromptInjection.ts:8:9:8:15 | persona | provenance |  |
+| mcp-host/src/llm/systemPromptInjection.ts:8:26:8:42 | req.query.persona | mcp-host/src/llm/systemPromptInjection.ts:8:19:8:49 | String( ...  \|\| '') | provenance |  |
+| mcp-host/src/llm/systemPromptInjection.ts:12:73:12:79 | persona | mcp-host/src/llm/systemPromptInjection.ts:12:34:12:82 | `You ar ... sona}.` | provenance |  |
+nodes
+| mcp-host/src/llm/systemPromptInjection.ts:8:9:8:15 | persona | semmle.label | persona |
+| mcp-host/src/llm/systemPromptInjection.ts:8:19:8:49 | String( ...  \|\| '') | semmle.label | String( ...  \|\| '') |
+| mcp-host/src/llm/systemPromptInjection.ts:8:26:8:42 | req.query.persona | semmle.label | req.query.persona |
+| mcp-host/src/llm/systemPromptInjection.ts:12:34:12:82 | `You ar ... sona}.` | semmle.label | `You ar ... sona}.` |
+| mcp-host/src/llm/systemPromptInjection.ts:12:73:12:79 | persona | semmle.label | persona |
+subpaths
+#select
+| mcp-host/src/llm/systemPromptInjection.ts:12:34:12:82 | `You ar ... sona}.` | mcp-host/src/llm/systemPromptInjection.ts:8:26:8:42 | req.query.persona | mcp-host/src/llm/systemPromptInjection.ts:12:34:12:82 | `You ar ... sona}.` | This system prompt depends on a $@. | mcp-host/src/llm/systemPromptInjection.ts:8:26:8:42 | req.query.persona | user-provided value |

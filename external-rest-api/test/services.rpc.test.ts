@@ -13,18 +13,18 @@ describe('rpcService.issueRpcAccessToken', () => {
     clientMock.controlApiRequest.mockReset()
   })
 
-  it('surfaces the control-api denial reason on a 403 instead of collapsing to null', async () => {
+  it('does not convert a control-api 403 body into a public result', async () => {
     clientMock.controlApiRequest.mockRejectedValueOnce(
       new ControlApiError(
-        'Control API POST /external/rpc/token failed (403): desktop_requires_team',
+        'Control API POST /external/rpc/token failed (403): secret-internal-reason',
         403,
-        { error: 'desktop_requires_team' }
+        { error: 'secret-internal-reason' }
       )
     )
 
-    const result = await issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
-
-    expect(result).toEqual({ error: 'desktop_requires_team' })
+    await expect(
+      issueRpcAccessToken('session', ['desktop:view'], ['pro-agent'])
+    ).rejects.toBeInstanceOf(ControlApiError)
   })
 
   it('returns the issued token unchanged on success', async () => {
@@ -50,6 +50,8 @@ describe('rpcService.issueRpcAccessToken', () => {
       })
     )
 
-    await expect(issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])).rejects.toThrow()
+    await expect(
+      issueRpcAccessToken('session', ['host:message:invoke'], ['pro-agent'])
+    ).rejects.toThrow()
   })
 })

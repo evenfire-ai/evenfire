@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type * as k8s from '@kubernetes/client-node'
 import {
   K8sConflictError,
   K8sNotFoundError,
@@ -86,6 +87,113 @@ describe('ResourceService.getResource', () => {
       service.getResource('workflowrecipes', 'sandbox-only', 'mcp-server')
     ).rejects.toMatchObject({ statusCode: 403 })
     expect(customApi.listNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+})
+
+describe('ResourceService bounded operational reads', () => {
+  it('passes a bounded keyset page request and preserves continuation metadata', async () => {
+    const listNamespacedCustomObject = vi.fn().mockResolvedValue({
+      items: [{ metadata: { name: 'host-a' } }],
+      metadata: { continue: 'next-page', resourceVersion: '42' },
+    })
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+    const controller = new AbortController()
+
+    await expect(
+      service.listResourcePage('hosts', 'mcp-host', {
+        limit: 100,
+        continueToken: 'prior-page',
+        timeoutSeconds: 5,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual({
+      items: [{ metadata: { name: 'host-a' } }],
+      continueToken: 'next-page',
+      resourceVersion: '42',
+    })
+    expect(listNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        namespace: 'mcp-host',
+        plural: 'hosts',
+        limit: 100,
+        _continue: 'prior-page',
+        timeoutSeconds: 5,
+      }),
+      expect.objectContaining({ middlewareMergeStrategy: 'append' })
+    )
+  })
+
+  it('rejects invalid limits before calling Kubernetes', async () => {
+    const listNamespacedCustomObject = vi.fn()
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+
+    await expect(
+      service.listResourcePage('hosts', 'mcp-host', {
+        limit: 101,
+        timeoutSeconds: 5,
+        signal: new AbortController().signal,
+      })
+    ).rejects.toThrow('between 1 and 100')
+    expect(listNamespacedCustomObject).not.toHaveBeenCalled()
+  })
+
+  it('propagates cancellation into the Kubernetes transport and waits for it to stop', async () => {
+    let transportSignal: AbortSignal | undefined
+    let transportStopped = false
+    const listNamespacedCustomObject = vi.fn(
+      async (_request: unknown, options: { middleware: k8s.ObservableMiddleware[] }) => {
+        const context = {
+          setSignal: (signal: AbortSignal) => {
+            transportSignal = signal
+          },
+        }
+        await options.middleware[0]!.pre(context as never).toPromise()
+        return new Promise((_resolve, reject) => {
+          const stop = () => {
+            transportStopped = true
+            reject(new Error('transport aborted'))
+          }
+          if (transportSignal!.aborted) stop()
+          else transportSignal!.addEventListener('abort', stop, { once: true })
+        })
+      }
+    )
+    const service = new ResourceService({ listNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+    const controller = new AbortController()
+    const pending = service.listResourcePage('hosts', 'mcp-host', {
+      limit: 1,
+      timeoutSeconds: 5,
+      signal: controller.signal,
+    })
+
+    controller.abort('test-cancel')
+    await expect(pending).rejects.toThrow('transport aborted')
+    expect(transportSignal).toBe(controller.signal)
+    expect(transportStopped).toBe(true)
+  })
+
+  it('uses exact namespace/name lookup and maps a Kubernetes 404', async () => {
+    const getNamespacedCustomObject = vi.fn().mockRejectedValue(makeNotFoundError())
+    const service = new ResourceService({ getNamespacedCustomObject } as never, 'control-plane', {
+      hosts: 'mcp-host',
+    })
+
+    await expect(
+      service.getResourceExact('hosts', 'host-a', 'mcp-host', {
+        timeoutSeconds: 2,
+        signal: new AbortController().signal,
+      })
+    ).rejects.toBeInstanceOf(K8sNotFoundError)
+    expect(getNamespacedCustomObject).toHaveBeenCalledWith(
+      expect.objectContaining({ namespace: 'mcp-host', plural: 'hosts', name: 'host-a' }),
+      expect.objectContaining({ middlewareMergeStrategy: 'append' })
+    )
   })
 })
 

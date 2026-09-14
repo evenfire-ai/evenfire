@@ -1,43 +1,94 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { once } from 'node:events'
 import request from 'supertest'
-import {
-  adminCodexReadRateLimits,
-  adminCodexWriteRateLimits,
-  adminOutputsReadRateLimits,
-  adminWorkflowRateLimitCredential,
-  adminWorkflowTriggerRateLimit,
-  codexOAuthCallbackRateLimits,
-  llmProviderAttemptAuthorizeRateLimits,
-  mcpHostWorkflowTriggerRateLimit,
-  mcpHostWorkflowTriggerRateLimitCredential,
-  shouldSkipWorkflowGrantEdgeRateLimit,
-  verifiedAdminRateLimitSubject,
-  workflowAdminReadRateLimits,
-  workflowGrantEdgeRateLimitKey,
-  workflowGrantReadRateLimit,
-  workflowGrantReadRateLimits,
-  workflowGrantWriteRateLimits,
-  workflowTriggerRateLimit,
-  workflowTriggerRateLimitCredential,
-} from '../src/routes/workflows/shared/rateLimit.js'
+
+type WorkflowRateLimitModule = typeof import('../src/routes/workflows/shared/rateLimit.js')
+
+let adminCodexReadRateLimits: WorkflowRateLimitModule['adminCodexReadRateLimits']
+let adminCodexWriteRateLimits: WorkflowRateLimitModule['adminCodexWriteRateLimits']
+let adminOutputsReadRateLimits: WorkflowRateLimitModule['adminOutputsReadRateLimits']
+let adminWorkflowRateLimitCredential: WorkflowRateLimitModule['adminWorkflowRateLimitCredential']
+let adminWorkflowTriggerRateLimit: WorkflowRateLimitModule['adminWorkflowTriggerRateLimit']
+let codexOAuthCallbackRateLimits: WorkflowRateLimitModule['codexOAuthCallbackRateLimits']
+let llmProviderAttemptAuthorizeRateLimits: WorkflowRateLimitModule['llmProviderAttemptAuthorizeRateLimits']
+let mcpHostWorkflowTriggerRateLimit: WorkflowRateLimitModule['mcpHostWorkflowTriggerRateLimit']
+let mcpHostWorkflowTriggerRateLimitCredential: WorkflowRateLimitModule['mcpHostWorkflowTriggerRateLimitCredential']
+let shouldSkipWorkflowGrantEdgeRateLimit: WorkflowRateLimitModule['shouldSkipWorkflowGrantEdgeRateLimit']
+let verifiedAdminRateLimitSubject: WorkflowRateLimitModule['verifiedAdminRateLimitSubject']
+let workflowAdminReadRateLimits: WorkflowRateLimitModule['workflowAdminReadRateLimits']
+let workflowGrantEdgeRateLimitKey: WorkflowRateLimitModule['workflowGrantEdgeRateLimitKey']
+let workflowGrantReadRateLimit: WorkflowRateLimitModule['workflowGrantReadRateLimit']
+let workflowGrantReadRateLimits: WorkflowRateLimitModule['workflowGrantReadRateLimits']
+let workflowGrantWriteRateLimits: WorkflowRateLimitModule['workflowGrantWriteRateLimits']
+let workflowTriggerRateLimit: WorkflowRateLimitModule['workflowTriggerRateLimit']
+let workflowTriggerRateLimitCredential: WorkflowRateLimitModule['workflowTriggerRateLimitCredential']
 
 const mockCheckAndIncrement = vi.hoisted(() => vi.fn())
 const mockVerifyAdminToken = vi.hoisted(() => vi.fn())
-const mockVerifyExternalSessionToken = vi.hoisted(() => vi.fn())
 
-vi.mock('../src/services/rateLimiterService.js', () => ({
-  checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
-}))
-vi.mock('../src/observability/metrics.js', () => ({
-  rateLimitHitsTotal: { inc: vi.fn() },
-}))
-vi.mock('../src/utils/auth/adminAuthToken.js', () => ({
-  verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
-}))
-vi.mock('../src/utils/auth/externalSessionAuthToken.js', () => ({
-  verifyExternalSessionToken: (token: string) => mockVerifyExternalSessionToken(token),
-}))
+async function loadWorkflowRateLimitModule() {
+  vi.resetModules()
+  vi.doMock('../src/services/rateLimiterService.js', () => ({
+    checkAndIncrement: (...args: unknown[]) => mockCheckAndIncrement(...args),
+  }))
+  vi.doMock('../src/observability/metrics.js', () => ({
+    rateLimitHitsTotal: { inc: vi.fn() },
+  }))
+  vi.doMock('../src/utils/auth/adminAuthToken.js', () => ({
+    verifyAdminToken: (token: string) => mockVerifyAdminToken(token),
+  }))
+
+  const module = await import('../src/routes/workflows/shared/rateLimit.js')
+  adminCodexReadRateLimits = module.adminCodexReadRateLimits
+  adminCodexWriteRateLimits = module.adminCodexWriteRateLimits
+  adminOutputsReadRateLimits = module.adminOutputsReadRateLimits
+  adminWorkflowRateLimitCredential = module.adminWorkflowRateLimitCredential
+  adminWorkflowTriggerRateLimit = module.adminWorkflowTriggerRateLimit
+  codexOAuthCallbackRateLimits = module.codexOAuthCallbackRateLimits
+  llmProviderAttemptAuthorizeRateLimits = module.llmProviderAttemptAuthorizeRateLimits
+  mcpHostWorkflowTriggerRateLimit = module.mcpHostWorkflowTriggerRateLimit
+  mcpHostWorkflowTriggerRateLimitCredential = module.mcpHostWorkflowTriggerRateLimitCredential
+  shouldSkipWorkflowGrantEdgeRateLimit = module.shouldSkipWorkflowGrantEdgeRateLimit
+  verifiedAdminRateLimitSubject = module.verifiedAdminRateLimitSubject
+  workflowAdminReadRateLimits = module.workflowAdminReadRateLimits
+  workflowGrantEdgeRateLimitKey = module.workflowGrantEdgeRateLimitKey
+  workflowGrantReadRateLimit = module.workflowGrantReadRateLimit
+  workflowGrantReadRateLimits = module.workflowGrantReadRateLimits
+  workflowGrantWriteRateLimits = module.workflowGrantWriteRateLimits
+  workflowTriggerRateLimit = module.workflowTriggerRateLimit
+  workflowTriggerRateLimitCredential = module.workflowTriggerRateLimitCredential
+}
+
+function unloadWorkflowRateLimitModule() {
+  vi.doUnmock('../src/services/rateLimiterService.js')
+  vi.doUnmock('../src/observability/metrics.js')
+  vi.doUnmock('../src/utils/auth/adminAuthToken.js')
+  vi.resetModules()
+}
+
+async function withWorkflowRateLimitApp(
+  app: express.Express,
+  run: (client: ReturnType<typeof request>) => Promise<void>
+) {
+  const server = app.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const client = request(server)
+  try {
+    await run(client)
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise<void>((resolve, reject) => {
+      server.close(err => {
+        if (err) {
+          reject(err)
+          return
+        }
+        resolve()
+      })
+    })
+  }
+}
 
 function signedClaims(sub: string) {
   return {
@@ -61,19 +112,17 @@ function pgAllows() {
 }
 
 describe('routes/workflows/shared/rateLimit', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    mockCheckAndIncrement.mockReset()
+    mockVerifyAdminToken.mockReset()
+    await loadWorkflowRateLimitModule()
     mockVerifyAdminToken.mockImplementation((token: string) =>
       token.startsWith('signed-') ? signedClaims(token.slice('signed-'.length)) : null
     )
-    mockVerifyExternalSessionToken.mockImplementation((token: string) => {
-      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
-        return { userId: 'user-a' }
-      }
-      if (token === 'user-session-b') {
-        return { userId: 'user-b' }
-      }
-      return null
-    })
+  })
+
+  afterEach(() => {
+    unloadWorkflowRateLimitModule()
   })
 
   it('adminWorkflowRateLimitCredential accepts HttpOnly admin session cookies', () => {
@@ -96,15 +145,17 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    for (let i = 0; i < 60; i++) {
+    await withWorkflowRateLimitApp(app, async client => {
+      for (let i = 0; i < 60; i++) {
+        pgAllows()
+        await client.post('/authorize').expect(200)
+      }
       pgAllows()
-      await request(app).post('/authorize').expect(200)
-    }
-    pgAllows()
-    const res = await request(app).post('/authorize').expect(429)
-    expect(res.body).toMatchObject({
-      error: 'Too Many Requests',
-      retryAfterSeconds: expect.any(Number),
+      const res = await client.post('/authorize').expect(429)
+      expect(res.body).toMatchObject({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
     })
   })
 
@@ -251,25 +302,25 @@ describe('routes/workflows/shared/rateLimit', () => {
       const app = express()
       mount(app)
 
-      for (let i = 0; i < limit; i++) {
+      await withWorkflowRateLimitApp(app, async client => {
+        for (let i = 0; i < limit; i++) {
+          pgAllows()
+          await client[method]('/probe')
+            .set('Cookie', `control_ui_admin_session=${cookie}`)
+            .expect(200)
+        }
+
         pgAllows()
-        await request(app)
-          [method]('/probe')
+        const res = await client[method]('/probe')
           .set('Cookie', `control_ui_admin_session=${cookie}`)
-          .expect(200)
-      }
+          .expect(429)
 
-      pgAllows()
-      const res = await request(app)
-        [method]('/probe')
-        .set('Cookie', `control_ui_admin_session=${cookie}`)
-        .expect(429)
-
-      expect(res.body).toMatchObject({
-        error: 'Too Many Requests',
-        retryAfterSeconds: expect.any(Number),
+        expect(res.body).toMatchObject({
+          error: 'Too Many Requests',
+          retryAfterSeconds: expect.any(Number),
+        })
+        expect(res.headers['retry-after']).toBeDefined()
       })
-      expect(res.headers['retry-after']).toBeDefined()
     }
   )
 
@@ -281,9 +332,11 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    for (let i = 0; i < 25; i++) {
-      await request(app).put('/grants').expect(200)
-    }
+    await withWorkflowRateLimitApp(app, async client => {
+      for (let i = 0; i < 25; i++) {
+        await client.put('/grants').expect(200)
+      }
+    })
   })
 
   it('workflowGrantWriteRateLimits aggregates unverified cookie rotation on the same IP', async () => {
@@ -294,23 +347,25 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    for (let i = 0; i < 20; i++) {
+    await withWorkflowRateLimitApp(app, async client => {
+      for (let i = 0; i < 20; i++) {
+        pgAllows()
+        await client
+          .put('/grants')
+          .set('Cookie', `control_ui_admin_session=forged-${i}`)
+          .expect(200)
+      }
+
       pgAllows()
-      await request(app)
+      const res = await client
         .put('/grants')
-        .set('Cookie', `control_ui_admin_session=forged-${i}`)
-        .expect(200)
-    }
+        .set('Cookie', 'control_ui_admin_session=forged-final')
+        .expect(429)
 
-    pgAllows()
-    const res = await request(app)
-      .put('/grants')
-      .set('Cookie', 'control_ui_admin_session=forged-final')
-      .expect(429)
-
-    expect(res.body).toMatchObject({
-      error: 'Too Many Requests',
-      retryAfterSeconds: expect.any(Number),
+      expect(res.body).toMatchObject({
+        error: 'Too Many Requests',
+        retryAfterSeconds: expect.any(Number),
+      })
     })
   })
 
@@ -329,14 +384,16 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .get('/grants')
-      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
-      .expect(200)
-    await request(app)
-      .get('/grants')
-      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .get('/grants')
+        .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+        .expect(200)
+      await client
+        .get('/grants')
+        .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:ip:/)
@@ -359,14 +416,16 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Cookie', 'control_ui_admin_session=forged-cookie-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Cookie', 'control_ui_admin_session=forged-cookie-b')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
@@ -389,10 +448,12 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
@@ -416,14 +477,16 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=signed-admin-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Cookie', 'control_ui_admin_session=signed-admin-b')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-b')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).not.toBe(
@@ -446,17 +509,35 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .get('/grants')
-      .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .get('/grants')
+        .set('Cookie', 'control_ui_admin_session=signed-admin-cookie')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledOnce()
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_grants_read:[0-9a-f]{32}$/)
   })
 
-  it('workflowTriggerRateLimitCredential prefers verified userId over service bearer', () => {
+  function externalWorkflowReq(userId: string, headers: Record<string, string> = {}) {
+    return {
+      externalWorkflowCaller: {
+        kind: 'user-session',
+        claims: { userId },
+      },
+      header(name: string) {
+        return headers[name.toLowerCase()]
+      },
+    } as express.Request
+  }
+
+  it('workflowTriggerRateLimitCredential prefers bound userId over service bearer', () => {
     const req = {
+      externalWorkflowCaller: {
+        kind: 'user-session',
+        claims: { userId: 'user-a' },
+      },
       header(name: string) {
         if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
         if (name.toLowerCase() === 'x-user-session-token') return 'user-session-a'
@@ -467,18 +548,23 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowTriggerRateLimitCredential(req)).toBe('user:user-a')
   })
 
-  it('workflowTriggerRateLimitCredential reuses one userId across rotated session tokens', () => {
-    const reqFor = (token: string) =>
-      ({
-        header(name: string) {
-          if (name.toLowerCase() === 'authorization') return 'Bearer service-token'
-          if (name.toLowerCase() === 'x-user-session-token') return token
-          return undefined
-        },
-      }) as express.Request
-
-    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a'))).toBe('user:user-a')
-    expect(workflowTriggerRateLimitCredential(reqFor('user-session-a-rotated'))).toBe('user:user-a')
+  it('workflowTriggerRateLimitCredential reuses one userId across rotated bound sessions', () => {
+    expect(
+      workflowTriggerRateLimitCredential(
+        externalWorkflowReq('user-a', {
+          authorization: 'Bearer service-token',
+          'x-user-session-token': 'user-session-a',
+        })
+      )
+    ).toBe('user:user-a')
+    expect(
+      workflowTriggerRateLimitCredential(
+        externalWorkflowReq('user-a', {
+          authorization: 'Bearer service-token',
+          'x-user-session-token': 'user-session-a-rotated',
+        })
+      )
+    ).toBe('user:user-a')
   })
 
   it('workflowTriggerRateLimitCredential keys unverified user tokens to IP, not the bearer', () => {
@@ -495,21 +581,7 @@ describe('routes/workflows/shared/rateLimit', () => {
     expect(workflowTriggerRateLimitCredential(req)).not.toBe('service-token')
   })
 
-  it('workflowTriggerRateLimitCredential keys a real signed session and rejects a forged one', async () => {
-    const actual = await vi.importActual<
-      typeof import('../src/utils/auth/externalSessionAuthToken.js')
-    >('../src/utils/auth/externalSessionAuthToken.js')
-    mockVerifyExternalSessionToken.mockImplementation(token =>
-      actual.verifyExternalSessionToken(token)
-    )
-
-    const signed = actual.signExternalSessionToken({
-      userId: 'user-signed-1',
-      email: 'signed@example.com',
-      teamId: 'team-1',
-      role: 'member',
-      authGeneration: 1,
-    })
+  it('workflowTriggerRateLimitCredential does not verify raw signed sessions directly', () => {
     const reqFor = (token: string) =>
       ({
         ip: '203.0.113.10',
@@ -520,7 +592,7 @@ describe('routes/workflows/shared/rateLimit', () => {
         },
       }) as express.Request
 
-    expect(workflowTriggerRateLimitCredential(reqFor(signed))).toBe('user:user-signed-1')
+    expect(workflowTriggerRateLimitCredential(reqFor('signed-session-token'))).toMatch(/^ip:/)
     expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).toMatch(/^ip:/)
     expect(workflowTriggerRateLimitCredential(reqFor('forged-not-a-jwt'))).not.toBe('service-token')
   })
@@ -571,25 +643,43 @@ describe('routes/workflows/shared/rateLimit', () => {
     })
 
     const app = express()
+    app.use((req, _res, next) => {
+      const token = req.header('x-user-session-token')
+      if (token === 'user-session-a') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-a' },
+        }
+      }
+      if (token === 'user-session-b') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-b' },
+        }
+      }
+      next()
+    })
     app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'user-session-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'user-session-b')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'user-session-a')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-b')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-a')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
     const [keyA, keyB, keyAAgain] = mockCheckAndIncrement.mock.calls.map(call => call[0])
@@ -610,20 +700,32 @@ describe('routes/workflows/shared/rateLimit', () => {
     })
 
     const app = express()
+    app.use((req, _res, next) => {
+      const token = req.header('x-user-session-token')
+      if (token === 'user-session-a' || token === 'user-session-a-rotated') {
+        ;(req as express.Request & { externalWorkflowCaller?: unknown }).externalWorkflowCaller = {
+          kind: 'user-session',
+          claims: { userId: 'user-a' },
+        }
+      }
+      next()
+    })
     app.post('/trigger', workflowTriggerRateLimit(), (_req, res) => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'user-session-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'user-session-a-rotated')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'user-session-a-rotated')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toBe(mockCheckAndIncrement.mock.calls[1]?.[0])
@@ -644,16 +746,18 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'forged-session-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer service-token')
-      .set('x-user-session-token', 'forged-session-b')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'forged-session-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer service-token')
+        .set('x-user-session-token', 'forged-session-b')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)
@@ -675,20 +779,22 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer mcp-host-control-token')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer mcp-host-control-token')
-      .set('x-user-session-token', 'user-session-a')
-      .expect(200)
-    await request(app)
-      .post('/trigger')
-      .set('Authorization', 'Bearer mcp-host-control-token')
-      .set('x-user-session-token', 'forged-session')
-      .expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer mcp-host-control-token')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer mcp-host-control-token')
+        .set('x-user-session-token', 'user-session-a')
+        .expect(200)
+      await client
+        .post('/trigger')
+        .set('Authorization', 'Bearer mcp-host-control-token')
+        .set('x-user-session-token', 'forged-session')
+        .expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(3)
     const [bearerOnly, injectedVerified, injectedForged] = mockCheckAndIncrement.mock.calls.map(
@@ -714,8 +820,10 @@ describe('routes/workflows/shared/rateLimit', () => {
       res.status(200).json({ ok: true })
     })
 
-    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
-    await request(app).post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+    await withWorkflowRateLimitApp(app, async client => {
+      await client.post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+      await client.post('/trigger').set('Authorization', 'Bearer service-token').expect(200)
+    })
 
     expect(mockCheckAndIncrement).toHaveBeenCalledTimes(2)
     expect(mockCheckAndIncrement.mock.calls[0]?.[0]).toMatch(/^workflow_trigger:[0-9a-f]{32}$/)

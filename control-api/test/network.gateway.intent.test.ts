@@ -150,6 +150,30 @@ function roleRuleForResource(doc: string, resource: string): string {
   return lines.slice(start, end).join('\n')
 }
 
+function roleRulesForResource(doc: string, resource: string): string[] {
+  const lines = doc.split('\n')
+  const rules: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (
+      lines[index] !== `  - ${resource}` &&
+      !lines[index].includes(`['${resource}']`) &&
+      !lines[index].includes(`["${resource}"]`)
+    ) {
+      continue
+    }
+    let start = index
+    while (start > 0 && lines[start] !== '- apiGroups:' && lines[start] !== '  - apiGroups:') {
+      start -= 1
+    }
+    let end = index + 1
+    while (end < lines.length && lines[end] !== '- apiGroups:' && lines[end] !== '  - apiGroups:') {
+      end += 1
+    }
+    rules.push(lines.slice(start, end).join('\n'))
+  }
+  return rules
+}
+
 function fromPeerBlock(doc: string, marker: string): string {
   const lines = doc.split('\n')
   const markerIndex = lines.findIndex(line => line.includes(marker))
@@ -1031,6 +1055,39 @@ describe('network/gateway intent (manifest-level)', () => {
     for (const resource of ['contexts', 'communicationchannels', 'mcpservers']) {
       expect(roleRuleForResource(controlApiRole, resource)).not.toContain('  - patch')
     }
+  })
+
+  it('grants control-api watch access only for operational access index families', () => {
+    const clusterRoles = read(`${BASE}/cluster-wide/clusterroles.yaml`)
+    const controlApiClusterRole = docContaining(yamlDocs(clusterRoles), 'name: control-api')
+    const hostRbac = read(`${BASE}/mcp-host/rbac.yaml`)
+    const controlApiHostRole = docContaining(
+      yamlDocs(hostRbac),
+      'name: control-api-hosts-and-secrets'
+    )
+    const sandboxRbac = read(`${BASE}/sandbox-recipes/rbac.yaml`)
+    const controlApiWorkflowRole = docContaining(
+      yamlDocs(sandboxRbac),
+      'name: control-api-workflow-recipes-sandbox'
+    )
+
+    for (const resource of ['hosts', 'contexts', 'mcpservers']) {
+      expect(roleRulesForResource(controlApiClusterRole, resource)).toSatisfy(rules =>
+        rules.some(rule => rule.includes('  - watch'))
+      )
+    }
+    expect(roleRulesForResource(controlApiClusterRole, 'communicationchannels')).toSatisfy(rules =>
+      rules.every(rule => !rule.includes('  - watch'))
+    )
+    expect(roleRulesForResource(controlApiHostRole, 'sharedfilesystems')).toSatisfy(rules =>
+      rules.some(rule => rule.includes('watch'))
+    )
+    expect(roleRulesForResource(controlApiWorkflowRole, 'workflowrecipes')).toSatisfy(rules =>
+      rules.some(rule => rule.includes('watch'))
+    )
+
+    const controlApiConfig = read(`${BASE}/control-plane/configmaps.yaml`)
+    expect(controlApiConfig).toContain("CONTROL_API_OPERATIONAL_ACCESS_INDEXER_ENABLED: 'false'")
   })
 
   it('routes every rpc-proxy internal-service endpoint through the control-api-rpc-gateway allowlist', () => {
