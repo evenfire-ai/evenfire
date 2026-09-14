@@ -171,7 +171,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
     const runId = await insertPendingRun()
     await expect(
       databasePool.query(
-        `UPDATE workflow_runs SET failure_reason = 'Bearer token https://secret.invalid' 
+        `UPDATE workflow_runs SET failure_reason = 'Bearer token https://secret.invalid'
           WHERE run_id = $1`,
         [runId]
       )
