@@ -1,4 +1,5 @@
 import type { K8sGateway } from '../../k8s.js'
+import { rootLogger } from '../../observability/logger.js'
 import type { ExternalSessionAuthorityContext } from '../auth/externalSessionAuthentication.js'
 import type { LogicalSessionCheckpointAuthority } from './accessAuthorityStore.js'
 import { AccessExecutionBudget } from './accessExecutionBudget.js'
@@ -221,7 +222,17 @@ export async function authorizeActionV2(
       }
       throw error
     }
-  } catch {
+  } catch (error) {
+    rootLogger.warn(
+      {
+        event: 'action_authorization_unavailable',
+        operationId: input.operationId,
+        resourceType: input.resource.type,
+        correlationId: input.correlationId ?? null,
+        errorType: error instanceof Error ? error.name : 'unknown',
+      },
+      'action authorization unavailable'
+    )
     return unavailable()
   } finally {
     ownedBudget?.close()
