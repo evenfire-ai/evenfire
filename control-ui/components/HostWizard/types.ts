@@ -3,6 +3,7 @@ import type { LlmPolicy, LlmProvider } from '@/lib/llm'
 
 export type McpServer = {
   metadata?: { name?: string; namespace?: string }
+  spec?: Record<string, unknown>
 }
 
 export type SecretMeta = {

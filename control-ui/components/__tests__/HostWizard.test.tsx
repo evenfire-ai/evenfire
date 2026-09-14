@@ -650,6 +650,28 @@ describe('HostWizard — created-agent handoff (TASK-229)', () => {
   })
 })
 
+describe('HostWizard — connectors step summary (TASK-231)', () => {
+  it('summarizes the selected connectors with a live count', async () => {
+    await renderWizard()
+    await walkToAccessStep({ agentName: 'connector-agent' })
+    continueToConnectorsStep()
+
+    const summary = screen.getByText('Selected connectors').closest('.cu-agent-connectors-summary')
+    expect(summary).not.toBeNull()
+    expect(within(summary as HTMLElement).getByText('0')).toBeInTheDocument()
+    expect(
+      within(summary as HTMLElement).getByText(/None selected\. You can add connectors later/i)
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /mcp-a/i }))
+
+    expect(
+      screen.getByText('mcp-a', { selector: '.cu-agent-connectors-summary__list li' })
+    ).toBeInTheDocument()
+    expect(within(summary as HTMLElement).getByText('1')).toBeInTheDocument()
+  })
+})
+
 describe('HostWizard — submit path uses the atomic agent-centric endpoints', () => {
   it('creates an agent without access grants when no users or teams are selected', async () => {
     await renderWizard()

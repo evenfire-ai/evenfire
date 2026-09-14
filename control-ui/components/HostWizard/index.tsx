@@ -70,6 +70,21 @@ function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, st
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
 }
 
+// TASK-231: human label for a connector's transport, shown on the step-4 cards
+// so the grid reads as a catalog instead of a bare name list. Falls back to
+// "Connector" when the spec carries no recognizable transport (legacy CRs).
+function mcpConnectorMeta(spec: Record<string, unknown> | undefined): string {
+  const transport = spec?.transport
+  const type =
+    transport && typeof transport === 'object' && !Array.isArray(transport)
+      ? String((transport as { type?: unknown }).type || '')
+      : ''
+  if (type === 'stdio') return 'Connector · local (stdio)'
+  if (type === 'sse') return 'Connector · HTTP (SSE)'
+  if (type === 'streamableHttp') return 'Connector · HTTP'
+  return 'Connector'
+}
+
 // The DELETE path for one tracked sibling. The server fixes each resource's
 // namespace (secrets → config.secretsNamespace; hosts/contexts/channels →
 // their configured namespace), so — exactly like the SecretsTable /
@@ -282,9 +297,13 @@ export function HostWizard({
   const availableMcp = useMemo(
     () =>
       mcpServers
-        .map(m => m.metadata?.name)
-        .filter((v): v is string => Boolean(v))
-        .sort(),
+        .map(m => {
+          const name = m.metadata?.name
+          if (!name) return null
+          return { name, meta: mcpConnectorMeta(m.spec) }
+        })
+        .filter((v): v is { name: string; meta: string } => Boolean(v))
+        .sort((left, right) => left.name.localeCompare(right.name)),
     [mcpServers]
   )
 
@@ -1152,7 +1171,7 @@ export function HostWizard({
         )}
 
         {step === 3 && (
-          <div className="cu-form-stack cu-agent-form-stack">
+          <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
             <div className="cu-agent-access-section">
               <strong>Connectors</strong>
               <span className="cu-muted cu-agent-access-hint">
@@ -1160,9 +1179,8 @@ export function HostWizard({
                 connectors later.
               </span>
             </div>
-            <div className="cu-agent-section-label">Available connectors (optional)</div>
             <div className="cu-agent-mcp-grid" role="group" aria-label="Available connectors">
-              {availableMcp.map(name => (
+              {availableMcp.map(({ name, meta }) => (
                 <CheckboxField
                   key={name}
                   checked={selectedMcp.includes(name)}
@@ -1170,7 +1188,7 @@ export function HostWizard({
                   label={
                     <span className="cu-agent-mcp-option__label">
                       <span className="cu-agent-mcp-option__name">{name}</span>
-                      <span className="cu-agent-mcp-option__meta">Connector</span>
+                      <span className="cu-agent-mcp-option__meta">{meta}</span>
                     </span>
                   }
                   disabled={busy}
@@ -1180,6 +1198,25 @@ export function HostWizard({
               {availableMcp.length === 0 ? (
                 <span className="cu-agent-empty-note">No connectors available.</span>
               ) : null}
+            </div>
+            <div className="cu-agent-connectors-summary" aria-live="polite">
+              <div className="cu-agent-connectors-summary__head">
+                <span>Selected connectors</span>
+                <span>{selectedMcp.length}</span>
+              </div>
+              {selectedMcp.length > 0 ? (
+                <ul className="cu-agent-connectors-summary__list">
+                  {[...selectedMcp]
+                    .sort((a, b) => a.localeCompare(b))
+                    .map(name => (
+                      <li key={name}>{name}</li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="cu-muted">
+                  None selected. You can add connectors later from the agent detail page.
+                </p>
+              )}
             </div>
           </div>
         )}
