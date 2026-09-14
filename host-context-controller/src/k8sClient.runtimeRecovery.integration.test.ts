@@ -20,10 +20,12 @@ const fixture = vi.hoisted(() => ({
   revision: 0,
   rolloutReady: true,
   failDeployment: false,
+  failDeploymentName: undefined as string | undefined,
   serverExists: true,
   readInput: undefined as undefined | (() => Promise<unknown>),
   failPublication: undefined as undefined | ((body: any[]) => boolean),
   server: undefined as any,
+  peers: [] as any[],
   readService: undefined as undefined | (() => Promise<void>),
 }))
 
@@ -55,7 +57,10 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
     return structuredClone(object)
   }
   const save = (kind: string, store: Map<string, any>, namespace: string, body: any) => {
-    if (kind === 'Deployment' && fixture.failDeployment)
+    if (
+      kind === 'Deployment' &&
+      (fixture.failDeployment || fixture.failDeploymentName === body.metadata.name)
+    )
       throw new Error('fixture deployment write unavailable')
     const object = structuredClone(body)
     object.metadata = {
@@ -110,32 +115,35 @@ vi.mock('@kubernetes/client-node', async importOriginal => {
     replaceNamespacedDeployment: async ({ namespace, body }: any) =>
       save('Deployment', fixture.deployments, namespace, body),
   }
+  const servers = () => [...(fixture.serverExists ? [fixture.server] : []), ...fixture.peers]
+  const serverNamed = (name: string) => {
+    const server = servers().find(candidate => candidate.metadata.name === name)
+    if (!server) throw absent()
+    return server
+  }
   const custom = {
     listNamespacedCustomObject: async ({ plural }: any) => ({
       metadata: { resourceVersion: String(++fixture.revision) },
-      items:
-        plural === 'mcpservers' && fixture.serverExists ? [structuredClone(fixture.server)] : [],
+      items: plural === 'mcpservers' ? servers().map(server => structuredClone(server)) : [],
     }),
-    getNamespacedCustomObject: async () => {
-      if (!fixture.serverExists) throw absent()
-      return structuredClone(fixture.server)
-    },
-    getNamespacedCustomObjectStatus: async () => structuredClone(fixture.server),
-    patchNamespacedCustomObjectStatus: async ({ body }: any) => {
+    getNamespacedCustomObject: async ({ name }: any) => structuredClone(serverNamed(name)),
+    getNamespacedCustomObjectStatus: async ({ name }: any) => structuredClone(serverNamed(name)),
+    patchNamespacedCustomObjectStatus: async ({ name, body }: any) => {
       if (fixture.failPublication?.(body))
         throw Object.assign(new Error('fixture status unavailable'), { code: 503 })
+      const server = serverNamed(name)
       for (const patch of body) {
         if (patch.op === 'test') {
           const field = patch.path.slice('/metadata/'.length)
-          if (fixture.server.metadata[field] !== patch.value)
+          if (server.metadata[field] !== patch.value)
             throw Object.assign(new Error('fixture status conflict'), { code: 409 })
-        } else if (patch.path === '/status') fixture.server.status = structuredClone(patch.value)
+        } else if (patch.path === '/status') server.status = structuredClone(patch.value)
         else if (patch.path === '/status/conditions')
-          fixture.server.status.conditions = structuredClone(patch.value)
+          server.status.conditions = structuredClone(patch.value)
         else throw new Error(`Unexpected status patch ${patch.path}`)
       }
-      fixture.server.metadata.resourceVersion = String(++fixture.revision)
-      return structuredClone(fixture.server)
+      server.metadata.resourceVersion = String(++fixture.revision)
+      return structuredClone(server)
     },
   }
   return {
@@ -201,6 +209,16 @@ function prepareWatcher(policyTail?: Promise<void>) {
   return { watcher, state }
 }
 
+function recordReconciledNames(state: any): string[] {
+  const names: string[] = []
+  const reconcile = state.reconciler.reconcile.bind(state.reconciler)
+  vi.spyOn(state.reconciler, 'reconcile').mockImplementation(async (server: any, options: any) => {
+    names.push(server.name)
+    return reconcile(server, options)
+  })
+  return names
+}
+
 async function skippedTickCount() {
   const metric = await registry
     .getSingleMetric('clerum_hcc_netpol_resync_ticks_skipped_total')!
@@ -218,7 +236,9 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     fixture.revision = 0
     fixture.rolloutReady = true
     fixture.failDeployment = false
+    fixture.failDeploymentName = undefined
     fixture.serverExists = true
+    fixture.peers = []
     fixture.readInput = undefined
     fixture.failPublication = undefined
     fixture.readService = undefined
@@ -561,5 +581,81 @@ describe('A-T7 real MCP runtime repair after identical recovery', () => {
     expect(fixture.deployments.size).toBe(0)
     expect(state.reconciler.hasPendingReconciliation()).toBe(false)
     expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+  })
+
+  describe('a persistently failing server alongside a healthy peer', () => {
+    beforeEach(() => {
+      const peer = structuredClone(fixture.server)
+      peer.metadata = { ...peer.metadata, name: 'runtime-peer', uid: 'runtime-peer-uid' }
+      fixture.peers = [peer]
+      fixture.failDeploymentName = 'runtime-witness'
+    })
+
+    async function startWithScopedRetryArmed() {
+      const harness = prepareWatcher()
+      watcher = harness.watcher
+      const { state } = harness
+      await watcher.start()
+      await drain(state)
+      expect(fixture.deployments.has('runtime-peer')).toBe(true)
+      expect(fixture.deployments.has('runtime-witness')).toBe(false)
+      expect(state.reconciler.incompleteReconciliationNames()).toEqual(['runtime-witness'])
+      expect(state.runtimeRepairPending).toBe(true)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(true)
+      return state
+    }
+
+    it('A-T7 regression: retries only the failing server, then certifies and skips identical recovery', async () => {
+      const state = await startWithScopedRetryArmed()
+      const reconciled = recordReconciledNames(state)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect(reconciled).toEqual(['runtime-witness'])
+      expect(state.runtimeRepairPending).toBe(true)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(true)
+
+      fixture.failDeploymentName = undefined
+      await vi.advanceTimersByTimeAsync(15000)
+      await drain(state)
+      expect(reconciled).toEqual(['runtime-witness', 'runtime-witness'])
+      expect(fixture.deployments.has('runtime-witness')).toBe(true)
+      expect(state.reconciler.hasIncompleteReconciliation()).toBe(false)
+      expect(state.runtimeRepairPending).toBe(false)
+      expect(state.initialConvergenceRetryTimers.has('McpServer')).toBe(false)
+
+      // Fold the status writes back through a real LIST once, then an
+      // identical recovery must skip again.
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      const decisions = vi.spyOn(hccLogger, 'info')
+      await state.recoverMcpServerInventoryAndWatch()
+      await drain(state)
+      expect(decisions).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ decision: 'skip', reason: 'identical-complete' })
+      )
+    })
+
+    it('A-T7 control: a scoped retry widens to the fleet once inventory has moved', async () => {
+      const state = await startWithScopedRetryArmed()
+      state.mcpServerRetryRequest = {
+        ...state.mcpServerRetryRequest,
+        serverRevision: state.mcpServerRetryRequest.serverRevision - 1,
+      }
+      const reconciled = recordReconciledNames(state)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect([...reconciled].sort()).toEqual(['runtime-peer', 'runtime-witness'])
+    })
+
+    it('A-T7 control: a full retry request widens an armed scoped retry', async () => {
+      const state = await startWithScopedRetryArmed()
+      state.scheduleInitialConvergenceRetry('McpServer')
+      expect(state.mcpServerRetryRequest).toBe('full')
+      const reconciled = recordReconciledNames(state)
+      await vi.advanceTimersByTimeAsync(5000)
+      await drain(state)
+      expect([...reconciled].sort()).toEqual(['runtime-peer', 'runtime-witness'])
+    })
   })
 })

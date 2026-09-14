@@ -104,6 +104,10 @@ export type McpServerInventoryAuthoritySnapshot = {
 export type McpServerFullReconcileOptions = {
   runEffect?: (serverName: string, work: () => Promise<void>) => Promise<void>
   maxConcurrency?: number
+  // Restrict create/update and orphan cleanup to these names. desiredServers
+  // must still be the whole inventory so out-of-scope servers are never
+  // mistaken for orphans.
+  scope?: ReadonlySet<string>
 }
 
 export type McpServerMutationOptions = {
@@ -314,6 +318,10 @@ export class McpServerReconciler {
 
   hasIncompleteReconciliation(): boolean {
     return this.pendingReconciliations.size > 0
+  }
+
+  incompleteReconciliationNames(): string[] {
+    return [...this.pendingReconciliations.keys()]
   }
 
   hasPendingReconciliation(): boolean {
@@ -2530,13 +2538,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const runEffect =
       options.runEffect ?? ((_serverName: string, work: () => Promise<void>) => work())
     const maxConcurrency = options.maxConcurrency ?? DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY
+    const inScope = (name: string) => options.scope === undefined || options.scope.has(name)
 
     // Create or update desired servers independently. runEffect owns each
     // per-server lane, so a slow fleet member cannot become a process-wide
     // startup barrier. The finite worker pool admits no more than the configured
     // number of effects at once, while still waiting for every desired result
     // before reporting aggregated failures or moving to orphan cleanup.
-    const desiredResults = await mapSettledWithConcurrency(desiredServers, maxConcurrency, server =>
+    const scopedServers = desiredServers.filter(server => inScope(server.name))
+    const desiredResults = await mapSettledWithConcurrency(scopedServers, maxConcurrency, server =>
       runEffect(server.name, async () => {
         const current = this.resolveCurrentServer ? this.resolveCurrentServer(server.name) : server
         // Cache mutation happens synchronously before its keyed watch effect is
@@ -2578,7 +2588,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       if (!presentNames.has(name)) cleanupTargets.set(name, pending.namespace)
     }
     for (const [name, namespace] of cleanupTargets) {
-      if (!desiredNames.has(name)) {
+      if (!desiredNames.has(name) && inScope(name)) {
         if (!presentNames.has(name)) this.pendingReconciliations.set(name, { namespace })
         await runEffect(name, async () => {
           if (!(await this.orphanDeleteAllowed(name, namespace, capturedAuthority))) {

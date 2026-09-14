@@ -244,6 +244,27 @@ type NetworkPolicyConvergenceCause =
   | 'context-change'
   | 'context-reconcile-failure'
 type CompletedInventoryRevision = { contextRevision: number; serverRevision: number }
+// A scoped McpServer pass retries only names left incomplete by a pass whose
+// effects all ran under this inventory revision. 'full' covers the fleet.
+type McpServerConvergenceRequest =
+  | 'full'
+  | (CompletedInventoryRevision & { names: ReadonlySet<string> })
+
+function widenMcpServerConvergence(
+  current: McpServerConvergenceRequest | undefined,
+  next: McpServerConvergenceRequest
+): McpServerConvergenceRequest {
+  if (current === undefined) return next
+  if (
+    current === 'full' ||
+    next === 'full' ||
+    current.contextRevision !== next.contextRevision ||
+    current.serverRevision !== next.serverRevision
+  ) {
+    return 'full'
+  }
+  return { ...next, names: new Set([...current.names, ...next.names]) }
+}
 
 type InitialConvergencePassResult =
   | 'certified'
@@ -793,6 +814,8 @@ export class McpServerWatcher implements McpServerProvider {
   private completedRuntimeRevision: CompletedInventoryRevision | null = null
   private networkPolicyRepairPending = false
   private runtimeRepairPending = false
+  private pendingMcpServerConvergence: McpServerConvergenceRequest | undefined
+  private mcpServerRetryRequest: McpServerConvergenceRequest | undefined
   private runtimeInventoryGeneration: number | null = null
   private readonly pendingNetworkPolicyCauses = new Set<NetworkPolicyConvergenceCause>()
   private networkPolicyPassSequence = 0
@@ -3105,7 +3128,13 @@ export class McpServerWatcher implements McpServerProvider {
     return request
   }
 
-  private runInitialMcpServerConvergence(): Promise<void> {
+  private runInitialMcpServerConvergence(
+    request: McpServerConvergenceRequest = 'full'
+  ): Promise<void> {
+    this.pendingMcpServerConvergence = widenMcpServerConvergence(
+      this.pendingMcpServerConvergence,
+      request
+    )
     return this.runInitialConvergence('McpServer')
   }
 
@@ -3161,12 +3190,18 @@ export class McpServerWatcher implements McpServerProvider {
   }
 
   private async runInitialMcpServerConvergenceCore(): Promise<void> {
+    const request = this.pendingMcpServerConvergence ?? 'full'
+    this.pendingMcpServerConvergence = undefined
     const safetyCertificate = this.currentNetworkPolicySafetyCertificate()
     // A retired run may settle normally without invoking work. Keep its repair
     // obligation until an authoritative pass actually completes every effect.
     this.runtimeRepairPending = true
     if (safetyCertificate === null) return
     let effectsComplete = true
+    // A scoped retry completes only the pass it came from. Once the inventory
+    // has moved, the rest of the fleet may need work too, so run a full pass.
+    const scope =
+      request !== 'full' && this.matchesCurrentInventory(request) ? request.names : undefined
     const inventoryGeneration = this.mcpWatchGeneration
     this.runtimeInventoryGeneration = inventoryGeneration
     const inventoryAuthoritative = () =>
@@ -3175,12 +3210,19 @@ export class McpServerWatcher implements McpServerProvider {
     try {
       const initialServers = [...this.servers.values()]
       const initialExternalEgressGates = this.externalEgressCoordinator.prepareStartupGates(
-        initialServers,
+        scope ? initialServers.filter(server => scope.has(server.name)) : initialServers,
         inventoryAuthoritative
       )
       if (this.stopped) return
-      hccLogger.info('[K8s] Running initial McpServer background reconciliation...')
+      if (scope) {
+        hccLogger.info('[K8s] Running scoped McpServer background reconciliation retry...', {
+          servers: [...scope].sort(),
+        })
+      } else {
+        hccLogger.info('[K8s] Running initial McpServer background reconciliation...')
+      }
       await this.reconciler.fullReconcile(initialServers, {
+        scope,
         runEffect: async (serverName, work) => {
           const selected = this.servers.get(serverName)
           const laneOwner = selected ?? {
@@ -3204,12 +3246,20 @@ export class McpServerWatcher implements McpServerProvider {
           })
         },
       })
-      if (
-        !effectsComplete ||
-        !inventoryAuthoritative() ||
-        this.reconciler.hasIncompleteReconciliation()
-      ) {
+      if (!effectsComplete || !inventoryAuthoritative()) {
         this.scheduleInitialConvergenceRetry('McpServer')
+        return
+      }
+      if (this.reconciler.hasIncompleteReconciliation()) {
+        // Every offered effect ran under this certificate, so only individual
+        // servers are unfinished (for example a Deployment write rejected by
+        // admission). Retry just those names: one persistently failing server
+        // must not re-reconcile the whole fleet at the retry cap.
+        this.scheduleInitialConvergenceRetry('McpServer', {
+          contextRevision: safetyCertificate.contextRevision,
+          serverRevision: safetyCertificate.serverRevision,
+          names: new Set(this.reconciler.incompleteReconciliationNames()),
+        })
         return
       }
       this.completedRuntimeRevision = safetyCertificate
@@ -3536,10 +3586,22 @@ export class McpServerWatcher implements McpServerProvider {
       this.initialConvergenceRetryTimers.delete(lane)
     }
     this.initialConvergenceRetryAttempts.delete(lane)
+    if (lane === 'McpServer') this.mcpServerRetryRequest = undefined
   }
 
-  private scheduleInitialConvergenceRetry(lane: InitialConvergenceLane): void {
-    if (this.stopped || this.initialConvergenceRetryTimers.has(lane)) return
+  private scheduleInitialConvergenceRetry(
+    lane: InitialConvergenceLane,
+    mcpServerRequest: McpServerConvergenceRequest = 'full'
+  ): void {
+    if (this.stopped) return
+    if (lane === 'McpServer') {
+      // An armed retry widens to cover every request made before it fires.
+      this.mcpServerRetryRequest = widenMcpServerConvergence(
+        this.mcpServerRetryRequest,
+        mcpServerRequest
+      )
+    }
+    if (this.initialConvergenceRetryTimers.has(lane)) return
 
     const attempt = (this.initialConvergenceRetryAttempts.get(lane) ?? 0) + 1
     const delayMs =
@@ -3556,7 +3618,9 @@ export class McpServerWatcher implements McpServerProvider {
       this.initialConvergenceRetryTimers.delete(lane)
       if (this.stopped) return
       if (lane === 'McpServer') {
-        void this.runInitialMcpServerConvergence()
+        const request = this.mcpServerRetryRequest ?? 'full'
+        this.mcpServerRetryRequest = undefined
+        void this.runInitialMcpServerConvergence(request)
         return
       }
       void this.runInitialNetworkPolicyConvergence({ cause: 'retry' })
