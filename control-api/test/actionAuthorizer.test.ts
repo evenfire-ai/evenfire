@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { rootLogger } from '../src/observability/logger.js'
 import { knownBehavior, unknownBehavior } from '../src/services/access/accessPath.js'
 import { authorizeActionV2 } from '../src/services/access/actionAuthorizer.js'
 import { canonicalEnvironmentId } from '../src/services/access/operationalAccessProjection.js'
@@ -65,6 +66,28 @@ function request(resolve: ReturnType<typeof vi.fn>) {
 }
 
 describe('action authorizer v2', () => {
+  it('logs a structured safe diagnostic when live authorization is unavailable', async () => {
+    const warn = vi.spyOn(rootLogger, 'warn')
+    const resolve = vi.fn().mockRejectedValue(new Error('postgres://secret@example.test/db'))
+
+    await expect(request(resolve)).resolves.toEqual({
+      status: 'authority_unavailable',
+      code: 'authority_unavailable',
+      retryable: true,
+    })
+
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'action_authorization_unavailable',
+        operationId: 'chat.message.invoke',
+        resourceType: 'host',
+        errorType: 'Error',
+      }),
+      'action authorization unavailable'
+    )
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('postgres://secret')
+  })
+
   it.each([
     [
       'chat.read',
