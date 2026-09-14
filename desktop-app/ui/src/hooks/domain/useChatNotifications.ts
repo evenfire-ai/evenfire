@@ -32,6 +32,13 @@ interface UseChatNotificationsParams {
   activeChatVisibilityRef: MutableRefObject<ActiveChatVisibility>
   currentTeamId: string
   currentTeamName: string
+  /**
+   * Human-visible name for an agent identifier (catalog `spec.host` display
+   * name, identifier fallback). Used ONLY in desktop toast titles — the
+   * notification objects stay keyed by the immutable identifier so matching
+   * (`resolveApprovalNotification`) and dedupe keep working after a rename.
+   */
+  agentDisplayName: (agentName: string) => string
   pushNotification: (n: PushNotificationInput) => void
   canDeliverChatResponseNotification: (
     channel: 'inApp' | 'desktop',
@@ -66,6 +73,7 @@ export function useChatNotifications({
   activeChatVisibilityRef,
   currentTeamId,
   currentTeamName,
+  agentDisplayName,
   pushNotification,
   canDeliverChatResponseNotification,
   showDesktopNotification,
@@ -75,6 +83,7 @@ export function useChatNotifications({
   const liveDepsRef = useRef({
     currentTeamId,
     currentTeamName,
+    agentDisplayName,
     pushNotification,
     openAgentConversationFromNotification,
     decideApprovalFromNotification,
@@ -83,6 +92,7 @@ export function useChatNotifications({
     liveDepsRef.current = {
       currentTeamId,
       currentTeamName,
+      agentDisplayName,
       pushNotification,
       openAgentConversationFromNotification,
       decideApprovalFromNotification,
@@ -90,6 +100,7 @@ export function useChatNotifications({
   }, [
     currentTeamId,
     currentTeamName,
+    agentDisplayName,
     pushNotification,
     openAgentConversationFromNotification,
     decideApprovalFromNotification,
@@ -165,7 +176,7 @@ export function useChatNotifications({
       }
       if (canDeliver('desktop', { activeChatVisible })) {
         void showDesktopNotification({
-          title: `${agentName} replied`,
+          title: `${deps.agentDisplayName(agentName)} replied`,
           body: text,
           tag: `assistant-reply:${agentName}:${chatId || 'no-chat'}:${message.id}`,
           onClick: () =>
@@ -215,7 +226,7 @@ export function useChatNotifications({
         notificationDeliveryRef.current
       if (!canDeliver('desktop', { activeChatVisible })) return
       void showDesktopNotification({
-        title: `${agentName} needs authorization`,
+        title: `${deps.agentDisplayName(agentName)} needs authorization`,
         body: desktopText,
         tag: dedupeKey,
         actions: [
