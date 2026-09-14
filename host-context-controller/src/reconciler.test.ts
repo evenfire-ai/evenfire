@@ -1544,6 +1544,31 @@ describe('full reconciliation inventory authority', () => {
     warn.mockRestore()
   })
 
+  it('limits a scoped pass to its names without treating out-of-scope servers as orphans', async () => {
+    reconciler.setInventoryAuthority(() => ({ known: true, generation: 31 }))
+    const failed = makeServer({ name: 'failed-server' })
+    const healthy = makeServer({ name: 'healthy-server' })
+    const reconcile = vi.spyOn(reconciler, 'reconcile').mockResolvedValue(undefined)
+    appsApi.listNamespacedDeployment.mockResolvedValueOnce({
+      items: [
+        { metadata: { name: 'healthy-server', namespace: 'mcp-server' } },
+        { metadata: { name: 'scoped-orphan', namespace: 'mcp-server' } },
+        { metadata: { name: 'unscoped-orphan', namespace: 'mcp-server' } },
+      ],
+    })
+
+    await reconciler.fullReconcile([failed, healthy], {
+      scope: new Set(['failed-server', 'scoped-orphan']),
+    })
+
+    expect(reconcile.mock.calls.map(([server]) => server.name)).toEqual(['failed-server'])
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledOnce()
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalledWith({
+      name: 'scoped-orphan',
+      namespace: 'mcp-server',
+    })
+  })
+
   it('deletes an orphan when inventory authority remains known and stable', async () => {
     reconciler.setInventoryAuthority(() => ({ known: true, generation: 21 }))
     appsApi.listNamespacedDeployment.mockResolvedValueOnce({

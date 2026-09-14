@@ -5167,7 +5167,9 @@ describe('NetworkPolicyReconciler', () => {
         ],
       })
 
-      await fullPass
+      await expect(fullPass).rejects.toThrow(
+        'One or more additive Context NetworkPolicy reconciliations failed'
+      )
       expect(mockApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
       expect(onAuthoritativeRevocationComplete).not.toHaveBeenCalled()
     })

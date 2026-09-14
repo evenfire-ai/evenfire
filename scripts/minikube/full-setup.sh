@@ -2151,6 +2151,7 @@ CORE_DEPLOYS=(
   "profiles:external-rest-api"
   "rpc-proxy:rpc-proxy"
   "mcp-host:chatllm"
+  "mcp-server:mcp-proxy"
 )
 # registry-api is deployed by Step 7 (side-by-side); failure there is a
 # warning, not blocking — leave it out of the CORE_DEPLOYS readiness gate
