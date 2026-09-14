@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -77,9 +77,26 @@ describe('auto-title dual-store parity (spec 15 A10/A11 — assert observable ou
         },
       })
       const manager = new ConversationManager(dual)
-      const conv = await manager.getOrCreate(KEY)
-      await manager.startTurn(conv, 'hello', 'task-1', null, 'My Title')
-      await manager.completeTurn(conv, 'hi')
+      // Memory stamps lastActivityAt from `conversation.updated_at` while SQLite
+      // stamps its row from an independent clock read in the persist worker; the
+      // two land on the same millisecond ~98% of runs but straddle a second
+      // boundary otherwise, so the parity probe reports a spurious lastActivityAt
+      // mismatch (mirrors dualConversationStore.test.ts). Freeze Date at a
+      // whole-second instant so both reads are identical and the seconds↔ms
+      // round-trip is exact; only Date is faked so the persist queue's real
+      // timers still run.
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+      try {
+        const conv = await manager.getOrCreate(KEY)
+        await manager.startTurn(conv, 'hello', 'task-1', null, 'My Title')
+        await manager.completeTurn(conv, 'hi')
+        // Wait for the durable row (stamped at the frozen instant) to land before
+        // the parity probe reads it.
+        await sqlite.persistQueue.drainPrefix(PREFIX)
+      } finally {
+        vi.useRealTimers()
+      }
 
       const memSummaries = await memory.listSessionSummariesByPrefix(PREFIX, {})
       const sqlSummaries = await sqlite.store.listSessionSummariesByPrefix(PREFIX, {})
