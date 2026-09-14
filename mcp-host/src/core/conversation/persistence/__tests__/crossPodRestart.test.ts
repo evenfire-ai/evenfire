@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import { type AuthorityBindingV2, hashActionTarget } from '@clerum/action-context-contracts'
 import { AgentStateMachine } from '../../../../agent/stateMachine'
 import { TaskLifecycle } from '../../../../lifecycle/taskLifecycle'
 import { MessageQueue } from '../../../../queue/messageQueue'
@@ -37,7 +38,8 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     // Pod A — write a session with a pending_approval.
     const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
     const managerA = new ConversationManager(podA.store)
-    const sessionKey = 'user-1:rpc:agent:default'
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const sessionKey = `${userId}:rpc:agent:default`
     const traceContext = {
       version: 1,
       runId: 'run-cross-pod',
@@ -45,15 +47,45 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       origin: 'direct_chat',
       correlationRefs: ['edge-request:req-7', 'channel-message:msg-7'],
     } satisfies TraceContextV1
+    const messageId = '44444444-4444-4444-8444-444444444444'
+    const target = {
+      hostRef: 'mcp-host/chatllm',
+      channelType: 'rpc',
+      channelId: 'agent',
+      messageId,
+    }
+    const authorityV2: AuthorityBindingV2 = {
+      version: 2,
+      userId,
+      sid: '22222222-2222-4222-8222-222222222222',
+      sessionVersion: 3,
+      delegationJti: '33333333-3333-4333-8333-333333333333',
+      operationId: 'chat.message.invoke',
+      resource: {
+        environmentId: 'cluster.local/evenfire',
+        type: 'host',
+        canonicalId: 'host:mcp-host/chatllm',
+        logicalId: 'mcp-host/chatllm',
+        displayName: 'chatllm',
+      },
+      target,
+      targetHash: hashActionTarget(target),
+      accessPathId: `ap1_${'b'.repeat(43)}`,
+      authorizationRevision: `ar1_${'c'.repeat(43)}`,
+      pathKind: 'direct',
+      effectiveTeamId: null,
+      behaviorBindingHash: `bh2_${'d'.repeat(43)}`,
+    }
     const message: IncomingMessage = {
       content: 'do dangerous thing',
       channelType: 'rpc',
       channelId: 'agent',
-      sender: 'user-1',
+      sender: userId,
       timestamp: new Date().toISOString(),
-      messageId: 'msg-7',
+      messageId,
       hostRef: 'chatllm',
       traceContext,
+      authorityV2,
     }
     const lifecycle = new TaskLifecycle()
     const queue = new MessageQueue()
@@ -67,14 +99,18 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     const convA = await managerA.getOrCreate(sessionKey)
     await managerA.startTurn(convA, message.content, task.id, task.traceContext ?? null)
     expect(convA.traceContext).toEqual(traceContext)
-    await managerA.suspendForApproval(convA, {
-      request_id: 'req-cross-pod',
-      tool_name: 'shell_exec',
-      tool_call_id: 'tc-cross-pod',
-      parameters: { command: 'rm -rf /' },
-      description: 'dangerous',
-      context_snapshot: [],
-    })
+    await managerA.suspendForApproval(
+      convA,
+      {
+        request_id: 'req-cross-pod',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-cross-pod',
+        parameters: { command: 'rm -rf /' },
+        description: 'dangerous',
+        context_snapshot: [],
+      },
+      message
+    )
     await podA.shutdown()
 
     // Pod B — fresh worker, same dbPath. The pending_approval must come back.
@@ -87,6 +123,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       expect(rehydrated[0].task_id).toBe(task.id)
       expect(rehydrated[0].approval.tool_name).toBe('shell_exec')
       expect(rehydrated[0].approval.traceContext).toEqual(traceContext)
+      expect(rehydrated[0].source_message).toMatchObject({ authorityV2 })
 
       const conv = podB.store.get(sessionKey)
       expect(conv).toBeDefined()
@@ -113,16 +150,63 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       ])
       const rehydratedExecutor = (
         podBAgent as unknown as {
-          activeExecutors: Map<string, { sourceTask: { traceContext?: unknown } }>
+          activeExecutors: Map<
+            string,
+            { sourceTask: { traceContext?: unknown; sourceMessage?: IncomingMessage } }
+          >
         }
       ).activeExecutors.get(task.id)
       expect(rehydratedExecutor?.sourceTask.traceContext).toEqual(traceContext)
+      expect(rehydratedExecutor?.sourceTask.sourceMessage?.authorityV2).toEqual(authorityV2)
       await expect(
-        podBAgent.handleDenial('user-1', 'req-cross-pod', 'rpc', 'agent')
+        podBAgent.handleDenial(userId, 'req-cross-pod', 'rpc', 'agent')
       ).resolves.toEqual({ success: true })
     } finally {
       await podB.shutdown()
     }
+  })
+
+  it('fails closed instead of rehydrating an RPC approval with corrupt authority provenance', async () => {
+    const pod = makeSqliteStore({ dbPath, cacheSize: 4 })
+    const manager = new ConversationManager(pod.store)
+    const sessionKey = 'user-1:rpc:agent:default'
+    const conv = await manager.getOrCreate(sessionKey, {
+      userId: 'user-1',
+      channelType: 'rpc',
+      channelId: 'agent',
+      source: 'rpc',
+    })
+    await manager.startTurn(conv, 'needs approval', 'task-corrupt-authority')
+    await manager.suspendForApproval(
+      conv,
+      {
+        request_id: 'req-corrupt-authority',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-corrupt-authority',
+        parameters: {},
+        description: 'corrupt authority fixture',
+        context_snapshot: [],
+      },
+      {
+        content: 'needs approval',
+        channelType: 'rpc',
+        channelId: 'agent',
+        sender: 'user-1',
+        timestamp: new Date().toISOString(),
+        messageId: 'msg-corrupt',
+        hostRef: 'chatllm',
+      }
+    )
+    pod.worker.db
+      .prepare('UPDATE pending_approvals SET source_message = ? WHERE request_id = ?')
+      .run('{"channelType":"rpc","authorityV2":{"version":2}}', 'req-corrupt-authority')
+    pod.store['cache'].clear()
+    pod.store['ordinals'].clear()
+    pod.store['sessionKeyById'].clear()
+
+    const loader = new SqliteColdStartLoader(pod.store)
+    await expect(loader.loadPendingApprovals(Date.now())).resolves.toEqual([])
+    await pod.shutdown()
   })
 
   it('Pod B sees zero pending_approvals after the user approves on Pod A', async () => {
@@ -195,12 +279,10 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     try {
       await expect(agent.bootstrap()).resolves.toBeUndefined()
       expect(agent.getPendingApprovals()).toEqual([])
-      expect(log).toHaveBeenCalledWith(
-        expect.stringContaining('CONV_OWNERSHIP_MISMATCH')
-      )
-      await expect(
-        manager.getOrCreate(sessionKey, { userId: 'user-1' })
-      ).rejects.toMatchObject({ code: 'CONV_OWNERSHIP_MISMATCH' })
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('CONV_OWNERSHIP_MISMATCH'))
+      await expect(manager.getOrCreate(sessionKey, { userId: 'user-1' })).rejects.toMatchObject({
+        code: 'CONV_OWNERSHIP_MISMATCH',
+      })
     } finally {
       log.mockRestore()
       await pod.shutdown()

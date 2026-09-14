@@ -491,6 +491,12 @@ describe('TaskExecutor', () => {
 
     const deps = createDeps()
     const task = createTask('Run a command')
+    task.sourceMessage!.channelType = 'rpc'
+    task.sourceMessage!.sender = '11111111-1111-4111-8111-111111111111'
+    task.sourceMessage!.channelId = 'chatllm'
+    task.sourceMessage!.messageId = '44444444-4444-4444-8444-444444444444'
+    task.sourceMessage!.authorityV2 = runtimeAuthority()
+    const persistSuspend = vi.spyOn(deps.conversationManager.getStore(), 'persistSuspend')
     const executor = new TaskExecutor(task, deps)
 
     await executor.run()
@@ -500,6 +506,11 @@ describe('TaskExecutor', () => {
       'req-1',
       task.id,
       expect.objectContaining({ request_id: 'req-1' })
+    )
+    expect(persistSuspend).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ request_id: 'req-1' }),
+      expect.objectContaining({ authorityV2: task.sourceMessage!.authorityV2 })
     )
   })
 

@@ -988,7 +988,8 @@ export class TaskExecutor {
         try {
           await this.deps.conversationManager.suspendForApproval(
             this.conversation!,
-            result.approval
+            result.approval,
+            this.task.sourceMessage ? { ...this.task.sourceMessage } : undefined
           )
         } catch (err) {
           await this.deps.conversationManager.failTurn(this.conversation!)
