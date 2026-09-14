@@ -1,12 +1,19 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Pool, type PoolClient } from 'pg'
 import { createDbRunProcessor } from '../../workflow-recipes/src/reconciler/dbRunProcessor.js'
 import { WorkflowAuthorityCheckpointError } from '../../workflow-recipes/src/reconciler/workflowActionCheckpointClient.js'
+import { pool } from '../src/db.js'
 import type { K8sGateway } from '../src/k8s.js'
 import { listRunsByRecipe } from '../src/services/workflowRunService.js'
 import { archiveTerminalRuns } from '../src/services/workflowRunsArchiveService.js'
 import { mapDbRun } from '../src/services/workflows/workflowRunReadService.js'
+import { createWorkflowTriggerApprovalRequest } from '../src/services/workflows/workflowTriggerApprovalService.js'
+
+vi.mock('../src/services/notificationEmitter.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/services/notificationEmitter.js')>()),
+  emitNotification: vi.fn().mockResolvedValue(undefined),
+}))
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -38,6 +45,7 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
   )
   let adminPool: Pool
   let databasePool: Pool
+  let corePoolConnectSpy: ReturnType<typeof vi.spyOn>
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -45,9 +53,13 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
     databasePool = new Pool({ connectionString })
     const { initDb } = await import('../src/db.js')
     await initDb({ connect: () => databasePool.connect() })
+    corePoolConnectSpy = vi
+      .spyOn(pool, 'connect')
+      .mockImplementation((() => databasePool.connect()) as typeof pool.connect)
   })
 
   afterAll(async () => {
+    corePoolConnectSpy?.mockRestore()
     await databasePool?.end()
     if (adminPool) {
       await adminPool.query(
@@ -221,5 +233,45 @@ describeRealPostgres('workflow run failure reasons on PostgreSQL 16', () => {
       [runId]
     )
     expect(audit.rows).toEqual([{ error_message: 'workflow_authority_invalid_binding' }])
+  })
+
+  it('returns the typed reason through an approval idempotency readback', async () => {
+    const userId = randomUUID()
+    const idempotencyKey = `failure-readback-${randomUUID()}`
+    const request = {
+      recipeNamespace: 'demo',
+      recipeName: 'failure-readback',
+      callerKey: 'external-rest-api',
+      targetUserId: userId,
+      payload: { message: 'Approve the workflow trigger' },
+      idempotencyKey,
+      runIntent: {
+        actorType: 'user' as const,
+        actorId: userId,
+        teamId: null,
+        usageTeamId: null,
+        triggerSource: 'onDemand' as const,
+        ttlSecondsAfterFinished: 0,
+      },
+    }
+    const approval = await createWorkflowTriggerApprovalRequest(request)
+    expect(approval.kind).toBe('approval')
+    if (approval.kind !== 'approval') throw new Error('expected approval request')
+
+    await databasePool.query(
+      `INSERT INTO workflow_runs (
+         run_id, recipe_namespace, recipe_name, phase, actor_type, actor_id,
+         idempotency_key, trigger_source, approval_request_id,
+         ttl_seconds_after_finished, failure_reason
+       ) VALUES ($1, 'demo', 'failure-readback', 'Failed', 'user', $2,
+                 $3, 'onDemand', $4, 0, 'workflow_authority_denied')`,
+      [randomUUID(), userId, idempotencyKey, approval.approvalRequestId]
+    )
+
+    const retried = await createWorkflowTriggerApprovalRequest(request)
+    expect(retried.kind).toBe('run')
+    if (retried.kind !== 'run') throw new Error('expected existing run')
+    expect(retried.row.failure_reason).toBe('workflow_authority_denied')
+    expect(mapDbRun(retried.row).message).toBe('workflow_authority_denied')
   })
 })
