@@ -498,30 +498,33 @@ describe('LlmModelTable sorting', () => {
     expect(screen.getByRole('heading', { name: /LLM Models/ })).toBeInTheDocument()
   })
 
-  it('sorts models inside a provider group by model name when ascending', () => {
-    const alpha = newModel({ id: 'a', model: 'alpha', display_name: 'Alpha' })
-    const bravo = newModel({ id: 'b', model: 'bravo', display_name: 'Bravo' })
-    const charlie = newModel({ id: 'c', model: 'charlie', display_name: 'Charlie' })
+  it('exposes model ascending as the initial sort and applies it inside groups', () => {
+    const alpha = newModel({ id: 'z', model: 'alpha', display_name: 'Alpha' })
+    const bravo = newModel({ id: 'm', model: 'bravo', display_name: 'Bravo' })
+    const charlie = newModel({ id: 'a', model: 'charlie', display_name: 'Charlie' })
     renderTable([charlie, alpha, bravo])
     expandAnthropicModels()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
-
+    expect(screen.getByRole('columnheader', { name: 'Model' })).toHaveAttribute(
+      'aria-sort',
+      'ascending'
+    )
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
   })
 
-  it('toggles a sort header to descending on the second click', () => {
+  it('toggles the active model sort between descending and ascending', () => {
     const alpha = newModel({ id: 'a', model: 'alpha' })
     const bravo = newModel({ id: 'b', model: 'bravo' })
     renderTable([alpha, bravo])
     expandAnthropicModels()
 
-    const modelSort = screen.getByRole('button', { name: 'Sort by Model ascending' })
-    fireEvent.click(modelSort)
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
     fireEvent.click(screen.getByRole('button', { name: 'Sort by Model descending' }))
     expect(expandedRowOrder()).toEqual(['bravo', 'alpha'])
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
+    expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
   })
 
   it('sorts context window descending by default and pushes null values to the end', () => {
@@ -542,8 +545,7 @@ describe('LlmModelTable sorting', () => {
     renderTable([alpha, bravo])
     expandAnthropicModels()
 
-    // Model asc (default for text columns).
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
+    // Model asc is the visible initial sort.
     expect(expandedRowOrder()).toEqual(['alpha', 'bravo'])
 
     // Switching to context window uses its natural default (descending) — not

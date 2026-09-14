@@ -25,7 +25,6 @@ import { IconRefresh } from './icons'
 import { SelectInput } from './ui'
 
 type ModelSortKey =
-  | 'provider'
   | 'model'
   | 'credential'
   | 'vendor'
@@ -174,11 +173,10 @@ export function LlmModelTable({
   }, [filteredItems])
   const modelSort = useTableSort<DisplayModel, ModelSortKey>({
     rows: displayItems,
-    defaultKey: 'provider',
+    defaultKey: 'model',
     defaultDirections: { contextWindow: 'desc' },
     identity: model => model.id,
     accessors: {
-      provider: model => getProviderDisplayLabel(catalogGroupKey(model.provider)),
       model: model => model.model,
       credential: model => model.credentialLabel,
       vendor: model => model.vendor,
