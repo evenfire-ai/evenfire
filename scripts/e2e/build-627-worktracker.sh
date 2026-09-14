@@ -17,9 +17,13 @@ printf '{"auths":{}}\n' > "$task_docker_config/config.json"
 export DOCKER_CONFIG="$task_docker_config" DOCKER_HOST="$docker_endpoint" DOCKER_BUILDKIT=1
 unset DOCKER_CONTEXT
 for service in api mcp ui; do
+  image="clerum/issue627-worktracker-$service:${revision:0:12}"
+  cd "$source_dir/$service"
   node "$root/scripts/minikube/run-with-deadline.mjs" \
     --timeout-seconds 900 --kill-grace-seconds 5 --label "worktracker-$service-build" -- \
     minikube --profile "${MINIKUBE_PROFILE:?}" image build \
-    --tag "clerum/issue627-worktracker-$service:${revision:0:12}" \
-    --file "$source_dir/$service/Dockerfile" "$source_dir/$service"
+    --tag "$image" .
+  node "$root/scripts/minikube/run-with-deadline.mjs" \
+    --timeout-seconds 30 --kill-grace-seconds 5 --label "worktracker-$service-verify" -- \
+    minikube --profile "$MINIKUBE_PROFILE" image ls | grep -Fx "$image"
 done
