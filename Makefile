@@ -1472,3 +1472,7 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: minikube-build-627-github
+minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owned profile architecture
+	@bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh
