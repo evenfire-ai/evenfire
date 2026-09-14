@@ -698,6 +698,103 @@ describeRealPostgres('workflow authority bindings on real PostgreSQL', () => {
     ).resolves.toMatchObject({ kind: 'mismatch' })
   })
 
+  it('keeps v2 approval idempotency stable across refreshed delegation identity', async () => {
+    const recipeName = 'approval-refreshed-delegation'
+    const firstAuthority = await authority({
+      resourceLogicalId: `sandbox-recipes/${recipeName}`,
+      target: { recipeNamespace: 'sandbox-recipes', recipeName },
+    })
+    const firstBinding = firstAuthority.binding
+    const refreshedClaims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: {
+          userId: firstBinding.userId,
+          sid: firstBinding.sid,
+          sessionVersion: firstBinding.sessionVersion,
+        },
+        operationIds: ['workflow.trigger'],
+        resource: firstBinding.resource,
+        preparedTargets: {
+          'workflow.trigger': {
+            target: firstBinding.target,
+            targetHash: firstBinding.targetHash,
+          },
+        },
+        accessPathId: firstBinding.accessPathId,
+        authorizationRevision: firstBinding.authorizationRevision,
+        behaviorBindingHash: firstBinding.behaviorBindingHash,
+        pathKind: firstBinding.pathKind,
+        effectiveTeamId: firstBinding.effectiveTeamId,
+      })
+    )
+    if (!refreshedClaims) throw new Error('refreshed delegation failed verification')
+    const refreshedAuthority = workflowAuthorityBindingFromClaims(refreshedClaims)
+    expect(refreshedAuthority.binding.delegationJti).not.toBe(firstAuthority.binding.delegationJti)
+    const idempotencyKey = `approval-refreshed-${randomUUID()}`
+    const request = {
+      recipeNamespace: 'sandbox-recipes',
+      recipeName,
+      callerKey: 'external-rest-api',
+      targetUserId: userId,
+      payload: { message: 'Approve the workflow trigger' },
+      idempotencyKey,
+      runIntent: {
+        actorType: 'user' as const,
+        actorId: userId,
+        teamId: null,
+        usageTeamId: null,
+        triggerSource: 'onDemand' as const,
+        ttlSecondsAfterFinished: defaultTtlSecondsAfterFinished,
+      },
+    }
+
+    const first = await createWorkflowTriggerApprovalRequest({
+      ...request,
+      authority: firstAuthority,
+    })
+    const retried = await createWorkflowTriggerApprovalRequest({
+      ...request,
+      authority: refreshedAuthority,
+    })
+
+    expect(first).toMatchObject({ kind: 'approval' })
+    expect(retried).toMatchObject({
+      kind: 'approval',
+      approvalRequestId: first.approvalRequestId,
+      existing: true,
+    })
+
+    const changedPathClaims = verifyUserDelegationV2(
+      issueUserDelegationV2({
+        principal: {
+          userId: firstBinding.userId,
+          sid: firstBinding.sid,
+          sessionVersion: firstBinding.sessionVersion,
+        },
+        operationIds: ['workflow.trigger'],
+        resource: firstBinding.resource,
+        preparedTargets: {
+          'workflow.trigger': {
+            target: firstBinding.target,
+            targetHash: firstBinding.targetHash,
+          },
+        },
+        accessPathId: `ap1_${'z'.repeat(43)}`,
+        authorizationRevision: firstBinding.authorizationRevision,
+        behaviorBindingHash: firstBinding.behaviorBindingHash,
+        pathKind: firstBinding.pathKind,
+        effectiveTeamId: firstBinding.effectiveTeamId,
+      })
+    )
+    if (!changedPathClaims) throw new Error('changed-path delegation failed verification')
+    await expect(
+      createWorkflowTriggerApprovalRequest({
+        ...request,
+        authority: workflowAuthorityBindingFromClaims(changedPathClaims),
+      })
+    ).resolves.toMatchObject({ kind: 'mismatch', reason: 'payload_hash_mismatch' })
+  })
+
   it('rejects legacy/v2 run idempotency reuse in both directions', async () => {
     const currentAuthority = await authority()
     const base = {
