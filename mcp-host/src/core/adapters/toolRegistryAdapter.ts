@@ -1,7 +1,50 @@
+import Ajv, { type ValidateFunction } from 'ajv'
+import Ajv2019 from 'ajv/dist/2019'
+import Ajv2020 from 'ajv/dist/2020'
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import { Tool, ToolRegistry } from '../interfaces'
-import { Attachment, ToolDefinition, ToolOutput } from '../types'
+import { Attachment, ToolDefinition, ToolOutput, ValidationResult } from '../types'
+
+// Compile only selected schemas, sharing across per-turn adapter refreshes.
+// Weak keys release removed catalog entries. The serialized comparison also
+// invalidates a validator if an in-memory schema is updated in place.
+const mcpValidators = new WeakMap<
+  object,
+  { serialized: string; validate: ValidateFunction | null }
+>()
+
+function selectedSchemaValidator(schema: Record<string, unknown>): ValidateFunction | null {
+  const serialized = JSON.stringify(schema)
+  const cached = mcpValidators.get(schema)
+  if (cached?.serialized === serialized) return cached.validate
+  let validate: ValidateFunction | null = null
+  try {
+    const Constructor =
+      schema.$schema === 'https://json-schema.org/draft/2020-12/schema'
+        ? Ajv2020
+        : schema.$schema === 'https://json-schema.org/draft/2019-09/schema'
+          ? Ajv2019
+          : Ajv
+    // Isolate each schema's $id namespace. Synchronous compile has no remote
+    // reference loader; schema validation must never fetch a URL or alter args.
+    const ajv = new Constructor({
+      strict: false,
+      allErrors: false,
+      coerceTypes: false,
+      useDefaults: false,
+      removeAdditional: false,
+      validateFormats: false,
+    })
+    validate = ajv.compile(schema)
+    if ('$async' in validate) validate = null
+  } catch {
+    // Unresolved references/unsupported dialects are explicit validation errors.
+  }
+  mcpValidators.set(schema, { serialized, validate })
+  return validate
+}
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -104,6 +147,32 @@ class McpToolAdapter implements Tool {
   requiresApproval() {
     return false
   }
+  validateParams(params: Record<string, unknown>): ValidationResult {
+    const live = this.mcpManager
+      .getAllTools()
+      .find(tool => tool.name === this.fullName && serverNameOf(tool) === this.serverName)
+    if (!live) return { is_valid: false, errors: ['MCP tool is no longer available.'] }
+    try {
+      const schema = live.inputSchema
+      if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+        return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
+      }
+      const validate = selectedSchemaValidator(schema)
+      if (!validate)
+        return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
+      return validate(params)
+        ? { is_valid: true, errors: [] }
+        : {
+            is_valid: false,
+            errors: [
+              'Arguments do not match the current MCP tool schema; describe the tool again.',
+            ],
+          }
+    } catch {
+      // Never include raw schemas, arguments or validator diagnostics in errors.
+      return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
+    }
+  }
   traceDescriptor() {
     // `sourceRef` is the tool-lane guardrail's `server` identity (provenance.ts),
     // so a `server=` deny rule matches on THIS value. It used to be sliced off the
@@ -121,6 +190,16 @@ class McpToolAdapter implements Tool {
   async execute(params: Record<string, unknown>): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
+      // An approval may have been suspended with an older adapter/schema.
+      // Resolve the live schema again immediately before manager dispatch.
+      const validation = this.validateParams(params)
+      if (!validation.is_valid) {
+        return {
+          content: validation.errors.join(' '),
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
       // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
       // `this.userId` — the authenticated task sender baked in at construction
       // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
@@ -202,7 +281,7 @@ export class McpToolRegistryAdapter implements ToolRegistry {
       description: t.description(),
       parameters: t.parametersSchema(),
     }))
-    console.log(`[NewCore:ToolRegistry] MCP tools loaded: ${defs.length}`)
+    logger.info({ component: 'ToolRegistry', toolCount: defs.length }, 'MCP tools loaded')
     return defs
   }
 
