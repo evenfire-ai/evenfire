@@ -2460,11 +2460,19 @@ textarea.cu-input {
 .cu-table-panel__title-row {
   display: flex;
   align-items: center;
-  gap: var(--cu-space-1);
+  gap: var(--cu-space-2);
   min-width: 0;
 }
 
+.cu-table-panel__title-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  line-height: 0;
+}
+
 .cu-table-panel__title-text {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

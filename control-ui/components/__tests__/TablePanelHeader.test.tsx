@@ -25,6 +25,24 @@ describe('TablePanelHeader', () => {
     )
   })
 
+  it('keeps a section icon aligned and separate from the truncatable title text', () => {
+    render(
+      <TablePanelHeader
+        title={
+          <>
+            <svg aria-label="Agents icon" />
+            Agents (8)
+          </>
+        }
+      />
+    )
+
+    expect(screen.getByLabelText('Agents icon').parentElement).toHaveClass(
+      'cu-table-panel__title-icon'
+    )
+    expect(screen.getByText('Agents (8)')).toHaveClass('cu-table-panel__title-text')
+  })
+
   it('renders secondary actions, search, refresh, and the primary action in focus order', () => {
     render(
       <TablePanelHeader
@@ -53,6 +71,7 @@ describe('TablePanelHeader', () => {
       /\.cu-table-panel__head\s+\.eft-data-view-header__actions\s*\{[^}]*flex:\s*0\s+0\s+auto/
     )
     expect(css).toMatch(/\.cu-table-panel__title-text\s*\{[^}]*text-overflow:\s*ellipsis/)
+    expect(css).toMatch(/\.cu-table-panel__title-icon\s*\{[^}]*align-items:\s*center/)
     expect(css).toMatch(/\.cu-table-panel__description-value\s*\{[^}]*-webkit-line-clamp:\s*2/)
     expect(css).toMatch(/\.cu-table-panel__description-tooltip\s*\{[^}]*inset-inline:\s*0/)
     expect(css).not.toMatch(
