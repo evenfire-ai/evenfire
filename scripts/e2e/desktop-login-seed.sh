@@ -70,4 +70,3 @@ seed_desktop_login_for_user() {
     die "No user row updated while seeding desktop login for $email"
   fi
 }
-
