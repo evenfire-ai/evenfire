@@ -8,6 +8,7 @@ set -euo pipefail
 # symlinks.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+IMAGES_MANIFEST="$REPO_ROOT/deploy/images.json"
 failures=0
 
 fail() {
@@ -77,6 +78,41 @@ assert_copy_before_last_ci() {
   if [[ -z "$copy_line" || -z "$ci_line" || "$copy_line" -ge "$ci_line" ]]; then
     fail "$file must COPY packages/$package before its last npm ci"
   fi
+}
+
+assert_copy_before_service_ci() {
+  local file="$1"
+  local service="$2"
+  shift 2
+  local packages=("$@")
+  local copied=""
+  local workdir=""
+  local line_no=0
+  local line package
+
+  while IFS= read -r line; do
+    line_no=$((line_no + 1))
+    if [[ "$line" == FROM\ * ]]; then
+      copied=""
+      workdir=""
+      continue
+    fi
+    if [[ "$line" == WORKDIR\ * ]]; then
+      workdir="${line#WORKDIR }"
+    fi
+    for package in "${packages[@]}"; do
+      if [[ "$line" == "COPY packages/$package"* ]]; then
+        copied="$copied|$package|"
+      fi
+    done
+    if [[ "$line" == "RUN npm ci"* && "$workdir" == */"$service" ]]; then
+      for package in "${packages[@]}"; do
+        if [[ "$copied" != *"|$package|"* ]]; then
+          fail "$file must COPY packages/$package before service npm ci at line $line_no"
+        fi
+      done
+    fi
+  done < "$REPO_ROOT/$file"
 }
 
 assert_materialized() {
@@ -202,9 +238,74 @@ assert_declared_local_packages() {
   while IFS= read -r package; do
     [[ -n "$package" ]] && packages+=("$package")
   done < <(declared_local_packages "$service")
+  if (( ${#packages[@]} == 0 )); then
+    return
+  fi
   for file in "$@"; do
-    assert_copy_before_every_ci "$file" "${packages[@]}"
+    assert_copy_before_service_ci "$file" "$(basename "$service")" "${packages[@]}"
   done
+}
+
+assert_declared_local_package_sources() {
+  local image="$1"
+  local service="$2"
+  local package expected
+  while IFS= read -r package; do
+    [[ -z "$package" ]] && continue
+    expected="packages/$package/**"
+    if ! node -e '
+      const manifest = require(process.argv[1]);
+      const [imageName, expected] = process.argv.slice(2);
+      const image = manifest.images.find(candidate => candidate.name === imageName);
+      process.exit(image?.source_paths?.includes(expected) ? 0 : 1);
+    ' "$IMAGES_MANIFEST" "$image" "$expected"; then
+      fail "$image publish sources must include declared local package $expected"
+    fi
+  done < <(declared_local_packages "$service")
+}
+
+assert_manifest_declared_local_packages() {
+  local row image service dockerfile
+  while IFS=$'\t' read -r image service dockerfile; do
+    [[ -z "$image" ]] && continue
+    assert_declared_local_packages "$service" "$dockerfile"
+    assert_declared_local_package_sources "$image" "$service"
+  done < <(node -e '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const root = process.argv[2];
+    for (const image of manifest.images.filter(candidate => candidate.published)) {
+      const packageJson = `${root}/${image.path}/package.json`;
+      if (!fs.existsSync(packageJson)) continue;
+      const dockerfile = `${image.path}/${image.dockerfile ?? "Dockerfile"}`;
+      console.log([image.name, image.path, dockerfile].join("\t"));
+    }
+  ' "$IMAGES_MANIFEST" "$REPO_ROOT")
+}
+
+assert_manifest_source_mutations_rejected() {
+  local fixture_dir fixture_manifest before real_manifest
+  fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-publish-sources.XXXXXX")"
+  fixture_manifest="$fixture_dir/images.json"
+  real_manifest="$IMAGES_MANIFEST"
+  node -e '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const image = manifest.images.find(candidate => candidate.name === "rpc-proxy");
+    image.source_paths = image.source_paths.filter(path => path !== "packages/action-context-contracts/**");
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  ' "$real_manifest" "$fixture_manifest"
+
+  IMAGES_MANIFEST="$fixture_manifest"
+  before="$failures"
+  assert_declared_local_package_sources rpc-proxy rpc-proxy 2>/dev/null
+  IMAGES_MANIFEST="$real_manifest"
+  if [[ "$failures" -eq "$before" ]]; then
+    fail 'publish coverage must reject an omitted declared local-package consumer'
+  else
+    failures="$before"
+  fi
+  rm -rf -- "$fixture_dir"
 }
 
 assert_root_build_context() {
@@ -245,12 +346,11 @@ assert_copy_before_every_ci mcp-host/Dockerfile.desktop llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.full llm-providers
 assert_copy_before_every_ci mcp-host/Dockerfile.slim llm-providers
 
-# Derive PR2 local-package coverage from each production manifest so adding a
-# new file: dependency cannot leave this guard green without Docker coverage.
-assert_declared_local_packages control-api control-api/Dockerfile
-assert_declared_local_packages rpc-proxy rpc-proxy/Dockerfile
-assert_declared_local_packages mcp-host \
-  mcp-host/Dockerfile mcp-host/Dockerfile.desktop mcp-host/Dockerfile.full mcp-host/Dockerfile.slim
+# Derive every published Node image's local-package coverage from its service
+# manifest and deploy/images.json row. Adding a file: dependency cannot leave
+# Docker materialization or change detection green with an omitted consumer.
+assert_manifest_declared_local_packages
+assert_manifest_source_mutations_rejected
 assert_root_build_context rpc-proxy
 assert_publish_root_build_context rpc-proxy
 
