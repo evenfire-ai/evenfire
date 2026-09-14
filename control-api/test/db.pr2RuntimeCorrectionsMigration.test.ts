@@ -35,4 +35,22 @@ describe('PR2 runtime correction migrations', () => {
     expect(sql).toContain('ADD CONSTRAINT workflow_authority_bindings_entity_type_check')
     expect(sql).not.toContain('NOT VALID')
   })
+
+  it('adds only the closed workflow authority failure vocabulary', async () => {
+    const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
+    const migration = CONTROL_API_MIGRATIONS.find(
+      candidate => candidate.version === '0114_workflow_run_failure_reason'
+    )!
+    const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
+
+    await migration.apply({ query })
+
+    const sql = query.mock.calls.map(call => String(call[0])).join('\n')
+    expect(sql).toContain('ADD COLUMN IF NOT EXISTS failure_reason TEXT NULL')
+    expect(sql).toContain("'workflow_authority_denied'")
+    expect(sql).toContain("'workflow_authority_not_found'")
+    expect(sql).toContain("'workflow_authority_access_path_stale'")
+    expect(sql).toContain("'workflow_authority_invalid_binding'")
+    expect(sql).not.toMatch(/token|delegation|https?:\/\//i)
+  })
 })

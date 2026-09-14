@@ -314,7 +314,7 @@ export function mapDbRun(row: WorkflowRunRow): CanonicalRunDto {
     triggeredAt: toIso(row.created_at),
     startedAt: toIso(row.started_at),
     completedAt: toIso(row.completed_at),
-    message: null,
+    message: row.failure_reason ?? null,
     actor: actorFromDbRow(row),
     executionRef,
   }

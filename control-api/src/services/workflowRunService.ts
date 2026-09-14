@@ -11,6 +11,12 @@ export type WorkflowRunPhase = 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 
 
 export type WorkflowRunActorType = 'user' | 'admin' | 'autonomous' | 'scheduled'
 
+export type WorkflowRunFailureReason =
+  | 'workflow_authority_denied'
+  | 'workflow_authority_not_found'
+  | 'workflow_authority_access_path_stale'
+  | 'workflow_authority_invalid_binding'
+
 export interface WorkflowRunRow {
   run_id: string
   recipe_namespace: string
@@ -38,6 +44,7 @@ export interface WorkflowRunRow {
   created_at: string
   updated_at: string
   initiating_authority_binding_id: string | null
+  failure_reason: WorkflowRunFailureReason | null
 }
 
 export interface CreateRunInput {
