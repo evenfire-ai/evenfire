@@ -154,6 +154,41 @@
 .eft-table tbody tr:hover > td {
   background: color-mix(in srgb, var(--eft-surface-muted) 55%, transparent);
 }
+.eft-table-group__summary-row > td {
+  padding: 0;
+}
+.eft-table-group__disclosure {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+.eft-table-group__disclosure:focus-visible {
+  outline: 2px solid var(--eft-focus);
+  outline-offset: -2px;
+}
+.eft-table-group__indicator {
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 1.25em;
+  transition: transform 160ms ease;
+}
+.eft-table-group__disclosure[aria-expanded='true'] .eft-table-group__indicator {
+  transform: rotate(90deg);
+}
+.eft-table-group__summary {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+}
 .eft-table tr[data-selected='true'] > td {
   background: color-mix(in srgb, var(--eft-accent) 12%, var(--eft-surface));
 }

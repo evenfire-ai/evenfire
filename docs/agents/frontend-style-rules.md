@@ -134,6 +134,19 @@ application guidance that must be combined with this shared document.
   boundary before cursor slicing, bind cursor continuation to the selected
   order, and reset pagination when ordering changes; sorting only the loaded
   page is not authoritative.
+- Require an explicit owner/product presentation decision when either the
+  dataset is known or identified to be unusually long, including when the
+  owner says its presentation needs reconsideration, or a meaningful candidate
+  grouping column has at least three distinct values and every one of those
+  values occurs at least four times. Formally, the repetition gate is met when
+  at least three distinct values `v` satisfy `count(C = v) >= 4` for candidate
+  column `C`; three repeated rows or one value occurring four times is not
+  sufficient. The gate does not choose the presentation. The recorded decision
+  may retain a flat sortable/filterable table, or choose grouped expansion,
+  segmentation, pagination, virtualization, or another domain-appropriate
+  presentation. Record the choice in the active specification or decision
+  context when one exists. Expandable rows remain exceptional and must use an
+  explicit shared primitive rather than changing ordinary `DataTable` rows.
 - Keep standard rows compact and consistent. Use `TableViewport` for horizontal
   overflow and for long-list body scrolling so the page title, toolbar, tabs,
   and semantic sticky table header remain visible. Embedded/diagnostic views

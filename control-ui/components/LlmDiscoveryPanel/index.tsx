@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  GroupedTableBody,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { LlmProviderIcon } from '@components/LlmProviderIcon'
 import { IconModels } from '@components/Sidebar/icons'
 import { TableHeaderRow } from '@components/TableHeaderRow'
@@ -18,7 +24,7 @@ import {
   syncDiscovery,
   updateLlmModel,
 } from '@lib/api'
-import { formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
+import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import type { LlmDiscoveryPanelProps } from './types'
 
 const CONFIGMAP_DEFERRED_WARNING =
@@ -50,6 +56,7 @@ export function LlmDiscoveryPanel({
   const [syncing, setSyncing] = useState(false)
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [bulkEnabling, setBulkEnabling] = useState(false)
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const statusRequestGeneration = useRef(0)
 
@@ -76,6 +83,27 @@ export function LlmDiscoveryPanel({
     [reviewQueue, selectedIds]
   )
   const allSelected = reviewQueue.length > 0 && selectedCount === reviewQueue.length
+  const groupedReviewRows = useMemo(() => {
+    const groups = new Map<string, LlmAllowedModel[]>()
+    for (const model of reviewSort.sortedRows) {
+      const provider = catalogGroupKey(model.provider)
+      const group = groups.get(provider)
+      if (group) group.push(model)
+      else groups.set(provider, [model])
+    }
+    return Array.from(groups.entries()).sort(([left], [right]) =>
+      getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
+    )
+  }, [reviewSort.sortedRows])
+
+  function setProviderExpanded(provider: string, expanded: boolean) {
+    setExpandedProviders(current => {
+      const next = new Set(current)
+      if (expanded) next.add(provider)
+      else next.delete(provider)
+      return next
+    })
+  }
 
   useEffect(() => {
     let active = true
@@ -250,7 +278,6 @@ export function LlmDiscoveryPanel({
           />
         ),
       },
-      { key: 'provider', label: 'Provider', minWidth: '9rem' },
       { key: 'model', label: 'Model', minWidth: '12rem' },
       { key: 'vendor', label: 'Vendor', width: '10rem' },
       {
@@ -271,6 +298,13 @@ export function LlmDiscoveryPanel({
           onSort: () => reviewSort.sortBy(column.key as ReviewSortKey),
         }
   )
+
+  const providerColumns: TableHeaderColumn[] = [
+    { key: 'provider', label: 'Provider', colSpan: 2 },
+    { key: 'models', label: 'Models' },
+    { key: 'details', label: 'Details' },
+    { key: 'actions', label: 'Actions', align: 'right' },
+  ]
 
   return (
     <>
@@ -357,60 +391,88 @@ export function LlmDiscoveryPanel({
         <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
           <DataTable className="eft-table cu-table cu-table--header-band cu-llm-review-table">
             <thead>
-              <TableHeaderRow columns={reviewColumns} />
+              <TableHeaderRow columns={providerColumns} />
             </thead>
-            <tbody className="cu-llm-model-group">
-              {isInitialLoad ? (
+            {isInitialLoad ? (
+              <tbody>
                 <TableStateRow
                   colSpan={reviewColumns.length}
                   kind="loading"
                   message="Loading discovery review…"
                 />
-              ) : reviewQueue.length === 0 ? (
+              </tbody>
+            ) : reviewQueue.length === 0 ? (
+              <tbody>
                 <TableStateRow
                   colSpan={reviewColumns.length}
                   message="No models awaiting review. Sync the catalog to pull newly released models."
                 />
-              ) : (
-                reviewSort.sortedRows.map(model => (
-                  <tr key={model.id} className="cu-table__row cu-llm-model-row">
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selectedIds.has(model.id)}
-                        onChange={() => toggleRow(model.id)}
-                        disabled={bulkEnabling}
-                        aria-label={`Select ${modelLabel(model)}`}
-                      />
-                    </td>
-                    <td className="cu-llm-provider-cell">
-                      <span className="cu-inline-icon-label">
-                        <LlmProviderIcon
-                          provider={model.provider}
-                          label={getProviderDisplayLabel(model.provider)}
-                        />
-                        {getProviderDisplayLabel(model.provider)}
-                      </span>
-                    </td>
-                    <td className="cu-px-model">{model.model}</td>
-                    <td>{model.vendor || '—'}</td>
-                    <td className="cu-px-num">
-                      {formatContextWindow(model.context_window_tokens)}
-                    </td>
-                    <td className="cu-px-actions">
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--primary cu-btn--sm"
-                        onClick={() => void handleEnable(model)}
-                        disabled={pendingId === model.id || bulkEnabling}
-                      >
-                        {pendingId === model.id ? 'Enabling…' : 'Enable'}
-                      </button>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
+              </tbody>
+            ) : (
+              groupedReviewRows.map(([provider, models]) => {
+                const providerLabel = getProviderDisplayLabel(provider)
+                const expanded = expandedProviders.has(provider)
+
+                return (
+                  <GroupedTableBody
+                    childBodyClassName="cu-llm-model-group__children"
+                    childHeader={<TableHeaderRow columns={reviewColumns} />}
+                    className="cu-llm-model-group"
+                    colSpan={reviewColumns.length}
+                    disclosureClassName="cu-llm-model-group__toggle"
+                    disclosureLabel={isExpanded =>
+                      `${isExpanded ? 'Collapse' : 'Expand'} ${providerLabel} review models`
+                    }
+                    expanded={expanded}
+                    groupId={provider}
+                    key={provider}
+                    onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
+                    summary={
+                      <>
+                        <LlmProviderIcon provider={provider} label={providerLabel} />
+                        <span className="cu-llm-model-group__provider">{providerLabel}</span>
+                        <span className="cu-llm-model-group__count">
+                          {models.length} model{models.length === 1 ? '' : 's'}
+                        </span>
+                        <span className="cu-llm-model-group__summary">Awaiting review</span>
+                        <span className="cu-llm-model-group__action" aria-hidden="true">
+                          {expanded ? 'Hide models' : 'Show models'}
+                        </span>
+                      </>
+                    }
+                  >
+                    {models.map(model => (
+                      <tr key={model.id} className="cu-table__row cu-llm-model-row">
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(model.id)}
+                            onChange={() => toggleRow(model.id)}
+                            disabled={bulkEnabling}
+                            aria-label={`Select ${modelLabel(model)}`}
+                          />
+                        </td>
+                        <td className="cu-px-model">{model.model}</td>
+                        <td>{model.vendor || '—'}</td>
+                        <td className="cu-px-num">
+                          {formatContextWindow(model.context_window_tokens)}
+                        </td>
+                        <td className="cu-px-actions">
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--primary cu-btn--sm"
+                            onClick={() => void handleEnable(model)}
+                            disabled={pendingId === model.id || bulkEnabling}
+                          >
+                            {pendingId === model.id ? 'Enabling…' : 'Enable'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </GroupedTableBody>
+                )
+              })
+            )}
           </DataTable>
         </TableViewport>
       </div>

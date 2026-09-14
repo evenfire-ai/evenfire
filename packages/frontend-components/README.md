@@ -10,3 +10,9 @@ import the single global stylesheet from
 `@clerum/frontend-components/styles.css` in each application's root layout.
 Apps retain ownership of data loading, routes, permissions, domain cells, and
 mutation behavior.
+
+The root `src/index.tsx` file is the stable public barrel. Table and record-list
+implementation is organized under `src/table/` by responsibility: shells,
+semantic primitives, actions, truncation, sorting, and public types. Consumers
+must continue importing from `@clerum/frontend-components`; internal module
+paths are not part of the supported API.

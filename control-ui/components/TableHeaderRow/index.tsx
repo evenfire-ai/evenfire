@@ -10,6 +10,7 @@ export function TableHeaderRow({ columns }: { columns: TableHeaderColumn[] }) {
         <TableHeaderCell
           key={column.key}
           aria-label={column.ariaLabel}
+          colSpan={column.colSpan}
           title={column.title}
           label={column.label}
           kind={column.kind}
