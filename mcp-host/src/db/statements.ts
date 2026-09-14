@@ -437,6 +437,7 @@ export function prepareStatements(db: Database): PreparedStatements {
         task_budget = excluded.task_budget,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
+        source_message = excluded.source_message,
         trace_context = excluded.trace_context,
         expires_at = excluded.expires_at
     `),
