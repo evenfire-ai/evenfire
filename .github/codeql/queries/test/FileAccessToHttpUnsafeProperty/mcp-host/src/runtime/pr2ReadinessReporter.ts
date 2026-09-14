@@ -10,7 +10,7 @@ export function startPr2ReadinessReporter(
   fetchImpl: typeof fetch = fetch,
 ): void {
   fetchImpl(
-    auth.baseUrl.replace(/\/+$/, "") + "/api/v1/internal/pr2-readiness/runtime-evidence",
+    `${auth.baseUrl.replace(/\/+$/, "")}/api/v1/internal/pr2-readiness/runtime-evidence`,
     { headers: { authorization: "Bearer " + persistedCredential } },
   );
 }

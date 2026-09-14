@@ -60,14 +60,13 @@ private predicate isCanonicalRuntimeAuthFactoryCall(CallExpr factoryCall) {
   hasCanonicalRuntimeAuthFactory()
 }
 
-private predicate writesBaseUrlThroughRuntimeAuth(AssignExpr write, Variable runtimeAuth) {
-  exists(PropAccess property, VarAccess runtimeAuthUse |
-    write.getLhs() = property and
-    property.getPropertyName() = "baseUrl" and
+private predicate writesBaseUrlThroughRuntimeAuth(
+  DataFlow::PropWrite write, Variable runtimeAuth
+) {
+  exists(VarAccess runtimeAuthUse |
+    write.getPropertyName() = "baseUrl" and
     runtimeAuthUse.getVariable() = runtimeAuth and
-    DataFlow::valueNode(runtimeAuthUse)
-        .(DataFlow::SourceNode)
-        .flowsTo(DataFlow::valueNode(property.getBase()))
+    DataFlow::valueNode(runtimeAuthUse) = write.getBase()
   )
 }
 
@@ -94,7 +93,9 @@ private predicate hasOnlyCanonicalRuntimeAuthWrites(Variable runtimeAuth) {
       isCanonicalRuntimeAuthFactoryCall(factoryCall)
     )
   ) and
-  not exists(AssignExpr propertyWrite | writesBaseUrlThroughRuntimeAuth(propertyWrite, runtimeAuth))
+  not exists(DataFlow::PropWrite propertyWrite |
+    writesBaseUrlThroughRuntimeAuth(propertyWrite, runtimeAuth)
+  )
 }
 
 private predicate functionOccursWithin(Function inner, Function outer) {
