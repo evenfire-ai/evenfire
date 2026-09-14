@@ -65,6 +65,89 @@ function request(resolve: ReturnType<typeof vi.fn>) {
 }
 
 describe('action authorizer v2', () => {
+  it.each([
+    [
+      'chat.read',
+      'chat',
+      'chat-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a' },
+    ],
+    ['task.read', 'runtime_session', 'task-a', { hostRef: 'default/chatllm', taskId: 'task-a' }],
+    [
+      'task.manage',
+      'runtime_session',
+      'task-a',
+      { hostRef: 'default/chatllm', taskId: 'task-a', action: 'cancel' },
+    ],
+    [
+      'model.read',
+      'runtime_session',
+      'session-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a' },
+    ],
+    [
+      'model.select',
+      'runtime_session',
+      'session-a',
+      {
+        hostRef: 'default/chatllm',
+        agent: 'main',
+        chatId: 'chat-a',
+        provider: 'openai',
+        model: 'gpt-test',
+      },
+    ],
+    ['session.read', 'runtime_session', 'session-a', { hostRef: 'default/chatllm' }],
+    [
+      'session.manage',
+      'runtime_session',
+      'session-a',
+      { hostRef: 'default/chatllm', agent: 'main', chatId: 'chat-a', action: 'delete' },
+    ],
+  ] as const)(
+    'authorizes %s through the current host relation while retaining its requested resource',
+    async (operationId, resourceType, logicalId, operationTarget) => {
+      const requestedResource = canonicalResourceIdentity({
+        environmentId: canonicalEnvironmentId(),
+        type: resourceType,
+        logicalId,
+      })
+      const selected = path(selectedPathId, [operationId])
+      const resolve = vi.fn().mockResolvedValue({
+        status: 'allowed',
+        effectiveCapabilities: [operationId],
+        paths: [selected],
+        selectedPath: selected,
+        authorizationRevision: revision,
+        validUntil: null,
+      })
+
+      const result = await authorizeActionV2(
+        {
+          session,
+          requested: { version: 2, requestedAccessPathId: selectedPathId },
+          operationId,
+          resource: requestedResource,
+          operationTarget,
+          allocateChatMessageId: false,
+        },
+        { resolve: resolve as never }
+      )
+
+      expect(result.status).toBe('allowed')
+      if (result.status !== 'allowed') return
+      expect(resolve).toHaveBeenCalledWith(
+        expect.objectContaining({
+          resource: expect.objectContaining({ type: 'host', logicalId: 'default/chatllm' }),
+          operationTarget,
+        }),
+        expect.any(Object)
+      )
+      expect(result.context.resource).toEqual(requestedResource)
+      expect(result.context.target).toEqual(operationTarget)
+    }
+  )
+
   it('never treats aggregate effective capabilities as selected-path authority', async () => {
     const selected = path(selectedPathId, ['host.read'])
     const other = path(`ap1_${'c'.repeat(43)}`, ['host.read', 'chat.message.invoke'])
