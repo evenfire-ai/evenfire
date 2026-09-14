@@ -126,6 +126,18 @@ vi.mock('../../lib/api', () => ({
         created_at: '',
         updated_at: '',
       },
+      {
+        id: 'm6',
+        provider: 'openai-compatible',
+        model: 'local-llama',
+        vendor: 'Local',
+        display_name: null,
+        context_window_tokens: null,
+        enabled: true,
+        stale: false,
+        created_at: '',
+        updated_at: '',
+      },
     ],
   }),
   isSilentApiError: vi.fn().mockReturnValue(false),
@@ -937,6 +949,32 @@ async function selectCodexSubscription(model = 'gpt-5.1') {
   })
   expect(screen.queryByRole('radio', { name: /^ChatGPT subscription$/i })).not.toBeInTheDocument()
 }
+
+describe('HostWizard — R4-H4: optional-only local provider is usable without a key', () => {
+  it('enables Next for an openai-compatible primary with a new Secret and no key typed', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'local-agent' })
+
+    // Switch the primary provider to the local openai-compatible provider.
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    fireEvent.click(screen.getByRole('option', { name: /OpenAI-compatible/i }))
+
+    // Its LAN endpoint is required; give it a valid private-LAN IPv4 literal.
+    fireEvent.change(screen.getByLabelText(/LAN endpoint/i), {
+      target: { value: 'http://192.168.1.50:8000/v1' },
+    })
+
+    // Create a new LLM Secret but type NO key: openai-compatible's only slot is
+    // optional (self-hosted servers often need no auth), so the asymmetric
+    // primary-credential gate must not block the step (R4-H4). Before the fix
+    // `usable` was always false for this provider and Next stayed disabled.
+    fireEvent.click(screen.getByLabelText(/Create a new LLM Secret/i))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).not.toBeDisabled()
+    })
+  })
+})
 
 describe('HostWizard — broker-backed Codex authoring', () => {
   it('creates a Codex-only Host without secretRef or a Secret POST', async () => {

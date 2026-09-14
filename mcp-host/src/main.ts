@@ -62,6 +62,7 @@ import type { TransitionEvent } from './lifecycle/types'
 import { SingleTurnProvider, apiKeysFromEnv, createLLMProvider } from './llm'
 import { setCodexPlatformJwtReader, setCodexPlatformJwtRefresh } from './llm/codexPlatformJwt'
 import { setCodexPolicyBindingReader } from './llm/codexPolicyBinding'
+import { createFallbackProviderBuilder } from './llm/failover/buildFallbackProvider'
 import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
@@ -146,7 +147,7 @@ import {
   resolveSessionDbPathFrom,
 } from './statelessBootGuard'
 import { StatelessCronPolicyError, assertStatelessCronPolicyConfig } from './statelessCronPolicy'
-import { ApiKeys, HostCRD, McpServerInfo, ProviderCredentials } from './types'
+import { ApiKeys, HostCRD, McpServerInfo } from './types'
 import { ApprovalPromptHistoryClient } from './usage/approvalPromptHistoryClient'
 import {
   GovernedRunReporter,
@@ -489,46 +490,18 @@ function fallbackCredentialSlotsFor(policy: LlmPolicy | null): string[] {
 }
 
 /**
- * Build the credential bag for a fallback entry from the LIVE ConfigStore
- * fallback-slot values (same `chatllm-api-keys` Secret). The entry's optional
- * `credentialSlot` overrides the provider's PRIMARY slot source; the remaining
- * (multi-slot) slots read their normal dataKeys. Returns null when any required
- * slot is absent → the engine skips that entry.
- */
-function buildFallbackCredentials(
-  store: ConfigStore,
-  entry: FallbackEntry
-): ProviderCredentials | null {
-  if (!isLlmProvider(entry.provider)) return null
-  const slots = descriptorFor(entry.provider).credentialSlots
-  const creds: ProviderCredentials = {}
-  slots.forEach((slot, i) => {
-    const dataKey = i === 0 && entry.credentialSlot ? entry.credentialSlot : slot.dataKey
-    const value = store.fallbackSlotValue(dataKey)
-    if (value) creds[slot.dataKey] = value
-  })
-  for (const slot of slots) {
-    if (slot.required && !creds[slot.dataKey]) return null
-  }
-  return creds
-}
-
-/**
  * R5.3 — the fallback provider factory. Builds a fresh provider for `entry`
  * from the live ConfigStore keys (rotation-safe: rebuilt per attempt). Returns
  * null when unconstructible (missing slot / unknown provider). Shared by the
  * per-task/-compact wrappers (via {@link currentFailoverSupport}) and the boot
- * resolver.
+ * resolver. The build logic (and the `slotIndex == null ⇒ null` guard) lives in
+ * `./llm/failover/buildFallbackProvider` as a pure, testable seam; `getStore` is
+ * lazy because `configStore` is reassigned on every Host update.
  */
-function buildFallbackProvider(entry: FallbackEntry): SingleTurnProvider | null {
-  if (!configStore) return null
-  const creds = buildFallbackCredentials(configStore, entry)
-  if (!creds) return null
-  return createLLMProvider(
-    { [entry.provider]: creds },
-    { provider: entry.provider as LlmProvider, name: entry.model }
-  )
-}
+const buildFallbackProvider = createFallbackProviderBuilder({
+  getStore: () => configStore,
+  createProvider: createLLMProvider,
+})
 
 /**
  * The current {@link ExecutorFailoverSupport} for the agent, or null when no
@@ -594,7 +567,13 @@ function buildProviderForModel(model: string): SingleTurnProvider | null {
   const modelCfg = currentHost?.spec.model
   if (!modelCfg?.provider) return null
   const keys = configStore ? apiKeysFromConfigStore(configStore) : currentKeys
-  return createLLMProvider(keys, { provider: modelCfg.provider, name: model })
+  // baseURL carries the local openai-compatible LAN endpoint (broker pathname
+  // source); inert for every other provider. slotId defaults to 'primary'.
+  return createLLMProvider(keys, {
+    provider: modelCfg.provider,
+    name: model,
+    baseURL: modelCfg.baseURL,
+  })
 }
 
 /**
@@ -1353,7 +1332,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
-  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged } =
+  const { providerChanged, secretRefChanged, modelChanged, connectionRefChanged, baseURLChanged } =
     hostPrimaryLlmBindingChanged(
       currentHost
         ? {
@@ -1361,6 +1340,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
             name: currentHost.spec.model?.name,
             connectionRef: currentHost.spec.model?.connectionRef,
             secretRef: currentHost.spec.secretRef,
+            baseURL: currentHost.spec.model?.baseURL,
           }
         : null,
       {
@@ -1368,6 +1348,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
         name: host.spec.model?.name,
         connectionRef: host.spec.model?.connectionRef,
         secretRef: host.spec.secretRef,
+        baseURL: host.spec.model?.baseURL,
       }
     )
 
@@ -1407,8 +1388,12 @@ async function onHostChange(host: HostCRD): Promise<void> {
   // may clear a sticky runtime cooldown; unrelated CR edits must not (see
   // initializeProvider). A `secretRefChanged` rebuilds the ConfigStore fresh, so
   // the store.onChange clearCooldown path never fires for it — this covers it.
+  // A baseURL-only edit repoints the local openai-compatible primary (a new
+  // derived broker URL / pathname): it is part of the primary's connectable
+  // surface, so it re-binds the provider AND clears a sticky cooldown so the
+  // repointed primary is retried immediately (same rationale as secretRef).
   await initializeProvider(host, currentKeys, {
-    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged,
+    llmConfigChanged: secretRefChanged || providerChanged || connectionRefChanged || baseURLChanged,
   })
 
   // PMC-2 — the cached `stable` tier embeds the model+provider runtime line

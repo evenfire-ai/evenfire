@@ -11,6 +11,7 @@ import { enforceNamespace } from '../../http/namespaceAudit.js'
 import { validateCommunicationChannelSpec } from '../../http/validateCommunicationChannelSpec.js'
 import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec.js'
 import { K8sGateway } from '../../k8s.js'
+import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
   K8sConflictError,
@@ -30,13 +31,19 @@ import {
 } from './communicationChannelSpecHelpers.js'
 import { enumerateHostModelReferences } from './hostModelReferences.js'
 import { validateHostSecretRef } from './hostSecrets.js'
-import { createHostValidationDeps, validateHostSpec } from './hostSpecValidation.js'
+import {
+  collectOpenAiCompatibleBaseUrlTargets,
+  createHostValidationDeps,
+  validateHostSpec,
+} from './hostSpecValidation.js'
 import {
   type HostSpecIncoherenceToleratedEvent,
   emitHostSpecIncoherenceTolerated,
 } from './hostWriteGateAudit.js'
 import { collectResourceSpecFieldIssues, validateResourceName } from './resourceFieldValidation.js'
 import type { StaleModelWarning } from './staleModelWarning.js'
+
+const log = rootLogger.child({ module: 'admin-resources' })
 
 const PROVIDER_SETTINGS_FIELDS: Readonly<Record<string, readonly string[]>> = {
   telegramSettings: ['botHandle', 'replyOnlyWhenMentioned'],
@@ -228,6 +235,86 @@ async function rollbackPrunedContextCreate(
     const safeErrMsg = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]/g, '')
     console.warn(
       `[Admin] context pruned-displayName rollback failed for "${safeName}": ${safeErrMsg}`
+    )
+  }
+}
+
+/**
+ * Deploy-order guard for the additive Host `baseURL` fields — `spec.model.baseURL`
+ * and `spec.llmPolicy.fallbacks[i].baseURL` for provider `openai-compatible`
+ * (fase 2). If the CRD applied to the cluster is OUTDATED (does not yet declare
+ * `baseURL`), the apiserver PRUNES the unknown field SILENTLY and returns
+ * success — the local endpoint is lost with no error surfaced, leaving a Host
+ * that routes to no upstream.
+ *
+ * Pure read-after-write check: compares the `baseURL` the caller sent against the
+ * object the apiserver actually persisted (the create/replace response, AFTER
+ * pruning — reused with NO extra apiserver read). Returns the field path of the
+ * first pruned `baseURL`, or null. Provider matching reuses
+ * `collectOpenAiCompatibleBaseUrlTargets` — the SAME trimmed `openai-compatible`
+ * predicate the admission gate uses — so a provider carrying surrounding
+ * whitespace (`'openai-compatible '`) cannot slip a pruned baseURL past this
+ * guard, and there is a single definition of "which
+ * spec locations carry a local baseURL" (regla D4).
+ *
+ * STRICTLY SCOPED to `hosts` + the `baseURL` fields — the only additive fields at
+ * pruning risk in this feature. Do NOT generalize to other fields or resources:
+ * that would be a decision module (which fields, precedence) requiring its own
+ * mini-spec, not a one-field hardening net (mirrors the context displayName guard).
+ */
+function hostBaseUrlNotPersisted(
+  requestedSpec: Record<string, unknown>,
+  persisted: unknown
+): string | null {
+  const requestedTargets = collectOpenAiCompatibleBaseUrlTargets(requestedSpec)
+  if (requestedTargets.length === 0) return null
+  const persistedSpec = recordValue((persisted as { spec?: unknown } | null)?.spec) || {}
+  const persistedByField = new Map<string, unknown>()
+  for (const target of collectOpenAiCompatibleBaseUrlTargets(persistedSpec)) {
+    persistedByField.set(target.field, target.baseURL)
+  }
+  for (const target of requestedTargets) {
+    const requested = target.baseURL
+    // Only guard a baseURL the caller actually sent as a non-empty string. The
+    // admission gate (validateOpenAiCompatibleBaseUrls, run inside the write
+    // transaction) already 422'd an invalid/missing one before the write, so a
+    // present string here is a valid LAN endpoint.
+    if (typeof requested !== 'string' || requested.trim() === '') continue
+    // baseURL is stored verbatim (no server-side normalization), so a persisted
+    // value that differs from what was sent means loss (pruned), not transform.
+    if (persistedByField.get(target.field) !== requested) return target.field
+  }
+  return null
+}
+
+function sendPrunedHostBaseUrlError(res: Response, field: string): void {
+  res.status(409).json({
+    code: 'host_crd_outdated',
+    error:
+      `Host ${field} was not persisted by Kubernetes; the Host CRD does not support ` +
+      'baseURL for provider "openai-compatible". Apply the latest clerum-crds ' +
+      '(kubectl apply -f charts/clerum-crds/crds/host.yaml) before configuring a local endpoint.',
+  })
+}
+
+/**
+ * Best-effort rollback of a Host whose create silently dropped `baseURL`. Like
+ * the context create rollback, a POST is NOT idempotent: leaving the pruned Host
+ * would make the operator's retry (after applying the CRD) collide with a 409
+ * AlreadyExists, and the stranded Host routes to no upstream. Deleting it
+ * restores a clean retry path.
+ */
+async function rollbackPrunedHostCreate(
+  gateway: K8sGateway,
+  name: string,
+  namespace: string
+): Promise<void> {
+  try {
+    await gateway.deleteResource('hosts', name, namespace)
+  } catch (err) {
+    log.warn(
+      { name, err: err instanceof Error ? err.message : String(err) },
+      'host pruned-baseURL rollback failed'
     )
   }
 }
@@ -672,6 +759,21 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           }
           throw err
         }
+        // Deploy-order guard: the additive `baseURL` fields (openai-compatible)
+        // are pruned SILENTLY by an outdated Host CRD. Detect the loss on the
+        // persisted object and surface a loud 409 instead of a "successful" write
+        // that dropped the local endpoint. Roll the orphan back so the retry
+        // (after the CRD is applied) does not collide with AlreadyExists.
+        const prunedBaseUrlField = hostBaseUrlNotPersisted(hostSpec, created)
+        if (prunedBaseUrlField) {
+          await rollbackPrunedHostCreate(gateway, body.metadata.name, ns)
+          ;(req.log ?? log).warn(
+            { field: prunedBaseUrlField, name: body.metadata.name },
+            'host baseURL pruned by apiserver (CRD outdated); rolled back create'
+          )
+          sendPrunedHostBaseUrlError(res, prunedBaseUrlField)
+          return
+        }
         res
           .status(201)
           .json(
@@ -874,6 +976,20 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
         // Host CR persisted: NOW emit any Pieza D tolerations (never before the
         // write lands, so a K8s conflict/error leaves no audit record).
         for (const event of hostTolerations) emitHostSpecIncoherenceTolerated(event)
+        // Deploy-order guard for the additive `baseURL` fields. NO rollback
+        // (unlike the create path): a PUT is idempotent and the Host's other spec
+        // fields persisted legitimately, so the loud 409 is the recovery signal —
+        // once the CRD is applied the same PUT round-trips baseURL. Mirrors the
+        // context displayName update guard.
+        const prunedBaseUrlField = hostBaseUrlNotPersisted(hostSpec, updated)
+        if (prunedBaseUrlField) {
+          ;(req.log ?? log).warn(
+            { field: prunedBaseUrlField, name: req.params.name },
+            'host baseURL pruned by apiserver (CRD outdated)'
+          )
+          sendPrunedHostBaseUrlError(res, prunedBaseUrlField)
+          return
+        }
         res
           .status(200)
           .json(

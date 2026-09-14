@@ -8,6 +8,8 @@
 !packages/workflow-recipe-capability-policy/**
 !packages/image-policy/
 !packages/image-policy/**
+!packages/egress-policy/
+!packages/egress-policy/**
 !host-context-controller/
 !host-context-controller/package.json
 !host-context-controller/package-lock.json

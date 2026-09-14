@@ -8,6 +8,7 @@ resources:
   - mcp-host
   - mcp-server
   - llm-hooks
+  - llm-egress
   - channels
   - profiles
   - rpc-proxy

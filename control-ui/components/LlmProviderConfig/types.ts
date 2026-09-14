@@ -15,7 +15,13 @@ export type LlmProviderConfigProps = {
   // PRIMARY model (spec.model). Always required.
   provider: LlmProvider
   model: string
-  onPrimaryChange: (next: { provider: LlmProvider; model: string }) => void
+  // LAN endpoint for a local `openai-compatible` primary (spec.model.baseURL).
+  // Ignored for every other provider; controlled by the parent.
+  baseURL?: string
+  // Carries provider, model and (for openai-compatible) the LAN baseURL. On a
+  // provider switch baseURL resets; on a model or baseURL edit the provider is
+  // preserved.
+  onPrimaryChange: (next: { provider: LlmProvider; model: string; baseURL?: string }) => void
 
   // Fallback policy (spec.llmPolicy). `undefined` = the Host has no fallback.
   policy: LlmPolicy | undefined

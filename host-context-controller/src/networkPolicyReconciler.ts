@@ -16,6 +16,7 @@
 import * as k8s from '@kubernetes/client-node'
 import * as dns from 'node:dns/promises'
 import { isIP } from 'node:net'
+import { NON_PUBLIC_EGRESS_CIDRS } from '@clerum/egress-policy'
 import {
   RESOLVED_AT_ANNOTATION,
   STATE_ANNOTATION,
@@ -310,26 +311,12 @@ function classifySafetyInventoryPolicy(
   return 'unrelated'
 }
 
-export const PUBLIC_EGRESS_EXCEPT_CIDRS = [
-  '0.0.0.0/8',
-  '10.0.0.0/8',
-  '100.64.0.0/10',
-  '127.0.0.0/8',
-  '169.254.0.0/16',
-  '172.16.0.0/12',
-  '192.0.0.0/24',
-  '192.0.2.0/24',
-  '192.31.196.0/24',
-  '192.52.193.0/24',
-  '192.88.99.0/24',
-  '192.168.0.0/16',
-  '192.175.48.0/24',
-  '198.18.0.0/15',
-  '198.51.100.0/24',
-  '203.0.113.0/24',
-  '224.0.0.0/4',
-  '240.0.0.0/4',
-]
+// Single-sourced from @clerum/egress-policy (verbatim the same list that ships
+// in deploy/base/public-egress-exceptions.yaml). Re-exported under the original
+// name so every call site and the `except:` builder below stay unchanged.
+// Copied into a mutable array so the type stays `string[]` (the V1IPBlock
+// `except` field is mutable) exactly as the previous literal was.
+export const PUBLIC_EGRESS_EXCEPT_CIDRS = [...NON_PUBLIC_EGRESS_CIDRS]
 
 function ipv4ToNumber(ip: string): number | undefined {
   const parts = ip.split('.')

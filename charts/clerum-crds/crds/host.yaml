@@ -57,6 +57,13 @@ spec:
                 model:
                   type: object
                   description: LLM model configuration.
+                  x-kubernetes-validations:
+                    - rule: "!has(self.provider) || self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)"
+                      message: "spec.model.baseURL is required when spec.model.provider is 'openai-compatible'"
+                    - rule: "!has(self.baseURL) || (has(self.provider) && self.provider == 'openai-compatible')"
+                      message: "spec.model.baseURL is only valid when spec.model.provider is 'openai-compatible'"
+                    - rule: "!has(self.baseURL) || !self.baseURL.lowerAscii().contains('.svc')"
+                      message: "spec.model.baseURL must not target a cluster-internal service address (.svc, .svc.cluster.local)"
                   properties:
                     provider:
                       type: string
@@ -83,6 +90,7 @@ spec:
                         - novita
                         - minimax
                         - azure
+                        - openai-compatible
                         - codex-subscription
                       description: LLM provider to use.
                     name:
@@ -99,6 +107,13 @@ spec:
                         ROLLOUT ORDER — CRD FIRST: apiextensions/v1 prunes unknown
                         fields, so this property must be applied before control-api
                         or Control UI persist spec.model.connectionRef.
+                    baseURL:
+                      type: string
+                      maxLength: 2048
+                      description: >-
+                        Operator LAN endpoint for provider 'openai-compatible' (e.g. http://<lan-ip>:8000/v1). Private LAN
+                        only; must NOT target cluster-internal, metadata, or CGNAT. Egress is brokered — the mcp-host never dials
+                        this directly. ROLLOUT ORDER — CRD FIRST.
                 allowedModels:
                   # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
                   # ADDITIVE: when absent or empty, the host offers the FULL global
@@ -177,6 +192,10 @@ spec:
                     fallbacks:
                       type: array
                       minItems: 1
+                      # Pinned to @clerum/llm-providers MAX_LLM_FALLBACKS. Caps the
+                      # per-Host broker blast radius (each local fallback provisions a
+                      # full egress broker); control-api enforces the same bound on write.
+                      maxItems: 8
                       description: >-
                         Ordered fallback list, tried in order. The engine advances
                         to the next entry when the current one also fails.
@@ -211,6 +230,7 @@ spec:
                               - novita
                               - minimax
                               - azure
+                              - openai-compatible
                               - codex-subscription
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.
@@ -235,6 +255,27 @@ spec:
                               normal slots. Existence of the key in the Secret is resolved
                               by mcp-host at runtime; control-api validates only its format
                               on write.
+                          baseURL:
+                            type: string
+                            maxLength: 2048
+                            description: >-
+                              Operator LAN endpoint for provider 'openai-compatible' (e.g. http://<lan-ip>:8000/v1). Private LAN
+                              only; must NOT target cluster-internal, metadata, or CGNAT. Egress is brokered — the mcp-host never dials
+                              this directly. ROLLOUT ORDER — CRD FIRST.
+                        x-kubernetes-validations:
+                          - rule: "self.provider != 'openai-compatible' || (has(self.baseURL) && size(self.baseURL) > 0)"
+                            message: "fallbacks[].baseURL is required when the fallback provider is 'openai-compatible'"
+                          - rule: "!has(self.baseURL) || self.provider == 'openai-compatible'"
+                            message: "fallbacks[].baseURL is only valid when the fallback provider is 'openai-compatible'"
+                          - rule: "!has(self.baseURL) || !self.baseURL.lowerAscii().contains('.svc')"
+                            message: "fallbacks[].baseURL must not target a cluster-internal service address (.svc, .svc.cluster.local)"
+                          # A local 'openai-compatible' fallback mirrors its credentialSlot
+                          # key verbatim to the admin-chosen LAN endpoint; an unowned slot
+                          # would exfiltrate another provider's key. Restrict it to the
+                          # provider's own slot (backstop for kubectl/GitOps; control-api
+                          # enforces the general rule for every provider).
+                          - rule: "!has(self.credentialSlot) || self.provider != 'openai-compatible' || self.credentialSlot == 'openai-compatible-api-key' || self.credentialSlot.startsWith('openai-compatible-api-key-')"
+                            message: "fallbacks[].credentialSlot for 'openai-compatible' must be openai-compatible-api-key or openai-compatible-api-key-<suffix>"
                 approval:
                   type: object
                   description: Tool approval configuration. Controls who can approve tool executions.

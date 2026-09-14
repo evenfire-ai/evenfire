@@ -51,9 +51,26 @@ const PROVIDER_IDS = Object.freeze([
   'minimax',
   // Light-driver (OpenAI-compatible shape, non-vanilla auth/host).
   'azure',
+  // Generic OpenAI-compatible endpoint (local/self-hosted). baseURL is per-Host
+  // (consumed by HCC, never an env key); the api key is optional. Ordered last
+  // among static providers so env-key autodetection — which DOES scan its key —
+  // never preempts a higher-priority provider, and with no defaultModel yet an
+  // accidental auto-selection fails loudly rather than picking a wrong model.
+  // Excluding it from autodetection outright lands in the mcp-host phase.
+  'openai-compatible',
   // OAuth-broker subscription provider. Not part of env-key autodetection.
   'codex-subscription',
 ])
+
+// Upper bound on `llmPolicy.fallbacks` entries. Failover is sequential (each hop
+// adds cooldown + latency), so more than a handful of distinct providers has no
+// operational meaning; 8 leaves headroom for "same provider, another key"
+// chains. It also caps the blast radius of local (openai-compatible) fallbacks:
+// each one provisions a full broker (Deployment+Service+ConfigMap+Secret+NetPol),
+// so 1 primary + 8 fallbacks is the worst-case per-Host object/pod count. Canonical
+// here so control-api (write gate), the CRD (maxItems) and control-ui all pin the
+// same number.
+const MAX_LLM_FALLBACKS = 8
 
 // Model identifiers are transport selectors, not arbitrary user text. Keep
 // one executable grammar shared by authoring, WRC admission and mcp-host.
@@ -119,6 +136,16 @@ const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
   minimax: apiKeySlot('minimax-api-key', 'MINIMAX_API_KEY'),
   // Azure: one API key, sent via the `api-key` header (driver concern, not here).
   azure: apiKeySlot('azure-openai-api-key', 'AZURE_OPENAI_API_KEY'),
+  // Generic OpenAI-compatible endpoint: a single, OPTIONAL api key. Local/
+  // self-hosted servers frequently need no auth, so `required: false` (unlike the
+  // required apiKeySlot() the other single-key providers use).
+  'openai-compatible': Object.freeze([
+    Object.freeze({
+      dataKey: 'openai-compatible-api-key',
+      envName: 'OPENAI_COMPATIBLE_API_KEY',
+      required: false,
+    }),
+  ]),
   // Subscription broker: zero Secret slots. Env autodetection must never pick it.
   'codex-subscription': Object.freeze([]),
 })
@@ -150,6 +177,7 @@ const PROVIDER_DISPLAY_LABELS = Object.freeze({
   novita: 'Novita AI',
   minimax: 'MiniMax',
   azure: 'Azure OpenAI',
+  'openai-compatible': 'OpenAI-compatible (local)',
   'codex-subscription': 'OpenAI Codex Subscription',
 })
 
@@ -192,6 +220,9 @@ const PROVIDER_NON_SECRET_ENV = Object.freeze({
     Object.freeze({ envName: 'AZURE_OPENAI_ENDPOINT', required: true }),
     Object.freeze({ envName: 'AZURE_OPENAI_API_VERSION', required: false }),
   ]),
+  // No non-secret env: the per-Host baseURL is consumed by HCC, it does NOT
+  // travel to the runtime as an env var.
+  'openai-compatible': Object.freeze([]),
   'codex-subscription': Object.freeze([]),
 })
 
@@ -262,6 +293,7 @@ function requireStaticCredentialSlot(descriptor) {
 
 module.exports = {
   PROVIDER_IDS,
+  MAX_LLM_FALLBACKS,
   RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
   RUNNABLE_LLM_MODEL_ID_PATTERN,
   PROVIDER_CREDENTIAL_SLOTS,

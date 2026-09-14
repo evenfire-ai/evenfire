@@ -76,6 +76,8 @@ export type HostWizardValidationState = {
   llmPolicy: LlmPolicy | undefined
   provider: LlmProvider
   modelName: string
+  // LAN endpoint for a local `openai-compatible` primary (spec.model.baseURL).
+  baseURL: string
   connectionRef: string
   codexModels: string[]
 }

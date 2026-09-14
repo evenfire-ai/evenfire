@@ -256,6 +256,17 @@ image_mode_override_render_dir() {
     printf 'image-mode: generate it with: CONTEXT=<minikube-profile> deploy/scripts/minikube-detect-k8s-api-ip.sh (make minikube-setup and make minikube-deploy-all both do this)\n' >&2
     return 1
   fi
+  # patches/llm-egress-cluster-cidrs.yaml is the sibling GENERATED, gitignored
+  # patch also listed in ../minikube's patchesStrategicMerge, so the render copy
+  # dies the same way (evalsymlink failure inside a temp dir) when it is missing.
+  # Fail here too, naming the file in THEIR tree and the command that writes it.
+  cidrs_patch="${root}/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml"
+  if [ ! -f "$cidrs_patch" ]; then
+    printf 'image-mode: %s/deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml has not been generated, so the MINIKUBE_IMAGE_TAG=%s render copy would not render.\n' \
+      "$project_dir" "$tag" >&2
+    printf 'image-mode: generate it with: CONTEXT=<minikube-profile> deploy/scripts/minikube-detect-cluster-cidrs.sh (make minikube-setup and make minikube-deploy-all both do this)\n' >&2
+    return 1
+  fi
   # -i.bak plus rm keeps this portable across BSD and GNU sed; `sed -i ''` is a
   # BSD-only spelling GNU sed rejects.
   sed -i.bak "s|^\([[:space:]]*newTag:[[:space:]]*\).*$|\1${tag}|" "$component"

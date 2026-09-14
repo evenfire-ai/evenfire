@@ -293,6 +293,34 @@ describe('admin Codex bind/unbind host write contract', () => {
     )
   })
 
+  it('drops baseURL when binding Codex over a former openai-compatible Host (R4-M2)', async () => {
+    assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.6-luna'])
+    const gateway = makeGateway()
+    gateway.getResource.mockResolvedValue({
+      metadata: { name: 'local-agent', resourceVersion: '7' },
+      spec: {
+        model: {
+          provider: 'openai-compatible',
+          name: 'local-model',
+          baseURL: 'http://192.168.1.50:8000/v1',
+        },
+        secretRef: 'llm-keys',
+      },
+    })
+    gateway.updateResource.mockResolvedValue({})
+    const res = await request(makeAuthedApp(gateway)).post(
+      '/admin/llm/providers/codex-subscription/connections/codex-aaa/hosts/local-agent/bind'
+    )
+    expect(res.status).toBe(200)
+    const writtenModel = gateway.updateResource.mock.calls[0][2].spec.model
+    expect(writtenModel).toMatchObject({
+      provider: 'codex-subscription',
+      connectionRef: 'codex-aaa',
+    })
+    // baseURL is exclusive to openai-compatible — the converting write must drop it.
+    expect(writtenModel).not.toHaveProperty('baseURL')
+  })
+
   it('completes an already-bound Host that is missing spec.model.name', async () => {
     assignment.listOfferedCodexModelsForAssignment.mockResolvedValue(['gpt-5.1'])
     const gateway = makeGateway()

@@ -134,6 +134,33 @@ spec:
           value: CLERUM_AUTH_JWT_PUBLIC_KEY
         - name: HCC_TARGET_NAMESPACE
           value: mcp-host
+        # OpenAI-compatible local-model egress broker (spec v2 §6.10). HCC
+        # provisions one broker per (Host, local openai-compatible slot) in this
+        # namespace, and mcp-host dials it at
+        # <brokerName>.<namespace>.svc.cluster.local:<port>. The binding only
+        # works if HCC and mcp-host AGREE on both the namespace and the port, so
+        # both are pinned explicitly here (and on mcp-host via the mcp-host-config
+        # ConfigMap) even though both default to the same values in config.ts —
+        # the parity is a hard contract, not a coincidence of defaults, and must
+        # stay visible on both sides. Override either and you MUST override the
+        # matching mcp-host env (CLERUM_LLM_EGRESS_NAMESPACE /
+        # CLERUM_OAI_EGRESS_BROKER_PORT) in lockstep.
+        - name: CONTEXT_MAPPER_LLM_EGRESS_NAMESPACE
+          value: llm-egress
+        - name: CONTEXT_MAPPER_OAI_EGRESS_BROKER_PORT
+          value: "3000"
+        # Fail-closed guard. HCC refuses to provision a broker unless BOTH
+        # CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS (pod + Service ranges) and
+        # CONTEXT_MAPPER_CLUSTER_NODE_CIDRS (node IPs + apiserver endpoint) are
+        # set, so a deploy that forgot either cannot silently accept a
+        # cluster-internal baseURL (SSRF pivot into the control plane) — the node
+        # ranges close the gap the pod+Service ranges leave open, since a node IP
+        # is RFC1918 and would otherwise read as a legitimate LAN target. BASE IS
+        # FAIL-CLOSED: it ships no CIDRs, so an overlay MUST supply both (the
+        # minikube overlay renders them by default) or the feature stays inert.
+        # Set to "false" only for a deploy that deliberately runs without the guard.
+        - name: CONTEXT_MAPPER_OAI_EGRESS_REQUIRE_CLUSTER_CIDRS
+          value: "true"
         # Existing Control API RS256 public key used to verify the first-party
         # mcp-host access-token family on HCC v2 Host routes. The audience is a
         # fixed HCC code contract; the issuer is read from the same ConfigMap

@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { OAI_EGRESS_BROKERS_CONDITION_TYPE } from '@clerum/egress-policy'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { DetailPageShell } from '@components/DetailPageShell'
@@ -60,6 +61,7 @@ import {
   providerRequiresLlmSecret,
   resolveCodexGrantModel,
   resolveDefaultModel,
+  validateLlmLanBaseUrl,
   validateLlmPolicy,
 } from '../../../lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '../../../lib/llmCredentialSelect'
@@ -210,6 +212,9 @@ export default function HostDetailsPage() {
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelNameDraft, setModelNameDraft] = useState('')
+  // LAN endpoint for a local `openai-compatible` primary (spec.model.baseURL).
+  // Empty for every other provider.
+  const [baseURLDraft, setBaseURLDraft] = useState('')
   const [connectionRefDraft, setConnectionRefDraft] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
@@ -265,6 +270,15 @@ export default function HostDetailsPage() {
   const [selectedConnectorNames, setSelectedConnectorNames] = useState<string[]>([])
   const [hostStatusLabel, setHostStatusLabel] = useState('Unknown')
   const [hostStatusTone, setHostStatusTone] = useState<'active' | 'inactive' | 'unknown'>('unknown')
+  // HCC's egress-broker outcome for a local `openai-compatible` endpoint,
+  // surfaced from Host.status.conditions[type=OpenAiEgressBrokersReady]. Non-null
+  // only when the condition is `False` (a slot was dropped or failed to
+  // provision), so the model tab can tell the operator the LAN endpoint is not
+  // actually reachable — the write path 200s regardless.
+  const [egressBrokerNotice, setEgressBrokerNotice] = useState<{
+    reason: string
+    message: string
+  } | null>(null)
   const [hostCreatedAt, setHostCreatedAt] = useState('')
   const [accessSummary, setAccessSummary] = useState<{
     memberCount: number
@@ -414,6 +428,29 @@ export default function HostDetailsPage() {
       // AP-6: remember the version of THIS read — the edit drafts below are
       // built from it, so it is the correct precondition for the eventual save.
       formResourceVersionRef.current = String(host.metadata?.resourceVersion || '')
+      // Egress-broker outcome is read-only server truth (not a draft), so refresh
+      // it on every load regardless of which drafts are being reset. Shown only
+      // when the shared condition reports `False`.
+      const brokerCondition = (
+        host.status as
+          | {
+              conditions?: Array<{
+                type?: string
+                status?: string
+                reason?: string
+                message?: string
+              }>
+            }
+          | undefined
+      )?.conditions?.find(condition => condition?.type === OAI_EGRESS_BROKERS_CONDITION_TYPE)
+      setEgressBrokerNotice(
+        brokerCondition && String(brokerCondition.status) === 'False'
+          ? {
+              reason: String(brokerCondition.reason || '').trim(),
+              message: String(brokerCondition.message || '').trim(),
+            }
+          : null
+      )
       if (resetDrafts === 'all' || resetDrafts === 'overview') {
         const overview = {
           hostName: String(host.metadata?.name || routeName),
@@ -493,6 +530,9 @@ export default function HostDetailsPage() {
           currentModel ||
             resolveDefaultModel(nextProvider, getModelOptions(allowedCatalog, nextProvider))
         )
+        // Hydrate the local provider's LAN endpoint verbatim (kept for any
+        // provider on load; the editor only surfaces it for openai-compatible).
+        setBaseURLDraft(String((spec.model as { baseURL?: string } | undefined)?.baseURL || ''))
         setSecretRefDraft(String(spec.secretRef || ''))
         setConnectionRefDraft(
           String(
@@ -820,6 +860,13 @@ export default function HostDetailsPage() {
       setError(modelNameProblem)
       return false
     }
+    if (providerDraft === 'openai-compatible') {
+      const baseUrlProblem = validateLlmLanBaseUrl(baseURLDraft)
+      if (baseUrlProblem) {
+        setError(`Primary model: ${baseUrlProblem}`)
+        return false
+      }
+    }
     if (providerDraft === 'codex-subscription') {
       if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
         setError('Choose a ChatGPT subscription before saving.')
@@ -893,6 +940,9 @@ export default function HostDetailsPage() {
                 connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
               }
             : {}),
+          // Local OpenAI-compatible primary carries its LAN endpoint; every other
+          // provider omits it (a stale baseURL is never persisted).
+          ...(providerDraft === 'openai-compatible' ? { baseURL: baseURLDraft.trim() } : {}),
         },
       }
       // Host identity is metadata.name / the route slug. Never persist
@@ -1125,6 +1175,12 @@ export default function HostDetailsPage() {
             </div>
 
             <div className="cu-form-stack cu-form-stack--wide">
+              {egressBrokerNotice ? (
+                <div className="cu-banner cu-banner--warning" role="status">
+                  Local endpoint not provisioned — {egressBrokerNotice.reason}:{' '}
+                  {egressBrokerNotice.message}
+                </div>
+              ) : null}
               <div className="cu-field">
                 <label htmlFor="model-secret">{credentialFieldLabel}</label>
                 <div className="cu-llm-secret-control">
@@ -1222,9 +1278,11 @@ export default function HostDetailsPage() {
                   <LlmProviderConfig
                     provider={providerDraft}
                     model={modelNameDraft}
+                    baseURL={baseURLDraft}
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
+                      setBaseURLDraft(next.baseURL ?? '')
                       if (next.provider !== 'codex-subscription') {
                         setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
@@ -1258,6 +1316,8 @@ export default function HostDetailsPage() {
                       disabled={
                         busy ||
                         Boolean(hostModelNameError(modelNameDraft)) ||
+                        (providerDraft === 'openai-compatible' &&
+                          Boolean(validateLlmLanBaseUrl(baseURLDraft))) ||
                         (providerDraft === 'codex-subscription' &&
                           (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
                             Boolean(grantCatalogError) ||
@@ -1272,6 +1332,7 @@ export default function HostDetailsPage() {
                 <LlmProviderSummary
                   provider={providerDraft}
                   model={modelNameDraft}
+                  baseURL={baseURLDraft}
                   allowedModels={effectiveAllowedModelsSpec}
                   policy={llmPolicyDraft}
                 />

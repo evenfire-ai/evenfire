@@ -1,0 +1,52 @@
+# --- Role: host-context-controller (llm-egress namespace) ---
+# Namespace-scoped grant for the HCC ServiceAccount (which runs in control-plane)
+# to provision the per-(Host, local openai-compatible slot) egress broker stack:
+# a Deployment + Service + ConfigMap + Secret mirror plus the per-broker
+# NetworkPolicies (the `/32` broker→LAN egress and the mcp-host→broker ingress;
+# the broker dials a LAN IP literal, so it has no DNS egress). Modeled on the HCC
+# Role in deploy/base/llm-hooks/rbac.yaml.
+#
+# The create verb on networkpolicies here is what the
+# `managed-networkpolicy-label-immutability` VAP permits ONLY for this SA — the
+# dynamic per-broker policies carry `clerum.io/managed-by: host-context-controller`,
+# so they may only be created by this identity. The static baseline in
+# networkpolicies.yaml carries `managed-by: llm-egress` precisely so the deploy
+# identity can create it without tripping that VAP. No new VAP binding is needed:
+# the binding is cluster-scoped and gates on the SA username, not the namespace,
+# so it already covers CREATE of host-context-controller-labeled policies in
+# llm-egress — the same way it covers llm-hooks.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: host-context-controller
+  namespace: llm-egress
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "create", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: host-context-controller
+  namespace: llm-egress
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: host-context-controller
+subjects:
+  - kind: ServiceAccount
+    name: host-context-controller
+    namespace: control-plane
