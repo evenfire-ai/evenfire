@@ -49,7 +49,7 @@ export function DetailPageShell<T extends string>({
           />
         }
       >
-        {tabs ? (
+        {tabs && activeTab !== undefined && onTabChange && tabAriaLabel ? (
           <TabBar<T>
             ariaLabel={tabAriaLabel}
             activeValue={activeTab}
@@ -61,7 +61,11 @@ export function DetailPageShell<T extends string>({
       </CreateFlowPanel>
 
       {notice}
-      {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
+      {error ? (
+        <div className="cu-banner cu-banner--error" role="alert">
+          {error}
+        </div>
+      ) : null}
 
       {contentMode === 'plain' ? (
         <div className={cn('cu-detail-content-stack', contentClassName)}>{children}</div>

@@ -1,17 +1,21 @@
 'use client'
 
-import React, { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { DataTable, TableViewport } from '@clerum/frontend-components'
+import {
+  GUARDRAIL_DEFAULT_TAB,
+  GUARDRAIL_DETAIL_TABS,
+  GUARDRAIL_TAB_LABELS,
+  type GuardrailTab,
+} from '../../../app/constants/guardrailDetails'
 import { CONTROL_ROUTES } from '../../../app/constants/routes'
 import { useConfirmDialog } from '../../../components/ConfirmDialog'
-import { CreateFlowPanel } from '../../../components/CreateFlowPanel'
-import { CreatePageHeader } from '../../../components/CreatePageHeader'
-import { DashboardLayout } from '../../../components/DashboardLayout'
+import { DetailPageShell } from '../../../components/DetailPageShell'
 import { KebabMenu } from '../../../components/KebabMenu'
 import { IconShield } from '../../../components/Sidebar/icons'
+import { TablePanelHeader } from '../../../components/TablePanelHeader'
 import { useToast } from '../../../components/Toast'
-import { FormSection } from '../../../components/ui'
 import { deleteLlmHook, getHosts, getLlmHook, isSilentApiError } from '../../../lib/api'
 import type { HostResource, LlmHookResource, LlmHookStatus } from '../../../lib/api'
 
@@ -27,6 +31,10 @@ type HookSpec = {
   order?: number
   failMode?: string
   capabilities?: string[]
+}
+
+function parseGuardrailTab(value: string | undefined): GuardrailTab {
+  return GUARDRAIL_DETAIL_TABS.find(tab => tab === value) ?? GUARDRAIL_DEFAULT_TAB
 }
 
 function describeTarget(t?: HookTarget): { kind: string; value: string } {
@@ -106,17 +114,8 @@ function StatusBadge({ status }: { status?: LlmHookStatus }) {
   )
 }
 
-function Row({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="cu-summary-list__row">
-      <span>{label}</span>
-      <span>{children}</span>
-    </div>
-  )
-}
-
 export default function GuardrailDetailPage() {
-  const params = useParams<{ name: string }>()
+  const params = useParams<{ name: string; tab?: string }>()
   const name = decodeURIComponent(String(params?.name ?? ''))
   const router = useRouter()
   const { showToast } = useToast()
@@ -126,6 +125,7 @@ export default function GuardrailDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [uninstalling, setUninstalling] = useState(false)
+  const [activeTab, setActiveTab] = useState<GuardrailTab>(() => parseGuardrailTab(params?.tab))
 
   async function load() {
     setLoading(true)
@@ -147,9 +147,22 @@ export default function GuardrailDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
+  useEffect(() => {
+    setActiveTab(parseGuardrailTab(params?.tab))
+  }, [params?.tab])
+
   const spec = (hook?.spec ?? {}) as HookSpec
   const target = describeTarget(spec.target)
   const agents = useMemo(() => agentsUsingHook(hosts, name), [hosts, name])
+
+  function guardrailTabHref(tab: GuardrailTab): string {
+    return CONTROL_ROUTES.guardrails.tab(name, tab)
+  }
+
+  function selectTab(tab: GuardrailTab) {
+    setActiveTab(tab)
+    router.replace(guardrailTabHref(tab))
+  }
 
   async function handleUninstall() {
     const ok = await confirm({
@@ -173,147 +186,170 @@ export default function GuardrailDetailPage() {
   }
 
   return (
-    <DashboardLayout isDetailPage>
-      <CreateFlowPanel
-        className="cu-detail-flow-panel"
-        header={
-          <CreatePageHeader
-            icon={<IconShield />}
-            title={name || 'Guardrail'}
-            subtitle="Guardrail details and runtime status."
-            backLabel="Back to guardrails"
-            onBack={() => router.push(CONTROL_ROUTES.guardrails.root)}
-            titleActions={
-              hook ? (
-                <KebabMenu
-                  ariaLabel="More guardrail actions"
-                  items={[
-                    {
-                      label: uninstalling ? 'Uninstalling…' : 'Uninstall',
-                      disabled: uninstalling,
-                      danger: true,
-                      onClick: () => void handleUninstall(),
-                    },
-                  ]}
-                />
-              ) : undefined
-            }
+    <DetailPageShell<GuardrailTab>
+      activeTab={activeTab}
+      backLabel="Back to guardrails"
+      contentMode="plain"
+      error={error}
+      icon={<IconShield />}
+      onBack={() => router.push(CONTROL_ROUTES.guardrails.root)}
+      onTabChange={selectTab}
+      overlays={confirmDialog}
+      subtitle="Guardrail details and runtime status."
+      tabAriaLabel="Guardrail detail sections"
+      tabClassName="cu-tabs--compact"
+      tabs={GUARDRAIL_DETAIL_TABS.map(tab => ({
+        value: tab,
+        label: GUARDRAIL_TAB_LABELS[tab],
+        href: guardrailTabHref(tab),
+      }))}
+      title={name || 'Guardrail'}
+      titleActions={
+        hook ? (
+          <KebabMenu
+            ariaLabel="More guardrail actions"
+            items={[
+              {
+                label: uninstalling ? 'Uninstalling…' : 'Uninstall',
+                disabled: uninstalling,
+                danger: true,
+                onClick: () => void handleUninstall(),
+              },
+            ]}
           />
-        }
-      >
-        {null}
-      </CreateFlowPanel>
-
-      {error ? (
-        <div className="cu-banner cu-banner--error" role="alert">
-          {error}
+        ) : undefined
+      }
+    >
+      {loading && !hook ? (
+        <div className="cu-card">
+          <div className="cu-card__body cu-muted">Loading guardrail…</div>
         </div>
-      ) : null}
-
-      {/* The header panel squares off its bottom edge and expects the content
-          stack directly below it, so the first section fuses with it instead of
-          floating as a separate rounded card. */}
-      <div className="cu-detail-content-stack">
-        {loading && !hook ? (
-          <div className="cu-card">
-            <div className="cu-card__body cu-muted">Loading guardrail…</div>
-          </div>
-        ) : !hook ? (
+      ) : !hook ? (
+        <div className="cu-card">
           <div className="cu-empty">Guardrail not found.</div>
-        ) : (
-          <>
-            <FormSection
-              title="Details"
-              description="Runtime configuration reported by the installed hook."
-            >
-              <div className="cu-summary-list cu-summary-list--flush">
-                <Row label="Status">
-                  <StatusBadge status={hook.status} />
-                </Row>
-                <Row label={target.kind}>
-                  <strong className="cu-detail-field__code">{target.value}</strong>
-                </Row>
-                <Row label="Path">{spec.path || '/'}</Row>
-                <Row label="Lifecycle points">{(spec.lifecyclePoints || []).join(', ') || '—'}</Row>
-                <Row label="Fail mode">{spec.failMode || '—'}</Row>
-                <Row label="Capabilities">
-                  {spec.capabilities && spec.capabilities.length > 0 ? (
-                    <span className="cu-detail-tags">
-                      {spec.capabilities.map(c => (
-                        <span key={c} className="cu-registry-tag">
-                          {c}
-                        </span>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="cu-muted">None declared</span>
-                  )}
-                </Row>
-                <Row label="Observed digest">
-                  <strong className="cu-detail-field__code">
-                    {hook.status?.observedDigest || '—'}
-                  </strong>
-                </Row>
-                <Row label="Ready replicas">
-                  {typeof hook.status?.readyReplicas === 'number' ? hook.status.readyReplicas : '—'}
-                </Row>
+        </div>
+      ) : activeTab === 'details' ? (
+        <div className="cu-card">
+          <TablePanelHeader
+            title="Details"
+            subtitle="Runtime configuration reported by the installed hook."
+          />
+          <div className="cu-detail-summary">
+            <div className="cu-detail-summary__fields">
+              <div className="cu-detail-field">
+                <span className="cu-detail-field__label">Status</span>
+                <StatusBadge status={hook.status} />
               </div>
-            </FormSection>
-
-            <FormSection
-              title={`Agents using this guardrail (${agents.length})`}
-              description="Agents whose guardrails reference this hook, and the lifecycle phases they use it in."
-            >
-              {agents.length === 0 ? (
-                <div className="cu-empty">No agents reference this guardrail.</div>
-              ) : (
-                <TableViewport className="cu-table-wrap">
-                  <DataTable className="eft-table cu-table cu-table--header-band">
-                    <thead>
-                      <tr>
-                        <th>Agent</th>
-                        <th>Phases</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {agents.map(a => (
-                        <tr
-                          key={a.name}
-                          className="cu-table__row cu-table__row--clickable"
-                          role="button"
-                          tabIndex={0}
-                          onClick={() =>
-                            router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))
-                          }
-                          onKeyDown={e => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))
-                            }
-                          }}
-                          aria-label={`Open agent ${a.name} guardrails`}
-                        >
-                          <td>{a.name}</td>
-                          <td>
-                            <span className="cu-detail-tags">
-                              {a.phases.map(p => (
-                                <span key={p} className="cu-registry-tag">
-                                  {PHASE_LABEL[p] || p}
-                                </span>
-                              ))}
+              <div className="cu-detail-field cu-detail-field--wide">
+                <span className="cu-detail-field__label">{target.kind}</span>
+                <strong className="cu-detail-field__code">{target.value}</strong>
+              </div>
+              <div className="cu-detail-field">
+                <span className="cu-detail-field__label">Path</span>
+                <span>{spec.path || '/'}</span>
+              </div>
+              <div className="cu-detail-field">
+                <span className="cu-detail-field__label">Order</span>
+                <span>{typeof spec.order === 'number' ? spec.order : '—'}</span>
+              </div>
+              <div className="cu-detail-field">
+                <span className="cu-detail-field__label">Fail mode</span>
+                <span>{spec.failMode || '—'}</span>
+              </div>
+              <div className="cu-detail-field cu-detail-field--wide">
+                <span className="cu-detail-field__label">Lifecycle points</span>
+                {spec.lifecyclePoints && spec.lifecyclePoints.length > 0 ? (
+                  <span className="cu-detail-tags">
+                    {spec.lifecyclePoints.map(point => (
+                      <span key={point} className="cu-registry-tag">
+                        {PHASE_LABEL[point] || point}
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  <span className="cu-muted">None declared</span>
+                )}
+              </div>
+              <div className="cu-detail-field cu-detail-field--wide">
+                <span className="cu-detail-field__label">Capabilities</span>
+                {spec.capabilities && spec.capabilities.length > 0 ? (
+                  <span className="cu-detail-tags">
+                    {spec.capabilities.map(capability => (
+                      <span key={capability} className="cu-registry-tag">
+                        {capability}
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  <span className="cu-muted">None declared</span>
+                )}
+              </div>
+              <div className="cu-detail-field cu-detail-field--wide">
+                <span className="cu-detail-field__label">Observed digest</span>
+                <strong className="cu-detail-field__code">
+                  {hook.status?.observedDigest || '—'}
+                </strong>
+              </div>
+              <div className="cu-detail-field">
+                <span className="cu-detail-field__label">Ready replicas</span>
+                <span>
+                  {typeof hook.status?.readyReplicas === 'number' ? hook.status.readyReplicas : '—'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="cu-card">
+          <TablePanelHeader
+            title={`Agents with access (${agents.length})`}
+            subtitle="Agents whose guardrails reference this hook, and the lifecycle phases they use it in."
+          />
+          {agents.length === 0 ? (
+            <div className="cu-empty">No agents reference this guardrail.</div>
+          ) : (
+            <TableViewport className="cu-table-wrap">
+              <DataTable className="eft-table cu-table cu-table--header-band">
+                <thead>
+                  <tr>
+                    <th>Agent</th>
+                    <th>Phases</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {agents.map(a => (
+                    <tr
+                      key={a.name}
+                      className="cu-table__row cu-table__row--clickable"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          router.push(CONTROL_ROUTES.agents.tab(a.name, 'guardrails'))
+                        }
+                      }}
+                      aria-label={`Open agent ${a.name} guardrails`}
+                    >
+                      <td>{a.name}</td>
+                      <td>
+                        <span className="cu-detail-tags">
+                          {a.phases.map(p => (
+                            <span key={p} className="cu-registry-tag">
+                              {PHASE_LABEL[p] || p}
                             </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </DataTable>
-                </TableViewport>
-              )}
-            </FormSection>
-          </>
-        )}
-      </div>
-      {confirmDialog}
-    </DashboardLayout>
+                          ))}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </DataTable>
+            </TableViewport>
+          )}
+        </div>
+      )}
+    </DetailPageShell>
   )
 }
