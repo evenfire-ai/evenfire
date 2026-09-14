@@ -427,19 +427,41 @@ export function LlmDiscoveryPanel({
                     groupId={provider}
                     key={provider}
                     onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
-                    summary={
-                      <>
-                        <LlmProviderIcon provider={provider} label={providerLabel} />
-                        <span className="cu-llm-model-group__provider">{providerLabel}</span>
-                        <span className="cu-llm-model-group__count">
-                          {models.length} model{models.length === 1 ? '' : 's'}
-                        </span>
-                        <span className="cu-llm-model-group__summary">Awaiting review</span>
-                        <span className="cu-llm-model-group__action" aria-hidden="true">
-                          {expanded ? 'Hide models' : 'Show models'}
-                        </span>
-                      </>
-                    }
+                    summaryCells={[
+                      {
+                        key: 'provider',
+                        colSpan: 2,
+                        content: (
+                          <>
+                            <LlmProviderIcon provider={provider} label={providerLabel} />
+                            <span className="cu-llm-model-group__provider">{providerLabel}</span>
+                          </>
+                        ),
+                      },
+                      {
+                        key: 'models',
+                        content: (
+                          <span className="cu-llm-model-group__count">
+                            {models.length} model{models.length === 1 ? '' : 's'}
+                          </span>
+                        ),
+                      },
+                      {
+                        key: 'details',
+                        content: (
+                          <span className="cu-llm-model-group__summary">Awaiting review</span>
+                        ),
+                      },
+                      {
+                        key: 'actions',
+                        className: 'cu-llm-model-group__action-cell',
+                        content: (
+                          <span className="cu-llm-model-group__action" aria-hidden="true">
+                            {expanded ? 'Hide models' : 'Show models'}
+                          </span>
+                        ),
+                      },
+                    ]}
                   >
                     {models.map(model => (
                       <tr key={model.id} className="cu-table__row cu-llm-model-row">

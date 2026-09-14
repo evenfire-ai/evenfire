@@ -147,6 +147,11 @@ application guidance that must be combined with this shared document.
   presentation. Record the choice in the active specification or decision
   context when one exists. Expandable rows remain exceptional and must use an
   explicit shared primitive rather than changing ordinary `DataTable` rows.
+  When a grouped summary exposes column-shaped values, use
+  `GroupedTableBody.summaryCells` and mirror the visible header `colSpan`
+  values. Native table cells own alignment for every valid column count; do
+  not reproduce header lanes with app-specific flex/grid widths or positional
+  selectors.
 - Keep standard rows compact and consistent. Use `TableViewport` for horizontal
   overflow and for long-list body scrolling so the page title, toolbar, tabs,
   and semantic sticky table header remain visible. Embedded/diagnostic views

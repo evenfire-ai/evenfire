@@ -117,6 +117,99 @@ describe('shared frontend components', () => {
     expect(onAlphaExpandedChange).toHaveBeenLastCalledWith(false)
   })
 
+  it.each([
+    { label: 'five columns', colSpan: 5, spans: [2, 1, 2] },
+    { label: 'seven columns', colSpan: 7, spans: [1, 2, 1, 3] },
+  ])(
+    'aligns grouped summaries with arbitrary $label through native cells',
+    ({ colSpan, spans }) => {
+      const onExpandedChange = vi.fn()
+      render(
+        <DataTable>
+          <thead>
+            <tr>
+              {spans.map((span, index) => (
+                <TableHeaderCell
+                  colSpan={span}
+                  key={`header-${index}`}
+                  label={`Header ${index + 1}`}
+                />
+              ))}
+            </tr>
+          </thead>
+          <GroupedTableBody
+            colSpan={colSpan}
+            disclosureLabel={() => 'Expand provider records'}
+            expanded={false}
+            groupId={`provider-${colSpan}`}
+            onExpandedChange={onExpandedChange}
+            summaryCells={spans.map((span, index) => ({
+              key: `cell-${index}`,
+              colSpan: span,
+              content:
+                index === spans.length - 1 ? (
+                  <button type="button">Inspect provider</button>
+                ) : (
+                  `Summary ${index + 1}`
+                ),
+            }))}
+          >
+            <tr>
+              <td colSpan={colSpan}>Provider child</td>
+            </tr>
+          </GroupedTableBody>
+        </DataTable>
+      )
+
+      const disclosure = screen.getByRole('button', { name: 'Expand provider records' })
+      const summaryRow = disclosure.closest('tr')
+      expect(summaryRow).not.toBeNull()
+      expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual(spans)
+
+      fireEvent.click(screen.getByText('Summary 2'))
+      expect(onExpandedChange).not.toHaveBeenCalled()
+
+      fireEvent.click(disclosure)
+      expect(onExpandedChange).toHaveBeenCalledOnce()
+      expect(onExpandedChange).toHaveBeenLastCalledWith(true)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Inspect provider' }))
+      expect(onExpandedChange).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('rejects grouped summary-cell spans that cannot match the table columns', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const preventReportedError = (event: ErrorEvent) => event.preventDefault()
+    window.addEventListener('error', preventReportedError)
+    try {
+      expect(() =>
+        render(
+          <DataTable>
+            <GroupedTableBody
+              colSpan={4}
+              disclosureLabel={() => 'Expand invalid records'}
+              expanded={false}
+              groupId="invalid"
+              onExpandedChange={() => undefined}
+              summaryCells={[
+                { key: 'provider', content: 'Provider' },
+                { key: 'details', colSpan: 2, content: 'Details' },
+              ]}
+            >
+              <tr>
+                <td colSpan={4}>Invalid child</td>
+              </tr>
+            </GroupedTableBody>
+          </DataTable>
+        )
+      ).toThrow('GroupedTableBody summary cell spans (3) must equal colSpan (4).')
+    } finally {
+      window.removeEventListener('error', preventReportedError)
+      errorSpy.mockRestore()
+    }
+  })
+
   it('uses unique, labelled rowgroup relationships across table instances', () => {
     render(
       <>

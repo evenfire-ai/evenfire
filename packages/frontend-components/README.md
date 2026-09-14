@@ -16,3 +16,10 @@ implementation is organized under `src/table/` by responsibility: shells,
 semantic primitives, actions, truncation, sorting, and public types. Consumers
 must continue importing from `@clerum/frontend-components`; internal module
 paths are not part of the supported API.
+
+Grouped tables use `GroupedTableBody`. Use `summaryCells` when a summary row
+must align with visible column headers: each definition renders a native table
+cell and its optional `colSpan` must mirror the corresponding header span. The
+component validates that the summary spans cover the complete grouped row, so
+new grouped layouts do not need app-specific grid or positional CSS. The
+single `summary` prop remains available for intentionally full-width summaries.

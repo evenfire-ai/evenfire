@@ -157,6 +157,15 @@
 .eft-table-group__summary-row > td {
   padding: 0;
 }
+.eft-table-group__summary-row--cells > .eft-table-group__summary-cell {
+  padding: 0.625rem 0.75rem;
+}
+.eft-table-group__summary-row--cells > .eft-table-group__summary-cell--disclosure {
+  padding: 0;
+}
+.eft-table-group__summary-row--cells .eft-table-group__disclosure {
+  padding: 0.625rem 0.75rem;
+}
 .eft-table-group__disclosure {
   display: flex;
   width: 100%;

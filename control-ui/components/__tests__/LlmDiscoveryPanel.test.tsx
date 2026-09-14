@@ -98,6 +98,10 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
       'aria-expanded',
       'false'
     )
+    const summaryRow = screen
+      .getByRole('button', { name: 'Expand OpenAI review models' })
+      .closest('tr')
+    expect(Array.from(summaryRow?.cells ?? []).map(cell => cell.colSpan)).toEqual([2, 1, 1, 1])
     fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByText('claude-retired')).toBeNull()

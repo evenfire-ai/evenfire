@@ -30,7 +30,7 @@ export type TableStateRowProps = {
   message?: ReactNode
 }
 
-export type GroupedTableBodyProps = {
+type GroupedTableBodyBaseProps = {
   childBodyClassName?: string
   childHeader?: ReactNode
   children: ReactNode
@@ -41,8 +41,26 @@ export type GroupedTableBodyProps = {
   expanded: boolean
   groupId: string
   onExpandedChange: (expanded: boolean) => void
-  summary: ReactNode
 }
+
+export type GroupedTableSummaryCell = {
+  className?: string
+  colSpan?: number
+  content: ReactNode
+  key: string
+}
+
+export type GroupedTableBodyProps = GroupedTableBodyBaseProps &
+  (
+    | {
+        summary: ReactNode
+        summaryCells?: never
+      }
+    | {
+        summary?: never
+        summaryCells: readonly GroupedTableSummaryCell[]
+      }
+  )
 
 export type RowAction = {
   key: string

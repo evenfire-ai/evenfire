@@ -397,23 +397,46 @@ export function LlmModelTable({
                   groupId={provider}
                   key={provider}
                   onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
-                  summary={
-                    <>
-                      <LlmProviderIcon provider={provider} label={providerLabel} />
-                      <span className="cu-llm-model-group__provider">{providerLabel}</span>
-                      <span className="cu-llm-model-group__count">
-                        {providerModels.length} model{providerModels.length === 1 ? '' : 's'}
-                      </span>
-                      <span className="cu-llm-model-group__summary">
-                        {enabledCount} enabled
-                        {staleCount > 0 ? ` · ${staleCount} stale` : ''}
-                        {hasFilteredModels ? ` · ${models.length} matching` : ''}
-                      </span>
-                      <span className="cu-llm-model-group__action" aria-hidden="true">
-                        {expanded ? 'Hide models' : 'Show models'}
-                      </span>
-                    </>
-                  }
+                  summaryCells={[
+                    {
+                      key: 'provider',
+                      content: (
+                        <>
+                          <LlmProviderIcon provider={provider} label={providerLabel} />
+                          <span className="cu-llm-model-group__provider">{providerLabel}</span>
+                        </>
+                      ),
+                    },
+                    {
+                      key: 'models',
+                      content: (
+                        <span className="cu-llm-model-group__count">
+                          {providerModels.length} model{providerModels.length === 1 ? '' : 's'}
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'availability',
+                      colSpan: 4,
+                      content: (
+                        <span className="cu-llm-model-group__summary">
+                          {enabledCount} enabled
+                          {staleCount > 0 ? ` · ${staleCount} stale` : ''}
+                          {hasFilteredModels ? ` · ${models.length} matching` : ''}
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'actions',
+                      colSpan: 2,
+                      className: 'cu-llm-model-group__action-cell',
+                      content: (
+                        <span className="cu-llm-model-group__action" aria-hidden="true">
+                          {expanded ? 'Hide models' : 'Show models'}
+                        </span>
+                      ),
+                    },
+                  ]}
                 >
                   {models.map((model: DisplayModel) => (
                     <tr key={model.id} className="cu-table__row cu-llm-model-row">
