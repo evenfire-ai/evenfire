@@ -139,6 +139,15 @@ const DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY = 10
 // Status is a read/merge/write transaction shared with other controllers.
 // Bound optimistic-conflict retries so a hot object cannot stall reconciliation.
 const STATUS_CONDITION_WRITE_MAX_ATTEMPTS = 3
+/** Types HCC no longer writes and strips from every status write (#606). A future writer must not reuse `NetworkReady`; remove the entry first. */
+const RETIRED_STATUS_CONDITION_TYPES = ['NetworkReady'] as const
+const RUNTIME_NOT_DESIRED_DISABLED_MESSAGE = 'McpServer is disabled; HCC does not run its runtime'
+const RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE =
+  'Env Secret validation failed; HCC does not run its runtime'
+
+function isRetiredStatusConditionType(type: string): boolean {
+  return (RETIRED_STATUS_CONDITION_TYPES as readonly string[]).includes(type)
+}
 
 function throwCleanupFailures(failures: unknown[], message: string): void {
   if (failures.length > 0) {
@@ -257,6 +266,12 @@ interface ReadinessPollState {
    */
   isCurrent: () => boolean
   server: McpServerCRD
+  /**
+   * Snapshot of `readinessRetirements` at window create time (#606). A later
+   * retirement increments the name's counter; the tick must not publish after
+   * that, even if this state was already deleted from `readinessPolls`.
+   */
+  retirementEpoch: number
 }
 
 export class McpServerReconciler {
@@ -302,6 +317,13 @@ export class McpServerReconciler {
    * sticky for the same Deployment generation.
    */
   private readonly readinessPolls: Map<string, ReadinessPollState> = new Map()
+  /**
+   * Retirement epoch per server name (#606). Incremented when a disabled or
+   * fail-closed reconcile retracts the readiness window. `clearStatus` does
+   * not delete entries: a recreated name keeps the counter so stale ticks fail
+   * the epoch check in addition to the uid fence.
+   */
+  private readonly readinessRetirements = new Map<string, number>()
 
   /**
    * Tail promise of the in-flight reconcile chain per server name. Serializes
@@ -346,6 +368,24 @@ export class McpServerReconciler {
     if (this.readinessPollStillDesired(poll)) {
       this.pendingReconciliations.set(poll.server.name, { namespace: poll.server.namespace })
     }
+  }
+
+  /**
+   * Retract the live readiness window for a name that will no longer run a
+   * runtime (#606). Increments the retirement epoch first so an in-flight tick
+   * that already deleted its map entry still fails `retiredNow()`. Clears any
+   * pending timer. Does not record an incomplete-publication obligation: the
+   * runtime is being withdrawn on purpose.
+   */
+  private retireReadinessWindow(name: string): void {
+    this.readinessRetirements.set(name, (this.readinessRetirements.get(name) ?? 0) + 1)
+    const poll = this.readinessPolls.get(name)
+    if (poll === undefined) return
+    if (poll.timer !== undefined) {
+      clearTimeout(poll.timer)
+      poll.timer = undefined
+    }
+    this.readinessPolls.delete(name)
   }
 
   constructor(kc: k8s.KubeConfig, deps?: McpServerReconcilerDeps) {
@@ -618,6 +658,7 @@ export class McpServerReconciler {
       detail: previous?.detail ?? '',
       isCurrent,
       server,
+      retirementEpoch: this.readinessRetirements.get(name) ?? 0,
     }
     this.readinessPolls.set(name, state)
 
@@ -627,6 +668,9 @@ export class McpServerReconciler {
       // can tell "tick running" apart from "window ended" during our awaits.
       state.timer = undefined
       state.ticking = true
+      const retiredNow = (): boolean =>
+        (this.readinessRetirements.get(name) ?? 0) !== state.retirementEpoch
+      const publishIfCurrent = (): boolean => state.isCurrent() && !retiredNow()
       // Mutation fencing: a superseded reconcile (desired-revision or
       // inventory-authority change) must not keep observing — or writing
       // status — on behalf of a stale desired state. End the window quietly;
@@ -692,10 +736,12 @@ export class McpServerReconciler {
         // always false, so this is the ONLY place a converged rollout is ever
         // recorded — without it every successful credential rotation would sit
         // at DeploymentReady=False forever and the UI would report a timeout.
-        await this.updateStatusConditions(state.server, true, undefined, state.isCurrent)
+        if (retiredNow()) return
+        await this.updateStatusConditions(state.server, true, undefined, publishIfCurrent)
         // Readiness is decoupled from fleet convergence: the poll also
         // upgrades the persisted, generation-matched Ready condition so a
         // controller restart can trust the recorded readiness (see getStatus).
+        if (retiredNow()) return
         await this.writeStatusCondition(
           state.server,
           {
@@ -704,7 +750,7 @@ export class McpServerReconciler {
             reason: 'ReconcileSuccess',
             message: 'Deployment created',
           },
-          state.isCurrent
+          publishIfCurrent
         )
         return
       }
@@ -725,7 +771,8 @@ export class McpServerReconciler {
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
-        await this.updateStatusConditions(state.server, false, rollout.detail, state.isCurrent)
+        if (retiredNow()) return
+        await this.updateStatusConditions(state.server, false, rollout.detail, publishIfCurrent)
         return
       }
 
@@ -1831,9 +1878,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * G11: Update status conditions on McpServer CRD.
-   * Sets NetworkReady and DeploymentReady conditions so WRC can watch
-   * for status changes instead of polling with sleeps.
+   * G11: Update DeploymentReady on the McpServer status subresource.
+   * The condition describes Deployment rollout. WRC does not watch this type;
+   * it reads the `clerum.io/network-ready` annotation.
    */
   private async updateStatusConditions(
     server: McpServerCRD,
@@ -1847,16 +1894,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean = () => true
   ): Promise<void> {
     try {
-      const networkWrote = await this.writeStatusCondition(
-        server,
-        {
-          type: 'NetworkReady',
-          status: 'True',
-          reason: 'NetworkPoliciesApplied',
-          message: 'NetworkPolicies and Service created',
-        },
-        isCurrent
-      )
       const deploymentWrote = await this.writeStatusCondition(
         server,
         {
@@ -1875,10 +1912,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      if (networkWrote || deploymentWrote) {
-        console.log(
-          `[Reconciler] Updated status conditions on "${server.name}" (DeploymentReady=${deploymentReady})`
-        )
+      if (deploymentWrote) {
+        hccLogger.info('Updated status conditions', {
+          name: server.name,
+          deploymentReady,
+        })
       }
     } catch (error) {
       // Status subresource may not exist yet — log but don't fail reconciliation
@@ -1977,7 +2015,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         prior.status === condition.status &&
         prior.reason === condition.reason &&
         prior.message === condition.message &&
-        prior.observedGeneration === observedGeneration
+        prior.observedGeneration === observedGeneration &&
+        !existingConditions.some(existing => isRetiredStatusConditionType(existing.type))
 
       // Skip the patch when the condition is identical to what's already on
       // the CRD. Without this, every reconcile bumps the McpServer's
@@ -2000,7 +2039,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ...(observedGeneration !== undefined && { observedGeneration }),
       }
 
-      const nextConditions = [...existingConditions.filter(c => c.type !== condition.type), merged]
+      const nextConditions = [
+        ...existingConditions.filter(
+          existing =>
+            existing.type !== condition.type && !isRetiredStatusConditionType(existing.type)
+        ),
+        merged,
+      ]
 
       const writePreconditions: Array<{
         op: 'test'
@@ -2159,6 +2204,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
         )
+        this.retireReadinessWindow(server.name)
         if (
           !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
             isCurrent()
@@ -2182,6 +2228,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      if (currentManaged) {
+        await this.writeStatusCondition(
+          server,
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RuntimeNotDesired',
+            message: RUNTIME_NOT_DESIRED_DISABLED_MESSAGE,
+          },
+          isCurrent
+        )
+      }
       return isCurrent()
     }
 
@@ -2197,6 +2255,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
       )
       if (shouldFailClosedForSecretFailure(secretResult.reason)) {
+        this.retireReadinessWindow(server.name)
         if (
           !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
             isCurrent()
@@ -2234,6 +2293,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      if (shouldFailClosedForSecretFailure(secretResult.reason)) {
+        await this.writeStatusCondition(
+          server,
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'RuntimeNotDesired',
+            message: RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE,
+          },
+          isCurrent
+        )
+      }
       return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 

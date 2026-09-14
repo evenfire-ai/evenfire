@@ -72,6 +72,101 @@ function credentialsRevisionOf(deployment: k8s.V1Deployment): string | undefined
   return deployment.spec?.template?.metadata?.annotations?.[CREDENTIALS_REVISION_ANNOTATION]
 }
 
+const RUNTIME_NOT_DESIRED_FAIL_CLOSED = 'Env Secret validation failed; HCC does not run its runtime'
+
+function readinessPollsOf(reconciler: McpServerReconciler): Map<string, unknown> {
+  return (reconciler as unknown as { readinessPolls: Map<string, unknown> }).readinessPolls
+}
+
+function notConvergedDeployment(generation: number, name = 'linear') {
+  return {
+    metadata: {
+      name,
+      namespace: 'mcp-server',
+      resourceVersion: '1',
+      uid: 'linear-deployment',
+      generation,
+      labels: {
+        'clerum.io/managed-by': 'host-context-controller',
+        'clerum.io/mcpserver': 'linear',
+      },
+    },
+    spec: { replicas: 1 },
+    status: {
+      observedGeneration: generation,
+      replicas: 2,
+      updatedReplicas: 1,
+      readyReplicas: 1,
+      availableReplicas: 1,
+      unavailableReplicas: 0,
+    },
+  }
+}
+
+function holdNextStatusRead(customApi: ReturnType<typeof createMockCustomApi>): {
+  release: (value?: unknown) => void
+  resolved: () => number
+  isHeld: () => boolean
+} {
+  let pending: ((value: unknown) => void) | undefined
+  let resolved = 0
+  let holdNext = true
+  customApi.getNamespacedCustomObjectStatus.mockImplementation(
+    () =>
+      new Promise(resolve => {
+        if (holdNext) {
+          holdNext = false
+          pending = value => {
+            resolved += 1
+            resolve(value)
+          }
+          return
+        }
+        resolve({ metadata: { resourceVersion: '1' }, status: { conditions: [] } })
+      })
+  )
+  return {
+    isHeld: () => pending !== undefined,
+    resolved: () => resolved,
+    release: (value = { metadata: { resourceVersion: '1' }, status: { conditions: [] } }) => {
+      if (pending === undefined) {
+        throw new Error('status GET was never held')
+      }
+      pending(value)
+    },
+  }
+}
+
+function laterConditionWrites(
+  customApi: ReturnType<typeof createMockCustomApi>,
+  afterCallCount: number
+): Array<{ type: string; status: string; reason: string }> {
+  return customApi.patchNamespacedCustomObjectStatus.mock.calls
+    .slice(afterCallCount)
+    .flatMap(call => {
+      const body = (call[0] as { body?: unknown }).body
+      return Array.isArray(body) ? body : []
+    })
+    .flatMap((op: unknown) => {
+      const value = (op as { value?: unknown }).value
+      const conditions = Array.isArray(value)
+        ? value
+        : ((value as { conditions?: unknown[] })?.conditions ?? [])
+      return Array.isArray(conditions) ? conditions : []
+    })
+    .map((c: unknown) => c as { type: string; status: string; reason: string })
+}
+
+async function reconcileFailClosed(
+  reconciler: McpServerReconciler,
+  coreApi: ReturnType<typeof createMockCoreApi>
+) {
+  coreApi.readNamespacedSecret.mockRejectedValue(
+    Object.assign(new Error('not found'), { code: 404 })
+  )
+  await reconciler.reconcile(makeServer())
+}
+
 /**
  * Every DeploymentReady condition written to the CRD, oldest first. Conditions
  * travel as a JSON Patch on the status subresource, so this digs the condition
@@ -706,6 +801,142 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     const writes = deploymentReadyWrites(customApi)
     expect(writes.at(-1)?.status).toBe('True')
     expect(writes.some(w => w.reason === 'RolloutIncomplete')).toBe(false)
+  })
+
+  it('open readiness window does not write RolloutIncomplete after fail-closed retirement', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer())
+    const readsBeforeTick = appsApi.readNamespacedDeployment.mock.calls.length
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(readsBeforeTick)
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    await reconcileFailClosed(reconciler, coreApi)
+    const lastAfterRetirement = deploymentReadyWrites(customApi).at(-1)
+    expect(lastAfterRetirement?.reason).toBe('RuntimeNotDesired')
+    expect(lastAfterRetirement?.message).toBe(RUNTIME_NOT_DESIRED_FAIL_CLOSED)
+    const warnsAfterRetirement = warn.mock.calls.length
+    const writesAfterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+
+    expect(
+      laterConditionWrites(customApi, writesAfterRetirement).some(
+        condition =>
+          condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
+      )
+    ).toBe(false)
+    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+    expect(warn.mock.calls.slice(warnsAfterRetirement).flat().join('\n')).not.toContain(
+      'not ready after'
+    )
+    warn.mockRestore()
+  })
+
+  it('in-flight ready-branch tick past map delete cannot write True after retirement', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer())
+
+    const held = holdNextStatusRead(customApi)
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(held.isHeld()).toBe(true)
+    expect(readinessPollsOf(reconciler).get('linear')).toBeUndefined()
+
+    await reconcileFailClosed(reconciler, coreApi)
+    expect(
+      deploymentReadyWrites(customApi).some(
+        write =>
+          write.reason === 'RuntimeNotDesired' && write.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+      )
+    ).toBe(true)
+    const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+    held.release()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(held.resolved()).toBe(1)
+
+    const leaked = laterConditionWrites(customApi, afterRetirement)
+    expect(
+      leaked.some(
+        condition =>
+          (condition.type === 'DeploymentReady' && condition.status === 'True') ||
+          (condition.type === 'Ready' &&
+            condition.status === 'True' &&
+            condition.reason === 'ReconcileSuccess')
+      )
+    ).toBe(false)
+    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('in-flight exhaustion tick cannot write RolloutIncomplete after retirement', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer())
+    await vi.advanceTimersByTimeAsync(23 * 5000)
+
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const held = holdNextStatusRead(customApi)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(held.isHeld()).toBe(true)
+    expect(warn.mock.calls.flat().join('\n')).toContain('not ready after 24 polls')
+
+    await reconcileFailClosed(reconciler, coreApi)
+    const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+    held.release()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(held.resolved()).toBe(1)
+
+    expect(
+      laterConditionWrites(customApi, afterRetirement).some(
+        condition =>
+          condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
+      )
+    ).toBe(false)
+    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+    warn.mockRestore()
+  })
+
+  it('retirement epoch stops a stale ready-branch tick after a later window was armed', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer())
+    const windowOne = readinessPollsOf(reconciler).get('linear')
+    expect(windowOne).toBeDefined()
+
+    const held = holdNextStatusRead(customApi)
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(held.isHeld()).toBe(true)
+    expect(readinessPollsOf(reconciler).get('linear')).toBeUndefined()
+
+    coreApi.readNamespacedSecret.mockResolvedValue({ data: { 'api-key': stored('rotated-key') } })
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(3))
+    await reconciler.reconcile(makeServer())
+    const windowTwo = readinessPollsOf(reconciler).get('linear')
+    expect(windowTwo).toBeDefined()
+    expect(windowTwo).not.toBe(windowOne)
+
+    await reconcileFailClosed(reconciler, coreApi)
+    expect(
+      deploymentReadyWrites(customApi).some(write => write.reason === 'RuntimeNotDesired')
+    ).toBe(true)
+    const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+    expect(readinessPollsOf(reconciler).has('linear')).toBe(false)
+
+    held.release()
+    await vi.advanceTimersByTimeAsync(24 * 5000)
+    expect(held.resolved()).toBe(1)
+
+    const leaked = laterConditionWrites(customApi, afterRetirement)
+    expect(
+      leaked.some(
+        condition =>
+          (condition.type === 'DeploymentReady' && condition.status === 'True') ||
+          (condition.type === 'Ready' && condition.status === 'True')
+      )
+    ).toBe(false)
+    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 })
 

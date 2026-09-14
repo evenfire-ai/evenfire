@@ -898,7 +898,7 @@ flowchart LR
         DEP --> SVC["3. Create ClusterIP Service"]
         SVC --> CONFLICT["4. 409? preserve resourceVersion,<br/>replace"]
         CONFLICT --> SIDECAR["5. stdio-bridge sidecar<br/>(managed:true + stdio transport)"]
-        SIDECAR --> STATUS["6. Patch status:<br/>NetworkReady, DeploymentReady"]
+        SIDECAR --> STATUS["6. Patch status:<br/>DeploymentReady<br/>(RuntimeNotDesired when HCC does not run the runtime)"]
     end
     subgraph L2["Context Watch Loop"]
         CTX["Context CRD<br/>created/modified"] --> NP["Generate NetworkPolicies<br/>per (context, server) pair"]
@@ -933,7 +933,7 @@ When an McpServer CRD is created or modified:
    - **MCP Proxy** routes HTTP requests to the sidecar transparently
    - Security overrides (`addCapabilities`, `runAsUser`, etc.) are propagated from the McpServer CRD
 
-6. **Status conditions** (G11): After reconciliation, HCC patches McpServer CRD status with `NetworkReady` and `DeploymentReady` conditions for reactive watches.
+6. **Status conditions** (G11): After reconciliation, HCC patches McpServer CRD status with `DeploymentReady` for the Deployment rollout. When HCC does not run the runtime (disabled or fail-closed secret validation), it writes `DeploymentReady=False/RuntimeNotDesired` and strips leftover `NetworkReady` from every status write. WRC watches the `clerum.io/network-ready` annotation, not a `NetworkReady` condition.
 
 7. **Orphan cleanup**: On startup, full reconciliation deletes any Deployments with `clerum.io/managed-by=host-context-controller` that no longer have a corresponding McpServer CRD.
 
