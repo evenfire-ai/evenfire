@@ -135,10 +135,13 @@ describe('approved-tools isolated upstream boundary', () => {
     expect(simulator.evidence().finalResponses).toBe(2)
   })
 
-  it('rediscovers after a new user turn and returns the actual empty catalog after revocation', async () => {
+  it('recovers after an interrupted user task and returns the actual empty catalog after revocation', async () => {
     const simulator = createApprovedToolsUpstream()
     const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
     await complete(simulator, input, 'revoked')
+    input.push({ role: 'user', content: 'verification receipt before cancellation' })
+    const canceled = await request(simulator, input)
+    input.push(canceled.event.item) // Genuine cancellation leaves no execution result.
     input.push({ role: 'user', content: 'verification receipt again' })
     const search = await request(simulator, input)
     expect(search.event.item.name).toBe(bridges[0])
@@ -151,11 +154,141 @@ describe('approved-tools isolated upstream boundary', () => {
     const denied = await request(simulator, input)
     expect(JSON.parse(denied.event.delta)).toEqual(empty)
     expect(simulator.evidence()).toMatchObject({
-      businessCalls: 1,
+      businessCalls: 2,
       finalResponses: 1,
       deniedResponses: 1,
     })
   })
+
+  it('reuses an earlier real schema for an ordinary repeated request', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'Show my verification receipt.' }]
+    const receipt = await complete(simulator, input, 'reuse')
+    const before = simulator.evidence()
+    input.push({ role: 'user', content: 'Show my verification receipt again.' })
+    const call = await request(simulator, input)
+    expect(call.event.item.name).toBe(bridges[2])
+    // Persisted JSON may reorder object keys without changing the call.
+    call.event.item.arguments = JSON.stringify({ arguments: {}, name: target })
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: `<tool_output name="${target}" sanitized="false">\n${JSON.stringify(receipt)}\n</tool_output>`,
+    })
+    const final = await request(simulator, input)
+    expect(JSON.parse(final.event.delta)).toEqual(receipt)
+    expect(simulator.evidence().searchCalls).toBe(before.searchCalls)
+    expect(simulator.evidence().describeCalls).toBe(before.describeCalls)
+    expect(
+      simulator
+        .evidence()
+        .requests.slice(before.requests.length)
+        .map(row => row.stage)
+    ).toEqual([bridges[2], 'final'])
+  })
+
+  it('approval denial returns the real denial and never requests another business call', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    await complete(simulator, input, 'denial')
+    input.push({ role: 'user', content: 'Please read my verification receipt.' })
+    const call = await request(simulator, input)
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: 'Error: Approval denied by user',
+    })
+    const final = await request(simulator, input)
+    expect(final.event.delta).toContain('Approval denied by user')
+    expect(simulator.evidence().businessCalls).toBe(2)
+    expect(simulator.evidence().deniedResponses).toBe(1)
+    input.push({ role: 'user', content: 'verification receipt please' })
+    expect((await request(simulator, input)).event.item.name).toBe(bridges[0])
+  })
+
+  it('revalidates an obsolete cached target through real search after a catalog denial', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const input: Entry[] = [{ role: 'user', content: 'verification receipt' }]
+    await complete(simulator, input, 'obsolete')
+    input.push({ role: 'user', content: 'verification receipt again' })
+    const call = await request(simulator, input)
+    input.push(call.event.item, {
+      type: 'function_call_output',
+      call_id: call.event.item.call_id,
+      output: 'Error: Tool not found in current catalog',
+    })
+    const search = await request(simulator, input)
+    expect(search.event.item.name).toBe(bridges[0])
+    input.push(search.event.item, {
+      type: 'function_call_output',
+      call_id: search.event.item.call_id,
+      output: JSON.stringify({ found: 0, results: [] }),
+    })
+    expect((await request(simulator, input)).event.delta).toContain('"found":0')
+  })
+
+  it.each(['running', 'completed'])(
+    'uses the native workflow result after %s status, never a fabricated receipt',
+    async phase => {
+      const simulator = createApprovedToolsUpstream()
+      const workflow = 'approved-receipt-workflow'
+      const nativeNames = [
+        'workflow_list',
+        'workflow_trigger',
+        'workflow_status',
+        'workflow_result',
+      ]
+      const definitions = [
+        ...tools,
+        ...nativeNames.map(name => ({ type: 'function', name, parameters: { type: 'object' } })),
+      ]
+      const input: Entry[] = [
+        {
+          role: 'user',
+          content: `Run my ${workflow} workflow, check that it finishes, and show the business ID from its result artifact.`,
+        },
+      ]
+      const businessId = randomUUID()
+      const outputs = [
+        {
+          items: [
+            { name: 'other-workflow' },
+            {
+              name: workflow,
+              requiresInput: false,
+              targets: [{ kind: 'user', label: 'Personal' }],
+            },
+          ],
+        },
+        { workflowName: workflow, phase: 'pending' },
+        { name: workflow, latestRun: { phase } },
+        {
+          workflowName: workflow,
+          artifactAvailable: true,
+          result: { businessId, tool: 'workitem_read_receipt' },
+        },
+      ]
+      for (let index = 0; index < nativeNames.length; index++) {
+        const call = await request(simulator, input, definitions)
+        expect(call.response.status).toBe(200)
+        expect(call.event.item.name).toBe(nativeNames[index])
+        if (index > 0)
+          expect(JSON.parse(call.event.item.arguments)).toEqual({
+            name: workflow,
+            targetLabel: 'Personal',
+          })
+        input.push(call.event.item, {
+          type: 'function_call_output',
+          call_id: call.event.item.call_id,
+          output: `<tool_output name="${nativeNames[index]}" sanitized="false">\n${JSON.stringify(outputs[index])}\n</tool_output>`,
+        })
+      }
+      const final = await request(simulator, input, definitions)
+      expect(JSON.parse(final.event.delta)).toEqual(outputs[3])
+      expect(simulator.evidence().requests.map(row => row.stage)).toEqual([...nativeNames, 'final'])
+      expect(simulator.evidence().businessCalls).toBe(0)
+    }
+  )
 
   it('rejects missing bridge definitions, incomplete results, wrong call IDs and leaked search schemas', async () => {
     const simulator = createApprovedToolsUpstream()
