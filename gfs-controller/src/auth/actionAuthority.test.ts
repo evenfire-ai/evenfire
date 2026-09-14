@@ -202,4 +202,33 @@ describe('gfs v2 live authority', () => {
       })(authority())
     ).rejects.toMatchObject({ code: 'not_mounted' })
   })
+
+  it('keeps the timeout active while consuming the checkpoint body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init: RequestInit) => {
+        const signal = init.signal as AbortSignal
+        return {
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              signal.addEventListener('abort', () => {
+                reject(new DOMException('aborted', 'AbortError'))
+              })
+            }),
+        } as Response
+      })
+    )
+    const startedAt = Date.now()
+
+    await expect(
+      createGfsAuthorityCheckpointer({
+        baseUrl: 'http://control-api:8090',
+        serviceToken: 'gfsc-service-token',
+        timeoutMs: 20,
+      })(authority())
+    ).rejects.toMatchObject({ code: 'not_mounted' })
+    expect(Date.now() - startedAt).toBeLessThan(500)
+  })
 })
