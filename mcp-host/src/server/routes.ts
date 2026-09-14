@@ -452,7 +452,10 @@ export async function handleActivityRoute(
           }
         : undefined
     )
-    json(res, 200, snapshot)
+    json(res, 200, {
+      ...snapshot,
+      items: snapshot.items.map(publicActivityEvent),
+    })
   } catch (error) {
     console.error('[Server] Error getting activity snapshot:', error)
     json(res, 500, { error: 'Activity unavailable' })
@@ -462,6 +465,11 @@ export async function handleActivityRoute(
 function writeSseEvent(res: Response, eventName: string, data: unknown): void {
   res.write(`event: ${eventName}\n`)
   res.write(`data: ${JSON.stringify(data)}\n\n`)
+}
+
+function publicActivityEvent(event: HostActivityEvent): Omit<HostActivityEvent, 'authorityV2'> {
+  const { authorityV2: _internalVisibilityBinding, ...publicEvent } = event
+  return publicEvent
 }
 
 export async function handleActivityStreamRoute(
@@ -513,7 +521,7 @@ export async function handleActivityStreamRoute(
       ) {
         return
       }
-      writeSseEvent(res, 'activity', event)
+      writeSseEvent(res, 'activity', publicActivityEvent(event))
     })
     unsubscribe = registration.unsubscribe
     writeSseEvent(res, 'open', { hostRef: registration.hostRef, ts: new Date().toISOString() })
