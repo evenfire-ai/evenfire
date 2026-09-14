@@ -21,7 +21,9 @@ All commands use the verified `MINIKUBE_PROFILE`, matching explicit
    the normal Codex proxy, the deterministic proxy fixture, the MCP fixture,
    the custom-coordinator SDK base, and the approved-tools workflow variant.
    Fixture tags do not replace production image tags. Run before reconcile
-   because image acquisition updates the manifest timestamp.
+   because image acquisition updates the manifest timestamp. Preparation checks
+   the live image IDs, each image's recorded source revision, and both derived
+   base-image bindings before changing cluster resources.
 2. Complete the supported profile reconcile and exact-HEAD validation sequence.
 3. `make minikube-run-codex-approved-tools` prepares isolated resources, runs the
    visible Playwright runner and restores the original proxy image/environment.
@@ -53,7 +55,11 @@ Additional fixture ports are randomly allocated once per fresh run, persisted in
 its metadata, and registered with `port-forward-owner.sh` in the profile's owned
 PID directory. A collision fails; no port mapping is regenerated. Readiness probes
 revalidate the same live process identity. Existing profile `ports.env` stays
-unchanged. Restoration rejects foreign worktrees, HEADs, deployments and images.
+unchanged. Restoration rejects foreign worktrees, deployments, images and
+fixture-run markers. A later commit in the same owned worktree is recorded in
+the restoration audit; it does not prevent cleanup of verified owned forwards.
+The proxy update checks its live object version and run marker. A refused proxy
+restore still attempts owned-forward cleanup and never reports restored=true.
 
 Scenario metadata is written to `scenarios.json` and passed directly to the runner
 in `run` mode. It contains no credentials. State records retain only fixture

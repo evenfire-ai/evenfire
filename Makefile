@@ -257,11 +257,15 @@ minikube-build-custom-coordinator-fixture-body:
 
 .PHONY: minikube-install-627-real-tools
 minikube-install-627-real-tools: ## Install real Worktracker and Wikipedia baseline under the owned profile lease
-	@bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/install-627-real-tools.mjs
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/install-627-real-tools.mjs
 
 .PHONY: minikube-build-627-worktracker
 minikube-build-627-worktracker: ## Build the reviewed Worktracker sources locally without registry credentials or publication
-	@bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-worktracker.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-worktracker.sh
 
 .PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
 minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
@@ -1475,4 +1479,6 @@ help: ## Show this help
 
 .PHONY: minikube-build-627-github
 minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owned profile architecture
-	@bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh

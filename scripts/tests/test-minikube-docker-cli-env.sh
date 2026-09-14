@@ -2,15 +2,22 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
 TMP_DIR="$(mktemp -d)"
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup_test_tmp() {
+  local result=$?
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged || result=1
+  fi
   if [[ "${KEEP_MINIKUBE_DOCKER_TEST_TMP:-false}" == true ]]; then
     printf 'Kept test fixtures at %s\n' "$TMP_DIR" >&2
   else
     rm -rf -- "$TMP_DIR"
   fi
+  return "$result"
 }
 trap cleanup_test_tmp EXIT
 
@@ -237,6 +244,10 @@ docker_log_has_ambient_runtime_operation() {
 
 prepare_fixture_repo() {
   local fixture="$1"
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged
+  fi
+  minikube_test_fixture_repo_init "$ROOT" "$(dirname "$fixture")"
   mkdir -p "$fixture/scripts/minikube" "$fixture/scripts/release" \
     "$fixture/control-api" "$fixture/deploy/minikube"
   cp "$ROOT/scripts/minikube/build-images.sh" \
@@ -394,7 +405,7 @@ assert_all_original_docker_env_is_restored() {
 }
 
 assert_real_build_script_isolated() {
-  local fixture="$TMP_DIR/repo" output="$TMP_DIR/build.out"
+  local fixture="$TMP_DIR/repo/repo" output="$TMP_DIR/build.out"
   prepare_fixture_repo "$fixture"
   : >"$DOCKER_LOG"
   if DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
@@ -422,7 +433,7 @@ assert_real_build_script_isolated() {
 }
 
 assert_public_pulls_are_isolated() {
-  local fixture="$TMP_DIR/public-repo" output="$TMP_DIR/public.out"
+  local fixture="$TMP_DIR/public-repo/repo" output="$TMP_DIR/public.out"
   prepare_fixture_repo "$fixture"
   : >"$DOCKER_LOG"
   if DOCKER_CONFIG="$AMBIENT_CONFIG" MINIKUBE_PRELOAD_BASE_IMAGES=false \
@@ -443,7 +454,7 @@ assert_public_pulls_are_isolated() {
 assert_local_image_operations_preserve_status() {
   local fixture output status
 
-  fixture="$TMP_DIR/base-inspect-failure-repo"
+  fixture="$TMP_DIR/base-inspect-failure-repo/repo"
   output="$TMP_DIR/base-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   : >"$DOCKER_LOG"
@@ -462,7 +473,7 @@ assert_local_image_operations_preserve_status() {
     fail "base-image inventory status/fallback contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/public-query-failure-repo"
+  fixture="$TMP_DIR/public-query-failure-repo/repo"
   output="$TMP_DIR/public-query-failure.out"
   prepare_fixture_repo "$fixture"
   : >"$DOCKER_LOG"
@@ -481,7 +492,7 @@ assert_local_image_operations_preserve_status() {
     fail "docker images query status/fallback contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/post-build-inspect-failure-repo"
+  fixture="$TMP_DIR/post-build-inspect-failure-repo/repo"
   output="$TMP_DIR/post-build-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   status=0
@@ -499,7 +510,7 @@ assert_local_image_operations_preserve_status() {
     fail "post-build docker inspect status contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/manifest-inspect-failure-repo"
+  fixture="$TMP_DIR/manifest-inspect-failure-repo/repo"
   output="$TMP_DIR/manifest-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   status=0
@@ -518,7 +529,7 @@ assert_local_image_operations_preserve_status() {
     fail "manifest docker inspect status contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/tag-failure-repo"
+  fixture="$TMP_DIR/tag-failure-repo/repo"
   output="$TMP_DIR/tag-failure.out"
   prepare_fixture_repo "$fixture"
   status=0
@@ -538,7 +549,7 @@ assert_local_image_operations_preserve_status() {
 }
 
 assert_local_minikube_load_timeout_kills_descendants() {
-  local fixture="$TMP_DIR/load-timeout-repo" output="$TMP_DIR/load-timeout.out"
+  local fixture="$TMP_DIR/load-timeout-repo/repo" output="$TMP_DIR/load-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
   : >"$MINIKUBE_LOG"
@@ -617,7 +628,7 @@ assert_startup_probes_are_isolated_and_bounded() {
 }
 
 assert_verify_inventory_is_read_only_and_bounded() {
-  local fixture="$TMP_DIR/verify-repo" output="$TMP_DIR/verify-timeout.out"
+  local fixture="$TMP_DIR/verify-repo/repo" output="$TMP_DIR/verify-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
   rm -f -- "$DESCENDANT_PID_FILE"
@@ -680,7 +691,7 @@ assert_invalid_deadline_and_explicit_buildx_fail_closed() {
 }
 
 assert_private_registry_requires_explicit_config() {
-  local fixture="$TMP_DIR/private-repo" output="$TMP_DIR/private-missing.out" status=0
+  local fixture="$TMP_DIR/private-repo/repo" output="$TMP_DIR/private-missing.out" status=0
   prepare_fixture_repo "$fixture"
   : >"$DOCKER_LOG"
   unset MINIKUBE_DOCKER_AUTH_CONFIG FAKE_EXPECT_AUTH_CONFIG

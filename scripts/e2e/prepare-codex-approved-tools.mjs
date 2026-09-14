@@ -4,11 +4,13 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { buildApprovedToolsImageProof } from './approved-tools-image-proof.mjs'
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const sizes = [83, 150, 250]
 const fixtureImage = 'clerum/codex-approved-tools-mcp-e2e:test'
 const proxyImage = 'clerum/codex-approved-tools-proxy-e2e:test'
+const proxyRunAnnotation = 'evenfire.ai/codex-tools-fixture-run'
 const workflowImage = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
 const workflowFeatureCheck = `process.stdout.write(JSON.stringify(process.env.WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE === 'true' && process.env.WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST === 'false' && (process.env.WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES || '').split(',').some(prefix => prefix.trim() && '${workflowImage}'.startsWith(prefix.trim()))))`
 const proxyFlags = [
@@ -16,6 +18,40 @@ const proxyFlags = [
   'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE',
   'NODE_ENV',
 ]
+
+// Shared deadline budget: the outer prepare runner wraps Electron
+// verification, the static audit, and the inner Playwright run (including its
+// spawn grace). The outer deadline derives from those phases plus
+// scheduling/reporting grace. Every bound stays finite.
+export const APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS = 35 * 60_000
+export const APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS = 30_000
+export const APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS = 30_000
+export const APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS = 15_000
+export const APPROVED_TOOLS_RUNNER_KILL_GRACE_SECONDS = 5
+export const APPROVED_TOOLS_RUNNER_SCHEDULING_GRACE_MS = 60_000
+export const APPROVED_TOOLS_RUNNER_TIMEOUT_SECONDS = Math.ceil(
+  (APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS +
+    APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS +
+    APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS +
+    APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS +
+    APPROVED_TOOLS_RUNNER_SCHEDULING_GRACE_MS) /
+    1000
+)
+export const APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS =
+  APPROVED_TOOLS_RUNNER_TIMEOUT_SECONDS * 1000 + 20_000
+export const APPROVED_TOOLS_MAX_DEADLINE_MS = 45 * 60_000
+export function runnerPhaseBudgetMs() {
+  return {
+    playwright: APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS,
+    electronCheck: APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS,
+    staticAudit: APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS,
+    playwrightSpawnGrace: APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS,
+    schedulingGrace: APPROVED_TOOLS_RUNNER_SCHEDULING_GRACE_MS,
+    runnerTimeoutSeconds: APPROVED_TOOLS_RUNNER_TIMEOUT_SECONDS,
+    runnerOuterSpawnTimeoutMs: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
+    maxDeadlineMs: APPROVED_TOOLS_MAX_DEADLINE_MS,
+  }
+}
 
 export function makeScenarios(run, ports, probePort) {
   if (!/^approved-tools-[a-f0-9]{12}$/.test(run)) throw new Error('Invalid fixture run identity')
@@ -398,6 +434,23 @@ export function validateKubectlArgs(args, profile) {
     operation[5] === '-p'
   ) {
     const patch = JSON.parse(operation[6])
+    if (
+      patch.metadata !== undefined &&
+      (Object.keys(patch.metadata).length !== 2 ||
+        !/^[a-zA-Z0-9-]{1,128}$/.test(patch.metadata.uid ?? '') ||
+        !/^[0-9]{1,32}$/.test(patch.metadata.resourceVersion ?? ''))
+    )
+      throw new Error('Invalid proxy object binding')
+    const annotations = patch?.spec?.template?.metadata?.annotations
+    if (
+      annotations !== undefined &&
+      (Object.keys(annotations).length !== 1 ||
+        !(
+          annotations[proxyRunAnnotation] === null ||
+          /^approved-tools-[a-f0-9]{12}$/.test(annotations[proxyRunAnnotation] ?? '')
+        ))
+    )
+      throw new Error('Invalid proxy run binding')
     const entries = patch?.spec?.template?.spec?.containers
     if (!Array.isArray(entries) || entries.length !== 1) throw new Error('Invalid proxy patch')
     const c = entries[0]
@@ -427,8 +480,17 @@ export function validateKubectlArgs(args, profile) {
     )
       throw new Error('Invalid proxy environment')
     const normalized = {
+      ...(patch.metadata === undefined
+        ? {}
+        : {
+            metadata: {
+              uid: patch.metadata.uid,
+              resourceVersion: patch.metadata.resourceVersion,
+            },
+          }),
       spec: {
         template: {
+          ...(annotations === undefined ? {} : { metadata: { annotations } }),
           spec: {
             containers: [
               { name: c.name, image: c.image, imagePullPolicy: c.imagePullPolicy, env: c.env },
@@ -493,7 +555,7 @@ function command(operation, args, { input, timeout = 60_000, inherit = false } =
       key.startsWith('BASH_FUNC_')
     )
       delete env[key]
-  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 25 * 60_000)
+  if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > APPROVED_TOOLS_MAX_DEADLINE_MS)
     throw new Error('Invalid deadline')
   const options = {
     cwd: repo,
@@ -511,6 +573,20 @@ function command(operation, args, { input, timeout = 60_000, inherit = false } =
       break
     case 'head':
       result = spawnSync('git', ['rev-parse', 'HEAD'], options)
+      break
+    case 'image-inventory':
+      if (args.length !== 0) throw new Error('Unexpected image inventory arguments')
+      result = spawnSync(
+        'minikube',
+        [
+          '--profile',
+          validateProfile(required('MINIKUBE_PROFILE')),
+          'image',
+          'ls',
+          '--format=json',
+        ],
+        options
+      )
       break
     case 'kubectl':
       result = spawnSync(
@@ -546,16 +622,16 @@ function command(operation, args, { input, timeout = 60_000, inherit = false } =
         [
           'scripts/minikube/run-with-deadline.mjs',
           '--timeout-seconds',
-          '1500',
+          String(APPROVED_TOOLS_RUNNER_TIMEOUT_SECONDS),
           '--kill-grace-seconds',
-          '5',
+          String(APPROVED_TOOLS_RUNNER_KILL_GRACE_SECONDS),
           '--label',
           'approved-tools-runner',
           '--',
           process.execPath,
           'scripts/e2e/run-codex-approved-tools.mjs',
         ],
-        { ...options, timeout: 1_520_000 }
+        { ...options, timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS }
       )
       break
     default:
@@ -597,6 +673,80 @@ async function waitHttp(url, accept) {
     await new Promise(resolve => setTimeout(resolve, 200))
   }
   throw new Error('Fixture readiness deadline exceeded')
+}
+
+// Independent forward cleanup with strict proxy-write guards.
+//
+// Profile/worktree ownership is required before any side effect. A HEAD
+// change does not block cleanup of our own forwards: when profile and
+// worktree still match and the live deployment identity (UID) plus image
+// binding are valid, restoration proceeds and the old HEAD is recorded in
+// state.headAudit. Proxy patching keeps its UID/image guards; forward cleanup
+// uses the ownership-checked cleanup path and runs even when the proxy step
+// fails. restored is set only when proxy and every cleanup complete.
+export async function restoreOwnedFixture({
+  state,
+  profile,
+  worktree,
+  head,
+  getDeployment,
+  patchProxy,
+  waitProxyRollout,
+  cleanupForward,
+}) {
+  if (!state || state.profile !== profile || state.worktree !== worktree)
+    throw new Error('Fixture ownership mismatch')
+  state.restored = false
+  if (state.head !== head) {
+    state.headAudit = { createdHead: state.head, restoredAtHead: head }
+  }
+  let proxyError = null
+  try {
+    const deployment = await getDeployment()
+    const container = deployment?.spec?.template?.spec?.containers?.find(
+      c => c.name === 'codex-llm-proxy'
+    )
+    if (deployment?.metadata?.uid !== state.proxyUid || !container)
+      throw new Error('Proxy deployment ownership changed')
+    const runBinding = deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation]
+    if (runBinding !== undefined && runBinding !== state.run)
+      throw new Error('Proxy belongs to another fixture run')
+    if (container.image === proxyImage) {
+      if (!/^approved-tools-[a-f0-9]{12}$/.test(state.run ?? '') || runBinding !== state.run)
+        throw new Error('Proxy fixture run binding is missing')
+      const env = proxyFlags.map(name => ({ name, $patch: 'delete' }))
+      if (state.originalNodeEnv) env[2] = state.originalNodeEnv
+      await patchProxy({
+        metadata: {
+          uid: deployment.metadata.uid,
+          resourceVersion: deployment.metadata.resourceVersion,
+        },
+        image: state.originalProxyImage,
+        imagePullPolicy: state.originalImagePullPolicy,
+        env,
+        annotations: { [proxyRunAnnotation]: null },
+      })
+    } else if (container.image !== state.originalProxyImage)
+      throw new Error('Refusing to restore an unrelated proxy image')
+    else if (runBinding !== undefined)
+      throw new Error('Original proxy still has a fixture run binding')
+    await waitProxyRollout()
+  } catch (error) {
+    proxyError = error
+  }
+  const cleanupErrors = []
+  for (const binding of state.forwards ?? []) {
+    try {
+      await cleanupForward(binding)
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
+  if (proxyError || cleanupErrors.length > 0) {
+    throw proxyError ?? cleanupErrors[0]
+  }
+  state.restored = true
+  return state
 }
 
 export function validateRunDirectory(canonical, evidence) {
@@ -672,70 +822,69 @@ async function main() {
     fs.fsyncSync(stateFile.fd)
   }
   async function restore() {
-    if (!state || state.profile !== profile || state.worktree !== repo || state.head !== head)
-      throw new Error('Fixture ownership mismatch')
-    const deployment = JSON.parse(
-      kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
-    )
-    const container = deployment.spec.template.spec.containers.find(
-      c => c.name === 'codex-llm-proxy'
-    )
-    if (deployment.metadata.uid !== state.proxyUid || !container)
-      throw new Error('Proxy deployment ownership changed')
-    if (container.image === proxyImage) {
-      const env = proxyFlags.map(name => ({ name, $patch: 'delete' }))
-      if (state.originalNodeEnv) env[2] = state.originalNodeEnv
-      kubectl([
-        '-n',
-        'control-plane',
-        'patch',
-        'deployment/codex-llm-proxy',
-        '--type=strategic',
-        '-p',
-        JSON.stringify({
-          spec: {
-            template: {
+    try {
+      await restoreOwnedFixture({
+        state,
+        profile,
+        worktree: repo,
+        head,
+        getDeployment: () =>
+          JSON.parse(
+            kubectl(['-n', 'control-plane', 'get', 'deployment/codex-llm-proxy', '-o', 'json'])
+          ),
+        patchProxy: ({ metadata, image, imagePullPolicy, env, annotations }) =>
+          kubectl([
+            '-n',
+            'control-plane',
+            'patch',
+            'deployment/codex-llm-proxy',
+            '--type=strategic',
+            '-p',
+            JSON.stringify({
+              metadata,
               spec: {
-                containers: [
-                  {
-                    name: 'codex-llm-proxy',
-                    image: state.originalProxyImage,
-                    imagePullPolicy: state.originalImagePullPolicy,
-                    env,
+                template: {
+                  metadata: { annotations },
+                  spec: {
+                    containers: [{ name: 'codex-llm-proxy', image, imagePullPolicy, env }],
                   },
-                ],
+                },
               },
-            },
-          },
-        }),
-      ])
-      kubectl(
-        [
-          '-n',
-          'control-plane',
-          'rollout',
-          'status',
-          'deployment/codex-llm-proxy',
-          '--timeout=180s',
-        ],
-        { timeout: 190_000 }
-      )
-    } else if (container.image !== state.originalProxyImage)
-      throw new Error('Refusing to restore an unrelated proxy image')
-    for (const binding of state.forwards) {
-      owner('pf_owner_cleanup_record', [
-        binding.record,
-        profile,
-        profile,
-        repo,
-        binding.namespace,
-        binding.service,
-        String(binding.localPort),
-        String(binding.remotePort),
-      ])
+            }),
+          ]),
+        waitProxyRollout: () =>
+          kubectl(
+            [
+              '-n',
+              'control-plane',
+              'rollout',
+              'status',
+              'deployment/codex-llm-proxy',
+              '--timeout=180s',
+            ],
+            { timeout: 190_000 }
+          ),
+        cleanupForward: binding =>
+          owner('pf_owner_cleanup_record', [
+            binding.record,
+            profile,
+            profile,
+            repo,
+            binding.namespace,
+            binding.service,
+            String(binding.localPort),
+            String(binding.remotePort),
+          ]),
+      })
+      save()
+    } catch (error) {
+      try {
+        if (state && state.profile === profile && state.worktree === repo) save()
+      } catch {
+        // Persisting the HEAD audit must not mask the original restore failure.
+      }
+      throw error
     }
-    state.restored = true
-    save()
   }
   if (action === 'restore') {
     stateFile = openOwnedFile(evidence, 'fixture-state.json', { writable: true })
@@ -814,6 +963,24 @@ async function main() {
     throw new Error(
       'Workflow fixture image is not permitted by the running Minikube coordinator policy'
     )
+  const imageManifest = JSON.parse(
+    readOwnedFile(path.join(repo, 'deploy/minikube'), '.image-manifest.json', 4 * 1024 * 1024)
+  )
+  const inventory = JSON.parse(command('image-inventory', [], { timeout: 30_000 }))
+  if (!Array.isArray(inventory)) throw new Error('IMAGE_PROOF_MANIFEST_INVALID: invalid inventory')
+  const observedImages = inventory.flatMap(item => {
+    if (item.repoTags == null) return []
+    if (!Array.isArray(item.repoTags) || typeof item.id !== 'string')
+      throw new Error('IMAGE_PROOF_MANIFEST_INVALID: invalid inventory item')
+    const id = item.id.startsWith('sha256:') ? item.id : `sha256:${item.id}`
+    return item.repoTags.map(ref => ({ ref, id }))
+  })
+  const imageProof = buildApprovedToolsImageProof({
+    profile,
+    sourceHead: head,
+    manifest: imageManifest,
+    images: observedImages,
+  })
   const run = 'approved-tools-' + randomBytes(6).toString('hex')
   const ports = []
   while (ports.length < 5) {
@@ -843,6 +1010,7 @@ async function main() {
   if (
     !container ||
     container.image === proxyImage ||
+    deployment.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== undefined ||
     (container.env ?? []).some(e => proxyFlags.slice(0, 2).includes(e.name))
   )
     throw new Error('Proxy already has test ownership')
@@ -853,6 +1021,7 @@ async function main() {
     profile,
     worktree: repo,
     head,
+    imageProof,
     run,
     scenarios,
     workflowScenario,
@@ -933,8 +1102,13 @@ async function main() {
       '--type=strategic',
       '-p',
       JSON.stringify({
+        metadata: {
+          uid: deployment.metadata.uid,
+          resourceVersion: deployment.metadata.resourceVersion,
+        },
         spec: {
           template: {
+            metadata: { annotations: { [proxyRunAnnotation]: state.run } },
             spec: {
               containers: [
                 {
@@ -1044,7 +1218,7 @@ async function main() {
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
       process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
       command('runner', [], {
-        timeout: 25 * 60_000,
+        timeout: APPROVED_TOOLS_RUNNER_OUTER_SPAWN_TIMEOUT_MS,
         inherit: true,
       })
       await restore()

@@ -12,7 +12,11 @@ if (!profile || context !== profile || !/^clerum-[a-z0-9-]+-[a-f0-9]{8}$/.test(p
 
 function run(executable, args, input, timeout = 30000) {
   const result = spawnSync(executable, args, {
-    cwd: root, input, encoding: 'utf8', timeout, maxBuffer: 4 * 1024 * 1024,
+    cwd: root,
+    input,
+    encoding: 'utf8',
+    timeout,
+    maxBuffer: 4 * 1024 * 1024,
   })
   if (result.error || result.signal || result.status !== 0)
     throw new Error(`${executable} operation failed; no response bodies are logged`)
@@ -24,22 +28,42 @@ function kubectl(args, value) {
   return run('kubectl', kc(args), value === undefined ? undefined : JSON.stringify(value))
 }
 function read(resource, namespace, name) {
-  const result = kubectl(['-n', namespace, 'get', resource, name, '--ignore-not-found', '-o', 'json'])
+  const result = kubectl([
+    '-n',
+    namespace,
+    'get',
+    resource,
+    name,
+    '--ignore-not-found',
+    '-o',
+    'json',
+  ])
   return result.trim() ? parseJson(result, 'Invalid Kubernetes JSON response') : undefined
 }
 function parseJson(value, message) {
-  try { return JSON.parse(value) } catch { throw new Error(message) }
+  try {
+    return JSON.parse(value)
+  } catch {
+    throw new Error(message)
+  }
 }
 function source(repository, file, commit) {
-  const entry = parseJson(run('gh', ['api', `repos/keyper-labs/${repository}/contents/${file}?ref=${commit}`]), 'Invalid source response JSON')
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
-      entry.encoding !== 'base64' || typeof entry.content !== 'string')
+  const entry = parseJson(
+    run('gh', ['api', `repos/keyper-labs/${repository}/contents/${file}?ref=${commit}`]),
+    'Invalid source response JSON'
+  )
+  if (
+    !entry ||
+    typeof entry !== 'object' ||
+    Array.isArray(entry) ||
+    entry.encoding !== 'base64' ||
+    typeof entry.content !== 'string'
+  )
     throw new Error('Invalid source content envelope')
   // GitHub wraps base64 in lines; require canonical encoding after removing only line breaks.
   const content = entry.content.replace(/[\r\n]/g, '')
   const decoded = Buffer.from(content, 'base64')
-  if (decoded.toString('base64') !== content)
-    throw new Error('Invalid source base64 content')
+  if (decoded.toString('base64') !== content) throw new Error('Invalid source base64 content')
   return { commit, value: parseJson(decoded.toString('utf8'), 'Invalid source document JSON') }
 }
 
@@ -47,8 +71,16 @@ const host = read('hosts', 'mcp-host', 'chatllm')
 if (host?.spec?.model?.provider !== 'codex-subscription' || !host.spec.contextRef)
   throw new Error('chatllm must already use the approved Codex subscription')
 // Install only the reviewed revisions; upstream HEAD is not an approved baseline.
-const pluginSource = source('worktracker-plugin', 'recipe/worktracker.json', '2b2dbd403d817fcfc20b0051a6d8ef637ee072c5')
-const wikiSource = source('mcp-servers-collection', 'mcp-wikipedia/registry.json', 'addf570cfcc8b2270b577f446fdb4c5d9d7b2d28')
+const pluginSource = source(
+  'worktracker-plugin',
+  'recipe/worktracker.json',
+  '2b2dbd403d817fcfc20b0051a6d8ef637ee072c5'
+)
+const wikiSource = source(
+  'mcp-servers-collection',
+  'mcp-wikipedia/registry.json',
+  'addf570cfcc8b2270b577f446fdb4c5d9d7b2d28'
+)
 const recipe = pluginSource.value
 const expectedImages = new Set([
   'postgres:16-alpine',
@@ -57,34 +89,63 @@ const expectedImages = new Set([
   'registry.evenfire.ai/evenfire/worktracker-ui:2.2.5',
 ])
 const workloads = recipe?.spec?.workloads
-if (recipe?.kind !== 'WorkflowRecipe' || recipe.metadata?.name !== 'worktracker' ||
-    !Array.isArray(workloads) || workloads.length !== 4 ||
-    workloads.some(workload => !expectedImages.has(workload?.image)) ||
-    new Set(workloads.map(workload => workload.image)).size !== expectedImages.size)
+if (
+  recipe?.kind !== 'WorkflowRecipe' ||
+  recipe.metadata?.name !== 'worktracker' ||
+  !Array.isArray(workloads) ||
+  workloads.length !== 4 ||
+  workloads.some(workload => !expectedImages.has(workload?.image)) ||
+  new Set(workloads.map(workload => workload.image)).size !== expectedImages.size
+)
   throw new Error('Worktracker source changed; review its images before installation')
-if (wikiSource.value?.version !== '1.0.0' || !Array.isArray(wikiSource.value.tools) || wikiSource.value.tools.length !== 11)
+if (
+  wikiSource.value?.version !== '1.0.0' ||
+  !Array.isArray(wikiSource.value.tools) ||
+  wikiSource.value.tools.length !== 11
+)
   throw new Error('Wikipedia catalog changed; review baseline before installation')
 
 const labels = { 'evenfire.ai/e2e-suite': 'issue-627-real-baseline' }
-recipe.metadata = { ...recipe.metadata, namespace: 'sandbox-recipes', labels: { ...recipe.metadata.labels, ...labels } }
+recipe.metadata = {
+  ...recipe.metadata,
+  namespace: 'sandbox-recipes',
+  labels: { ...recipe.metadata.labels, ...labels },
+}
 // Test data stays local; do not start optional meeting ingestion or background enrichment.
 for (const workload of workloads)
   for (const entry of workload.env ?? [])
-    if (['FEATURE_MEETINGS', 'FEATURE_PATTERNS_CRON', 'FEATURE_GITHUB', 'FEATURE_SEMANTIC_SEARCH'].includes(entry.name))
+    if (
+      [
+        'FEATURE_MEETINGS',
+        'FEATURE_PATTERNS_CRON',
+        'FEATURE_GITHUB',
+        'FEATURE_SEMANTIC_SEARCH',
+      ].includes(entry.name)
+    )
       entry.value = 'false'
 
 const wikipedia = {
-  apiVersion: 'clerum.io/v1alpha1', kind: 'McpServer',
+  apiVersion: 'clerum.io/v1alpha1',
+  kind: 'McpServer',
   metadata: { name: 'issue-627-wikipedia', namespace: 'mcp-server', labels },
   spec: {
     contextRef: host.spec.contextRef,
     image: 'registry.evenfire.ai/evenfire/mcp-wikipedia:1.0.0',
-    imagePullPolicy: 'IfNotPresent', enabled: true,
+    imagePullPolicy: 'IfNotPresent',
+    enabled: true,
     description: 'Issue 627 real Wikipedia baseline',
-    transport: { type: 'streamableHttp', port: 3000, url: 'http://issue-627-wikipedia.mcp-server.svc.cluster.local:3000/mcp' },
-    auth: { type: 'none' }, healthCheck: { port: 3000 },
+    transport: {
+      type: 'streamableHttp',
+      port: 3000,
+      url: 'http://issue-627-wikipedia.mcp-server.svc.cluster.local:3000/mcp',
+    },
+    auth: { type: 'none' },
+    healthCheck: { port: 3000 },
     egressBindings: [{ egressClass: 'public-web' }],
-    resources: { requests: { cpu: '25m', memory: '64Mi' }, limits: { cpu: '500m', memory: '256Mi' } },
+    resources: {
+      requests: { cpu: '25m', memory: '64Mi' },
+      limits: { cpu: '500m', memory: '256Mi' },
+    },
     env: [{ name: 'PORT', value: '3000' }],
   },
 }
@@ -92,25 +153,39 @@ const wikipedia = {
 const shared = randomBytes(32).toString('hex')
 const database = randomBytes(24).toString('hex')
 const bundles = ['sandbox-recipes', 'mcp-server'].map(namespace => ({
-  apiVersion: 'v1', kind: 'Secret', type: 'Opaque',
-  metadata: { name: 'worktracker-secrets', namespace, labels: { ...labels, 'clerum.io/owner-recipe': 'worktracker' } },
-  stringData: namespace === 'sandbox-recipes'
-    ? { 'pg-password': database, 'mcp-api-token': shared }
-    : { 'mcp-api-token': shared },
+  apiVersion: 'v1',
+  kind: 'Secret',
+  type: 'Opaque',
+  metadata: {
+    name: 'worktracker-secrets',
+    namespace,
+    labels: { ...labels, 'clerum.io/owner-recipe': 'worktracker' },
+  },
+  stringData:
+    namespace === 'sandbox-recipes'
+      ? { 'pg-password': database, 'mcp-api-token': shared }
+      : { 'mcp-api-token': shared },
 }))
 const objects = [recipe, ...bundles, wikipedia]
 for (const object of objects)
   if (read(object.kind, object.metadata.namespace, object.metadata.name))
-    throw new Error(`Existing ${object.kind}/${object.metadata.name}; refusing replacement or credential rotation`)
+    throw new Error(
+      `Existing ${object.kind}/${object.metadata.name}; refusing replacement or credential rotation`
+    )
 // Validate resource shapes before creation. Secrets follow the owning recipe.
 for (const object of [recipe, wikipedia])
   kubectl(['create', '--dry-run=server', '-f', '-', '-o', 'name'], object)
 for (const object of objects) {
   kubectl(['create', '-f', '-', '-o', 'name'], object)
-  process.stdout.write(`CREATED ${object.kind}/${object.metadata.namespace}/${object.metadata.name}\n`)
+  process.stdout.write(
+    `CREATED ${object.kind}/${object.metadata.namespace}/${object.metadata.name}\n`
+  )
 }
-process.stdout.write(JSON.stringify({
-  status: 'resources-created-not-certified', profile,
-  revisions: { worktracker: pluginSource.commit, wikipedia: wikiSource.commit },
-  next: 'Verify workloads and effective tools/list; grant connector access through the platform before the real chat test.',
-}) + '\n')
+process.stdout.write(
+  JSON.stringify({
+    status: 'resources-created-not-certified',
+    profile,
+    revisions: { worktracker: pluginSource.commit, wikipedia: wikiSource.commit },
+    next: 'Verify workloads and effective tools/list; grant connector access through the platform before the real chat test.',
+  }) + '\n'
+)

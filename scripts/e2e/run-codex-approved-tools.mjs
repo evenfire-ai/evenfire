@@ -3,6 +3,11 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
+  APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS,
+  APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS,
+  APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS,
+  APPROVED_TOOLS_RUNNER_KILL_GRACE_SECONDS,
+  APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS,
   openOwnedFile,
   readOwnedDescriptor,
   validateRunDirectory,
@@ -19,6 +24,15 @@ export const expectedTitles = [
     size => `approved tools ${size}: ordinary discovery, reuse, approval decisions and revocation`
   ),
 ]
+
+export function runPhaseTimeouts() {
+  return {
+    playwright: APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS,
+    electronCheck: APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS,
+    staticAudit: APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS,
+    playwrightSpawnGrace: APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS,
+  }
+}
 
 export function validateReport(report) {
   const specs = []
@@ -72,7 +86,11 @@ function required(name) {
 }
 
 function runNode(args, cwd, env, timeout) {
-  if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 35 * 60_000)
+  if (
+    !Number.isSafeInteger(timeout) ||
+    timeout < 1000 ||
+    timeout > APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
+  )
     throw new Error('Invalid browser deadline')
   const result = spawnSync(
     process.execPath,
@@ -81,7 +99,7 @@ function runNode(args, cwd, env, timeout) {
       '--timeout-seconds',
       String(Math.ceil(timeout / 1000)),
       '--kill-grace-seconds',
-      '5',
+      String(APPROVED_TOOLS_RUNNER_KILL_GRACE_SECONDS),
       '--label',
       'approved-tools-playwright',
       '--',
@@ -92,7 +110,7 @@ function runNode(args, cwd, env, timeout) {
       cwd,
       env,
       stdio: 'inherit',
-      timeout: timeout + 15_000,
+      timeout: timeout + APPROVED_TOOLS_PLAYWRIGHT_SPAWN_GRACE_MS,
       killSignal: 'SIGTERM',
     }
   )
@@ -147,7 +165,7 @@ function main() {
       cwd: path.join(repo, 'desktop-app'),
       env,
       stdio: 'inherit',
-      timeout: 30_000,
+      timeout: APPROVED_TOOLS_ELECTRON_CHECK_TIMEOUT_MS,
     })
     if (electronCheck.error || electronCheck.signal || electronCheck.status !== 0)
       throw new Error('Desktop Electron verification failed')
@@ -162,7 +180,7 @@ function main() {
         'tests/e2e/playwright/helpers/approved-tools-workflow.ts',
         'tests/e2e/playwright/helpers/approved-tools-subscription.ts',
       ],
-      { cwd: repo, env, stdio: 'inherit', timeout: 30_000 }
+      { cwd: repo, env, stdio: 'inherit', timeout: APPROVED_TOOLS_STATIC_AUDIT_TIMEOUT_MS }
     )
     if (audit.error || audit.signal || audit.status !== 0)
       throw new Error('E2E Guardian audit failed')
@@ -174,7 +192,7 @@ function main() {
       ],
       playwright,
       env,
-      35 * 60_000
+      APPROVED_TOOLS_PLAYWRIGHT_TIMEOUT_MS
     )
     const verified = validateReport(JSON.parse(readOwnedDescriptor(reportFile)))
     process.stdout.write(

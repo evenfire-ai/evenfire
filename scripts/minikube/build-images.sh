@@ -32,7 +32,12 @@
 #   --only=<svc>    Build only the image(s) whose tag matches the substring <svc>
 #                   (e.g. --only=control-api, --only=workflow-recipes). Skips
 #                   public-image pulls and preserves the recorded manifest
-#                   acquisition mode/tag while refreshing image IDs.
+#                   acquisition mode/tag while refreshing image IDs. A ref
+#                   this run does not build is carried forward from the
+#                   previous manifest only while that manifest names this
+#                   profile and the daemon still resolves the ref to the
+#                   recorded ID, with its own source revision preserved (see
+#                   the manifest writer at the bottom).
 #   --include-e2e-fixtures
 #                  --verify-only: also demand the two E2E-only fixtures
 #                  (workflow-custom-sdk-e2e, workflow-plugin-sdk-e2e) in ghcr
@@ -478,6 +483,27 @@ require_inherited_mutation_lease() {
     bash "${SCRIPT_DIR}/require-t2-mutation-lock.sh"
 }
 
+# The commit this run's images are built from, recorded in the manifest as
+# gitHead.
+#
+# Without it the manifest can only claim that a ref exists, never which commit
+# it was built from, and a reader asking "does this fixture image belong to the
+# head under review?" has no answer beyond the image name. --verify-only
+# acquires nothing and --public-only loads third-party images only, so neither
+# has a source revision to record; every other path refuses to write a manifest
+# it cannot stamp.
+SOURCE_REVISION=""
+resolve_source_revision() {
+  local revision
+  revision="$(git -C "$PROJECT_DIR" rev-parse --verify HEAD 2>/dev/null || true)"
+  if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+    printf 'SOURCE_REVISION_UNRESOLVED: %s is not a Git checkout with a resolvable HEAD, so the image manifest could not record the commit these images were built from\n' \
+      "$PROJECT_DIR" >&2
+    return 1
+  fi
+  SOURCE_REVISION="$revision"
+}
+
 run_with_deadline() {
   local label="$1" timeout_seconds="$2"
   shift 2
@@ -490,6 +516,9 @@ run_with_deadline() {
 
 validate_build_configuration
 require_inherited_mutation_lease
+if [[ "$VERIFY_ONLY" == false && "$PUBLIC_ONLY" == false ]]; then
+  resolve_source_revision
+fi
 
 if ! command -v node >/dev/null 2>&1 || [[ ! -f "$DOCKER_CLI_DEADLINE_RUNNER" ]]; then
   err "The existing deadline runner and Node.js are required"
@@ -940,6 +969,15 @@ build_section() {
 }
 
 # ---- Build function ----
+
+# Refs this invocation actually built (docker build), and the base each built
+# fixture was built FROM. Both feed the manifest: only a built ref may be
+# stamped with this run's source revision, and a fixture records the exact base
+# image it came from so a reader can prove the pair still matches instead of
+# assuming that the base tag it names is still the image it was built from.
+BUILT_IMAGE_REFS=()
+DERIVED_BASE_RECORDS=()
+
 build_image() {
   local name=$1 dir=$2 tag=$3 dockerfile=${4:-""}
   if [ -n "$ONLY_SVC" ] && [[ "$tag" != *"$ONLY_SVC"* ]] && [[ "$name" != *"$ONLY_SVC"* ]]; then
@@ -950,7 +988,7 @@ build_image() {
     return
   fi
   log "Building ${tag}..."
-  local docker_args=(-t "$tag")
+  local docker_args=(-t "$tag") derived_base=""
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
@@ -958,9 +996,11 @@ build_image() {
     # The public target builds this production tag immediately beforehand under
     # the same profile lease. The test image never replaces that tag.
     docker_args+=(--build-arg CODEX_PROXY_IMAGE=clerum/codex-llm-proxy:test)
+    derived_base="clerum/codex-llm-proxy:test"
   fi
   if [ "$name" = codex-approved-tools-workflow-e2e ]; then
     docker_args+=(--build-arg WORKFLOW_CUSTOM_SDK_IMAGE=clerum/workflow-custom-sdk-e2e:test)
+    derived_base="clerum/workflow-custom-sdk-e2e:test"
   fi
   local build_cmd=(docker build "${docker_args[@]}" "$dir")
   local build_status=0
@@ -985,6 +1025,10 @@ build_image() {
     err "Image ${tag} not found after build!"
     FAILED_IMAGES+=("$tag")
     return 1
+  fi
+  BUILT_IMAGE_REFS+=("$tag")
+  if [ -n "$derived_base" ]; then
+    DERIVED_BASE_RECORDS+=("${tag}|${derived_base}")
   fi
   ok "${tag} (${sha:7:12})"
 }
@@ -1024,6 +1068,7 @@ build_control_ui_image() {
     FAILED_IMAGES+=("$tag")
     return 1
   fi
+  BUILT_IMAGE_REFS+=("$tag")
   ok "${tag} (${sha:7:12})"
 }
 
@@ -1365,39 +1410,252 @@ fi
 # Docker's generic exit 1 must never trigger a pull or be rewritten as
 # NOT_BUILT. Staging the values also preserves any prior good manifest when an
 # inventory or inspect command fails partway through the list.
-MANIFEST_SHAS=()
+#
+# One ref's current ID from the daemon this run built in: the digest, or
+# nothing when a successful inventory proves the ref absent. A failed read
+# prints the message the staging loop has always used and returns the child
+# status, so the caller stops instead of rewriting an infrastructure failure as
+# absence.
+manifest_live_image_id() {
+  local ref="$1" status=0 output="" ids=""
+  if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
+    output="$(minikube_image_id "$ref")" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      err "Could not inventory ${ref} while generating the image manifest" >&2
+      return "$status"
+    fi
+    case "$output" in
+      "" | NOT_FOUND) printf '' ;;
+      *) printf '%s' "$output" ;;
+    esac
+    return 0
+  fi
+  ids="$(docker_local_image_query "$ref")" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    err "Could not inventory ${ref} while generating the image manifest" >&2
+    return "$status"
+  fi
+  if [[ -z "$ids" ]]; then
+    printf ''
+    return 0
+  fi
+  output="$(docker_local_image_id "$ref")" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    err "Could not inspect ${ref} while generating the image manifest" >&2
+    return "$status"
+  fi
+  printf '%s' "$output"
+}
+
+# The source revision THIS invocation built a ref at, or nothing when it did
+# not build it. Only a build stamps a revision: an image that was merely
+# observed keeps whatever the previous manifest recorded for it, and no run may
+# stamp an image it did not build with its own head.
+manifest_built_source_revision() {
+  local ref="$1" built
+  for built in ${BUILT_IMAGE_REFS[@]+"${BUILT_IMAGE_REFS[@]}"}; do
+    if [[ "$built" == "$ref" ]]; then
+      printf '%s' "$SOURCE_REVISION"
+      return 0
+    fi
+  done
+  printf ''
+}
+
+manifest_ref_is_staged() {
+  local ref="$1" staged
+  for staged in "${ALL_IMAGES[@]}"; do
+    if [[ "$staged" == "$ref" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ---- Previous manifest records ----
+#
+# Read once, before staging, because two callers need it: a ref this run
+# rebuilds is stamped with this run's source revision, while a ref this run only
+# observed keeps the revision the previous manifest recorded for it -- and only
+# while that record still describes the same image (same profile, same digest).
+# A run never rewrites an old source revision into a new one.
+#
+# The node reader validates every field it emits, so a hand-edited or truncated
+# manifest cannot smuggle a ref, a digest, or a revision into this one.
+PRIOR_MANIFEST_PROFILE=""
+PRIOR_IMAGE_RECORDS=()
+PRIOR_BINDING_RECORDS=()
+load_previous_manifest_records() {
+  local manifest="$1" status=0 fields="" kind="" a="" b="" c=""
+  if [[ ! -f "$manifest" ]]; then
+    return 0
+  fi
+  fields="$(node -e '
+const fs = require("node:fs")
+const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/:-]*$/
+const digestPattern = /^sha256:[0-9a-f]{64}$/
+const revisionPattern = /^[0-9a-f]{40}$/
+let parsed
+try {
+  parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8"))
+} catch {
+  process.exit(1)
+}
+if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) process.exit(1)
+const profile = typeof parsed.profile === "string" && refPattern.test(parsed.profile) ? parsed.profile : ""
+process.stdout.write("meta\t" + profile + "\n")
+const images = parsed.images && typeof parsed.images === "object" ? parsed.images : {}
+const revisions = parsed.sourceRevisions && typeof parsed.sourceRevisions === "object" ? parsed.sourceRevisions : {}
+for (const [ref, id] of Object.entries(images)) {
+  if (!refPattern.test(ref) || typeof id !== "string" || !digestPattern.test(id)) continue
+  const revision = typeof revisions[ref] === "string" && revisionPattern.test(revisions[ref]) ? revisions[ref] : ""
+  process.stdout.write("image\t" + ref + "\t" + id + "\t" + revision + "\n")
+}
+const derived = parsed.derivedFrom && typeof parsed.derivedFrom === "object" ? parsed.derivedFrom : {}
+for (const [ref, entry] of Object.entries(derived)) {
+  if (!refPattern.test(ref) || !entry || typeof entry !== "object") continue
+  if (typeof entry.ref !== "string" || !refPattern.test(entry.ref)) continue
+  if (typeof entry.id !== "string" || !digestPattern.test(entry.id)) continue
+  process.stdout.write("base\t" + ref + "\t" + entry.ref + "\t" + entry.id + "\n")
+}
+' "$manifest")" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    warn "Ignoring an unreadable previous manifest; no record is carried forward"
+    return 0
+  fi
+  while IFS=$'\t' read -r kind a b c || [[ -n "$kind" ]]; do
+    case "$kind" in
+      meta) PRIOR_MANIFEST_PROFILE="$a" ;;
+      image) PRIOR_IMAGE_RECORDS+=("${a}|${b}|${c}") ;;
+      base) PRIOR_BINDING_RECORDS+=("${a}|${b}|${c}") ;;
+    esac
+  done <<<"$fields"
+  return 0
+}
+
+# The revision the previous manifest recorded for a ref, and only while that
+# record still describes the digest this profile holds right now.
+manifest_previous_source_revision() {
+  local ref="$1" id="$2" record rest
+  if [[ "$PRIOR_MANIFEST_PROFILE" != "$PROFILE" ]]; then
+    printf ''
+    return 0
+  fi
+  for record in ${PRIOR_IMAGE_RECORDS[@]+"${PRIOR_IMAGE_RECORDS[@]}"}; do
+    [[ "${record%%|*}" == "$ref" ]] || continue
+    rest="${record#*|}"
+    [[ "${rest%%|*}" == "$id" ]] || continue
+    printf '%s' "${rest#*|}"
+    return 0
+  done
+  printf ''
+}
+
+load_previous_manifest_records "$MANIFEST_FILE"
+
+MANIFEST_ENTRY_REFS=()
+MANIFEST_ENTRY_SHAS=()
+MANIFEST_ENTRY_REVISIONS=()
+MANIFEST_BINDING_DERIVED=()
+MANIFEST_BINDING_BASES=()
+MANIFEST_BINDING_IDS=()
 if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
   cache_minikube_image_inventory
 fi
 for img in "${ALL_IMAGES[@]}"; do
-  sha=""
-  if [[ "$MINIKUBE_MULTI_NODE" == true ]]; then
-    manifest_inventory_status=0
-    sha="$(minikube_image_id "$img")" || manifest_inventory_status=$?
-    if [[ "$manifest_inventory_status" -ne 0 ]]; then
-      err "Could not inventory ${img} while generating the image manifest" >&2
-      exit "$manifest_inventory_status"
-    fi
-  else
-    manifest_inventory_status=0
-    manifest_image_ids="$(docker_local_image_query "$img")" || manifest_inventory_status=$?
-    if [[ "$manifest_inventory_status" -ne 0 ]]; then
-      err "Could not inventory ${img} while generating the image manifest" >&2
-      exit "$manifest_inventory_status"
-    fi
-    if [[ -z "$manifest_image_ids" ]]; then
-      sha="NOT_BUILT"
-    else
-      manifest_inspect_status=0
-      sha="$(docker_local_image_id "$img")" || manifest_inspect_status=$?
-      if [[ "$manifest_inspect_status" -ne 0 ]]; then
-        err "Could not inspect ${img} while generating the image manifest" >&2
-        exit "$manifest_inspect_status"
-      fi
-    fi
+  img_sha="$(manifest_live_image_id "$img")" || exit $?
+  if [[ -z "$img_sha" ]]; then
+    img_sha="NOT_BUILT"
+  elif [[ ! "$img_sha" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    err "MINIKUBE_IMAGE_INVENTORY_INVALID: ${img} resolved to '${img_sha}', which is not an image digest" >&2
+    exit 1
   fi
-  MANIFEST_SHAS+=("$sha")
+  MANIFEST_ENTRY_REFS+=("$img")
+  MANIFEST_ENTRY_SHAS+=("$img_sha")
+  img_revision="$(manifest_built_source_revision "$img")"
+  if [[ -z "$img_revision" ]]; then
+    img_revision="$(manifest_previous_source_revision "$img" "$img_sha")"
+  fi
+  MANIFEST_ENTRY_REVISIONS+=("$img_revision")
 done
+
+# A fixture built FROM another image this profile holds records that base and
+# the ID it resolved to. Trusting the base TAG alone would let a fixture that
+# was built from an older base keep certifying the newer one: the tag is the
+# same string either way, the ID is not.
+for record in ${DERIVED_BASE_RECORDS[@]+"${DERIVED_BASE_RECORDS[@]}"}; do
+  derived="${record%%|*}"
+  base="${record#*|}"
+  base_id="$(manifest_live_image_id "$base")" || exit $?
+  if [[ ! "$base_id" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+    err "Could not resolve ${base}, the base image ${derived} was built from, in profile '${PROFILE}'" >&2
+    exit 1
+  fi
+  MANIFEST_BINDING_DERIVED+=("$derived")
+  MANIFEST_BINDING_BASES+=("$base")
+  MANIFEST_BINDING_IDS+=("$base_id")
+done
+
+# ---- Carry verified records forward from the previous manifest ----
+#
+# This writer replaces the whole file, and a partial run stages only the refs in
+# its own ALL_IMAGES. Without carrying, the fixture target -- five --only
+# invocations in a row -- would leave a manifest holding only the last fixture,
+# and the prepare step that swaps the proxy onto a fixture would have nothing to
+# verify against.
+#
+# Carrying is never a re-stamp. The previous manifest's own source revision
+# travels with the record, and only while the record is still true of THIS
+# profile: the manifest must name this profile and the daemon must resolve the
+# ref to exactly the recorded ID right now. A ref whose image was replaced, or a
+# record acquired for another profile, is dropped -- an absent record makes the
+# reader fail closed and name the acquisition command, which is the verdict a
+# stale fixture deserves. The node reader below validates every field it emits,
+# so a hand-edited or truncated manifest cannot smuggle a ref, digest, or
+# revision into this one.
+carry_previous_manifest_records() {
+  local record="" rest="" ref="" id="" revision=""
+  local binding="" base="" base_id="" live_id="" live_base_id=""
+  if [[ "$PRIOR_MANIFEST_PROFILE" != "$PROFILE" ]]; then
+    if [[ -n "$PRIOR_MANIFEST_PROFILE" ]]; then
+      log "Not carrying image records acquired for profile '${PRIOR_MANIFEST_PROFILE}'"
+    fi
+    return 0
+  fi
+  for record in ${PRIOR_IMAGE_RECORDS[@]+"${PRIOR_IMAGE_RECORDS[@]}"}; do
+    ref="${record%%|*}"
+    rest="${record#*|}"
+    id="${rest%%|*}"
+    revision="${rest#*|}"
+    if manifest_ref_is_staged "$ref"; then
+      continue
+    fi
+    live_id="$(manifest_live_image_id "$ref")" || return $?
+    if [[ "$live_id" != "$id" ]]; then
+      continue
+    fi
+    MANIFEST_ENTRY_REFS+=("$ref")
+    MANIFEST_ENTRY_SHAS+=("$id")
+    MANIFEST_ENTRY_REVISIONS+=("$revision")
+    for binding in ${PRIOR_BINDING_RECORDS[@]+"${PRIOR_BINDING_RECORDS[@]}"}; do
+      [[ "${binding%%|*}" == "$ref" ]] || continue
+      rest="${binding#*|}"
+      base="${rest%%|*}"
+      base_id="${rest#*|}"
+      live_base_id="$(manifest_live_image_id "$base")" || return $?
+      if [[ "$live_base_id" != "$base_id" ]]; then
+        log "Dropping the recorded base of ${ref}: ${base} is no longer the image it was built from"
+        continue
+      fi
+      MANIFEST_BINDING_DERIVED+=("$ref")
+      MANIFEST_BINDING_BASES+=("$base")
+      MANIFEST_BINDING_IDS+=("$base_id")
+    done
+  done
+  return 0
+}
+
+carry_previous_manifest_records
 
 mkdir -p "$(dirname "$MANIFEST_FILE")"
 echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
@@ -1407,16 +1665,53 @@ echo -e "\n${BOLD}=== Generating Image Manifest ===${NC}"
   echo "  \"profile\": \"${PROFILE}\","
   echo "  \"imageSource\": \"${MANIFEST_IMAGE_SOURCE}\","
   echo "  \"imageTag\": \"${MANIFEST_IMAGE_TAG}\","
+  # Informational only: the commit THIS invocation built from. It certifies
+  # nothing about a ref this run did not build -- sourceRevisions below is the
+  # per-ref answer, and a reader must decide freshness from that.
+  echo "  \"gitHead\": \"${SOURCE_REVISION}\","
+  revision_total=0
+  for image_index in "${!MANIFEST_ENTRY_REFS[@]}"; do
+    if [ -n "${MANIFEST_ENTRY_REVISIONS[$image_index]}" ]; then
+      revision_total=$((revision_total + 1))
+    fi
+  done
+  if [ "$revision_total" -eq 0 ]; then
+    echo "  \"sourceRevisions\": {},"
+  else
+    echo "  \"sourceRevisions\": {"
+    count=0
+    for image_index in "${!MANIFEST_ENTRY_REFS[@]}"; do
+      revision="${MANIFEST_ENTRY_REVISIONS[$image_index]}"
+      if [ -z "$revision" ]; then
+        continue
+      fi
+      count=$((count + 1))
+      comma=","
+      if [ "$count" -eq "$revision_total" ]; then comma=""; fi
+      echo "    \"${MANIFEST_ENTRY_REFS[$image_index]}\": \"${revision}\"${comma}"
+    done
+    echo "  },"
+  fi
+  if [ "${#MANIFEST_BINDING_DERIVED[@]}" -gt 0 ]; then
+    echo "  \"derivedFrom\": {"
+    binding_total=${#MANIFEST_BINDING_DERIVED[@]}
+    count=0
+    for binding_index in "${!MANIFEST_BINDING_DERIVED[@]}"; do
+      count=$((count + 1))
+      comma=","
+      if [ "$count" -eq "$binding_total" ]; then comma=""; fi
+      echo "    \"${MANIFEST_BINDING_DERIVED[$binding_index]}\": { \"ref\": \"${MANIFEST_BINDING_BASES[$binding_index]}\", \"id\": \"${MANIFEST_BINDING_IDS[$binding_index]}\" }${comma}"
+    done
+    echo "  },"
+  fi
   echo "  \"images\": {"
   count=0
-  total=${#ALL_IMAGES[@]}
-  for image_index in "${!ALL_IMAGES[@]}"; do
-    img="${ALL_IMAGES[$image_index]}"
-    sha="${MANIFEST_SHAS[$image_index]}"
+  total=${#MANIFEST_ENTRY_REFS[@]}
+  for image_index in "${!MANIFEST_ENTRY_REFS[@]}"; do
     count=$((count + 1))
     comma=","
     if [ "$count" -eq "$total" ]; then comma=""; fi
-    echo "    \"${img}\": \"${sha}\"${comma}"
+    echo "    \"${MANIFEST_ENTRY_REFS[$image_index]}\": \"${MANIFEST_ENTRY_SHAS[$image_index]}\"${comma}"
   done
   echo "  }"
   echo "}"

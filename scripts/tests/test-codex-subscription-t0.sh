@@ -201,6 +201,8 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
   "scripts/e2e/run-codex-approved-tools.test.mjs" \
   "scripts/e2e/desktop-login-seed.test.mjs" \
+  "scripts/e2e/approved-tools-image-proof.test.mjs" \
+  "scripts/e2e/approved-tools-restoration.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"
 
 

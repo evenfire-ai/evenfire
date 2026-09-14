@@ -265,6 +265,45 @@ NODE
   printf 'PASS: WRC direct entry, pending journal and dedicated recovery enforce the real inherited lease\n'
 }
 
+# The #627 real-tool targets are the only mutation targets whose recipes call a
+# reviewed external builder directly. They must forward the same explicit
+# profile/context/lease passthrough as every sibling target; without it a
+# makefile-variable profile (`MINIKUBE_PROFILE ?=`, never exported) never
+# reaches the wrapper and the transition fails before it can run.
+assert_627_targets_forward_the_profile_and_lease() {
+  local target plan problem=""
+  for target in \
+    minikube-install-627-real-tools \
+    minikube-build-627-worktracker \
+    minikube-build-627-github; do
+    # Inspect the rendered boundary with a known Make value. Explicit recipe
+    # assignments also support values defined by included Makefiles, which are
+    # not automatically exported like command-line assignments are.
+    plan="$(dry_run_make "${target}" MINIKUBE_PROFILE="${PROFILE}" 2>&1)" || {
+      printf 'FAIL: dry-run %s failed:\n%s\n' "${target}" "${plan}" >&2
+      exit 1
+    }
+    [[ "${plan}" == *"with-t2-mutation-lock.sh"* ]] \
+      || problem+="${target} is not enclosed by the mutation wrapper; "
+    [[ "${plan}" == *"T2_PROFILE=\"${PROFILE}\""* ]] \
+      || problem+="${target} does not forward T2_PROFILE; "
+    [[ "${plan}" == *"T2_CONTEXT=\"${PROFILE}\""* ]] \
+      || problem+="${target} does not forward T2_CONTEXT; "
+    [[ "${plan}" == *"T2_PROJECT_DIR="* ]] \
+      || problem+="${target} does not forward T2_PROJECT_DIR; "
+    [[ "${plan}" == *"T2_SKIP_LOCK="* ]] \
+      || problem+="${target} does not forward T2_SKIP_LOCK; "
+    [[ "${plan}" == *"T2_LOCK_TOKEN="* ]] \
+      || problem+="${target} does not forward T2_LOCK_TOKEN; "
+  done
+  if [[ -n "${problem}" ]]; then
+    printf 'FAIL: #627 mutation targets: %s\n' "${problem}" >&2
+    exit 1
+  fi
+  printf 'PASS: the #627 real-tool targets forward the explicit profile, context and inherited lease\n'
+}
+
+
 run_child
 [[ "$(wc -l <"${LOG}" | tr -d ' ')" -eq 1 ]] || {
   echo 'FAIL: valid inherited lease did not reach the child boundary' >&2
@@ -296,6 +335,7 @@ fi
 }
 
 assert_wrc_admission
+assert_627_targets_forward_the_profile_and_lease
 
 full_plan="$(dry_run_make minikube-build-images 2>&1)"
 full_body_plan="$(dry_run_make minikube-build-images-body 2>&1)"
