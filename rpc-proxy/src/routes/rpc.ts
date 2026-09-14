@@ -58,6 +58,14 @@ function isSafeUpstreamAgentSegment(value: string): boolean {
   return isSafeUpstreamPathSegment(value) && value.length <= 200 && !value.includes(':')
 }
 
+// Strip line breaks before interpolating a user-derived value into a log line.
+// Path segments logged below are already rejected for control chars by
+// isSafeUpstreamPathSegment, so this is defense in depth: it guarantees a logged
+// value can never forge an extra log line even if a caller logs before that guard.
+function logSafe(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ')
+}
+
 function parseUnsignedIntegerQuery(value: unknown): number | undefined | null {
   if (value === undefined) return undefined
   if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
@@ -999,7 +1007,7 @@ export function createRpcRouter(): Router {
         const baseUrl = host.url.replace(/\/+$/, '')
         // Never log the raw title (spec 15 §5): titles are user content.
         console.info(
-          `[RPC_PROXY] user=${auth.sub} host=${hostRef} method=rename-session agent=${agent} chatId=${chatId}`
+          `[RPC_PROXY] user=${auth.sub} host=${logSafe(hostRef)} method=rename-session agent=${logSafe(agent)} chatId=${logSafe(chatId)}`
         )
         try {
           // Only host.headers carry the edge identity (x-clerum-edge-user-id and
