@@ -177,9 +177,10 @@ export async function createWorkflowTriggerApprovalRequest(params: {
                 wr.completed_at,
                 wr.last_reconciled_at,
                 wr.created_at,
-                wr.updated_at
-                , binding.binding_hash AS "authorityBindingHash"
-                , binding.delegation_jti AS "authorityDelegationJti"
+                wr.updated_at,
+                wr.failure_reason,
+                binding.binding_hash AS "authorityBindingHash",
+                binding.delegation_jti AS "authorityDelegationJti"
            FROM workflow_approval_requests war
       LEFT JOIN workflow_approval_trigger_run_intents watri
              ON watri.approval_request_id = war.id
