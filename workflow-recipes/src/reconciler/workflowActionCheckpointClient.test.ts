@@ -96,6 +96,26 @@ describe('workflow action checkpoint client', () => {
     await expect(checkpoint(run)).resolves.toBeUndefined()
   })
 
+  it('canonicalizes a JSONB target before checkpoint transport', async () => {
+    const jsonbOrderedRun = {
+      authority_binding: {
+        ...run.authority_binding,
+        target: { recipeName: 'demo', recipeNamespace: 'sandbox-recipes' },
+      },
+    } as never
+    const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { target: Record<string, string> }
+      expect(Object.keys(body.target)).toEqual(['recipeName', 'recipeNamespace'])
+      expect(body.target).toEqual(target)
+      return new Response(JSON.stringify(allowedCheckpoint()), { status: 200 })
+    })
+    const checkpoint = createWorkflowRunAuthorityCheckpointer({
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+
+    await expect(checkpoint(jsonbOrderedRun)).resolves.toBeUndefined()
+  })
+
   it('fails closed on checkpoint denial and malformed success bodies', async () => {
     const denied = createWorkflowRunAuthorityCheckpointer({
       fetchImpl: vi.fn(
