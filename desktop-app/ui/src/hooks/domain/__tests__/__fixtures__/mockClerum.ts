@@ -35,6 +35,7 @@ interface RpcMock {
   getTaskResult: Fn
   listSessions: Fn
   loadSessionMessages: Fn
+  renameSession: Fn
   getContextBreakdown: Fn
   cancelTask: Fn
   subscribeHostActivity: Fn
@@ -94,6 +95,11 @@ export function installMockClerum(): MockClerum {
     getTaskResult: vi.fn(async () => ({ response: 'ok' })),
     listSessions: vi.fn(async () => ({ items: [] })),
     loadSessionMessages: vi.fn(async () => ({ agent: '', chatId: '', turns: [] })),
+    renameSession: vi.fn(
+      async (_hostRef: string, _agent: string, _chatId: string, title: string) => ({
+        title,
+      })
+    ),
     getContextBreakdown: vi.fn(async () => ({ breakdown: null })),
     cancelTask: vi.fn(async () => undefined),
     subscribeHostActivity: vi.fn(

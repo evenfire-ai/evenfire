@@ -76,6 +76,10 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // restart this may point at a task whose reporter is gone (ghost); the D.2
     // processing reaper reconciles that at boot.
     activeTaskId: persisted.session.active_task_id ?? undefined,
+    // Server-authoritative title (spec 15). `?? undefined` (not null) so the
+    // RAM shape matches the memory store for dual-store parity (a persisted
+    // NULL becomes undefined, which `normalizeParityValue` drops on both sides).
+    title: persisted.session.title ?? undefined,
     traceContext:
       parseTraceContext(persisted.session.active_trace_context) ?? pending?.traceContext ?? null,
     // Lifetime token totals — rehydrate the RAM mirror from the durable columns.
