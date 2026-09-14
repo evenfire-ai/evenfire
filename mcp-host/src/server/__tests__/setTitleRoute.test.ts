@@ -137,9 +137,13 @@ describe('handleSetTitleRoute (spec 15 Fase B)', () => {
     expect(captured.jsonBody).toEqual({ ok: true, title: 'Quarterly plan' })
   })
 
-  it('never logs the raw title — only titleLength (T4)', async () => {
+  it('never logs the raw title on ANY console channel — only titleLength (T4)', async () => {
     const manager = await managerWithSession()
-    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    // Spy every channel: the success path logs via console.info, but a future
+    // leak could surface on error/warn/log, and the invariant is "the raw title
+    // never reaches a log", not "console.info is clean".
+    const channels = ['info', 'error', 'warn', 'log', 'debug'] as const
+    const spies = channels.map(ch => vi.spyOn(console, ch).mockImplementation(() => {}))
     try {
       const captured = makeRes()
       const secretish = 'MyPrivateBoardName'
@@ -149,11 +153,14 @@ describe('handleSetTitleRoute (spec 15 Fase B)', () => {
         makeHandlers({ setTitleHandler: realHandler(manager) })
       )
       expect(captured.statusCode).toBe(200)
-      const allLogs = infoSpy.mock.calls.map(args => args.join(' ')).join('\n')
+      const allLogs = spies
+        .flatMap(spy => spy.mock.calls)
+        .map(args => args.join(' '))
+        .join('\n')
       expect(allLogs).not.toContain(secretish)
       expect(allLogs).toContain('titleLength')
     } finally {
-      infoSpy.mockRestore()
+      spies.forEach(spy => spy.mockRestore())
     }
   })
 })
