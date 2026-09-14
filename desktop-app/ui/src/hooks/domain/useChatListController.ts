@@ -9,6 +9,19 @@ import { type SessionFsmEvent, type SessionFsmStore, seedSessionSnapshots } from
 
 const SESSION_CATALOG_PAGE_LIMIT = 50
 
+// R1-M1: an 'offline' pending rename (a genuine network / 5xx failure) retries on
+// every listSessions poll and every `window 'online'` event. A deterministic 5xx
+// / 501 would otherwise re-issue the PATCH forever, so cap the auto-retries per
+// entry: 5 rides out a transient blip and a few poll cycles before giving up,
+// while keeping the request volume bounded. Only 'offline' failures count toward
+// this budget — a 404 ('in-flight', waiting for the session to materialize) is a
+// wait, not a failure, and is bounded instead by the flush gate (it only retries
+// when a poll reports its session present), so a never-materializing session
+// simply stops PATCHing without ever exhausting a budget. On exhaustion the
+// optimistic local title is KEPT (no rollback, no more PATCH); an explicit fresh
+// user rename replaces the entry and starts a new budget.
+export const MAX_RENAME_SYNC_ATTEMPTS = 5
+
 /**
  * useChatListController (spec-v2 §4.4) — owns the whole sidebar chat-list
  * subsystem extracted from the god-hook:
@@ -190,6 +203,15 @@ export function useChatListController({
         // from `state` (which is the durable 'in-flight'/'offline' pending kind):
         // this gates re-entrancy so a flush poll never fires a duplicate PATCH.
         sending: boolean
+        // R1-M1: count of GENUINE ('offline' network / 5xx) failed sync attempts
+        // for THIS entry (never reset while the entry lives). A 404 ('in-flight')
+        // does NOT increment it — that is a wait for materialization, not a
+        // failure. Drives the retry budget below.
+        failureCount: number
+        // R1-M1: budget exhausted — keep the optimistic local title but stop
+        // auto-retrying on polls/online. Only 'offline' entries can reach this;
+        // a fresh user rename makes a new entry.
+        retriesExhausted: boolean
       }
     >
   >(new Map())
@@ -761,6 +783,8 @@ export function useChatListController({
       previousTitle: string
       state: PendingRename
       sending: boolean
+      failureCount: number
+      retriesExhausted: boolean
     }) => {
       const key = pendingRenameKey(entry.agentRef, entry.chatId)
       // FIX 1: never fire a duplicate PATCH for a key whose entry is already
@@ -800,6 +824,20 @@ export function useChatListController({
         // 404 → keep 'in-flight' (retry once the session exists server-side);
         // network / 5xx → 'offline' (retry on reconnect). Never rolled back.
         entry.state = kind === 'network' ? 'offline' : 'in-flight'
+        // R1-M1: bound the auto-retry, but count ONLY genuine failures (network /
+        // 5xx → 'offline'). A 404 ('in-flight') is not a failure — it is a WAIT
+        // for the session to materialize server-side, and it must survive for as
+        // long as that takes; counting it would retire a legitimate slow-to-
+        // materialize rename before its PATCH could be accepted (a silent rename
+        // loss). On the budget's last genuine failure, stop the entry
+        // auto-retrying on future polls/online while keeping its optimistic title
+        // (case E/F keeps resolving local until a fresh rename replaces it).
+        if (kind === 'network') {
+          entry.failureCount += 1
+          if (entry.failureCount >= MAX_RENAME_SYNC_ATTEMPTS) {
+            entry.retriesExhausted = true
+          }
+        }
       } finally {
         // Clearing on the entry object is safe even if it was deleted from the
         // Map (a superseding rename owns a different object).
@@ -810,10 +848,12 @@ export function useChatListController({
   )
 
   /**
-   * Retry pending renames (spec 15 §2.5). With `serverChatKeys` (a listSessions
-   * poll), retry an 'in-flight' entry only once its session actually appears
-   * server-side (the 404 → turn-1 case); 'offline' entries retry unconditionally
-   * (the reconnect case). Without keys (a `window 'online'` event) retry all.
+   * Retry pending renames (spec 15 §2.5). An 'in-flight' entry (a 404 awaiting the
+   * session to materialize server-side) is retried ONLY when a listSessions poll
+   * reports its session present (`serverChatKeys` has the key) — a reconnect does
+   * not make the session exist, so a bare `window 'online'` event (no keys) never
+   * retries it. 'offline' entries (a network / 5xx failure) retry unconditionally,
+   * which is exactly the reconnect case.
    */
   const flushPendingRenames = useCallback(
     async (serverChatKeys?: Set<string>) => {
@@ -821,8 +861,21 @@ export function useChatListController({
         // FIX 1: skip a key with a PATCH already in flight (attemptRenameRpc
         // guards this too, but skipping avoids spawning a no-op).
         if (entry.sending) continue
+        // R1-M1: skip an entry whose retry budget is spent — its optimistic title
+        // stays, but it no longer PATCHes on polls/online. Only 'offline' entries
+        // can ever reach this state (in-flight never counts toward the budget).
+        if (entry.retriesExhausted) continue
         const key = pendingRenameKey(entry.agentRef, entry.chatId)
-        if (entry.state === 'in-flight' && serverChatKeys && !serverChatKeys.has(key)) continue
+        // An 'in-flight' (404 waiting for materialization) retries ONLY when this
+        // flush is a poll that reports its session present. `online` (no keys) and
+        // a poll that does not list the session both skip it — a 404 is not
+        // resolved by reconnecting, only by the session existing server-side.
+        // Deliberately NOT budgeted: counting the 404 is what silently dropped a
+        // legitimate slow-to-materialize rename. The accepted trade is that a
+        // session which IS listed yet whose rename keeps 404ing (a backend
+        // list-vs-rename inconsistency) re-PATCHes once per poll unbounded — a
+        // pathological, self-resolving state, preferred over dropping the rename.
+        if (entry.state === 'in-flight' && !serverChatKeys?.has(key)) continue
         await attemptRenameRpc(entry)
       }
     },
@@ -860,6 +913,8 @@ export function useChatListController({
         previousTitle,
         state: 'in-flight' as PendingRename,
         sending: false,
+        failureCount: 0,
+        retriesExhausted: false,
       }
       pendingRenamesRef.current.set(key, entry)
       await attemptRenameRpc(entry)

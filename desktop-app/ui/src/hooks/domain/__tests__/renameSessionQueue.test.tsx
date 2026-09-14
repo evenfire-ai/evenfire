@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, waitFor } from '@testing-library/react'
 import { parseSessionsListResult } from '../../../../../src/rpcProxyClient'
 import type { ChatIndex } from '../../../../../src/types'
+import { MAX_RENAME_SYNC_ATTEMPTS } from '../useChatListController'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -509,5 +510,158 @@ describe('rename pending queue — user-identity teardown (spec 15 §2.5 / R1-H1
     // The user's optimistic rename survived the team-switch — the server title did
     // NOT overwrite it.
     expect(titleInList(result.current, 'c1')).toBe('renamed')
+  })
+})
+
+describe('rename pending queue — bounded retry (spec 15 §2.5 / R1-M1)', () => {
+  // R1-M1 repro (fails at the R1-H1 head): a deterministic failure (5xx/501 →
+  // 'network' → offline, or a never-materializing 404) retried on EVERY `online`
+  // event forever. The budget must stop the auto-retry after a bounded number of
+  // attempts while KEEPING the optimistic local title. Assert the observable: the
+  // PATCH count stops growing and the shown title stays put (pr-discipline T4).
+  it('stops PATCHing after a bounded number of failed attempts and keeps the local title', async () => {
+    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
+    // Deterministic network failure on every attempt → the entry never confirms.
+    clerum.rpc.renameSession.mockRejectedValue(new Error('fetch failed'))
+
+    const { result } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+
+    await act(async () => {
+      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+    })
+    // The optimistic title is shown and the first attempt failed (queued offline).
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+
+    // Simulate 12 reconnects. Without a budget each one fires a fresh PATCH.
+    const RECONNECTS = 12
+    for (let i = 0; i < RECONNECTS; i += 1) {
+      await act(async () => {
+        window.dispatchEvent(new Event('online'))
+        await flushMicrotasks()
+      })
+    }
+
+    // Bounded to EXACTLY the budget: 1 rename + 12 online would be 13 unbounded;
+    // the deterministic offline failure caps auto-retries at MAX_RENAME_SYNC_ATTEMPTS.
+    const patchesAfterReconnects = clerum.rpc.renameSession.mock.calls.length
+    expect(patchesAfterReconnects).toBe(MAX_RENAME_SYNC_ATTEMPTS)
+
+    // Further reconnects add NO more PATCHes — the entry is retired.
+    for (let i = 0; i < 5; i += 1) {
+      await act(async () => {
+        window.dispatchEvent(new Event('online'))
+        await flushMicrotasks()
+      })
+    }
+    expect(clerum.rpc.renameSession.mock.calls.length).toBe(patchesAfterReconnects)
+
+    // The optimistic local title is kept (close-by-writing: no rollback).
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+  })
+
+  // Happy path F must keep working within the budget: an offline entry that
+  // reconnects and succeeds before the budget is spent still syncs.
+  it('still syncs an offline rename that reconnects within the budget', async () => {
+    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
+    // First attempt fails offline; the reconnect retry succeeds.
+    clerum.rpc.renameSession
+      .mockRejectedValueOnce(new Error('fetch failed'))
+      .mockResolvedValue({ title: 'renamed' })
+
+    const { result } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+
+    await act(async () => {
+      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+    })
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await flushMicrotasks()
+    })
+
+    // The reconnect retry ran and confirmed — the title stays and the queue drains.
+    await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2))
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+
+    // A later reconnect does NOT re-PATCH a confirmed (drained) entry.
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await flushMicrotasks()
+    })
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2)
+  })
+
+  // Regression guard for the budget's first cut (fails at the pre-amend 81f193ab):
+  // a brand-new chat renamed before its first turn 404s while it materializes. The
+  // budget must NOT count those 404s and `online` churn must NOT retire the entry —
+  // once the session materializes in a poll the rename MUST still sync. Asserts the
+  // observable (T4): the PATCH is emitted after materialization and the entry drains.
+  it('a 404-while-materializing rename survives online churn and syncs on the poll', async () => {
+    wireStatefulIndex(clerum, [{ id: 'c1', title: 'old' }])
+    // Session not materialized yet: the poll lists nothing; the first rename 404s,
+    // the retry (once it materializes) succeeds. Churn never calls renameSession
+    // (in-flight is skipped on `online`), so mockRejectedValueOnce cleanly models
+    // "first PATCH 404s, next PATCH 200".
+    clerum.rpc.listSessions.mockResolvedValue(reportedSessions([]))
+    clerum.rpc.renameSession
+      .mockRejectedValueOnce(new Error('Rename session failed (404)'))
+      .mockResolvedValue({ title: 'renamed' })
+
+    const { result, rerender } = renderController({
+      selectedAgent: 'agent-x',
+      agentNames: ['agent-x'],
+    })
+    await waitFor(() => expect(titleInList(result.current, 'c1')).toBe('old'))
+
+    await act(async () => {
+      await result.current.handleRenameChatForAgent('agent-x', 'c1', 'renamed')
+    })
+    // Optimistic title shown; the first PATCH 404'd (in-flight, awaiting the session).
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    // Network flapping: more online events than the budget (5). An 'in-flight'
+    // entry must NOT retry on `online` (a 404 is not resolved by reconnecting) and
+    // must NOT be retired by the budget — so no extra PATCH and the entry survives.
+    // Literal count (not MAX_RENAME_SYNC_ATTEMPTS) on purpose: run verbatim against
+    // the pre-fix head this loop must still iterate, so the red is behavioral — the
+    // symbol did not exist there and `NaN` would silently skip the churn (false green).
+    for (let i = 0; i < 8; i += 1) {
+      await act(async () => {
+        window.dispatchEvent(new Event('online'))
+        await flushMicrotasks()
+      })
+    }
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(1)
+
+    // The session materializes. Swap in a fresh listSessions source (a new function
+    // ref invalidates useChatStore's TTL catalog cache) that now reports c1, then a
+    // cross-agent poll (agentNames rerender) reports the session present and the
+    // in-flight rename finally syncs.
+    clerum.rpc.listSessions = vi.fn(async () =>
+      reportedSessions([{ chatId: 'c1', title: 'server' }])
+    )
+    await act(async () => {
+      rerender({ agentNames: ['agent-x'] })
+      await flushMicrotasks()
+    })
+    await waitFor(() => expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2))
+    expect(titleInList(result.current, 'c1')).toBe('renamed')
+
+    // The entry drained (confirmed) — a later reconnect does not re-PATCH it.
+    await act(async () => {
+      window.dispatchEvent(new Event('online'))
+      await flushMicrotasks()
+    })
+    expect(clerum.rpc.renameSession).toHaveBeenCalledTimes(2)
   })
 })
