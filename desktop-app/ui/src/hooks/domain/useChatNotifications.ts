@@ -210,7 +210,12 @@ export function useChatNotifications({
       const deps = liveDepsRef.current
       const notificationTeamId = deps.currentTeamId || undefined
       const dedupeKey = `approval:${agentName}:${taskId}:${requestId}`
-      const desktopText = formatNotificationPreview(text, `Approval required for ${agentName}.`)
+      // Body fallback resolves the display name too — the title next to it
+      // already does, so an empty approval text never degrades to the raw slug.
+      const desktopText = formatNotificationPreview(
+        text,
+        `Approval required for ${deps.agentDisplayName(agentName)}.`
+      )
       deps.pushNotification({
         kind: 'approval_required',
         agentName,

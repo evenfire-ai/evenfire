@@ -107,4 +107,30 @@ describe('useChatNotifications — reply first-materialization dedupe (§4.7.2)'
       expect.objectContaining({ kind: 'assistant_reply', agentName: 'agent-x' })
     )
   })
+
+  // Review P1: the approval toast's BODY fallback must also resolve the
+  // display name — an empty approval text used to degrade to the raw slug
+  // while the title right above it showed the friendly name.
+  it('uses the display name in the approval toast body fallback', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useChatNotifications(params))
+
+    result.current.pushApprovalNotification({
+      agentName: 'agent-x',
+      chatId: 'chat-1',
+      taskId: 'task-1',
+      requestId: 'request-1',
+      text: '',
+    })
+
+    expect(params.showDesktopNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Agent X needs authorization',
+        body: 'Approval required for Agent X.',
+      })
+    )
+    expect(params.pushNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'approval_required', agentName: 'agent-x' })
+    )
+  })
 })
