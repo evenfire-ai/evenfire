@@ -9,13 +9,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
+import { parseCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { createToolDescribeTool } from '../../../capabilities/toolCatalogTools'
 import type { Tool, ToolRegistry } from '../../interfaces'
 import { BasicSafety } from '../../safety/safety'
 import { DefaultToolOutputProcessor } from '../../safety/toolOutputProcessor'
 import { SpilloverStorage } from '../../spillover'
+import { SpilloverReadTool } from '../../tools/spilloverRead'
 import type { ToolOutput } from '../../types'
 import { SimpleEventEmitter } from '../eventEmitter'
+import { DefaultLoopController } from '../loopConfig'
 import { executeSingleTool } from '../toolUseLoop'
+import { executeToolCalls } from '../toolUseLoopToolBatch'
 
 function tool(name: string, output: string, isError = false): Tool {
   return {
@@ -103,6 +108,91 @@ describe('executeSingleTool — T1.5 spillover wiring', () => {
     expect(typeof parsed.fingerprint_sha256).toBe('string')
     expect(result.rawContent).toBe(big) // UI sees the real output
     expect(eventTypes).toContain('spillover:persisted')
+  })
+
+  it('keeps a large discovered schema exact in spillover rather than flooding the next model request', async () => {
+    const schema = {
+      type: 'object',
+      properties: Object.fromEntries(
+        Array.from({ length: 200 }, (_, i) => [
+          `field_${i}`,
+          { type: 'string', description: `Field ${i}` },
+        ])
+      ),
+    }
+    const describe = createToolDescribeTool(() => [
+      { name: 'fixture__large_schema', serverName: 'fixture', inputSchema: schema },
+    ])
+    const definition = tool(describe.name, '')
+    definition.execute = async args => {
+      const result = await describe.execute(args, workspace)
+      return {
+        content: result.content ?? result.error ?? '',
+        duration_ms: 0,
+        is_error: !result.success,
+      }
+    }
+    const result = await executeSingleTool(
+      { id: 'describe-large', name: describe.name, arguments: { name: 'fixture__large_schema' } },
+      configFor({ tools: [definition], storage, taskId: 'schema-task' })
+    )
+    expect(result.is_error).toBe(false)
+    expect(result.spillover_ref).toBeDefined()
+    expect(Buffer.byteLength(result.content)).toBeLessThan(8192)
+    const saved = await storage.load(result.spillover_ref!)
+    expect(JSON.parse(saved!.content).parameters).toEqual(schema)
+    expect(JSON.parse(saved!.content).name).toBe('fixture__large_schema')
+    const reader = new SpilloverReadTool(storage)
+    const read = await executeSingleTool(
+      { id: 'read-schema', name: reader.name(), arguments: { ref: result.spillover_ref } },
+      configFor({ tools: [reader], storage, taskId: 'schema-task' })
+    )
+    expect(read.is_error).toBe(false)
+    expect(read.spillover_ref).toBeUndefined()
+    expect(read.content).toContain(JSON.stringify(schema))
+    const request = parseCodexCompletionRequestV1({
+      schemaVersion: 'codex-completion-request.v1',
+      provider: 'codex-subscription',
+      model: 'gpt-5.3-codex',
+      requestId: 'schema-read',
+      idempotencyKey: 'schema-read',
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [
+            { id: 'read-schema', name: reader.name(), arguments: { ref: result.spillover_ref } },
+          ],
+        },
+        { role: 'tool', content: read.content, toolCallId: 'read-schema', name: reader.name() },
+      ],
+    })
+    expect(request.ok).toBe(true)
+    const target = tool('fixture__large_schema', 'business-result')
+    const invoked = await executeToolCalls(
+      [
+        {
+          id: 'business-call',
+          name: 'clerum__tool_call',
+          arguments: { name: target.name(), arguments: { field_0: 'selected' } },
+        },
+      ],
+      {
+        ...configFor({ tools: [target], taskId: 'schema-task' }),
+        loopController: new DefaultLoopController(),
+        bridge: {
+          nativeNames: new Set([reader.name(), 'clerum__tool_call']),
+          getDeferrableCatalogNames: () => new Set([target.name()]),
+        },
+      } as never,
+      0
+    )
+    expect(target.execute).toHaveBeenCalledExactlyOnceWith({ field_0: 'selected' }, undefined)
+    expect(invoked.toolResults[0]).toMatchObject({
+      tool_call_id: 'business-call',
+      name: target.name(),
+      is_error: false,
+    })
   })
 
   it('ships content inline when below threshold (no spillover ref)', async () => {

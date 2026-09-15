@@ -1,4 +1,5 @@
 import { evaluateTaskBrake } from '../../budget/taskBrake'
+import { logger } from '../../logger'
 import type {
   Attachment,
   ChatMessage,
@@ -79,8 +80,14 @@ export async function runToolUseLoop(
   const userRequestText = latestUserText(initialMessages)
 
   const initialTools = toolRegistry.listDefinitions()
-  console.log(
-    `[NewCore:Loop] START → maxIter=${maxIterations}, tools=${initialTools.length}, messages=${initialMessages.length}`
+  logger.info(
+    {
+      component: 'Loop',
+      maxIterations,
+      toolCount: initialTools.length,
+      messageCount: initialMessages.length,
+    },
+    'Loop started'
   )
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -107,8 +114,14 @@ export async function runToolUseLoop(
     let tools: ToolDefinition[]
     try {
       tools = await loopController.refreshTools(toolRegistry.listDefinitions())
-    } catch {
-      tools = toolRegistry.listDefinitions()
+    } catch (error) {
+      if (config.abortSignal?.aborted) return { type: 'cancelled', reason: 'signal_aborted' }
+      // Presentation failures must not dump the entire local catalog into the
+      // model request or bypass the controller's approved tool selection.
+      return {
+        type: 'error',
+        error: error instanceof Error ? error : new Error('Tool presentation failed'),
+      }
     }
 
     const context: ReasoningContext = {
@@ -176,8 +189,9 @@ export async function runToolUseLoop(
           shouldRecoverWorkflowTriggerTextResponse(userRequestText, result.content)
         ) {
           workflowTriggerAfterListTextResponseRecovered = true
-          console.log(
-            `[NewCore:Loop] iter=${iteration} → recovering workflow trigger text response after workflow_list`
+          logger.info(
+            { component: 'Loop', iteration },
+            'recovering workflow trigger text response after workflow_list'
           )
           messages.push({ role: 'assistant', content: result.content })
           messages.push({
@@ -199,8 +213,9 @@ export async function runToolUseLoop(
           !hasWorkflowListResultForCurrentUserTurn(messages)
         ) {
           workflowListTextResponseRecovered = true
-          console.log(
-            `[NewCore:Loop] iter=${iteration} → recovering workflow list text response without tool call`
+          logger.info(
+            { component: 'Loop', iteration },
+            'recovering workflow list text response without tool call'
           )
           messages.push({ role: 'assistant', content: result.content })
           messages.push({
@@ -218,8 +233,9 @@ export async function runToolUseLoop(
           shouldRecoverWorkflowTriggerTextResponse(userRequestText, result.content)
         ) {
           workflowTriggerTextResponseRecovered = true
-          console.log(
-            `[NewCore:Loop] iter=${iteration} → recovering workflow trigger text response without tool call`
+          logger.info(
+            { component: 'Loop', iteration },
+            'recovering workflow trigger text response without tool call'
           )
           messages.push({ role: 'assistant', content: result.content })
           messages.push({
@@ -236,8 +252,9 @@ export async function runToolUseLoop(
           shouldRecoverWorkflowArtifactTextResponse(userRequestText)
         ) {
           workflowArtifactTextResponseRecovered = true
-          console.log(
-            `[NewCore:Loop] iter=${iteration} → recovering workflow artifact text response without tool call`
+          logger.info(
+            { component: 'Loop', iteration },
+            'recovering workflow artifact text response without tool call'
           )
           messages.push({ role: 'assistant', content: result.content })
           messages.push({
@@ -265,8 +282,8 @@ export async function runToolUseLoop(
       }
 
       case 'tool_calls': {
-        const toolNames = result.calls.map(c => c.name).join(', ')
-        console.log(`[NewCore:Loop] iter=${iteration} → tool_calls: [${toolNames}]`)
+        const toolNames = result.calls.map(c => c.name)
+        logger.info({ component: 'Loop', iteration, toolNames }, 'Tool calls selected')
 
         if (
           isWorkflowListIntent(userRequestText) &&
@@ -373,7 +390,7 @@ export async function runToolUseLoop(
       }
 
       case 'need_approval':
-        console.log(`[NewCore:Loop] EXIT → need_approval, iterations=${iteration + 1}`)
+        logger.info({ component: 'Loop', iterations: iteration + 1 }, 'Loop requires approval')
         return { type: 'need_approval', approval: result.approval }
       case 'error': {
         const recovery = handleLoopErrorRecovery({
@@ -397,7 +414,7 @@ export async function runToolUseLoop(
           workflowTriggerTextResponseRecovered =
             recovery.workflowTriggerTextResponseRecovered ?? workflowTriggerTextResponseRecovered
           messages = recovery.messages
-          console.log(`[NewCore:Loop] iter=${iteration} → recovering from LLM error`)
+          logger.info({ component: 'Loop', iteration }, 'recovering from LLM error')
           continue
         }
 
@@ -412,8 +429,9 @@ export async function runToolUseLoop(
           )
         }
 
-        console.log(
-          `[NewCore:Loop] EXIT → error: ${result.error.message}, iterations=${iteration + 1}`
+        logger.error(
+          { component: 'Loop', iterations: iteration + 1, err: result.error },
+          'Loop failed'
         )
         return { type: 'error', error: result.error }
       }

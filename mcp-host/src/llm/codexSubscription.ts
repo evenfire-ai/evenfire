@@ -12,6 +12,7 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import { logger } from '../logger'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
@@ -61,24 +62,20 @@ export type CodexSubscriptionDeps = {
   attemptContext: (input: { model: string }) => CodexAttemptContext
 }
 
-/**
- * Codex authorize is capped at `LIMITS.maxTools` (32). MCP tools use
- * `serverName__toolName`; native tools are unprefixed or `clerum__*`.
- * Drop MCP tools first so a Host with a large MCP catalog can still
- * authorize. If natives still exceed the cap, keep the leading native
- * slice in registry order.
- */
-export function isCodexNativeToolName(name: string): boolean {
-  const idx = name.indexOf('__')
-  if (idx <= 0) return true
-  return name.startsWith('clerum__')
-}
-
 function assertTerminalCodexOutcome(result: {
   text: string
   toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
   outcome: 'success' | 'canceled' | 'error' | 'unknown'
 }): void {
+  if (result.toolCalls.length > LIMITS.maxToolCalls) {
+    throw new CodexProxyError('provider_unavailable', `tool calls exceed ${LIMITS.maxToolCalls}`)
+  }
+  if (result.toolCalls.length > 0 && result.outcome !== 'success') {
+    throw new CodexProxyError(
+      'provider_unavailable',
+      'tool calls require a successful terminal outcome'
+    )
+  }
   if (result.outcome === 'error') {
     throw new CodexProxyError('provider_unavailable', 'proxy stream ended with an error outcome')
   }
@@ -88,12 +85,6 @@ function assertTerminalCodexOutcome(result: {
       'proxy stream ended without a terminal outcome'
     )
   }
-}
-
-export function selectCodexAdvertisedTools(tools: ToolDefinition[]): ToolDefinition[] {
-  const natives = tools.filter(tool => isCodexNativeToolName(tool.name))
-  if (natives.length <= LIMITS.maxTools) return natives
-  return natives.slice(0, LIMITS.maxTools)
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
@@ -332,20 +323,20 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       })),
     }
     if (tools && tools.length > 0) {
-      const advertised = selectCodexAdvertisedTools(tools)
-      if (advertised.length !== tools.length) {
-        console.warn(
-          `[Codex] advertised ${advertised.length} native tool(s) of ${tools.length} offered (MCP omitted, cap ${LIMITS.maxTools})`
-        )
-      }
-      if (advertised.length > 0) {
-        request.tools = advertised.map(tool => ({
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.parameters,
-        }))
-      }
+      // Presentation is owned by the agent loop. Preserve its final definitions
+      // in both the authorized hash and the proxy request; MCP names are not
+      // permissions and must never be discarded by the provider adapter.
+      logger.debug(
+        { provider: 'codex-subscription', presentedCount: tools.length },
+        'Tool definitions prepared for authorization'
+      )
+      request.tools = tools.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }))
     }
+
     if (
       options?.temperature !== undefined ||
       options?.max_tokens !== undefined ||
