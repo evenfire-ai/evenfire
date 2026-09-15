@@ -3,7 +3,7 @@ import type { TabBarOption } from '@components/TabBar/types'
 
 export type DetailPageShellProps<T extends string> = {
   actions?: ReactNode
-  activeTab: T
+  activeTab?: T
   backDisabled?: boolean
   backLabel: string
   children: ReactNode
@@ -16,9 +16,9 @@ export type DetailPageShellProps<T extends string> = {
   notice?: ReactNode
   onBack: () => void
   overlays?: ReactNode
-  onTabChange: (value: T) => void
+  onTabChange?: (value: T) => void
   subtitle: ReactNode
-  tabAriaLabel: string
+  tabAriaLabel?: string
   tabClassName?: string
   tabs?: TabBarOption<T>[]
   title: string

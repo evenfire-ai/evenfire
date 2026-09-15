@@ -7,6 +7,7 @@ import { CONTROL_ROUTES } from '@constants/routes'
 import { DEFAULT_WORKFLOW_RECIPE_NAMESPACE } from '@constants/workflowRecipes'
 import type { WorkflowRecipeResource } from '../lib/api'
 import { PluginsEmptyState } from './PluginsEmptyState'
+import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconWorkflow } from './Sidebar/icons'
 import { TableHeaderRow } from './TableHeaderRow'
@@ -87,17 +88,21 @@ export function RecipesTab({ items, loading, error, onInstall, onRefresh }: Prop
             {isInitialLoad ? 'Plugins' : `Plugins (${filteredItems.length})`}
           </>
         }
-        subtitle="Select a plugin to view status, run history, and actions."
-        secondaryActions={
-          <button
-            type="button"
-            className="cu-btn cu-btn--sm cu-nowrap"
-            onClick={() => router.push(CONTROL_ROUTES.plugins.sdk)}
-            disabled={isInitialLoad}
-          >
-            Plugins SDK
-          </button>
+        titleActions={
+          <RowActionsMenu
+            ariaLabel="Plugin actions"
+            horizontalTrigger
+            actions={[
+              {
+                key: 'sdk',
+                label: 'Plugin SDK',
+                onClick: () => router.push(CONTROL_ROUTES.plugins.sdk),
+                disabled: isInitialLoad,
+              },
+            ]}
+          />
         }
+        subtitle="Select a plugin to view status, run history, and actions."
         refreshAction={
           <button
             type="button"

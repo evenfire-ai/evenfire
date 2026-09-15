@@ -8026,9 +8026,15 @@ td.cu-registry-description {
   min-width: var(--cu-create-action-min-width);
 }
 
+/* Same content padding as the registry edit form and the create-flow step
+   panel, so this edit flow keeps its margins inside the panel like its
+   siblings instead of sitting flush against the panel edges. */
+.cu-channel-edit-form {
+  padding: 1.9rem 2.35rem 1.1rem;
+}
+
 .cu-channel-edit-form .cu-create-actions {
   margin-top: var(--cu-space-3);
-  margin-bottom: var(--cu-space-4);
 }
 
 .cu-section-title {
