@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { redactUnknown } from './logger.js'
 
 describe('mcp-host structured logger redaction', () => {
@@ -33,5 +33,45 @@ describe('mcp-host structured logger redaction', () => {
   it('drops prototype-polluting keys instead of writing them onto the clone', () => {
     const input = { ok: true, constructor: { evil: true }, prototype: { evil: true } }
     expect(redactUnknown(input)).toEqual({ ok: true })
+  })
+
+  it('emits a structured fallback through the public logger when fields cannot be serialized', async () => {
+    const previousConsole = { log: console.log, error: console.error, warn: console.warn }
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.stubEnv('LOG_LEVEL', 'info')
+    vi.resetModules()
+    try {
+      // The module binds its sinks at import time, so capture the sink before
+      // loading it and restore its console adapters after this isolated check.
+      const { logger } = await import('./logger.js')
+      logger.info({ taskId: 'task-1' }, 'valid fields')
+      const fields = Object.defineProperty({ taskId: 'task-2' }, 'unreadable', {
+        enumerable: true,
+        get() {
+          throw new Error('fixture field cannot be read')
+        },
+      })
+      logger.info(fields, 'unserializable fields')
+
+      expect(output).toHaveBeenCalledTimes(2)
+      expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({
+        taskId: 'task-1',
+        level: 'info',
+        msg: 'valid fields',
+      })
+      expect(JSON.parse(output.mock.calls[1]![0] as string)).toEqual({
+        fields: '[Unserializable]',
+        timestamp: expect.any(String),
+        level: 'info',
+        msg: 'unserializable fields',
+      })
+    } finally {
+      output.mockRestore()
+      console.log = previousConsole.log
+      console.error = previousConsole.error
+      console.warn = previousConsole.warn
+      vi.unstubAllEnvs()
+      vi.resetModules()
+    }
   })
 })

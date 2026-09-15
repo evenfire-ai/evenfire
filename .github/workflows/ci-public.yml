@@ -585,6 +585,8 @@ jobs:
         run: bash scripts/tests/test-minikube-makefile.sh
 
       - name: Test local Minikube T0/T1/T2 contract
+        # Includes test-minikube-docker-cli-env.sh: the real image-manifest
+        # writer's hermetic sequential-build and derived-base provenance checks.
         run: bash scripts/tests/test-minikube-t2-contract.sh
 
       - name: Test local Minikube T2 setup handoff

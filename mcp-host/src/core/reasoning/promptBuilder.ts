@@ -108,9 +108,9 @@ export const MCP_SERVER_SELECTION_TEXT =
 /**
  * Tool-discovery guidance (dynamic-tool-loading, Phase F4.1). Emitted whenever
  * the `clerum__tool_search` bridge tool is registered — i.e. when the stable
- * bridge is in play. Teaches the model the 3-step discovery flow so it knows
- * the deferred MCP catalog is reachable even though those tools are not listed
- * directly in `tools[]`.
+ * bridge is callable. Direct definitions take precedence; discovery is explained
+ * for additional approved tools. This applies both below and above the auto
+ * threshold without claiming that directly presented schemas are hidden.
  *
  * Single source of truth, shared by the legacy and tiered paths. It is a
  * CONSTANT (the bridge tools are always present when active), so it lives in the

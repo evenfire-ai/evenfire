@@ -13,6 +13,7 @@ import { ApprovalController } from '../../extensions/approvalController'
 import { InLoopContextManager, PressureContextManager } from '../../extensions/contextManager'
 import { UnifiedApprovalGateController } from '../../extensions/mcpApprovalGateController'
 import type { Tool } from '../../interfaces'
+import { DefaultPromptBuilder, TOOL_DISCOVERY_TEXT } from '../../reasoning/promptBuilder'
 import { BasicSafety } from '../../safety/safety'
 import { NativeToolRegistry } from '../../tools/nativeToolRegistry'
 import { type ChatMessage, ConversationState, type ToolCall } from '../../types'
@@ -155,6 +156,68 @@ const bridgeCall = (name: string, id = 'selected-call', args = {}): ToolCall => 
 })
 
 describe('approved catalog across presentation and lifecycle', () => {
+  it.each([83, 150, 250])(
+    'keeps direct-first guidance accurate in both prompt paths as auto grows to %i tools and shrinks',
+    async count => {
+      const { manager, registry, nativeNames } = await setup(1)
+      const controller = new DeferrableToolController(
+        new DefaultLoopController(),
+        nativeNames,
+        { dynamicToolsEnabled: false, dynamicToolsThreshold: 60, codexMode: 'auto' },
+        { get: () => undefined, set: () => {} }
+      )
+      const builder = new DefaultPromptBuilder()
+      const buildPrompts = async () => {
+        const presented = await controller.refreshTools(registry.listDefinitions())
+        const hasBridge = presented.some(tool => tool.name === 'clerum__tool_search')
+        const parts = builder.buildParts({
+          identityFiles: { identity: '', soul: '', agents: '', user: '' },
+          dailyLogSnapshot: '',
+          model: 'codex-test',
+          provider: 'codex-subscription',
+          platformHints: [],
+          capabilities: '',
+          workflowGuidance: '',
+          mcpServerGuidance: '',
+          toolDiscoveryGuidance: hasBridge ? TOOL_DISCOVERY_TEXT : '',
+          memoryGuidance: '',
+        })
+        const legacy = String(builder.buildSystemPrompt(presented).content)
+        for (const prompt of [legacy, parts.context]) {
+          expect(prompt).toContain('Use directly listed tools when available.')
+          expect(prompt).toContain('For additional approved tools,')
+          expect(prompt).not.toContain('not all listed directly')
+        }
+        expect(hasBridge).toBe(true)
+        return { presented, parts }
+      }
+      const direct = await buildPrompts()
+      expect(direct.presented).toEqual(registry.listDefinitions())
+      expect(direct.presented.some(tool => tool.name === 'alpha__record__read_000')).toBe(true)
+
+      remote.catalogs.set(
+        'late',
+        Array.from({ length: count - 1 }, (_, i) => ({
+          name: `read_${i}`,
+          description: `Read record ${i}`,
+          inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+        }))
+      )
+      await manager.addServer(serverInfo('late'))
+      expect(manager.getAllTools()).toHaveLength(count)
+      const discovery = await buildPrompts()
+      expect(discovery.presented.every(tool => nativeNames.has(tool.name))).toBe(true)
+      expect(discovery.parts.contextHash).toBe(direct.parts.contextHash)
+      expect(discovery.parts.stableHash).toBe(direct.parts.stableHash)
+
+      await manager.removeServer('late')
+      const directAgain = await buildPrompts()
+      expect(directAgain.presented).toEqual(direct.presented)
+      expect(directAgain.parts.contextHash).toBe(direct.parts.contextHash)
+      expect(remote.calls).not.toHaveBeenCalled()
+    }
+  )
+
   for (const mode of ['direct', 'auto', 'discovery'] as const) {
     for (const count of [83, 90, 150, 250]) {
       it.each([false, true])(`${mode}: ${count} MCP + 36 natives, reversed=%s`, async reverse => {
