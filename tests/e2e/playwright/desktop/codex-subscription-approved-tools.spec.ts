@@ -127,6 +127,7 @@ test('unauthenticated agent route guard prevents connector use', async ({ page }
 test('authenticated user without agent access cannot select the protected agents', async () => {
   const before = await Promise.all(cases.map(readEvidence))
   const app = await launchDesktopApp()
+  let journeyPassed = false
   try {
     const page = await app.firstWindow()
     await expect(page.getByLabel('Email', { exact: true })).toBeVisible()
@@ -140,16 +141,28 @@ test('authenticated user without agent access cannot select the protected agents
     await expect(page.getByTestId('nav-agents')).toBeVisible()
     await page.getByTestId('nav-agents').click()
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'No agents', exact: true })).toBeVisible()
+    await expect(
+      page.getByRole('heading', { name: 'No agents available', exact: true })
+    ).toBeVisible()
     for (const scenario of cases) {
       await expect(page.getByText(scenario.agentDisplayName, { exact: true })).toHaveCount(0)
     }
     await page.getByTestId('nav-chat').click()
+    await expect(page.getByRole('heading', { name: 'Chat', exact: true })).toBeVisible()
+    await expect(
+      page.getByText('You do not currently have authorized agents in this team.', { exact: true })
+    ).toBeVisible()
     await expect(page.getByTestId('chat-input')).toHaveCount(0)
     await expect(page.getByTestId('send-button')).toHaveCount(0)
     expect(await Promise.all(cases.map(readEvidence))).toEqual(before)
+    journeyPassed = true
   } finally {
-    await app.close()
+    try {
+      await app.close()
+    } catch {
+      if (journeyPassed) throw new Error('Desktop cleanup failed')
+      // Preserve the original assertion failure when cleanup also fails.
+    }
   }
 })
 
@@ -470,25 +483,38 @@ for (const scenario of cases) {
       })
       corpusOutcome = 'passed'
     } finally {
-      const desktop = await app.firstWindow()
-      // Read-only measurement snapshot, not a readiness or correctness assertion.
-      // Preserve exact provider-reported UI figures; never infer tokens from bytes.
-      const reportedTokenLabels = await desktop
-        .getByLabel(/^Turn token usage/)
-        .evaluateAll(elements => elements.map(element => element.getAttribute('aria-label')))
-      await testInfo.attach('provider-parity-corpus', {
-        body: JSON.stringify({
-          mode,
-          catalogSize: scenario.catalogSize,
-          outcome: corpusOutcome,
-          completedTasks,
-          elapsedMs: Date.now() - corpusStarted,
-          reportedTokenLabels,
-          subscriptionUsage: null,
-        }),
-        contentType: 'application/json',
-      })
-      await app.close()
+      const cleanupFailures: string[] = []
+      try {
+        const desktop = await app.firstWindow()
+        // Read-only measurement snapshot, not a readiness or correctness assertion.
+        // Preserve exact provider-reported UI figures; never infer tokens from bytes.
+        const reportedTokenLabels = await desktop
+          .getByLabel(/^Turn token usage/)
+          .evaluateAll(elements => elements.map(element => element.getAttribute('aria-label')))
+        await testInfo.attach('provider-parity-corpus', {
+          body: JSON.stringify({
+            mode,
+            catalogSize: scenario.catalogSize,
+            outcome: corpusOutcome,
+            completedTasks,
+            elapsedMs: Date.now() - corpusStarted,
+            reportedTokenLabels,
+            subscriptionUsage: null,
+          }),
+          contentType: 'application/json',
+        })
+      } catch {
+        cleanupFailures.push('measurement unavailable')
+      }
+      try {
+        await app.close()
+      } catch {
+        cleanupFailures.push('Desktop cleanup failed')
+      }
+      if (cleanupFailures.length) {
+        testInfo.annotations.push({ type: 'cleanup', description: cleanupFailures.join('; ') })
+        if (corpusOutcome === 'passed') throw new Error(cleanupFailures.join('; '))
+      }
     }
   })
 }
