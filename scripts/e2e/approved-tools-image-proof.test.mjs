@@ -5,10 +5,10 @@
 // runs a command, touches the filesystem, or reaches a cluster, and every
 // digest is generated, not copied.
 //
-// This is NOT the end-to-end coverage for the acquisition contract. The hermetic
-// builder test -- which runs scripts/minikube/build-images.sh against fake
-// runtime binaries and proves the carry-across-partial-runs behaviour -- is
-// still owed, and its absence is the open gap for this change.
+// Real-builder coverage lives in scripts/tests/test-minikube-docker-cli-env.sh:
+// sequential partial builds, both derived-image bindings, stale/missing images,
+// profile mismatch, malformed prior JSON, and preservation of a good manifest
+// when late inventory queries fail. Neither suite certifies a live deployment.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
