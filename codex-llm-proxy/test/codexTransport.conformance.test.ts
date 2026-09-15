@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
-import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import {
+  hashCodexCompletionRequestV1,
+  parseCodexCompletionRequestV1,
+} from '@clerum/llm-provider-attempt-contract'
 import { CodexTransportError, streamCodexCompletion } from '../src/codexTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
@@ -673,81 +676,147 @@ describe('streamCodexCompletion', () => {
     expect(body).not.toHaveProperty('temperature')
   })
 
-  it.each(['service.with.dots__read', `generated_server_${'x'.repeat(70)}__read`])(
-    'roundtrips the canonical tool name %s without changing authorization identity',
-    async name => {
-      const request = {
-        ...REQUEST,
-        tools: [{ name, description: 'Read one record', parameters: { type: 'object' } }],
-        messages: [
-          ...REQUEST.messages,
-          {
-            role: 'assistant' as const,
-            content: '',
-            toolCalls: [{ id: 'previous', name, arguments: {} }],
-          },
-          { role: 'tool' as const, content: 'previous result', toolCallId: 'previous', name },
-        ],
-      }
-      const requestHash = hashCodexCompletionRequestV1(request)
-      const original = structuredClone(request)
-      const emitted: unknown[] = []
-      const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
-        const body = JSON.parse(String(init?.body))
-        const wireName = body.tools[0].name
-        expect(wireName).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
-        expect(wireName).not.toBe(name)
-        expect(
-          body.input.find((item: { type?: string }) => item.type === 'function_call').name
-        ).toBe(wireName)
-        expect(
-          body.input.find((item: { type?: string }) => item.type === 'function_call_output')
-        ).toEqual({
-          type: 'function_call_output',
-          call_id: 'previous',
-          output: 'previous result',
-        })
-        return sseResponse([
-          `data: ${JSON.stringify({
-            type: 'response.output_item.done',
-            item: {
-              type: 'function_call',
-              id: 'item-new',
-              call_id: 'new-call',
-              name: wireName,
-              arguments: '{}',
-            },
-          })}\n\n`,
-          'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
-        ])
+  it.each([
+    { name: 'service.with.dots__read', mode: 'alias' },
+    { name: `generated_server_${'x'.repeat(140)}__read`, mode: 'alias' },
+    { name: '工具@read record', mode: 'alias' },
+    { name: 'history@removed tool', mode: 'history-only' },
+    { name: 'service.with.dots__read', mode: 'canonical-echo' },
+  ])('roundtrips $name ($mode) without changing authorization identity', async ({ name, mode }) => {
+    const request = {
+      ...REQUEST,
+      ...(mode === 'history-only'
+        ? {}
+        : { tools: [{ name, description: 'Read one record', parameters: { type: 'object' } }] }),
+      messages: [
+        ...REQUEST.messages,
+        {
+          role: 'assistant' as const,
+          content: '',
+          toolCalls: [{ id: 'previous', name, arguments: {} }],
+        },
+        { role: 'tool' as const, content: 'previous result', toolCallId: 'previous', name },
+      ],
+    }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    expect(parseCodexCompletionRequestV1(request).ok).toBe(true)
+    const original = structuredClone(request)
+    const emitted: unknown[] = []
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      const wireName = body.input.find(
+        (item: { type?: string }) => item.type === 'function_call'
+      ).name
+      if (mode === 'history-only') expect(body.tools).toBeUndefined()
+      else expect(body.tools[0].name).toBe(wireName)
+      expect(wireName).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
+      expect(wireName).not.toBe(name)
+      expect(body.input.find((item: { type?: string }) => item.type === 'function_call').name).toBe(
+        wireName
+      )
+      expect(
+        body.input.find((item: { type?: string }) => item.type === 'function_call_output')
+      ).toEqual({
+        type: 'function_call_output',
+        call_id: 'previous',
+        output: 'previous result',
       })
-      const result = await streamCodexCompletion({
-        executionTicket: 'ticket-name-map',
+      return sseResponse([
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-new',
+            call_id: 'new-call',
+            name: mode === 'canonical-echo' ? name : wireName,
+            arguments: '{}',
+          },
+        })}\n\n`,
+        'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+      ])
+    })
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-name-map',
+      requestHash,
+      request,
+      ticket: {
+        jti: 'name-map',
+        hostRef: 'research-host',
+        model: request.model,
+        requestHash,
+        providerAttemptId: 'att-name-map',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: async () => ({
+        providerAttemptId: 'att-name-map',
+        outcome: 'success' as const,
+        duplicate: false,
+      }),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => emitted.push(frame),
+    })
+    expect(result.outcome).toBe('success')
+    expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
+    expect(request).toEqual(original)
+    expect(hashCodexCompletionRequestV1(request)).toBe(requestHash)
+  })
+
+  it('rejects an unregistered alias in a completed stream before emitting any calls', async () => {
+    const emitted: unknown[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-unknown-alias',
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const request = {
+      ...REQUEST,
+      tools: [{ name: 'known.read', description: 'Read a record', parameters: { type: 'object' } }],
+    }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      return sseResponse([
+        ...[body.tools[0].name, '__codex_tool_unregistered'].map(
+          (name, index) =>
+            `data: ${JSON.stringify({
+              type: 'response.output_item.done',
+              item: { type: 'function_call', id: `call-${index}`, name, arguments: '{}' },
+            })}\n\n`
+        ),
+        'data: {"type":"response.completed"}\n\n',
+      ])
+    })
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'ticket-unknown-alias',
         requestHash,
         request,
         ticket: {
-          jti: 'name-map',
+          jti: 'unknown-alias',
           hostRef: 'research-host',
           model: request.model,
           requestHash,
-          providerAttemptId: 'att-name-map',
+          providerAttemptId: 'att-unknown-alias',
         },
         redeem: async () => redeemSuccess(),
-        finalize: async () => ({
-          providerAttemptId: 'att-name-map',
-          outcome: 'success' as const,
-          duplicate: false,
-        }),
+        finalize,
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
         onFrame: frame => emitted.push(frame),
       })
-      expect(result.outcome).toBe('success')
-      expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
-      expect(request).toEqual(original)
-      expect(hashCodexCompletionRequestV1(request)).toBe(requestHash)
-    }
-  )
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream returned an unknown tool name',
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+    expect(emitted).toEqual([])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        receipt: expect.objectContaining({ outcome: 'error' }),
+      })
+    )
+  })
 
   it('omits Notify-like generation fields on the Responses wire', async () => {
     const fetchFn = vi.fn(async () =>

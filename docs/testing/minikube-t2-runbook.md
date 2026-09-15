@@ -133,6 +133,26 @@ cluster fingerprint, image coordinate, and the exact `imagesGeneratedAt` value
 from the image manifest. A mismatch—including a new image acquisition at the
 same HEAD—stops with a stable error code instead of allowing a mixed-commit run.
 
+Certifying preflight also verifies the live `codex-llm-proxy` against the
+profile's recorded production image ID. The Deployment and every selected
+running pod must have the production image, with no approved-tools fixture
+annotation or environment flags. A bounded read-only predicate checks the live
+environment without exposing values, including flags inherited through
+`envFrom`. Repository digests are resolved to config image IDs through the
+bounded, profile-local image inventory; missing or ambiguous mappings fail
+`PROXY_RUNTIME_MISMATCH`. Ready replicas and a matching marker alone cannot
+certify a fixture proxy left by prepare or an interrupted journey. Restore the
+production proxy before retrying runtime certification. This check runs again
+in the final preflight after optional journeys; planner mode does not certify it.
+
+Health and Playwright commands inherit the parent's opaque lease token,
+profile, explicit context, repository, and lock root for that invocation only.
+A nested mutation wrapper revalidates the full repository/branch/HEAD/profile/
+context/worktree/lock-key binding and live owner before using the lease. A
+missing token or mismatched binding fails; the journey cannot acquire a second
+lease or redirect an inherited lease to another profile. Hermetic coverage is
+`bash scripts/tests/test-minikube-t2-proxy-runtime.sh`.
+
 Mutating image acquisition/builds and targeted deploys are children of that
 same exact profile lease. Public Make targets acquire it; private body targets,
 `pull-images.sh`, and `build-images.sh` validate the inherited token again

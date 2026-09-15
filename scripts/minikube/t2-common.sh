@@ -652,9 +652,118 @@ PY
   fi
 }
 
+# Readiness alone does not prove that a journey restored the production proxy.
+# The planner may reconcile; certifying preflight requires the live baseline.
+t2_proxy_runtime_check() {
+  [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
+  local deployments="$1" pods inventory pod_names pod_name environment_check
+  if ! pods="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pods -l app=codex-llm-proxy -o json)"; then
+    t2_fail PROXY_RUNTIME_MISMATCH 'unable to observe running proxy identity'
+    return 1
+  fi
+  if ! inventory="$(t2_mk image ls --format=json)"; then
+    t2_fail PROXY_RUNTIME_MISMATCH 'unable to observe profile image inventory'
+    return 1
+  fi
+  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" <<'PY_PROXY'
+import json
+import re
+import sys
+from pathlib import Path
+
+def require(condition):
+    if not condition:
+        raise ValueError("unproven production proxy")
+
+def clean(template):
+    require("evenfire.ai/codex-tools-fixture-run" not in (template.get("metadata", {}).get("annotations") or {}))
+    containers = [c for c in template["spec"]["containers"] if c.get("name") == "codex-llm-proxy"]
+    require(len(containers) == 1)
+    container = containers[0]
+    for entry in container.get("env", []):
+        require(entry.get("name") not in {"CODEX_APPROVED_TOOLS_TEST_ONLY", "CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE"})
+        require(entry.get("name") != "NODE_ENV" or entry.get("value") != "test")
+    return container
+
+try:
+    manifest = json.loads(Path(sys.argv[1]).read_text())
+    require(manifest.get("profile") == sys.argv[2])
+    images = manifest["images"]
+    # Both acquisition modes record this production alias and Docker config ID.
+    baseline = images["clerum/codex-llm-proxy:test"]
+    require(isinstance(baseline, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", baseline))
+    inventory = json.loads(sys.argv[6])
+    require(isinstance(inventory, list))
+    observed = {}
+    for item in inventory:
+        identity = item.get("id", "")
+        if not identity.startswith("sha256:"):
+            identity = "sha256:" + identity
+        require(re.fullmatch(r"sha256:[0-9a-f]{64}", identity))
+        for ref in (item.get("repoTags") or []) + (item.get("repoDigests") or []):
+            require(ref not in observed or observed[ref] == identity)
+            observed[ref] = identity
+    deployments = [d for d in json.loads(sys.argv[4])["items"] if
+                   d.get("metadata", {}).get("namespace") == sys.argv[3] and
+                   d.get("metadata", {}).get("name") == "codex-llm-proxy"]
+    require(len(deployments) == 1)
+    deployment = deployments[0]
+    desired = deployment["spec"].get("replicas", 1)
+    require(isinstance(desired, int) and desired > 0)
+    target = clean(deployment["spec"]["template"])
+    require(images.get(target["image"]) == baseline)
+    ref = target["image"]
+    canonical = "docker.io/" + ref if ref.startswith("clerum/") else ref
+    require(observed.get(canonical) == baseline)
+    pods = json.loads(sys.argv[5])["items"]
+    require(len(pods) >= desired)
+    names = []
+    for pod in pods:
+        require(not pod["metadata"].get("deletionTimestamp"))
+        require(pod["metadata"].get("namespace") == sys.argv[3])
+        container = clean(pod)
+        require(container["image"] == target["image"])
+        statuses = [c for c in pod["status"]["containerStatuses"] if c.get("name") == "codex-llm-proxy"]
+        require(len(statuses) == 1 and statuses[0].get("ready") is True)
+        require(bool(statuses[0].get("state", {}).get("running")))
+        # Resolve a repository digest through the owned profile inventory;
+        # config IDs and repository manifest digests are different identities.
+        image_id = statuses[0].get("imageID", "")
+        if image_id.startswith("docker://"):
+            image_id = image_id[len("docker://"):]
+        elif image_id.startswith("docker-pullable://"):
+            image_id = image_id[len("docker-pullable://"):]
+        if "@sha256:" in image_id:
+            image_id = observed.get(image_id)
+        require(image_id == baseline)
+        name = pod["metadata"]["name"]
+        require(re.fullmatch(r"[a-z0-9][a-z0-9.-]*", name))
+        names.append(name)
+    print("\n".join(names))
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    raise SystemExit("production proxy identity, fixture markers, or baseline evidence did not match")
+PY_PROXY
+  )"; then
+    T2_NEXT_COMMAND="restore the production proxy and retry MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2-runtime"
+    t2_fail PROXY_RUNTIME_MISMATCH 'live proxy does not prove the recorded production baseline'
+    return 1
+  fi
+  # Read only fixture predicates, including envFrom/image-level variables;
+  # never emit the environment or secret-bearing objects as evidence.
+  while IFS= read -r pod_name; do
+    if ! environment_check="$(t2_kc -n "$T2_CONTROL_NAMESPACE" exec "$pod_name" -c codex-llm-proxy -- node -e \
+      'process.stdout.write(String(!("CODEX_APPROVED_TOOLS_TEST_ONLY" in process.env) && !("CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE" in process.env) && process.env.NODE_ENV !== "test"))')" ||
+      [ "$environment_check" != true ]; then
+      t2_fail PROXY_RUNTIME_MISMATCH 'running proxy environment is unknown or retains fixture configuration'
+      return 1
+    fi
+  done <<< "$pod_names"
+}
+
 t2_deployment_check() {
   local deployment_json unready
   deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
+  T2_DEPLOYMENT_JSON="$deployment_json"
   if [ -z "$deployment_json" ]; then
     if [ "$T2_BOOTSTRAP_REQUIRED" = true ]; then
       T2_PLAN_STATE=full-bootstrap

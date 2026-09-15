@@ -122,8 +122,13 @@ function writeStructured(
     (configured && levels[configured] !== undefined ? levels[configured] : levels.info)
   )
     return
+  const redactedFields = redactUnknown(fields)
   const entry = {
-    ...(redactUnknown(fields) as Record<string, unknown>),
+    ...(redactedFields !== null &&
+    typeof redactedFields === 'object' &&
+    !Array.isArray(redactedFields)
+      ? (redactedFields as Record<string, unknown>)
+      : { fields: '[Unserializable]' }),
     timestamp: new Date().toISOString(),
     level,
     msg: msg.replace(/[\r\n\u2028\u2029]/g, ' ').trim(),

@@ -117,8 +117,8 @@ export const MCP_SERVER_SELECTION_TEXT =
  * `context` tier without breaking the stable/context cache hash.
  */
 export const TOOL_DISCOVERY_TEXT =
-  'You have access to a large catalog of tools that are not all listed directly. ' +
-  'Use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
+  'Use directly listed tools when available. For additional approved tools, ' +
+  'use `clerum__tool_search` to find them by keyword, `clerum__tool_describe` to ' +
   "see one's schema, and `clerum__tool_call` to invoke it. Native tools are " +
   'already available directly. Search narrowly for the current task; refine or page ' +
   'only when needed rather than loading the whole catalog. Describe only the chosen ' +

@@ -1726,8 +1726,8 @@ export class TaskExecutor {
       this.workflowCallerContextOverride === undefined
         ? await this.prepareChannelWorkflowCallerContext()
         : this.workflowCallerContextOverride
-    // Failover reuses this presentation and bridge; optimization follows the
-    // primary provider for this task. Both presentations remain executable.
+    // Failover reuses this registry: any Codex provider in the chain requires
+    // Codex-compatible presentation before the first provider attempt.
     const presentation = resolveToolPresentation(
       this.deps.llmProvider.getProviderType(),
       appConfig,
@@ -1763,7 +1763,8 @@ export class TaskExecutor {
         // absent). buildToolRegistry runs per turn, so one userId per adapter.
         new McpToolRegistryAdapter(
           this.deps.mcpManager,
-          this.task.sourceMessage?.sender ?? undefined
+          this.task.sourceMessage?.sender ?? undefined,
+          { strictValidation: presentation.codexMode !== undefined }
         )
       : nativeRegistry
     const compositeRegistry = this.deps.mcpManager

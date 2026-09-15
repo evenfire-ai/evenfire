@@ -42,6 +42,9 @@ export class ToolNameMap {
   fromWire(name: string): string | undefined {
     const canonical = this.inbound.get(name)
     if (canonical !== undefined) return canonical
+    // Some providers echo the registered canonical name despite receiving an
+    // alias. Accept only an exact known key; do not infer or normalize targets.
+    if (this.outbound.has(name)) return name
     // Ordinary unknown names still reach the Host registry for rejection.
     // Never infer a target from an unregistered alias or unsafe name.
     if (wireNamePattern.test(name) && !name.startsWith('__codex_tool_')) return name

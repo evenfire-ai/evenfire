@@ -17,6 +17,7 @@ export default defineConfig({
     baseURL: localUrl(required('CONTROL_UI_URL')),
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
-    trace: 'retain-on-failure',
+    // Login inputs must not be persisted in Playwright action traces.
+    trace: 'off',
   },
 })

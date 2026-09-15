@@ -30,6 +30,9 @@ describe('bounded MCP schema validation', () => {
   it.each([
     undefined,
     'http://json-schema.org/draft-07/schema#',
+    'https://json-schema.org/draft-07/schema',
+    'http://json-schema.org/draft/2020-12/schema#',
+    'http://json-schema.org/draft/2019-09/schema',
     'https://json-schema.org/draft/2019-09/schema',
     'https://json-schema.org/draft/2020-12/schema',
   ])('validates without coercion for %s', async dialect => {
@@ -72,7 +75,29 @@ describe('bounded MCP schema validation', () => {
     expect(() => boundedJson({ toJSON: () => ({}) })).toThrow()
   })
 
-  it('fails closed at capacity until cancelled workers actually exit', async () => {
+  it('queues a fifth validation until a worker exits', async () => {
+    const workers = Array.from({ length: 5 }, () => {
+      const worker = new EventEmitter() as EventEmitter & { terminate: ReturnType<typeof vi.fn> }
+      worker.terminate = vi.fn(async () => {
+        worker.emit('exit', 0)
+        return 0
+      })
+      vi.mocked(Worker).mockImplementationOnce(function () {
+        return worker as unknown as Worker
+      })
+      return worker
+    })
+    const pending = workers.map(() => validateBoundedSchema('{}', '{}'))
+    await Promise.resolve()
+    expect(Worker).toHaveBeenCalledTimes(4)
+    workers[0].emit('message', true)
+    await Promise.resolve()
+    expect(Worker).toHaveBeenCalledTimes(5)
+    workers.slice(1).forEach(worker => worker.emit('message', true))
+    expect(await Promise.all(pending)).toEqual([true, true, true, true, true])
+  })
+
+  it('bounds queued requests and retains slots until stalled workers exit', async () => {
     vi.useFakeTimers()
     const workers = Array.from({ length: 4 }, () => {
       const worker = new EventEmitter() as EventEmitter & { terminate: ReturnType<typeof vi.fn> }
@@ -82,12 +107,13 @@ describe('bounded MCP schema validation', () => {
       })
       return worker
     })
-    const pending = workers.map(() => validateBoundedSchema('{}', '{}'))
-    expect(await validateBoundedSchema('{}', '{}')).toBe(false)
+    const pending = Array.from({ length: 36 }, () => validateBoundedSchema('{}', '{}'))
+    const failure = vi.fn()
+    expect(await validateBoundedSchema('{}', '{}', failure)).toBe(false)
+    expect(failure).toHaveBeenCalledWith('queue_full')
     expect(Worker).toHaveBeenCalledTimes(4)
     await vi.advanceTimersByTimeAsync(2_000)
-    expect(await Promise.all(pending)).toEqual([false, false, false, false])
-    expect(await validateBoundedSchema('{}', '{}')).toBe(false)
+    expect(await Promise.all(pending)).toEqual(Array(36).fill(false))
     expect(Worker).toHaveBeenCalledTimes(4)
     for (const worker of workers) worker.emit('exit', 1)
   })
@@ -104,11 +130,35 @@ describe('bounded MCP schema validation', () => {
     })
     const hostTick = vi.fn()
     setTimeout(hostTick, 10)
-    const result = validateBoundedSchema('{}', '{}')
+    const failure = vi.fn()
+    const result = validateBoundedSchema('{}', '{}', failure)
     await vi.advanceTimersByTimeAsync(10)
     expect(hostTick).toHaveBeenCalledOnce()
     await vi.advanceTimersByTimeAsync(2_000)
     expect(await result).toBe(false)
+    expect(failure).toHaveBeenCalledWith('timeout')
     expect(stalled.terminate).toHaveBeenCalledOnce()
   })
+})
+
+it.each([
+  [{ $schema: 'https://example.invalid/schema' }, {}, 'unsupported_schema'],
+  [{ type: 'unknown-type' }, {}, 'invalid_schema'],
+  [{ type: 'object', required: ['count'] }, {}, 'invalid_arguments'],
+] as const)(
+  'classifies validation failures without raw diagnostics: %s',
+  async (schema, params, code) => {
+    const failure = vi.fn()
+    expect(await validateBoundedSchema(boundedJson(schema), boundedJson(params), failure)).toBe(
+      false
+    )
+    expect(failure).toHaveBeenCalledExactlyOnceWith(code)
+  }
+)
+
+it('classifies oversized worker input before starting a worker', async () => {
+  const failure = vi.fn()
+  expect(await validateBoundedSchema('{}', 'x'.repeat(256 * 1024 + 1), failure)).toBe(false)
+  expect(failure).toHaveBeenCalledExactlyOnceWith('input_limit')
+  expect(Worker).not.toHaveBeenCalled()
 })

@@ -1,5 +1,5 @@
-import { createHash } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { ToolNameMap } from '../src/toolNameMap.js'
 
 vi.mock('node:crypto', async importOriginal => {
@@ -8,8 +8,16 @@ vi.mock('node:crypto', async importOriginal => {
 })
 
 describe('ToolNameMap', () => {
-  it('preserves compliant names and reverses punctuation and 128-character names', () => {
-    const names = ['tool_A-2', 'x'.repeat(64), 'files.read', 'mcp:lookup', 'x'.repeat(128)]
+  it('preserves compliant names and reverses opaque canonical names', () => {
+    const names = [
+      'tool_A-2',
+      'x'.repeat(64),
+      'files.read',
+      'mcp:lookup',
+      'x'.repeat(129),
+      'tool name',
+      '工具@read',
+    ]
     const map = new ToolNameMap(names)
     for (const name of names) {
       expect(map.toWire(name)).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
@@ -47,10 +55,16 @@ describe('ToolNameMap', () => {
     expect(map.fromWire(map.toWire('a.b'))).toBe('a.b')
     expect(map.fromWire(map.toWire('a:b'))).toBe('a:b')
   })
+  it('accepts exact registered canonical echoes', () => {
+    const name = '工具@read record'
+    const map = new ToolNameMap([name])
+    expect(map.fromWire(name)).toBe(name)
+    expect(map.fromWire(`${name} extra`)).toBeUndefined()
+  })
   it('does not manufacture canonical targets from unknown aliases or unsafe names', () => {
     const map = new ToolNameMap(['files.read'])
     expect(map.fromWire('__codex_tool_unknown')).toBeUndefined()
-    expect(map.fromWire('files.read')).toBeUndefined()
+    expect(map.fromWire('unknown.read')).toBeUndefined()
     expect(map.fromWire('ordinary_unknown')).toBe('ordinary_unknown')
     expect(() => map.toWire('missing')).toThrow('Unknown canonical tool name')
   })

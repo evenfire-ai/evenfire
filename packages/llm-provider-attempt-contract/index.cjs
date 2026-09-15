@@ -124,6 +124,12 @@ function isBoundedId(value) {
   return typeof value === 'string' && ID_PATTERN.test(value)
 }
 
+// Tool names are opaque registry keys, not authorization/request identifiers.
+// Their size is bounded by maxRequestBodyBytes; transport aliases apply later.
+function isToolName(value) {
+  return typeof value === 'string' && value.length > 0 && !/[\p{Cc}\p{Cs}]/u.test(value)
+}
+
 function rejectUnknown(obj, allowed, label) {
   const extra = unknownKeys(obj, allowed)
   if (extra.length === 0) return null
@@ -176,7 +182,7 @@ function parseMessages(raw) {
     if (typeof item.content !== 'string') return fail('invalid', `messages[${i}].content must be a string`)
     const message = { role: item.role, content: item.content }
     if (item.name !== undefined) {
-      if (!isBoundedId(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
+      if (!isToolName(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
       message.name = item.name
     }
     if (item.toolCallId !== undefined) {
@@ -204,7 +210,7 @@ function parseMessages(raw) {
         if (!isBoundedId(call.id)) {
           return fail('invalid', `messages[${i}].toolCalls[${j}].id is invalid`)
         }
-        if (!isBoundedId(call.name)) {
+        if (!isToolName(call.name)) {
           return fail('invalid', `messages[${i}].toolCalls[${j}].name is invalid`)
         }
         if (!isPlainObject(call.arguments)) {
@@ -236,7 +242,7 @@ function parseTools(raw) {
     if (!isPlainObject(item)) return fail('invalid', `tools[${i}] must be an object`)
     const extra = rejectUnknown(item, TOOL_KEYS, `tools[${i}]`)
     if (extra) return extra
-    if (!isBoundedId(item.name)) return fail('invalid', `tools[${i}].name is invalid`)
+    if (!isToolName(item.name)) return fail('invalid', `tools[${i}].name is invalid`)
     if (typeof item.description !== 'string') {
       return fail('invalid', `tools[${i}].description must be a string`)
     }

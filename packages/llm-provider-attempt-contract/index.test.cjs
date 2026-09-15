@@ -303,11 +303,67 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
 })
 
 test('validates the last definition beyond the former count boundary', () => {
-  for (const invalid of [{ name: 'invalid name' }, { parameters: { value: Infinity } }, { headers: {} }]) {
+  for (const invalid of [{ name: 'invalid\u0000name' }, { parameters: { value: Infinity } }, { headers: {} }]) {
     const tools = catalog(250)
     tools[249] = { ...tools[249], ...invalid }
     const parsed = contract.parseCodexCompletionRequestV1({ ...BASE, tools })
     assert.equal(parsed.ok, false)
     assert.match(parsed.message, /tools\[249\]/)
   }
+})
+
+function withCanonicalName(name) {
+  return {
+    ...BASE,
+    tools: [{ name, description: 'Read a record', parameters: { type: 'object' } }],
+    messages: [
+      { role: 'assistant', content: '', toolCalls: [{ id: 'call-1', name, arguments: {} }] },
+      { role: 'tool', content: 'ok', toolCallId: 'call-1', name },
+    ],
+  }
+}
+
+test('preserves opaque canonical names in definitions and assistant/tool history', () => {
+  for (const name of ['read record', '工具@café', 'x'.repeat(129)]) {
+    const request = withCanonicalName(name)
+    const parsed = contract.parseCodexCompletionRequestV1(request)
+    assert.equal(parsed.ok, true, parsed.message)
+    assert.deepEqual(parsed.value, request)
+    assert.equal(contract.hashCodexCompletionRequestV1(parsed.value),
+      crypto.createHash('sha256').update(contract.stableStringify(request)).digest('hex'))
+  }
+})
+
+test('rejects empty and control-bearing names at every canonical name location', () => {
+  for (const name of ['', 'a\u0000b', 'a\nb', 'a\u007fb', 'a\u0085b', 'a\ud800b']) {
+    for (const location of ['definition', 'assistant', 'result']) {
+      const request = withCanonicalName('valid')
+      if (location === 'definition') request.tools[0].name = name
+      if (location === 'assistant') request.messages[0].toolCalls[0].name = name
+      if (location === 'result') request.messages[1].name = name
+      assert.equal(contract.parseCodexCompletionRequestV1(request).ok, false, location)
+    }
+  }
+})
+
+test('opaque tool name support retains strict request and call identifiers', () => {
+  for (const value of ['read record', '工具@café', 'x'.repeat(129)]) {
+    for (const location of ['requestId', 'idempotencyKey', 'callId', 'toolCallId']) {
+      const request = withCanonicalName(value)
+      if (location === 'callId') request.messages[0].toolCalls[0].id = value
+      else if (location === 'toolCallId') request.messages[1].toolCallId = value
+      else request[location] = value
+      assert.equal(contract.parseCodexCompletionRequestV1(request).ok, false, location)
+    }
+  }
+})
+
+test('opaque canonical names remain bounded by serialized UTF-8 request bytes', () => {
+  const request = { ...BASE, tools: [{ name: '工具', description: 'Read a record', parameters: {} }] }
+  request.tools[0].name += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(request)))
+  assert.equal(contract.parseCodexCompletionRequestV1(request).ok, true)
+  request.tools[0].name += 'é'
+  assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
+    ok: false, code: 'limit', message: 'request exceeds maxRequestBodyBytes',
+  })
 })

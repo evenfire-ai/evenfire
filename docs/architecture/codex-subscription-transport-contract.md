@@ -117,9 +117,10 @@ ordinary unknown names retain the Host registry's authorization checks.
 
 ### Selected MCP argument validation
 
-The Host validates selected MCP arguments before approval and rechecks the live
-schema immediately before dispatch. Missing `$schema` uses JSON Schema 2020-12;
-explicit draft-07 and 2019-09 are also supported. Unsupported dialects and
+For tasks whose provider chain includes Codex, the Host validates selected MCP
+arguments before approval and rechecks the live schema immediately before
+dispatch. Other provider chains retain server-side argument validation. Missing `$schema` uses JSON Schema 2020-12;
+explicit draft-07 and 2019-09 are also supported, including HTTP/HTTPS URI aliases. Unsupported dialects and
 unresolved references fail explicitly. Validation never coerces types, applies
 defaults, removes arguments, or loads remote references.
 
@@ -127,10 +128,14 @@ Compilation and evaluation run in disposable Node workers, outside the Host
 event loop. Each operation has a two-second deadline and V8 heap/stack limits;
 these are not a total-process RSS guarantee. Inputs are bounded to 256 KiB per
 schema/argument document, 10,000 nodes and depth 64. At most four workers may be
-active; saturation fails validation instead of building an unbounded queue.
+active, with a FIFO queue of at most 32 waiting requests. Admission and execution
+share the two-second deadline; queue overflow and timeout fail explicitly.
 Worker startup adds latency and is not claimed as a quota optimization. A
 successful validation waits for worker teardown before releasing its caller.
-Schema or argument changes during validation prevent dispatch.
+A single successful schema/argument pair may be reused by the same adapter;
+byte-identical live inputs are required, so changes invalidate reuse before
+dispatch. Sanitized failure codes distinguish argument/schema errors, resource
+limits, saturation, timeout and worker failure.
 
 Deployment readiness checks after a combined apply do not enforce the ordering
 above. The infrastructure rollout barrier remains a separate release dependency;

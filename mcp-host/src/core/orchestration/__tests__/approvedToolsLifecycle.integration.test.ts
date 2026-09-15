@@ -116,7 +116,7 @@ async function setup(count = 83, reverse = false) {
   }
   const registry = new CompositeToolRegistry(
     native,
-    new McpToolRegistryAdapter(manager, 'authenticated-user')
+    new McpToolRegistryAdapter(manager, 'authenticated-user', { strictValidation: true })
   )
   const conversation = makeFakeConversation({ state: ConversationState.Processing })
   const config = buildLoopConfig({
@@ -354,7 +354,9 @@ describe('approved catalog across presentation and lifecycle', () => {
       const result = await executeToolCalls([bridgeCall(target)], config, 0)
       expect(result.pendingApproval).toBeUndefined()
       expect(result.toolResults[0].is_error).toBe(true)
-      expect(result.toolResults[0].content).toContain('MCP validation failed')
+      expect(result.toolResults[0].content).toContain(
+        '$async' in schema ? 'unsupported by local validation' : 'could not be compiled locally'
+      )
       expect(result.toolResults[0].content.length).toBeLessThan(150)
       expect(result.toolResults[0].content).not.toContain('unresolvable.example')
       expect(remote.calls).not.toHaveBeenCalled()
@@ -547,7 +549,7 @@ describe('approved catalog across presentation and lifecycle', () => {
               message => message.role === 'tool' && message.tool_call_id === call.id
             )
             if (decision === 'schema-change')
-              expect(result?.content).toContain('MCP validation failed')
+              expect(result?.content).toContain('Arguments do not match the current MCP schema')
             else if (decision === 'revoke')
               expect(result?.content).toMatch(/not found|not available/i)
             else expect(result?.content).toContain('receipt:alpha:record__read_082')

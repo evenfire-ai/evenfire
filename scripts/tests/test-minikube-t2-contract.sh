@@ -26,6 +26,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-public-boundary.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
+  "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh" \
@@ -644,6 +645,7 @@ if T2_PUBLIC_ROOT="$public_repo" T2_PUBLIC_BASE_REF="$public_base" \
   exit 1
 fi
 bash "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh"
+bash "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh"
 bash "$ROOT/scripts/tests/test-minikube-profile-readiness.sh"
 bash "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh"
 bash "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh"
