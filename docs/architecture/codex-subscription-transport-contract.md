@@ -185,6 +185,11 @@ Direct retains all definitions subject to the bounded request contract.
 Discovery exposes the stable native set and search/describe/call bridge.
 The same presentation is usable across a configured failover chain.
 
+All Codex modes emit the structured `tool-presentation` diagnostic when the
+presentation counts change, including the first refresh. It reports the mode,
+strategy, native/MCP counts and presented/deferred counts without tool definitions.
+Direct mode reports `strategy: direct` and `deferredCount: 0`.
+
 Search results contain bounded compact descriptions and no schemas. Follow
 `nextOffset` with the same query/filter to continue; explicit `enumerate`
 permits full traversal. Describe returns the exact selected schema, never a
