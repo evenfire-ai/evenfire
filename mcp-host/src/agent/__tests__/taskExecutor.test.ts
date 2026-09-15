@@ -326,7 +326,11 @@ describe('TaskExecutor', () => {
           is_error: false,
         },
       ])
-      return { type: 'response', content: 'must not be returned' }
+      return {
+        type: 'response',
+        content: 'must not be returned',
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      }
     })
     const checkpoint = vi
       .fn()
