@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import express from 'express'
+import { once } from 'node:events'
 import request from 'supertest'
 import { createMembersRouter } from '../src/routes/members.js'
 
@@ -130,26 +131,36 @@ describe('routes/members', () => {
     authTokenMock.verifyToken.mockReturnValue({ ...claims, userId: 'rate-limited-user' })
     memberManagementMock.deleteManagedUser.mockResolvedValue({ ok: true })
 
-    for (let attempt = 1; attempt <= 30; attempt++) {
-      await request(makeApp())
+    // Keep one listener for the sequence: reopening ephemeral ports for each
+    // request can race Node's pooled HTTP sockets against server teardown.
+    const server = makeApp().listen(0)
+    await once(server, 'listening')
+    try {
+      for (let attempt = 1; attempt <= 30; attempt++) {
+        await request(server)
+          .delete(`/members/${TARGET_USER_ID}`)
+          .set('authorization', 'Bearer good-token')
+          .set('x-forwarded-for', '198.51.100.10')
+          .set('Idempotency-Key', `retire-attempt-${attempt}`)
+          .send({ reason: `retirement attempt ${attempt}` })
+          .expect(200)
+      }
+
+      await request(server)
         .delete(`/members/${TARGET_USER_ID}`)
         .set('authorization', 'Bearer good-token')
         .set('x-forwarded-for', '198.51.100.10')
-        .set('Idempotency-Key', `retire-attempt-${attempt}`)
-        .send({ reason: `retirement attempt ${attempt}` })
-        .expect(200)
+        .set('Idempotency-Key', 'retire-attempt-31')
+        .set('x-correlation-id', '22222222-2222-4222-8222-222222222222')
+        .send({ reason: 'changed reason cannot bypass the verified-actor bucket' })
+        .expect(429)
+
+      expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledTimes(30)
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close(error => (error ? reject(error) : resolve()))
+      })
     }
-
-    await request(makeApp())
-      .delete(`/members/${TARGET_USER_ID}`)
-      .set('authorization', 'Bearer good-token')
-      .set('x-forwarded-for', '198.51.100.10')
-      .set('Idempotency-Key', 'retire-attempt-31')
-      .set('x-correlation-id', '22222222-2222-4222-8222-222222222222')
-      .send({ reason: 'changed reason cannot bypass the verified-actor bucket' })
-      .expect(429)
-
-    expect(memberManagementMock.deleteManagedUser).toHaveBeenCalledTimes(30)
   })
 
   it.each([

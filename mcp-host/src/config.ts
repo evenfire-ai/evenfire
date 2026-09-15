@@ -4,6 +4,11 @@
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
+import {
+  type CodexToolPresentation,
+  parseCodexToolDiscoveryBytes,
+  parseCodexToolPresentation,
+} from './core/orchestration/toolPresentationPolicy'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
 import { HostSpec, McpServerInfo, MemoryConfig, ModelConfig, PersonalizationConfig } from './types'
 
@@ -156,6 +161,9 @@ export interface Config {
   // prompt with <turn-context> moved to the user message).
   promptCacheEnabled: boolean
 
+  // Codex presentation is independent of the legacy bridge opt-in.
+  codexToolPresentation: CodexToolPresentation
+  codexToolDiscoveryBytes: number
   // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
   // OFF; set true per-host to enable; see
   // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
@@ -816,9 +824,10 @@ export const config: Config = {
   // caching, but the tiered build path is used uniformly).
   promptCacheEnabled: getEnvBool('CLERUM_PROMPT_CACHE_ENABLED', true),
 
-  // F1 (dynamic-tool-loading) — Gates the dynamic-tool-loading bridge; default
-  // OFF; set true per-host to enable; see
-  // `.specs/dynamic-tool-loading/plan-hermes-bridge.es.md`.
+  // Codex optimization is independent of the legacy dynamic-tools opt-in.
+  codexToolPresentation: parseCodexToolPresentation(process.env.CODEX_TOOL_PRESENTATION),
+  codexToolDiscoveryBytes: parseCodexToolDiscoveryBytes(process.env.CODEX_TOOL_DISCOVERY_BYTES),
+  // Legacy dynamic tools remain opt-in for other providers.
   dynamicToolsEnabled: getEnvBool('CLERUM_DYNAMIC_TOOLS_ENABLED', false),
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
   // the bridge activates when enabled; small hosts stay on passthrough.
