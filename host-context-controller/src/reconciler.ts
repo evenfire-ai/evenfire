@@ -159,6 +159,15 @@ type RetractManagedRuntimeResult = {
   retracted: boolean
   cleanupComplete: boolean
   foreignRuntime: boolean
+  runtimeGone: boolean
+}
+
+function shouldStopAfterIncompleteRetract(
+  retract: RetractManagedRuntimeResult,
+  isCurrent: () => boolean
+): boolean {
+  if (retract.retracted || retract.foreignRuntime) return false
+  return !(retract.runtimeGone && isCurrent())
 }
 
 function runtimeNotDesiredMessage(kind: RuntimeWithdrawKind): string {
@@ -1782,9 +1791,11 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * Withdraw an HCC-owned runtime: persist DeploymentReady=False/RuntimeNotDesired
-   * once the Deployment is confirmed gone, then retire the poll, then finish
-   * sibling deletes. Sibling failure does not roll back the retract.
+   * Withdraw an HCC-owned runtime: once the Deployment is confirmed gone, retire
+   * the poll, persist DeploymentReady=False/RuntimeNotDesired, then finish
+   * sibling deletes. Sibling failure does not roll back the retract. Retire
+   * before the retract write so an in-flight tick cannot republish True after
+   * the retract PATCH commits but before the epoch bumps.
    */
   private async deleteHccOwnedRuntimeSiblings(
     name: string,
@@ -1842,18 +1853,24 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         failures,
         `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
       )
-      return { retracted: false, cleanupComplete: false, foreignRuntime: false }
+      return { retracted: false, cleanupComplete: false, foreignRuntime: false, runtimeGone: false }
     }
 
     switch (deploymentOutcome) {
       case 'denied':
-        return { retracted: false, cleanupComplete: false, foreignRuntime: false }
+        return {
+          retracted: false,
+          cleanupComplete: false,
+          foreignRuntime: false,
+          runtimeGone: false,
+        }
       case 'foreign':
         await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
         return {
           retracted: false,
           cleanupComplete: cleanupComplete && isCurrent(),
           foreignRuntime: true,
+          runtimeGone: false,
         }
       case 'gone':
         break
@@ -1863,6 +1880,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       }
     }
 
+    this.retireReadinessWindow(name)
     const retractWrite = await this.writeStatusCondition(
       server,
       {
@@ -1873,7 +1891,6 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       },
       isCurrent
     )
-    this.retireReadinessWindow(name)
     hccLogger.info('Retracted managed runtime', {
       name,
       kind,
@@ -1883,12 +1900,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
 
     await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
     if (retractWrite === 'declined') {
-      return { retracted: false, cleanupComplete: false, foreignRuntime: false }
+      return {
+        retracted: false,
+        cleanupComplete: false,
+        foreignRuntime: false,
+        runtimeGone: true,
+      }
     }
     return {
       retracted: true,
       cleanupComplete: cleanupComplete && isCurrent(),
       foreignRuntime: false,
+      runtimeGone: true,
     }
   }
 
@@ -2371,12 +2394,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // WRC owns runtime resources; HCC only marks discovery status disabled.
     if (server.spec.enabled === false) {
       let cleanupComplete = true
+      let retract: RetractManagedRuntimeResult | undefined
       if (currentManaged) {
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
         )
-        const retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
-        if (!retract.retracted && !retract.foreignRuntime) return false
+        retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
+        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
         console.log(
@@ -2395,6 +2419,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      if (retract && !retract.retracted && !retract.foreignRuntime) return false
       return cleanupComplete && isCurrent()
     }
 
@@ -2411,9 +2436,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       )
       const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
       let cleanupComplete = true
+      let retract: RetractManagedRuntimeResult | undefined
       if (withdrawRuntime) {
-        const retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
-        if (!retract.retracted && !retract.foreignRuntime) return false
+        retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
+        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
         cleanupComplete = retract.cleanupComplete
       } else {
         console.warn(
@@ -2446,6 +2472,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
+      if (retract && !retract.retracted && !retract.foreignRuntime) return false
       return withdrawRuntime && cleanupComplete && isCurrent()
     }
 

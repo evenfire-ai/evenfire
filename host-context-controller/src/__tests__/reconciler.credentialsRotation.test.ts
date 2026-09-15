@@ -870,6 +870,76 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     expect(reconciler.hasIncompleteReconciliation()).toBe(false)
   })
 
+  it('in-flight ready tick cannot overwrite RuntimeNotDesired while retract write is in flight', async () => {
+    appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
+    await reconciler.reconcile(makeServer())
+
+    const held = holdNextStatusRead(customApi)
+    appsApi.readNamespacedDeployment.mockResolvedValue(convergedDeployment('linear'))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(held.isHeld()).toBe(true)
+
+    let releaseRetractPatch: (() => void) | undefined
+    let retractPatchHeld!: () => void
+    const retractPatchGate = new Promise<void>(resolve => {
+      retractPatchHeld = resolve
+    })
+    const livePatch = customApi.patchNamespacedCustomObjectStatus.getMockImplementation()
+    customApi.patchNamespacedCustomObjectStatus.mockImplementation(async req => {
+      const body = (req as { body?: Array<{ op?: string; path?: string; value?: unknown }> }).body
+      const op = body?.find(
+        candidate =>
+          candidate.op === 'add' &&
+          (candidate.path === '/status' || candidate.path === '/status/conditions')
+      )
+      const conditions = (
+        Array.isArray(op?.value)
+          ? op.value
+          : ((op?.value as { conditions?: Array<{ reason?: string }> }).conditions ?? [])
+      ) as Array<{ reason?: string }>
+      if (conditions.some(condition => condition.reason === 'RuntimeNotDesired')) {
+        await new Promise<void>(resolve => {
+          releaseRetractPatch = resolve
+          retractPatchHeld()
+        })
+      }
+      if (livePatch) return livePatch(req)
+      return {}
+    })
+
+    const failClosed = reconcileFailClosed(reconciler, coreApi)
+    try {
+      await retractPatchGate
+      expect(releaseRetractPatch).toBeDefined()
+      const writesWhileRetractHeld = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+
+      held.release({ metadata: { resourceVersion: '2' }, status: { conditions: [] } })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(
+        laterConditionWrites(customApi, writesWhileRetractHeld).some(
+          condition =>
+            (condition.type === 'DeploymentReady' && condition.status === 'True') ||
+            (condition.type === 'Ready' &&
+              condition.status === 'True' &&
+              condition.reason === 'ReconcileSuccess')
+        )
+      ).toBe(false)
+
+      releaseRetractPatch?.()
+      await failClosed
+      expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+      expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+    } finally {
+      releaseRetractPatch?.()
+      if (livePatch) {
+        customApi.patchNamespacedCustomObjectStatus.mockImplementation(livePatch)
+      } else {
+        customApi.patchNamespacedCustomObjectStatus.mockReset()
+      }
+    }
+  })
+
   it('in-flight exhaustion tick cannot write RolloutIncomplete after retirement', async () => {
     appsApi.readNamespacedDeployment.mockResolvedValue(notConvergedDeployment(2))
     await reconciler.reconcile(makeServer())
