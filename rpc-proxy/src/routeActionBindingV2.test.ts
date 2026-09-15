@@ -193,6 +193,20 @@ describe('route action v2 binding', () => {
         body: { agent: 'agent-a', chatId: 'chat-a', provider: 'openai', model: 'model-a' },
       }),
     },
+    {
+      operationId: 'session.manage' as const,
+      target: {
+        hostRef: 'mcp-host/chatllm',
+        agent: 'agent-a',
+        chatId: 'chat-a',
+        action: 'rename',
+      },
+      req: request({
+        path: '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
+        method: 'PATCH',
+        params: { hostRef: 'chatllm', agent: 'agent-a', chatId: 'chat-a' },
+      }),
+    },
   ])(
     'binds real runtime-session producer shape for $operationId',
     ({ operationId, target, req }) => {

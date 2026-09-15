@@ -213,6 +213,17 @@ function candidateForRequest(req: AuthedRequest): {
         target: { hostRef: host.authorityHostRef, ...(agent ? { agent } : {}) },
       }
     }
+    if (method === 'PATCH' && path === '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name') {
+      return {
+        operationId: 'session.manage',
+        target: {
+          hostRef: host.authorityHostRef,
+          agent: requiredString(req.params.agent),
+          chatId: requiredString(req.params.chatId),
+          action: 'rename',
+        },
+      }
+    }
     if (
       method === 'GET' &&
       (path === '/rpc/hosts/:hostRef/sessions/:agent/:chatId/messages' ||
