@@ -66,7 +66,7 @@ export interface AgentConfig {
   // Maximum time to process a single task (ms)
   maxTaskDuration: number
 
-  // Maximum tool calls per task
+  // Maximum LLM/tool iterations per task (each iteration may call multiple tools)
   maxToolCallsPerTask: number
 
   // Whether to auto-start processing
@@ -84,7 +84,7 @@ export interface AgentConfig {
  */
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   maxTaskDuration: 5 * 60 * 1000, // 5 minutes
-  maxToolCallsPerTask: 50,
+  maxToolCallsPerTask: 1000,
   autoStart: true,
   taskDelay: 100, // 100ms between tasks
   approvalTimeout: 0, // 0 = no in-memory auto-deny; the request stays available until resolved. Override via CLERUM_APPROVAL_TIMEOUT

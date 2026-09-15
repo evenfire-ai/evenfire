@@ -669,7 +669,7 @@ stateDiagram-v2
 
 **Configurable limits**:
 
-- `maxToolCallsPerTask` (default: 50) - Prevents infinite tool calling loops
+- `maxToolCallsPerTask` (default: 1000) - Bounds LLM/tool iterations per task; each iteration may call multiple tools
 - `maxTaskDuration` (default: 300000ms / 5 min) - Task timeout
 - `taskDelay` (default: 100ms) - Delay between processing tasks
 
@@ -836,7 +836,7 @@ The HTTP response is held open until the agent finishes processing. The response
 | `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                            |
 | `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                                                                    |
 | `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                                                                      |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                                                                     |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`             | Max LLM/tool iterations per task, configured per Host process                                |
 | `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                      |
 
 ### Dependencies
