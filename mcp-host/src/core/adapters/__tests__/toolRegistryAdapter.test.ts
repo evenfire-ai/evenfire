@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Tool, ToolRegistry } from '../../interfaces'
 import type { ToolOutput } from '../../types'
+import { validateBoundedSchema } from '../boundedSchemaValidation'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../toolRegistryAdapter'
+
+vi.mock('../boundedSchemaValidation', async importOriginal => {
+  const actual = await importOriginal<typeof import('../boundedSchemaValidation')>()
+  return { ...actual, validateBoundedSchema: vi.fn(actual.validateBoundedSchema) }
+})
 
 function createMockTool(
   toolName: string,
@@ -349,4 +355,44 @@ describe('McpToolRegistryAdapter', () => {
     expect(output.attachments).toHaveLength(1)
     expect(output.attachments?.[0].dataBase64).toBe('c2VjcmV0LWJhc2U2NA==')
   })
+})
+
+describe('MCP dispatch freshness across asynchronous validation', () => {
+  it.each(['schema', 'arguments', 'removed'] as const)(
+    'rejects %s changes while the validator waits',
+    async change => {
+      const schema: Record<string, unknown> = { type: 'object' }
+      const args: Record<string, unknown> = {}
+      let present = true
+      const manager = {
+        getAllTools: () =>
+          present
+            ? [
+                {
+                  name: 'alpha__read',
+                  serverName: 'alpha',
+                  description: 'Read',
+                  inputSchema: schema,
+                },
+              ]
+            : [],
+        callTool: vi.fn(async () => ({ result: { content: [] }, isError: false })),
+      }
+      const tool = new McpToolRegistryAdapter(manager as any).get('alpha__read')!
+      let complete!: (valid: boolean) => void
+      vi.mocked(validateBoundedSchema).mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            complete = resolve
+          })
+      )
+      const pending = tool.execute(args)
+      if (change === 'schema') schema.required = ['recordId']
+      if (change === 'arguments') args.changed = true
+      if (change === 'removed') present = false
+      complete(true)
+      expect((await pending).is_error).toBe(true)
+      expect(manager.callTool).not.toHaveBeenCalled()
+    }
+  )
 })

@@ -625,7 +625,11 @@ describe('streamCodexCompletion', () => {
         },
         { role: 'tool' as const, content: 'ok', toolCallId: 'call-1' },
       ],
-      tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+      tools: Array.from({ length: 250 }, (_, index) => ({
+        name: index === 0 ? 'echo' : `approved_tool_${index}`,
+        description: `Approved tool ${index}`,
+        parameters: { type: 'object', properties: { x: { type: 'integer' } } },
+      })),
       generation: { toolChoice: 'auto' as const },
       transportHints: { promptCacheKey: 'sess-1' },
     }
@@ -656,6 +660,8 @@ describe('streamCodexCompletion', () => {
     const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.instructions).toBe('be brief')
     expect(body.store).toBe(false)
+    expect(body.tools).toEqual(request.tools.map(tool => ({ type: 'function', ...tool })))
+    expect(body.parallel_tool_calls).toBe(true)
     expect(body.tool_choice).toBe('auto')
     expect(body.prompt_cache_key).toBe('sess-1')
     expect(body.input).toEqual([

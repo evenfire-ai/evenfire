@@ -224,7 +224,7 @@ export async function executeToolCalls(
     let validation = config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
     if (validation.is_valid) {
       validation =
-        config.toolRegistry.get(call.name)?.validateParams?.(call.arguments) ?? validation
+        (await config.toolRegistry.get(call.name)?.validateParams?.(call.arguments)) ?? validation
     }
     if (!validation.is_valid) {
       events.emit({

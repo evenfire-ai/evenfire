@@ -531,6 +531,9 @@ main() {
   run_np08_hcc_authorization
   run_healthcheck_if_requested
   run_playwright_if_requested
+  # Journeys may mutate the owned profile under the inherited lease. Certify
+  # the restored runtime after them, not only the state before they ran.
+  run_final_preflight
   # Health and Playwright run after the planner's initial ownership scan. A
   # forward can disappear, be replaced, or lose its binding during either
   # journey, so the exact PID/start-time/argv record must be revalidated before

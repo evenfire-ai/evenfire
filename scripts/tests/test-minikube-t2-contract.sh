@@ -342,6 +342,13 @@ grep -Fq 'T2_T0_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_T1_STATUS=NOT_RUN' "$T2"
 grep -Fq 'T2_HEALTHCHECK_COMMAND' "$T2"
 grep -Fq 'minikube-t2-runtime' "$ROOT/Makefile"
+post_journey_preflight_line="$(grep -nFx '  run_final_preflight' "$T2" | tail -1 | cut -d: -f1)"
+journey_line="$(grep -nFx '  run_playwright_if_requested' "$T2" | tail -1 | cut -d: -f1)"
+if [ -z "$post_journey_preflight_line" ] || [ -z "$journey_line" ] ||
+   [ "$post_journey_preflight_line" -le "$journey_line" ]; then
+  echo 'FAIL: T2 must revalidate exact-head runtime after the journey' >&2
+  exit 1
+fi
 post_runtime_process_check_line="$(grep -nF 'if ! t2_process_check; then' "$T2" | tail -1 | cut -d: -f1)"
 complete_pass_line="$(grep -nF 't2_evidence_write complete PASS' "$T2" | tail -1 | cut -d: -f1)"
 if [ -z "$post_runtime_process_check_line" ] || [ -z "$complete_pass_line" ] ||

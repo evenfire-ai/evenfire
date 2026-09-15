@@ -97,6 +97,27 @@ only the sender is insufficient. For rollback, restore the old sender first,
 drain outstanding incompatible attempts, then restore older validators. An old
 sender reintroduces the known connector exclusion and is not a correction.
 
+### Selected MCP argument validation
+
+The Host validates selected MCP arguments before approval and rechecks the live
+schema immediately before dispatch. Missing `$schema` uses JSON Schema 2020-12;
+explicit draft-07 and 2019-09 are also supported. Unsupported dialects and
+unresolved references fail explicitly. Validation never coerces types, applies
+defaults, removes arguments, or loads remote references.
+
+Compilation and evaluation run in disposable Node workers, outside the Host
+event loop. Each operation has a two-second deadline and V8 heap/stack limits;
+these are not a total-process RSS guarantee. Inputs are bounded to 256 KiB per
+schema/argument document, 10,000 nodes and depth 64. At most four workers may be
+active; saturation fails validation instead of building an unbounded queue.
+Worker startup adds latency and is not claimed as a quota optimization. A
+successful validation waits for worker teardown before releasing its caller.
+Schema or argument changes during validation prevent dispatch.
+
+Deployment readiness checks after a combined apply do not enforce the ordering
+above. The infrastructure rollout barrier remains a separate release dependency;
+this document alone does not certify mixed-version deployment safety.
+
 ## Errors
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,

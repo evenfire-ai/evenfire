@@ -1,54 +1,9 @@
-import Ajv, { type ValidateFunction } from 'ajv'
-import Ajv2019 from 'ajv/dist/2019'
-import Ajv2020 from 'ajv/dist/2020'
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
 import { Tool, ToolRegistry } from '../interfaces'
 import { Attachment, ToolDefinition, ToolOutput, ValidationResult } from '../types'
-
-// Compile only selected schemas, sharing across per-turn adapter refreshes.
-// Weak keys release removed catalog entries. The serialized comparison also
-// invalidates a validator if an in-memory schema is updated in place.
-const mcpValidators = new WeakMap<
-  object,
-  { serialized: string; validate: ValidateFunction | null }
->()
-
-function selectedSchemaValidator(schema: Record<string, unknown>): ValidateFunction | null {
-  const serialized = JSON.stringify(schema)
-  const cached = mcpValidators.get(schema)
-  if (cached?.serialized === serialized) return cached.validate
-  let validate: ValidateFunction | null = null
-  try {
-    // An empty fragment denotes the same JSON Schema meta-schema URI.
-    const dialect =
-      typeof schema.$schema === 'string' ? schema.$schema.replace(/#$/, '') : undefined
-    // MCP defines an omitted $schema as JSON Schema 2020-12.
-    const Constructor =
-      dialect === undefined || dialect === 'https://json-schema.org/draft/2020-12/schema'
-        ? Ajv2020
-        : dialect === 'https://json-schema.org/draft/2019-09/schema'
-          ? Ajv2019
-          : Ajv
-    // Isolate each schema's $id namespace. Synchronous compile has no remote
-    // reference loader; schema validation must never fetch a URL or alter args.
-    const ajv = new Constructor({
-      strict: false,
-      allErrors: false,
-      coerceTypes: false,
-      useDefaults: false,
-      removeAdditional: false,
-      validateFormats: false,
-    })
-    validate = ajv.compile(schema)
-    if ('$async' in validate) validate = null
-  } catch {
-    // Unresolved references/unsupported dialects are explicit validation errors.
-  }
-  mcpValidators.set(schema, { serialized, validate })
-  return validate
-}
+import { boundedJson, validateBoundedSchema } from './boundedSchemaValidation'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -151,31 +106,52 @@ class McpToolAdapter implements Tool {
   requiresApproval() {
     return false
   }
-  validateParams(params: Record<string, unknown>): ValidationResult {
-    const live = this.mcpManager
+  private liveTool() {
+    return this.mcpManager
       .getAllTools()
       .find(tool => tool.name === this.fullName && serverNameOf(tool) === this.serverName)
-    if (!live) return { is_valid: false, errors: ['MCP tool is no longer available.'] }
+  }
+
+  private async validateCurrent(params: Record<string, unknown>) {
+    const live = this.liveTool()
+    const rejected: ValidationResult = {
+      is_valid: false,
+      errors: ['Arguments or current MCP schema could not be validated; describe the tool again.'],
+    }
     try {
-      const schema = live.inputSchema
-      if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
-        return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
-      }
-      const validate = selectedSchemaValidator(schema)
-      if (!validate)
-        return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
-      return validate(params)
-        ? { is_valid: true, errors: [] }
-        : {
-            is_valid: false,
-            errors: [
-              'Arguments do not match the current MCP tool schema; describe the tool again.',
-            ],
-          }
+      if (!live || !asRecord(live.inputSchema)) return { result: rejected }
+      const schemaJson = boundedJson(live.inputSchema)
+      const paramsJson = boundedJson(params)
+      if (!(await validateBoundedSchema(schemaJson, paramsJson))) return { result: rejected }
+      return { result: { is_valid: true, errors: [] } as ValidationResult, schemaJson, paramsJson }
     } catch {
       // Never include raw schemas, arguments or validator diagnostics in errors.
-      return { is_valid: false, errors: ['MCP tool schema is invalid or unsupported.'] }
+      return { result: rejected }
     }
+  }
+
+  private validationStillCurrent(
+    checked: Awaited<ReturnType<McpToolAdapter['validateCurrent']>>,
+    params: Record<string, unknown>
+  ): boolean {
+    try {
+      const live = this.liveTool()
+      return (
+        checked.result.is_valid &&
+        !!live &&
+        boundedJson(live.inputSchema) === checked.schemaJson &&
+        boundedJson(params) === checked.paramsJson
+      )
+    } catch {
+      return false
+    }
+  }
+
+  async validateParams(params: Record<string, unknown>): Promise<ValidationResult> {
+    const checked = await this.validateCurrent(params)
+    return this.validationStillCurrent(checked, params)
+      ? checked.result
+      : { is_valid: false, errors: ['MCP validation failed or tool changed during validation.'] }
   }
   traceDescriptor() {
     // `sourceRef` is the tool-lane guardrail's `server` identity (provenance.ts),
@@ -196,10 +172,12 @@ class McpToolAdapter implements Tool {
     try {
       // An approval may have been suspended with an older adapter/schema.
       // Resolve the live schema again immediately before manager dispatch.
-      const validation = this.validateParams(params)
-      if (!validation.is_valid) {
+      const checked = await this.validateCurrent(params)
+      // No await between the freshness check and manager dispatch: catalog or
+      // argument changes during worker evaluation cannot authorize this call.
+      if (!this.validationStillCurrent(checked, params)) {
         return {
-          content: validation.errors.join(' '),
+          content: 'MCP validation failed or tool changed during validation.',
           duration_ms: Date.now() - startTime,
           is_error: true,
         }

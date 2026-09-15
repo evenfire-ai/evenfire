@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import Ajv2020 from 'ajv/dist/2020'
 import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor'
 import { config as appConfig } from '../../../config'
 import { TaskLifecycle } from '../../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../../llm/types'
 import { McpManager } from '../../../mcp/manager'
 import type { Task } from '../../../queue/types'
+import * as boundedValidation from '../../adapters/boundedSchemaValidation'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../../adapters/toolRegistryAdapter'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../conversation/conversation'
@@ -287,9 +287,9 @@ describe('approved catalog across presentation and lifecycle', () => {
   })
 
   it.each([83, 250])(
-    'compiles only the selected schema out of %i and reuses validation without mutating arguments',
+    'validates only the selected schema out of %i across repeated calls without mutating arguments',
     async count => {
-      const compile = vi.spyOn(Ajv2020.prototype, 'compile')
+      const compile = vi.spyOn(boundedValidation, 'validateBoundedSchema')
       try {
         const { manager, registry, config } = await setup(count)
         const target = 'alpha__record__read_000'
@@ -307,7 +307,13 @@ describe('approved catalog across presentation and lifecycle', () => {
         const second = await executeToolCalls([bridgeCall(target, 'second', args)], config, 1)
         expect(first.toolResults[0].is_error).toBe(false)
         expect(second.toolResults[0].is_error).toBe(false)
-        expect(compile).toHaveBeenCalledTimes(1)
+        expect(compile).toHaveBeenCalled()
+        expect(
+          compile.mock.calls.every(
+            ([schema]) =>
+              JSON.stringify(JSON.parse(schema)) === JSON.stringify(definition.inputSchema)
+          )
+        ).toBe(true)
         expect(args).toEqual({})
         const coerced = await executeToolCalls(
           [bridgeCall(target, 'wrong-type', { limit: '3' })],
@@ -316,7 +322,13 @@ describe('approved catalog across presentation and lifecycle', () => {
         )
         expect(coerced.toolResults[0].is_error).toBe(true)
         expect(remote.calls).toHaveBeenCalledTimes(2)
-        expect(compile).toHaveBeenCalledTimes(1)
+        expect(compile).toHaveBeenCalled()
+        expect(
+          compile.mock.calls.every(
+            ([schema]) =>
+              JSON.stringify(JSON.parse(schema)) === JSON.stringify(definition.inputSchema)
+          )
+        ).toBe(true)
       } finally {
         compile.mockRestore()
       }
@@ -342,7 +354,7 @@ describe('approved catalog across presentation and lifecycle', () => {
       const result = await executeToolCalls([bridgeCall(target)], config, 0)
       expect(result.pendingApproval).toBeUndefined()
       expect(result.toolResults[0].is_error).toBe(true)
-      expect(result.toolResults[0].content).toContain('schema is invalid or unsupported')
+      expect(result.toolResults[0].content).toContain('MCP validation failed')
       expect(result.toolResults[0].content.length).toBeLessThan(150)
       expect(result.toolResults[0].content).not.toContain('unresolvable.example')
       expect(remote.calls).not.toHaveBeenCalled()
@@ -419,7 +431,7 @@ describe('approved catalog across presentation and lifecycle', () => {
     const { manager, registry } = await setup()
     const target = 'alpha__record__read_000'
     const captured = registry.get(target)!
-    expect(captured.validateParams!({})).toMatchObject({ is_valid: true })
+    expect(await captured.validateParams!({})).toMatchObject({ is_valid: true })
     const schema = manager.getAllTools().find(tool => tool.name === target)!.inputSchema
     Object.assign(schema, { properties: { recordId: { type: 'string' } }, required: ['recordId'] })
     const rejected = await captured.execute({})
@@ -535,7 +547,7 @@ describe('approved catalog across presentation and lifecycle', () => {
               message => message.role === 'tool' && message.tool_call_id === call.id
             )
             if (decision === 'schema-change')
-              expect(result?.content).toContain('current MCP tool schema')
+              expect(result?.content).toContain('MCP validation failed')
             else if (decision === 'revoke')
               expect(result?.content).toMatch(/not found|not available/i)
             else expect(result?.content).toContain('receipt:alpha:record__read_082')
