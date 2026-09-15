@@ -168,7 +168,7 @@ log "Resolving inter-service tokens (context: ${CONTEXT:-<current>})"
 # avoid YAML quoting surprises with commas/equals in the token strings.
 command -v jq >/dev/null 2>&1 || die "jq is required (apt-get install jq)"
 
-for ns in control-plane profiles rpc-proxy channels webhook-ingress; do
+for ns in control-plane profiles rpc-proxy channels webhook-ingress gfs mcp-host; do
   ensure_namespace "$ns"
 done
 # Resolve each token from the side that already holds it (if any). We read
@@ -185,6 +185,13 @@ TOKEN_WA_READER="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WA_READER \
   channels workflow-approval-request-reader-credentials control-api-token)"
 TOKEN_CODEX_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY \
   control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN)"
+TOKEN_GFSC="$(resolve_token CONTROL_API_INTERNAL_TOKEN_GFSC \
+  gfs gfs-controller-service-token token)"
+TOKEN_WFC="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WFC \
+  mcp-host workspace-files-controller-service-token token)"
+if [[ "$TOKEN_GFSC" == "$TOKEN_WFC" || "$TOKEN_GFSC" == "$TOKEN_RPC" || "$TOKEN_WFC" == "$TOKEN_RPC" ]]; then
+  die "filesystem controller service tokens must be distinct from each other and rpc-proxy"
+fi
 READER_HANDOFF_TOKEN_VALUE="$(resolve_token CHANNEL_READER_HANDOFF_TOKEN \
   channels workflow-approval-request-reader-credentials channel-reader-handoff-token)"
 INTERNAL_CONTROL_WRC_HMAC="$(resolve_token INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
@@ -199,6 +206,8 @@ for pair in \
   "WEBHOOK_PROXY:$TOKEN_WEBHOOK_PROXY" \
   "WA_READER:$TOKEN_WA_READER" \
   "CODEX_LLM_PROXY:$TOKEN_CODEX_LLM_PROXY" \
+  "GFSC:$TOKEN_GFSC" \
+  "WFC:$TOKEN_WFC" \
   "CHANNEL_READER_HANDOFF:$READER_HANDOFF_TOKEN_VALUE" \
   "INTERNAL_CONTROL_WRC_HMAC:$INTERNAL_CONTROL_WRC_HMAC" \
   "INTERNAL_CONTROL_HCC_HMAC:$INTERNAL_CONTROL_HCC_HMAC" \
@@ -208,8 +217,8 @@ for pair in \
   [ -n "$val" ] || die "token $name resolved to empty — refusing to patch"
 done
 
-SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY}"
-INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY}"
+SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},gfs-controller=${TOKEN_GFSC},workspace-files-controller=${TOKEN_WFC}"
+INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GFSC},${TOKEN_WFC}"
 
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
@@ -284,6 +293,15 @@ ensure_secret rpc-proxy rpc-proxy-secrets
 RPC_PATCH="$(jq -cn --arg t "$TOKEN_RPC" \
   '{stringData: {RPC_PROXY_CONTROL_API_SERVICE_TOKEN: $t}}')"
 kctl -n rpc-proxy patch secret rpc-proxy-secrets --type=merge -p "$RPC_PATCH"
+
+# --- 4a. filesystem controller checkpoint identities ---
+log "Patching distinct filesystem controller service tokens"
+ensure_secret gfs gfs-controller-service-token
+GFSC_PATCH="$(jq -cn --arg t "$TOKEN_GFSC" '{stringData: {token: $t}}')"
+kctl -n gfs patch secret gfs-controller-service-token --type=merge -p "$GFSC_PATCH"
+ensure_secret mcp-host workspace-files-controller-service-token
+WFC_PATCH="$(jq -cn --arg t "$TOKEN_WFC" '{stringData: {token: $t}}')"
+kctl -n mcp-host patch secret workspace-files-controller-service-token --type=merge -p "$WFC_PATCH"
 
 # --- 4b. webhook-proxy-secrets (webhook-ingress) ---
 # Adds/updates WEBHOOK_PROXY_CONTROL_API_SERVICE_TOKEN. webhook-proxy uses

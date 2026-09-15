@@ -192,8 +192,7 @@ export class DualConversationStore implements ConversationStore {
       return memList
     }
 
-    const sqlParityPage =
-      query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
+    const sqlParityPage = query.limit === undefined ? sqlList : sqlList.slice(0, query.limit)
     this.recordParity('listSessionSummariesByPrefix', pagesMatch(memList, sqlParityPage))
     if (query.limit !== undefined && memList.length >= query.limit) return memList
     // A live memory copy is canonical even when its timestamp places it outside
@@ -327,10 +326,14 @@ export class DualConversationStore implements ConversationStore {
     ])
   }
 
-  async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
+  async persistSuspend(
+    conv: Conversation,
+    approval: PendingApproval,
+    sourceMessage?: Record<string, unknown>
+  ): Promise<void> {
     await Promise.all([
-      this.memory.persistSuspend(conv, approval),
-      this.sqlite.persistSuspend(conv, approval),
+      this.memory.persistSuspend(conv, approval, sourceMessage),
+      this.sqlite.persistSuspend(conv, approval, sourceMessage),
     ])
   }
 

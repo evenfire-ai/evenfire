@@ -14,6 +14,7 @@ WORKDIR /app
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 
 # Install dependencies (file: deps resolve to ../packages/llm-providers and
 # ../packages/llm-provider-attempt-contract)
@@ -30,6 +31,11 @@ RUN npm run build
 
 # Production image — Debian slim (glibc + apt available)
 FROM node:24.16.0-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203
+ARG EVENFIRE_SOURCE_REVISION
+ARG EVENFIRE_SERVICE_VERSION
+ENV EVENFIRE_SOURCE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_IMAGE_REVISION=$EVENFIRE_SOURCE_REVISION
+ENV EVENFIRE_SERVICE_VERSION=$EVENFIRE_SERVICE_VERSION
 
 WORKDIR /app
 
@@ -50,6 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages/llm-providers ./packages/llm-providers
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/codex-catalog-projection ./packages/codex-catalog-projection
+COPY packages/action-context-contracts ./packages/action-context-contracts
 COPY mcp-host/package*.json ./mcp-host/
 WORKDIR /app/mcp-host
 RUN npm ci --only=production

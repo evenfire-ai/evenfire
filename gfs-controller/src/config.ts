@@ -12,17 +12,17 @@
  */
 import {
   GFS_UPLOAD_V2_DEFAULT_CONCURRENCY,
+  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_FALLBACK_CONCURRENCY,
+  GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS,
   GFS_UPLOAD_V2_INSTABILITY_FAILURE_THRESHOLD,
   GFS_UPLOAD_V2_MAX_PART_BYTES,
   GFS_UPLOAD_V2_MIN_PART_BYTES,
   GFS_UPLOAD_V2_PART_TIMEOUT_MS,
-  GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS,
-  GFS_UPLOAD_V2_STALE_PART_LEASE_MS,
   GFS_UPLOAD_V2_PREFERRED_PART_BYTES,
-  GFS_UPLOAD_V2_DEFAULT_PRODUCT_MAX_BYTES,
   GFS_UPLOAD_V2_PROTOCOL_MAX_BYTES,
   GFS_UPLOAD_V2_SESSION_TTL_SECONDS,
+  GFS_UPLOAD_V2_STALE_PART_LEASE_MS,
 } from './upload/protocol'
 
 export interface GfsUploadConfig {
@@ -93,6 +93,9 @@ export interface GfsConfig {
   syncRenameTimeoutMs: number
   uploadV2: GfsUploadConfig
   devMode: boolean
+  controlApiBaseUrl: string
+  controlApiServiceToken: string
+  authorityCheckpointTimeoutMs: number
 }
 
 function required(name: string, devMode: boolean, devDefault?: string): string {
@@ -143,7 +146,9 @@ function syncCopyPositiveInteger(name: string, defaultValue: number): number {
 function storageRole(): GfsConfig['storageRole'] {
   const value = process.env.GFS_STORAGE_ROLE
   if (value === 'reader' || value === 'writer') return value
-  throw new Error(`[gfsc] GFS_STORAGE_ROLE must be explicitly set to 'reader' or 'writer', got: ${JSON.stringify(value)}`)
+  throw new Error(
+    `[gfsc] GFS_STORAGE_ROLE must be explicitly set to 'reader' or 'writer', got: ${JSON.stringify(value)}`
+  )
 }
 
 function strictBoolean(name: string, defaultValue: boolean): boolean {
@@ -158,7 +163,9 @@ function uploadInteger(name: string, defaultValue: number, min: number, max: num
   const raw = process.env[name]
   if (raw === undefined) return defaultValue
   if (!/^[0-9]+$/.test(raw)) {
-    throw new Error(`[gfsc] ${name} must be an integer from ${min} through ${max}, got: ${JSON.stringify(raw)}`)
+    throw new Error(
+      `[gfsc] ${name} must be an integer from ${min} through ${max}, got: ${JSON.stringify(raw)}`
+    )
   }
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value < min || value > max) {
@@ -177,7 +184,8 @@ function requireCanonicalUploadInteger(name: string): void {
 function uploadDurationMs(name: string, defaultValue: number, max: number): number {
   const raw = process.env[name]
   if (raw === undefined) return defaultValue
-  if (!/^[0-9]+$/.test(raw)) throw new Error(`[gfsc] ${name} must be a positive integer number of milliseconds`)
+  if (!/^[0-9]+$/.test(raw))
+    throw new Error(`[gfsc] ${name} must be a positive integer number of milliseconds`)
   const value = Number(raw)
   if (!Number.isSafeInteger(value) || value <= 0 || value > max) {
     throw new Error(`[gfsc] ${name} must be a positive integer number of milliseconds`)
@@ -190,16 +198,21 @@ function uploadDurationMsWithAlias(
   aliasName: string,
   defaultValue: number,
   max: number,
-  aliasMultiplier: number,
+  aliasMultiplier: number
 ): number {
   const canonicalRaw = process.env[canonicalName]
   const aliasRaw = process.env[aliasName]
-  const canonical = canonicalRaw === undefined
-    ? undefined
-    : uploadDurationMs(canonicalName, defaultValue, max)
-  const alias = aliasRaw === undefined
-    ? undefined
-    : uploadInteger(aliasName, Math.round(defaultValue / aliasMultiplier), 1, Math.floor(max / aliasMultiplier)) * aliasMultiplier
+  const canonical =
+    canonicalRaw === undefined ? undefined : uploadDurationMs(canonicalName, defaultValue, max)
+  const alias =
+    aliasRaw === undefined
+      ? undefined
+      : uploadInteger(
+          aliasName,
+          Math.round(defaultValue / aliasMultiplier),
+          1,
+          Math.floor(max / aliasMultiplier)
+        ) * aliasMultiplier
   if (canonical !== undefined && alias !== undefined && canonical !== alias) {
     throw new Error(`[gfsc] ${canonicalName} and deprecated ${aliasName} must match`)
   }
@@ -211,7 +224,7 @@ function uploadIntegerWithAlias(
   aliasName: string,
   defaultValue: number,
   min: number,
-  max: number,
+  max: number
 ): number {
   const canonicalRaw = process.env[canonicalName]
   const aliasRaw = process.env[aliasName]
@@ -221,16 +234,22 @@ function uploadIntegerWithAlias(
   if (canonicalRaw !== undefined && aliasRaw !== undefined) {
     const canonicalNumber = Number(canonicalRaw)
     const aliasNumber = Number(aliasRaw)
-    if (Number.isFinite(canonicalNumber) && Number.isFinite(aliasNumber) && canonicalNumber !== aliasNumber) {
+    if (
+      Number.isFinite(canonicalNumber) &&
+      Number.isFinite(aliasNumber) &&
+      canonicalNumber !== aliasNumber
+    ) {
       throw new Error(`[gfsc] ${canonicalName} and deprecated ${aliasName} must match`)
     }
   }
-  const canonical = process.env[canonicalName] === undefined
-    ? undefined
-    : uploadInteger(canonicalName, defaultValue, min, max)
-  const alias = process.env[aliasName] === undefined
-    ? undefined
-    : uploadInteger(aliasName, defaultValue, min, max)
+  const canonical =
+    process.env[canonicalName] === undefined
+      ? undefined
+      : uploadInteger(canonicalName, defaultValue, min, max)
+  const alias =
+    process.env[aliasName] === undefined
+      ? undefined
+      : uploadInteger(aliasName, defaultValue, min, max)
   if (canonical !== undefined && alias !== undefined && canonical !== alias) {
     throw new Error(`[gfsc] ${canonicalName} and deprecated ${aliasName} must match`)
   }
@@ -278,13 +297,15 @@ function uploadConfig(): GfsUploadConfig {
     'GFS_UPLOAD_MIN_PART_BYTES',
     GFS_UPLOAD_V2_MIN_PART_BYTES,
     GFS_UPLOAD_V2_MIN_PART_BYTES,
-    maxPartBytes,
+    maxPartBytes
   )
   if (minPartBytes > maxPartBytes) {
     throw new Error(`[gfsc] GFS_UPLOAD_MIN_PART_BYTES cannot exceed GFS_UPLOAD_MAX_CHUNK_BYTES`)
   }
   if (preferredPartBytes < minPartBytes) {
-    throw new Error(`[gfsc] GFS_UPLOAD_PREFERRED_CHUNK_BYTES cannot be below GFS_UPLOAD_MIN_PART_BYTES`)
+    throw new Error(
+      `[gfsc] GFS_UPLOAD_PREFERRED_CHUNK_BYTES cannot be below GFS_UPLOAD_MIN_PART_BYTES`
+    )
   }
   const maxPartCount = uploadInteger('GFS_UPLOAD_MAX_PART_COUNT', 1024, 1, 1024)
   const maxConcurrentPartsPerSession = uploadInteger(
@@ -312,8 +333,18 @@ function uploadConfig(): GfsUploadConfig {
   )
   const maxActivePerSubject = uploadInteger('GFS_UPLOAD_MAX_ACTIVE_PER_SUBJECT', 2, 1, 100)
   const maxActiveGlobal = uploadInteger('GFS_UPLOAD_MAX_ACTIVE_GLOBAL', 8, 1, 1000)
-  const maxConcurrentFinalizations = uploadInteger('GFS_UPLOAD_MAX_CONCURRENT_FINALIZATIONS', 1, 1, 100)
-  const minFreeBytes = uploadInteger('GFS_UPLOAD_MIN_FREE_BYTES', 10 * 1024 * 1024 * 1024, 0, Number.MAX_SAFE_INTEGER)
+  const maxConcurrentFinalizations = uploadInteger(
+    'GFS_UPLOAD_MAX_CONCURRENT_FINALIZATIONS',
+    1,
+    1,
+    100
+  )
+  const minFreeBytes = uploadInteger(
+    'GFS_UPLOAD_MIN_FREE_BYTES',
+    10 * 1024 * 1024 * 1024,
+    0,
+    Number.MAX_SAFE_INTEGER
+  )
   const instabilityFailureThreshold = uploadInteger(
     'GFS_UPLOAD_INSTABILITY_FAILURE_THRESHOLD',
     GFS_UPLOAD_V2_INSTABILITY_FAILURE_THRESHOLD,
@@ -325,11 +356,23 @@ function uploadConfig(): GfsUploadConfig {
     'GFS_UPLOAD_SESSION_TTL_SECONDS',
     GFS_UPLOAD_V2_SESSION_TTL_SECONDS * 1000,
     7 * 24 * 60 * 60 * 1000,
-    1000,
+    1000
   )
-  const partTimeoutMs = uploadDurationMs('GFS_UPLOAD_PART_TIMEOUT_MS', GFS_UPLOAD_V2_PART_TIMEOUT_MS, 24 * 60 * 60 * 1000)
-  const finalizeTimeoutMs = uploadDurationMs('GFS_UPLOAD_FINALIZE_TIMEOUT_MS', GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS, 24 * 60 * 60 * 1000)
-  const stalePartLeaseMs = uploadDurationMs('GFS_UPLOAD_STALE_PART_LEASE_MS', GFS_UPLOAD_V2_STALE_PART_LEASE_MS, 24 * 60 * 60 * 1000)
+  const partTimeoutMs = uploadDurationMs(
+    'GFS_UPLOAD_PART_TIMEOUT_MS',
+    GFS_UPLOAD_V2_PART_TIMEOUT_MS,
+    24 * 60 * 60 * 1000
+  )
+  const finalizeTimeoutMs = uploadDurationMs(
+    'GFS_UPLOAD_FINALIZE_TIMEOUT_MS',
+    GFS_UPLOAD_V2_FINALIZE_TIMEOUT_MS,
+    24 * 60 * 60 * 1000
+  )
+  const stalePartLeaseMs = uploadDurationMs(
+    'GFS_UPLOAD_STALE_PART_LEASE_MS',
+    GFS_UPLOAD_V2_STALE_PART_LEASE_MS,
+    24 * 60 * 60 * 1000
+  )
   if (stalePartLeaseMs <= partTimeoutMs) {
     throw new Error(
       '[gfsc] GFS_UPLOAD_STALE_PART_LEASE_MS must be greater than GFS_UPLOAD_PART_TIMEOUT_MS'
@@ -340,7 +383,7 @@ function uploadConfig(): GfsUploadConfig {
     'GFS_UPLOAD_RECEIPT_RETENTION_SECONDS',
     24 * 60 * 60 * 1000,
     7 * 24 * 60 * 60 * 1000,
-    1000,
+    1000
   )
   return {
     productMaxFileBytes,
@@ -382,11 +425,7 @@ export function loadConfig(): GfsConfig {
       3600000,
       31536000000
     ),
-    blobCleanupIntervalMs: positiveInteger(
-      'GFS_BLOB_CLEANUP_INTERVAL_MS',
-      60000,
-      2147483647
-    ),
+    blobCleanupIntervalMs: positiveInteger('GFS_BLOB_CLEANUP_INTERVAL_MS', 60000, 2147483647),
     blobCleanupBatchSize: positiveInteger('GFS_BLOB_CLEANUP_BATCH_SIZE', 100, 10000),
     syncCopyMaxObjects: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_OBJECTS', 1000),
     syncCopyMaxBytes: syncCopyPositiveInteger('GFS_SYNC_COPY_MAX_BYTES', 1073741824),
@@ -395,5 +434,16 @@ export function loadConfig(): GfsConfig {
     syncRenameTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
     uploadV2: uploadConfig(),
     devMode,
+    controlApiBaseUrl: required(
+      'GFS_CONTROL_API_BASE_URL',
+      devMode,
+      'http://control-api.control-plane.svc.cluster.local:8090'
+    ),
+    controlApiServiceToken: required('GFS_CONTROL_API_SERVICE_TOKEN', false),
+    authorityCheckpointTimeoutMs: positiveInteger(
+      'GFS_AUTHORITY_CHECKPOINT_TIMEOUT_MS',
+      5000,
+      60000
+    ),
   }
 }

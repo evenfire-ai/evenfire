@@ -1,4 +1,5 @@
 import type { Response as ExpressResponse } from 'express'
+import type { AuthorizedActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import type { ResolvedServerConnection, RpcAccessClaims } from '../types.js'
 import { type HostWakeApiResponse, requestHostWakeFromControlApi } from './controlApiRestService.js'
@@ -51,6 +52,7 @@ export type WakeHoldOutcome =
   | { kind: 'not-found' }
   /** Still waking (or hold aborted) — structured retryable to the caller. */
   | { kind: 'waking'; retryAfterMs: number; reason: string; lastKnownState: string }
+  | { kind: 'authority'; status: number; code: string }
 
 type Waiter = {
   id: number
@@ -68,6 +70,7 @@ type Waiter = {
 type WakeAuthorization = {
   token: string
   tokenExpMs: number
+  authorizedActionV2?: AuthorizedActionV2
 }
 
 type HostWakeEntry = {
@@ -90,7 +93,11 @@ type HostWakeEntry = {
 }
 
 export type WakeCoordinatorDeps = {
-  requestWake: (hostRef: string, rpcAccessToken: string) => Promise<HostWakeApiResponse>
+  requestWake: (
+    hostRef: string,
+    rpcAccessToken: string,
+    options?: { authorizedActionV2?: AuthorizedActionV2; wakeReason?: string }
+  ) => Promise<HostWakeApiResponse>
   probeReady: (host: ResolvedServerConnection) => Promise<boolean>
   maxHoldMs: number
   pollMs: number
@@ -110,6 +117,7 @@ export type WakeHoldParams = {
   claims: RpcAccessClaims
   /** Raw bearer forwarded to the wake plane when this caller is wake-capable. */
   rpcAccessToken: string
+  authorizedActionV2?: AuthorizedActionV2
 }
 
 /**
@@ -118,12 +126,24 @@ export type WakeHoldParams = {
  * scopes (they rotate per token and would fragment one principal), and never
  * contains bearer material.
  */
-export function wakeCoordinationKey(claims: RpcAccessClaims, hostRef: string): string {
+export function wakeCoordinationKey(
+  claims: RpcAccessClaims,
+  hostRef: string,
+  authorizedActionV2?: AuthorizedActionV2
+): string {
   // Delimiter-safe encoding (adversarial review F4): sub/teamId are
   // server-assigned UUIDs today, but principal isolation must not silently
   // depend on ID format — JSON framing makes boundary-shifting collisions
   // impossible regardless of future identifier shapes.
-  return JSON.stringify([claims.typ, claims.sub, claims.accessScope, claims.teamId ?? '', hostRef])
+  return authorizedActionV2
+    ? JSON.stringify([
+        'v2',
+        authorizedActionV2.claims.sub,
+        authorizedActionV2.claims.sid,
+        authorizedActionV2.claims.accessPathId,
+        hostRef,
+      ])
+    : JSON.stringify([claims.typ, claims.sub, claims.accessScope, claims.teamId ?? '', hostRef])
 }
 
 /**
@@ -132,9 +152,18 @@ export function wakeCoordinationKey(claims: RpcAccessClaims, hostRef: string): s
  * hold budget so a token that cannot survive the wake call is not treated as
  * usable for it.
  */
-function isWakeCapable(claims: RpcAccessClaims, hostRef: string, now: number): boolean {
+function isWakeCapable(
+  claims: RpcAccessClaims,
+  hostRef: string,
+  now: number,
+  authorizedActionV2?: AuthorizedActionV2
+): boolean {
   const tokenExpMs = claims.exp * 1000
   if (tokenExpMs - TOKEN_EXP_SAFETY_MARGIN_MS <= now) return false
+  if (authorizedActionV2) {
+    const destination = authorizedActionV2.checkpoint.destination
+    return destination?.kind === 'host' && destination.ref.endsWith(`/${hostRef}`)
+  }
   if (!claims.scopes.includes(WAKE_SCOPE)) return false
   if (!claims.hostRefs.includes(hostRef)) return false
   return true
@@ -185,8 +214,8 @@ export class WakeAndHoldCoordinator {
     const deadlineReason =
       holdBudgetMs < this.deps.maxHoldMs ? 'token-expiring' : 'max-hold-exceeded'
 
-    const key = wakeCoordinationKey(params.claims, params.hostRef)
-    const wakeCapable = isWakeCapable(params.claims, params.hostRef, now)
+    const key = wakeCoordinationKey(params.claims, params.hostRef, params.authorizedActionV2)
+    const wakeCapable = isWakeCapable(params.claims, params.hostRef, now, params.authorizedActionV2)
 
     let entry = this.entries.get(key)
     if (!entry) {
@@ -202,7 +231,11 @@ export class WakeAndHoldCoordinator {
       if (tokenExpMs > entry.wakeAuthorization.tokenExpMs) {
         // Same principal, wake-capable, later valid expiry → replace the wake
         // authorization and the connection the probe uses.
-        entry.wakeAuthorization = { token: params.rpcAccessToken, tokenExpMs }
+        entry.wakeAuthorization = {
+          token: params.rpcAccessToken,
+          tokenExpMs,
+          ...(params.authorizedActionV2 ? { authorizedActionV2: params.authorizedActionV2 } : {}),
+        }
         entry.connection = params.host
       }
       // Same principal, wake-capable, earlier/equal expiry → retain current.
@@ -268,7 +301,11 @@ export class WakeAndHoldCoordinator {
       createdAt: this.now(),
       lastKnownState: 'unknown',
       waiters: new Map(),
-      wakeAuthorization: { token: params.rpcAccessToken, tokenExpMs },
+      wakeAuthorization: {
+        token: params.rpcAccessToken,
+        tokenExpMs,
+        ...(params.authorizedActionV2 ? { authorizedActionV2: params.authorizedActionV2 } : {}),
+      },
       connection: params.host,
       pollTimer: null,
       retriggerTimer: null,
@@ -314,7 +351,12 @@ export class WakeAndHoldCoordinator {
   private async issueWake(entry: HostWakeEntry, options: { initial: boolean }): Promise<void> {
     let response: HostWakeApiResponse
     try {
-      response = await this.deps.requestWake(entry.hostRef, entry.wakeAuthorization.token)
+      response = entry.wakeAuthorization.authorizedActionV2
+        ? await this.deps.requestWake(entry.hostRef, entry.wakeAuthorization.token, {
+            authorizedActionV2: entry.wakeAuthorization.authorizedActionV2,
+            wakeReason: 'message_retry',
+          })
+        : await this.deps.requestWake(entry.hostRef, entry.wakeAuthorization.token)
     } catch (error) {
       console.warn(
         `[RPC_PROXY] wake call failed host=${entry.hostRef} initial=${options.initial} error=${
@@ -380,6 +422,13 @@ export class WakeAndHoldCoordinator {
         if (options.initial) {
           this.settle(entry, { kind: 'legacy', reason: `wake-auth-${response.status}` })
         }
+        return
+      case 'authority':
+        this.settle(entry, {
+          kind: 'authority',
+          status: response.status,
+          code: response.code,
+        })
         return
     }
   }
@@ -536,6 +585,14 @@ function respondHostWaking(
   })
 }
 
+function actionAuthorityFailure(error: unknown): { status: number; code: string } | null {
+  if (!(error instanceof Error) || error.name !== 'ActionAuthorityCheckpointError') return null
+  const value = error as Error & { status?: unknown; code?: unknown }
+  return typeof value.status === 'number' && typeof value.code === 'string'
+    ? { status: value.status, code: value.code }
+    : null
+}
+
 /**
  * Readiness probe (§11.3): mcp-host's UNAUTHENTICATED `/v1/runtime/health`.
  * It comes up before MCP background init and is the same signal the Pod
@@ -582,6 +639,8 @@ export type RespondWithWakeAndHoldOptions = {
   claims: RpcAccessClaims
   /** Raw bearer forwarded to the wake plane when the caller is wake-capable. */
   rpcAccessToken: string
+  authorizedActionV2?: AuthorizedActionV2
+  reauthorizeV2?: () => Promise<void>
   /** Re-issues the original upstream request and writes the success response. */
   attemptUpstream: () => Promise<void>
   /** Writes today's error response (502/504) — the pre-wake behavior. */
@@ -615,6 +674,7 @@ export async function respondWithWakeAndHold(
     host: options.host,
     claims: options.claims,
     rpcAccessToken: options.rpcAccessToken,
+    ...(options.authorizedActionV2 ? { authorizedActionV2: options.authorizedActionV2 } : {}),
   })
 
   switch (outcome.kind) {
@@ -631,6 +691,7 @@ export async function respondWithWakeAndHold(
           return
         }
         try {
+          if (options.reauthorizeV2) await options.reauthorizeV2()
           await options.attemptUpstream()
           return
         } catch (error) {
@@ -643,6 +704,11 @@ export async function respondWithWakeAndHold(
                 error instanceof Error ? error.message : String(error)
               }`
             )
+            return
+          }
+          const authorityFailure = actionAuthorityFailure(error)
+          if (authorityFailure) {
+            options.res.status(authorityFailure.status).json({ error: authorityFailure.code })
             return
           }
           if (isWakeEligibleHostError(error)) continue
@@ -691,6 +757,9 @@ export async function respondWithWakeAndHold(
         retryAfterMs: outcome.retryAfterMs,
         lastKnownState: outcome.lastKnownState,
       })
+      return
+    case 'authority':
+      options.res.status(outcome.status).json({ error: outcome.code })
       return
   }
 }

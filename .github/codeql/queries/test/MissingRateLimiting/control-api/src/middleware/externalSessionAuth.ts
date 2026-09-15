@@ -1,14 +1,14 @@
-import fs from 'fs'
+import fs from "fs";
 
-declare function login(): void
+declare function login(): void;
 
 export function requireValidExternalSessionToken(
   _req: unknown,
   _res: unknown,
   next: () => void,
 ) {
-  login()
-  next()
+  login();
+  next();
 }
 
 export function requireValidExternalSessionTokenWithPublicErrors(
@@ -16,15 +16,15 @@ export function requireValidExternalSessionTokenWithPublicErrors(
   _res: unknown,
   next: () => void,
 ) {
-  login()
-  next()
+  login();
+  next();
 }
 
 export function requireExternalSessionRateLimitContext(_options: unknown) {
   return (_req: unknown, _res: unknown, next: () => void) => {
-    login()
-    next()
-  }
+    login();
+    next();
+  };
 }
 
 export function requireExternalTeamParamMatch(
@@ -32,8 +32,8 @@ export function requireExternalTeamParamMatch(
   _res: unknown,
   next: () => void,
 ) {
-  fs.writeFileSync('/tmp/evenfire-codeql-team-match', 'value')
-  next()
+  fs.writeFileSync("/tmp/evenfire-codeql-team-match", "value");
+  next();
 }
 
 export async function requireExternalSessionLimiterIdentityWithPublicErrors(
@@ -41,8 +41,8 @@ export async function requireExternalSessionLimiterIdentityWithPublicErrors(
   _res: unknown,
   next: () => void,
 ) {
-  login()
-  next()
+  login();
+  next();
 }
 
 export async function requireEffectiveV2ContractWithPublicErrors(
@@ -50,6 +50,6 @@ export async function requireEffectiveV2ContractWithPublicErrors(
   _res: unknown,
   next: () => void,
 ) {
-  login()
-  next()
+  login();
+  next();
 }

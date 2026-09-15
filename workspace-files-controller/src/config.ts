@@ -39,6 +39,9 @@ export interface Config {
   maxListEntries: number
   /** Max path depth (segments) accepted from clients. */
   maxPathDepth: number
+  controlApiBaseUrl?: string
+  controlApiServiceToken?: string
+  authorityCheckpointTimeoutMs?: number
 }
 
 export function loadConfig(): Config {
@@ -53,5 +56,11 @@ export function loadConfig(): Config {
     maxUploadBytes: getEnvInt('WSF_MAX_UPLOAD_BYTES', 100 * 1024 * 1024),
     maxListEntries: getEnvInt('WSF_MAX_LIST_ENTRIES', 5000),
     maxPathDepth: getEnvInt('WSF_MAX_PATH_DEPTH', 32),
+    controlApiBaseUrl: getEnv(
+      'WSF_CONTROL_API_BASE_URL',
+      'http://control-api.control-plane.svc.cluster.local:8090'
+    ),
+    controlApiServiceToken: getEnv('WSF_CONTROL_API_SERVICE_TOKEN'),
+    authorityCheckpointTimeoutMs: getEnvInt('WSF_AUTHORITY_CHECKPOINT_TIMEOUT_MS', 5000),
   }
 }

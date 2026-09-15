@@ -5,7 +5,11 @@ import {
 } from './migrationExecutionPolicy.js'
 
 export type OnlineIndexDefinition = Readonly<{
-  migrationVersion: '0109_user_access_foundation' | '010b_catalog_utf8_ordering'
+  migrationVersion:
+    | '0109_user_access_foundation'
+    | '010b_catalog_utf8_ordering'
+    | '010f_workflow_authority_bindings'
+  phase?: 'before-schema' | 'after-schema'
   name: string
   table: string
   unique?: boolean
@@ -205,6 +209,15 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       ON operational_resource_relationships
       (environment_id, target_type, relationship_type, catalog_utf8_bytes(target_id))`,
   },
+  {
+    migrationVersion: '010f_workflow_authority_bindings',
+    phase: 'after-schema',
+    name: 'workflow_runs_initiating_authority_binding',
+    table: 'workflow_runs',
+    createSql: `CREATE INDEX CONCURRENTLY workflow_runs_initiating_authority_binding
+      ON workflow_runs (initiating_authority_binding_id)
+      WHERE initiating_authority_binding_id IS NOT NULL`,
+  },
 ])
 
 export const canonicalOnlineIndexDefinition = (value: string): string =>
@@ -329,8 +342,20 @@ async function prepareCatalogUtf8Function(db: DbClient): Promise<void> {
   }
 }
 
-export async function preparePr1Migration(db: DbClient, version: string): Promise<void> {
-  const indexes = PR1_ONLINE_INDEX_PLAN.filter(entry => entry.migrationVersion === version)
+export function hasPostSchemaOnlineIndexes(version: string): boolean {
+  return PR1_ONLINE_INDEX_PLAN.some(
+    entry => entry.migrationVersion === version && entry.phase === 'after-schema'
+  )
+}
+
+export async function preparePr1Migration(
+  db: DbClient,
+  version: string,
+  phase: 'before-schema' | 'after-schema' = 'before-schema'
+): Promise<void> {
+  const indexes = PR1_ONLINE_INDEX_PLAN.filter(
+    entry => entry.migrationVersion === version && (entry.phase ?? 'before-schema') === phase
+  )
   if (indexes.length === 0) return
   if (version === '010b_catalog_utf8_ordering') await prepareCatalogUtf8Function(db)
   for (const index of indexes) await ensureOnlineIndex(db, index)

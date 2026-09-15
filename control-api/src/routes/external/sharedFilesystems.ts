@@ -12,12 +12,17 @@ import { externalUserRateLimitOptions } from '../../middleware/externalUserRateL
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import { scheduleAccessCatalogShadow } from '../../services/access/accessCatalogShadow.js'
 import { getLiveTeamMembership } from '../../services/access/liveTeamAuthorization.js'
+import { relationshipInstanceId } from '../../services/access/operationalAccessProjection.js'
 import {
   listActiveContextIds,
   partitionAccessValues,
 } from '../../services/directory/accessReconciliation.js'
 import { getTeamContexts, getUserContexts } from '../../services/directory/index.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
+import {
+  WorkflowAuthorityError,
+  requireWorkflowActionAuthority,
+} from '../../services/workflows/workflowAuthorityBindingService.js'
 import { WFC_BROWSING_READ_SCOPE, signWfcBrowsingToken } from '../../utils/auth/wfcBrowsingToken.js'
 import { wfcServiceUrl } from '../../utils/wfcServiceUrl.js'
 
@@ -372,8 +377,8 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
         }
         throw e
       }
-      const referencesSfs = (ctx.spec?.sharedFileSystems ?? []).some(r => r.name === sfsName)
-      if (!referencesSfs) {
+      const sfsReference = (ctx.spec?.sharedFileSystems ?? []).find(r => r.name === sfsName)
+      if (!sfsReference?.mountPath) {
         res.status(404).json({ error: 'SharedFileSystem not attached to context' })
         return
       }
@@ -410,11 +415,56 @@ export function createExternalSharedFilesystemsRouter(gateway: K8sGateway): Rout
       const subPath = rawSubPath === '/' ? '' : rawSubPath
       const target = `${upstream}${subPath}`
 
+      let actionAuthority
+      if (req.externalSessionAuthority?.contract === 'v2') {
+        const canonicalRelativePath =
+          new URL(rawSubPath, 'http://wfc.local').searchParams.get('path') || '.'
+        try {
+          actionAuthority = await requireWorkflowActionAuthority({
+            req,
+            caller: {
+              kind: 'user-session',
+              claims,
+              session: req.externalSessionAuthority,
+            },
+            operationId: 'shared_filesystem.read',
+            resourceType: 'shared_filesystem',
+            resourceLogicalId: `${sfsNs}/${sfsName}`,
+            target: {
+              sharedFileSystemNamespace: sfsNs,
+              sharedFileSystemName: sfsName,
+              relationshipInstanceId: relationshipInstanceId([
+                'context',
+                `${ctxNs}/${contextId}`,
+                'sfs',
+                `${sfsNs}/${sfsName}`,
+                sfsReference.mountPath,
+              ]),
+              canonicalRelativePath,
+            },
+            gateway,
+          })
+        } catch (error) {
+          if (!(error instanceof WorkflowAuthorityError)) throw error
+          res.status(error.status).json({ error: error.code })
+          return
+        }
+      }
+
       const { token: browsingToken } = signWfcBrowsingToken({
-        subject: claims.email || claims.userId,
+        subject: actionAuthority ? claims.userId : claims.email || claims.userId,
         sharedFileSystem: sfsName,
         sharedFileSystemNamespace: sfsNs,
         scopes: [WFC_BROWSING_READ_SCOPE],
+        ...(actionAuthority
+          ? {
+              actionAuthority: {
+                binding: actionAuthority.binding,
+                sourceIssuedAt: actionAuthority.sourceIssuedAt,
+                sourceExpiresAt: actionAuthority.sourceExpiresAt,
+              },
+            }
+          : {}),
       })
       const headers: Record<string, string> = {
         authorization: `Bearer ${browsingToken}`,

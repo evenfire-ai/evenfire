@@ -143,6 +143,13 @@ describe('gfsFactory writer Deployment', () => {
     expect(byName('GFS_PORT')?.value).toBe('8087')
     expect(byName('GFS_DRIVE_NAME')?.value).toBe('main')
     expect(byName('GFS_TOKEN_AUDIENCE')?.value).toBe('gfs-controller')
+    expect(byName('GFS_CONTROL_API_BASE_URL')?.value).toBe(
+      'http://control-api.control-plane.svc.cluster.local:8090'
+    )
+    expect(byName('GFS_CONTROL_API_SERVICE_TOKEN')?.valueFrom?.secretKeyRef).toEqual({
+      name: 'gfs-controller-service-token',
+      key: 'token',
+    })
     expect(byName('GFS_PG_CONNECTION_STRING')?.valueFrom?.secretKeyRef?.name).toBe(
       'gfs-controller-db'
     )
@@ -273,9 +280,9 @@ describe('gfsFactory reader Deployment', () => {
     expect(mount?.readOnly).toBe(true)
     const env = dep.spec?.template.spec?.containers[0].env ?? []
     expect(env.find(e => e.name === 'GFS_STORAGE_ROLE')?.value).toBe('reader')
-    expect(env.find(e => e.valueFrom?.secretKeyRef)?.valueFrom?.secretKeyRef?.name).toBe(
-      'gfs-controller-reader-db'
-    )
+    expect(
+      env.find(e => e.name === 'GFS_PG_CONNECTION_STRING')?.valueFrom?.secretKeyRef?.name
+    ).toBe('gfs-controller-reader-db')
     expect(dep.spec?.strategy).toEqual({
       type: 'RollingUpdate',
       rollingUpdate: { maxUnavailable: 0, maxSurge: 1 },
@@ -336,7 +343,7 @@ describe('gfsFactory NetworkPolicies', () => {
     expect(rule.ports?.[0].port).toBe(8087)
   })
 
-  it('egress allows DNS AND the permission-store Postgres (gfs-specific, NOT DNS-only like SFS)', () => {
+  it('egress allows only DNS, permission Postgres, and the Control API checkpoint', () => {
     const np = buildEgressNetworkPolicy(gfs(), config)
     const egress = np.spec?.egress ?? []
     // DNS rule
@@ -347,6 +354,16 @@ describe('gfsFactory NetworkPolicies', () => {
     expect(pg).toBeDefined()
     const pgTo = pg?.to?.[0] as { podSelector?: { matchLabels?: Record<string, string> } }
     expect(pgTo.podSelector?.matchLabels?.app).toBe('control-postgres')
+    const checkpoint = egress.find(r => r.ports?.some(p => p.port === 8090))
+    expect(checkpoint?.to).toEqual([
+      {
+        namespaceSelector: {
+          matchLabels: { 'kubernetes.io/metadata.name': 'control-plane' },
+        },
+        podSelector: { matchLabels: { app: 'control-api' } },
+      },
+    ])
+    expect(egress).toHaveLength(3)
   })
 
   it('adds kube-dns service-ip egress only when GKE NodeLocal DNS CIDR is configured', () => {

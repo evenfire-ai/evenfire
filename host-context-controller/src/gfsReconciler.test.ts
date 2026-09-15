@@ -130,8 +130,8 @@ describe('GfsReconciler.reconcile', () => {
     const writer = api.deploymentManifests.find(d => d.metadata?.name === 'gfsc-writer')
     const reader = api.deploymentManifests.find(d => d.metadata?.name === 'gfsc-reader')
     const pgRef = (dep: k8s.V1Deployment | undefined) =>
-      dep?.spec?.template.spec?.containers[0].env?.find(variable =>
-        Boolean(variable.valueFrom?.secretKeyRef)
+      dep?.spec?.template.spec?.containers[0].env?.find(
+        variable => variable.name === 'GFS_PG_CONNECTION_STRING'
       )?.valueFrom?.secretKeyRef?.name
     expect(pgRef(writer)).toBe('gfs-controller-db')
     expect(pgRef(reader)).toBe('gfs-controller-reader-db')

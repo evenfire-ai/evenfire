@@ -74,6 +74,52 @@ describe('signGfsToken', () => {
     })
   })
 
+  it('carries immutable v2 action provenance without exposing a service credential', () => {
+    const userId = '11111111-1111-4111-8111-111111111111'
+    const now = Math.floor(Date.now() / 1000)
+    const actionAuthority = {
+      binding: {
+        version: 2 as const,
+        userId,
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: '33333333-3333-4333-8333-333333333333',
+        operationId: 'gfs.read' as const,
+        resource: {
+          environmentId: 'development:local-cluster',
+          type: 'gfs_resource' as const,
+          canonicalId: 'gfs_resource:44444444-4444-4444-8444-444444444444',
+          logicalId: '44444444-4444-4444-8444-444444444444',
+          displayName: 'document',
+        },
+        target: {
+          drive: 'main',
+          resourceId: '44444444-4444-4444-8444-444444444444',
+        },
+        targetHash: 'ath2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct' as const,
+        effectiveTeamId: null,
+        behaviorBindingHash: 'bh2_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      sourceIssuedAt: now - 1,
+      sourceExpiresAt: now + 60,
+    }
+    const { token } = signGfsToken({
+      subject: userId,
+      drive: 'main',
+      scopes: ['gfs.read'],
+      principalType: 'user',
+      authGeneration: 1,
+      actionAuthority,
+    })
+    const decoded = jwt.verify(token, config.rpcJwtPublicKey, VERIFY) as jwt.JwtPayload
+
+    expect(decoded.actionAuthority).toEqual(actionAuthority)
+    expect(decoded).not.toHaveProperty('serviceToken')
+  })
+
   it('FAILS verification under the wrong audience (fail-loud)', () => {
     const { token } = signGfsToken({ subject: 'u', drive: 'main', scopes: ['gfs.read'] })
     expect(() =>

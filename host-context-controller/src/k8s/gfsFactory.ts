@@ -120,6 +120,9 @@ export interface GfsFactoryConfig {
   uploadFinalizeTimeoutMs?: string
   /** Optional kube-dns Service ClusterIP /32 for GKE NodeLocal DNS + Calico. */
   nodeLocalDnsCidr?: string
+  controlApiBaseUrl?: string
+  serviceTokenSecretName?: string
+  serviceTokenSecretKey?: string
 }
 
 export function pvcName(_gfs: Pick<GlobalFileSystemCRD, 'name'>): string {
@@ -316,6 +319,21 @@ function gfscEnv(config: GfsFactoryConfig, role: GfscRole): k8s.V1EnvVar[] {
     { name: 'GFS_STORAGE_ROLE', value: role },
     { name: 'GFS_DRIVE_NAME', value: config.driveName },
     { name: 'GFS_TOKEN_AUDIENCE', value: config.tokenAudience },
+    {
+      name: 'GFS_CONTROL_API_BASE_URL',
+      value:
+        config.controlApiBaseUrl ??
+        `http://control-api.${config.controlPlaneNamespace}.svc.cluster.local:8090`,
+    },
+    {
+      name: 'GFS_CONTROL_API_SERVICE_TOKEN',
+      valueFrom: {
+        secretKeyRef: {
+          name: config.serviceTokenSecretName ?? 'gfs-controller-service-token',
+          key: config.serviceTokenSecretKey ?? 'token',
+        },
+      },
+    },
     ...(role === 'writer' && config.uploadV2Enabled !== undefined
       ? [{ name: 'GFS_UPLOAD_V2_ENABLED', value: config.uploadV2Enabled }]
       : []),
@@ -666,6 +684,17 @@ export function buildEgressNetworkPolicy(
       },
     ],
     ports: [{ port: config.postgresPort, protocol: 'TCP' }],
+  })
+  egress.push({
+    to: [
+      {
+        namespaceSelector: {
+          matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+        },
+        podSelector: { matchLabels: { app: 'control-api' } },
+      },
+    ],
+    ports: [{ port: 8090, protocol: 'TCP' }],
   })
 
   return {

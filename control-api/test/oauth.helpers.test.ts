@@ -212,6 +212,7 @@ describe('getAccessToken (O5.1)', () => {
     /** Use `noRefresh: true` to omit the refresh token entirely. */
     noRefresh?: boolean
     accessTokenExpiresAt?: Date | null
+    provider?: string
   }) {
     return {
       query: vi.fn(async () => ({
@@ -221,7 +222,7 @@ describe('getAccessToken (O5.1)', () => {
             recipe_name: 'crm',
             user_id: 'user-1',
             oauth_client_id: 'salesforce',
-            provider: 'salesforce',
+            provider: opts.provider ?? 'salesforce',
             access_token_encrypted: opts.accessTokenEncrypted ?? encryptValue('AT_FROM_DB'),
             refresh_token_encrypted: opts.noRefresh
               ? null
@@ -247,7 +248,7 @@ describe('getAccessToken (O5.1)', () => {
   }
 
   it('returns no_grant when no row exists', async () => {
-    const { recipeReader, secretReader } = buildReaders({})
+    const { recipeReader, secretReader } = buildReaders({ recipe: recipeWithSalesforce() })
     const db = emptyDb()
     const result = await getAccessToken(
       {
@@ -269,7 +270,7 @@ describe('getAccessToken (O5.1)', () => {
   })
 
   it('returns the cached access token when still valid', async () => {
-    const { recipeReader, secretReader } = buildReaders({})
+    const { recipeReader, secretReader } = buildReaders({ recipe: recipeWithSalesforce() })
     const db = dbWithGrant({})
     const result = await getAccessToken(
       {
@@ -288,6 +289,43 @@ describe('getAccessToken (O5.1)', () => {
       }
     )
     expect(result).toMatchObject({ kind: 'ok', accessToken: 'AT_FROM_DB' })
+  })
+
+  it('does not return a cached token after the current recipe client is removed', async () => {
+    const { recipeReader, secretReader } = buildReaders({ recipe: { spec: { oauthClients: [] } } })
+    const db = dbWithGrant({})
+    const fetchFn = vi.fn() as unknown as typeof fetch
+    const result = await getAccessToken(
+      {
+        grantKind: 'user',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'crm',
+        oauthClientId: 'salesforce',
+        userId: 'user-1',
+      },
+      { db, recipeReader, secretReader, fetchFn, encryptionKey: KEY }
+    )
+    expect(result.kind).toBe('unknown_oauth_client')
+    expect(db.query).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('does not return a cached token for a grant whose provider no longer matches', async () => {
+    const { recipeReader, secretReader } = buildReaders({ recipe: recipeWithSalesforce() })
+    const db = dbWithGrant({ provider: 'attacker-provider' })
+    const fetchFn = vi.fn() as unknown as typeof fetch
+    const result = await getAccessToken(
+      {
+        grantKind: 'user',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'crm',
+        oauthClientId: 'salesforce',
+        userId: 'user-1',
+      },
+      { db, recipeReader, secretReader, fetchFn, encryptionKey: KEY }
+    )
+    expect(result.kind).toBe('no_grant')
+    expect(fetchFn).not.toHaveBeenCalled()
   })
 
   it('refreshes when the access token is expired and persists the new value', async () => {
@@ -340,7 +378,7 @@ describe('getAccessToken (O5.1)', () => {
   })
 
   it('returns no_grant when the access token is expired and there is no refresh token', async () => {
-    const { recipeReader, secretReader } = buildReaders({})
+    const { recipeReader, secretReader } = buildReaders({ recipe: recipeWithSalesforce() })
     const db = dbWithGrant({
       accessTokenExpiresAt: new Date(Date.now() - 60_000),
       noRefresh: true,
@@ -455,7 +493,7 @@ describe('getAccessToken (O5.1)', () => {
   })
 
   it('reads a service grant via the user_id IS NULL path (Path B)', async () => {
-    const { recipeReader, secretReader } = buildReaders({})
+    const { recipeReader, secretReader } = buildReaders({ recipe: recipeWithSalesforce() })
     const db = {
       query: vi.fn(async () => ({
         rows: [

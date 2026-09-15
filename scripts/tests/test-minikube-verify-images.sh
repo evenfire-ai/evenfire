@@ -24,9 +24,26 @@ FAIL=0
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 GHCR_COMPONENT="$REPO_ROOT/deploy/components/ghcr-images/kustomization.yaml"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
+source "$REPO_ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
+HOST_CHECKOUT_ROOT="$REPO_ROOT"
+HOST_CHECKOUT_HEAD="$(git -C "$HOST_CHECKOUT_ROOT" rev-parse --verify HEAD)"
+HOST_CHECKOUT_BRANCH="$(git -C "$HOST_CHECKOUT_ROOT" branch --show-current)"
+HOST_CHECKOUT_STATUS_HASH="$({ git -C "$HOST_CHECKOUT_ROOT" status --porcelain=v1 || true; } |
+  shasum -a 256 | awk '{print $1}')"
 
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; FAIL=1; }
+
+host_checkout_matches_snapshot() {
+  local expected_head="$1" expected_branch="$2" expected_status_hash="$3"
+  local current_status_hash
+  current_status_hash="$({ git -C "$HOST_CHECKOUT_ROOT" status --porcelain=v1 || true; } |
+    shasum -a 256 | awk '{print $1}')"
+  [[ "$(git -C "$HOST_CHECKOUT_ROOT" rev-parse --verify HEAD)" == "$expected_head" ]] \
+    && [[ "$(git -C "$HOST_CHECKOUT_ROOT" branch --show-current)" == "$expected_branch" ]] \
+    && [[ "$current_status_hash" == "$expected_status_hash" ]]
+}
 
 PIN_TAG="$(sed -n 's/^[[:space:]]*newTag:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' "$GHCR_COMPONENT" | sort -u)"
 if [ -z "$PIN_TAG" ] || [ "$(printf '%s\n' "$PIN_TAG" | wc -l | tr -d ' ')" != "1" ]; then
@@ -114,10 +131,14 @@ STUB
 prepare_repo() {
   local d=$1
   make_stubs "$d"
-  mkdir -p "$d/repo"
+  MINIKUBE_TEST_PROFILE=clerum-test \
+    MINIKUBE_TEST_CONTEXT=clerum-test \
+    minikube_test_fixture_repo_init "$REPO_ROOT" "$d"
   cp -R "$REPO_ROOT/deploy" "$d/repo/deploy"
   cp -R "$REPO_ROOT/scripts" "$d/repo/scripts"
   rm -rf "$d/repo/deploy/minikube"
+  git -C "$d/repo" add -A
+  git -C "$d/repo" commit -qm 'fixture: install image verification inputs'
 }
 
 # Pulls, full builds, and --only builds are mutation paths and now require the
@@ -690,6 +711,16 @@ assert_every_defined_case_is_invoked() {
   fi
 }
 
+assert_the_host_snapshot_guard_rejects_a_stale_snapshot() {
+  if host_checkout_matches_snapshot \
+    "0000000000000000000000000000000000000000" \
+    "$HOST_CHECKOUT_BRANCH" "$HOST_CHECKOUT_STATUS_HASH"; then
+    fail "host snapshot guard accepted a stale HEAD"
+  else
+    pass "host snapshot guard rejects stale state before later fixtures can mask it"
+  fi
+}
+
 assert_a_recorded_local_build_is_verified_locally_despite_the_ghcr_default
 assert_a_recorded_ghcr_pull_is_verified_against_ghcr_despite_a_local_env
 assert_the_env_is_the_fallback_when_no_manifest_exists
@@ -712,5 +743,11 @@ assert_local_mode_still_demands_the_e2e_fixtures
 assert_the_verify_set_is_read_from_the_manifest_not_hardcoded
 assert_an_empty_verify_set_is_a_failure_not_a_pass
 assert_every_defined_case_is_invoked
+assert_the_host_snapshot_guard_rejects_a_stale_snapshot
+
+if ! host_checkout_matches_snapshot \
+  "$HOST_CHECKOUT_HEAD" "$HOST_CHECKOUT_BRANCH" "$HOST_CHECKOUT_STATUS_HASH"; then
+  fail "fixture mutated the host checkout"
+fi
 
 exit $FAIL

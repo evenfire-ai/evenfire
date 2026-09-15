@@ -18,7 +18,7 @@ const shadowIntent: ConfiguredUserAccessIntent = Object.freeze({
 })
 
 describe('catalog readiness isolation', () => {
-  it('keeps ordinary policy resolution independent from catalog readiness', async () => {
+  it('keeps the legacy path query-free when catalog and v2 readiness are disabled', async () => {
     const query = vi.fn().mockRejectedValue(new Error('catalog source unavailable'))
 
     await expect(
