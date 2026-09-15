@@ -83,10 +83,10 @@ export interface AgentConfig {
  * Default agent configuration.
  */
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
-  maxTaskDuration: 24 * 60 * 60 * 1000, // 24 hours; not currently enforced
+  maxTaskDuration: 24 * 60 * 60 * 1000, // 24 hours of active task execution
   maxToolCallsPerTask: 1000,
   autoStart: true,
-  taskDelay: 3, // 3ms; not currently consumed by SessionProcessor
+  taskDelay: 3, // 3ms minimum between task dispatches
   approvalTimeout: 0, // 0 = no in-memory auto-deny; the request stays available until resolved. Override via CLERUM_APPROVAL_TIMEOUT
 }
 

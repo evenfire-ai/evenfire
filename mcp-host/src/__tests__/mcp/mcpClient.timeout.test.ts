@@ -132,7 +132,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.callToolCalls[0]).toEqual([
       { name: 'read', arguments: { id: 1 } },
       undefined,
-      expect.objectContaining({ timeout: 3_600_000 }),
+      expect.objectContaining({ timeout: 1_500_000 }),
     ])
   })
 
@@ -155,7 +155,7 @@ describe('McpClient SDK request timeouts', () => {
     expect(sdkState.callToolCalls).toHaveLength(2)
     expect(sdkState.callToolCalls[0][2]).toEqual(expect.objectContaining({ timeout: 30_000 }))
     expect(sdkState.callToolCalls[1][2]).toEqual(expect.objectContaining({ timeout: 29_000 }))
-    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 3_600_000 }))
+    expect(sdkState.listToolsCalls[1][1]).toEqual(expect.objectContaining({ timeout: 1_500_000 }))
   })
 
   it('lets a slower peer adopt the completed recovery of their shared session', async () => {

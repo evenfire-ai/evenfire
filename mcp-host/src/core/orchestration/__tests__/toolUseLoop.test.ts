@@ -973,7 +973,10 @@ describe('runToolUseLoop — loop control', () => {
     if (result.type === 'response') {
       expect(result.content).toBe('Found X')
     }
-    expect(searchTool.execute).toHaveBeenCalledWith({ q: 'X' }, undefined)
+    expect(searchTool.execute).toHaveBeenCalledWith(
+      { q: 'X' },
+      expect.objectContaining({ timeoutMs: expect.any(Number), signal: expect.any(AbortSignal) })
+    )
   })
 
   it('collects tool attachments without leaking base64 into tool messages', async () => {
@@ -2051,6 +2054,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       // NO supportsProgressOutput
@@ -2069,6 +2073,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => false,
@@ -2087,6 +2092,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'ok', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,
@@ -2107,6 +2113,7 @@ describe('executeSingleTool — progress watcher', () => {
     // Tool that calls context.onOutput BEFORE resolving — so watcher has dirty data.
     let resolveTool: (v: any) => void = () => {}
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn((_args: any, ctx: any) => {
         return new Promise<any>(r => {
           resolveTool = r
@@ -2146,6 +2153,7 @@ describe('executeSingleTool — progress watcher', () => {
     const reporter = makeReporterMock()
     let resolveTool: (v: any) => void = () => {}
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn((_args: any, _ctx: any) => {
         // Tool produces NO output — ring buffer stays empty.
         return new Promise<any>(r => {
@@ -2184,6 +2192,7 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useFakeTimers()
     const reporter = makeReporterMock()
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(async () => ({ content: 'done', is_error: false, duration_ms: 1 })),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,
@@ -2207,6 +2216,7 @@ describe('executeSingleTool — progress watcher', () => {
     const reporter = makeReporterMock()
     // Tool that never resolves — triggers Promise.race timeout.
     const tool = {
+      name: () => 'shell_exec',
       execute: vi.fn(() => new Promise(() => {})),
       requiresSanitization: () => false,
       supportsProgressOutput: () => true,

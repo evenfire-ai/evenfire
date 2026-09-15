@@ -193,7 +193,7 @@ describe('McpClient — callTool', () => {
       expect(internalClient.callTool).toHaveBeenCalledWith(
         { name: 'my-tool', arguments: { key: 'val' } },
         undefined,
-        expect.objectContaining({ timeout: 3600000 })
+        expect.objectContaining({ timeout: 1500000 })
       )
     } else {
       // Fallback: just verify no error is thrown

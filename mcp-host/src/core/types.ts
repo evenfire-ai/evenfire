@@ -492,7 +492,19 @@ export interface TurnToolCall {
   spillover_ref?: string
 }
 
+export interface TaskExecutionBudgetSnapshot {
+  elapsedActiveMs: number
+  iterationsUsed: number
+  durationMs: number
+  maxIterations: number
+}
+
 export interface PendingApproval {
+  task_budget?: TaskExecutionBudgetSnapshot
+  /** Set only by reconstruction of migration-marked legacy rows. */
+  legacy_budget?: boolean
+  /** Internal atomic replacement instruction; not persisted in the snapshot. */
+  replaces_request_id?: string
   request_id: string
   tool_name: string
   /** Producer-owned governed replay classification; never inferred by Control UI. */
@@ -533,7 +545,13 @@ export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
-  | { type: 'exhaustion'; message: string; iterations: number; attachments?: Attachment[] }
+  | {
+      type: 'exhaustion'
+      reason?: 'iteration_limit' | 'task_budget'
+      message: string
+      iterations: number
+      attachments?: Attachment[]
+    }
   | { type: 'cancelled'; reason?: string }
 
 export type AgentEventType =

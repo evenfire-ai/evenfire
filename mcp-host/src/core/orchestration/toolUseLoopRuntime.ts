@@ -1,4 +1,5 @@
 import type { TaskBrakeTrip } from '../../budget/taskBrake'
+import { logger } from '../../logger'
 import { clerumCompactionTotal } from '../extensions/contextManager'
 import type {
   Attachment,
@@ -47,9 +48,7 @@ export async function manageMessagesForIteration(
   const managed = await config.contextManager.manage(messages, config.conversation)
   if (managed.length < beforeCount) {
     if (logCompaction) {
-      console.log(
-        `[ContextManager] context:compacted — before=${beforeCount}, after=${managed.length}, dropped=${beforeCount - managed.length}, iter=${iteration}`
-      )
+      logger.debug({ beforeCount, afterCount: managed.length, iteration }, 'Context compacted')
     }
     config.events.emit({
       type: 'context:compacted',
@@ -89,12 +88,13 @@ export async function callReasoningForIteration(
     const continuingFromToolResults = Boolean(lastToolResults)
     const callReasoning = async (): Promise<RespondResult> => {
       if (lastToolResults) {
-        console.log(
-          `[NewCore:Loop] iter=${iteration} → continueWithToolResults (${lastToolResults.length} results)`
+        logger.debug(
+          { iteration, resultCount: lastToolResults.length },
+          'Continuing with tool results'
         )
         return config.reasoning.continueWithToolResults(context, lastToolResults)
       }
-      console.log(`[NewCore:Loop] iter=${iteration} → respondWithTools`)
+      logger.debug({ iteration }, 'Requesting model response')
       return config.reasoning.respondWithTools(context)
     }
 
@@ -104,9 +104,7 @@ export async function callReasoningForIteration(
       isRetryableLlmTransportError(result.error) &&
       !config.abortSignal?.aborted
     ) {
-      console.log(
-        `[NewCore:Loop] iter=${iteration} → retrying retryable LLM transport error once: ${result.error.message}`
-      )
+      logger.warn({ iteration, err: result.error }, 'Retrying model transport failure')
       await delay(LLM_TRANSPORT_RETRY_DELAY_MS, config.abortSignal)
       if (!config.abortSignal?.aborted) {
         result = await callReasoning()
@@ -150,7 +148,7 @@ export function responseResult(
   attachments: Attachment[],
   logMessage: string
 ): LoopResult {
-  console.log(logMessage)
+  logger.debug({ message: logMessage }, 'Loop response')
   config.events.emit({
     type: 'loop:completed',
     data: { iteration, resultType: 'response' },
@@ -187,8 +185,9 @@ export function taskBrakeResult(
   trip: TaskBrakeTrip,
   attachments: Attachment[]
 ): LoopResult {
-  console.log(
-    `[NewCore:Loop] EXIT → task budget brake (${trip.unit}: spent=${trip.spent} > limit=${trip.limit}), iterations=${iteration}`
+  logger.info(
+    { unit: trip.unit, spent: trip.spent, limit: trip.limit, iteration },
+    'Task budget brake reached'
   )
   config.events.emit({
     type: 'loop:completed',
@@ -197,6 +196,7 @@ export function taskBrakeResult(
   })
   return {
     type: 'exhaustion',
+    reason: 'task_budget',
     message: TASK_BUDGET_BRAKE_MESSAGE,
     iterations: iteration,
     attachments: attachments.length > 0 ? attachments : undefined,
@@ -209,7 +209,7 @@ export function exhaustionResult(
   message: string,
   attachments: Attachment[]
 ): LoopResult {
-  console.log(`[NewCore:Loop] EXIT → exhaustion, iterations=${maxIterations}`)
+  logger.info({ iterations: maxIterations }, 'Loop iteration limit reached')
   config.events.emit({
     type: 'loop:completed',
     data: { iteration: maxIterations, resultType: 'exhaustion' },

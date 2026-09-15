@@ -36,8 +36,8 @@ MCP Host is a Kubernetes-native service that reads Host CRD configuration and pr
 | `CLAUDE_API_KEY`                       | Anthropic API key used by dev mode when provider selection resolves to Claude.                                                                                                                                                                                                                            | `CLAUDE_API_KEY=sk-ant-xxxx`                                                                                                                                                                       |
 | `ZAI_API_KEY`                          | ZAI API key used by dev mode when provider selection resolves to ZAI.                                                                                                                                                                                                                                     | `ZAI_API_KEY=zai-xxxx`                                                                                                                                                                             |
 | `BAILIAN_API_KEY`                      | Bailian API key used by dev mode when provider selection resolves to Bailian/Qwen.                                                                                                                                                                                                                        | `BAILIAN_API_KEY=ba-xxxx`                                                                                                                                                                          |
-| `CLERUM_AGENT_TASK_DELAY`              | Configured delay in milliseconds; the current SessionProcessor does not consume this setting.                                                                                                                                                                                                             | `CLERUM_AGENT_TASK_DELAY=3`                                                                                                                                                                        |
-| `CLERUM_AGENT_MAX_TASK_DURATION`       | Configured duration in milliseconds (24 hours); the current TaskExecutor does not enforce this deadline.                                                                                                                                                                                                  | `CLERUM_AGENT_MAX_TASK_DURATION=86400000`                                                                                                                                                          |
+| `CLERUM_AGENT_TASK_DELAY`              | Minimum interval in milliseconds between task dispatches; does not delay individual tool iterations.                                                                                                                                                                                                      | `CLERUM_AGENT_TASK_DELAY=3`                                                                                                                                                                        |
+| `CLERUM_AGENT_MAX_TASK_DURATION`       | Maximum active task execution time in milliseconds (24 hours), accumulated across approval resumptions. Approval waiting is excluded.                                                                                                                                                                     | `CLERUM_AGENT_MAX_TASK_DURATION=86400000`                                                                                                                                                          |
 | `CLERUM_AGENT_MAX_TOOL_CALLS`          | Maximum LLM/tool iterations per task; each iteration may call multiple tools. Configured per Host process.                                                                                                                                                                                                | `CLERUM_AGENT_MAX_TOOL_CALLS=1000`                                                                                                                                                                 |
 | `CLERUM_AGENT_MAX_QUEUE_SIZE`          | Maximum pending queue size before new tasks are rejected/back-pressured.                                                                                                                                                                                                                                  | `CLERUM_AGENT_MAX_QUEUE_SIZE=100`                                                                                                                                                                  |
 | `CLERUM_ENABLE_APPROVAL`               | Enables the approval gate workflow for tool execution decisions.                                                                                                                                                                                                                                          | `CLERUM_ENABLE_APPROVAL=true`                                                                                                                                                                      |
@@ -334,3 +334,36 @@ per-Host ServiceAccount (`host-<hostRef>-sa`) bound to a narrow Role
 (`host-<hostRef>-config-reader`) on every reconcile, scoped to exactly the Host
 CRD by name, its env ConfigMap/Secret, and the LLM Secret named by
 `spec.secretRef` — so one Host cannot read another Host's resources.
+
+### Long-running task limits
+
+The task keeps one active-time and iteration budget across approval resumptions.
+`CLERUM_AGENT_MAX_TASK_DURATION=86400000` allows 24 hours of active execution,
+and `CLERUM_AGENT_MAX_TOOL_CALLS=1000` allows at most 1000 agent iterations.
+An iteration may call several tools. Waiting for approval consumes neither
+budget. Approval snapshots persist consumption and original limits; a restart
+cannot replenish them. A lower operator limit applies on restoration, while a
+higher ENV value does not enlarge an already-issued budget.
+
+On exhaustion, the task reports an incomplete execution with a structured
+`TASK_DURATION_LIMIT` or `TASK_ITERATION_LIMIT` error and retains an interruption
+message in the conversation. It does not report successful completion.
+
+Tool, shell and MCP execution defaults are 1500000 ms (25 minutes). Shell
+termination starts at the shorter shell/caller deadline, or when the task is
+cancelled. The caller permits up to 6 additional seconds for bounded process
+termination and result collection (5 seconds for SIGKILL escalation and 1 second
+for close delivery); this is cleanup time, not a longer execution allowance.
+MCP receives both the caller deadline and cancellation signal. A remote MCP
+server must cooperate with cancellation; the Host cannot guarantee remote
+side effects stop after the request is cancelled.
+
+Migration 014 marks existing pending approvals as legacy. They cannot silently
+receive a new budget: the same task requests a new approval explicitly stating
+that prior consumption was not recorded. The old approval and its replay state
+are replaced atomically, and no pending tool executes until the new approval
+is granted. Newly written or malformed accounting is never treated as legacy.
+
+`CLERUM_AGENT_TASK_DELAY=3` is a 3-millisecond minimum between task dispatches,
+not seconds and not a delay between tool iterations. Zero disables dispatch
+spacing. Invalid or overflowing execution limits fail configuration validation.
