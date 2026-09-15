@@ -203,6 +203,7 @@ run_node_group "approved-tools-fixtures-and-runner" \
   "scripts/e2e/desktop-login-seed.test.mjs" \
   "scripts/e2e/approved-tools-image-proof.test.mjs" \
   "scripts/e2e/approved-tools-restoration.test.mjs" \
+  "scripts/e2e/approved-tools-resource-cleanup.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs"
 
 

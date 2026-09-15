@@ -49,17 +49,17 @@ OAuth scopes: `openid`, `profile`, `email`, `offline_access`.
 All values are finite and greater than zero. `maxRetriesPerAttempt` is `1`:
 one physical execution per ticket. A retry or fallback must mint a new attempt.
 
-| Limit | Value |
-| --- | --- |
-| maxRequestBodyBytes | 1048576 |
-| maxMessages | 128 |
-| maxToolCalls | 32 |
-| maxOutputTokens | 16384 |
-| maxStreamDurationMs | 300000 |
-| maxDeadlineMs | 300000 |
-| maxConcurrentStreams | 8 |
-| maxQueuedRequests | 16 |
-| maxRetriesPerAttempt | 1 |
+| Limit                | Value   |
+| -------------------- | ------- |
+| maxRequestBodyBytes  | 1048576 |
+| maxMessages          | 128     |
+| maxToolCalls         | 32      |
+| maxOutputTokens      | 16384   |
+| maxStreamDurationMs  | 300000  |
+| maxDeadlineMs        | 300000  |
+| maxConcurrentStreams | 8       |
+| maxQueuedRequests    | 16      |
+| maxRetriesPerAttempt | 1       |
 
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
@@ -84,12 +84,14 @@ included in the hash. Tickets and receipts keep their existing binding.
 This is a validator relaxation, not a new wire format. No version negotiation
 or fallback to a truncated catalog is introduced.
 
-| Sender | Validator | Result within all other limits |
-| --- | --- | --- |
-| Old (at most 32 definitions) | New | Accepted; unchanged hash |
-| New (at most 32 definitions) | Old | Accepted; unchanged hash |
-| New (more than 32 definitions) | Old | Explicit count-limit rejection |
-| New (more than 32 definitions) | New | Accepted locally; upstream capability is tested separately |
+| Sender                         | Authorizer     | Proxy                 | Result within all other limits                                                |
+| ------------------------------ | -------------- | --------------------- | ----------------------------------------------------------------------------- |
+| Old (at most 32 definitions)   | New            | New                   | Accepted; unchanged hash                                                      |
+| New (at most 32 definitions)   | Old            | Old                   | Accepted; unchanged hash                                                      |
+| New (more than 32 definitions) | Old            | Any                   | Rejected before issuing the execution ticket                                  |
+| New (more than 32 definitions) | New            | Old                   | Authorization can succeed, then the proxy rejects the request                 |
+| New (more than 32 definitions) | New            | New                   | Accepted locally; upstream capability is tested separately                    |
+| New (more than 32 definitions) | Mixed replicas | Mixed or new replicas | Results can vary by serving replica; readiness of one replica is insufficient |
 
 Deploy updated Control API and proxy consumers before the updated MCP Host
 sender. Verify that both consumers use the updated shared package; rebuilding

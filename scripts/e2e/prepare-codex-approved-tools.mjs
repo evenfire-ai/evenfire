@@ -5,6 +5,13 @@ import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { buildApprovedToolsImageProof } from './approved-tools-image-proof.mjs'
+import {
+  cleanupJournaledFixtureResources,
+  createJournaledFixtureResources,
+  fixtureDeleteRequest,
+  fixtureResourceGetArgs,
+  validateFixtureDeleteRequest,
+} from './approved-tools-resource-cleanup.mjs'
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const sizes = [83, 150, 250]
@@ -392,11 +399,21 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
   return args
 }
 
-export function validateKubectlArgs(args, profile) {
+export function validateKubectlArgs(args, profile, { input, resourceCleanup } = {}) {
   if (args[0] !== `--context=${validateProfile(profile)}` || args[1] !== '--request-timeout=30s')
     throw new Error('Invalid kubectl context or timeout')
   const operation = args.slice(2)
   const exact = allowed => JSON.stringify(operation) === JSON.stringify(allowed)
+  if (resourceCleanup) {
+    const { entry, live, run } = resourceCleanup
+    if (exact(fixtureResourceGetArgs(entry, run)) && input === undefined) return args
+    const request = fixtureDeleteRequest(entry, live, run)
+    if (exact(['delete', '--raw', request.path, '-f', '-'])) {
+      validateFixtureDeleteRequest({ ...request, body: JSON.parse(input) }, entry, live, run)
+      return args
+    }
+    throw new Error('Invalid owned resource cleanup operation')
+  }
   if (
     exact(['create', '--dry-run=server', '-f', '-', '-o', 'json']) ||
     exact(['create', '-f', '-', '-o', 'json'])
@@ -547,7 +564,11 @@ export function validateKubectlArgs(args, profile) {
   throw new Error('Unsupported kubectl operation')
 }
 
-function command(operation, args, { input, timeout = 60_000, inherit = false } = {}) {
+function command(
+  operation,
+  args,
+  { input, timeout = 60_000, inherit = false, resourceCleanup } = {}
+) {
   const env = { ...process.env }
   for (const key of Object.keys(env))
     if (
@@ -591,7 +612,7 @@ function command(operation, args, { input, timeout = 60_000, inherit = false } =
     case 'kubectl':
       result = spawnSync(
         'kubectl',
-        validateKubectlArgs(args, required('MINIKUBE_PROFILE')),
+        validateKubectlArgs(args, required('MINIKUBE_PROFILE'), { input, resourceCleanup }),
         options
       )
       break
@@ -693,6 +714,7 @@ export async function restoreOwnedFixture({
   patchProxy,
   waitProxyRollout,
   cleanupForward,
+  cleanupResources,
 }) {
   if (!state || state.profile !== profile || state.worktree !== worktree)
     throw new Error('Fixture ownership mismatch')
@@ -741,6 +763,13 @@ export async function restoreOwnedFixture({
     } catch (error) {
       cleanupErrors.push(error)
     }
+  }
+  try {
+    if (state.resources?.length && !cleanupResources)
+      throw new Error('Resource cleanup adapter is required')
+    if (cleanupResources) await cleanupResources()
+  } catch (error) {
+    cleanupErrors.push(error)
   }
   if (proxyError || cleanupErrors.length > 0) {
     throw proxyError ?? cleanupErrors[0]
@@ -821,6 +850,12 @@ async function main() {
     fs.writeSync(stateFile.fd, data, 0, data.length, 0)
     fs.fsyncSync(stateFile.fd)
   }
+  const getOwnedResource = entry => {
+    const output = kubectl(fixtureResourceGetArgs(entry, state.run), {
+      resourceCleanup: { entry, run: state.run },
+    }).trim()
+    return output === '' ? null : JSON.parse(output)
+  }
   async function restore() {
     try {
       await restoreOwnedFixture({
@@ -875,6 +910,30 @@ async function main() {
             String(binding.localPort),
             String(binding.remotePort),
           ]),
+        cleanupResources: () =>
+          cleanupJournaledFixtureResources({
+            journal: state.resources,
+            run: state.run,
+            save,
+            get: getOwnedResource,
+            waitForDeletion: async entry => {
+              const deadline = Date.now() + 30_000
+              do {
+                const live = getOwnedResource(entry)
+                if (live === null) return null
+                // Stop immediately on replacement or lost labels; otherwise
+                // poll foreground deletion within a finite cleanup deadline.
+                fixtureDeleteRequest(entry, live, state.run)
+                await new Promise(resolve => setTimeout(resolve, 200))
+              } while (Date.now() < deadline)
+              throw new Error('Fixture foreground deletion deadline exceeded')
+            },
+            remove: (request, entry, live) =>
+              kubectl(['delete', '--raw', request.path, '-f', '-'], {
+                input: JSON.stringify(request.body),
+                resourceCleanup: { entry, live, run: state.run },
+              }),
+          }),
       })
       save()
     } catch (error) {
@@ -1026,11 +1085,7 @@ async function main() {
     scenarios,
     workflowScenario,
     forwards: [],
-    resources: resources.map(r => ({
-      kind: r.kind,
-      name: r.metadata.name,
-      namespace: r.metadata.namespace,
-    })),
+    resources: [],
     originalProxyImage: container.image,
     originalImagePullPolicy: container.imagePullPolicy,
     originalNodeEnv,
@@ -1090,10 +1145,19 @@ async function main() {
     validateForward(binding)
   }
   try {
-    const created = JSON.parse(
-      kubectl(['create', '-f', '-', '-o', 'json'], { input: JSON.stringify(proposed) })
-    )
-    assertResourceRoundTrip(resources, created.items)
+    await createJournaledFixtureResources({
+      resources,
+      run,
+      journal: state.resources,
+      save,
+      create: resource =>
+        JSON.parse(
+          kubectl(['create', '-f', '-', '-o', 'json'], {
+            input: JSON.stringify(resource),
+          })
+        ),
+      validateCreated: assertResourceRoundTrip,
+    })
     kubectl([
       '-n',
       'control-plane',

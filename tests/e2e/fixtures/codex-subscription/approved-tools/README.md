@@ -13,7 +13,8 @@ tests use ephemeral loopback ports and require host execution if the sandbox
 forbids listening. No subscription is consumed.
 
 Start the service with `node tests/e2e/fixtures/codex-subscription/approved-tools/server.mjs`.
-Configure CATALOG_SIZE to exactly 83, 150 or 250, RUN_ID to a unique safe run
+CATALOG_SIZE defaults to 83; set it explicitly to 83, 150 or 250 for each
+measured scenario. Configure RUN_ID to a unique safe run
 identifier, and PORT to the assigned port. The default bind address is loopback.
 For the isolated Minikube instance set BIND_ADDRESS to all interfaces. The
 Node 24 test container needs only server.mjs mounted read-only.

@@ -64,8 +64,12 @@ restore still attempts owned-forward cleanup and never reports restored=true.
 Scenario metadata is written to `scenarios.json` and passed directly to the runner
 in `run` mode. It contains no credentials. State records retain only fixture
 identity, ports, original image/pull policy and the non-sensitive NODE_ENV value.
-Created CRDs and synthetic database fixtures remain available for diagnosis;
-cleanup must explicitly target the listed run-owned resources and seed rows.
+Created Kubernetes resources are journaled individually with their server UID
+and version. Restoration deletes them in dependency order after checking the
+current run labels and UID, using UID/version preconditions. Ambiguous creation
+and legacy journals fail closed and require explicit recovery; they are never
+deleted by name alone. Database fixture cleanup remains pending with the absent
+seed implementation, so this does not certify a complete E2E cleanup.
 
 Real subscription tests do not use this synthetic prepare path. They require the
 separately approved account/preconditions and production proxy image. Refusing
