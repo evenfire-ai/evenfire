@@ -62,6 +62,7 @@ Use this index for long-form docs.
 | [Publish a plugin](how-to/publish-plugin-to-registry.md)                      | Publish under your org with an `efrk_` key                 |
 | [Shared & global files](how-to/shared-and-global-files.md)                    | Team workspaces (SFS) and the brokered drive (GFS)         |
 | [Minikube full stack](deploy/minikube.md)                                     | Local Kubernetes platform                                  |
+| [Evenfire on existing Amazon EKS](deploy/aws-eks-agent-guide.md)              | Agent how-to: install into a customer's EKS cluster        |
 | [Production notes](deploy/production.md)                                      | Checklist and in-repo deploy assets                        |
 | [WorkflowRecipes operations](deploy/workflow-recipes-guide.md)                | Recipe ops, RBAC, debugging                                |
 
@@ -86,6 +87,7 @@ Use this index for long-form docs.
 
 | Doc                                                             | Description                                     |
 | --------------------------------------------------------------- | ----------------------------------------------- |
+| [EKS agent how-to](deploy/aws-eks-agent-guide.md)               | Customer agent: deploy Evenfire onto existing EKS |
 | [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents                   |
 | [Shared frontend rules](agents/frontend-style-rules.md)         | Cross-app rules for the three frontend surfaces |
 | [Control UI rules](agents/control-ui-rules.md)                  | Control UI application-specific guidance        |
@@ -115,6 +117,7 @@ Use this index for long-form docs.
 | Pick or configure an LLM provider    | [LLM providers overview](llm-providers/README.md)        |
 | Run the full stack locally           | [Minikube](deploy/minikube.md)                           |
 | Ship to a real cluster               | [Production notes](deploy/production.md)                 |
+| Install on existing Amazon EKS       | [EKS agent how-to](deploy/aws-eks-agent-guide.md)        |
 | Debug E2E                            | [E2E guide](testing/e2e-guide.md)                        |
 | Feed docs to an LLM                  | [llms.txt](llms.txt)                                     |
 | Use the admin console                | [Control UI](surfaces/control-ui.md)                     |
