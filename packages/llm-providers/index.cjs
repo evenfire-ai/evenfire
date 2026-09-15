@@ -221,17 +221,47 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
   return canonical.includes(credentialSlot)
 }
 
-/** @type {Record<string, 'static-credentials' | 'oauth-broker'>} */
-const PROVIDER_AUTH_MODE = Object.freeze(
-  Object.fromEntries(
-    PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'oauth-broker' : 'static-credentials'])
-  )
+const OAUTH_BROKER_IDS = Object.freeze(['codex-subscription'])
+
+/**
+ * Pure map builder so tests can inject a second broker id without editing
+ * production PROVIDER_IDS. Production maps call this with OAUTH_BROKER_IDS.
+ * @param {readonly string[]} ids
+ * @param {readonly string[]} brokerIds
+ */
+function buildProviderMaps(ids, brokerIds) {
+  const brokers = new Set(brokerIds)
+  return {
+    PROVIDER_AUTH_MODE: Object.freeze(
+      Object.fromEntries(
+        ids.map(id => [id, brokers.has(id) ? 'oauth-broker' : 'static-credentials'])
+      )
+    ),
+    PROVIDER_MODEL_CATALOG_MODE: Object.freeze(
+      Object.fromEntries(ids.map(id => [id, brokers.has(id) ? 'dynamic' : 'static']))
+    ),
+  }
+}
+
+const { PROVIDER_AUTH_MODE, PROVIDER_MODEL_CATALOG_MODE } = buildProviderMaps(
+  PROVIDER_IDS,
+  OAUTH_BROKER_IDS
 )
 
-/** @type {Record<string, 'static' | 'dynamic'>} */
-const PROVIDER_MODEL_CATALOG_MODE = Object.freeze(
-  Object.fromEntries(PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'dynamic' : 'static']))
-)
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_EXECUTE_SCOPE = Object.freeze({
+  'codex-subscription': 'llm:codex:execute',
+})
+
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_PROXY_APP = Object.freeze({
+  'codex-subscription': 'codex-llm-proxy',
+})
+
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_PROXY_SERVICE = Object.freeze({
+  'codex-subscription': 'codex-llm-proxy',
+})
 
 function providerDescriptor(id) {
   if (!isLlmProviderId(id)) {
@@ -244,6 +274,9 @@ function providerDescriptor(id) {
     modelCatalogMode: PROVIDER_MODEL_CATALOG_MODE[id],
     credentialSlots: PROVIDER_CREDENTIAL_SLOTS[id],
     nonSecretEnv: PROVIDER_NON_SECRET_ENV[id],
+    executeScope: PROVIDER_EXECUTE_SCOPE[id],
+    proxyApp: PROVIDER_PROXY_APP[id],
+    proxyService: PROVIDER_PROXY_SERVICE[id],
   })
 }
 
@@ -269,6 +302,8 @@ module.exports = {
   PROVIDER_NON_SECRET_ENV,
   PROVIDER_AUTH_MODE,
   PROVIDER_MODEL_CATALOG_MODE,
+  OAUTH_BROKER_IDS,
+  buildProviderMaps,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,
