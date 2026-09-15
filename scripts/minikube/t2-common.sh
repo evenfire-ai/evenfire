@@ -679,6 +679,21 @@ def require(condition):
     if not condition:
         raise ValueError("unproven production service")
 
+def completed_job_pod(pod):
+    status = pod.get("status", {})
+    if status.get("phase") != "Succeeded":
+        return False
+    owners = pod.get("metadata", {}).get("ownerReferences") or []
+    if not any(owner.get("apiVersion") == "batch/v1" and owner.get("kind") == "Job" and
+               owner.get("controller") is True for owner in owners):
+        return False
+    containers = status.get("containerStatuses") or []
+    return bool(containers) and all(
+        set(container.get("state", {})) == {"terminated"} and
+        container["state"]["terminated"].get("exitCode") == 0
+        for container in containers + (status.get("initContainerStatuses") or [])
+    )
+
 def clean(template):
     require("evenfire.ai/codex-tools-fixture-run" not in (template.get("metadata", {}).get("annotations") or {}))
     containers = [c for c in template["spec"]["containers"] if c.get("name") == service]
@@ -722,6 +737,10 @@ try:
     canonical = "docker.io/" + ref if ref.startswith("clerum/") else ref
     require(observed.get(canonical) == baseline)
     pods = json.loads(sys.argv[5])["items"]
+    # Migration Jobs share the service label but completed Job pods do not
+    # serve requests. Exclude only proven successful Job completions before
+    # checking the required serving count; all other pods remain mandatory.
+    pods = [pod for pod in pods if not completed_job_pod(pod)]
     require(len(pods) >= desired)
     names = []
     for pod in pods:

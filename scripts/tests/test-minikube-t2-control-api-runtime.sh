@@ -100,12 +100,41 @@ if case == 'ghcr':
     inventory[0]['repoTags'].append(ghcr)
     status['imageID'] = 'docker-pullable://' + digest_ref
 if case == 'unknown-repo-digest': status['imageID'] = 'docker-pullable://' + digest_ref + 'd'
+pods = [pod] if pod else []
+if 'migration' in case:
+    # Migration Jobs share app=control-api with the serving Deployment.
+    migration = {
+        'metadata': {'name': 'control-api-db-migrate-test', 'namespace': 'control-plane',
+                     'ownerReferences': [{'apiVersion': 'batch/v1', 'kind': 'Job',
+                                          'name': 'control-api-db-migrate', 'uid': 'job-fixture',
+                                          'controller': True}]},
+        'spec': {'containers': [{'name': 'migrate', 'image': ref}]},
+        'status': {'phase': 'Succeeded', 'containerStatuses': [
+            {'name': 'migrate', 'ready': False, 'imageID': 'docker://' + base,
+             'state': {'terminated': {'exitCode': 0}}}]},
+    }
+    if case == 'running-migration': migration['status']['phase'] = 'Running'
+    if case == 'failed-migration': migration['status']['phase'] = 'Failed'
+    if case == 'unknown-migration': migration['status']['phase'] = 'Unknown'
+    if case == 'migration-running-container': migration['status']['containerStatuses'][0]['state'] = {'running': {'startedAt': '2026-01-01'}}
+    if case == 'migration-failed-container': migration['status']['containerStatuses'][0]['state']['terminated']['exitCode'] = 1
+    if case == 'migration-unknown-containers': migration['status']['containerStatuses'] = []
+    if case == 'migration-running-init': migration['status']['initContainerStatuses'] = [{'name': 'setup', 'state': {'running': {'startedAt': '2026-01-01'}}}]
+    if case == 'migration-unknown-owner-api': migration['metadata']['ownerReferences'][0]['apiVersion'] = 'other/v1'
+    if case == 'unowned-migration': migration['metadata']['ownerReferences'] = []
+    if case == 'noncontroller-migration': migration['metadata']['ownerReferences'][0]['controller'] = False
+    if case == 'nonjob-migration': migration['metadata']['ownerReferences'][0]['kind'] = 'ReplicaSet'
+    if case == 'migration-only': pods = []
+    if case == 'migration-insufficient-serving': deployment['spec']['replicas'] = 2
+    if case == 'migration-wrong-serving-id': status['imageID'] = 'docker://' + other
+    if case == 'migration-fixture-serving': pod['spec']['containers'][0]['env'] = [{'name': 'EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE', 'value': '1'}]
+    pods.append(migration)
 for name, data in [('manifest', manifest), ('deployments', {'items': [deployment] if deployment else []}),
-                   ('pods', {'items': [pod] if pod else []}), ('inventory', inventory)]:
+                   ('pods', {'items': pods}), ('inventory', inventory)]:
     (root / (name + '.json')).write_text(json.dumps(data))
 PY
 }
-for scenario in restored ghcr; do
+for scenario in restored ghcr completed-migration; do
   make_case "$scenario"
   t2_deployment_check
   t2_control_api_runtime_check "$T2_DEPLOYMENT_JSON"
@@ -114,7 +143,7 @@ done
 # The contract checks literal shell source, not an expanded value.
 # shellcheck disable=SC2016
 grep -Fq 't2_control_api_runtime_check "$T2_DEPLOYMENT_JSON"' "$ROOT/scripts/minikube/t2-preflight.sh"
-for scenario in fixture-image fixture-image-alias fixture-env fixture-run-env fixture-node-env fixture-marker old-fixture-pod old-fixture-marker wrong-id unknown-id missing-id missing-baseline missing-api wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-run runtime-test runtime-marker runtime-unknown; do
+for scenario in fixture-image fixture-image-alias fixture-env fixture-run-env fixture-node-env fixture-marker old-fixture-pod old-fixture-marker wrong-id unknown-id missing-id missing-baseline missing-api wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-run runtime-test runtime-marker runtime-unknown migration-only migration-insufficient-serving running-migration failed-migration unknown-migration unowned-migration noncontroller-migration nonjob-migration migration-wrong-serving-id migration-fixture-serving migration-running-container migration-failed-container migration-unknown-containers migration-running-init migration-unknown-owner-api; do
   make_case "$scenario"
   case "$scenario" in
     runtime-fixture) runtime_environment=fixture ;;
