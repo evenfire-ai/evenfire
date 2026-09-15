@@ -109,7 +109,7 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
         description: 'dangerous',
         context_snapshot: [],
       },
-      message
+      { ...message }
     )
     await podA.shutdown()
 
