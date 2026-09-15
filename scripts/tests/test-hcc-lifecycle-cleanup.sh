@@ -30,6 +30,10 @@ for value in 1 5 300; do
 done
 # Verify the validated value reaches the actual runner invocation.
 source_function "$ROOT/scripts/minikube/t2.sh" run_healthcheck_if_requested
+# The isolated invocation forwards a parent lease identity but does not enter
+# the orchestrator or validate a live lease. Keep its synthetic identity local.
+T2_LOCK_TOKEN=fixture-lease T2_PROFILE=fixture-context T2_CONTEXT=fixture-context
+T2_PROJECT_DIR="$tmp" T2_LOCK_ROOT="$tmp/locks"
 T2_HEALTHCHECK_COMMAND=true T2_DEADLINE_RUNNER="$ROOT/scripts/minikube/run-with-deadline.mjs"
 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300
 node() { printf '%s\n' "$@" > "$tmp/runner-args"; }
