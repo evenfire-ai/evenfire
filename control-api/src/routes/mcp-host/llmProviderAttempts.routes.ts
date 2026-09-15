@@ -4,14 +4,16 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
-import {
-  CODEX_CONNECTION_REF_ANNOTATION,
-  readHostCodexConnectionRef,
-} from '../../services/codexSubscriptionConnection.js'
+import { readHostCodexConnectionRef } from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptAuthorizer.js'
+import {
+  collectHostOauthBrokerProviders,
+  collectRecipeOauthBrokerProviders,
+  readSubscriptionConnectionRef,
+} from '../../services/subscriptionGrantIdentity.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
 const log = rootLogger.child({ module: 'mcp-host-llm-provider-attempts' })
@@ -42,15 +44,23 @@ function sendAuthorizeError(res: Response, err: unknown): void {
   throw err
 }
 
-export async function resolveHostAssignedConnectionKey(
+export type LiveBrokerAssignment = {
+  liveBrokerProviders: string[]
+  liveConnectionRef: string
+}
+
+function throwAttestError(result: { ok: false; code: string; message: string }): never {
+  throw new LlmProviderAttemptAuthorizeError(
+    result.code as 'host_binding_mismatch' | 'unassigned_connection',
+    result.message
+  )
+}
+
+export async function resolveHostAssignedAssignment(
   gateway: Pick<K8sGateway, 'getResource'>,
   hostRef: string
-): Promise<string> {
+): Promise<LiveBrokerAssignment> {
   if (hostRef.includes('/')) {
-    // Workflow callers attest as `namespace/recipeName`. The grant identity is
-    // the `clerum.io/codex-connection-ref` annotation on that WorkflowRecipe
-    // (WRC stamps the parent's chosen key onto DB-run children). Missing or
-    // empty annotations resolve to the fail-closed `unassigned` sentinel.
     const [recipeNamespace, recipeName, ...rest] = hostRef.split('/')
     if (!recipeNamespace || !recipeName || rest.length > 0) {
       throw new LlmProviderAttemptAuthorizeError(
@@ -64,9 +74,19 @@ export async function resolveHostAssignedConnectionKey(
         recipeName,
         recipeNamespace
       )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
-      return readHostCodexConnectionRef(
-        recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
-      )
+      const spec = recipe?.spec && typeof recipe.spec === 'object' ? recipe.spec : {}
+      const liveBrokerProviders = collectRecipeOauthBrokerProviders(spec)
+      const annotationProvider =
+        liveBrokerProviders[0] ??
+        (typeof (spec.agent as { provider?: string } | undefined)?.provider === 'string'
+          ? String((spec.agent as { provider: string }).provider)
+          : 'codex-subscription')
+      const read = readSubscriptionConnectionRef({
+        provider: annotationProvider,
+        annotations: recipe?.metadata?.annotations,
+      })
+      if (!read.ok) throwAttestError(read)
+      return { liveBrokerProviders, liveConnectionRef: read.connectionKey }
     } catch (err) {
       if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
@@ -77,15 +97,33 @@ export async function resolveHostAssignedConnectionKey(
   }
   try {
     const host = (await gateway.getResource('hosts', hostRef, config.hostsNamespace)) as {
-      spec?: { model?: { connectionRef?: string } }
+      spec?: Record<string, unknown>
     }
-    return readHostCodexConnectionRef(host?.spec?.model?.connectionRef)
-  } catch {
+    const spec = host?.spec && typeof host.spec === 'object' ? host.spec : {}
+    const model = spec.model
+    const connectionRef =
+      model && typeof model === 'object' && !Array.isArray(model)
+        ? (model as { connectionRef?: string }).connectionRef
+        : undefined
+    return {
+      liveBrokerProviders: collectHostOauthBrokerProviders(spec),
+      liveConnectionRef: readHostCodexConnectionRef(connectionRef),
+    }
+  } catch (err) {
+    if (err instanceof LlmProviderAttemptAuthorizeError) throw err
     throw new LlmProviderAttemptAuthorizeError(
       'host_binding_mismatch',
       'Host assignment could not be attested'
     )
   }
+}
+
+export async function resolveHostAssignedConnectionKey(
+  gateway: Pick<K8sGateway, 'getResource'>,
+  hostRef: string
+): Promise<string> {
+  const assignment = await resolveHostAssignedAssignment(gateway, hostRef)
+  return assignment.liveConnectionRef
 }
 
 export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {
@@ -103,6 +141,7 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       try {
         const result = await authorizeLlmProviderAttempt(claims, req.body, {
           resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
+          resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef),
         })
         res.status(200).json(result)
       } catch (err) {

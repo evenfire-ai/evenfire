@@ -130,10 +130,28 @@ function validateCodexBrokerAdmission(
     }
   }
 
-  const hasBroker = targets.some(
-    target =>
-      isLlmProviderId(target.provider) && PROVIDER_AUTH_MODE[target.provider] === 'oauth-broker'
-  )
+  const brokerIds = [
+    ...new Set(
+      targets
+        .map(target => target.provider)
+        .filter(
+          (provider): provider is string =>
+            isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+        )
+    ),
+  ]
+  if (brokerIds.length > 1) {
+    return {
+      errors: [
+        {
+          field: 'spec.model.provider',
+          message:
+            'a Host may declare at most one oauth-broker provider across model, fallbacks, and allowedModels',
+        },
+      ],
+    }
+  }
+  const hasBroker = brokerIds.length > 0
   const hasStatic = targets.some(
     target =>
       isLlmProviderId(target.provider) &&

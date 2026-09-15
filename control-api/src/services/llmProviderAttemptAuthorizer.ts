@@ -16,7 +16,6 @@ import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
   isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
 } from './codexSubscriptionConnection.js'
 import {
   getMaxLlmProviderAttemptGeneration,
@@ -29,6 +28,7 @@ import {
   pluginWorkloadSdkSpendOutcomeExists,
   promoteReservedOauthBrokerProviderAttempt,
 } from './pluginWorkloadSdkDb.js'
+import { attestRequestedBrokerProvider } from './subscriptionGrantIdentity.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -91,6 +91,16 @@ export type LlmProviderAttemptAuthorizerDeps = {
   getConnection: typeof getSafeCodexSubscriptionConnection
   getModelState: typeof getCodexCatalogModelState
   resolveConnectionKey: (hostRef: string) => Promise<string>
+  /**
+   * Live oauth-broker targets on the Host/recipe. When omitted, authorize
+   * treats the requested provider as the only live target so existing unit
+   * tests that mock only the connection key keep working. Production routes
+   * must pass the K8s-attested assignment.
+   */
+  resolveAssignment?: (hostRef: string) => Promise<{
+    liveBrokerProviders: string[]
+    liveConnectionRef: string
+  }>
   evaluateBudget: typeof evaluateBudgetCheck
   getActiveReservation: typeof getActiveReservation
   getMaxGeneration: typeof getMaxLlmProviderAttemptGeneration
@@ -254,9 +264,21 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const connectionKey = readHostCodexConnectionRef(
-    await resolvedDeps.resolveConnectionKey(caller.hostRef)
-  )
+  const assignment = resolvedDeps.resolveAssignment
+    ? await resolvedDeps.resolveAssignment(caller.hostRef)
+    : {
+        liveBrokerProviders: [request.provider],
+        liveConnectionRef: await resolvedDeps.resolveConnectionKey(caller.hostRef),
+      }
+  const attested = attestRequestedBrokerProvider({
+    requestedProvider: request.provider,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+    liveConnectionRef: assignment.liveConnectionRef,
+  })
+  if (!attested.ok) {
+    throw new LlmProviderAttemptAuthorizeError(attested.code, attested.message)
+  }
+  const connectionKey = attested.connectionKey
   if (isCodexUnassignedConnectionKey(connectionKey)) {
     throw new LlmProviderAttemptAuthorizeError(
       'unassigned_connection',

@@ -3,6 +3,7 @@ import express from 'express'
 import request from 'supertest'
 import {
   createMcpHostLlmProviderAttemptRoutes,
+  resolveHostAssignedAssignment,
   resolveHostAssignedConnectionKey,
 } from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
 import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAttemptAuthorizer.js'
@@ -145,6 +146,39 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
 })
 
 describe('resolveHostAssignedConnectionKey', () => {
+  it('reads connectionRef from a static primary with a Codex fallback', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        spec: {
+          model: { provider: 'openai', name: 'gpt-5.1', connectionRef: 'team-plus' },
+          secretRef: 'llm',
+          llmPolicy: { fallbacks: [{ provider: 'codex-subscription', name: 'gpt-5.3-codex' }] },
+        },
+      }),
+    }
+    await expect(resolveHostAssignedAssignment(gateway, 'agent-a')).resolves.toEqual({
+      liveBrokerProviders: ['codex-subscription'],
+      liveConnectionRef: 'team-plus',
+    })
+  })
+
+  it('fails closed when recipe subscription annotations disagree', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        metadata: {
+          annotations: {
+            'clerum.io/codex-connection-ref': 'team-plus',
+            'clerum.io/subscription-connection-ref': 'other-key',
+          },
+        },
+        spec: { agent: { provider: 'codex-subscription' } },
+      }),
+    }
+    await expect(
+      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+  })
+
   it('reads the Host connectionRef and treats a missing field as unassigned', async () => {
     const gateway = {
       getResource: vi.fn().mockResolvedValue({

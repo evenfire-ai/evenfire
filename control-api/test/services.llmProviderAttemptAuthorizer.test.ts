@@ -474,6 +474,31 @@ describe('authorizeLlmProviderAttempt', () => {
     ).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
+  it('allows Codex spend when the live Host primary is static and Codex is a fallback', async () => {
+    const result = await authorizeLlmProviderAttempt(claims(), body(), {
+      ...current,
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'team-plus',
+      }),
+    })
+    expect(result.executionTicket).toBe('ticket.jwt')
+    expect(current.getConnection).toHaveBeenCalledWith(expect.anything(), 'team-plus')
+  })
+
+  it('denies a Codex body when the live Host has no oauth-broker target', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(claims(), body(), {
+        ...current,
+        resolveAssignment: async () => ({
+          liveBrokerProviders: [],
+          liveConnectionRef: 'team-plus',
+        }),
+      })
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
+    expect(current.getConnection).not.toHaveBeenCalled()
+  })
+
   it('rejects an unassigned Host connectionRef as unassigned_connection', async () => {
     await expect(
       authorizeLlmProviderAttempt(claims(), body(), {
