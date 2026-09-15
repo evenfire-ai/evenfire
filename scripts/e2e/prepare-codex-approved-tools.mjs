@@ -399,6 +399,16 @@ export function validateOwnerArgs(args, recording, profile, pidDirectory) {
   return args
 }
 
+export function validateProxyImage(image, imagePullPolicy) {
+  if (
+    !/^(clerum\/codex-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/codex-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/.test(
+      image
+    ) ||
+    !['Always', 'IfNotPresent', 'Never'].includes(imagePullPolicy)
+  )
+    throw new Error('Invalid proxy image')
+}
+
 export function validateKubectlArgs(args, profile, { input, resourceCleanup } = {}) {
   if (args[0] !== `--context=${validateProfile(profile)}` || args[1] !== '--request-timeout=30s')
     throw new Error('Invalid kubectl context or timeout')
@@ -471,14 +481,8 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     const entries = patch?.spec?.template?.spec?.containers
     if (!Array.isArray(entries) || entries.length !== 1) throw new Error('Invalid proxy patch')
     const c = entries[0]
-    if (
-      c.name !== 'codex-llm-proxy' ||
-      !/^(clerum\/codex-(llm-proxy|approved-tools-proxy-e2e)|ghcr\.io\/evenfire-ai\/codex-llm-proxy)(:[a-zA-Z0-9._-]+|@sha256:[a-f0-9]{64})$/.test(
-        c.image
-      ) ||
-      !['Always', 'IfNotPresent', 'Never'].includes(c.imagePullPolicy)
-    )
-      throw new Error('Invalid proxy image')
+    if (c.name !== 'codex-llm-proxy') throw new Error('Invalid proxy image')
+    validateProxyImage(c.image, c.imagePullPolicy)
     if (
       !Array.isArray(c.env) ||
       c.env.length !== 3 ||
@@ -1076,6 +1080,8 @@ async function main() {
   const originalNodeEnv = container.env?.find(e => e.name === 'NODE_ENV')
   if (originalNodeEnv && !['production', 'development', 'test'].includes(originalNodeEnv.value))
     throw new Error('Unsupported explicit NODE_ENV binding')
+  // Refuse an unsupported original image before any fixture resource is created.
+  validateProxyImage(container.image, container.imagePullPolicy)
   state = {
     profile,
     worktree: repo,

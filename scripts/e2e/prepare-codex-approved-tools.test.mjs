@@ -23,8 +23,23 @@ import {
   validateKubectlArgs,
   validateOwnerArgs,
   validateProfile,
+  validateProxyImage,
   validateRunDirectory,
 } from './prepare-codex-approved-tools.mjs'
+
+test('original proxy image must satisfy the same policy used for restoration', () => {
+  for (const image of [
+    'clerum/codex-llm-proxy:test',
+    `ghcr.io/evenfire-ai/codex-llm-proxy@sha256:${'a'.repeat(64)}`,
+  ])
+    assert.doesNotThrow(() => validateProxyImage(image, 'IfNotPresent'))
+  for (const image of ['localhost:5000/proxy:test', 'unrelated/proxy:test', ''])
+    assert.throws(() => validateProxyImage(image, 'Never'), /Invalid proxy image/)
+  assert.throws(
+    () => validateProxyImage('clerum/codex-llm-proxy:test', 'invalid'),
+    /Invalid proxy image/
+  )
+})
 
 const scenarios = makeScenarios('approved-tools-a1b2c3d4e5f6', [43101, 43102, 43103], 43104)
 
