@@ -12,10 +12,31 @@ const RECEIPT_SCHEMA_VERSION = 'codex-attempt-receipt.v1'
 const PROVIDER_ID = 'codex-subscription'
 const TICKET_TYP = 'codex-execution-ticket'
 
+/**
+ * Evenfire-side request bounds. These are OUR limits on what a host may ask the
+ * proxy to execute; they are not a transcription of an upstream provider cap.
+ *
+ * `maxToolDefinitions` and `maxToolCallsPerMessage` are DISTINCT policies and
+ * must stay that way. They used to share one `maxTools` key, which silently tied
+ * the size of the advertised tool catalog to the number of tool calls a single
+ * assistant turn may emit — two unrelated quantities. Collapsing them is what
+ * forced `mcp-host` to drop every MCP tool before authorizing (#627).
+ *
+ * `maxToolDefinitions` is sized from measured native inventory: a fully-featured
+ * chat Host registers ~53 native tools (core file/shell/http/system/json, the
+ * four memory tools, cron_manage, spillover_read, session_search, five
+ * `workflow_*`, seven `clerum__generate_*`, two `clerum__context_files_*`,
+ * `clerum__get_capabilities`, ten `clerum__gfs_*`, the three discovery/bridge
+ * tools, and up to twelve desktop/browser tools). 128 leaves roughly 2.4x
+ * headroom over that measurement while keeping every request bounded. The
+ * per-request presentation capacity a host actually uses is configured
+ * separately and clamped to this ceiling (see mcp-host `codexMaxToolDefinitions`).
+ */
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
   maxMessages: 128,
-  maxTools: 32,
+  maxToolDefinitions: 128,
+  maxToolCallsPerMessage: 32,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
@@ -189,8 +210,11 @@ function parseMessages(raw) {
       if (!Array.isArray(item.toolCalls) || item.toolCalls.length === 0) {
         return fail('invalid', `messages[${i}].toolCalls must be a non-empty array`)
       }
-      if (item.toolCalls.length > LIMITS.maxTools) {
-        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxTools}`)
+      if (item.toolCalls.length > LIMITS.maxToolCallsPerMessage) {
+        return fail(
+          'limit',
+          `messages[${i}].toolCalls exceed ${LIMITS.maxToolCallsPerMessage}`
+        )
       }
       const toolCalls = []
       for (let j = 0; j < item.toolCalls.length; j++) {
@@ -227,7 +251,9 @@ function parseTools(raw) {
   if (raw === undefined) return ok(undefined)
   if (!Array.isArray(raw)) return fail('invalid', 'tools must be an array')
   if (raw.length === 0) return ok(undefined)
-  if (raw.length > LIMITS.maxTools) return fail('limit', `tools exceed ${LIMITS.maxTools}`)
+  if (raw.length > LIMITS.maxToolDefinitions) {
+    return fail('limit', `tools exceed ${LIMITS.maxToolDefinitions}`)
+  }
   const tools = []
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i]

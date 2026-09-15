@@ -35,6 +35,9 @@ function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
       readPlatformJwt: readCodexPlatformJwt,
       refreshOnUnauthorized: refreshCodexPlatformJwt,
     }),
+    // #627 — tool-definition capacity for this host, already clamped to the
+    // shared contract ceiling in config.ts.
+    maxToolDefinitions: config.codexMaxToolDefinitions,
     attemptContext: ({ model }: { model: string }): CodexAttemptContext => {
       if (captured) return captured
       const resolved = resolveCodexAttemptPolicy({

@@ -249,3 +249,58 @@ test('authorize response is metadata-only; redeem type is documented but not par
   assert.equal('accountId' in authorize.value, false)
   assert.equal(typeof contract.RedeemAttemptResponseSensitive, 'undefined')
 })
+
+// --- #627: tool-definition capacity is a separate policy from tool-call count ---
+
+const withTools = count => ({
+  ...BASE,
+  tools: Array.from({ length: count }, (_, i) => ({
+    name: `tool_${i}`,
+    description: 'd',
+    parameters: { type: 'object' },
+  })),
+})
+
+test('tool definitions are bounded by maxToolDefinitions, not the tool-call limit', () => {
+  // The old contract capped definitions at 32, which is what forced mcp-host to
+  // strip every MCP tool before authorizing (#627).
+  assert.equal(contract.LIMITS.maxToolDefinitions, 128)
+  assert.equal(contract.parseCodexCompletionRequestV1(withTools(33)).ok, true)
+  assert.equal(contract.parseCodexCompletionRequestV1(withTools(128)).ok, true)
+
+  const over = contract.parseCodexCompletionRequestV1(withTools(129))
+  assert.equal(over.ok, false)
+  assert.equal(over.code, 'limit')
+  assert.match(over.message, /tools exceed 128/)
+})
+
+test('assistant tool-call count keeps its own, unchanged bound', () => {
+  assert.equal(contract.LIMITS.maxToolCallsPerMessage, 32)
+
+  const calls = count =>
+    contract.parseCodexCompletionRequestV1({
+      ...BASE,
+      messages: [
+        { role: 'user', content: 'hello' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: Array.from({ length: count }, (_, i) => ({
+            id: `call_${i}`,
+            name: 'tool_0',
+            arguments: {},
+          })),
+        },
+      ],
+    })
+
+  assert.equal(calls(32).ok, true)
+  const over = calls(33)
+  assert.equal(over.ok, false)
+  assert.equal(over.code, 'limit')
+  assert.match(over.message, /toolCalls exceed 32/)
+})
+
+test('the conflated maxTools key is gone so neither policy can silently reuse it', () => {
+  assert.equal('maxTools' in contract.LIMITS, false)
+})

@@ -61,6 +61,42 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | maxQueuedRequests | 16 |
 | maxRetriesPerAttempt | 1 |
 
+### Evenfire request bounds are not upstream limits
+
+The table above records the UPSTREAM contract. `@clerum/llm-provider-attempt-contract`
+carries Evenfire's own bounds on what a host may ask the proxy to execute, and
+those are set independently.
+
+Until #627 one `maxTools: 32` in that package governed two unrelated quantities:
+the number of tool DEFINITIONS a request may advertise, and the number of tool
+CALLS one assistant turn may emit. They are now distinct:
+
+| Evenfire bound | Value | Governs |
+| --- | --- | --- |
+| `maxToolDefinitions` | 128 | `tools[]` — the advertised catalog |
+| `maxToolCallsPerMessage` | 32 | `messages[].toolCalls[]` — one assistant turn |
+
+`maxToolDefinitions` is sized from measured native inventory, not from an
+assumed provider cap. A fully-featured chat Host registers roughly 53 native
+tools: core file/shell/http/system/json, four memory tools, `cron_manage`,
+`spillover_read`, `session_search`, five `workflow_*`, seven
+`clerum__generate_*`, two `clerum__context_files_*`,
+`clerum__get_capabilities`, ten `clerum__gfs_*`, the three discovery/bridge
+tools, and up to twelve desktop/browser tools. 128 leaves about 2.4x headroom
+over that while keeping every request bounded.
+
+What a host actually puts on the wire is smaller and separately configurable:
+`CLERUM_CODEX_MAX_TOOL_DEFINITIONS` (default 64), clamped to
+`maxToolDefinitions`. Tools beyond that capacity are deferred to the
+`clerum__tool_search` / `clerum__tool_describe` / `clerum__tool_call` bridge
+rather than dropped, so the advertised set plus the bridge-reachable set always
+covers the whole permitted catalog. The separate env knob is what allows a
+bounded canary to raise presented capacity without touching the shared contract.
+
+Whether the upstream provider accepts more than 32 tool definitions is NOT
+established by the evidence below, which is why the upstream table is unchanged
+and the default presented capacity stays conservative.
+
 ## Errors
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,

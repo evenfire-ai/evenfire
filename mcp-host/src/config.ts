@@ -1,6 +1,7 @@
 /**
  * Configuration settings loaded from environment variables.
  */
+import { LIMITS as CONTRACT_LIMITS } from '@clerum/llm-provider-attempt-contract'
 import type { ApprovalConfig } from './core/extensions/approvalTypes'
 import type { GuardrailsConfig } from './core/guardrails/config'
 import { NativeToolConfig } from './core/interfaces'
@@ -163,6 +164,12 @@ export interface Config {
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
   // the bridge activates when enabled; small hosts stay on passthrough.
   dynamicToolsThreshold: number
+
+  // #627 — How many tool DEFINITIONS one codex-subscription request may
+  // advertise. Tools past this capacity are deferred to the discovery bridge
+  // rather than dropped. Clamped to the shared contract's maxToolDefinitions so
+  // a host can never ask the proxy to accept a request control-api will reject.
+  codexMaxToolDefinitions: number
 
   // T1.5 — Tool-result spillover. Master flag + threshold + TTL + GC period.
   // When `toolSpilloverEnabled` is true the host wires a `SpilloverStorage`
@@ -823,6 +830,15 @@ export const config: Config = {
   // F1 (dynamic-tool-loading) — Minimum deferrable (MCP) tool count above which
   // the bridge activates when enabled; small hosts stay on passthrough.
   dynamicToolsThreshold: getEnvNumber('CLERUM_DYNAMIC_TOOLS_THRESHOLD', 60),
+
+  // #627 — codex-subscription tool-definition capacity. The default of 64 sits
+  // above the ~53 natives a fully-featured chat Host registers, so no native is
+  // ever forced out, while leaving the value tunable for a bounded canary
+  // before the ceiling itself is revisited.
+  codexMaxToolDefinitions: Math.min(
+    Math.max(getEnvNumber('CLERUM_CODEX_MAX_TOOL_DEFINITIONS', 64), 1),
+    CONTRACT_LIMITS.maxToolDefinitions
+  ),
 
   // T2.1 — Conversation store backend selector.
   //

@@ -1,11 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { LlmErrorCode } from '../../core/errors'
 import { CodexProxyError } from '../codexLlmProxyClient'
-import {
-  CodexSubscriptionProvider,
-  isCodexNativeToolName,
-  selectCodexAdvertisedTools,
-} from '../codexSubscription'
+import { CodexSubscriptionProvider } from '../codexSubscription'
 import { classifyFailoverClass } from '../failover/classify'
 import { CodexAuthorizeError } from '../providerAttemptAuthorizer'
 import { makeProvider } from '../registry'
@@ -167,42 +163,7 @@ describe('CodexSubscriptionProvider', () => {
     expect(result.providerAttemptIndex).toBe(1)
   })
 
-  it('omits MCP tools and caps natives at the Codex maxTools limit', () => {
-    const tools = [
-      { name: 'file_read', description: 'read', parameters: {} },
-      {
-        name: 'mongodb-mcp-stack-mongodb-mcp-server__find',
-        description: 'find',
-        parameters: {},
-      },
-      { name: 'clerum__gfs_read', description: 'gfs', parameters: {} },
-      {
-        name: 'mongodb-mcp-stack-mongodb-mcp-server__aggregate',
-        description: 'agg',
-        parameters: {},
-      },
-    ]
-    expect(isCodexNativeToolName('file_read')).toBe(true)
-    expect(isCodexNativeToolName('clerum__gfs_read')).toBe(true)
-    expect(isCodexNativeToolName('mongodb-mcp-stack-mongodb-mcp-server__find')).toBe(false)
-    expect(selectCodexAdvertisedTools(tools).map(tool => tool.name)).toEqual([
-      'file_read',
-      'clerum__gfs_read',
-    ])
-
-    const overflow = Array.from({ length: 40 }, (_, i) => ({
-      name: i < 36 ? `native_${i}` : `mongo-server__tool_${i}`,
-      description: 't',
-      parameters: {},
-    }))
-    const advertised = selectCodexAdvertisedTools(overflow)
-    expect(advertised).toHaveLength(32)
-    expect(advertised.every(tool => isCodexNativeToolName(tool.name))).toBe(true)
-    expect(advertised[0]?.name).toBe('native_0')
-    expect(advertised[31]?.name).toBe('native_31')
-  })
-
-  it('authorizes with native tools only when MCP tools are also offered', async () => {
+  it('advertises approved MCP tools instead of dropping them', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     await provider.completeSingleTurnWithTools(
@@ -214,14 +175,68 @@ describe('CodexSubscriptionProvider', () => {
           description: 'find',
           parameters: {},
         },
-        { name: 'clerum__tool_search', description: 'search', parameters: {} },
       ]
     )
     const authorizedBody = wired.authorize.mock.calls[0][0]
+    // The defect this replaces: the MCP tool never reached the wire, so an
+    // agent that had successfully connected to the service could not use it.
     expect(authorizedBody.request.tools.map((tool: { name: string }) => tool.name)).toEqual([
       'file_read',
-      'clerum__tool_search',
+      'mongodb-mcp-stack-mongodb-mcp-server__find',
     ])
+  })
+
+  it('advertises a lone MCP tool when no native tool is offered', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'connector__lookup', description: 'lookup', parameters: {} }]
+    )
+    const authorizedBody = wired.authorize.mock.calls[0][0]
+    // Previously this produced zero definitions, so the request carried no
+    // tools at all and the model had nothing to select.
+    expect(authorizedBody.request.tools.map((tool: { name: string }) => tool.name)).toEqual([
+      'connector__lookup',
+    ])
+  })
+
+  it('defers an oversized MCP catalog to the bridge and keeps every native', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', {
+      ...wired,
+      maxToolDefinitions: 8,
+    } as never)
+    await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [
+        ...Array.from({ length: 4 }, (_, i) => ({
+          name: `native_${i}`,
+          description: 'n',
+          parameters: {},
+        })),
+        ...Array.from({ length: 90 }, (_, i) => ({
+          name: `connector__tool_${i}`,
+          description: 'm',
+          parameters: {},
+        })),
+        { name: 'clerum__tool_search', description: 'search', parameters: {} },
+        { name: 'clerum__tool_describe', description: 'describe', parameters: {} },
+        { name: 'clerum__tool_call', description: 'call', parameters: {} },
+      ]
+    )
+    const authorizedBody = wired.authorize.mock.calls[0][0]
+    const names = authorizedBody.request.tools.map((tool: { name: string }) => tool.name)
+    // The bridge leads, so the tools that make the deferred catalog reachable
+    // can never be the ones capacity removes.
+    expect(names.slice(0, 3)).toEqual([
+      'clerum__tool_search',
+      'clerum__tool_describe',
+      'clerum__tool_call',
+    ])
+    expect(names).toContain('native_3')
+    expect(names.some((name: string) => name.startsWith('connector__'))).toBe(false)
+    expect(names.length).toBeLessThanOrEqual(8)
   })
 
   it('does not treat an unknown empty stream as a successful stop', async () => {

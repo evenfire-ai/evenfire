@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequestV1,
-  LIMITS,
   hashCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
@@ -13,6 +12,7 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
+import { presentCodexTools } from './codexToolPresentation'
 import { classifyUnknown } from './errorClassification'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
 import type { LlmProvider } from './registryCore'
@@ -59,20 +59,22 @@ export type CodexSubscriptionDeps = {
   authorizer: ProviderAttemptAuthorizer
   proxy: CodexLlmProxyClient
   attemptContext: (input: { model: string }) => CodexAttemptContext
+  /**
+   * #627 — how many tool definitions one request may advertise. Supplied by
+   * `createCodexRuntimeDeps` from `config.codexMaxToolDefinitions` (already
+   * clamped to the shared contract ceiling). Omitted only by tests and callers
+   * that predate the setting, which fall back to `DEFAULT_CODEX_TOOL_CAPACITY`.
+   */
+  maxToolDefinitions?: number
 }
 
 /**
- * Codex authorize is capped at `LIMITS.maxTools` (32). MCP tools use
- * `serverName__toolName`; native tools are unprefixed or `clerum__*`.
- * Drop MCP tools first so a Host with a large MCP catalog can still
- * authorize. If natives still exceed the cap, keep the leading native
- * slice in registry order.
+ * Fallback capacity when a caller supplies no explicit one. Matches the
+ * `config.codexMaxToolDefinitions` default so the two cannot drift apart
+ * silently: above the ~53 natives a fully-featured chat Host registers, and
+ * within the shared contract's `maxToolDefinitions` ceiling.
  */
-export function isCodexNativeToolName(name: string): boolean {
-  const idx = name.indexOf('__')
-  if (idx <= 0) return true
-  return name.startsWith('clerum__')
-}
+export const DEFAULT_CODEX_TOOL_CAPACITY = 64
 
 function assertTerminalCodexOutcome(result: {
   text: string
@@ -90,14 +92,9 @@ function assertTerminalCodexOutcome(result: {
   }
 }
 
-export function selectCodexAdvertisedTools(tools: ToolDefinition[]): ToolDefinition[] {
-  const natives = tools.filter(tool => isCodexNativeToolName(tool.name))
-  if (natives.length <= LIMITS.maxTools) return natives
-  return natives.slice(0, LIMITS.maxTools)
-}
-
 export class CodexSubscriptionProvider implements SingleTurnProvider {
   private nextProviderAttemptIndex = 1
+  private readonly toolCapacity: number
 
   constructor(
     private readonly model: string,
@@ -106,6 +103,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (!model.trim()) {
       throw new Error('[LLM] makeProvider: codex-subscription requires an explicit model')
     }
+    this.toolCapacity = deps.maxToolDefinitions ?? DEFAULT_CODEX_TOOL_CAPACITY
   }
 
   getProviderType(): LlmProvider {
@@ -332,14 +330,30 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       })),
     }
     if (tools && tools.length > 0) {
-      const advertised = selectCodexAdvertisedTools(tools)
-      if (advertised.length !== tools.length) {
-        console.warn(
-          `[Codex] advertised ${advertised.length} native tool(s) of ${tools.length} offered (MCP omitted, cap ${LIMITS.maxTools})`
-        )
+      const presentation = presentCodexTools(tools, { capacity: this.toolCapacity })
+      // Counts and an outcome only — never tool schemas, arguments or results.
+      if (presentation.outcome !== 'complete') {
+        const diagnostic = {
+          event: 'codex.tool_presentation',
+          outcome: presentation.outcome,
+          offered: tools.length,
+          presented: presentation.presented.length,
+          deferred: presentation.deferredCount,
+          unreachable: presentation.unreachableCount,
+          capacity: presentation.capacity,
+        }
+        // `deferred` is the designed steady state for a large catalog: every
+        // deferred tool is still reachable through the discovery bridge, so it
+        // is informational. `capacity_exceeded` means tools were dropped with
+        // no way to reach them — the one case that is a real defect.
+        if (presentation.outcome === 'capacity_exceeded') {
+          console.error(JSON.stringify(diagnostic))
+        } else {
+          console.info(JSON.stringify(diagnostic))
+        }
       }
-      if (advertised.length > 0) {
-        request.tools = advertised.map(tool => ({
+      if (presentation.presented.length > 0) {
+        request.tools = presentation.presented.map(tool => ({
           name: tool.name,
           description: tool.description,
           parameters: tool.parameters,

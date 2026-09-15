@@ -16,7 +16,13 @@ export declare const TICKET_TYP: 'codex-execution-ticket'
 export declare const LIMITS: {
   readonly maxRequestBodyBytes: 1048576
   readonly maxMessages: 128
-  readonly maxTools: 32
+  /**
+   * Ceiling on `tools[]` — how many tool DEFINITIONS one request may advertise.
+   * Distinct from `maxToolCallsPerMessage`; see the rationale in index.cjs.
+   */
+  readonly maxToolDefinitions: 128
+  /** Ceiling on `messages[].toolCalls[]` — tool calls in one assistant turn. */
+  readonly maxToolCallsPerMessage: 32
   readonly maxOutputTokens: 16384
   readonly maxDeadlineMs: 300000
   readonly maxIdLength: 128
