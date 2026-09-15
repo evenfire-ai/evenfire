@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { RpcProxyClient } from '../src/rpcProxyClient.js'
+import { RpcProxyClient, parseSessionsListResult } from '../src/rpcProxyClient.js'
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
@@ -203,5 +203,169 @@ describe('RpcProxyClient — openTaskProgressStream()', () => {
     // renderer's watchdog can reset on it.
     expect(events).toContain('heartbeat')
     expect(events).toEqual(['open', 'heartbeat', 'done'])
+  })
+})
+
+describe('RpcProxyClient — renameSession() (spec 15 Fase B)', () => {
+  it('PATCHes the name route with the title and returns the (re-sanitized) server title', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ ok: true, title: 'Clean name' }), { status: 200 })
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const client = new RpcProxyClient()
+    const result = await client.renameSession(
+      'rpc-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'Clean name'
+    )
+
+    expect(result).toEqual({ title: 'Clean name' })
+    const [requestUrl, init] = fetchMock.mock.calls[0] as [URL, RequestInit]
+    expect(String(requestUrl)).toContain('/hosts/chatllm/sessions/chatllm/chat-1/name')
+    expect(init.method).toBe('PATCH')
+    expect(JSON.parse(String(init.body))).toEqual({ title: 'Clean name' })
+  })
+
+  it('re-sanitizes a hostile echoed title on read (bidi override stripped)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ ok: true, title: 'Safe‮name' }), { status: 200 })
+        )
+    )
+    const client = new RpcProxyClient()
+    const result = await client.renameSession(
+      'rpc-token',
+      'chatllm',
+      'chatllm',
+      'chat-1',
+      'Safe name'
+    )
+    expect(result.title).toBe('Safename')
+    expect(result.title).not.toContain('‮')
+  })
+
+  it('preserves the HTTP status in the thrown error message (404 / 400 / 403 / 5xx)', async () => {
+    const client = new RpcProxyClient()
+    for (const status of [404, 400, 403, 502]) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('nope', { status })))
+      await expect(
+        client.renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'x')
+      ).rejects.toThrow(`(${status})`)
+    }
+  })
+
+  it('never puts the raw title in the error message', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('bad', { status: 400 })))
+    const client = new RpcProxyClient()
+    await expect(
+      client.renameSession('rpc-token', 'chatllm', 'chatllm', 'chat-1', 'super-secret-title')
+    ).rejects.toThrow(/^Rename session failed \(400\)$/)
+  })
+
+  it('rejects an unsafe chatId segment before any fetch', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const client = new RpcProxyClient()
+    await expect(
+      client.renameSession('rpc-token', 'chatllm', 'chatllm', '../evil', 'x')
+    ).rejects.toThrow(/unsafe path segment/)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('parseSessionsListResult — title parse + sanitize on read (spec 15 §2.2/A14)', () => {
+  const baseItem = {
+    agent: 'chatllm',
+    chatId: 'c1',
+    turnCount: 1,
+    lastActivityAt: '2026-09-12T00:00:00.000Z',
+  }
+
+  it('parses a clean server title verbatim', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'Deploy the staging cluster' }],
+    })
+    expect(result.items[0]?.title).toBe('Deploy the staging cluster')
+  })
+
+  it('omits the title when the host does not report one', () => {
+    const result = parseSessionsListResult({ items: [baseItem] })
+    expect(result.items[0]).not.toHaveProperty('title')
+  })
+
+  it('strips bidi-override and zero-width characters (spoofing defense)', () => {
+    // A title crafted to spoof the destructive rename dialog with an RLO
+    // override + zero-width joiner. The client must not trust it.
+    const hostile = 'Safe‮erongi​ name'
+    const result = parseSessionsListResult({ items: [{ ...baseItem, title: hostile }] })
+    expect(result.items[0]?.title).toBe('Safeerongi name')
+    expect(result.items[0]?.title).not.toContain('‮')
+    expect(result.items[0]?.title).not.toContain('​')
+  })
+
+  it('strips control characters (newlines, tabs, NUL)', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'line1\n\tline2 ' }],
+    })
+    expect(result.items[0]?.title).toBe('line1line2')
+  })
+
+  it('drops a title that is empty after sanitization', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: '‮​ ' }],
+    })
+    expect(result.items[0]).not.toHaveProperty('title')
+  })
+
+  it('keeps a session whose optional title is a non-string, just untitled (not dropped)', () => {
+    // A malformed cosmetic field must not make a real conversation disappear.
+    // T4: assert the resulting item (present, untitled), not a drop count.
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, chatId: 'keep', title: 123 }],
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]?.chatId).toBe('keep')
+    expect(result.items[0]).not.toHaveProperty('title')
+    expect(result.droppedItemCount).toBeUndefined()
+  })
+
+  it('still drops an item whose MANDATORY field is malformed (title fix does not mask this)', () => {
+    const result = parseSessionsListResult({
+      items: [
+        { ...baseItem, chatId: 'good', title: 'fine' },
+        { ...baseItem, chatId: 'bad', lastActivityAt: 123 },
+      ],
+    })
+    expect(result.items).toHaveLength(1)
+    expect(result.items[0]?.chatId).toBe('good')
+    expect(result.droppedItemCount).toBe(1)
+  })
+
+  it('truncates an oversized title from a stale/hostile host to the server cap (120 code points)', () => {
+    // The server rejects >120 code points with a 400, so a legit stored title is
+    // always within the cap; a host that returns more is not trusted. Emoji so a
+    // naive .length (UTF-16 units) would miscount vs the code-point cap.
+    const oversized = '😀'.repeat(200)
+    const result = parseSessionsListResult({ items: [{ ...baseItem, title: oversized }] })
+    const title = result.items[0]?.title as string
+    expect(Array.from(title)).toHaveLength(120)
+    expect(title).toBe('😀'.repeat(120))
+  })
+
+  it('strips line/paragraph separators (U+2028/U+2029) — single-line title', () => {
+    const result = parseSessionsListResult({
+      items: [{ ...baseItem, title: 'line1\u2028line2\u2029end' }],
+    })
+    expect(result.items[0]?.title).toBe('line1line2end')
+    expect(result.items[0]?.title).not.toContain('\u2028')
+    expect(result.items[0]?.title).not.toContain('\u2029')
   })
 })

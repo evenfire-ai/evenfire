@@ -461,7 +461,10 @@ describe('TaskExecutor', () => {
       expect.objectContaining({
         ...traceContext,
         sessionId: expect.stringMatching(/^conv-user-1:telegram:test-channel:default-/),
-      })
+      }),
+      // spec 15 — turn 1 derives the auto-title from the first input (channel
+      // sessions included); a short input passes through deriveAutoTitle intact.
+      'Hello'
     )
     expect(task.traceContext?.sessionId).toMatch(/^conv-user-1:telegram:test-channel:default-/)
   })

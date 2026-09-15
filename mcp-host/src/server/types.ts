@@ -523,6 +523,8 @@ export type SessionsListItem = {
   turnCount: number
   messageCount?: number
   lastActivityAt: string
+  /** Server-authoritative session title (spec 15); omitted when unset. */
+  title?: string
 } & SessionStateWire
 
 export type SessionsListQuery = {
@@ -673,3 +675,22 @@ export type SetModelHandler = (
   chatId: string,
   model: string
 ) => SetModelResult | Promise<SetModelResult>
+
+/**
+ * Result of `PATCH /v1/runtime/sessions/:agent/:chatId/name` (spec 15 Fase B).
+ * `ok` → 200 `{ ok:true, title }` (the server's sanitized canonical title, which
+ * the client adopts). `invalid_title` → 400 (empty after sanitize, or over the
+ * 120-code-point / 512-byte cap). `not_found` → **uniform 404** for a session
+ * that does not exist, is owned by another user, OR is a channel session (not
+ * renamable) — no cross-user existence oracle.
+ */
+export type SetTitleResult =
+  | { ok: true; title: string }
+  | { ok: false; reason: 'invalid_title' | 'not_found' }
+
+export type SetTitleHandler = (
+  userSub: string,
+  agent: string,
+  chatId: string,
+  title: string
+) => SetTitleResult | Promise<SetTitleResult>

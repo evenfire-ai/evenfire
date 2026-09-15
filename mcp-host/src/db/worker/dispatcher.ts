@@ -425,6 +425,16 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return { ok: true }
       })
 
+    case 'update_session_title':
+      // Spec 15 Fase B — unconditional overwrite (rename wins over the auto-title).
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          s.updateSessionTitle.run({ id: op.sessionId, title: op.title })
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
     case 'insert_message':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
@@ -517,6 +527,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           // statement in the SAME transaction (see 'update_session_state').
           if (op.activeTaskId === null) {
             s.clearSessionActiveTask.run({ id: op.sessionId })
+          }
+          // Auto-title (spec 15) — turn 1 only carries a title. COALESCE inside
+          // the statement makes a retried turn 1 idempotent and preserves a
+          // rename. Run in the SAME transaction as the boundary message.
+          if (op.title !== undefined) {
+            s.setSessionTitleIfAbsent.run({ id: op.sessionId, title: op.title })
           }
         })
         tx.immediate()
