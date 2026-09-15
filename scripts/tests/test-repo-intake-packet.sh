@@ -3,6 +3,9 @@ set -u
 
 FAIL=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+HOST_HEAD="$(git -C "${ROOT}" rev-parse HEAD)"
+HOST_BRANCH="$(git -C "${ROOT}" branch --show-current)"
+HOST_STATUS="$(git -C "${ROOT}" status --porcelain=v1)"
 SCRIPT="${ROOT}/scripts/dev/repo-intake-packet.sh"
 OWNER_SCRIPT="${ROOT}/scripts/minikube/profile-owner.sh"
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/clerum-intake-test.XXXXXX")"
@@ -11,8 +14,16 @@ PROFILE_ROOT="${TMP_ROOT}/profiles"
 mkdir -p "${PROFILE_ROOT}"
 
 cleanup() {
+  local status=$?
   chmod -R u+w "${TMP_ROOT}" 2>/dev/null || true
   rm -rf "${TMP_ROOT}"
+  if [[ "$(git -C "${ROOT}" rev-parse HEAD)" != "${HOST_HEAD}" ||
+        "$(git -C "${ROOT}" branch --show-current)" != "${HOST_BRANCH}" ||
+        "$(git -C "${ROOT}" status --porcelain=v1)" != "${HOST_STATUS}" ]]; then
+    echo 'FAIL: fixture changed host checkout'
+    status=1
+  fi
+  exit "${status}"
 }
 trap cleanup EXIT
 
@@ -76,11 +87,17 @@ payload_value() {
 
 write_ports() {
   local destination="$1" base="$2"
-  cat >"${destination}" <<EOF_PORTS
-PORT_BASE=${base}
-CONTROL_API_PORT=$((base + 90))
-CONTROL_API_URL=http://127.0.0.1:$((base + 90))
-EOF_PORTS
+  # Schema-v2 requires the full branch-profile mapping, not just control-api.
+  local spec name port
+  {
+    printf 'PORT_BASE=%s\n' "${base}"
+    for spec in CONTROL_UI:0 PROFILE_UI:1 MCP_HOST:80 REGISTRY_API:85 CONTROL_API:90 EXTERNAL_REST_API:91 MEMBER_REGISTRATION_SERVICE:92 RPC_PROXY:94 WORKFLOW_APPROVAL_READER:98; do
+      name="${spec%:*}"
+      port=$((base + ${spec#*:}))
+      printf '%s_PORT=%s\n%s_URL=http://127.0.0.1:%s\n' "${name}" "${port}" "${name}" "${port}"
+    done
+    printf 'PROFILE_UI_BASE_URL=http://127.0.0.1:%s\n' "$((base + 1))"
+  } >"${destination}"
 }
 
 if bash -n "${SCRIPT}"; then
