@@ -217,13 +217,15 @@ function convergedDeployment(name = 'linear') {
 }
 
 describe('connector credentials revision (issue #223)', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     let live: k8s.V1Deployment | undefined
     // This suite creates a connector, then observes the same API object on rotation.
     appsApi.readNamespacedDeployment.mockImplementation(async () => {
@@ -811,26 +813,29 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     expect(appsApi.readNamespacedDeployment.mock.calls.length).toBeGreaterThan(readsBeforeTick)
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    await reconcileFailClosed(reconciler, coreApi)
-    const lastAfterRetirement = deploymentReadyWrites(customApi).at(-1)
-    expect(lastAfterRetirement?.reason).toBe('RuntimeNotDesired')
-    expect(lastAfterRetirement?.message).toBe(RUNTIME_NOT_DESIRED_FAIL_CLOSED)
-    const warnsAfterRetirement = warn.mock.calls.length
-    const writesAfterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+    try {
+      await reconcileFailClosed(reconciler, coreApi)
+      const lastAfterRetirement = deploymentReadyWrites(customApi).at(-1)
+      expect(lastAfterRetirement?.reason).toBe('RuntimeNotDesired')
+      expect(lastAfterRetirement?.message).toBe(RUNTIME_NOT_DESIRED_FAIL_CLOSED)
+      const warnsAfterRetirement = warn.mock.calls.length
+      const writesAfterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
 
-    await vi.advanceTimersByTimeAsync(24 * 5000)
+      await vi.advanceTimersByTimeAsync(24 * 5000)
 
-    expect(
-      laterConditionWrites(customApi, writesAfterRetirement).some(
-        condition =>
-          condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
+      expect(
+        laterConditionWrites(customApi, writesAfterRetirement).some(
+          condition =>
+            condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
+        )
+      ).toBe(false)
+      expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+      expect(warn.mock.calls.slice(warnsAfterRetirement).flat().join('\n')).not.toContain(
+        'not ready after'
       )
-    ).toBe(false)
-    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
-    expect(warn.mock.calls.slice(warnsAfterRetirement).flat().join('\n')).not.toContain(
-      'not ready after'
-    )
-    warn.mockRestore()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('in-flight ready-branch tick past map delete cannot write True after retirement', async () => {
@@ -946,25 +951,28 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     await vi.advanceTimersByTimeAsync(23 * 5000)
 
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-    const held = holdNextStatusRead(customApi)
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(held.isHeld()).toBe(true)
-    expect(warn.mock.calls.flat().join('\n')).toContain('not ready after 24 polls')
+    try {
+      const held = holdNextStatusRead(customApi)
+      await vi.advanceTimersByTimeAsync(5000)
+      expect(held.isHeld()).toBe(true)
+      expect(warn.mock.calls.flat().join('\n')).toContain('not ready after 24 polls')
 
-    await reconcileFailClosed(reconciler, coreApi)
-    const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
-    held.release()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(held.resolved()).toBe(1)
+      await reconcileFailClosed(reconciler, coreApi)
+      const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
+      held.release()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(held.resolved()).toBe(1)
 
-    expect(
-      laterConditionWrites(customApi, afterRetirement).some(
-        condition =>
-          condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
-      )
-    ).toBe(false)
-    expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
-    warn.mockRestore()
+      expect(
+        laterConditionWrites(customApi, afterRetirement).some(
+          condition =>
+            condition.type === 'DeploymentReady' && condition.reason === 'RolloutIncomplete'
+        )
+      ).toBe(false)
+      expect(deploymentReadyWrites(customApi).at(-1)?.reason).toBe('RuntimeNotDesired')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('retirement epoch stops a stale ready-branch tick after a later window was armed', async () => {

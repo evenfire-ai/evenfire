@@ -359,13 +359,31 @@ export async function putMcpServer(
 
 /** Fail loud when HCC is running with the Secret informer disabled. */
 export function requireHccDevModeUnset(): void {
-  const value = kubectlSafe(
-    `-n control-plane get deploy host-context-controller -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="CLERUM_DEV_MODE")].value}'`
+  const raw = kubectl(
+    `-n control-plane get deploy host-context-controller -o jsonpath='{.spec.template.spec.containers[?(@.name=="host-context-controller")].env[?(@.name=="CLERUM_DEV_MODE")].value}'`
   )
-  if (value === 'true') {
+  // Match host-context-controller/src/config.ts getEnvBool: true/TRUE/1.
+  if (raw.toLowerCase() === 'true' || raw === '1') {
     throw new Error(
-      'HCC pod has CLERUM_DEV_MODE=true; the Secret informer is off. Stop and fix the profile before running runtime-condition e2e.'
+      'HCC pod has CLERUM_DEV_MODE enabled; the Secret informer is off. Stop and fix the profile before running runtime-condition e2e.'
     )
+  }
+}
+
+/** Milliseconds of a persisted condition timestamp. Throws if unparseable. */
+export function conditionTransitionMs(condition: { lastTransitionTime: string }): number {
+  const parsed = Date.parse(condition.lastTransitionTime)
+  if (Number.isNaN(parsed)) {
+    throw new Error(`invalid lastTransitionTime: ${condition.lastTransitionTime}`)
+  }
+  return parsed
+}
+
+/** Empty name means the Deployment is gone. Any kubectl error throws. */
+export function requireDeploymentAbsent(name: string, namespace: string): void {
+  const found = kubectl(`get deploy ${name} -n ${namespace} --ignore-not-found -o name`)
+  if (found !== '') {
+    throw new Error(`expected Deployment "${name}" to be absent, found ${found}`)
   }
 }
 
@@ -396,9 +414,10 @@ export function deploymentReadyCondition(
  * `expectStatus` (and optional `expectReason`) with a `lastTransitionTime`
  * at or after `sinceMs`.
  *
- * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
- * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would
- * satisfy the predicate instantly, before the rollout under test even began.
+ * The `sinceMs` correlation is load-bearing: without it, a leftover
+ * condition from a previous deploy would satisfy the predicate instantly,
+ * before the rollout under test even began. Prefer a previous condition's
+ * server-side timestamp over the host clock so VM clock skew cannot flake.
  */
 export async function waitForStatusCondition(
   name: string,
@@ -413,7 +432,7 @@ export async function waitForStatusCondition(
 ): Promise<McpServerCondition> {
   const reasonLabel = opts.expectReason ? ` reason=${opts.expectReason}` : ''
   return waitFor(
-    `McpServer "${name}" ${opts.type}=${opts.expectStatus}${reasonLabel} with lastTransitionTime after ${new Date(
+    `McpServer "${name}" ${opts.type}=${opts.expectStatus}${reasonLabel} with lastTransitionTime at or after ${new Date(
       opts.sinceMs
     ).toISOString()}`,
     async () => {
@@ -441,9 +460,9 @@ export async function waitForStatusCondition(
  * Poll GET /admin/mcp-servers/:name until DeploymentReady reaches
  * `expectStatus` with a `lastTransitionTime` at or after `sinceMs`.
  *
- * The `sinceMs` correlation is load-bearing (plan Fase 3, requisito 6 /
- * hallazgo 1): without it, a condition left over from a PREVIOUS deploy would
- * satisfy the predicate instantly, before the rollout under test even began.
+ * The `sinceMs` correlation is load-bearing: without it, a leftover
+ * condition from a previous deploy would satisfy the predicate instantly,
+ * before the rollout under test even began.
  */
 export async function waitForRolloutCondition(
   name: string,

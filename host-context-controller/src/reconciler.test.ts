@@ -286,13 +286,15 @@ function firstPatchWithType(
 }
 
 describe('Reconciler managed:false guard (Risk 1.7)', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -673,14 +675,17 @@ describe('Reconciler managed:false guard (Risk 1.7)', () => {
 // ─── PR-B B1: validateSecret result shape + writeStatusCondition ───────
 
 describe('PR-B B1 — validateSecret result shape', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
-  const networkingApi = createMockNetworkingApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
+  let networkingApi: ReturnType<typeof createMockNetworkingApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
+    networkingApi = createMockNetworkingApi()
     const kubeConfig = new k8s.KubeConfig()
     // Keep the forbidden API reachable: reintroducing the old optional
     // NetworkingApi client must not pass by observing an unrelated mock.
@@ -911,6 +916,41 @@ describe('PR-B B1 — validateSecret result shape', () => {
             condition.type === 'DeploymentReady' &&
             condition.reason === 'RuntimeNotDesired' &&
             condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+        )
+      )
+    ).toBe(true)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
+  })
+
+  it('disabled writes RuntimeNotDesired when Service cleanup is denied after Deployment delete', async () => {
+    installLiveStatus(customApi, [secretResolvedTrue(), deploymentReadyTrue(), networkReadyTrue()])
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = persistReadySeed(makeServer({ name: 'pg', managed: true, enabled: false }))
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(
+          condition =>
+            condition.type === 'DeploymentReady' &&
+            condition.reason === 'RuntimeNotDesired' &&
+            condition.message === RUNTIME_NOT_DESIRED_DISABLED
         )
       )
     ).toBe(true)
@@ -1207,9 +1247,9 @@ describe('PR-B B1 — validateSecret result shape', () => {
 })
 
 describe('PR-B B1 — writeStatusCondition', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   const getPatchedConditions = () => {
@@ -1225,7 +1265,9 @@ describe('PR-B B1 — writeStatusCondition', () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -1263,6 +1305,38 @@ describe('PR-B B1 — writeStatusCondition', () => {
     expect(Date.parse(written.lastTransitionTime)).toBeGreaterThan(
       Date.parse('2020-01-01T00:00:00.000Z')
     )
+  })
+
+  it('bumps DeploymentReady lastTransitionTime when only the message changes', async () => {
+    customApi.getNamespacedCustomObjectStatus.mockResolvedValueOnce({
+      status: {
+        conditions: [
+          {
+            type: 'DeploymentReady',
+            status: 'False',
+            reason: 'WaitingForReplicas',
+            message: 'Waiting for pods to become ready',
+            lastTransitionTime: '2020-01-01T00:00:00.000Z',
+          },
+        ],
+      },
+    })
+
+    const server = makeServer({ name: 'pg' })
+    await reconciler.writeStatusCondition(server, {
+      type: 'DeploymentReady',
+      status: 'False',
+      reason: 'WaitingForReplicas',
+      message: 'Rollout did not converge — 0/1 ready',
+    })
+
+    const { conditions } = getPatchedConditions()
+    const written = conditions.find((c: { type: string }) => c.type === 'DeploymentReady')
+    expect(written.lastTransitionTime).not.toBe('2020-01-01T00:00:00.000Z')
+    expect(Date.parse(written.lastTransitionTime)).toBeGreaterThan(
+      Date.parse('2020-01-01T00:00:00.000Z')
+    )
+    expect(written.message).toBe('Rollout did not converge — 0/1 ready')
   })
 
   it('preserves lastTransitionTime when status is unchanged', async () => {
@@ -1754,13 +1828,15 @@ describe('PR-B B1 — writeStatusCondition', () => {
 })
 
 describe('restart-safe discovery status', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -1923,13 +1999,15 @@ describe('restart-safe discovery status', () => {
 })
 
 describe('ownership-safe fail-closed cleanup', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -2010,6 +2088,7 @@ describe('ownership-safe fail-closed cleanup', () => {
         conditions.some(condition => condition.reason === 'RuntimeNotDesired')
       )
     ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 
   it('skips cleanup when the existing runtime is WRC-owned', async () => {
@@ -2061,6 +2140,53 @@ describe('ownership-safe fail-closed cleanup', () => {
       )
     ).toBe(false)
     expect(reconciler.hasIncompleteReconciliation()).toBe(false)
+  })
+
+  it('keeps the obligation when a foreign Deployment sits next to a denied HCC Service', async () => {
+    const missing = new Error('missing') as Error & { code?: number }
+    missing.code = 404
+    const notFound = new Error('not found') as Error & { code?: number }
+    notFound.code = 404
+    coreApi.readNamespacedSecret.mockRejectedValueOnce(missing)
+    appsApi.readNamespacedDeployment.mockResolvedValueOnce({
+      metadata: {
+        labels: {
+          [MANAGED_BY_LABEL]: WRC_MANAGED_BY_VALUE,
+          [MCPSERVER_LABEL]: 'pg',
+        },
+      },
+    })
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce(notFound)
+    let seenServiceRead = false
+    let deniedServiceDelete = false
+    coreApi.readNamespacedService.mockImplementation(async () => {
+      seenServiceRead = true
+      return { metadata: hccOwnedMetadata('pg') }
+    })
+
+    const server = makeServer({
+      name: 'pg',
+      managed: true,
+      envSecret: { name: 'pg-creds', keys: [{ secretKey: 'password', envVar: 'PGPASSWORD' }] },
+    })
+    await reconciler.reconcile(server, {
+      isCurrent: () => {
+        if (seenServiceRead && !deniedServiceDelete) {
+          deniedServiceDelete = true
+          return false
+        }
+        return true
+      },
+    })
+
+    expect(appsApi.deleteNamespacedDeployment).not.toHaveBeenCalled()
+    expect(coreApi.deleteNamespacedService).not.toHaveBeenCalled()
+    expect(
+      patchedConditionSets(customApi).some(conditions =>
+        conditions.some(condition => condition.reason === 'RuntimeNotDesired')
+      )
+    ).toBe(false)
+    expect(reconciler.hasIncompleteReconciliation()).toBe(true)
   })
 
   it('disabled managed server still writes Disabled when the runtime is WRC-owned', async () => {
@@ -2163,13 +2289,15 @@ describe('ownership-safe fail-closed cleanup', () => {
 })
 
 describe('full reconciliation inventory authority', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     customApi.getNamespacedCustomObject.mockRejectedValue(
       Object.assign(new Error('not found'), { code: 404 })
     )
@@ -2665,13 +2793,15 @@ describe('full reconciliation inventory authority', () => {
 })
 
 describe('updateStatusConditions', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let reconciler: McpServerReconciler
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -2789,9 +2919,9 @@ describe('updateStatusConditions', () => {
 })
 
 describe('unconfigured inventory authority fails closed (G1)', () => {
-  const appsApi = createMockAppsApi()
-  const coreApi = createMockCoreApi()
-  const customApi = createMockCustomApi()
+  let appsApi: ReturnType<typeof createMockAppsApi>
+  let coreApi: ReturnType<typeof createMockCoreApi>
+  let customApi: ReturnType<typeof createMockCustomApi>
   let errorSpy: ReturnType<typeof vi.spyOn>
 
   // Deliberately NO assumeInventoryAuthorityWhenUnconfigured and NO
@@ -2805,7 +2935,9 @@ describe('unconfigured inventory authority fails closed (G1)', () => {
   }
 
   beforeEach(() => {
-    vi.clearAllMocks()
+    appsApi = createMockAppsApi()
+    coreApi = createMockCoreApi()
+    customApi = createMockCustomApi()
     errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   })
 

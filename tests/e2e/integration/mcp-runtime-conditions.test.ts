@@ -5,8 +5,8 @@
  * not run a managed server and never writes a NetworkReady condition.
  *
  * Actions go through control-api (DELETE + POST of the Secret; full-spec PUT
- * to disable). Writing the Secret with kubectl after setup, or merge-patching
- * it, is forbidden — PUT is merge-patch and cannot produce SecretMissingKey.
+ * to disable). Do not write the Secret with kubectl after setup, and do not
+ * merge-patch it — PUT is merge-patch and cannot produce a missing key.
  *
  * Run:
  *   bash scripts/e2e/run-vitest-e2e.sh integration/mcp-runtime-conditions.test.ts
@@ -16,19 +16,19 @@ import {
   MCP_SERVERS_NAMESPACE,
   ROLLOUT_TIMEOUT_MS,
   adminLogin,
+  conditionTransitionMs,
   deleteMcpSecret,
   deleteMcpServerFixture,
   getMcpServerResource,
   kubectlApply,
-  kubectlSafe,
   localMcpServerYaml,
   postMcpSecret,
   putMcpServer,
   randomSuffix,
   requireControlApiUp,
+  requireDeploymentAbsent,
   requireHccDevModeUnset,
   secretYaml,
-  waitFor,
   waitForRolloutCondition,
   waitForStatusCondition,
 } from './mcpCredentialRotation.helpers.js'
@@ -46,7 +46,12 @@ let adminToken = ''
 function expectNoNetworkReady(resource: {
   status?: { conditions?: Array<{ type: string }> }
 }): void {
-  const types = (resource.status?.conditions ?? []).map(condition => condition.type)
+  const conditions = resource.status?.conditions
+  expect(conditions, 'status.conditions must be present').toBeDefined()
+  const types = (conditions ?? []).map(condition => condition.type)
+  expect(types, `DeploymentReady must be present; saw ${types.join(',')}`).toContain(
+    'DeploymentReady'
+  )
   expect(types, `NetworkReady must be absent; saw ${types.join(',')}`).not.toContain('NetworkReady')
 }
 
@@ -89,9 +94,8 @@ describe('mcp runtime conditions (#606)', () => {
         timeoutMs: ROLLOUT_TIMEOUT_MS,
       })
       expectNoNetworkReady(await getMcpServerResource(SERVER_NAME, adminToken))
-      expect(ready.reason).toBe('ReplicasAvailable')
 
-      const deletedAt = Date.now()
+      const deletedAt = conditionTransitionMs(ready)
       const deleted = await deleteMcpSecret(SECRET_NAME, adminToken)
       expect(deleted.status, `DELETE secret failed: ${JSON.stringify(deleted.data)}`).toBe(200)
 
@@ -117,22 +121,9 @@ describe('mcp runtime conditions (#606)', () => {
       })
       expect(retired.message).toContain('Env Secret validation failed')
       expectNoNetworkReady(await getMcpServerResource(SERVER_NAME, adminToken))
-      await waitFor(
-        `Deployment "${SERVER_NAME}" absent after fail-closed delete`,
-        () =>
-          kubectlSafe(`get deploy ${SERVER_NAME} -n ${MCP_SERVERS_NAMESPACE}`) === null
-            ? 'absent'
-            : null,
-        ROLLOUT_TIMEOUT_MS,
-        {
-          diagnostics: () =>
-            kubectlSafe(
-              `get deploy,pods -n ${MCP_SERVERS_NAMESPACE} -l clerum.io/mcpserver=${SERVER_NAME}`
-            ) ?? '(kubectl failed)',
-        }
-      )
+      requireDeploymentAbsent(SERVER_NAME, MCP_SERVERS_NAMESPACE)
 
-      const restoredAt = Date.now()
+      const restoredAt = conditionTransitionMs(retired)
       const created = await postMcpSecret(
         SECRET_NAME,
         { [SECRET_KEY]: RESTORED_SECRET_VALUE },
@@ -149,10 +140,24 @@ describe('mcp runtime conditions (#606)', () => {
       expect(Date.parse(restored.lastTransitionTime)).toBeGreaterThan(
         Date.parse(retired.lastTransitionTime)
       )
+      const recoveredReady = await waitForStatusCondition(SERVER_NAME, adminToken, {
+        type: 'Ready',
+        expectStatus: 'True',
+        expectReason: 'ReconcileSuccess',
+        sinceMs: restoredAt,
+        timeoutMs: ROLLOUT_TIMEOUT_MS,
+      })
+      await waitForStatusCondition(SERVER_NAME, adminToken, {
+        type: 'SecretResolved',
+        expectStatus: 'True',
+        expectReason: 'SecretFound',
+        sinceMs: restoredAt,
+        timeoutMs: ROLLOUT_TIMEOUT_MS,
+      })
       expectNoNetworkReady(await getMcpServerResource(SERVER_NAME, adminToken))
 
       const current = await getMcpServerResource(SERVER_NAME, adminToken)
-      const disabledAt = Date.now()
+      const disabledAt = conditionTransitionMs(recoveredReady)
       const disabled = await putMcpServer(
         SERVER_NAME,
         {
@@ -178,7 +183,8 @@ describe('mcp runtime conditions (#606)', () => {
       })
       expect(disabledReady.message).toContain('McpServer is disabled')
       expectNoNetworkReady(await getMcpServerResource(SERVER_NAME, adminToken))
+      requireDeploymentAbsent(SERVER_NAME, MCP_SERVERS_NAMESPACE)
     },
-    ROLLOUT_TIMEOUT_MS * 4 + 30_000
+    ROLLOUT_TIMEOUT_MS * 8 + 30_000
   )
 })
