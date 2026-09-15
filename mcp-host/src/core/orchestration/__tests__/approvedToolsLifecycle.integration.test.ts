@@ -262,6 +262,11 @@ describe('approved catalog across presentation and lifecycle', () => {
     const name = 'alpha__record__read_082'
     const initial = await registry.get('clerum__tool_describe')!.execute({ name })
     expect(initial.content).not.toContain('recordId')
+    const witness = await executeToolCalls([bridgeCall(name, 'before-schema-change')], config, 0)
+    expect(witness.toolResults[0].is_error).toBe(false)
+    expect(witness.toolResults[0].content).toContain('receipt:alpha:record__read_082')
+    expect(remote.calls).toHaveBeenCalledTimes(1)
+    remote.calls.mockClear()
     const updated = remote.catalogs.get('alpha')!.map(tool =>
       tool.name === 'record__read_082'
         ? {

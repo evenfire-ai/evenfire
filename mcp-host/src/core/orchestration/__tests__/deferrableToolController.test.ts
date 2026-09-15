@@ -237,6 +237,20 @@ describe('Codex presentation without access limits', () => {
     }
   )
 
+  it.each([60, 61])('auto changes strategy only above the count threshold: %i', async count => {
+    const all = [...native, ...mcpTools(count)]
+    const result = await controller('auto', makeLatch(), 1_000_000).refreshTools(all)
+    expect(result).toEqual(count === 60 ? all : native)
+  })
+
+  it('auto changes strategy only above the exact UTF-8 byte threshold', async () => {
+    const deferred = [{ ...tool('server__read'), description: 'Información' }]
+    const bytes = Buffer.byteLength(JSON.stringify(deferred), 'utf8')
+    const all = [...native, ...deferred]
+    expect(await controller('auto', makeLatch(), bytes).refreshTools(all)).toEqual(all)
+    expect(await controller('auto', makeLatch(), bytes - 1).refreshTools(all)).toEqual(native)
+  })
+
   it('auto detects late connections and ignores a legacy false latch', async () => {
     const latch = makeLatch()
     latch.set(false)
