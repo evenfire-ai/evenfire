@@ -1,5 +1,5 @@
-const DEFAULT_MCP_TOOL_TIMEOUT_MS = 3_600_000
-const DEFAULT_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS = 3_600_000
+const DEFAULT_MCP_TOOL_TIMEOUT_MS = 1_500_000
+const DEFAULT_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS = 1_500_000
 const MCP_TOOL_TIMEOUT_ENV = 'CLERUM_MCP_TOOL_TIMEOUT_MS'
 const MCP_TOOL_MAX_TOTAL_TIMEOUT_ENV = 'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS'
 
@@ -24,7 +24,7 @@ function readPositiveSafeIntegerEnv(name: string, defaultValue: number): number 
   if (raw === undefined || raw === '') return defaultValue
   if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a positive safe integer`)
   const value = Number.parseInt(raw, 10)
-  if (!Number.isSafeInteger(value) || value < 1) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
     throw new Error(`${name} must be a positive safe integer`)
   }
   return value
@@ -48,7 +48,11 @@ export function resolveMcpRequestTimeoutMs(callerTimeoutMs?: number): number {
     )
   }
   if (callerTimeoutMs !== undefined) {
-    if (!Number.isSafeInteger(callerTimeoutMs) || callerTimeoutMs < 1) {
+    if (
+      !Number.isSafeInteger(callerTimeoutMs) ||
+      callerTimeoutMs < 1 ||
+      callerTimeoutMs > 2_147_483_647
+    ) {
       throw new Error('caller MCP timeout must be a positive safe integer')
     }
     return Math.min(configuredTimeoutMs, configuredMaxTotalTimeoutMs, callerTimeoutMs)

@@ -170,7 +170,9 @@ describe('AgentStateMachine — task processing', () => {
     await agent.executeTask(task)
 
     expect(task.responseCallback).toHaveBeenCalledWith(
-      expect.objectContaining({ response: 'Max iterations reached' })
+      expect.objectContaining({
+        error: expect.objectContaining({ code: 'TASK_ITERATION_LIMIT', retryable: false }),
+      })
     )
   })
 })
