@@ -139,6 +139,49 @@ const DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY = 10
 // Status is a read/merge/write transaction shared with other controllers.
 // Bound optimistic-conflict retries so a hot object cannot stall reconciliation.
 const STATUS_CONDITION_WRITE_MAX_ATTEMPTS = 3
+/** Types HCC no longer writes and strips from every status write (#606). A future writer must not reuse `NetworkReady`; remove the entry first. */
+const RETIRED_STATUS_CONDITION_TYPES = ['NetworkReady'] as const
+const RUNTIME_NOT_DESIRED_DISABLED_MESSAGE = 'McpServer is disabled; HCC does not run its runtime'
+const RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE =
+  'Env Secret validation failed; HCC does not run its runtime'
+
+function isRetiredStatusConditionType(type: string): boolean {
+  return (RETIRED_STATUS_CONDITION_TYPES as readonly string[]).includes(type)
+}
+
+type StatusWriteDecline = 'record-obligation' | 'silent'
+type StatusWriteDeclineArg = () => StatusWriteDecline
+type StatusWriteOutcome = 'wrote' | 'unchanged' | 'declined'
+type RuntimeWithdrawKind = 'disabled' | 'fail-closed'
+type DeploymentDeleteOutcome = 'gone' | 'denied' | 'foreign'
+
+type RetractManagedRuntimeResult = {
+  retracted: boolean
+  cleanupComplete: boolean
+  foreignRuntime: boolean
+  runtimeGone: boolean
+}
+
+function shouldStopAfterIncompleteRetract(
+  retract: RetractManagedRuntimeResult,
+  isCurrent: () => boolean
+): boolean {
+  if (retract.retracted || retract.foreignRuntime) return false
+  return !(retract.runtimeGone && isCurrent())
+}
+
+function runtimeNotDesiredMessage(kind: RuntimeWithdrawKind): string {
+  switch (kind) {
+    case 'disabled':
+      return RUNTIME_NOT_DESIRED_DISABLED_MESSAGE
+    case 'fail-closed':
+      return RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
+    default: {
+      const _exhaustive: never = kind
+      return _exhaustive
+    }
+  }
+}
 
 function throwCleanupFailures(failures: unknown[], message: string): void {
   if (failures.length > 0) {
@@ -257,6 +300,12 @@ interface ReadinessPollState {
    */
   isCurrent: () => boolean
   server: McpServerCRD
+  /**
+   * Snapshot of `readinessRetirements` at window create time (#606). A later
+   * retirement increments the name's counter; the tick must not publish after
+   * that, even if this state was already deleted from `readinessPolls`.
+   */
+  retirementEpoch: number
 }
 
 export class McpServerReconciler {
@@ -302,6 +351,13 @@ export class McpServerReconciler {
    * sticky for the same Deployment generation.
    */
   private readonly readinessPolls: Map<string, ReadinessPollState> = new Map()
+  /**
+   * Retirement epoch per server name (#606). Incremented when a disabled or
+   * fail-closed reconcile retracts the readiness window. `clearStatus` does
+   * not delete entries: a recreated name keeps the counter so stale ticks fail
+   * the epoch check in addition to the uid fence.
+   */
+  private readonly readinessRetirements = new Map<string, number>()
 
   /**
    * Tail promise of the in-flight reconcile chain per server name. Serializes
@@ -346,6 +402,26 @@ export class McpServerReconciler {
     if (this.readinessPollStillDesired(poll)) {
       this.pendingReconciliations.set(poll.server.name, { namespace: poll.server.namespace })
     }
+  }
+
+  /**
+   * Retract the live readiness window for a name that will no longer run a
+   * runtime (#606). Increments the retirement epoch first so an in-flight tick
+   * that already deleted its map entry still fails `retiredNow()`. Clears any
+   * pending timer. Does not record an incomplete-publication obligation. Poll
+   * ticks pass an `onDecline` factory evaluated at decline time: silent only
+   * when `retiredNow()` is true, otherwise the revision fence still records
+   * an obligation.
+   */
+  private retireReadinessWindow(name: string): void {
+    this.readinessRetirements.set(name, (this.readinessRetirements.get(name) ?? 0) + 1)
+    const poll = this.readinessPolls.get(name)
+    if (poll === undefined) return
+    if (poll.timer !== undefined) {
+      clearTimeout(poll.timer)
+      poll.timer = undefined
+    }
+    this.readinessPolls.delete(name)
   }
 
   constructor(kc: k8s.KubeConfig, deps?: McpServerReconcilerDeps) {
@@ -618,6 +694,7 @@ export class McpServerReconciler {
       detail: previous?.detail ?? '',
       isCurrent,
       server,
+      retirementEpoch: this.readinessRetirements.get(name) ?? 0,
     }
     this.readinessPolls.set(name, state)
 
@@ -627,6 +704,11 @@ export class McpServerReconciler {
       // can tell "tick running" apart from "window ended" during our awaits.
       state.timer = undefined
       state.ticking = true
+      const retiredNow = (): boolean =>
+        (this.readinessRetirements.get(name) ?? 0) !== state.retirementEpoch
+      const publishIfCurrent = (): boolean => state.isCurrent() && !retiredNow()
+      const pollWriteDecline = (): StatusWriteDecline =>
+        retiredNow() ? 'silent' : 'record-obligation'
       // Mutation fencing: a superseded reconcile (desired-revision or
       // inventory-authority change) must not keep observing — or writing
       // status — on behalf of a stale desired state. End the window quietly;
@@ -692,10 +774,18 @@ export class McpServerReconciler {
         // always false, so this is the ONLY place a converged rollout is ever
         // recorded — without it every successful credential rotation would sit
         // at DeploymentReady=False forever and the UI would report a timeout.
-        await this.updateStatusConditions(state.server, true, undefined, state.isCurrent)
+        if (retiredNow()) return
+        await this.updateStatusConditions(
+          state.server,
+          true,
+          undefined,
+          publishIfCurrent,
+          pollWriteDecline
+        )
         // Readiness is decoupled from fleet convergence: the poll also
         // upgrades the persisted, generation-matched Ready condition so a
         // controller restart can trust the recorded readiness (see getStatus).
+        if (retiredNow()) return
         await this.writeStatusCondition(
           state.server,
           {
@@ -704,7 +794,8 @@ export class McpServerReconciler {
             reason: 'ReconcileSuccess',
             message: 'Deployment created',
           },
-          state.isCurrent
+          publishIfCurrent,
+          pollWriteDecline
         )
         return
       }
@@ -725,7 +816,14 @@ export class McpServerReconciler {
         // Give up loudly, on the CRD: a stuck rollout must be visible to the
         // operator with the numbers that prove it, never left as a stale
         // condition or a silent Unknown.
-        await this.updateStatusConditions(state.server, false, rollout.detail, state.isCurrent)
+        if (retiredNow()) return
+        await this.updateStatusConditions(
+          state.server,
+          false,
+          rollout.detail,
+          publishIfCurrent,
+          pollWriteDecline
+        )
         return
       }
 
@@ -1657,36 +1755,168 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     name: string,
     namespace: string,
     deleteAllowed?: () => Promise<boolean>
-  ): Promise<void> {
+  ): Promise<DeploymentDeleteOutcome> {
     let deployment: k8s.V1Deployment
     try {
       deployment = await this.appsApi.readNamespacedDeployment({ name, namespace })
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Deployment "${name}" already gone`)
-      } else {
-        console.error(`[Reconciler] Failed to read Deployment "${name}" ownership:`, error)
-        throw error
+        hccLogger.info('Deployment already gone', { name })
+        return 'gone'
       }
-      return
+      hccLogger.error('Failed to read Deployment ownership', { name, err: error })
+      throw error
     }
 
     if (!this.isHccOwnedMcpResource(deployment, name)) {
-      console.warn(`[Reconciler] Skipping Deployment "${name}" delete — not HCC-owned`)
-      return
+      hccLogger.warn('Skipping Deployment delete — not HCC-owned', { name })
+      return 'foreign'
     }
-    if (deleteAllowed && !(await deleteAllowed())) return
+    if (deleteAllowed && !(await deleteAllowed())) return 'denied'
 
     try {
       await this.appsApi.deleteNamespacedDeployment({ name, namespace })
-      console.log(`[Reconciler] Deleted Deployment "${name}"`)
+      hccLogger.info('Deleted Deployment', { name })
+      return 'gone'
     } catch (error: unknown) {
       if (getErrorCode(error) === 404) {
-        console.log(`[Reconciler] Deployment "${name}" already gone`)
-      } else {
-        console.error(`[Reconciler] Failed to delete Deployment "${name}":`, error)
-        throw error
+        hccLogger.info('Deployment already gone', { name })
+        return 'gone'
       }
+      hccLogger.error('Failed to delete Deployment', { name, err: error })
+      throw error
+    }
+  }
+
+  /**
+   * Delete leftover HCC-owned ConfigMap and Service after the Deployment
+   * outcome is known. Does not write status.
+   */
+  private async deleteHccOwnedRuntimeSiblings(
+    name: string,
+    namespace: string,
+    deleteAllowed?: () => Promise<boolean>
+  ): Promise<void> {
+    const siblingFailures: unknown[] = []
+    for (const cleanup of [
+      () => this.deleteConfigMapIfHccOwned(`${name}-nginx-conf`, namespace, name, deleteAllowed),
+      () => this.deleteServiceIfHccOwned(name, namespace, deleteAllowed),
+    ]) {
+      try {
+        await cleanup()
+      } catch (error) {
+        siblingFailures.push(error)
+      }
+    }
+    throwCleanupFailures(
+      siblingFailures,
+      `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
+    )
+  }
+
+  /**
+   * Withdraw an HCC-owned runtime (#606): once the Deployment is confirmed
+   * gone, retire the poll, persist DeploymentReady=False/RuntimeNotDesired,
+   * then finish sibling deletes. Sibling failure does not roll back the
+   * retract. Retire before the retract write so an in-flight tick cannot
+   * republish True after the retract PATCH commits but before the epoch
+   * bumps. A foreign (WRC-owned) Deployment retires the window without
+   * writing RuntimeNotDesired.
+   */
+  private async retractManagedRuntime(
+    server: McpServerCRD,
+    kind: RuntimeWithdrawKind,
+    isCurrent: () => boolean
+  ): Promise<RetractManagedRuntimeResult> {
+    const name = server.name
+    const namespace = server.namespace
+    const deleteAllowed = async (): Promise<boolean> => isCurrent()
+    let cleanupComplete = true
+    const gatedDeleteAllowed = async (): Promise<boolean> => {
+      const allowed = await deleteAllowed()
+      if (!allowed) cleanupComplete = false
+      return allowed
+    }
+
+    let deploymentOutcome: DeploymentDeleteOutcome
+    try {
+      deploymentOutcome = await this.deleteDeploymentIfHccOwned(name, namespace, deleteAllowed)
+    } catch (error) {
+      const failures: unknown[] = [error]
+      for (const cleanup of [
+        () => this.deleteConfigMapIfHccOwned(`${name}-nginx-conf`, namespace, name, deleteAllowed),
+        () => this.deleteServiceIfHccOwned(name, namespace, deleteAllowed),
+      ]) {
+        try {
+          await cleanup()
+        } catch (siblingError) {
+          failures.push(siblingError)
+        }
+      }
+      throwCleanupFailures(
+        failures,
+        `Failed to delete runtime Kubernetes resources for McpServer "${name}"`
+      )
+      throw new Error(`Failed to delete runtime Kubernetes resources for McpServer "${name}"`)
+    }
+
+    switch (deploymentOutcome) {
+      case 'denied':
+        return {
+          retracted: false,
+          cleanupComplete: false,
+          foreignRuntime: false,
+          runtimeGone: false,
+        }
+      case 'foreign':
+        this.retireReadinessWindow(name)
+        await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
+        return {
+          retracted: false,
+          cleanupComplete: cleanupComplete && isCurrent(),
+          foreignRuntime: true,
+          runtimeGone: false,
+        }
+      case 'gone':
+        break
+      default: {
+        const _exhaustive: never = deploymentOutcome
+        return _exhaustive
+      }
+    }
+
+    this.retireReadinessWindow(name)
+    const retractWrite = await this.writeStatusCondition(
+      server,
+      {
+        type: 'DeploymentReady',
+        status: 'False',
+        reason: 'RuntimeNotDesired',
+        message: runtimeNotDesiredMessage(kind),
+      },
+      isCurrent
+    )
+    const epoch = this.readinessRetirements.get(name)
+    if (retractWrite === 'declined') {
+      hccLogger.warn('Retract write declined', { name, kind, epoch, outcome: retractWrite })
+    } else {
+      hccLogger.info('Retracted managed runtime', { name, kind, epoch, outcome: retractWrite })
+    }
+
+    await this.deleteHccOwnedRuntimeSiblings(name, namespace, gatedDeleteAllowed)
+    if (retractWrite === 'declined') {
+      return {
+        retracted: false,
+        cleanupComplete: false,
+        foreignRuntime: false,
+        runtimeGone: true,
+      }
+    }
+    return {
+      retracted: true,
+      cleanupComplete: cleanupComplete && isCurrent(),
+      foreignRuntime: false,
+      runtimeGone: true,
     }
   }
 
@@ -1831,9 +2061,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   }
 
   /**
-   * G11: Update status conditions on McpServer CRD.
-   * Sets NetworkReady and DeploymentReady conditions so WRC can watch
-   * for status changes instead of polling with sleeps.
+   * G11: Update DeploymentReady on the McpServer status subresource.
+   * The condition describes Deployment rollout. WRC does not watch this type;
+   * it reads the `clerum.io/network-ready` annotation.
    */
   private async updateStatusConditions(
     server: McpServerCRD,
@@ -1844,19 +2074,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
      * that only know the verdict omit it.
      */
     rolloutDetail?: string,
-    isCurrent: () => boolean = () => true
+    isCurrent: () => boolean = () => true,
+    onDecline: StatusWriteDeclineArg = () => 'record-obligation'
   ): Promise<void> {
     try {
-      const networkWrote = await this.writeStatusCondition(
-        server,
-        {
-          type: 'NetworkReady',
-          status: 'True',
-          reason: 'NetworkPoliciesApplied',
-          message: 'NetworkPolicies and Service created',
-        },
-        isCurrent
-      )
       const deploymentWrote = await this.writeStatusCondition(
         server,
         {
@@ -1873,16 +2094,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
               ? 'Deployment has ready replicas'
               : 'Waiting for pods to become ready',
         },
-        isCurrent
+        isCurrent,
+        onDecline
       )
-      if (networkWrote || deploymentWrote) {
-        console.log(
-          `[Reconciler] Updated status conditions on "${server.name}" (DeploymentReady=${deploymentReady})`
-        )
+      if (deploymentWrote === 'wrote') {
+        hccLogger.info('Updated status conditions', {
+          name: server.name,
+          deploymentReady,
+        })
       }
     } catch (error) {
       // Status subresource may not exist yet — log but don't fail reconciliation
-      console.warn(`[Reconciler] Failed to update status conditions on "${server.name}":`, error)
+      hccLogger.warn('Failed to update status conditions', { name: server.name, err: error })
     }
   }
 
@@ -1892,24 +2115,41 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
    * Merge semantics:
    *   - Condition with same `type` and unchanged `status` → keep existing
    *     `lastTransitionTime`, refresh `reason` / `message`.
+   *   - `DeploymentReady` with the same `status` but a new `reason` or
+   *     `message` → bump `lastTransitionTime` so recovery after
+   *     `RuntimeNotDesired` is visible to #223 consumers.
    *   - Condition with same `type` but different `status` → bump
    *     `lastTransitionTime` to now.
    *   - New type → append with fresh `lastTransitionTime`.
+   *   - Any write also strips retired types (NetworkReady). If a retired
+   *     type is still present, the patch is forced even when the requested
+   *     condition is otherwise unchanged.
    *
    * Side-effect: updates the `clerum_hcc_mcpserver_missing_secret` gauge for
    * `SecretResolved` conditions (1 when False, 0 when True).
    *
+   * `onDecline` is a factory evaluated at decline time. The default records
+   * an incomplete-publication obligation. Poll ticks pass a factory that is
+   * `'silent'` only while `retiredNow()` is true.
+   *
+   * Returns `'wrote'` after a successful patch, `'unchanged'` when the
+   * requested condition already matches and no retired type remains, or
+   * `'declined'` when the fence or a write error stops the update.
+   *
    * Failure modes:
-   *   - 404 (CRD deleted mid-reconcile) → log + swallow.
+   *   - 404 (CRD deleted mid-reconcile) → log + `decline()`.
    *   - 409/422 (optimistic conflict) → re-read, re-merge, bounded retry.
-   *   - Other errors → log + swallow (status writes are best-effort).
+   *   - Other errors or exhausted retries → log + `decline()`.
    */
   async writeStatusCondition(
     server: McpServerCRD,
     condition: Omit<McpServerCondition, 'lastTransitionTime'>,
-    isCurrent: () => boolean = () => true
-  ): Promise<boolean> {
-    if (!isCurrent()) return this.recordIncompletePublication(server)
+    isCurrent: () => boolean = () => true,
+    onDecline: StatusWriteDeclineArg = () => 'record-obligation'
+  ): Promise<StatusWriteOutcome> {
+    const decline = (): StatusWriteOutcome =>
+      onDecline() === 'silent' ? 'declined' : this.recordIncompletePublication(server)
+    if (!isCurrent()) return decline()
     const now = new Date().toISOString()
 
     // Update the missing-secret gauge for SecretResolved conditions.
@@ -1934,7 +2174,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // if anything changed since our read; we then re-read and retry, so no
     // writer's condition is lost.
     for (let attempt = 1; attempt <= STATUS_CONDITION_WRITE_MAX_ATTEMPTS; attempt += 1) {
-      if (!isCurrent()) return this.recordIncompletePublication(server)
+      if (!isCurrent()) return decline()
       // Re-read on every optimistic-conflict retry. Merging against the
       // latest resourceVersion preserves conditions written by peer
       // controllers between our read and patch.
@@ -1960,15 +2200,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
           )
-          return this.recordIncompletePublication(server)
+          return decline()
         }
         console.warn(
           `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
           error
         )
-        return this.recordIncompletePublication(server)
+        return decline()
       }
-      if (!isCurrent()) return this.recordIncompletePublication(server)
+      if (!isCurrent()) return decline()
 
       const prior = existingConditions.find(c => c.type === condition.type)
       const observedGeneration = condition.observedGeneration ?? server.generation
@@ -1977,7 +2217,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         prior.status === condition.status &&
         prior.reason === condition.reason &&
         prior.message === condition.message &&
-        prior.observedGeneration === observedGeneration
+        prior.observedGeneration === observedGeneration &&
+        !existingConditions.some(existing => isRetiredStatusConditionType(existing.type))
 
       // Skip the patch when the condition is identical to what's already on
       // the CRD. Without this, every reconcile bumps the McpServer's
@@ -1985,11 +2226,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       // reconcile — a tight self-loop that also amplifies NetworkPolicy
       // optimistic-lock contention downstream.
       if (unchanged) {
-        return false
+        return 'unchanged'
       }
 
+      const refreshDeploymentReadyTime =
+        condition.type === 'DeploymentReady' &&
+        prior !== undefined &&
+        (prior.reason !== condition.reason || prior.message !== condition.message)
       const lastTransitionTime =
-        prior && prior.status === condition.status ? prior.lastTransitionTime : now
+        prior && prior.status === condition.status && !refreshDeploymentReadyTime
+          ? prior.lastTransitionTime
+          : now
 
       const merged: McpServerCondition = {
         type: condition.type,
@@ -2000,7 +2247,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         ...(observedGeneration !== undefined && { observedGeneration }),
       }
 
-      const nextConditions = [...existingConditions.filter(c => c.type !== condition.type), merged]
+      const nextConditions = [
+        ...existingConditions.filter(
+          existing =>
+            existing.type !== condition.type && !isRetiredStatusConditionType(existing.type)
+        ),
+        merged,
+      ]
 
       const writePreconditions: Array<{
         op: 'test'
@@ -2039,7 +2292,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // The generated client prefers JSON Patch for this endpoint. Send an
         // actual patch document so status writes keep working across client
         // upgrades instead of relying on merge-patch object bodies.
-        if (!isCurrent()) return this.recordIncompletePublication(server)
+        if (!isCurrent()) return decline()
         await this.customApi.patchNamespacedCustomObjectStatus({
           group: 'clerum.io',
           version: 'v1alpha1',
@@ -2048,14 +2301,14 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           name: server.name,
           body: statusPatch,
         })
-        return true
+        return 'wrote'
       } catch (error) {
         const errorCode = getErrorCode(error)
         if (errorCode === 404) {
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
           )
-          return this.recordIncompletePublication(server)
+          return decline()
         }
         // 409 (Conflict) or 422 (a `test` op failed) mean a concurrent writer
         // won the race. Re-read and retry rather than lose our condition. Any
@@ -2071,18 +2324,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS}):`,
           error
         )
-        return this.recordIncompletePublication(server)
+        return decline()
       }
     }
-    return this.recordIncompletePublication(server)
+    return decline()
   }
 
-  private recordIncompletePublication(server: McpServerCRD): false {
-    // Keep the changed-boolean API: an unchanged condition is successful but
-    // returns false. Only a failed/retired write replaces the obligation, so
-    // an enclosing reconcile cannot clear that failure on normal return.
+  private recordIncompletePublication(server: McpServerCRD): 'declined' {
+    // A declined or failed write replaces the obligation so an enclosing
+    // reconcile cannot clear that failure on a later successful sibling write.
     this.pendingReconciliations.set(server.name, { namespace: server.namespace })
-    return false
+    return 'declined'
   }
 
   // ─── Public API ─────────────────────────────────────────────────────
@@ -2155,16 +2407,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // If disabled, respect ownership before any cleanup. managed:false means
     // WRC owns runtime resources; HCC only marks discovery status disabled.
     if (server.spec.enabled === false) {
+      let cleanupComplete = true
+      let retract: RetractManagedRuntimeResult | undefined
       if (currentManaged) {
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
         )
-        if (
-          !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
-            isCurrent()
-          ))
-        )
-          return false
+        retract = await this.retractManagedRuntime(server, 'disabled', isCurrent)
+        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
+        cleanupComplete = retract.cleanupComplete
       } else {
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled but WRC-owned; skipping runtime cleanup`
@@ -2182,7 +2433,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      return isCurrent()
+      if (retract && !retract.retracted && !retract.foreignRuntime) return false
+      return cleanupComplete && isCurrent()
     }
 
     if (!currentManaged) {
@@ -2196,13 +2448,13 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       console.error(
         `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
       )
-      if (shouldFailClosedForSecretFailure(secretResult.reason)) {
-        if (
-          !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
-            isCurrent()
-          ))
-        )
-          return false
+      const withdrawRuntime = shouldFailClosedForSecretFailure(secretResult.reason)
+      let cleanupComplete = true
+      let retract: RetractManagedRuntimeResult | undefined
+      if (withdrawRuntime) {
+        retract = await this.retractManagedRuntime(server, 'fail-closed', isCurrent)
+        if (shouldStopAfterIncompleteRetract(retract, isCurrent)) return false
+        cleanupComplete = retract.cleanupComplete
       } else {
         console.warn(
           `[Reconciler] Preserving existing runtime for "${server.name}" after transient Secret read failure`
@@ -2234,7 +2486,8 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
+      if (retract && !retract.retracted && !retract.foreignRuntime) return false
+      return withdrawRuntime && cleanupComplete && isCurrent()
     }
 
     // Ensure resources exist and are up to date
@@ -2344,9 +2597,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     await this.updateStatusConditions(server, ready, exhaustedDetail, isCurrent)
 
     // PR-B B1: record SecretResolved=True + Ready=True after a successful
-    // reconcile. This is additive to updateStatusConditions (NetworkReady /
-    // DeploymentReady); the merge logic in writeStatusCondition preserves
-    // the existing conditions by type.
+    // reconcile. This is additive to updateStatusConditions (DeploymentReady);
+    // the merge logic in writeStatusCondition preserves the existing
+    // conditions by type.
     if (server.spec.envSecret) {
       await this.writeStatusCondition(
         server,
