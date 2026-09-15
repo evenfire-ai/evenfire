@@ -10324,6 +10324,15 @@ td.cu-registry-description {
   border-radius: 6px;
 }
 
+/* Detail-page header title skeleton: bounded inline block so it reads as a
+ * loading title next to the icon, not a full-width bar (QA: no slug flash). */
+.cu-agent-detail-title-skeleton {
+  display: inline-block;
+  width: 11rem;
+  height: 1.25rem;
+  vertical-align: middle;
+}
+
 .cu-skeleton--text {
   height: 0.875rem;
   width: 100%;

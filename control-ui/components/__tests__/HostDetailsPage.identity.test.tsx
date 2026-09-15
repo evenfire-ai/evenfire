@@ -126,6 +126,39 @@ describe('HostDetailsPage identity integration', () => {
     expect(container.querySelector('.cu-agent-detail-card')).toBeNull()
   })
 
+  // QA: the header title leads with the display name (spec.host) and NEVER
+  // flashes the route slug while loading — a skeleton holds the slot until the
+  // first Overview read lands. The eyebrow route URL was removed by product.
+  it('skeletonizes the header title while loading, then shows the display name', async () => {
+    let resolveBundle: (value: unknown) => void = () => {}
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockReturnValue(
+      new Promise(resolve => {
+        resolveBundle = resolve
+      })
+    )
+
+    render(<HostDetailsPage />)
+
+    // Loading: skeleton in the title slot; no slug, no route-URL eyebrow.
+    expect(document.querySelector('.cu-agent-detail-title-skeleton')).not.toBeNull()
+    expect(screen.queryByText('Agent: foo')).toBeNull()
+    expect(screen.queryByText('/agents/foo')).toBeNull()
+
+    resolveBundle({
+      host,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [{ name: 'openai-secret', keys: ['openai-api-key'] }],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+
+    expect(await screen.findByRole('heading', { name: 'Agent: foo-display' })).toBeInTheDocument()
+    expect(document.querySelector('.cu-agent-detail-title-skeleton')).toBeNull()
+    expect(screen.queryByText('/agents/foo')).toBeNull()
+  })
+
   it('renders the agent detail tabs in order', async () => {
     render(<HostDetailsPage />)
 
