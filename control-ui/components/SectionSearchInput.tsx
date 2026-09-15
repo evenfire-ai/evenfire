@@ -1,6 +1,6 @@
 'use client'
 
-import React from 'react'
+import { TableSearch } from '@clerum/frontend-components'
 
 export function SectionSearchInput({
   disabled = false,
@@ -16,11 +16,10 @@ export function SectionSearchInput({
   ariaLabel?: string
 }) {
   return (
-    <input
+    <TableSearch
       className="cu-input cu-input--compact cu-section-search"
-      type="search"
       value={value}
-      onChange={event => onChange(event.target.value)}
+      onChange={onChange}
       placeholder={placeholder}
       aria-label={ariaLabel}
       disabled={disabled}

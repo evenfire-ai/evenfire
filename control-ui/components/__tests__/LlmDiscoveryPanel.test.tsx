@@ -1,6 +1,8 @@
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as api from '../../lib/api'
 import type { LlmAllowedModel } from '../../lib/api'
 import { LlmDiscoveryPanel } from '../LlmDiscoveryPanel'
@@ -47,6 +49,13 @@ function render(children: ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
 }
 
+function cssRuleBody(selector: string) {
+  const css = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`, 'm'))
+  return match?.[1] ?? ''
+}
+
 beforeEach(() => {
   vi.mocked(api.getDiscoveryStatus).mockResolvedValue({
     ranAt: '2026-07-29T12:00:00.000Z',
@@ -72,7 +81,7 @@ afterEach(() => {
 })
 
 describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
-  it('groups discovery review by provider and excludes stale rows', async () => {
+  it('shows review records with provider identity and excludes stale rows', async () => {
     render(
       <LlmDiscoveryPanel
         items={[reviewModel, staleModel]}
@@ -84,14 +93,10 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(screen.getByText('LLM Models')).toBeInTheDocument()
     expect(screen.getByText(/Newly synced models land here disabled/)).toBeInTheDocument()
 
-    const reviewGroup = screen.getByRole('button', { name: 'Expand OpenAI review models' })
-    expect(reviewGroup).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText('gpt-5')).toBeNull()
-    expect(screen.queryByText('claude-retired')).toBeNull()
-
-    fireEvent.click(reviewGroup)
+    expect(screen.getByRole('columnheader', { name: /Provider/i })).toBeInTheDocument()
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByText('claude-retired')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Expand .* review models/ })).toBeNull()
 
     await waitFor(() => expect(screen.getByText('Live catalog')).toBeInTheDocument())
     expect(screen.getByText('+3 new')).toBeInTheDocument()
@@ -103,13 +108,29 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     const onRefresh = vi.fn().mockResolvedValue(undefined)
     render(<LlmDiscoveryPanel items={[reviewModel]} loading={false} onRefresh={onRefresh} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
     fireEvent.click(screen.getByRole('button', { name: 'Enable' }))
 
     await waitFor(() =>
       expect(api.updateLlmModel).toHaveBeenCalledWith('review-openai', { enabled: true })
     )
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the per-row enable action cell wide enough for its button', () => {
+    render(
+      <LlmDiscoveryPanel
+        items={[reviewModel]}
+        loading={false}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />
+    )
+
+    const actionCell = screen.getByRole('button', { name: 'Enable' }).closest('td')
+    expect(actionCell).toHaveClass('cu-px-actions')
+    expect(actionCell).not.toHaveClass('cu-table__cell-actions')
+    expect(cssRuleBody('.cu-px-actions')).not.toMatch(/\b(?:max-width|min-width|width)\s*:/)
+    expect(cssRuleBody('.cu-tb-actions')).not.toMatch(/\b(?:max-width|min-width|width)\s*:/)
+    expect(cssRuleBody('.cu-table__cell-actions')).toMatch(/\bwidth:\s*3\.5rem\b/)
   })
 
   it('does not render a dedicated stale-model management section', () => {
@@ -168,7 +189,7 @@ describe('LlmDiscoveryPanel sorting', () => {
   }
 
   function expandOpenAi() {
-    fireEvent.click(screen.getByRole('button', { name: 'Expand OpenAI review models' }))
+    // Review rows are always visible; retained as a no-op for the sorting tests.
   }
 
   const discoveryModel = (overrides: Partial<LlmAllowedModel>): LlmAllowedModel => ({
@@ -188,7 +209,7 @@ describe('LlmDiscoveryPanel sorting', () => {
         onRefresh={vi.fn().mockResolvedValue(undefined)}
       />
     )
-    expect(document.querySelector('.cu-panel-title')?.textContent).toContain('LLM Models')
+    expect(screen.getByRole('heading', { name: /LLM Models/ })).toBeInTheDocument()
   })
 
   it('sorts queued models by model name ascending when clicked', () => {
@@ -204,7 +225,7 @@ describe('LlmDiscoveryPanel sorting', () => {
     )
     expandOpenAi()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by model ascending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Model ascending' }))
 
     expect(rowOrder()).toEqual(['alpha', 'bravo', 'charlie'])
   })
@@ -222,7 +243,7 @@ describe('LlmDiscoveryPanel sorting', () => {
     )
     expandOpenAi()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sort by context window descending' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sort by Context window descending' }))
 
     expect(rowOrder()).toEqual(['large', 'small', 'unknown'])
   })

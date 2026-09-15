@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
+import { replaceSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
 import { PluginWorkloadSdkControlApiClient } from './controlApiClient'
 
 const promptBody = {
@@ -32,6 +34,8 @@ function authorizedBody(invocationId: string) {
     attemptGeneration: 1,
     policyRevision: 2,
     policyHash: 'a'.repeat(64),
+    // The field is required on the wire again. `null` is "this grant
+    // sets no ceiling", which is the default these fixtures describe.
     maxOutputTokens: null,
   }
 }
@@ -53,6 +57,27 @@ function makeClient(fetchImpl: typeof fetch, breaker?: CircuitBreaker) {
     breaker,
   })
 }
+
+function installCodexBinding(model = 'gpt-5.1') {
+  const binding = {
+    connectionKey: 'team-plus',
+    catalogRevision: 4,
+    credentialRevision: 1,
+    model,
+    bindingHash: computeCodexPolicyHash({
+      model,
+      catalogRevision: 4,
+      credentialRevision: 1,
+      connectionKey: 'team-plus',
+    }),
+  }
+  replaceSdkOnlyCodexBinding(binding)
+  return binding
+}
+
+afterEach(() => {
+  replaceSdkOnlyCodexBinding(null)
+})
 
 describe('PluginWorkloadSdkControlApiClient', () => {
   it('posts to the gateway with the mcp-host bearer token', async () => {
@@ -116,6 +141,271 @@ describe('PluginWorkloadSdkControlApiClient', () => {
       'http://gateway:8092/api/v1/mcp-host/plugin-workload-sdk/capabilities',
       expect.objectContaining({ method: 'GET' })
     )
+  })
+
+  it('requires reservation-only Codex capabilities before marking policy ready', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 3,
+        supportedContractVersions: [2, 3],
+        reservationOnlyOauthBroker: true,
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'active',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'codex-primary',
+        defaultProvider: 'codex-subscription',
+        defaultModel: 'gpt-5.1',
+        defaultConnectionRef: 'team-plus',
+        v2Ready: true,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      ready: true,
+      contractVersion: 3,
+      policyReady: true,
+      policyState: 'active',
+      codexBindingReady: true,
+    })
+  })
+
+  it('keeps Codex policy not ready when an old API advertises contract v2', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        contractVersion: 2,
+        supportedContractVersions: [2, 3],
+        targetAwarePromptBridge: true,
+        attemptLedger: true,
+        credentialTickets: true,
+        policyState: 'active',
+        policyRevision: 2,
+        policyHash: 'a'.repeat(64),
+        defaultTargetRef: 'codex-primary',
+        defaultProvider: 'codex-subscription',
+        defaultModel: 'gpt-5.1',
+        defaultConnectionRef: 'team-plus',
+        v2Ready: true,
+        clientNotificationsPolicyState: 'missing',
+        clientNotificationsReady: false,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      ready: true,
+      contractVersion: 3,
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  // #533 acceptance criterion 2 — the binding must also be tied to the catalog
+  // and credential revisions. They are authoritative on control-api, so the
+  // comparison exists only when the peer publishes them; these five cases pin
+  // every combination, including the deliberate mixed-binary compromise.
+  const codexCapabilities = (extra: Record<string, unknown>) => ({
+    contractVersion: 3,
+    supportedContractVersions: [2, 3],
+    reservationOnlyOauthBroker: true,
+    targetAwarePromptBridge: true,
+    attemptLedger: true,
+    credentialTickets: true,
+    policyState: 'active',
+    policyRevision: 2,
+    policyHash: 'a'.repeat(64),
+    defaultTargetRef: 'codex-primary',
+    defaultProvider: 'codex-subscription',
+    defaultModel: 'gpt-5.1',
+    defaultConnectionRef: 'team-plus',
+    v2Ready: true,
+    clientNotificationsPolicyState: 'missing',
+    clientNotificationsReady: false,
+    ...extra,
+  })
+
+  it('marks the Codex binding ready when the published revisions match it', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
+  it('refuses a binding whose catalog revision is behind the published one', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 5,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('refuses a binding whose credential revision is behind the published one', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 2,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('refuses the binding when the peer claims revisions but omits one', async () => {
+    // A partial deploy must not read as agreement: the flag is the peer's
+    // promise to send both values, so a missing one is a broken promise.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(
+          200,
+          codexCapabilities({ codexBindingRevisions: true, defaultCredentialRevision: 1 })
+        )
+      )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('keeps the binding ready against an API that predates the revision fields', async () => {
+    // Deliberate: demanding a field an older control-api cannot emit would
+    // fail closed across a mixed-binary window (the #540 shape). This is not
+    // unfenced — authorize and redeem still reject a stale revision — so the
+    // cost is that a stale binding surfaces at the first prompt instead of at
+    // reconcile. Do not "fix" this into a fail-closed branch.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, codexCapabilities({ defaultCatalogRevision: 999 })))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({ policyReady: true, codexBindingReady: true })
+  })
+
+  // The hand-built fixtures only ever used catalog revisions
+  // {4,5,7,999} and never 0 — which is the schema DEFAULT for a never-synced
+  // catalog and exactly the value the inverted bounds rejected. These pin the
+  // real CHECK constraints of codex_subscription_connections:
+  //   catalog_revision    BIGINT NOT NULL DEFAULT 0 CHECK (>= 0)
+  //   credential_revision BIGINT NOT NULL DEFAULT 1 CHECK (>= 1)
+  it('accepts a never-synced peer publishing catalog revision 0 and reports the binding not ready', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 0,
+          defaultCredentialRevision: 1,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
+  })
+
+  it('rejects a credential revision below the schema floor as a protocol mismatch', async () => {
+    installCodexBinding()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        codexCapabilities({
+          codexBindingRevisions: true,
+          defaultCatalogRevision: 4,
+          defaultCredentialRevision: 0,
+        })
+      )
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).rejects.toMatchObject({ code: 'protocol_mismatch' })
+  })
+
+  it('refuses the binding when the peer claims revisions but omits both', async () => {
+    // A revoked or absent connection now keeps the flag and drops only
+    // the numbers, so this is the branch a live control-api takes for a
+    // connection that cannot back any binding.
+    installCodexBinding()
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(200, codexCapabilities({ codexBindingRevisions: true })))
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+
+    await expect(
+      client.verifyPromptBridgeBootstrapV2('codex-subscription', 'gpt-5.1')
+    ).resolves.toMatchObject({
+      policyReady: false,
+      policyReason: 'codex_execution_binding_missing',
+      codexBindingReady: false,
+    })
   })
 
   it('keeps request-time policy readiness separate from identity bootstrap', async () => {
@@ -450,6 +740,97 @@ describe('PluginWorkloadSdkControlApiClient', () => {
       status: 'complete',
       usage: { inputTokens: 3, outputTokens: 4 },
     })
+  })
+
+  it('surfaces ledger_pending as the retryable-with-reason finalize triple', async () => {
+    // The handler retries a finalize ONLY on this exact triple. If control-api
+    // ever stops sending `reason`, or the client stops mapping it, the retry
+    // silently disappears — so the triple is asserted end to end here.
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(409, {
+        error: 'provider_unavailable',
+        message: 'linked Codex attempt has not finalized usage yet',
+        retryable: true,
+        reason: 'provider_unavailable',
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    const failure = await client
+      .finalizePromptBridge({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        status: 'complete',
+        reason: 'provider_completed',
+        target,
+      })
+      .catch((err: unknown) => err)
+    expect(failure).toBeInstanceOf(PluginWorkloadError)
+    expect(failure).toMatchObject({
+      code: 'provider_unavailable',
+      retryable: true,
+      reason: 'provider_unavailable',
+    })
+    // A 409 is not retried by the transport itself; the ledger retry lives in
+    // the handler, where the deadline can bound it.
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('threads a caller deadline into the finalize request and stops retrying once aborted', async () => {
+    const controller = new AbortController()
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(201, {
+        invocationId: 'inv-1',
+        providerAttemptId: 'attempt-1',
+        status: 'complete',
+        outcome: 'exact',
+        idempotent: false,
+        usageAccepted: true,
+      })
+    )
+    const client = makeClient(fetchImpl as unknown as typeof fetch)
+    await client.finalizePromptBridge(
+      {
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'r1',
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptId: 'attempt-1',
+        providerAttemptIndex: 1,
+        status: 'complete',
+        reason: 'provider_completed',
+        target,
+      },
+      { signal: controller.signal }
+    )
+    const [, init] = fetchImpl.mock.calls[0] as [string, RequestInit]
+    expect(init.signal).toBeInstanceOf(AbortSignal)
+    expect(init.signal?.aborted).toBe(false)
+
+    // An already-expired deadline must not buy a single transport attempt: the
+    // AbortError would otherwise be swallowed by the network-retry branch.
+    const abortedFetch = vi.fn()
+    const abortedClient = makeClient(abortedFetch as unknown as typeof fetch)
+    await expect(
+      abortedClient.finalizePromptBridge(
+        {
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'r1',
+          invocationId: 'inv-1',
+          attemptGeneration: 1,
+          providerAttemptId: 'attempt-1',
+          providerAttemptIndex: 1,
+          status: 'complete',
+          reason: 'provider_completed',
+          target,
+        },
+        { signal: AbortSignal.abort() }
+      )
+    ).rejects.toMatchObject({ code: 'provider_unavailable', retryable: true })
+    expect(abortedFetch).not.toHaveBeenCalled()
   })
 
   it('submitClientNotification maps event_type_not_allowed', async () => {

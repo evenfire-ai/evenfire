@@ -121,6 +121,7 @@ declare global {
           path?: string | null
           version: number
           bytes?: number
+          updatedAt?: string
         }>
         download: (uri: string) => Promise<{
           resource: {
@@ -135,6 +136,7 @@ declare global {
             path?: string | null
             version: number
             bytes?: number
+            updatedAt?: string
           }
           bytes: ArrayBuffer
         }>
@@ -153,6 +155,7 @@ declare global {
             path: string | null
             version: number
             bytes: number
+            updatedAt?: string
             sources?: string[]
             permissions?: string[]
             coversDescendants?: boolean
@@ -177,6 +180,7 @@ declare global {
             path: string | null
             version: number
             bytes: number
+            updatedAt?: string
           }>
           nextCursor: string | null
         }>
@@ -572,6 +576,17 @@ declare global {
           model: string,
           hostRefs?: string[]
         ) => Promise<SetHostModelResult>
+        /**
+         * Spec 15 Fase B — explicit user rename, propagated to the server. Rejects
+         * with an error whose message carries the HTTP status `(NNN)` so the
+         * renderer's pending-rename queue can branch on 404 / 400·403 / 5xx.
+         */
+        renameSession: (
+          hostRef: string,
+          agent: string,
+          chatId: string,
+          title: string
+        ) => Promise<{ title: string }>
         getTokenMetadata: () => Promise<TokenMetadata>
         // U5 (mcp-oauth reactive consent): "Connect <server>" for a task
         // suspended with `connect_required`. Host-bound to that conversation.
@@ -604,8 +619,15 @@ declare global {
       }
       window: {
         getVisibility: () => Promise<{ visible: boolean; focused: boolean }>
+        getControlsState: () => Promise<{ fullscreen: boolean; maximized: boolean }>
+        minimize: () => Promise<void>
+        toggleMaximize: () => Promise<void>
+        close: () => Promise<void>
         onVisibilityChange: (
           callback: (state: { visible: boolean; focused: boolean }) => void
+        ) => () => void
+        onControlsStateChange: (
+          callback: (state: { fullscreen: boolean; maximized: boolean }) => void
         ) => () => void
       }
       system: {

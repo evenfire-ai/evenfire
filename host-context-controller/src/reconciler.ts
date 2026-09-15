@@ -21,17 +21,22 @@ import {
 import { isWorkflowRecipeDefaultAllowedCapability } from '@clerum/workflow-recipe-capability-policy'
 import { config } from './config'
 import { MANAGED_BY_LABEL, MANAGED_BY_VALUE, MCPSERVER_LABEL } from './constants'
+import { hccLogger } from './logger'
 import {
   confirmAuthoritativeMcpServerAbsence,
   sameMcpServerDesiredRevision,
+  shouldFailClosedForSecretFailure,
 } from './mcpServerSafety'
-import { mcpserverMissingSecret } from './metrics'
+import { createsTotal, mcpserverMissingSecret } from './metrics'
 import { McpServerCRD, McpServerStatus } from './types'
 import {
   canonicalStringify,
   configMapMatchesDesired,
   deploymentMatchesDesired,
+  ensureResource,
   getErrorCode,
+  observeCreate,
+  observeExistenceRead,
   preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   preserveServiceAssignedFields,
@@ -81,7 +86,6 @@ type McpServerReconcilerDeps = {
   appsApi?: k8s.AppsV1Api
   coreApi?: k8s.CoreV1Api
   customApi?: k8s.CustomObjectsApi
-  networkingApi?: k8s.NetworkingV1Api
   /**
    * TEST-ONLY escape hatch. When the inventory-authority fence is not wired
    * (setInventoryAuthority / setResolveCurrentServer never called), mutation
@@ -100,6 +104,10 @@ export type McpServerInventoryAuthoritySnapshot = {
 export type McpServerFullReconcileOptions = {
   runEffect?: (serverName: string, work: () => Promise<void>) => Promise<void>
   maxConcurrency?: number
+  // Restrict create/update and orphan cleanup to these names. desiredServers
+  // must still be the whole inventory so out-of-scope servers are never
+  // mistaken for orphans.
+  scope?: ReadonlySet<string>
 }
 
 export type McpServerMutationOptions = {
@@ -255,7 +263,6 @@ export class McpServerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
   private readonly customApi: k8s.CustomObjectsApi
-  private readonly networkingApi?: k8s.NetworkingV1Api
 
   /**
    * Snapshot the McpServer LIST→WATCH authority owned by McpServerWatcher.
@@ -304,13 +311,47 @@ export class McpServerReconciler {
    */
   private readonly inFlight: Map<string, Promise<void>> = new Map()
 
+  // A fulfilled reconcile promise can mean an authority guard retired work or
+  // a resource API error was reported through status. Keep that distinction
+  // independently of discovery readiness and the per-name promise queue.
+  private readonly pendingReconciliations = new Map<string, { namespace: string }>()
+
+  hasIncompleteReconciliation(): boolean {
+    return this.pendingReconciliations.size > 0
+  }
+
+  incompleteReconciliationNames(): string[] {
+    return [...this.pendingReconciliations.keys()]
+  }
+
+  hasPendingReconciliation(): boolean {
+    return (
+      this.hasIncompleteReconciliation() ||
+      this.inFlight.size > 0 ||
+      [...this.readinessPolls.values()].some(
+        poll => (poll.timer !== undefined || poll.ticking) && this.readinessPollStillDesired(poll)
+      )
+    )
+  }
+
+  private readinessPollStillDesired(poll: ReadinessPollState): boolean {
+    const current = this.resolveCurrentServer?.(poll.server.name)
+    return (
+      this.resolveCurrentServer === undefined ||
+      (current !== undefined && sameMcpServerDesiredRevision(poll.server, current))
+    )
+  }
+
+  private retainRetiredReadinessPoll(poll: ReadinessPollState): void {
+    if (this.readinessPollStillDesired(poll)) {
+      this.pendingReconciliations.set(poll.server.name, { namespace: poll.server.namespace })
+    }
+  }
+
   constructor(kc: k8s.KubeConfig, deps?: McpServerReconcilerDeps) {
     this.appsApi = deps?.appsApi ?? kc.makeApiClient(k8s.AppsV1Api)
     this.coreApi = deps?.coreApi ?? kc.makeApiClient(k8s.CoreV1Api)
     this.customApi = deps?.customApi ?? kc.makeApiClient(k8s.CustomObjectsApi)
-    this.networkingApi =
-      deps?.networkingApi ??
-      (typeof kc.makeApiClient === 'function' ? kc.makeApiClient(k8s.NetworkingV1Api) : undefined)
     this.assumeInventoryAuthorityWhenUnconfigured =
       deps?.assumeInventoryAuthorityWhenUnconfigured ?? false
   }
@@ -407,6 +448,7 @@ export class McpServerReconciler {
   }
 
   private beginStatusTracking(server: McpServerCRD): void {
+    const previousIdentity = this.statusIdentities.get(server.name)
     if (!this.statusIdentityMatches(server)) {
       this.statusMap.delete(server.name)
       // A new CRD identity (uid/generation) retires any poll window armed for
@@ -417,6 +459,9 @@ export class McpServerReconciler {
       if (poll) {
         if (poll.timer !== undefined) clearTimeout(poll.timer)
         this.readinessPolls.delete(server.name)
+      }
+      if (previousIdentity !== undefined && previousIdentity.uid !== server.uid) {
+        this.managedSnapshot.delete(server.name)
       }
     }
     this.statusIdentities.set(server.name, {
@@ -587,12 +632,14 @@ export class McpServerReconciler {
       // status — on behalf of a stale desired state. End the window quietly;
       // the current reconcile arms its own window after its Deployment write.
       if (!state.isCurrent()) {
+        this.retainRetiredReadinessPoll(state)
         state.ticking = false
         if (this.readinessPolls.get(name) === state) this.readinessPolls.delete(name)
         return
       }
       const rollout = await this.readDeploymentRollout(name, namespace)
       if (!state.isCurrent() || !this.statusIdentityMatches(state.server)) {
+        this.retainRetiredReadinessPoll(state)
         state.ticking = false
         if (this.readinessPolls.get(name) === state) this.readinessPolls.delete(name)
         return
@@ -947,30 +994,37 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     isCurrent: () => boolean = () => true
   ): Promise<void> {
     const cm = this.buildNginxConfigMap(server)
-    if (!isCurrent()) return
     const name = `${server.name}-nginx-conf`
     const namespace = server.namespace
-    try {
-      await this.coreApi.createNamespacedConfigMap({
-        namespace,
-        body: cm,
-      })
-      console.log(`[Reconciler] Created nginx ConfigMap "${name}"`)
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        throw error
-      }
-      await replaceWithConflictRetry({
-        description: `nginx ConfigMap "${name}"`,
-        logPrefix: '[Reconciler]',
-        body: cm,
-        mergeExisting: preserveObjectAnnotations,
-        isUpToDate: configMapMatchesDesired,
-        mutationAllowed: isCurrent,
-        read: () => this.coreApi.readNamespacedConfigMap({ name, namespace }),
-        replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
-      })
-    }
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('ConfigMap', () =>
+          this.coreApi.readNamespacedConfigMap({ name, namespace })
+        ),
+      create: async () => {
+        await observeCreate('ConfigMap', () =>
+          this.coreApi.createNamespacedConfigMap({ namespace, body: cm })
+        )
+        hccLogger.info('nginx ConfigMap created', {
+          scope: '[Reconciler]',
+          configMap: name,
+          namespace,
+        })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `nginx ConfigMap "${name}"`,
+          logPrefix: '[Reconciler]',
+          body: cm,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: configMapMatchesDesired,
+          mutationAllowed: isCurrent,
+          read,
+          replace: body => this.coreApi.replaceNamespacedConfigMap({ name, namespace, body }),
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'ConfigMap', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1476,45 +1530,46 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const deployment = this.buildDeployment(server, credentialsRevision)
 
-    if (!isCurrent()) return
-    try {
-      await this.appsApi.createNamespacedDeployment({
-        namespace: server.namespace,
-        body: deployment,
-      })
-      console.log(`[Reconciler] Created Deployment "${server.name}"`)
-      return
-    } catch (error: unknown) {
-      if (getErrorCode(error) !== 409) {
-        throw error
-      }
-      // Already exists — read+replace with conflict retry. Races with the
-      // K8s Deployment controller (which bumps resourceVersion as pods +
-      // status conditions evolve) and with concurrent reconciles for the
-      // same server (CRD watch + SecretInformer) routinely produce stale
-      // resourceVersion errors. Helper does jittered backoff up to its
-      // attempt cap then re-throws — silently swallowing would hide
-      // immutable-field changes, quota exhaustion, etc.
-      await replaceWithConflictRetry({
-        description: `Deployment "${server.name}"`,
-        logPrefix: '[Reconciler]',
-        body: deployment,
-        mergeExisting: preserveDeploymentAnnotations,
-        isUpToDate: deploymentMatchesDesired,
-        read: () =>
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({
             name: server.name,
             namespace: server.namespace,
-          }),
-        replace: body =>
-          this.appsApi.replaceNamespacedDeployment({
-            name: server.name,
+          })
+        ),
+      create: async () => {
+        await observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({
             namespace: server.namespace,
-            body,
-          }),
-        mutationAllowed: isCurrent,
-      })
-    }
+            body: deployment,
+          })
+        )
+        hccLogger.info('Deployment created', {
+          scope: '[Reconciler]',
+          deployment: server.name,
+          namespace: server.namespace,
+        })
+      },
+      converge: read =>
+        replaceWithConflictRetry({
+          description: `Deployment "${server.name}"`,
+          logPrefix: '[Reconciler]',
+          body: deployment,
+          mergeExisting: preserveDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
+          read,
+          replace: body =>
+            this.appsApi.replaceNamespacedDeployment({
+              name: server.name,
+              namespace: server.namespace,
+              body,
+            }),
+          mutationAllowed: isCurrent,
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1526,25 +1581,30 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   ): Promise<void> {
     const service = this.buildService(server)
 
-    if (!isCurrent()) return
-    try {
-      await this.coreApi.createNamespacedService({
-        namespace: server.namespace,
-        body: service,
-      })
-    } catch (error: unknown) {
-      if (getErrorCode(error) === 409) {
-        await replaceWithConflictRetry({
+    await ensureResource({
+      mutationAllowed: isCurrent,
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({
+            name: server.name,
+            namespace: server.namespace,
+          })
+        ),
+      create: () =>
+        observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({
+            namespace: server.namespace,
+            body: service,
+          })
+        ),
+      converge: read =>
+        replaceWithConflictRetry({
           description: `Service "${server.name}"`,
           logPrefix: '[Reconciler]',
           body: service,
           mergeExisting: preserveServiceAssignedFields,
           isUpToDate: serviceMatchesDesired,
-          read: () =>
-            this.coreApi.readNamespacedService({
-              name: server.name,
-              namespace: server.namespace,
-            }),
+          read,
           replace: body =>
             this.coreApi.replaceNamespacedService({
               name: server.name,
@@ -1552,11 +1612,9 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
               body,
             }),
           mutationAllowed: isCurrent,
-        })
-      } else {
-        throw error
-      }
-    }
+        }),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+    })
   }
 
   /**
@@ -1707,73 +1765,26 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private async deleteNetworkPoliciesForServer(
-    name: string,
-    namespace: string,
-    deleteAllowed?: () => Promise<boolean>
-  ): Promise<void> {
-    if (!this.networkingApi) return
-    const failures: unknown[] = []
-    const namespaces = [...new Set([namespace, config.hostNamespace, config.rpcProxyNamespace])]
-    for (const policyNamespace of namespaces) {
-      try {
-        const policies = await this.networkingApi.listNamespacedNetworkPolicy({
-          namespace: policyNamespace,
-        })
-        for (const policy of policies.items ?? []) {
-          if (policy.metadata?.labels?.[MCPSERVER_LABEL] !== name) continue
-          const policyName = policy.metadata.name
-          if (!policyName) continue
-          try {
-            if (deleteAllowed && !(await deleteAllowed())) return
-            await this.networkingApi.deleteNamespacedNetworkPolicy({
-              name: policyName,
-              namespace: policyNamespace,
-            })
-            console.log(
-              `[Reconciler] Deleted NetworkPolicy "${policyName}" in "${policyNamespace}"`
-            )
-          } catch (error: unknown) {
-            if (getErrorCode(error) !== 404) {
-              console.error(
-                `[Reconciler] Failed to delete NetworkPolicy "${policyName}" in "${policyNamespace}":`,
-                error
-              )
-              failures.push(error)
-            }
-          }
-        }
-      } catch (error: unknown) {
-        if (getErrorCode(error) !== 404) {
-          console.error(
-            `[Reconciler] Failed to list NetworkPolicies in "${policyNamespace}" for "${name}":`,
-            error
-          )
-          failures.push(error)
-        }
-      }
-    }
-
-    throwCleanupFailures(failures, `Failed to delete NetworkPolicies for McpServer "${name}"`)
-  }
-
   private async deleteRuntimeResources(
     name: string,
     namespace: string,
     deleteAllowed?: () => Promise<boolean>
-  ): Promise<void> {
-    const failures: unknown[] = []
-    try {
-      await this.deleteResources(name, namespace, deleteAllowed)
-    } catch (error) {
-      failures.push(error)
-    }
-    try {
-      await this.deleteNetworkPoliciesForServer(name, namespace, deleteAllowed)
-    } catch (error) {
-      failures.push(error)
-    }
-    throwCleanupFailures(failures, `Failed to delete runtime resources for McpServer "${name}"`)
+  ): Promise<boolean> {
+    // A guarded no-op is incomplete even if authority returns before the
+    // outer call settles. Ownership-based skips remain legitimate outcomes.
+    let complete = true
+    await this.deleteResources(
+      name,
+      namespace,
+      deleteAllowed
+        ? async () => {
+            const allowed = await deleteAllowed()
+            if (!allowed) complete = false
+            return allowed
+          }
+        : undefined
+    )
+    return complete
   }
 
   // ─── CRD Status & Annotation Patching ──────────────────────────────
@@ -1898,7 +1909,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     condition: Omit<McpServerCondition, 'lastTransitionTime'>,
     isCurrent: () => boolean = () => true
   ): Promise<boolean> {
-    if (!isCurrent()) return false
+    if (!isCurrent()) return this.recordIncompletePublication(server)
     const now = new Date().toISOString()
 
     // Update the missing-secret gauge for SecretResolved conditions.
@@ -1923,7 +1934,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     // if anything changed since our read; we then re-read and retry, so no
     // writer's condition is lost.
     for (let attempt = 1; attempt <= STATUS_CONDITION_WRITE_MAX_ATTEMPTS; attempt += 1) {
-      if (!isCurrent()) return false
+      if (!isCurrent()) return this.recordIncompletePublication(server)
       // Re-read on every optimistic-conflict retry. Merging against the
       // latest resourceVersion preserves conditions written by peer
       // controllers between our read and patch.
@@ -1949,15 +1960,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — skipping status update`
           )
-          return false
+          return this.recordIncompletePublication(server)
         }
         console.warn(
           `[Reconciler] Failed to read status for "${server.name}" — skipping status update for type "${condition.type}" to avoid clobbering other status fields:`,
           error
         )
-        return false
+        return this.recordIncompletePublication(server)
       }
-      if (!isCurrent()) return false
+      if (!isCurrent()) return this.recordIncompletePublication(server)
 
       const prior = existingConditions.find(c => c.type === condition.type)
       const observedGeneration = condition.observedGeneration ?? server.generation
@@ -2028,7 +2039,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         // The generated client prefers JSON Patch for this endpoint. Send an
         // actual patch document so status writes keep working across client
         // upgrades instead of relying on merge-patch object bodies.
-        if (!isCurrent()) return false
+        if (!isCurrent()) return this.recordIncompletePublication(server)
         await this.customApi.patchNamespacedCustomObjectStatus({
           group: 'clerum.io',
           version: 'v1alpha1',
@@ -2044,7 +2055,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           console.warn(
             `[Reconciler] McpServer "${server.name}" deleted mid-reconcile — status patch skipped`
           )
-          return false
+          return this.recordIncompletePublication(server)
         }
         // 409 (Conflict) or 422 (a `test` op failed) mean a concurrent writer
         // won the race. Re-read and retry rather than lose our condition. Any
@@ -2060,9 +2071,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
           `[Reconciler] Failed to write status condition ${condition.type}=${condition.status} on "${server.name}" (attempt ${attempt}/${STATUS_CONDITION_WRITE_MAX_ATTEMPTS}):`,
           error
         )
-        return false
+        return this.recordIncompletePublication(server)
       }
     }
+    return this.recordIncompletePublication(server)
+  }
+
+  private recordIncompletePublication(server: McpServerCRD): false {
+    // Keep the changed-boolean API: an unchanged condition is successful but
+    // returns false. Only a failed/retired write replaces the obligation, so
+    // an enclosing reconcile cannot clear that failure on normal return.
+    this.pendingReconciliations.set(server.name, { namespace: server.namespace })
     return false
   }
 
@@ -2087,12 +2106,17 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       return current !== undefined && sameMcpServerDesiredRevision(server, current)
     }
     const key = server.name
+    const obligation = { namespace: server.namespace }
+    this.pendingReconciliations.set(key, obligation)
     const prev = this.inFlight.get(key) ?? Promise.resolve()
     const next = prev
       .catch(() => undefined)
       .then(async () => {
         if (!isCurrent()) return
-        await this.performReconcile(server, isCurrent)
+        const completed = await this.performReconcile(server, isCurrent)
+        if (completed && this.pendingReconciliations.get(key) === obligation) {
+          this.pendingReconciliations.delete(key)
+        }
       })
     this.inFlight.set(key, next)
     try {
@@ -2104,12 +2128,12 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     }
   }
 
-  private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<void> {
-    if (!isCurrent()) return
+  private async performReconcile(server: McpServerCRD, isCurrent: () => boolean): Promise<boolean> {
+    if (!isCurrent()) return false
     this.beginStatusTracking(server)
 
     // G7: Enforce managed field immutability — once set, cannot change
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     const currentManaged = server.spec.managed ?? true
     const previousManaged = this.managedSnapshot.get(server.name)
     if (previousManaged !== undefined && previousManaged !== currentManaged) {
@@ -2117,15 +2141,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         `[Reconciler] McpServer "${server.name}": managed field changed from ${previousManaged} to ${currentManaged}. ` +
           `This is not allowed — delete and recreate the McpServer to change ownership.`
       )
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
         message: `managed field is immutable (was ${previousManaged}, attempted ${currentManaged})`,
       })
-      return
+      return isCurrent()
     }
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     this.managedSnapshot.set(server.name, currentManaged)
 
     // If disabled, respect ownership before any cleanup. managed:false means
@@ -2135,13 +2159,18 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled — removing HCC-owned resources`
         )
-        await this.deleteRuntimeResources(server.name, server.namespace, async () => isCurrent())
+        if (
+          !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
+            isCurrent()
+          ))
+        )
+          return false
       } else {
         console.log(
           `[Reconciler] McpServer "${server.name}" is disabled but WRC-owned; skipping runtime cleanup`
         )
       }
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       this.setStatus(server.name, { deployed: false, ready: false, message: 'Disabled' })
       await this.writeStatusCondition(
         server,
@@ -2153,29 +2182,33 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      return
+      return isCurrent()
     }
 
     if (!currentManaged) {
-      await this.reconcileWrcOwnedServer(server, isCurrent)
-      return
+      return this.reconcileWrcOwnedServer(server, isCurrent)
     }
 
     // Validate secret before creating/updating
     const secretResult = await this.validateSecret(server)
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     if (!secretResult.ok) {
       console.error(
         `[Reconciler] Skipping deployment of "${server.name}" — secret validation failed`
       )
-      if (this.shouldFailClosedForSecretFailure(secretResult)) {
-        await this.deleteRuntimeResources(server.name, server.namespace, async () => isCurrent())
+      if (shouldFailClosedForSecretFailure(secretResult.reason)) {
+        if (
+          !(await this.deleteRuntimeResources(server.name, server.namespace, async () =>
+            isCurrent()
+          ))
+        )
+          return false
       } else {
         console.warn(
           `[Reconciler] Preserving existing runtime for "${server.name}" after transient Secret read failure`
         )
       }
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
@@ -2201,7 +2234,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      return
+      return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 
     // Ensure resources exist and are up to date
@@ -2234,27 +2267,27 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
               },
               isCurrent
             )
-            if (!isCurrent()) return
+            if (!isCurrent()) return false
             this.setStatus(server.name, { deployed: false, ready: false, message })
-            return
+            return isCurrent()
           }
           console.warn(
             `[Reconciler] ${message} for "${server.name}" — audit mode, allowing (set CONTEXT_MAPPER_ENFORCE_IMAGE_ALLOWLIST=true to block)`
           )
         }
       }
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       await this.ensureService(server, isCurrent)
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       await this.ensureDeployment(server, secretResult.revision, isCurrent)
     } catch (err) {
-      if (!isCurrent()) return
+      if (!isCurrent()) return false
       this.setStatus(server.name, {
         deployed: false,
         ready: false,
         message: `Resource sync failed: ${err instanceof Error ? err.message : String(err)}`,
       })
-      return
+      return false
     }
 
     // G2: Complete pre-deploy handshake — set network-ready annotation
@@ -2271,19 +2304,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       try {
         await this.setNetworkReadyAnnotation(server, isCurrent)
       } catch (err) {
-        if (!isCurrent()) return
+        if (!isCurrent()) return false
         this.setStatus(server.name, {
           deployed: false,
           ready: false,
           message: `Pre-deploy handshake failed: ${err instanceof Error ? err.message : String(err)}`,
         })
-        return
+        return false
       }
     }
 
     // Check readiness after reconciliation
     const rollout = await this.readDeploymentRollout(server.name, server.namespace)
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     const ready = rollout.ready
     this.setStatus(server.name, {
       deployed: true,
@@ -2357,30 +2390,21 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     if (!ready && isCurrent()) {
       this.pollReadiness(server, 5000, 24, isCurrent)
     }
-  }
-
-  private shouldFailClosedForSecretFailure(
-    result: Exclude<SecretValidationResult, { ok: true }>
-  ): boolean {
-    return (
-      result.reason === 'SecretNotFound' ||
-      result.reason === 'SecretMissingKey' ||
-      result.reason === 'SecretAccessDenied'
-    )
+    return isCurrent()
   }
 
   private async reconcileWrcOwnedServer(
     server: McpServerCRD,
     isCurrent: () => boolean
-  ): Promise<void> {
-    if (!isCurrent()) return
+  ): Promise<boolean> {
+    if (!isCurrent()) return false
     console.log(
       `[Reconciler] McpServer "${server.name}" is WRC-owned (managed:false); ` +
         'skipping HCC runtime creation/deletion and updating discovery status.'
     )
 
     const secretResult = await this.validateSecret(server)
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     if (!secretResult.ok) {
       this.setStatus(server.name, {
         deployed: true,
@@ -2409,10 +2433,10 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
         },
         isCurrent
       )
-      return
+      return shouldFailClosedForSecretFailure(secretResult.reason) && isCurrent()
     }
 
-    if (!isCurrent()) return
+    if (!isCurrent()) return false
     this.setStatus(server.name, {
       deployed: true,
       ready: true,
@@ -2440,6 +2464,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
       },
       isCurrent
     )
+    return isCurrent()
   }
 
   /**
@@ -2448,10 +2473,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
   async reconcileDelete(name: string, namespace: string): Promise<void> {
     console.log(`[Reconciler] McpServer "${name}" deleted — cleaning up resources`)
     const capturedAuthority = this.inventoryAuthority()
-    await this.deleteRuntimeResources(name, namespace, () =>
+    const obligation = { namespace }
+    this.pendingReconciliations.set(name, obligation)
+    const complete = await this.deleteRuntimeResources(name, namespace, () =>
       this.orphanDeleteAllowed(name, namespace, capturedAuthority)
     )
-    this.clearStatus(name)
+    if (complete && this.pendingReconciliations.get(name) === obligation) {
+      this.pendingReconciliations.delete(name)
+      this.clearStatus(name)
+    }
   }
 
   private authorityMatches(captured: McpServerInventoryAuthoritySnapshot): boolean {
@@ -2508,13 +2538,15 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     const runEffect =
       options.runEffect ?? ((_serverName: string, work: () => Promise<void>) => work())
     const maxConcurrency = options.maxConcurrency ?? DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY
+    const inScope = (name: string) => options.scope === undefined || options.scope.has(name)
 
     // Create or update desired servers independently. runEffect owns each
     // per-server lane, so a slow fleet member cannot become a process-wide
     // startup barrier. The finite worker pool admits no more than the configured
     // number of effects at once, while still waiting for every desired result
     // before reporting aggregated failures or moving to orphan cleanup.
-    const desiredResults = await mapSettledWithConcurrency(desiredServers, maxConcurrency, server =>
+    const scopedServers = desiredServers.filter(server => inScope(server.name))
+    const desiredResults = await mapSettledWithConcurrency(scopedServers, maxConcurrency, server =>
       runEffect(server.name, async () => {
         const current = this.resolveCurrentServer ? this.resolveCurrentServer(server.name) : server
         // Cache mutation happens synchronously before its keyed watch effect is
@@ -2545,10 +2577,19 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
     )
 
     // Delete orphaned deployments (managed by us but no longer desired)
-    for (const deployment of existingDeployments) {
-      const name = deployment.metadata?.name || ''
-      if (!desiredNames.has(name)) {
-        const namespace = deployment.metadata?.namespace || config.namespace
+    const cleanupTargets = new Map(
+      existingDeployments.map(deployment => [
+        deployment.metadata?.name || '',
+        deployment.metadata?.namespace || config.namespace,
+      ])
+    )
+    const presentNames = new Set(desiredServers.map(server => server.name))
+    for (const [name, pending] of this.pendingReconciliations) {
+      if (!presentNames.has(name)) cleanupTargets.set(name, pending.namespace)
+    }
+    for (const [name, namespace] of cleanupTargets) {
+      if (!desiredNames.has(name) && inScope(name)) {
+        if (!presentNames.has(name)) this.pendingReconciliations.set(name, { namespace })
         await runEffect(name, async () => {
           if (!(await this.orphanDeleteAllowed(name, namespace, capturedAuthority))) {
             console.warn(
@@ -2557,9 +2598,7 @@ ${authHeaderLines ? '\n        # ── Credential auth headers (envsubst-resolv
             return
           }
           console.log(`[Reconciler] Removing orphaned resources for "${name}"`)
-          await this.deleteRuntimeResources(name, namespace, () =>
-            this.orphanDeleteAllowed(name, namespace, capturedAuthority)
-          )
+          await this.reconcileDelete(name, namespace)
         })
       }
     }

@@ -334,6 +334,182 @@ test('classifyDnsError defaults unknown/undefined codes to permanent (matches WR
   assert.equal(core.classifyDnsError(new Error('no code')), 'permanent')
 })
 
+// ─── #513: the positive permanent set, which is NOT classifyDnsError's default ──
+// classifyDnsError answers "is this transient?" and says 'permanent' for
+// everything else, unknown codes included. That default is load-bearing for the
+// window (an unrecognized transient must not freeze forever), but it makes the
+// return value useless for deciding whether a failure was a DNS answer at all.
+// PERMANENT_DNS_CODES is that second, narrower question, and the gap between the
+// two sets is exactly the bug in issue #513.
+test('#513: PERMANENT_DNS_CODES is the positive verdict set, not the default', () => {
+  assert.deepEqual([...core.PERMANENT_DNS_CODES].sort(), ['EBADNAME', 'ENODATA', 'ENOTFOUND'])
+  for (const code of core.PERMANENT_DNS_CODES) {
+    assert.equal(core.classifyDnsError(code), 'permanent', `${code} must classify as permanent`)
+  }
+})
+
+test('#513: isPermanentDnsCode rejects what classifyDnsError merely defaults', () => {
+  // Every one of these yields 'permanent' from classifyDnsError. None is a DNS
+  // answer: they are c-ares complaints about the query WE built, or no code at
+  // all. Telling them apart is the whole point of the controllers' gates.
+  for (const code of [
+    undefined,
+    null,
+    'ESOMETHINGWEIRD',
+    'EBADFAMILY',
+    'EBADFLAGS',
+    'EBADHINTS',
+    'EBADQUERY',
+    'EBADSTR',
+    'ENONAME',
+  ]) {
+    assert.equal(core.classifyDnsError(code), 'permanent')
+    assert.equal(core.isPermanentDnsCode(code), false, `${String(code)} must not be a DNS verdict`)
+  }
+})
+
+// `isNoRecordsDnsCode` was reachable only through WRC before (#567 review nit).
+// It splits PERMANENT_DNS_CODES in two so the operator gets the right words: a
+// name with no records is a different event from one the resolver refused to
+// query, and the two must not collapse back into "no A or AAAA records".
+test('#567: isNoRecordsDnsCode is the empty-answer subset, EBADNAME excluded', () => {
+  for (const code of ['ENODATA', 'ENOTFOUND']) {
+    assert.equal(core.isNoRecordsDnsCode(code), true, `${code} is an empty answer`)
+    assert.equal(core.isPermanentDnsCode(code), true, `${code} is also a permanent verdict`)
+  }
+  // The member that separates the two sets. If this ever returns true, WRC's
+  // "the resolver refused to query it" branch goes unreachable and a malformed
+  // name is reported as a name with no records.
+  assert.equal(core.isNoRecordsDnsCode('EBADNAME'), false)
+  assert.equal(core.isPermanentDnsCode('EBADNAME'), true)
+
+  for (const code of [undefined, null, '', 'ESERVFAIL', 'EBADFAMILY', 123]) {
+    assert.equal(core.isNoRecordsDnsCode(code), false, `${String(code)} is not an empty answer`)
+  }
+})
+
+// ─── #567 R1-M2: one extraction of `.code`, shared by both egress gates ────────
+// Each lane used to unwrap the rejection by hand — HCC with a typeof dance, WRC
+// by reading `.code` straight off a value typed as an ErrnoException. Same field,
+// two implementations, in two processes: the drift surface this package exists to
+// remove. classifyDnsError reads through it too, so there is one answer.
+test('#567: dnsCodeOf extracts the code off any object rejection', () => {
+  assert.equal(core.dnsCodeOf(Object.assign(new Error('x'), { code: 'ENOTFOUND' })), 'ENOTFOUND')
+  // Not an Error instance: classified by its code, not by how it was thrown.
+  assert.equal(core.dnsCodeOf({ code: 'ESERVFAIL' }), 'ESERVFAIL')
+})
+
+test('#567: dnsCodeOf reports absence rather than inventing a code', () => {
+  for (const value of [undefined, null, 42, new Error('no code'), {}, { code: 7 }, { code: null }]) {
+    assert.equal(core.dnsCodeOf(value), undefined, `${String(value)} carries no string code`)
+  }
+})
+
+test('#567: dnsCodeOf does NOT accept a bare code string, unlike classifyDnsError', () => {
+  // The asymmetry is deliberate and load-bearing: a rejection whose VALUE is the
+  // string 'ENOTFOUND' must not be treated as a DNS answer by the gates, so it
+  // yields no code here and lands in the caller's fault branch. classifyDnsError
+  // keeps its string form because callers pass it a code directly.
+  assert.equal(core.dnsCodeOf('ENOTFOUND'), undefined)
+  assert.equal(core.classifyDnsError('ENOTFOUND'), 'permanent')
+  assert.equal(core.isPermanentDnsCode(core.dnsCodeOf('ENOTFOUND')), false)
+})
+
+test('#567 remediation: classifyDnsRejection is total for falsy and non-Error values', () => {
+  for (const value of [undefined, null, false, 0, '', 'ENOTFOUND', new Error('no code')]) {
+    const verdict = core.classifyDnsRejection(value)
+    assert.equal(verdict.kind, 'fault', `${String(value)} must remain a fault`)
+    assert.equal(verdict.cause, value)
+  }
+  assert.deepEqual(core.classifyDnsRejection({ code: 7 }), {
+    kind: 'fault',
+    cause: { code: 7 },
+  })
+})
+
+test('#567 remediation: classifyDnsRejection distinguishes transient and negative DNS verdicts', () => {
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('servfail'), { code: 'ESERVFAIL' })),
+    { kind: 'transient', code: 'ESERVFAIL' }
+  )
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('not found'), { code: 'ENOTFOUND' })),
+    { kind: 'negative', reason: 'no-records', code: 'ENOTFOUND' }
+  )
+  assert.deepEqual(
+    core.classifyDnsRejection(Object.assign(new Error('bad name'), { code: 'EBADNAME' })),
+    { kind: 'negative', reason: 'invalid-name', code: 'EBADNAME' }
+  )
+})
+
+test('#567 remediation: unknown coded rejections remain faults with their code and cause', () => {
+  const err = Object.assign(new Error('bad family'), { code: 'EBADFAMILY' })
+  assert.deepEqual(core.classifyDnsRejection(err), {
+    kind: 'fault',
+    code: 'EBADFAMILY',
+    cause: err,
+  })
+})
+
+test('#567 remediation: parseStateStrict rejects absent, malformed, undeclared, duplicate, and over-cap state', () => {
+  assert.deepEqual(core.parseStateStrict({}, CFG), { kind: 'absent' })
+  assert.equal(core.parseStateStrict({ [core.STATE_ANNOTATION]: '{' }, CFG).kind, 'invalid')
+
+  const validEntry = {
+    ip: '1.2.3.4',
+    port: 443,
+    protocol: 'TCP',
+    fqdn: 'api.example.com',
+    expiresAt: 2000,
+    lastObservedAt: 1000,
+  }
+  const declaration = [{ fqdn: 'api.example.com', port: 443, protocol: 'TCP' }]
+  const undeclared = { ...validEntry, fqdn: 'other.example.com' }
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([undeclared]) },
+      CFG,
+      declaration
+    ).kind,
+    'invalid'
+  )
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([validEntry, validEntry]) },
+      CFG,
+      declaration
+    ).kind,
+    'invalid'
+  )
+  assert.equal(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([validEntry, { ...validEntry, ip: '5.6.7.8' }]) },
+      { ...CFG, maxEntries: 1 },
+      declaration
+    ).kind,
+    'invalid'
+  )
+})
+
+test('#567 remediation: parseStateStrict returns normalized current state only', () => {
+  const entry = {
+    ip: '1.2.3.4',
+    port: 443,
+    protocol: 'TCP',
+    fqdn: 'api.example.com',
+    expiresAt: 2000,
+    lastObservedAt: 1000,
+  }
+  assert.deepEqual(
+    core.parseStateStrict(
+      { [core.STATE_ANNOTATION]: JSON.stringify([entry]) },
+      CFG,
+      [{ fqdn: 'api.example.com', port: 443 }]
+    ),
+    { kind: 'valid', state: { entries: [entry] } }
+  )
+})
+
 // ─── H-A: revocation/freeze keyed by (fqdn,port,protocol), not fqdn alone ──────
 // The state map is keyed by (fqdn,ip,port,protocol) but classification used to be
 // keyed by fqdn only, so an entry whose declared PORT was removed survived under

@@ -104,10 +104,7 @@ export default function HostsPage() {
         <HostTable
           items={hosts}
           onOpen={host => router.push(CONTROL_ROUTES.agents.tab(host.name, 'overview'))}
-          onOpenContext={contextName => {
-            const trimmed = contextName.trim()
-            if (trimmed) router.push(CONTROL_ROUTES.contexts.connectors(trimmed))
-          }}
+          onOpenConnectors={host => router.push(CONTROL_ROUTES.agents.tab(host.name, 'connectors'))}
           onDelete={handleDeleteHost}
           deletingKey={deletingKey}
           onRefresh={loadAll}

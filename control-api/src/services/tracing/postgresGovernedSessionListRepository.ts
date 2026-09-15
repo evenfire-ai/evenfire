@@ -65,6 +65,7 @@ export class PostgresGovernedSessionListRepository {
     after: SessionPageAnchor | null
     limit: number
     promptState: 'enabled' | 'disabled' | 'unavailable'
+    order: 'oldest' | 'latest'
   }): Promise<SessionRepositoryPage> {
     const values: unknown[] = [
       params.highWatermark,
@@ -112,8 +113,10 @@ export class PostgresGovernedSessionListRepository {
       )
     }
     let pagePredicate = ''
+    const pageOperator = params.order === 'latest' ? '<' : '>'
+    const orderDirection = params.order === 'latest' ? 'DESC' : 'ASC'
     if (params.after) {
-      pagePredicate = `WHERE (last_occurred_at, host_ref, session_id) <
+      pagePredicate = `WHERE (last_occurred_at, host_ref, session_id) ${pageOperator}
         (${bind(params.after.occurredAt)}::timestamptz, ${bind(params.after.hostRef)}, ${bind(params.after.sessionId)})`
     }
     values.push(params.limit)
@@ -195,7 +198,7 @@ export class PostgresGovernedSessionListRepository {
           GROUP BY a.host_ref, a.session_id
        )
        SELECT * FROM grouped ${pagePredicate}
-       ORDER BY last_occurred_at DESC, host_ref DESC, session_id DESC
+       ORDER BY last_occurred_at ${orderDirection}, host_ref ${orderDirection}, session_id ${orderDirection}
        LIMIT $${values.length}`,
       values
     )

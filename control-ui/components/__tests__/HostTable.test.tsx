@@ -8,7 +8,7 @@ function renderHostTable(items: HostItem[], contextsByRef?: Record<string, strin
     <HostTable
       items={items}
       onOpen={vi.fn()}
-      onOpenContext={vi.fn()}
+      onOpenConnectors={vi.fn()}
       onDelete={vi.fn().mockResolvedValue(undefined)}
       deletingKey={null}
       onRefresh={vi.fn()}
@@ -168,8 +168,8 @@ describe('HostTable providers column rendering', () => {
 })
 
 // UT-9 — the row shows the editable display name (spec.host) as the primary
-// label, with the immutable identifier (metadata.name / slug) as visible
-// secondary text; the search haystack matches BOTH.
+// label. The immutable identifier (metadata.name / slug) remains searchable
+// without restoring a visible identifier column.
 describe('HostTable display name column (UT-9)', () => {
   function makeDisplayHost(name: string, displayName: string): HostItem {
     return {
@@ -182,19 +182,18 @@ describe('HostTable display name column (UT-9)', () => {
     }
   }
 
-  it('renders the display name as primary and the slug as secondary', () => {
+  it('renders the display name as the primary row label without an identifier column', () => {
     renderHostTable([makeDisplayHost('prod-x', 'Prod X')])
 
     const row = screen.getByLabelText('Open agent prod-x')
     expect(within(row).getByText('Prod X')).toBeInTheDocument()
-    expect(within(row).getByText('prod-x')).toBeInTheDocument()
+    expect(within(row).queryByText('prod-x')).not.toBeInTheDocument()
   })
 
   it('falls back to the slug as the primary label when spec.host is blank', () => {
     renderHostTable([makeDisplayHost('prod-x', '   ')])
 
     const row = screen.getByLabelText('Open agent prod-x')
-    // Only the slug renders — no separate secondary line duplicating it.
     expect(within(row).getAllByText('prod-x')).toHaveLength(1)
   })
 
@@ -227,16 +226,17 @@ describe('HostTable display name column (UT-9)', () => {
   })
 })
 
-// Hover card on the Context column — when the page supplies a `contextsByRef`
-// map, hovering (or keyboard-focusing) the context pill reveals the same
-// MCP-server list the create wizard shows for the selected context. The cell
-// shows the count; the tooltip shows the context name + count + names.
-describe('HostTable context MCP hover card', () => {
+// Hover card on the Connectors column — when the page supplies a
+// `contextsByRef` map, hovering (or keyboard-focusing) the count pill reveals
+// the agent's MCP-server list. The cell shows the count; the tooltip shows a
+// neutral "Connectors" heading + count + server names. The private context
+// slug must never render (Category E1 invariant).
+describe('HostTable connectors hover card', () => {
   function contextPill(row: HTMLElement, count: string): HTMLElement {
     return within(row).getByRole('button', { name: count })
   }
 
-  it('reveals the MCP server list on hover and lists every server', () => {
+  it('reveals the MCP server list on hover without exposing the context slug', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: ['github', 'linear', 'slack'],
     })
@@ -250,14 +250,38 @@ describe('HostTable context MCP hover card', () => {
 
     fireEvent.mouseEnter(pill)
     const card = within(row).getByRole('tooltip')
-    expect(card).toHaveTextContent('context1')
+    expect(card).toHaveTextContent('Connectors')
     expect(card).toHaveTextContent('3')
     expect(within(card).getByText('github')).toBeInTheDocument()
     expect(within(card).getByText('linear')).toBeInTheDocument()
     expect(within(card).getByText('slack')).toBeInTheDocument()
+    // E1: the raw private-context slug never surfaces.
+    expect(card).not.toHaveTextContent('context1')
 
     fireEvent.mouseLeave(pill)
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('opens the agent’s own connectors tab when the count is clicked', () => {
+    const onOpenConnectors = vi.fn()
+    render(
+      <HostTable
+        items={[hostWithContext('chatllm', 'context1')]}
+        onOpen={vi.fn()}
+        onOpenConnectors={onOpenConnectors}
+        onDelete={vi.fn().mockResolvedValue(undefined)}
+        deletingKey={null}
+        onRefresh={vi.fn()}
+        onCreateHost={vi.fn()}
+        refreshing={false}
+        contextsByRef={{ context1: ['github'] }}
+      />
+    )
+
+    fireEvent.click(
+      within(screen.getByLabelText('Open agent chatllm')).getByRole('button', { name: '1' })
+    )
+    expect(onOpenConnectors).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })
   })
 
   it('reveals the card on keyboard focus (accessible path)', () => {
@@ -277,22 +301,24 @@ describe('HostTable context MCP hover card', () => {
     expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
   })
 
-  it('renders the bare count without a tooltip when the context has no MCP servers', () => {
+  it('shows an empty connector tooltip when the context has no MCP servers', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')], {
       context1: [],
     })
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
-    expect(within(row).getByText('0')).toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.mouseEnter(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 
-  it('renders a plain 0 when the context map is missing', () => {
+  it('keeps the zero count aligned when the context map is missing', () => {
     renderHostTable([hostWithContext('chatllm', 'context1')])
 
     const row = screen.getByLabelText('Open agent chatllm')
-    expect(within(row).getByText('0')).toBeInTheDocument()
-    expect(within(row).queryByRole('tooltip')).not.toBeInTheDocument()
+    const count = within(row).getByRole('button', { name: '0' })
+    fireEvent.focus(count)
+    expect(screen.getByRole('tooltip')).toHaveTextContent('No connectors')
   })
 })
 
@@ -307,7 +333,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={onOpen}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={onDelete}
         deletingKey={null}
         onRefresh={vi.fn()}
@@ -321,7 +347,7 @@ describe('HostTable — row actions kebab', () => {
 
     const viewItem = screen.getByRole('menuitem', { name: 'View agent details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
     fireEvent.click(viewItem)
     expect(onOpen).toHaveBeenCalledWith({ namespace: 'mcp-host', name: 'chatllm' })
@@ -334,7 +360,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={onOpen}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={vi.fn().mockResolvedValue(undefined)}
         deletingKey={null}
         onRefresh={vi.fn()}
@@ -354,7 +380,7 @@ describe('HostTable — row actions kebab', () => {
       <HostTable
         items={[hostWithContext('chatllm', 'context1')]}
         onOpen={vi.fn()}
-        onOpenContext={vi.fn()}
+        onOpenConnectors={vi.fn()}
         onDelete={onDelete}
         deletingKey="mcp-host/chatllm"
         onRefresh={vi.fn()}

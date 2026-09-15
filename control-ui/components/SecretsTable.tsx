@@ -2,6 +2,13 @@
 
 import React, { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
+import {
+  DataTable,
+  TableHeaderCell,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   type RecipeSecretItem,
@@ -161,6 +168,38 @@ export function SecretsTable({
         .includes(normalizedRecipeSearch)
     )
   }, [recipeRows, normalizedRecipeSearch])
+  const llmSort = useTableSort<string, 'name' | 'providers'>({
+    rows: filteredRows,
+    defaultKey: 'name',
+    identity: name => name,
+    accessors: {
+      name: name => name,
+      providers: name =>
+        getProvidersWithCompleteCredentials(keysByName.get(name) ?? [])
+          .map(getProviderLabel)
+          .join(', '),
+    },
+  })
+  const mcpSort = useTableSort<McpSecretRow, 'name' | 'servers' | 'registry'>({
+    rows: filteredMcpRows,
+    defaultKey: 'name',
+    identity: row => row.name,
+    accessors: {
+      name: row => row.name,
+      servers: row => row.servers.join(', '),
+      registry: row => row.registryEntries.join(', '),
+    },
+  })
+  const recipeSort = useTableSort<RecipeSecretRow, 'name' | 'keys' | 'recipes'>({
+    rows: filteredRecipeRows,
+    defaultKey: 'name',
+    identity: row => `${row.namespace}/${row.name}`,
+    accessors: {
+      name: row => `${row.namespace}/${row.name}`,
+      keys: row => row.keys.join(', '),
+      recipes: row => row.recipes.join(', '),
+    },
+  })
 
   function openUpdate(name: string) {
     setEditingName(name)
@@ -383,86 +422,88 @@ export function SecretsTable({
             </>
           }
           subtitle="Manage LLM, connector, and recipe credentials in one place."
-          actions={
-            <>
-              <SectionSearchInput
-                value={
-                  scope === 'llm'
-                    ? llmSearchQuery
-                    : scope === 'mcp'
-                      ? mcpSearchQuery
-                      : recipeSearchQuery
-                }
-                onChange={value => {
-                  if (scope === 'llm') setLlmSearchQuery(value)
-                  else if (scope === 'mcp') setMcpSearchQuery(value)
-                  else setRecipeSearchQuery(value)
-                }}
-                placeholder="Search secrets"
-                ariaLabel={
-                  scope === 'llm'
-                    ? 'Search LLM secrets'
-                    : scope === 'mcp'
-                      ? 'Search connector secrets'
-                      : 'Search recipe secrets'
-                }
-                disabled={activeInitialLoad}
-              />
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--toolbar"
-                onClick={() => {
-                  if (scope === 'llm') void onRefresh?.()
-                  else if (scope === 'mcp') void loadMcpSecretReferences()
-                  else void loadRecipeSecretsAndUsage()
-                }}
-                disabled={
-                  activeInitialLoad ||
-                  (scope === 'llm' ? refreshing : scope === 'mcp' ? mcpLoading : recipeLoading)
-                }
-                aria-label={
-                  scope === 'llm'
-                    ? refreshing
-                      ? 'Refreshing...'
-                      : 'Reload LLM secrets'
-                    : scope === 'mcp'
-                      ? mcpLoading
-                        ? 'Refreshing...'
-                        : 'Reload connector secret references'
-                      : recipeLoading
-                        ? 'Refreshing...'
-                        : 'Reload recipe secrets'
-                }
-              >
-                <IconRefresh
-                  className={
-                    (scope === 'llm' && refreshing) ||
-                    (scope === 'mcp' && mcpLoading) ||
-                    (scope === 'recipe' && recipeLoading)
-                      ? 'cu-spin'
-                      : undefined
-                  }
-                  width={18}
-                  height={18}
-                />
-              </button>
-              <button
-                type="button"
-                className="cu-btn cu-btn--primary cu-btn--sm"
-                onClick={() => {
-                  if (scope === 'llm') onCreateLlmSecret()
-                  else if (scope === 'mcp') onCreateMcpSecret()
-                  else onCreateRecipeSecret()
-                }}
-                disabled={activeInitialLoad}
-              >
-                {scope === 'llm'
-                  ? 'Add LLM secret'
+          primaryAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--primary cu-btn--sm"
+              onClick={() => {
+                if (scope === 'llm') onCreateLlmSecret()
+                else if (scope === 'mcp') onCreateMcpSecret()
+                else onCreateRecipeSecret()
+              }}
+              disabled={activeInitialLoad}
+            >
+              {scope === 'llm'
+                ? 'Add LLM secret'
+                : scope === 'mcp'
+                  ? 'Add connector secret'
+                  : 'Add recipe secret'}
+            </button>
+          }
+          refreshAction={
+            <button
+              type="button"
+              className="cu-btn cu-btn--icon cu-btn--toolbar"
+              onClick={() => {
+                if (scope === 'llm') void onRefresh?.()
+                else if (scope === 'mcp') void loadMcpSecretReferences()
+                else void loadRecipeSecretsAndUsage()
+              }}
+              disabled={
+                activeInitialLoad ||
+                (scope === 'llm' ? refreshing : scope === 'mcp' ? mcpLoading : recipeLoading)
+              }
+              aria-label={
+                scope === 'llm'
+                  ? refreshing
+                    ? 'Refreshing...'
+                    : 'Reload LLM secrets'
                   : scope === 'mcp'
-                    ? 'Add connector secret'
-                    : 'Add recipe secret'}
-              </button>
-            </>
+                    ? mcpLoading
+                      ? 'Refreshing...'
+                      : 'Reload connector secret references'
+                    : recipeLoading
+                      ? 'Refreshing...'
+                      : 'Reload recipe secrets'
+              }
+            >
+              <IconRefresh
+                className={
+                  (scope === 'llm' && refreshing) ||
+                  (scope === 'mcp' && mcpLoading) ||
+                  (scope === 'recipe' && recipeLoading)
+                    ? 'cu-spin'
+                    : undefined
+                }
+                width={18}
+                height={18}
+              />
+            </button>
+          }
+          search={
+            <SectionSearchInput
+              value={
+                scope === 'llm'
+                  ? llmSearchQuery
+                  : scope === 'mcp'
+                    ? mcpSearchQuery
+                    : recipeSearchQuery
+              }
+              onChange={value => {
+                if (scope === 'llm') setLlmSearchQuery(value)
+                else if (scope === 'mcp') setMcpSearchQuery(value)
+                else setRecipeSearchQuery(value)
+              }}
+              placeholder="Search secrets"
+              ariaLabel={
+                scope === 'llm'
+                  ? 'Search LLM secrets'
+                  : scope === 'mcp'
+                    ? 'Search connector secrets'
+                    : 'Search recipe secrets'
+              }
+              disabled={activeInitialLoad}
+            />
           }
         />
 
@@ -488,353 +529,322 @@ export function SecretsTable({
           </div>
         )}
 
-        {scope === 'llm' && isLlmInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+        {scope === 'llm' ? (
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Providers</th>
+                  <TableHeaderCell
+                    activeDirection={llmSort.key === 'name' ? llmSort.direction : null}
+                    label="Name"
+                    onSort={() => llmSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={llmSort.key === 'providers' ? llmSort.direction : null}
+                    label="Providers"
+                    onSort={() => llmSort.sortBy('providers')}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {Array.from({ length: 3 }).map((_, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <div
-                        className="cu-skeleton cu-skeleton--cell"
-                        style={{ width: `${55 + ((idx * 13) % 25)}%` }}
-                      />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '8rem' }} />
-                    </td>
-                    <td>
-                      <div
-                        className="cu-skeleton cu-skeleton--cell"
-                        style={{ width: '4rem', marginLeft: 'auto' }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : scope === 'llm' && filteredRows.length === 0 ? (
-          <div className="cu-empty">
-            {normalizedLlmSearch ? 'No LLM secrets match this search.' : <>No LLM secrets found.</>}
-          </div>
-        ) : scope === 'llm' ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Providers</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRows.map(name => {
-                  const providers = getProvidersWithCompleteCredentials(keysByName.get(name) ?? [])
-                  return (
-                    <tr key={name}>
-                      <td>{name}</td>
-                      <td>
-                        {providers.length > 0 ? (
-                          <div className="cu-chip-row" aria-label={`Providers for ${name}`}>
-                            {providers.map(provider => {
-                              const label = getProviderLabel(provider)
-                              return (
-                                <span key={provider} className="cu-chip">
-                                  <LlmProviderIcon provider={provider} label={label} />
-                                  {label}
-                                </span>
-                              )
-                            })}
+                {isLlmInitialLoad ? (
+                  <TableStateRow colSpan={3} kind="loading" message="Loading LLM secrets…" />
+                ) : error && filteredRows.length === 0 ? (
+                  <TableStateRow colSpan={3} kind="error" message={error} />
+                ) : filteredRows.length === 0 ? (
+                  <TableStateRow
+                    colSpan={3}
+                    message={
+                      normalizedLlmSearch
+                        ? 'No LLM secrets match this search.'
+                        : 'No LLM secrets found.'
+                    }
+                  />
+                ) : (
+                  llmSort.sortedRows.map(name => {
+                    const providers = getProvidersWithCompleteCredentials(
+                      keysByName.get(name) ?? []
+                    )
+                    return (
+                      <tr key={name}>
+                        <td>{name}</td>
+                        <td>
+                          {providers.length > 0 ? (
+                            <div className="cu-chip-row" aria-label={`Providers for ${name}`}>
+                              {providers.map(provider => {
+                                const label = getProviderLabel(provider)
+                                return (
+                                  <span key={provider} className="cu-chip">
+                                    <LlmProviderIcon provider={provider} label={label} />
+                                    {label}
+                                  </span>
+                                )
+                              })}
+                            </div>
+                          ) : (
+                            <span style={{ color: 'var(--cu-text-soft)' }}>—</span>
+                          )}
+                        </td>
+                        <td className="cu-table__cell-actions">
+                          <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for LLM secret ${name}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'update',
+                                  label: 'Update',
+                                  onClick: () => openUpdate(name),
+                                },
+                                {
+                                  key: 'delete',
+                                  label: deletingName === name ? 'Deleting…' : 'Delete',
+                                  danger: true,
+                                  disabled: deletingName === name,
+                                  onClick: () => void deleteSecret(name),
+                                },
+                              ]}
+                            />
                           </div>
-                        ) : (
-                          <span style={{ color: 'var(--cu-text-soft)' }}>—</span>
-                        )}
-                      </td>
-                      <td style={{ textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <RowActionsMenu
-                            ariaLabel={`Actions for LLM secret ${name}`}
-                            horizontalTrigger
-                            actions={[
-                              {
-                                key: 'update',
-                                label: 'Update',
-                                onClick: () => openUpdate(name),
-                              },
-                              {
-                                key: 'delete',
-                                label: deletingName === name ? 'Deleting…' : 'Delete',
-                                danger: true,
-                                disabled: deletingName === name,
-                                onClick: () => void deleteSecret(name),
-                              },
-                            ]}
-                          />
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                })}
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
               </tbody>
-            </table>
-          </div>
-        ) : scope === 'mcp' && isMcpInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th style={{ width: '36%' }}>Attached connectors</th>
-                  <th style={{ width: '34%' }}>Marketplace Source</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: 3 }).map((_, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <div
-                        className="cu-skeleton cu-skeleton--cell"
-                        style={{ width: `${52 + ((idx * 14) % 28)}%` }}
-                      />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '70%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '55%' }} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : scope === 'mcp' && filteredMcpRows.length === 0 ? (
-          <div className="cu-empty">
-            {normalizedMcpSearch
-              ? 'No connector secrets match this search.'
-              : 'No connector secrets found.'}
-          </div>
+            </DataTable>
+          </TableViewport>
         ) : scope === 'mcp' ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th style={{ width: '36%' }}>Attached connectors</th>
-                  <th style={{ width: '34%' }}>Marketplace Source</th>
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'name' ? mcpSort.direction : null}
+                    label="Name"
+                    onSort={() => mcpSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'servers' ? mcpSort.direction : null}
+                    label="Attached connectors"
+                    onSort={() => mcpSort.sortBy('servers')}
+                    style={{ width: '36%' }}
+                  />
+                  <TableHeaderCell
+                    activeDirection={mcpSort.key === 'registry' ? mcpSort.direction : null}
+                    label="Marketplace Source"
+                    onSort={() => mcpSort.sortBy('registry')}
+                    style={{ width: '34%' }}
+                  />
                   <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
                 </tr>
               </thead>
               <tbody>
-                {filteredMcpRows.map(row => (
-                  <tr key={row.name}>
-                    <td>{row.name}</td>
-                    <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
-                      {row.servers.length > 0
-                        ? `${row.servers.length} server(s): ${row.servers.join(', ')}`
-                        : 'Not yet attached to a connector.'}
-                    </td>
-                    <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
-                      {row.registryEntries.length > 0
-                        ? row.registryEntries.join(', ')
-                        : 'Created manually or source unknown.'}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      <button
-                        type="button"
-                        className="cu-btn cu-btn--primary cu-btn--sm"
-                        onClick={() => {
-                          const source =
-                            row.registrySources.length === 1 ? row.registrySources[0] : undefined
-                          router.push(
-                            CONTROL_ROUTES.secrets.new({
-                              scope: 'mcp',
-                              name: row.name,
-                              registryEntry: source?.name,
-                              registryVersion: source?.version,
-                            })
-                          )
-                        }}
-                        aria-label={`Add connector secret ${row.name}`}
-                      >
-                        Add
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : isRecipeInitialLoad ? (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th style={{ width: '32%' }}>Keys</th>
-                  <th style={{ width: '32%' }}>Used by recipes</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {Array.from({ length: 3 }).map((_, idx) => (
-                  <tr key={idx}>
-                    <td>
-                      <div
-                        className="cu-skeleton cu-skeleton--cell"
-                        style={{ width: `${48 + ((idx * 11) % 30)}%` }}
-                      />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '60%' }} />
-                    </td>
-                    <td>
-                      <div className="cu-skeleton cu-skeleton--cell" style={{ width: '50%' }} />
-                    </td>
-                    <td>
-                      <div
-                        className="cu-skeleton cu-skeleton--cell"
-                        style={{ width: '4rem', marginLeft: 'auto' }}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : filteredRecipeRows.length === 0 ? (
-          <div className="cu-empty">
-            {normalizedRecipeSearch
-              ? 'No recipe secrets match this search.'
-              : 'No recipe secrets found.'}
-          </div>
-        ) : (
-          <div className="cu-table-wrap">
-            <table className="cu-table cu-table--header-band">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th style={{ width: '32%' }}>Keys</th>
-                  <th style={{ width: '32%' }}>Used by recipes</th>
-                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
-                </tr>
-              </thead>
-              <tbody>
-                {filteredRecipeRows.map(row => (
-                  <tr key={`${row.status}:${row.namespace}:${row.name}`}>
-                    <td>
-                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
-                        <span>{row.name}</span>
-                        <span className="cu-chip" title={`Secret namespace: ${row.namespace}`}>
-                          {row.namespace}
-                        </span>
-                        {row.status === 'missing' ? (
-                          <span
-                            className="cu-chip"
-                            style={{
-                              color: 'var(--cu-warn-text, var(--cu-text-soft))',
-                              borderColor: 'var(--cu-warn-border, var(--cu-border-subtle))',
-                            }}
-                          >
-                            Missing
-                          </span>
-                        ) : null}
-                        {row.ownership?.kind === 'shared' ? (
-                          <span className="cu-chip" title="Any recipe can reference this secret">
-                            Shared
-                          </span>
-                        ) : null}
-                        {row.ownership?.kind === 'owner-recipe' ? (
-                          <span
-                            className="cu-chip"
-                            title={`Only ${row.ownership.recipeName} can reference this secret`}
-                          >
-                            Owner: {row.ownership.recipeName}
-                          </span>
-                        ) : null}
-                        {row.ownership?.kind === 'unlabeled' ? (
-                          <span
-                            className="cu-chip"
-                            style={{
-                              color: 'var(--cu-warn-text, var(--cu-text-soft))',
-                              borderColor: 'var(--cu-warn-border, var(--cu-border-subtle))',
-                            }}
-                            title="Secret has neither owner-recipe nor shared label — WRC will refuse to project it"
-                          >
-                            Unlabeled
-                          </span>
-                        ) : null}
-                      </div>
-                    </td>
-                    <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
-                      {row.keys.length > 0
-                        ? row.keys.join(', ')
-                        : row.status === 'missing'
-                          ? 'No keys declared by recipe.'
-                          : 'No keys defined.'}
-                    </td>
-                    <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
-                      {row.recipes.length > 0
-                        ? `${row.recipes.length} recipe(s): ${row.recipes.join(', ')}`
-                        : 'Not yet referenced by a recipe.'}
-                    </td>
-                    <td style={{ textAlign: 'right' }}>
-                      {row.status === 'missing' ? (
+                {isMcpInitialLoad ? (
+                  <TableStateRow colSpan={4} kind="loading" message="Loading connector secrets…" />
+                ) : mcpError && filteredMcpRows.length === 0 ? (
+                  <TableStateRow colSpan={4} kind="error" message={mcpError} />
+                ) : filteredMcpRows.length === 0 ? (
+                  <TableStateRow
+                    colSpan={4}
+                    message={
+                      normalizedMcpSearch
+                        ? 'No connector secrets match this search.'
+                        : 'No connector secrets found.'
+                    }
+                  />
+                ) : (
+                  mcpSort.sortedRows.map(row => (
+                    <tr key={row.name}>
+                      <td>{row.name}</td>
+                      <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
+                        {row.servers.length > 0
+                          ? `${row.servers.length} server(s): ${row.servers.join(', ')}`
+                          : 'Not yet attached to a connector.'}
+                      </td>
+                      <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
+                        {row.registryEntries.length > 0
+                          ? row.registryEntries.join(', ')
+                          : 'Created manually or source unknown.'}
+                      </td>
+                      <td className="cu-table__cell-actions">
                         <button
                           type="button"
                           className="cu-btn cu-btn--primary cu-btn--sm"
-                          onClick={() =>
-                            onCreateRecipeSecretFor(
-                              row.name,
-                              row.keys,
-                              row.recipes.length === 1 ? row.recipes[0] : undefined,
-                              row.namespace
+                          onClick={() => {
+                            const source =
+                              row.registrySources.length === 1 ? row.registrySources[0] : undefined
+                            router.push(
+                              CONTROL_ROUTES.secrets.new({
+                                scope: 'mcp',
+                                name: row.name,
+                                registryEntry: source?.name,
+                                registryVersion: source?.version,
+                              })
                             )
-                          }
-                          aria-label={`Add recipe secret ${row.name}`}
+                          }}
+                          aria-label={`Add connector secret ${row.name}`}
                         >
                           Add
                         </button>
-                      ) : (
-                        <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
-                          <RowActionsMenu
-                            ariaLabel={`Actions for recipe secret ${row.name}`}
-                            horizontalTrigger
-                            actions={[
-                              {
-                                key: 'update',
-                                label: 'Update',
-                                onClick: () => navigateToRecipeEdit(row.name, row.namespace),
-                              },
-                              {
-                                key: 'delete',
-                                label:
-                                  recipeDeletingName === `${row.namespace}/${row.name}`
-                                    ? 'Deleting…'
-                                    : 'Delete',
-                                danger: true,
-                                disabled: recipeDeletingName === `${row.namespace}/${row.name}`,
-                                onClick: () => void deleteRecipeSecretRow(row.name, row.namespace),
-                              },
-                            ]}
-                          />
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
-            </table>
-          </div>
+            </DataTable>
+          </TableViewport>
+        ) : (
+          <TableViewport className="cu-table-wrap">
+            <DataTable className="eft-table cu-table cu-table--header-band">
+              <thead>
+                <tr>
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'name' ? recipeSort.direction : null}
+                    label="Name"
+                    onSort={() => recipeSort.sortBy('name')}
+                  />
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'keys' ? recipeSort.direction : null}
+                    label="Keys"
+                    onSort={() => recipeSort.sortBy('keys')}
+                    style={{ width: '32%' }}
+                  />
+                  <TableHeaderCell
+                    activeDirection={recipeSort.key === 'recipes' ? recipeSort.direction : null}
+                    label="Used by recipes"
+                    onSort={() => recipeSort.sortBy('recipes')}
+                    style={{ width: '32%' }}
+                  />
+                  <th style={{ width: '8rem', textAlign: 'right' }} aria-label="Actions" />
+                </tr>
+              </thead>
+              <tbody>
+                {isRecipeInitialLoad ? (
+                  <TableStateRow colSpan={4} kind="loading" message="Loading recipe secrets…" />
+                ) : recipeError && filteredRecipeRows.length === 0 ? (
+                  <TableStateRow colSpan={4} kind="error" message={recipeError} />
+                ) : filteredRecipeRows.length === 0 ? (
+                  <TableStateRow
+                    colSpan={4}
+                    message={
+                      normalizedRecipeSearch
+                        ? 'No recipe secrets match this search.'
+                        : 'No recipe secrets found.'
+                    }
+                  />
+                ) : (
+                  recipeSort.sortedRows.map(row => (
+                    <tr key={`${row.status}:${row.namespace}:${row.name}`}>
+                      <td>
+                        <div
+                          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}
+                        >
+                          <span>{row.name}</span>
+                          <span className="cu-chip" title={`Secret namespace: ${row.namespace}`}>
+                            {row.namespace}
+                          </span>
+                          {row.status === 'missing' ? (
+                            <span
+                              className="cu-chip"
+                              style={{
+                                color: 'var(--cu-warn-text, var(--cu-text-soft))',
+                                borderColor: 'var(--cu-warn-border, var(--cu-border-subtle))',
+                              }}
+                            >
+                              Missing
+                            </span>
+                          ) : null}
+                          {row.ownership?.kind === 'shared' ? (
+                            <span className="cu-chip" title="Any recipe can reference this secret">
+                              Shared
+                            </span>
+                          ) : null}
+                          {row.ownership?.kind === 'owner-recipe' ? (
+                            <span
+                              className="cu-chip"
+                              title={`Only ${row.ownership.recipeName} can reference this secret`}
+                            >
+                              Owner: {row.ownership.recipeName}
+                            </span>
+                          ) : null}
+                          {row.ownership?.kind === 'unlabeled' ? (
+                            <span
+                              className="cu-chip"
+                              style={{
+                                color: 'var(--cu-warn-text, var(--cu-text-soft))',
+                                borderColor: 'var(--cu-warn-border, var(--cu-border-subtle))',
+                              }}
+                              title="Secret has neither owner-recipe nor shared label — WRC will refuse to project it"
+                            >
+                              Unlabeled
+                            </span>
+                          ) : null}
+                        </div>
+                      </td>
+                      <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
+                        {row.keys.length > 0
+                          ? row.keys.join(', ')
+                          : row.status === 'missing'
+                            ? 'No keys declared by recipe.'
+                            : 'No keys defined.'}
+                      </td>
+                      <td style={{ color: 'var(--cu-text-soft)', fontSize: '0.8125rem' }}>
+                        {row.recipes.length > 0
+                          ? `${row.recipes.length} recipe(s): ${row.recipes.join(', ')}`
+                          : 'Not yet referenced by a recipe.'}
+                      </td>
+                      <td className="cu-table__cell-actions">
+                        {row.status === 'missing' ? (
+                          <button
+                            type="button"
+                            className="cu-btn cu-btn--primary cu-btn--sm"
+                            onClick={() =>
+                              onCreateRecipeSecretFor(
+                                row.name,
+                                row.keys,
+                                row.recipes.length === 1 ? row.recipes[0] : undefined,
+                                row.namespace
+                              )
+                            }
+                            aria-label={`Add recipe secret ${row.name}`}
+                          >
+                            Add
+                          </button>
+                        ) : (
+                          <div style={{ display: 'inline-flex', gap: '0.35rem' }}>
+                            <RowActionsMenu
+                              ariaLabel={`Actions for recipe secret ${row.name}`}
+                              horizontalTrigger
+                              actions={[
+                                {
+                                  key: 'update',
+                                  label: 'Update',
+                                  onClick: () => navigateToRecipeEdit(row.name, row.namespace),
+                                },
+                                {
+                                  key: 'delete',
+                                  label:
+                                    recipeDeletingName === `${row.namespace}/${row.name}`
+                                      ? 'Deleting…'
+                                      : 'Delete',
+                                  danger: true,
+                                  disabled: recipeDeletingName === `${row.namespace}/${row.name}`,
+                                  onClick: () =>
+                                    void deleteRecipeSecretRow(row.name, row.namespace),
+                                },
+                              ]}
+                            />
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </DataTable>
+          </TableViewport>
         )}
 
         {scope === 'mcp' ? (

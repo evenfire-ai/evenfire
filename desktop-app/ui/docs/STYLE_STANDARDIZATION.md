@@ -2,7 +2,7 @@
 
 This document is the authoritative reference for **how a page is built in desktop-app/ui** after the layout/token consolidation refactor. It complements the cross-app rules in [`../../../docs/agents/frontend-style-rules.md`](../../../docs/agents/frontend-style-rules.md). Read the shared and renderer application rules selected by the provider adapter first; this document owns Desktop-specific visual and layout patterns.
 
-When in doubt, mimic an existing post-refactor page (`ContextsPage`, `WorkflowsPage`, `TeamsPage`, `McpServersPage`) before inventing.
+When in doubt, mimic an existing post-refactor page (`WorkflowsPage`, `McpServersPage`, `AgentsPage`) before inventing.
 
 ## 1. Page shell
 
@@ -62,9 +62,9 @@ The legacy aliases `.agents-fleet-tabs`, `.context-tabs`, `.team-tabs` (and thei
 The DataGrid is the canonical pattern for any tabular listing. It is a CSS-grid-driven primitive built from BEM classes.
 
 ```tsx
-import { SCOPED_RESOURCE_4COL } from '../lib/gridTemplates'
+const RESOURCE_GRID_COLS = 'minmax(0, 1.5fr) minmax(0, 0.9fr) minmax(0, 0.85fr)'
 
-;<div className="da-grid" style={{ '--da-grid-cols': SCOPED_RESOURCE_4COL }}>
+;<div className="da-grid" style={{ '--da-grid-cols': RESOURCE_GRID_COLS }}>
   <div className="da-grid__head">
     <span className="da-grid__col-header">Name</span>
     <span className="da-grid__col-header da-grid__col-header--center">Scope</span>
@@ -94,7 +94,7 @@ Available modifiers:
 
 Column widths are set via the CSS variable `--da-grid-cols` inline. **This is the only acceptable static inline-style use in pages.** Genuinely runtime-computed values follow the documented checker escape-hatch process in §7. Two rules apply:
 
-1. If the column template is shared across two or more pages, define it as a named constant in `src/lib/gridTemplates.ts` and import it. Existing constants: `SCOPED_RESOURCE_4COL`, `MEMBERS_3COL`.
+1. If the column template is shared across two or more pages, define it as a named constant in a shared module under `src/lib/` and import it from both. Extract it only once a second page actually needs the same template.
 2. If the template is unique to one page, leave it as a literal inline next to the JSX it describes — colocation beats premature extraction.
 
 Never add a new tabular-listing class family in parallel to `.da-grid`. Extend `da-grid` with new modifiers if needed.
@@ -178,7 +178,7 @@ Do not recreate equivalents inline. If a real new common control is needed, add 
 
 ## 5. Where pages live
 
-- Top-level pages: `src/pages/*.tsx` (flat). `ContextsPage`, `WorkflowsPage`, `TeamsPage`, `McpServersPage`, `ContextDetailsPage`, `TeamDetailsPage`, `AgentsPage`.
+- Top-level pages: `src/pages/*.tsx` (flat). `AgentsPage`, `WorkflowsPage`, `McpServersPage`, `FilesPage`, `SettingsPage`.
 - Auth/error pages with their own subtree: `src/pages/<Name>Page/index.tsx` (folder-based). `AuthPage`, `UnavailablePage`.
 - Tests: `src/pages/__tests__/<Name>Page.test.tsx`.
 

@@ -2,7 +2,6 @@
 
 import { useEffect, useId, useState } from 'react'
 import { Button, Field, TextInput } from '@components/ui'
-import { GFS_RESOURCE_NAME_MAX_LENGTH } from '@lib/gfsResourceName'
 import type { NewFolderModalProps } from './types'
 
 /**
@@ -70,11 +69,7 @@ export function NewFolderModal({
         <p id={descriptionId} className="cu-modal-copy">
           Create a new folder in {folderLabel}.
         </p>
-        <Field
-          label="Folder name"
-          htmlFor={inputId}
-          description={`Names longer than ${GFS_RESOURCE_NAME_MAX_LENGTH} characters are shortened automatically.`}
-        >
+        <Field label="Folder name" htmlFor={inputId}>
           <TextInput
             id={inputId}
             autoFocus

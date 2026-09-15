@@ -73,7 +73,12 @@ describe('GovernedSessionReplayService', () => {
     expect(list.mock.calls[1][0]).toMatchObject({
       highWatermark: '42',
       after: { occurredAt: '2026-07-01T02:00:00.000Z', hostRef: 'host-a', sessionId: 'session-2' },
+      order: 'latest',
     })
+
+    await expect(
+      service.list({ filters: FILTERS, limit: 1, order: 'oldest', cursor: first.nextCursor! })
+    ).rejects.toBeInstanceOf(GovernedSessionReplayInvalidQueryError)
 
     await expect(
       service.list({
@@ -82,5 +87,44 @@ describe('GovernedSessionReplayService', () => {
         cursor: first.nextCursor!,
       })
     ).rejects.toBeInstanceOf(GovernedSessionReplayInvalidQueryError)
+  })
+
+  it('preserves the selected order and tie-break anchor across producer pages', async () => {
+    const occurredAt = '2026-07-01T01:00:00.000Z'
+    for (const scenario of [
+      { order: 'latest' as const, sessions: ['session-c', 'session-b', 'session-a'] },
+      { order: 'oldest' as const, sessions: ['session-a', 'session-b', 'session-c'] },
+    ]) {
+      const page = scenario.sessions.map(sessionId => summary(sessionId, occurredAt))
+      const anchors = scenario.sessions.map(sessionId => ({
+        occurredAt,
+        hostRef: 'host-a',
+        sessionId,
+      }))
+      const captureHighWatermark = vi.fn().mockResolvedValue('42')
+      const list = vi
+        .fn()
+        .mockResolvedValueOnce({ summaries: page, anchors })
+        .mockResolvedValueOnce({ summaries: [page[2]], anchors: [anchors[2]] })
+      const service = new GovernedSessionReplayService({ captureHighWatermark, list } as never)
+
+      const first = await service.list({ filters: FILTERS, limit: 2, order: scenario.order })
+      const second = await service.list({
+        filters: FILTERS,
+        limit: 2,
+        order: scenario.order,
+        cursor: first.nextCursor!,
+      })
+
+      expect([...first.sessions, ...second.sessions].map(session => session.sessionId)).toEqual(
+        scenario.sessions
+      )
+      expect(list.mock.calls[0]?.[0]).toMatchObject({ order: scenario.order, after: undefined })
+      expect(list.mock.calls[1]?.[0]).toMatchObject({
+        order: scenario.order,
+        after: anchors[1],
+        highWatermark: '42',
+      })
+    }
   })
 })

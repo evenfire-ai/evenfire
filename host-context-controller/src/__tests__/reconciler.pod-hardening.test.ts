@@ -88,6 +88,9 @@ describe('McpServer generated pod hardening', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    // These tests inspect the first generated workload, before it exists in the API.
+    appsApi.readNamespacedDeployment.mockRejectedValueOnce({ code: 404 })
+    coreApi.readNamespacedService.mockRejectedValueOnce({ code: 404 })
     reconciler = new McpServerReconciler({} as k8s.KubeConfig, {
       assumeInventoryAuthorityWhenUnconfigured: true,
       appsApi: asAppsApi(appsApi),
@@ -107,6 +110,8 @@ describe('McpServer generated pod hardening', () => {
   })
 
   it('applies the same token and seccomp boundary to remote egress proxy pods', async () => {
+    // This case starts without the nginx ConfigMap.
+    coreApi.readNamespacedConfigMap.mockRejectedValueOnce({ code: 404 })
     await reconciler.reconcile(
       makeServer({
         name: 'remote-mcp',

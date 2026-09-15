@@ -41,7 +41,8 @@ export const destination = (): CopyDestinationSnapshot => ({
 function dbRow(value: CopySnapshotNode): Record<string, unknown> {
   return { resource_id: value.resourceId, drive: value.drive, parent_resource_id: value.parentResourceId,
     name: value.name, kind: value.kind, path_cache: value.pathCache, version: value.version,
-    bytes: value.bytes.toString(), blob_key: value.blobKey, content_sha256: value.contentSha256, deleted_at: value.deletedAt };
+    bytes: value.bytes.toString(), blob_key: value.blobKey, content_sha256: value.contentSha256, deleted_at: value.deletedAt,
+    updated_at: new Date("2026-01-01T00:00:00.000Z") };
 }
 
 export class CopyDb implements TxClient {
@@ -143,7 +144,12 @@ export class CopyDb implements TxClient {
           blob_key: values[offset + 7], content_sha256: values[offset + 8], version: values[offset + 9] };
       });
     for (const value of inserted) {
-      const row = { ...value, bytes: Number(value.bytes), deleted_at: null };
+      const row = {
+        ...value,
+        bytes: Number(value.bytes),
+        deleted_at: null,
+        updated_at: new Date("2026-01-01T00:00:00.000Z"),
+      };
       this.resources.set(String(row.resource_id), row); rows.push(row);
     }
     return { rows };

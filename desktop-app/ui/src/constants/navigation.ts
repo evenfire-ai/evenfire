@@ -7,10 +7,6 @@ export const DESKTOP_ROUTES = {
   plugins: 'workflows',
   agents: 'agents',
   connectors: 'mcp-servers',
-  contexts: 'contexts',
-  contextDetails: 'context-details',
-  teams: 'teams',
-  teamDetails: 'team-details',
   files: 'files',
   settings: 'settings',
 } as const
@@ -18,9 +14,8 @@ export const DESKTOP_ROUTES = {
 export type DesktopRoute = (typeof DESKTOP_ROUTES)[keyof typeof DESKTOP_ROUTES]
 
 export const AGENT_WORKSPACE_ROUTES = {
-  details: 'details',
   connectors: 'mcp-servers',
-  contexts: 'contexts',
+  members: 'members',
   sharedFiles: 'shared-files',
   activity: 'activity',
 } as const

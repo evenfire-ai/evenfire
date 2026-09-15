@@ -29,6 +29,7 @@ import {
   RESOLVED_AT_ANNOTATION,
   emptyState,
   parseState,
+  parseStateStrict,
   reconcileEgressState,
   serializeState,
 } from '@clerum/network-policy-core'
@@ -56,10 +57,14 @@ export interface AccumulateHostEgressInput {
 }
 
 export interface AccumulateHostEgressOutput {
+  /** Normalized state entries behind cidrs/annotations. */
+  entries: ReturnType<typeof emptyState>['entries']
   /** The effective accumulated /32 set to render as ipBlocks (sorted, deduped). */
   cidrs: string[]
   /** Annotations to stamp on the policy: serialized state + resolved-at. */
   annotations: Record<string, string>
+  /** Last accepted DNS observation represented by the effective set, if proven. */
+  resolvedAt?: string
   /** True iff the (fqdn,ip,port,protocol) set changed vs the previous state. */
   changed: boolean
   /** True iff the persisted window is aging and must be re-persisted (audit M1). */
@@ -107,12 +112,35 @@ export function accumulateHostExactHostEgress(
 
   const out = reconcileEgressState(previous, [observation], now, config)
 
+  const annotations = serializeState(out.state)
+  let resolvedAt: string | undefined
+  if (resolution.kind === 'ok') {
+    resolvedAt = new Date(now).toISOString()
+  } else {
+    const priorResolvedAt = previousAnnotations?.[RESOLVED_AT_ANNOTATION]
+    if (priorResolvedAt && Number.isFinite(Date.parse(priorResolvedAt))) {
+      resolvedAt = priorResolvedAt
+    } else if (previousAnnotations) {
+      const strictPrevious = parseStateStrict(previousAnnotations, config, [
+        { fqdn, port, protocol },
+      ])
+      if (strictPrevious.kind === 'valid' && strictPrevious.state.entries.length > 0) {
+        const latestObservedAt = Math.max(
+          ...strictPrevious.state.entries.map(entry => entry.lastObservedAt)
+        )
+        if (Number.isFinite(new Date(latestObservedAt).getTime())) {
+          resolvedAt = new Date(latestObservedAt).toISOString()
+        }
+      }
+    }
+  }
+  if (resolvedAt) annotations[RESOLVED_AT_ANNOTATION] = resolvedAt
+
   return {
+    entries: out.entries,
     cidrs: out.entries.map(entry => `${entry.ip}/32`),
-    annotations: {
-      ...serializeState(out.state),
-      [RESOLVED_AT_ANNOTATION]: new Date(now).toISOString(),
-    },
+    annotations,
+    resolvedAt,
     changed: out.changed,
     renewalDue: out.renewalDue,
     frozen: out.frozenFqdns.includes(fqdn),

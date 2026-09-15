@@ -591,7 +591,7 @@ test.describe('GFS Desktop user journey', () => {
             })
         })
 
-        await test.step('user with the share bit creates a read share through Desktop UI', async () => {
+        await test.step('user with the share bit cannot create a share through Desktop UI', async () => {
           const shared = ownerSession.page.getByRole('region', {
             name: 'GFS resources shared with you',
           })
@@ -602,34 +602,7 @@ test.describe('GFS Desktop user journey', () => {
           await expect(browser).toContainText(shareChainFixture.childName, { timeout: 30_000 })
 
           const delegation = ownerSession.page.getByRole('region', { name: 'Delegate access' })
-          await expect(delegation.getByRole('button', { name: 'Create share' })).toBeVisible()
-          await expect(
-            delegation.getByRole('group', { name: 'permissions' }).getByRole('button', {
-              name: 'share',
-            })
-          ).toBeVisible()
-          await delegation.getByLabel('Subject type').selectOption('user')
-          await delegation.getByLabel('subject', { exact: true }).selectOption(delegateUserId)
-          await delegation.getByRole('button', { name: 'Create share' }).click()
-          await expect(ownerSession.page.getByText('Share created')).toBeVisible({
-            timeout: 20_000,
-          })
-
-          await expect
-            .poll(
-              () =>
-                getGfsShareSummary({
-                  resourceId: shareChainFixture.resourceId,
-                  subjectType: 'user',
-                  subjectId: delegateUserId,
-                }),
-              { timeout: 15_000, intervals: [250, 500, 1_000] }
-            )
-            .toMatchObject({
-              permissions: ['read'],
-              includeDescendants: true,
-              createdBy: `user:${ownerUserId}`,
-            })
+          await expect(delegation.getByRole('button', { name: 'Create share' })).toHaveCount(0)
         })
 
         await test.step('user delegates read access to a visible team through Desktop UI', async () => {

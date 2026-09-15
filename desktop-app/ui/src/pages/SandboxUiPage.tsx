@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { Button, StatusBanner } from '@components/Common'
+import { createPortal } from 'react-dom'
+import { IconButton, StatusBanner } from '@components/Common'
+import { joinClasses } from '@lib/classNames'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
 import {
   IconChat,
-  IconClose,
+  IconChevronLeft,
   IconCopy,
   IconRefresh,
   IconSandboxUi,
@@ -112,8 +114,15 @@ function useEmbedBounds(
   enabled: boolean,
   parked: boolean,
   refreshKey: string | number,
-  onBoundsApplied?: () => void
+  onBoundsApplied?: () => void,
+  onSlotTopChange?: (topPx: number) => void,
+  onSlotRightChange?: (rightPx: number) => void
 ): void {
+  // Dedupe the emitted slot-top across pushes AND across effect re-runs, so a
+  // resize/scroll storm (or a dep change) never churns the parent's state when
+  // the measured top is unchanged.
+  const lastEmittedTopRef = useRef<number | null>(null)
+  const lastEmittedRightRef = useRef<number | null>(null)
   useLayoutEffect(() => {
     if (!enabled) return
     const target = ref.current
@@ -124,6 +133,20 @@ function useEmbedBounds(
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
         const rect = target.getBoundingClientRect()
+        if (onSlotTopChange) {
+          const top = Math.round(rect.top)
+          if (lastEmittedTopRef.current !== top) {
+            lastEmittedTopRef.current = top
+            onSlotTopChange(top)
+          }
+        }
+        if (onSlotRightChange) {
+          const right = Math.round(rect.right)
+          if (lastEmittedRightRef.current !== right) {
+            lastEmittedRightRef.current = right
+            onSlotRightChange(right)
+          }
+        }
         void window.clerum.sandboxUi
           .setBounds(boundsFromRect(rect))
           .then(() => onBoundsApplied?.())
@@ -141,12 +164,48 @@ function useEmbedBounds(
       window.removeEventListener('resize', push)
       window.removeEventListener('scroll', push, true)
     }
-  }, [parked, ref, enabled, onBoundsApplied, refreshKey])
+  }, [parked, ref, enabled, onBoundsApplied, onSlotTopChange, onSlotRightChange, refreshKey])
 }
 
 const APP_PAGE_SIZE = 6
 let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
+
+// Icon-only app action rendered into the native title bar's leading slot. The
+// label is surfaced through IconButton's native `title` (from `label`) plus
+// `aria-label` for assistive tech. The native `title` is deliberate here: the
+// mounted app is a native WebContentsView that always paints above the renderer
+// DOM regardless of CSS, so a DOM tooltip would render BEHIND the app view and
+// be unreadable. The OS composes the native `title` tooltip over that native
+// view, so it is the only label affordance that can actually be seen.
+function TitlebarLeadingAction({
+  className,
+  label,
+  pressed,
+  onClick,
+  children,
+}: {
+  className: string
+  label: string
+  pressed?: boolean
+  onClick: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <span className="titlebar-leading-action">
+      <IconButton
+        variant="ghost"
+        size="sm"
+        className={joinClasses('titlebar-leading-action__btn', className)}
+        label={label}
+        aria-pressed={pressed}
+        onClick={onClick}
+      >
+        {children}
+      </IconButton>
+    </span>
+  )
+}
 
 export function SandboxUiPage({
   actionRequest = null,
@@ -156,15 +215,21 @@ export function SandboxUiPage({
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
   toastShellOverlayOpen = false,
+  deepLinkShellOverlayOpen = false,
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
+  chatDrawerOpen = false,
+  titlebarLeadingContainer = null,
+  onToggleChatDrawer,
   onBackToConversation,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
   onEmbeddedAppBack,
   onEmbeddedAppRemoved,
   onEmbedBoundsApplied,
+  onEmbedSlotTopChange,
+  onEmbedSlotRightChange,
   onNotify,
   onShortcutOpenResult,
 }: SandboxUiPageProps = {}) {
@@ -184,8 +249,14 @@ export function SandboxUiPage({
   const localSearchPreviousFocusRef = useRef<HTMLElement | null>(null)
   const lastShortcutOpenRequestIdRef = useRef(0)
   const lastActionRequestIdRef = useRef(0)
+  // The deep-link confirm/error dialogs render as renderer DOM at the App
+  // shell level; like the other shell overlays they must hide the native
+  // WebContentsView, which always paints above the DOM, to be visible at all.
   const shellOverlayOpen =
-    headerShellOverlayOpen || sidebarShellOverlayOpen || toastShellOverlayOpen
+    headerShellOverlayOpen ||
+    sidebarShellOverlayOpen ||
+    toastShellOverlayOpen ||
+    deepLinkShellOverlayOpen
 
   const reload = useCallback(async () => {
     setError(null)
@@ -487,7 +558,9 @@ export function SandboxUiPage({
     launch.kind === 'mounted' || launch.kind === 'minting',
     shellOverlayOpen,
     boundsRefreshKey,
-    onEmbedBoundsApplied
+    onEmbedBoundsApplied,
+    onEmbedSlotTopChange,
+    onEmbedSlotRightChange
   )
 
   // Native WebContentsView content always paints above renderer DOM. Capture
@@ -545,64 +618,81 @@ export function SandboxUiPage({
   if (launch.kind === 'mounted' || launch.kind === 'minting') {
     const showRefreshBanner =
       refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
+    // Every leading control below is gated: the refresh/copy pair only exists
+    // while 'mounted', and the conversation/drawer control needs an origin. In
+    // the 'minting' state without an origin all of them are absent, so portaling
+    // the wrapper unconditionally would inject an empty <div> into the shared
+    // title bar. Only portal when at least one control will render.
+    const hasLeadingActions =
+      launch.kind === 'mounted' ||
+      Boolean(conversationOrigin && (onToggleChatDrawer || onBackToConversation))
     return (
-      <section className="page">
-        <div className="sandbox-ui-mounted-header">
-          {conversationOrigin && onBackToConversation ? (
-            <Button
-              color="neutral"
-              variant="soft"
-              size="sm"
-              className="sandbox-ui-conversation-btn"
-              aria-label={`Back to ${conversationOrigin.title}`}
-              title={`Back to ${conversationOrigin.title}`}
-              onClick={() => void handleBackToConversation()}
-            >
-              <IconChat />
-              <span>Back to {conversationOrigin.title}</span>
-            </Button>
-          ) : null}
-          <Button
-            color="neutral"
-            variant="soft"
-            size="sm"
-            className="sandbox-ui-close-btn"
-            aria-label="Back to apps"
-            title="Back to apps"
-            onClick={() => void onBackToApps()}
-          >
-            <IconClose />
-            <span>Back to apps</span>
-          </Button>
-          {launch.kind === 'mounted' && (
-            <>
-              <Button
-                color="neutral"
-                variant="soft"
-                size="sm"
-                className="sandbox-ui-refresh-btn"
-                aria-label="Refresh"
-                title="Refresh app content"
-                onClick={onRefresh}
-              >
-                <IconRefresh />
-                <span>Refresh</span>
-              </Button>
-              <Button
-                color="neutral"
-                variant="soft"
-                size="sm"
-                className="sandbox-ui-copy-link-btn"
-                aria-label="Copy current app link"
-                title="Copy current app link"
-                onClick={() => void onCopyDeepLink()}
-              >
-                <IconCopy />
-                <span>Copy URL</span>
-              </Button>
-            </>
+      <section className="page" data-testid="sandbox-ui-mounted">
+        {/* App actions live in the native title bar's leading slot (icon-only,
+            label in a hover flyout). They render through a portal only once the
+            title bar has published its container; there is no inline fallback,
+            mirroring how the header search/bell portal works. "Back to apps" is
+            intentionally gone — the sidebar owns the return to the app picker. */}
+        {titlebarLeadingContainer &&
+          hasLeadingActions &&
+          createPortal(
+            <div className="window-titlebar__leading-actions">
+              {conversationOrigin && (onToggleChatDrawer || onBackToConversation) ? (
+                // The originating conversation lives in the drawer beside the
+                // live embed now, so when a drawer toggle is wired this control
+                // opens/closes that drawer (chat icon, open/close label). When
+                // no toggle is wired it falls back to the destroy-and-reconstitute
+                // "back to conversation" path (chevron, "Back to {title}"; also
+                // reachable via the app.backToConversation command).
+                <TitlebarLeadingAction
+                  className="sandbox-ui-conversation-btn"
+                  label={
+                    onToggleChatDrawer
+                      ? chatDrawerOpen
+                        ? 'Close chat drawer'
+                        : 'Open chat drawer'
+                      : `Back to ${conversationOrigin.title}`
+                  }
+                  pressed={onToggleChatDrawer ? chatDrawerOpen : undefined}
+                  onClick={
+                    onToggleChatDrawer ? onToggleChatDrawer : () => void handleBackToConversation()
+                  }
+                >
+                  {onToggleChatDrawer ? <IconChat /> : <IconChevronLeft />}
+                </TitlebarLeadingAction>
+              ) : null}
+              {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
+                // No originating conversation to return to — a plain drawer toggle.
+                <TitlebarLeadingAction
+                  className="sandbox-ui-chat-drawer-btn"
+                  label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+                  pressed={chatDrawerOpen}
+                  onClick={onToggleChatDrawer}
+                >
+                  <IconChat />
+                </TitlebarLeadingAction>
+              )}
+              {launch.kind === 'mounted' && (
+                <>
+                  <TitlebarLeadingAction
+                    className="sandbox-ui-refresh-btn"
+                    label="Refresh app content"
+                    onClick={onRefresh}
+                  >
+                    <IconRefresh />
+                  </TitlebarLeadingAction>
+                  <TitlebarLeadingAction
+                    className="sandbox-ui-copy-link-btn"
+                    label="Copy current app link"
+                    onClick={() => void onCopyDeepLink()}
+                  >
+                    <IconCopy />
+                  </TitlebarLeadingAction>
+                </>
+              )}
+            </div>,
+            titlebarLeadingContainer
           )}
-        </div>
         {showRefreshBanner && (
           <StatusBanner
             tone="error"

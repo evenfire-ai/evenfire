@@ -22,6 +22,7 @@ export type LlmProviderAttemptInsert = {
   connectionRevision: number
   connectionId?: string | null
   correlationId?: string | null
+  pluginWorkloadSdkProviderAttemptId?: string | null
 }
 
 export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
@@ -29,7 +30,73 @@ export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
   provider: typeof LLM_PROVIDER_ATTEMPT_PROVIDER
   status: LlmProviderAttemptStatus
   outcome: LlmProviderAttemptOutcome | null
+  usageInputTokens?: number | null
+  usageOutputTokens?: number | null
   createdAt: Date
+}
+
+export function isLinkedCodexUsageReady(
+  row: Pick<LlmProviderAttemptRow, 'outcome' | 'usageInputTokens' | 'usageOutputTokens'>
+): boolean {
+  return row.outcome === 'success' && row.usageInputTokens != null && row.usageOutputTokens != null
+}
+
+/**
+ * Exact token pair of a usage-ready Codex row, or null. Shared by both SDK
+ * spend-floor writers (finalize and the stale-lease sweeper) so a ready Codex
+ * row always freezes the same `exact` floor. Never fabricates 0/0: the null
+ * re-check narrows the type without a cast and keeps a partially reported
+ * usage frame out of the ledger.
+ */
+export function linkedCodexExactUsage(
+  row: Pick<LlmProviderAttemptRow, 'outcome' | 'usageInputTokens' | 'usageOutputTokens'> | null
+): { inputTokens: number; outputTokens: number } | null {
+  if (!row || !isLinkedCodexUsageReady(row)) return null
+  if (row.usageInputTokens == null || row.usageOutputTokens == null) return null
+  return { inputTokens: row.usageInputTokens, outputTokens: row.usageOutputTokens }
+}
+
+/**
+ * How long an authorized/redeemed Codex row may block SDK spend freeze.
+ * After this, usage is treated as never arriving so the sweeper can close
+ * the invocation. `finalized` is always terminal: ingest will not add tokens.
+ */
+export const CODEX_IN_FLIGHT_USAGE_GRACE_MS = 15 * 60 * 1000
+
+/** Linked Codex still owns exact usage; sweepers must not freeze SDK spend. */
+export function isLinkedCodexInFlightWithoutUsage(
+  row: Pick<
+    LlmProviderAttemptRow,
+    'status' | 'outcome' | 'usageInputTokens' | 'usageOutputTokens'
+  > & {
+    createdAt?: Date | string | null
+  },
+  nowMs = Date.now()
+): boolean {
+  if (isLinkedCodexUsageReady(row)) return false
+  // Finalized rows never receive a later usage frame. Treating usage-less
+  // success as in-flight wedges complete behind ledger_pending forever.
+  if (row.status === 'finalized') return false
+  if (row.status !== 'authorized' && row.status !== 'redeemed') return false
+  const created =
+    row.createdAt instanceof Date
+      ? row.createdAt.getTime()
+      : row.createdAt
+        ? Date.parse(String(row.createdAt))
+        : Number.NaN
+  if (!Number.isFinite(created)) {
+    // An unreadable created_at used to default to "still in flight",
+    // which wedges the invocation behind ledger_pending forever and silently
+    // hides a corrupt/absent timestamp. The grace window is undecidable here,
+    // so fail loudly instead of guessing.
+    throw new Error(
+      'llm_provider_attempts.created_at is missing or unparseable; the Codex in-flight grace cannot be evaluated'
+    )
+  }
+  if (nowMs - created > CODEX_IN_FLIGHT_USAGE_GRACE_MS) {
+    return false
+  }
+  return true
 }
 
 export async function applyLlmProviderAttemptSchema(db: DbClient): Promise<void> {
@@ -90,6 +157,50 @@ export async function applyLlmProviderAttemptConnectionIdSchema(db: DbClient): P
   `)
 }
 
+export async function applyLlmProviderAttemptSdkLinkSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE llm_provider_attempts
+      ADD COLUMN IF NOT EXISTS plugin_workload_sdk_provider_attempt_id UUID
+        REFERENCES plugin_workload_sdk_provider_attempts(id);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS llm_provider_attempts_sdk_attempt_uidx
+      ON llm_provider_attempts (plugin_workload_sdk_provider_attempt_id)
+      WHERE plugin_workload_sdk_provider_attempt_id IS NOT NULL;
+  `)
+}
+
+export async function applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    DO $$
+    DECLARE
+      constraint_name text;
+    BEGIN
+      SELECT c.conname INTO constraint_name
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY (c.conkey)
+       WHERE t.relname = 'llm_provider_attempts'
+         AND c.contype = 'f'
+         AND a.attname = 'plugin_workload_sdk_provider_attempt_id'
+       LIMIT 1;
+      IF constraint_name IS NOT NULL THEN
+        EXECUTE format(
+          'ALTER TABLE llm_provider_attempts DROP CONSTRAINT %I',
+          constraint_name
+        );
+      END IF;
+    END $$;
+
+    ALTER TABLE llm_provider_attempts
+      ADD CONSTRAINT llm_provider_attempts_plugin_workload_sdk_provider_attempt_id_fkey
+      FOREIGN KEY (plugin_workload_sdk_provider_attempt_id)
+      REFERENCES plugin_workload_sdk_provider_attempts(id)
+      ON DELETE SET NULL;
+  `)
+}
+
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempt_tickets (
@@ -120,15 +231,16 @@ export async function insertLlmProviderAttempt(
        caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
        attempt_generation, provider_attempt_index, provider, model, request_hash,
        policy_revision, policy_hash, budget_reservation_id, connection_revision,
-       connection_id, status, correlation_id
+       connection_id, plugin_workload_sdk_provider_attempt_id, status, correlation_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, 'codex-subscription', $8, $9, $10, $11, $12, $13,
-       $14, 'authorized', $15
+       $14, $15, 'authorized', $16
      )
      RETURNING id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
                attempt_generation, provider_attempt_index, provider, model, request_hash,
                policy_revision, policy_hash, budget_reservation_id, connection_revision,
-               connection_id, status, outcome, created_at`,
+               connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+               usage_input_tokens, usage_output_tokens, created_at`,
     [
       input.callerKind,
       input.hostRef,
@@ -144,10 +256,15 @@ export async function insertLlmProviderAttempt(
       input.budgetReservationId,
       input.connectionRevision,
       input.connectionId ?? null,
+      input.pluginWorkloadSdkProviderAttemptId ?? null,
       input.correlationId ?? null,
     ]
   )
   const row = result.rows[0] as Record<string, unknown>
+  return mapLlmProviderAttemptRow(row)
+}
+
+function mapLlmProviderAttemptRow(row: Record<string, unknown>): LlmProviderAttemptRow {
   return {
     id: String(row.id),
     callerKind: row.caller_kind as 'host' | 'recipe',
@@ -165,8 +282,13 @@ export async function insertLlmProviderAttempt(
     budgetReservationId: String(row.budget_reservation_id),
     connectionRevision: Number(row.connection_revision),
     connectionId: row.connection_id ? String(row.connection_id) : null,
+    pluginWorkloadSdkProviderAttemptId: row.plugin_workload_sdk_provider_attempt_id
+      ? String(row.plugin_workload_sdk_provider_attempt_id)
+      : null,
     status: row.status as LlmProviderAttemptStatus,
     outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
+    usageInputTokens: row.usage_input_tokens == null ? null : Number(row.usage_input_tokens),
+    usageOutputTokens: row.usage_output_tokens == null ? null : Number(row.usage_output_tokens),
     createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
   }
 }
@@ -199,34 +321,32 @@ export async function loadLlmProviderAttempt(
     `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
             attempt_generation, provider_attempt_index, provider, model, request_hash,
             policy_revision, policy_hash, budget_reservation_id, connection_revision,
-            connection_id, status, outcome, created_at
+            connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+            usage_input_tokens, usage_output_tokens, created_at
        FROM llm_provider_attempts
       WHERE id = $1`,
     [id]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) return null
-  return {
-    id: String(row.id),
-    callerKind: row.caller_kind as 'host' | 'recipe',
-    hostRef: String(row.host_ref),
-    recipeNamespace: (row.recipe_namespace as string | null) ?? null,
-    recipeName: (row.recipe_name as string | null) ?? null,
-    invocationId: String(row.invocation_id),
-    attemptGeneration: Number(row.attempt_generation),
-    providerAttemptIndex: Number(row.provider_attempt_index),
-    provider: LLM_PROVIDER_ATTEMPT_PROVIDER,
-    model: String(row.model),
-    requestHash: String(row.request_hash),
-    policyRevision: Number(row.policy_revision),
-    policyHash: String(row.policy_hash),
-    budgetReservationId: String(row.budget_reservation_id),
-    connectionRevision: Number(row.connection_revision),
-    connectionId: row.connection_id ? String(row.connection_id) : null,
-    status: row.status as LlmProviderAttemptStatus,
-    outcome: (row.outcome as LlmProviderAttemptOutcome | null) ?? null,
-    createdAt: row.created_at instanceof Date ? row.created_at : new Date(String(row.created_at)),
-  }
+  return row ? mapLlmProviderAttemptRow(row) : null
+}
+
+export async function loadLlmProviderAttemptBySdkAttemptId(
+  db: DbClient,
+  pluginWorkloadSdkProviderAttemptId: string
+): Promise<LlmProviderAttemptRow | null> {
+  const result = await db.query(
+    `SELECT id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
+            attempt_generation, provider_attempt_index, provider, model, request_hash,
+            policy_revision, policy_hash, budget_reservation_id, connection_revision,
+            connection_id, plugin_workload_sdk_provider_attempt_id, status, outcome,
+            usage_input_tokens, usage_output_tokens, created_at
+       FROM llm_provider_attempts
+      WHERE plugin_workload_sdk_provider_attempt_id = $1`,
+    [pluginWorkloadSdkProviderAttemptId]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapLlmProviderAttemptRow(row) : null
 }
 
 export async function lockLlmProviderAttemptTicket(

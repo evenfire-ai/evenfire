@@ -5,8 +5,8 @@
 // dashboard shell renders, and exercises one filter change to prove the
 // dashboard is wired up. Creates no cluster resources.
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder"). The headful Chromium, viewport, slowMo, and video recording are
+// Contract: docs/testing/control-ui-headful-journeys.md. The headful Chromium,
+// viewport, slowMo, and video recording are
 // all managed by playwright.qa-recorder.config.ts via the built-in `page`
 // fixture — this spec never launches a browser itself.
 import { expect, test } from '@playwright/test'

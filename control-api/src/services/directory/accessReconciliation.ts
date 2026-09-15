@@ -182,7 +182,7 @@ export async function listActiveContextIds(gateway: K8sGateway): Promise<string[
   const contexts = Array.isArray(listed) ? (listed as ContextResource[]) : []
   return normalizeUnique(
     contexts
-      .map(context => context?.metadata?.name)
+      .flatMap(context => [context?.metadata?.name, context?.spec?.contextId])
       .filter((value): value is string => typeof value === 'string')
   )
 }

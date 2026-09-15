@@ -7,7 +7,13 @@ describe("transactional recursive copy publication", () => {
     const before = new Map(db.resources);
     const copied = await writes.copy(input);
     expect(copied).toMatchObject({ requestId: input.requestId, objectCount: 4, fileCount: 2, folderCount: 2, totalBytes: 10n });
-    expect(copied.root).toMatchObject({ parentResourceId: DEST, name: "source", pathCache: "/archive/source", version: 0 });
+    expect(copied.root).toMatchObject({
+      parentResourceId: DEST,
+      name: "source",
+      pathCache: "/archive/source",
+      version: 0,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    });
     const added = [...db.resources.values()].filter(row => !before.has(String(row.resource_id)));
     expect(added).toHaveLength(4);
     expect(new Set(added.map(row => row.resource_id)).size).toBe(4);

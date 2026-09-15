@@ -498,8 +498,8 @@ marker_bindings=(
   "$MCP_READINESS_GATE" 'Context watch event: MODIFIED for ${CONTEXT_NAME}'
   "$HCC_K8S_CLIENT" 'Context watch event: ${type} for ${context.name}'
 
-  "$MCP_READINESS_GATE" '[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []'
-  "$HCC_NETWORK_POLICY_RECONCILER" 'Reconciling context "${contextId}" — allowed servers: [${allowedServers.join('
+  "$MCP_READINESS_GATE" '.msg == "reconciling context network policies"'
+  "$HCC_NETWORK_POLICY_RECONCILER" "hccLogger.info('reconciling context network policies', { contextId, allowedServers })"
 
   "$MCP_READINESS_GATE" "NETPOL_INITIAL_FAILED_MARKER='Initial NetworkPolicy background reconciliation failed:'"
   "$HCC_K8S_CLIENT" 'Initial NetworkPolicy background reconciliation failed:'
@@ -577,6 +577,75 @@ if [ -z "$uninventoried_markers" ]; then
 else
   printf '%s' "$uninventoried_markers" >&2
   fail "an e2e gate defines a *_MARKER absent from marker_bindings (drift fence would miss it)"
+fi
+
+# The initial Context witness must come from the structured HCC event for the
+# exact fixture Context, not a substring in an unrelated event or old text log.
+# These are local log fixtures; kctl never contacts a cluster.
+initial_empty_context_function="$(
+  sed -n '/^hcc_initial_empty_context_observed() {$/,/^}$/p' "$MCP_READINESS_GATE"
+)"
+run_initial_empty_context_case() (
+  local mode=$1
+  NEW_HCC_POD=hcc-pod
+  HCC_NS=control-plane
+  CONTEXT_ID='fixture-context'
+  MOCK_CONTEXT_LOG="$(jq -cn --arg context "$CONTEXT_ID" '{
+    svc:"host-context-controller",level:"info",
+    msg:"reconciling context network policies",contextId:$context,allowedServers:[]
+  }')"
+  case "$mode" in
+    exact) ;;
+    mixed) MOCK_CONTEXT_LOG="unstructured bootstrap line
+not-json
+null
+42
+[]
+$MOCK_CONTEXT_LOG
+trailing diagnostic" ;;
+    reordered) MOCK_CONTEXT_LOG="$(jq '{allowedServers,contextId,msg,level,svc}' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    wrong-context) MOCK_CONTEXT_LOG="$(jq '.contextId="another-context"' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    nonempty) MOCK_CONTEXT_LOG="$(jq '.allowedServers=["server-a"]' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    missing-servers) MOCK_CONTEXT_LOG="$(jq 'del(.allowedServers)' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    null-servers) MOCK_CONTEXT_LOG="$(jq '.allowedServers=null' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    wrong-service) MOCK_CONTEXT_LOG="$(jq '.svc="another-service"' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    wrong-event) MOCK_CONTEXT_LOG="$(jq '.msg="context reconciliation failed"' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    nested) MOCK_CONTEXT_LOG="$(jq '{detail:.}' <<<"$MOCK_CONTEXT_LOG" | jq -c .)" ;;
+    legacy) MOCK_CONTEXT_LOG="[NetPol] Reconciling context \"${CONTEXT_ID}\" — allowed servers: []" ;;
+    empty) MOCK_CONTEXT_LOG='' ;;
+    api-error) ;;
+    no-pod) NEW_HCC_POD='' ;;
+    *) return 1 ;;
+  esac
+  kctl() {
+    [[ "$*" == 'logs pod/hcc-pod -n control-plane -c host-context-controller' ]] || return 1
+    printf '%s\n' "$MOCK_CONTEXT_LOG"
+    [ "$mode" != api-error ]
+  }
+  [ -n "$initial_empty_context_function" ] || return 1
+  eval "$initial_empty_context_function"
+  hcc_initial_empty_context_observed
+)
+for context_log_case in exact mixed reordered; do
+  if run_initial_empty_context_case "$context_log_case"; then
+    pass "initial Context witness accepts $context_log_case structured HCC evidence"
+  else
+    fail "initial Context witness rejects $context_log_case structured HCC evidence"
+  fi
+done
+for context_log_case in wrong-context nonempty missing-servers null-servers wrong-service wrong-event nested legacy empty api-error no-pod; do
+  if run_initial_empty_context_case "$context_log_case"; then
+    fail "initial Context witness accepts $context_log_case evidence"
+  else
+    pass "initial Context witness rejects $context_log_case evidence"
+  fi
+done
+initial_context_wait="$(sed -n '/initial NetworkPolicy pass to reconcile the fixture/,/initial NetworkPolicy pass never reconciled/p' "$MCP_READINESS_GATE")"
+if [[ "$initial_context_wait" == *'hcc_initial_empty_context_observed'* ]] &&
+   [[ "$initial_context_wait" != *'hcc_log_contains'* ]]; then
+  pass "initial Context readiness wait uses the structured identity-bound witness"
+else
+  fail "initial Context readiness wait does not use the structured identity-bound witness"
 fi
 
 fixture_mcp_runtime_absent_function="$(

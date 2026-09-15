@@ -260,7 +260,14 @@ export class BasicSafety implements Safety {
     return wrapped
   }
 
-  private sanitizeFreeformContent(
+  /**
+   * The core redaction primitive: strip injection patterns, well-known secret
+   * shapes, and operator-configured secret values by literal match. Public so
+   * callers that must redact WITHOUT the per-call logging of `sanitizeOutput`
+   * (e.g. the session auto-title derivation and list projection, spec 15) can
+   * reuse the exact same secret list. Does NOT log — the caller decides.
+   */
+  sanitizeFreeformContent(
     content: string,
     options: {
       secretWarning: string

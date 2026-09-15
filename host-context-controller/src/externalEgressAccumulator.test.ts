@@ -153,4 +153,52 @@ describe('accumulateHostExactHostEgress — issue #299 sliding window (HCC)', ()
     expect(r.annotations[STATE_ANNOTATION]).toBeTruthy()
     expect(r.annotations[RESOLVED_AT_ANNOTATION]).toBe(new Date(T0).toISOString())
   })
+
+  it('preserves resolved-at on a DNS failure instead of inventing a fresh resolution time', () => {
+    const r1 = accumulateHostExactHostEgress(baseInput({ resolution: ok(['140.82.112.3'], 15) }))
+    const r2 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: { kind: 'transient' },
+        previousAnnotations: r1.annotations,
+        now: T0 + 400_000,
+      })
+    )
+    expect(r2.annotations[RESOLVED_AT_ANNOTATION]).toBe(new Date(T0).toISOString())
+    expect(r2.resolvedAt).toBe(new Date(T0).toISOString())
+  })
+
+  it('derives resolved-at from proven structured state when the legacy timestamp is absent', () => {
+    const r1 = accumulateHostExactHostEgress(baseInput({ resolution: ok(['140.82.112.3'], 15) }))
+    const previousAnnotations = { ...r1.annotations }
+    delete previousAnnotations[RESOLVED_AT_ANNOTATION]
+    const r2 = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: { kind: 'transient' },
+        previousAnnotations,
+        now: T0 + 400_000,
+      })
+    )
+    expect(r2.resolvedAt).toBe(new Date(T0).toISOString())
+    expect(r2.annotations[RESOLVED_AT_ANNOTATION]).toBe(new Date(T0).toISOString())
+  })
+
+  it('does not synthesize resolved-at for a bootstrap failure', () => {
+    const r = accumulateHostExactHostEgress(baseInput({ resolution: { kind: 'transient' } }))
+    expect(r.annotations[RESOLVED_AT_ANNOTATION]).toBeUndefined()
+    expect(r.resolvedAt).toBeUndefined()
+  })
+
+  it('does not claim a DNS timestamp for legacy portless state during a failure', () => {
+    const r = accumulateHostExactHostEgress(
+      baseInput({
+        resolution: { kind: 'transient' },
+        previousAnnotations: {
+          [TARGETS_ANNOTATION]: 'api.github.com=140.82.112.9/32',
+        },
+      })
+    )
+    expect(r.cidrs).toEqual(['140.82.112.9/32'])
+    expect(r.resolvedAt).toBeUndefined()
+    expect(r.annotations[RESOLVED_AT_ANNOTATION]).toBeUndefined()
+  })
 })

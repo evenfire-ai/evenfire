@@ -96,7 +96,15 @@ export function formatApiError(res: Response, text: string): Error {
   try {
     const parsed = JSON.parse(text) as { error?: unknown; message?: unknown }
     if (parsed && typeof parsed === 'object') parsedBody = parsed as Record<string, unknown>
-    detail = String(parsed.message || parsed.error || text)
+    const nestedError =
+      parsed.error && typeof parsed.error === 'object'
+        ? (parsed.error as Record<string, unknown>)
+        : null
+    detail =
+      (typeof parsed.message === 'string' && parsed.message) ||
+      (typeof nestedError?.message === 'string' && nestedError.message) ||
+      (typeof parsed.error === 'string' && parsed.error) ||
+      text
   } catch {
     detail = text
   }
@@ -133,8 +141,16 @@ export function formatApiError(res: Response, text: string): Error {
   // render structured, actionable errors (e.g. unpriced_models, price_in_use_by_budget)
   // instead of the generic message string.
   if (parsedBody) {
+    const nestedError =
+      parsedBody.error && typeof parsedBody.error === 'object'
+        ? (parsedBody.error as Record<string, unknown>)
+        : null
     ;(error as Error & { code?: string }).code =
-      typeof parsedBody.error === 'string' ? (parsedBody.error as string) : undefined
+      typeof parsedBody.error === 'string'
+        ? parsedBody.error
+        : typeof nestedError?.code === 'string'
+          ? nestedError.code
+          : undefined
     ;(error as Error & { body?: Record<string, unknown> }).body = parsedBody
   }
   return error
@@ -1436,6 +1452,13 @@ export async function createMcpServer(payload: {
   }
 }) {
   return apiSend('POST', '/api/v1/admin/mcp-servers', payload) as Promise<McpServerResource>
+}
+
+export async function deleteMcpServer(name: string) {
+  return apiSend('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`) as Promise<{
+    name: string
+    namespace?: string
+  }>
 }
 
 export async function getMcpServer(name: string) {
@@ -3658,6 +3681,11 @@ export type PluginWorkloadSdkQuotaLimits = {
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /**
+   * @deprecated No longer enforced; the Codex ChatGPT wire discards
+   * max_output_tokens, so no layer capped the response by token count. Still
+   * returned on legacy grants; never sent by this UI.
+   */
   maxOutputTokens?: number
 }
 
@@ -3720,6 +3748,8 @@ export type PluginWorkloadSdkGrantInput = {
   // Input type omits the deprecated per-run keys (issue #348): this UI never
   // sends them and the server strips them on write. The response
   // PluginWorkloadSdkQuotaLimits still carries them for legacy grants.
+  // `maxOutputTokens` is NOT among them — it is a live per-grant
+  // ceiling on API-key providers.
   quotaLimits?: Omit<PluginWorkloadSdkQuotaLimits, 'maxRequestsPerRun' | 'maxNotificationsPerRun'>
   modelPolicies?: Record<string, PluginWorkloadSdkModelPolicy>
   promptTargets?: PluginWorkloadSdkPromptTarget[]

@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconButton, StatusBanner } from '@components/Common'
+import { Button, StatusBanner } from '@components/Common'
 import { IconClose, IconCopy } from '@components/SidebarNav/icons'
+import { useWorkspaceModalStyle } from '@hooks/useWorkspaceModalStyle'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewProps } from './types'
 
@@ -19,6 +20,7 @@ export function GfsImagePreview({
   const [sourceBlob, setSourceBlob] = useState<Blob | null>(null)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle')
+  const backdropStyle = useWorkspaceModalStyle()
   const copyResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const mountedRef = useRef(true)
   const onDownloadErrorRef = useRef(onDownloadError)
@@ -116,6 +118,7 @@ export function GfsImagePreview({
     <div
       className="da-gfs-image-preview-modal"
       role="presentation"
+      style={backdropStyle}
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose()
       }}
@@ -129,26 +132,32 @@ export function GfsImagePreview({
         <header className="da-gfs-image-preview-dialog__header">
           <h3 id={titleId}>{fileName}</h3>
           <div className="da-gfs-image-preview-dialog__header-actions">
-            <IconButton
-              label={
+            <Button
+              className="da-gfs-image-preview-dialog__copy"
+              aria-label={
                 copyState === 'copied' ? 'Copied image to clipboard' : 'Copy image to clipboard'
               }
+              color="neutral"
               disabled={!sourceBlob}
               onClick={() => void copyImageToClipboard()}
-              size="sm"
               variant="ghost"
             >
-              <IconCopy />
-            </IconButton>
-            <IconButton
+              <IconCopy width={18} height={18} />
+              <span className="da-gfs-preview-button__label">
+                {copyState === 'copied' ? 'Copied' : 'Copy'}
+              </span>
+            </Button>
+            <Button
+              className="da-gfs-image-preview-dialog__close"
+              data-preview-close
               ref={closeButtonRef}
-              label="Close image preview"
+              aria-label="Close image preview"
+              color="neutral"
               onClick={onClose}
-              size="sm"
               variant="ghost"
             >
-              <IconClose />
-            </IconButton>
+              <IconClose width={18} height={18} />
+            </Button>
           </div>
         </header>
         <div className="da-gfs-image-preview-dialog__body">

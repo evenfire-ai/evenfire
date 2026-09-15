@@ -210,6 +210,15 @@ const HOST_STATUS_SCOPES: RpcScope[] = HOST_OBSERVABILITY_SCOPES.status
 const HOST_ACTIVITY_SCOPES: RpcScope[] = HOST_OBSERVABILITY_SCOPES.activity
 const HOST_SESSION_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.session
 const HOST_MODEL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.model
+// Spec 15 Fase B — explicit user rename. A dedicated WRITE scope, distinct from
+// `host:session:read` (so a read/navigation token can never rename), and
+// DELIBERATELY NOT wake-eligible: it carries no HOST_WAKE_SCOPE. Rename is
+// optimistic local-first and reconciles on the next listSessions poll, and
+// rpc-proxy's PATCH route is non-wake too — granting wake here would turn a
+// rename into a cheap "wake my pod" primitive. Kept OUT of
+// HOST_FINITE_OPERATION_SCOPES (whose every entry carries wake, asserted by
+// appService.wakeScopeMatrix.issue791.test.ts) for exactly that reason.
+const HOST_SESSION_TITLE_SCOPES: RpcScope[] = ['host:session:write']
 const HOST_ARTIFACT_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.artifact
 const HOST_APPROVAL_SCOPES: RpcScope[] = HOST_FINITE_OPERATION_SCOPES.approval
 const MCP_SERVERS_LIST_SCOPES: RpcScope[] = ['mcp:servers:list']
@@ -1954,8 +1963,9 @@ export class AppService {
   /**
    * Delegate a grant to one or more subjects (each subjectKey → structured
    * subject) in a single atomic bulk PUT. No-escalation is server-side.
-   * `inherit` is renderer-driven (agent grants on directories default it ON so
-   * contained files are covered); omitted means the client's historical `false`.
+   * `inherit` is renderer-driven; omitting it defaults the wire body to
+   * `true` so a folder grant always covers the folder's contents (the
+   * historical `false` default is what produced unreadable children).
    */
   async grantGfs(
     resourceId: string,
@@ -4398,6 +4408,58 @@ export class AppService {
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_MODEL_SCOPES, effectiveHostRefs)
     return this.rpcClient.setHostModel(rpc.token, targetHostRef, chatId, targetModel)
+  }
+
+  /**
+   * Spec 15 Fase B — propagates an explicit user rename to the server. Mints a
+   * token carrying the dedicated, NON-wake `host:session:write` scope (see
+   * {@link HOST_SESSION_TITLE_SCOPES}). The raw title is never logged. Errors
+   * (404 missing/foreign/channel, 400 invalid, 403 access) throw so the renderer
+   * can drive the pending-rename queue (§2.5); a bounded refresh-retry mirrors
+   * {@link getDesktopStatus} for the 401/403-missing-scope token-lapse case.
+   */
+  async renameSession(
+    hostRef: string,
+    agent: string,
+    chatId: string,
+    title: string
+  ): Promise<{ title: string }> {
+    const targetHostRef = String(hostRef || '').trim()
+    const targetAgent = String(agent || '').trim()
+    const targetChatId = String(chatId || '').trim()
+    if (!targetHostRef || !targetAgent || !targetChatId) {
+      throw new Error('hostRef, agent, and chatId are required')
+    }
+    // A rename always targets exactly one host, so the write-scope token is minted
+    // for that single hostRef only — never a caller-supplied fleet list, which would
+    // widen an intentionally narrow token. (Unlike setHostModel, which is multi-host.)
+    const effectiveHostRefs = [targetHostRef]
+    const rpc = await this.issueRpcTokenForHostRefs(HOST_SESSION_TITLE_SCOPES, effectiveHostRefs)
+    try {
+      return await this.rpcClient.renameSession(
+        rpc.token,
+        targetHostRef,
+        targetAgent,
+        targetChatId,
+        title
+      )
+    } catch (error) {
+      if (AppService.shouldRefreshRpcToken(error)) {
+        this.rpcTokenManager.clear()
+        const retried = await this.issueRpcTokenForHostRefs(
+          HOST_SESSION_TITLE_SCOPES,
+          effectiveHostRefs
+        )
+        return this.rpcClient.renameSession(
+          retried.token,
+          targetHostRef,
+          targetAgent,
+          targetChatId,
+          title
+        )
+      }
+      throw error
+    }
   }
 
   getTokenMetadata(): TokenMetadata {

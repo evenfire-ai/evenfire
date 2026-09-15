@@ -96,7 +96,8 @@ test.describe('optional QA recorder: Control UI marketplace API keys', () => {
 
       // Revoke from the row, confirming via the danger dialog.
       const row = page.locator('table.cu-table tr', { hasText: description })
-      await row.getByRole('button', { name: 'Revoke', exact: true }).click()
+      await row.getByRole('button', { name: /Actions for API key/ }).click()
+      await page.getByRole('menuitem', { name: 'Revoke', exact: true }).click()
       const confirmDialog = page.getByRole('alertdialog', { name: 'Revoke API key' })
       await expect(confirmDialog).toBeVisible({ timeout: 20_000 })
       await confirmDialog.getByRole('button', { name: 'Revoke', exact: true }).click()

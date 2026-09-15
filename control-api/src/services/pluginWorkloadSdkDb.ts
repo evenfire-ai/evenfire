@@ -3,6 +3,17 @@ import { type DbClient, type DbTransactionClient, pool, withTransaction } from '
 import type { AdministrativeEventSubmitterPrincipalV1 } from '../middleware/tracingSubmitterAuth.js'
 import { stableStringify } from '../utils/stableStringify.js'
 import {
+  type LlmProviderAttemptRow,
+  isLinkedCodexInFlightWithoutUsage,
+  linkedCodexExactUsage,
+  loadLlmProviderAttemptBySdkAttemptId,
+} from './llmProviderAttemptStore.js'
+import {
+  insertSpendOutcomeFloor,
+  isOauthBrokerProvider,
+  spendFloor,
+} from './pluginWorkloadSdkSpendLedger.js'
+import {
   type ControlApiPermissionChange,
   appendControlApiPermissionEventsInTransaction,
 } from './tracing/controlApiPermissionEvents.js'
@@ -156,10 +167,22 @@ export function getPromptBridgeAttemptLeaseSeconds(): number {
 const IDEMPOTENCY_TTL_HOURS = 24
 
 export interface PluginWorkloadSdkQuotaLimits {
+  /** Deprecated (issue #348) — accepted and validated on the wire, never persisted. */
   maxRequestsPerRun?: number
+  /** Deprecated (issue #348) — accepted and validated on the wire, never persisted. */
   maxNotificationsPerRun?: number
   maxInvocationsPerMinute?: number
   maxNotificationsPerMinute?: number
+  /**
+   * Per-grant output ceiling. PERSISTED and enforced: it lands as `max_tokens`
+   * on API-key providers; codex-subscription cannot bind it on the ChatGPT
+   * wire and is bounded there by the contract limit instead. See
+   * `AuthorizedPromptBridge.maxOutputTokens`.
+   *
+   * This said "never persisted" after the per-grant ceiling had already been
+   * reactivated. A reader trusting that comment would drop the persistence or the read
+   * and hand the regression straight back.
+   */
   maxOutputTokens?: number
 }
 
@@ -1493,6 +1516,84 @@ export async function getPluginWorkloadSdkProviderAttempt(
   return row ? mapProviderAttemptRow(row) : null
 }
 
+export async function lockPluginWorkloadSdkRecipe(
+  db: DbClient,
+  recipeNamespace: string,
+  recipeName: string
+): Promise<void> {
+  const recipeLock = `plugin_workload_sdk:${recipeNamespace}/${recipeName}`
+  await db.query(`SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, [recipeLock])
+}
+
+export async function getPluginWorkloadSdkProviderAttemptForUpdate(
+  id: string,
+  db: DbClient
+): Promise<PluginWorkloadSdkProviderAttempt | null> {
+  const result = await db.query(
+    `SELECT * FROM plugin_workload_sdk_provider_attempts WHERE id = $1 FOR UPDATE`,
+    [id]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapProviderAttemptRow(row) : null
+}
+
+export async function pluginWorkloadSdkSpendOutcomeExists(
+  providerAttemptId: string,
+  db: DbClient
+): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1 FROM plugin_workload_sdk_spend_outcomes WHERE provider_attempt_id = $1`,
+    [providerAttemptId]
+  )
+  return result.rows.length > 0
+}
+
+/**
+ * JTI-free reserved → in_progress for Codex authorize-link. Does not write
+ * credential_jti. The secret-ticket path still promotes through
+ * registerPluginWorkloadSdkCredentialTicketJti.
+ */
+export async function promoteReservedOauthBrokerProviderAttempt(
+  input: {
+    id: string
+    invocationId: string
+    recipeNamespace: string
+    recipeName: string
+    attemptGeneration: number
+    attemptIndex: number
+    model: string
+    targetRef: string
+  },
+  db: DbClient
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE plugin_workload_sdk_provider_attempts
+        SET status = 'in_progress'
+      WHERE id = $1
+        AND invocation_id = $2
+        AND recipe_namespace = $3
+        AND recipe_name = $4
+        AND attempt_generation = $5
+        AND attempt_index = $6
+        AND provider = 'codex-subscription'
+        AND model = $7
+        AND target_ref = $8
+        AND status = 'reserved'
+        AND credential_jti IS NULL`,
+    [
+      input.id,
+      input.invocationId,
+      input.recipeNamespace,
+      input.recipeName,
+      input.attemptGeneration,
+      input.attemptIndex,
+      input.model,
+      input.targetRef,
+    ]
+  )
+  return (result.rowCount ?? 0) === 1
+}
+
 export async function markPluginWorkloadSdkProviderAttemptStatus(input: {
   id: string
   invocationId: string
@@ -2045,21 +2146,30 @@ export async function failStaleInvocationsInTransaction(
   db: DbClient
 ): Promise<number> {
   const timeoutSeconds = Math.max(1, Math.floor(olderThanSeconds))
-  const result = await db.query(
-    `UPDATE plugin_workload_sdk_invocations
-       SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
-         WHERE status = 'in_progress'
-         AND (
-           (lease_expires_at IS NOT NULL AND lease_expires_at < now())
-           OR (
-             lease_expires_at IS NULL
-             AND updated_at < now() - interval '1 second' * $1
-           )
-         )
-       RETURNING id, attempt_generation`,
+  const stale = await db.query(
+    `SELECT id, attempt_generation, recipe_namespace, recipe_name
+       FROM plugin_workload_sdk_invocations
+      WHERE status = 'in_progress'
+        AND (
+          (lease_expires_at IS NOT NULL AND lease_expires_at < now())
+          OR (
+            lease_expires_at IS NULL
+            AND updated_at < now() - interval '1 second' * $1
+          )
+        )
+      FOR UPDATE`,
     [timeoutSeconds]
   )
-  for (const row of result.rows as Array<{ id: string; attempt_generation: number }>) {
+  let closed = 0
+  for (const row of stale.rows as Array<{
+    id: string
+    attempt_generation: number
+    recipe_namespace: string
+    recipe_name: string
+  }>) {
+    // Invocation FOR UPDATE is the fence. Do not take the recipe advisory lock
+    // here: finalize takes advisory first, then the invocation row. Row-then-
+    // advisory deadlocks the sweeper/finalizer interleaving.
     const physicalAttempts = await db.query(
       `SELECT id, recipe_namespace, recipe_name, attempt_generation,
                 attempt_index, target_ref, provider, model, credential_slot
@@ -2070,30 +2180,63 @@ export async function failStaleInvocationsInTransaction(
           FOR UPDATE`,
       [row.id, row.attempt_generation]
     )
+    let linkedCodexInFlight = false
+    const linkedByAttempt = new Map<string, LlmProviderAttemptRow>()
+    for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
+      const provider = String(attempt.provider)
+      if (!isOauthBrokerProvider(provider)) continue
+      const linked = await loadLlmProviderAttemptBySdkAttemptId(db, String(attempt.id))
+      if (!linked) continue
+      linkedByAttempt.set(String(attempt.id), linked)
+      if (isLinkedCodexInFlightWithoutUsage(linked)) {
+        linkedCodexInFlight = true
+        break
+      }
+    }
+    // Codex still owns exact usage within the in-flight grace. Leave the
+    // invocation leased so finalize can 409 ledger_pending. After the grace,
+    // or once Codex finalizes without tokens, unknown spend is the honest close.
+    if (linkedCodexInFlight) continue
+
+    const marked = await db.query(
+      `UPDATE plugin_workload_sdk_invocations
+          SET status = 'provider_unavailable', updated_at = now(), completed_at = now()
+        WHERE id = $1
+          AND attempt_generation = $2
+          AND status = 'in_progress'
+        RETURNING id`,
+      [row.id, row.attempt_generation]
+    )
+    if ((marked.rowCount ?? 0) !== 1) continue
+
     for (const attempt of physicalAttempts.rows as Array<Record<string, unknown>>) {
       // The host has disappeared, so no current JWT can prove a host_ref.
-      // Persist an unattributed unknown outcome instead of inventing one
-      // from recipe names; the physical-attempt PK makes this idempotent.
-      await db.query(
-        `INSERT INTO plugin_workload_sdk_spend_outcomes
-             (provider_attempt_id, invocation_id, recipe_namespace, recipe_name,
-              attempt_generation, attempt_index, target_ref, host_ref, provider, model,
-              credential_slot, outcome, reason, input_tokens, output_tokens, usage_request_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, $8, $9, $10, 'unknown',
-                   'stale_lease', NULL, NULL, NULL)
-           ON CONFLICT (provider_attempt_id) DO NOTHING`,
-        [
-          String(attempt.id),
-          row.id,
-          String(attempt.recipe_namespace),
-          String(attempt.recipe_name),
-          Number(attempt.attempt_generation),
-          Number(attempt.attempt_index),
-          String(attempt.target_ref),
-          String(attempt.provider),
-          String(attempt.model),
-          String(attempt.credential_slot),
-        ]
+      // Persist an unattributed row instead of inventing a host identity from
+      // recipe names; the physical-attempt PK makes this idempotent.
+      //
+      // Persist the best floor provable without a JWT: exact when the linked
+      // Codex row already carries usage, unknown otherwise. Finalize derives
+      // exact at read time for the in-flight residue that lands later.
+      const exact = linkedCodexExactUsage(linkedByAttempt.get(String(attempt.id)) ?? null)
+      await insertSpendOutcomeFloor(
+        db,
+        {
+          providerAttemptId: String(attempt.id),
+          invocationId: row.id,
+          recipeNamespace: String(attempt.recipe_namespace),
+          recipeName: String(attempt.recipe_name),
+          attemptGeneration: Number(attempt.attempt_generation),
+          attemptIndex: Number(attempt.attempt_index),
+          targetRef: String(attempt.target_ref),
+          hostRef: null,
+          provider: String(attempt.provider),
+          model: String(attempt.model),
+          credentialSlot: String(attempt.credential_slot),
+          reason: 'stale_lease',
+          // The sweeper never ingests a usage_events row.
+          usageRequestId: null,
+        },
+        exact ? { outcome: 'exact', ...exact } : spendFloor('unknown')
       )
     }
     await db.query(
@@ -2110,8 +2253,9 @@ export async function failStaleInvocationsInTransaction(
             AND status IN ('reserved', 'in_progress')`,
       [row.id, row.attempt_generation]
     )
+    closed += 1
   }
-  return result.rowCount ?? 0
+  return closed
 }
 
 export interface ListInvocationsFilter {
@@ -2156,43 +2300,61 @@ export async function listInvocations(
  * rows are pruned — an in_progress row past TTL is first failed by
  * failStaleInvocations.
  */
-export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number> {
-  return withTransaction(async db => {
-    // Child receipts and one-shot JTIs have no useful life once the parent
-    // idempotency reservation expires. Delete them in one transaction so
-    // usage and ticket lookups cannot observe orphaned authority.
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_credential_ticket_jtis jt
+export async function prunePluginWorkloadSdkExpiredIdempotencyInTransaction(
+  db: DbClient
+): Promise<number> {
+  // Child receipts and one-shot JTIs have no useful life once the parent
+  // idempotency reservation expires. Delete them in one transaction so
+  // usage and ticket lookups cannot observe orphaned authority.
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_credential_ticket_jtis jt
         USING plugin_workload_sdk_invocations inv
        WHERE jt.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_invocation_attempts attempts
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_invocation_attempts attempts
         USING plugin_workload_sdk_invocations inv
        WHERE attempts.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    await db.query(
-      `DELETE FROM plugin_workload_sdk_provider_attempts attempts
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  // Unlink the durable Codex ledger before deleting SDK attempt rows.
+  // 0108 also SET NULLs the FK on delete; this UPDATE keeps prune from
+  // depending on that constraint name and never CASCADE-deletes spend.
+  await db.query(
+    `UPDATE llm_provider_attempts a
+          SET plugin_workload_sdk_provider_attempt_id = NULL
+         FROM plugin_workload_sdk_provider_attempts attempts
+         JOIN plugin_workload_sdk_invocations inv
+           ON attempts.invocation_id = inv.id
+        WHERE a.plugin_workload_sdk_provider_attempt_id = attempts.id
+          AND inv.created_at < now() - interval '1 hour' * $1
+          AND inv.status <> 'in_progress'`,
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  await db.query(
+    `DELETE FROM plugin_workload_sdk_provider_attempts attempts
         USING plugin_workload_sdk_invocations inv
        WHERE attempts.invocation_id = inv.id
          AND inv.created_at < now() - interval '1 hour' * $1
          AND inv.status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    const result = await db.query(
-      `DELETE FROM plugin_workload_sdk_invocations
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  const result = await db.query(
+    `DELETE FROM plugin_workload_sdk_invocations
        WHERE created_at < now() - interval '1 hour' * $1
          AND status <> 'in_progress'`,
-      [IDEMPOTENCY_TTL_HOURS]
-    )
-    return result.rowCount ?? 0
-  })
+    [IDEMPOTENCY_TTL_HOURS]
+  )
+  return result.rowCount ?? 0
+}
+
+export async function prunePluginWorkloadSdkExpiredIdempotency(): Promise<number> {
+  return withTransaction(prunePluginWorkloadSdkExpiredIdempotencyInTransaction)
 }
 
 // ─── Quota counters (historical-only, issue #348) ────────────────────────

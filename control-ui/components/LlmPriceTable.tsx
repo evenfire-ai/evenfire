@@ -1,6 +1,13 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
+import {
+  DataTable,
+  TableRow,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import type { LlmModelPrice, UnpricedModel } from '@lib/api'
 import { getProviderDisplayLabel } from '@lib/llm'
 import type { LlmPriceTableProps } from './LlmPriceTable.types'
@@ -9,7 +16,6 @@ import { MissingPriceWarning } from './MissingPriceWarning'
 import { RowActionsMenu } from './RowActionsMenu'
 import { SectionSearchInput } from './SectionSearchInput'
 import { IconPrice } from './Sidebar/icons'
-import { SkeletonTableRows } from './SkeletonTableRows'
 import { TableHeaderRow } from './TableHeaderRow'
 import type { TableHeaderColumn } from './TableHeaderRow/types'
 import { TablePanelHeader } from './TablePanelHeader'
@@ -96,6 +102,56 @@ export function LlmPriceTable({
     )
   }, [missingPriceItems, normalizedSearch])
 
+  type PriceSortKey =
+    | 'provider'
+    | 'model'
+    | 'input'
+    | 'output'
+    | 'cacheRead'
+    | 'cacheWrite'
+    | 'currency'
+    | 'enabled'
+  type PriceTableRow =
+    | { kind: 'priced'; price: LlmModelPrice }
+    | { kind: 'missing'; item: UnpricedModel }
+  const tableRows = useMemo<PriceTableRow[]>(
+    () => [
+      ...filteredPrices.map(price => ({ kind: 'priced' as const, price })),
+      ...filteredMissingPriceItems.map(item => ({ kind: 'missing' as const, item })),
+    ],
+    [filteredMissingPriceItems, filteredPrices]
+  )
+  const tableSort = useTableSort<PriceTableRow, PriceSortKey>({
+    rows: tableRows,
+    defaultKey: 'provider',
+    identity: row =>
+      row.kind === 'priced' ? row.price.id : `missing/${row.item.provider ?? ''}/${row.item.model}`,
+    accessors: {
+      provider: row =>
+        row.kind === 'priced'
+          ? getProviderDisplayLabel(row.price.provider)
+          : row.item.provider
+            ? getProviderDisplayLabel(row.item.provider)
+            : 'Any provider',
+      model: row => (row.kind === 'priced' ? row.price.model : row.item.model),
+      input: row => (row.kind === 'priced' ? row.price.input_token_price : null),
+      output: row => (row.kind === 'priced' ? row.price.output_token_price : null),
+      cacheRead: row => (row.kind === 'priced' ? row.price.cache_read_token_price : null),
+      cacheWrite: row => (row.kind === 'priced' ? row.price.cache_write_token_price : null),
+      currency: row => (row.kind === 'priced' ? row.price.currency : null),
+      enabled: row => (row.kind === 'priced' ? row.price.enabled : false),
+    },
+  })
+  const columns = PRICE_COLUMNS.map(column =>
+    column.key === 'actions'
+      ? column
+      : {
+          ...column,
+          activeDirection: tableSort.key === column.key ? tableSort.direction : null,
+          onSort: () => tableSort.sortBy(column.key as PriceSortKey),
+        }
+  )
+
   const visibleRowCount = filteredPrices.length + filteredMissingPriceItems.length
   const isInitialLoad = Boolean(loading) && items.length === 0
 
@@ -109,60 +165,111 @@ export function LlmPriceTable({
           </>
         }
         subtitle="Per-model token prices that back cost-unit budgets. Prices are per 1M tokens."
-        actions={
-          <>
-            <SectionSearchInput
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder="Search prices"
-              ariaLabel="Search prices"
-              disabled={isInitialLoad}
-            />
-            <button
-              type="button"
-              className="cu-btn cu-btn--icon cu-btn--toolbar"
-              onClick={() => void onRefresh()}
-              disabled={refreshing || isInitialLoad}
-              aria-label={refreshing ? 'Refreshing…' : 'Reload prices'}
-            >
-              <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
-            </button>
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={onCreate}
-              disabled={isInitialLoad}
-            >
-              Add price
-            </button>
-          </>
+        primaryAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--primary cu-btn--sm"
+            onClick={onCreate}
+            disabled={isInitialLoad}
+          >
+            Add price
+          </button>
+        }
+        refreshAction={
+          <button
+            type="button"
+            className="cu-btn cu-btn--icon cu-btn--toolbar"
+            onClick={() => void onRefresh()}
+            disabled={refreshing || isInitialLoad}
+            aria-label={refreshing ? 'Refreshing…' : 'Reload prices'}
+          >
+            <IconRefresh className={refreshing ? 'cu-spin' : undefined} width={18} height={18} />
+          </button>
+        }
+        search={
+          <SectionSearchInput
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Search prices"
+            ariaLabel="Search prices"
+            disabled={isInitialLoad}
+          />
         }
       />
-      {isInitialLoad ? (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={PRICE_COLUMNS} />
-            </thead>
-            <tbody>
-              <SkeletonTableRows columns={PRICE_COLUMNS.length} rows={4} />
-            </tbody>
-          </table>
-        </div>
-      ) : visibleRowCount === 0 ? (
-        <div className="cu-empty">
-          {normalizedSearch
-            ? 'No prices match this search.'
-            : 'No model prices configured yet. Add one to start tracking cost.'}
-        </div>
-      ) : (
-        <div className="cu-table-wrap">
-          <table className="cu-table cu-table--header-band">
-            <thead>
-              <TableHeaderRow columns={PRICE_COLUMNS} />
-            </thead>
-            <tbody>
-              {filteredPrices.map((price: LlmModelPrice) => {
+      <TableViewport className="cu-table-wrap">
+        <DataTable className="eft-table cu-table cu-table--header-band">
+          <thead>
+            <TableHeaderRow columns={columns} />
+          </thead>
+          <tbody>
+            {isInitialLoad ? (
+              <TableStateRow colSpan={columns.length} kind="loading" message="Loading prices…" />
+            ) : visibleRowCount === 0 ? (
+              <TableStateRow
+                colSpan={columns.length}
+                message={
+                  normalizedSearch
+                    ? 'No prices match this search.'
+                    : 'No model prices configured yet. Add one to start tracking cost.'
+                }
+              />
+            ) : (
+              tableSort.sortedRows.map(row => {
+                if (row.kind === 'missing') {
+                  const { item } = row
+                  const label = item.provider
+                    ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
+                    : item.model
+                  return (
+                    <tr
+                      key={`missing/${item.provider ?? ''}/${item.model}`}
+                      className="cu-table__row cu-px-missing-row"
+                    >
+                      <td>
+                        {item.provider ? (
+                          <span className="cu-px-provider">
+                            <LlmProviderIcon
+                              provider={item.provider}
+                              label={getProviderDisplayLabel(item.provider)}
+                            />
+                            {getProviderDisplayLabel(item.provider)}
+                          </span>
+                        ) : (
+                          'Any provider'
+                        )}
+                      </td>
+                      <td className="cu-px-model">
+                        <span className="cu-px-model-content">
+                          {item.model}
+                          <MissingPriceWarning provider={item.provider} model={item.model} />
+                        </span>
+                      </td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td className="cu-px-num">—</td>
+                      <td>—</td>
+                      <td>
+                        <span className="cu-px-badge cu-px-badge--warn">Missing</span>
+                      </td>
+                      <td className="cu-px-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for price ${label}`}
+                          horizontalTrigger
+                          actions={[
+                            {
+                              key: 'add',
+                              label: 'Add price',
+                              onClick: () => onAddMissingPrice(item),
+                            },
+                          ]}
+                        />
+                      </td>
+                    </tr>
+                  )
+                }
+
+                const { price } = row
                 const isUnpriced = unpricedItems.some(
                   item =>
                     item.model === price.model &&
@@ -170,7 +277,11 @@ export function LlmPriceTable({
                 )
                 const providerLabel = getProviderDisplayLabel(price.provider)
                 return (
-                  <tr key={price.id} className="cu-table__row">
+                  <TableRow
+                    key={price.id}
+                    className="cu-table__row"
+                    onNavigate={() => onEdit(price.id)}
+                  >
                     <td>
                       <span className="cu-px-provider">
                         <LlmProviderIcon provider={price.provider} label={providerLabel} />
@@ -225,65 +336,13 @@ export function LlmPriceTable({
                         ]}
                       />
                     </td>
-                  </tr>
+                  </TableRow>
                 )
-              })}
-              {filteredMissingPriceItems.map((item: UnpricedModel) => {
-                const label = item.provider
-                  ? `${getProviderDisplayLabel(item.provider)}/${item.model}`
-                  : item.model
-                return (
-                  <tr
-                    key={`missing/${item.provider ?? ''}/${item.model}`}
-                    className="cu-table__row cu-px-missing-row"
-                  >
-                    <td>
-                      {item.provider ? (
-                        <span className="cu-px-provider">
-                          <LlmProviderIcon
-                            provider={item.provider}
-                            label={getProviderDisplayLabel(item.provider)}
-                          />
-                          {getProviderDisplayLabel(item.provider)}
-                        </span>
-                      ) : (
-                        'Any provider'
-                      )}
-                    </td>
-                    <td className="cu-px-model">
-                      <span className="cu-px-model-content">
-                        {item.model}
-                        <MissingPriceWarning provider={item.provider} model={item.model} />
-                      </span>
-                    </td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td className="cu-px-num">—</td>
-                    <td>—</td>
-                    <td>
-                      <span className="cu-px-badge cu-px-badge--warn">Missing</span>
-                    </td>
-                    <td className="cu-px-actions">
-                      <RowActionsMenu
-                        ariaLabel={`Actions for price ${label}`}
-                        horizontalTrigger
-                        actions={[
-                          {
-                            key: 'add',
-                            label: 'Add price',
-                            onClick: () => onAddMissingPrice(item),
-                          },
-                        ]}
-                      />
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+              })
+            )}
+          </tbody>
+        </DataTable>
+      </TableViewport>
     </div>
   )
 }

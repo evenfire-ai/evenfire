@@ -53,6 +53,11 @@ export type HostCr = {
   }
 }
 
+export type AgentAccess = {
+  agentNames: string[]
+  deletedAgentNames?: string[]
+}
+
 export const controlApi = {
   async validateRecipe(recipe: unknown): Promise<{ valid: boolean; errors?: unknown[] }> {
     return apiFetch<{ valid: boolean; errors?: unknown[] }>(
@@ -71,7 +76,7 @@ export const controlApi = {
   },
 
   async getUsers(query = ''): Promise<{ items: AdminUser[] }> {
-    const qs = query ? `?query=${encodeURIComponent(query)}` : ''
+    const qs = query ? `?q=${encodeURIComponent(query)}` : ''
     return apiFetch<{ items: AdminUser[] }>('GET', `/api/v1/admin/users${qs}`)
   },
 
@@ -208,5 +213,127 @@ export const controlApi = {
     } catch {
       // ignore — channel may not exist (404) or cluster may be unreachable
     }
+  },
+
+  // ── Context-removal e2e seeding (wire contract only — no UI concepts) ────
+
+  async createContext(payload: {
+    metadata: { name: string }
+    spec: { contextId: string; description?: string; mcpServers?: string[] }
+  }): Promise<unknown> {
+    return apiFetch<unknown>('POST', '/api/v1/admin/contexts', payload)
+  },
+
+  async updateContext(
+    name: string,
+    payload: { metadata: { resourceVersion: string }; spec: Record<string, unknown> }
+  ): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/contexts/${encodeURIComponent(name)}`, payload)
+  },
+
+  async getMcpServers(): Promise<{ items: unknown[] }> {
+    return apiFetch<{ items: unknown[] }>('GET', '/api/v1/admin/mcp-servers')
+  },
+
+  async createMcpServer(payload: unknown): Promise<unknown> {
+    return apiFetch<unknown>('POST', '/api/v1/admin/mcp-servers', payload)
+  },
+
+  async ensureMcpServerDeleted(name: string): Promise<void> {
+    try {
+      await apiFetch<unknown>('DELETE', `/api/v1/admin/mcp-servers/${encodeURIComponent(name)}`)
+    } catch {
+      // ignore — server may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async getUserContexts(userId: string): Promise<{ contextIds: string[] }> {
+    return apiFetch<{ contextIds: string[] }>(
+      'GET',
+      `/api/v1/admin/users/${encodeURIComponent(userId)}/contexts`
+    )
+  },
+
+  async updateUserContexts(userId: string, contextIds: string[]): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/contexts`, {
+      contextIds,
+    })
+  },
+
+  async getTeamContexts(teamId: string): Promise<{ contextIds: string[] }> {
+    return apiFetch<{ contextIds: string[] }>(
+      'GET',
+      `/api/v1/admin/teams/${encodeURIComponent(teamId)}/contexts`
+    )
+  },
+
+  async updateTeamContexts(teamId: string, contextIds: string[]): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/contexts`, {
+      contextIds,
+    })
+  },
+
+  // ── D8 member/team ↔ agent mappings ──────────────────────────────────────
+  // The Access tab's writes are composite writes (agents AND contexts), so
+  // specs that seed mappings restore both. PUT is compare-and-swap:
+  // expectedCurrentAgentNames must echo the full set the caller last observed
+  // (active ∪ deleted history from a fresh GET).
+
+  async getUserAgents(userId: string): Promise<AgentAccess> {
+    return apiFetch<AgentAccess>('GET', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`)
+  },
+
+  async putUserAgents(
+    userId: string,
+    agentNames: string[],
+    expectedCurrentAgentNames: string[]
+  ): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/users/${encodeURIComponent(userId)}/agents`, {
+      agentNames,
+      expectedCurrentAgentNames,
+    })
+  },
+
+  async getTeamAgents(teamId: string): Promise<AgentAccess> {
+    return apiFetch<AgentAccess>('GET', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`)
+  },
+
+  async putTeamAgents(
+    teamId: string,
+    agentNames: string[],
+    expectedCurrentAgentNames: string[]
+  ): Promise<unknown> {
+    return apiFetch<unknown>('PUT', `/api/v1/admin/teams/${encodeURIComponent(teamId)}/agents`, {
+      agentNames,
+      expectedCurrentAgentNames,
+    })
+  },
+
+  async createTeam(name: string): Promise<{ id: string; name: string }> {
+    return apiFetch<{ id: string; name: string }>('POST', '/api/v1/admin/teams', { name })
+  },
+
+  async ensureTeamDeleted(teamId: string): Promise<void> {
+    try {
+      await apiFetch<unknown>('DELETE', `/api/v1/admin/teams/${encodeURIComponent(teamId)}`)
+    } catch {
+      // ignore — team may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async createBudget(input: Record<string, unknown>): Promise<{ id: string }> {
+    return apiFetch<{ id: string }>('POST', '/api/v1/admin/budgets', input)
+  },
+
+  async ensureBudgetDeleted(id: string): Promise<void> {
+    try {
+      await apiFetch<unknown>('DELETE', `/api/v1/admin/budgets/${encodeURIComponent(id)}`)
+    } catch {
+      // ignore — budget may not exist (404) or cluster may be unreachable
+    }
+  },
+
+  async getSharedFileSystems(): Promise<{ items: unknown[] }> {
+    return apiFetch<{ items: unknown[] }>('GET', '/api/v1/admin/shared-filesystems')
   },
 }

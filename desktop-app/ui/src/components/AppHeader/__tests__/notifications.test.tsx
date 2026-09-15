@@ -52,8 +52,6 @@ vi.mock('@contexts/NavigationContext', () => ({
   useNavigationContext: () => ({
     navItem: 'apps',
     handleNavSelect: vi.fn(),
-    handleOpenContextDetails: vi.fn(),
-    handleOpenTeamDetails: vi.fn(),
   }),
 }))
 
@@ -114,6 +112,27 @@ describe('AppHeader notification tray presentation', () => {
 
     expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
     await waitFor(() => expect(notificationMocks.refresh).toHaveBeenCalledOnce())
+  })
+
+  it('does not show the empty notification state before the open refresh settles', async () => {
+    let resolveRefresh: (() => void) | undefined
+    notificationMocks.refresh.mockReturnValueOnce(
+      new Promise<void>(resolve => {
+        resolveRefresh = resolve
+      })
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(screen.getByRole('dialog', { name: 'Notifications and approvals' })).toBeTruthy()
+    expect(screen.queryByText('No notifications or pending approvals right now.')).toBeNull()
+
+    resolveRefresh?.()
+
+    await waitFor(() => {
+      expect(screen.getByText('No notifications or pending approvals right now.')).toBeTruthy()
+    })
   })
 
   it('opens a clickable notification card with the keyboard', () => {
@@ -220,6 +239,18 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(true)
   })
 
+  it('aligns the embedded-app drawer to the measured embed slot edge', () => {
+    render(
+      <AppHeader notificationTrayMode="drawer" notificationTrayReady notificationTrayLeft={416} />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const tray = screen.getByRole('dialog', { name: 'Notifications and approvals' })
+    expect(tray.classList.contains('notification-menu--embed-aligned')).toBe(true)
+    expect(tray.style.getPropertyValue('--notification-drawer-left')).toBe('416px')
+  })
+
   it('keeps the existing floating overlay outside embedded apps', async () => {
     const onShellOverlayOpenChange = vi.fn()
     render(<AppHeader onShellOverlayOpenChange={onShellOverlayOpenChange} />)
@@ -236,30 +267,24 @@ describe('AppHeader notification tray presentation', () => {
     ).toBe(false)
   })
 
-  it('uses a compact search label at constrained widths while retaining the full hover text', () => {
+  it('uses the shared search label at constrained widths', () => {
     vi.stubGlobal('innerWidth', 1200)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe('Search workspace...')
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
-  it('uses the full search label above the constrained-width breakpoint', () => {
+  it('uses the shared search label above the constrained-width breakpoint', () => {
     vi.stubGlobal('innerWidth', 1400)
 
     render(<AppHeader />)
 
     const search = screen.getByRole('textbox', { name: 'Search' })
-    expect(search.getAttribute('placeholder')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
-    expect(search.getAttribute('title')).toBe(
-      'Search teams, contexts, members, agents or connectors...'
-    )
+    expect(search.getAttribute('placeholder')).toBe('Search')
+    expect(search.getAttribute('title')).toBe('Search')
   })
 
   it('opens and focuses the existing global search for a command request', () => {

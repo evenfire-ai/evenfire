@@ -18,7 +18,7 @@ export function TracingOperations() {
         <TablePanelHeader
           title="Tracing dashboard"
           subtitle="Current control-api ingestion health and effective limits."
-          actions={
+          refreshAction={
             <button
               aria-label={refreshing ? 'Refreshing tracing health' : 'Refresh tracing health'}
               className="cu-trace-refresh"

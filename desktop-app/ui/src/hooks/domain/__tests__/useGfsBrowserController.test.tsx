@@ -2,11 +2,20 @@
 import { type ReactNode, useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AuthContext, type AuthContextValue } from '@contexts/AuthContext'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { desktopQueryKeys } from '../queryKeys'
 import { useGfsBrowserController } from '../useGfsBrowserController'
+
+// Fire-and-forget UI actions in these probes mirror the production callers,
+// which await the same promises inside try/catch (see FilesPage). Swallow
+// rejections here so a late/rejected mutation — e.g. a createFolder that runs
+// once `current` has cleared and throws "No folder selected" — never escapes as
+// an unhandled rejection and fails an unrelated test later in the full suite.
+const swallow = (promise: Promise<unknown>): void => {
+  void promise.catch(() => {})
+}
 
 const userA = {
   id: 'user-a',
@@ -81,6 +90,11 @@ function Probe() {
       <div data-testid="accessible-error">{ctrl.accessibleError ?? 'none'}</div>
       <div data-testid="accessible-notice">{ctrl.accessibleNotice ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
+      {ctrl.items.map(item => (
+        <div key={item.resourceId} data-testid={`row-affordances-${item.resourceId}`}>
+          {ctrl.rowAffordancesByResourceId[item.resourceId]?.held.join(',') ?? 'none'}
+        </div>
+      ))}
       {ctrl.accessibleResources.map(resource => (
         <button key={resource.resourceId} type="button" onClick={() => ctrl.openResource(resource)}>
           open {resource.name}
@@ -91,19 +105,17 @@ function Probe() {
           crumb {crumb.name}
         </button>
       ))}
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open
       </button>
-      <button type="button" onClick={() => void ctrl.refreshAffordances()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshAffordances())}>
         refresh permissions
       </button>
       <button
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl
-                .createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw==')
-                .catch(() => {})
+            ? swallow(ctrl.createFile(ctrl.current.resourceId, 'notes.md', 'IyBOb3Rlcw=='))
             : undefined
         }
       >
@@ -113,9 +125,13 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl
-                .renameResource(ctrl.current.resourceId, 'Renamed report.md', ctrl.current.version)
-                .catch(() => {})
+            ? swallow(
+                ctrl.renameResource(
+                  ctrl.current.resourceId,
+                  'Renamed report.md',
+                  ctrl.current.version
+                )
+              )
             : undefined
         }
       >
@@ -125,9 +141,7 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl
-                .replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version)
-                .catch(() => {})
+            ? swallow(ctrl.replaceFile(ctrl.current.resourceId, 'aGVsbG8=', ctrl.current.version))
             : undefined
         }
       >
@@ -137,13 +151,13 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl
-                .replaceFileFromPath(
+            ? swallow(
+                ctrl.replaceFileFromPath(
                   ctrl.current.resourceId,
                   '/tmp/replacement.bin',
                   ctrl.current.version
                 )
-                .catch(() => {})
+              )
             : undefined
         }
       >
@@ -153,9 +167,9 @@ function Probe() {
         type="button"
         onClick={() =>
           ctrl.current
-            ? void ctrl
-                .moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
-                .catch(() => {})
+            ? swallow(
+                ctrl.moveResource(ctrl.current.resourceId, 'destination-1', ctrl.current.version)
+              )
             : undefined
         }
       >
@@ -343,6 +357,105 @@ describe('useGfsBrowserController', () => {
     expect(affordances).toHaveBeenCalledTimes(1)
   })
 
+  it('resolves affordances for every visible child row', async () => {
+    const parent = {
+      resourceId: 'folder-root',
+      rid: 'folder-root',
+      gfsUri: 'gfs://main/folder-root',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Workspace',
+      kind: 'directory' as const,
+      path: '/Workspace',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const childFolder = {
+      resourceId: 'child-folder',
+      rid: 'child-folder',
+      gfsUri: 'gfs://main/child-folder',
+      drive: 'main',
+      parentResourceId: 'folder-root',
+      name: 'Assets',
+      kind: 'directory' as const,
+      path: '/Workspace/Assets',
+      version: 2,
+      bytes: 0,
+    }
+    const childFile = {
+      resourceId: 'child-file',
+      rid: 'child-file',
+      gfsUri: 'gfs://main/child-file',
+      drive: 'main',
+      parentResourceId: 'folder-root',
+      name: 'report.txt',
+      kind: 'file' as const,
+      path: '/Workspace/report.txt',
+      version: 3,
+      bytes: 12,
+    }
+    const readonlyFile = {
+      ...childFile,
+      resourceId: 'readonly-file',
+      rid: 'readonly-file',
+      gfsUri: 'gfs://main/readonly-file',
+      name: 'readonly.txt',
+    }
+    const listChildren = vi.fn(async () => ({
+      items: [childFolder, childFile, readonlyFile],
+      nextCursor: null,
+    }))
+    const affordances = vi.fn(async (resourceId: string) => {
+      const held =
+        resourceId === 'readonly-file'
+          ? ['read']
+          : resourceId === 'folder-root'
+            ? ['read']
+            : ['read', 'write', 'manage_acl']
+      return {
+        held,
+        canDelegate: held.includes('manage_acl'),
+        grantableBits: [],
+        canCreateShare: false,
+      }
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open Workspace' })).toBeTruthy())
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Workspace' }).click()
+    })
+
+    await waitFor(() => expect(listChildren).toHaveBeenCalledWith('folder-root', 'main', undefined))
+    await waitFor(() => {
+      expect(screen.getByTestId('row-affordances-child-folder').textContent).toBe(
+        'read,write,manage_acl'
+      )
+      expect(screen.getByTestId('row-affordances-child-file').textContent).toBe(
+        'read,write,manage_acl'
+      )
+      expect(screen.getByTestId('row-affordances-readonly-file').textContent).toBe('read')
+    })
+
+    expect(affordances).toHaveBeenCalledWith('child-folder', 'main')
+    expect(affordances).toHaveBeenCalledWith('child-file', 'main')
+    expect(affordances).toHaveBeenCalledWith('readonly-file', 'main')
+  })
+
   it('loads accessible GFS resources and opens one without a pasted link', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -404,6 +517,201 @@ describe('useGfsBrowserController', () => {
     })
 
     await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('team-folder'))
+  })
+
+  it('suppresses directly-shared files that live inside accessible folders (virtual-root hygiene)', async () => {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [
+              {
+                resourceId: 'marketing',
+                rid: 'marketing',
+                gfsUri: 'gfs://main/marketing',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'Marketing',
+                kind: 'directory',
+                path: '/Marketing',
+                version: 1,
+                bytes: 0,
+                sources: ['grant'],
+                permissions: ['read'],
+                coversDescendants: true,
+              },
+              {
+                resourceId: 'shared-file',
+                rid: 'sharedfile',
+                gfsUri: 'gfs://main/sharedfile',
+                drive: 'main',
+                parentResourceId: 'marketing',
+                name: 'enterprise-ai-agents-mockup.txt',
+                kind: 'file',
+                path: '/Marketing/enterprise-ai-agents-mockup.txt',
+                version: 1,
+                bytes: 7633,
+                sources: ['grant'],
+                permissions: ['read', 'share'],
+                coversDescendants: false,
+              },
+              {
+                // Nested under an accessible folder even though its immediate
+                // parent is not itself directly listed.
+                resourceId: 'nested-file',
+                rid: 'nestedfile',
+                gfsUri: 'gfs://main/nestedfile',
+                drive: 'main',
+                parentResourceId: 'not-listed-subfolder',
+                name: 'nested.txt',
+                kind: 'file',
+                path: '/Marketing/Assets/nested.txt',
+                version: 1,
+                bytes: 12,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+              {
+                // Orphan share: location not reachable — must stay listed.
+                resourceId: 'orphan-file',
+                rid: 'orphanfile',
+                gfsUri: 'gfs://main/orphanfile',
+                drive: 'main',
+                parentResourceId: null,
+                name: 'lonely.md',
+                kind: 'file',
+                path: '/lonely.md',
+                version: 1,
+                bytes: 8,
+                sources: ['share'],
+                permissions: ['read'],
+                coversDescendants: false,
+              },
+            ],
+            nextCursor: null,
+          })),
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+
+    // The Marketing folder and the unreachable orphan stay; the two files
+    // reachable by navigating into Marketing are suppressed from the root.
+    await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('2'))
+    expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'open lonely.md' })).toBeTruthy()
+    expect(
+      screen.queryByRole('button', { name: 'open enterprise-ai-agents-mockup.txt' })
+    ).toBeNull()
+    expect(screen.queryByRole('button', { name: 'open nested.txt' })).toBeNull()
+  })
+
+  it('revalidates folder listings on revisit and window focus under production cache defaults', async () => {
+    const marketingFolder = {
+      resourceId: 'folder-a',
+      rid: 'foldera',
+      gfsUri: 'gfs://main/foldera',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Marketing',
+      kind: 'directory' as const,
+      path: '/Marketing',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const financeFolder = {
+      ...marketingFolder,
+      resourceId: 'folder-b',
+      rid: 'folderb',
+      gfsUri: 'gfs://main/folderb',
+      name: 'Finance',
+      path: '/Finance',
+    }
+    const file = (id: string, name: string) => ({
+      resourceId: id,
+      rid: id,
+      gfsUri: `gfs://main/${id}`,
+      drive: 'main',
+      parentResourceId: 'folder-a',
+      name,
+      kind: 'file' as const,
+      path: `/Marketing/${name}`,
+      version: 1,
+      bytes: 10,
+    })
+    // The out-of-band writer (an agent with a host grant, or an operator).
+    let marketingItems = [file('file-1', 'report.txt')]
+    const listChildren = vi.fn(async (resourceId: string) =>
+      resourceId === 'folder-a'
+        ? { items: marketingItems, nextCursor: null }
+        : { items: [], nextCursor: null }
+    )
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({
+            items: [marketingFolder, financeFolder],
+            nextCursor: null,
+          })),
+          listChildren,
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+          resolve: vi.fn(),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: ProductionHarness })
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'open Marketing' })).toBeTruthy())
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('1'))
+
+    // An agent creates a second file while the app is open.
+    marketingItems = [file('file-1', 'report.txt'), file('file-2', 'northstar.md')]
+
+    // Navigating away and back revalidates — no hard reload needed.
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Finance' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('0'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open Marketing' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('2'))
+
+    // Focusing the window while the folder stays open revalidates in place.
+    marketingItems = [
+      file('file-1', 'report.txt'),
+      file('file-2', 'northstar.md'),
+      file('file-3', 'northstar-wordmark.svg'),
+    ]
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await waitFor(() => expect(screen.getByTestId('items-count').textContent).toBe('3'))
   })
 
   it('hydrates readable parent folders for a directly opened file', async () => {
@@ -1189,7 +1497,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
-      <button type="button" onClick={() => void ctrl.openUri('gfs://main/root')}>
+      <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
       <button type="button" onClick={() => setManageOpen(true)}>
@@ -1198,27 +1506,27 @@ function ManageProbe() {
       <button type="button" onClick={() => setManageOpen(false)}>
         close manage
       </button>
-      <button type="button" onClick={() => void ctrl.refreshGrants()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshGrants())}>
         refresh grants
       </button>
-      <button type="button" onClick={() => void ctrl.revokeGrant('grant-42')}>
+      <button type="button" onClick={() => swallow(ctrl.revokeGrant('grant-42'))}>
         revoke grant
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['user:bob'], ['read'], true)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['user:bob'], ['read'], true))}>
         grant inherit true
       </button>
-      <button type="button" onClick={() => void ctrl.grant(['team:qa'], ['read'], false)}>
+      <button type="button" onClick={() => swallow(ctrl.grant(['team:qa'], ['read'], false))}>
         grant inherit false
       </button>
-      <button type="button" onClick={() => void ctrl.refreshShares()}>
+      <button type="button" onClick={() => swallow(ctrl.refreshShares())}>
         refresh shares
       </button>
-      <button type="button" onClick={() => void ctrl.revokeShare('share-42')}>
+      <button type="button" onClick={() => swallow(ctrl.revokeShare('share-42'))}>
         revoke share
       </button>
       <button
         type="button"
-        onClick={() => void ctrl.createShare(['user:bob']).then(() => ctrl.refreshShares())}
+        onClick={() => swallow(ctrl.createShare(['user:bob']).then(() => ctrl.refreshShares()))}
       >
         create share
       </button>

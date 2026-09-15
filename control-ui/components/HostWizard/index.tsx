@@ -9,7 +9,6 @@ import { SelectionDropdown } from '@/components/SelectionDropdown'
 import { useToast } from '@/components/Toast'
 import { IconAlertTriangle, IconCheck, IconX } from '@/components/icons'
 import { Button, CheckboxField, Field, TextInput } from '@/components/ui'
-import { createAgentContextName } from '@/lib/agentContext'
 import {
   apiSend,
   getAdminTeams,
@@ -48,6 +47,7 @@ import {
   validateLlmSecretData,
 } from '@/lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '@/lib/llmCredentialSelect'
+import { createPrivateContext } from '@/lib/privateContext'
 import { toKebabCase, toKebabInput } from '@/lib/string'
 import {
   HOST_NAMESPACE,
@@ -147,39 +147,6 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
     }
     throw e
   }
-}
-
-async function createPrivateContext(
-  agentName: string,
-  selectedMcpServers: string[],
-  collisionMessage: string
-): Promise<string> {
-  // A generated context name is an implementation detail. Hide the rare
-  // collision from the operator by trying one fresh suffix before surfacing the
-  // existing friendly error. The successful name is returned to become the
-  // Host's contextRef.
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const contextName = createAgentContextName(agentName)
-    try {
-      await createOrThrow(
-        '/api/v1/admin/contexts',
-        {
-          metadata: { name: contextName },
-          spec: {
-            contextId: contextName,
-            description: `Connector context for agent ${agentName}`,
-            mcpServers: selectedMcpServers,
-          },
-        },
-        collisionMessage
-      )
-      return contextName
-    } catch (error) {
-      if (!(error instanceof ResourceNameCollisionError) || attempt === 1) throw error
-    }
-  }
-
-  throw new Error(collisionMessage)
 }
 
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
@@ -696,9 +663,12 @@ export function HostWizard({
       // intentionally generated here instead of being exposed as a wizard
       // field; the agent still needs a contextRef for its runtime contract.
       const generatedContextName = await createPrivateContext(
-        normalizedHostName,
-        Array.from(new Set(selectedMcp)),
-        'The agent connector context could not be created — please try again.'
+        {
+          subject: normalizedHostName,
+          description: `Connector context for agent ${normalizedHostName}`,
+          mcpServers: Array.from(new Set(selectedMcp)),
+        },
+        'We couldn’t finish setting up this agent’s connectors — please try again.'
       )
       created.push({ kind: 'context', name: generatedContextName })
 

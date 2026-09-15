@@ -8,7 +8,7 @@ import type {
   WorkflowRecipeResource,
   WorkflowRunsResult,
 } from '../../../src/types'
-import { DESKTOP_ROUTES } from '../constants/navigation'
+import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../constants/navigation'
 import { pickLatestAgent } from '../lib/agents'
 import { toPrettyJson } from '../lib/format'
 import { selectUnauthenticatedView } from '../lib/unauthenticatedView'
@@ -568,34 +568,21 @@ export function useAppController() {
           refresh: () => agentsData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
         {
-          route: DESKTOP_ROUTES.contexts,
-          refresh: () => contextsData.refreshWithCatalog(getCatalogRefreshPromise()),
-        },
-        {
           route: DESKTOP_ROUTES.connectors,
           refresh: () => mcpServersData.refreshWithCatalog(getCatalogRefreshPromise()),
         },
-        { route: DESKTOP_ROUTES.teams, refresh: teamsData.refresh },
         { route: DESKTOP_ROUTES.plugins, refresh: refreshWorkflowsData },
       ] as const
 
-      const activeRoute =
-        route === DESKTOP_ROUTES.contextDetails
-          ? DESKTOP_ROUTES.contexts
-          : route === DESKTOP_ROUTES.teamDetails
-            ? DESKTOP_ROUTES.teams
-            : route
-      const current = refreshers.find(entry => entry.route === activeRoute)
+      const current = refreshers.find(entry => entry.route === route)
 
       if (current) await current.refresh()
     },
     [
       agentsData.refreshWithCatalog,
-      contextsData.refreshWithCatalog,
       getCatalogRefreshPromise,
       mcpServersData.refreshWithCatalog,
       refreshWorkflowsData,
-      teamsData.refresh,
     ]
   )
 
@@ -612,37 +599,6 @@ export function useAppController() {
     auth.isAuthenticated,
     nav.selectedAgent,
     nav.setSelectedAgent,
-  ])
-
-  useEffect(() => {
-    if (!auth.isAuthenticated) return
-    if (contextsData.accessCatalog && nav.selectedContext) {
-      if (!contextsData.contextIds.includes(nav.selectedContext)) {
-        nav.setSelectedContext(null)
-      }
-    }
-  }, [
-    auth.isAuthenticated,
-    contextsData.accessCatalog,
-    contextsData.contextIds,
-    nav.selectedContext,
-    nav.setSelectedContext,
-  ])
-
-  useEffect(() => {
-    if (!auth.isAuthenticated) return
-    if (teamsData.teamDirectoryHydrated && nav.selectedTeam) {
-      const available = teamsData.teams.map(team => team.id)
-      if (!available.includes(nav.selectedTeam)) {
-        nav.setSelectedTeam(null)
-      }
-    }
-  }, [
-    auth.isAuthenticated,
-    nav.selectedTeam,
-    nav.setSelectedTeam,
-    teamsData.teamDirectoryHydrated,
-    teamsData.teams,
   ])
 
   const switchTeamForWorkspace = useCallback(
@@ -896,7 +852,7 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenAgentWorkspace ───
   const handleOpenAgentWorkspace = useCallback(
-    (agentName: string, route: AgentWorkspaceRoute = 'details') => {
+    (agentName: string, route: AgentWorkspaceRoute = AGENT_WORKSPACE_ROUTES.connectors) => {
       if (!agentName) return
       chat.setPendingChatSelection(agentName, null)
       chat.clearActiveChat()
@@ -917,7 +873,17 @@ export function useAppController() {
   const handleSelectChatAgent = useCallback(
     (
       agentName: string,
-      options: { selectLatest?: boolean; chatId?: string; isRemote?: boolean; title?: string } = {}
+      options: {
+        selectLatest?: boolean
+        chatId?: string
+        isRemote?: boolean
+        title?: string
+        // When true, drive the chat controller (pending selection + selectedAgent)
+        // WITHOUT flipping `navItem` to the chat route. The chat-drawer coexists
+        // with the live app on the `apps` route and needs to swap the shared
+        // <ChatPage>'s conversation in place, so it must not navigate away.
+        keepNavItem?: boolean
+      } = {}
     ) => {
       if (!agentName) return
       const targetChatId = String(options.chatId || '').trim()
@@ -934,11 +900,24 @@ export function useAppController() {
       // the pending-selection path below, which is designed to survive a route
       // change: it sets the active chat synchronously AND records the selection
       // the effect replays.
-      if (targetChatId && nav.selectedAgent === agentName && nav.navItem === DESKTOP_ROUTES.chat) {
+      // `keepNavItem` always takes the pending-selection path below: it is used
+      // when the route is changing to (or staying on) a non-chat route (the app
+      // drawer). The pending selection is what survives a route change — but it is
+      // only replayed when the agent-selection effect re-runs (deps include
+      // `navItem`/`selectedAgent`). When `keepNavItem` selects a chat of the
+      // ALREADY-selected agent WITHOUT a route change (drawer reopen / switcher),
+      // neither dep changes, the effect never replays, and the pending selection
+      // is left stuck loading. That case gets an imperative `switchToChat` below.
+      if (
+        targetChatId &&
+        nav.selectedAgent === agentName &&
+        nav.navItem === DESKTOP_ROUTES.chat &&
+        !options.keepNavItem
+      ) {
         // D.4: switchToChat is now a single unified path (no isRemote) — the
         // server is the source of truth and hydrates server-only chats itself.
         void chat.switchToChat(agentName, targetChatId)
-        nav.setSelectedAgentRoute('details')
+        nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
         nav.setNavItem(DESKTOP_ROUTES.chat)
         return
       }
@@ -958,9 +937,19 @@ export function useAppController() {
       if (!targetChatId) {
         chat.clearActiveChat()
       }
-      nav.setSelectedAgentRoute('details')
+      nav.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       nav.setSelectedAgent(agentName)
-      nav.setNavItem(DESKTOP_ROUTES.chat)
+      if (!options.keepNavItem) nav.setNavItem(DESKTOP_ROUTES.chat)
+      // Drawer same-agent selection: `setSelectedAgent` above is a no-op (same
+      // value) and `navItem` is not flipped, so the agent-selection effect will
+      // not replay to consume the pending selection — load the chat imperatively.
+      // The pending selection is still set above so that when the caller DID
+      // change the route in the same batch (launch-from-chat: chat→apps), the
+      // effect replays into its `specific` branch instead of the reset branch;
+      // both switches target the same chat and `switchToChat` coalesces them.
+      if (options.keepNavItem && targetChatId && nav.selectedAgent === agentName) {
+        void chat.switchToChat(agentName, targetChatId)
+      }
     },
     [
       chat.clearActiveChat,
@@ -994,17 +983,37 @@ export function useAppController() {
   )
 
   const openAgentConversationTarget = useCallback(
-    async (target: AgentConversationNotificationTarget) => {
+    async (
+      target: AgentConversationNotificationTarget,
+      options: { keepNavItem?: boolean } = {}
+    ) => {
       const targetAgent = String(target.agentName || '').trim()
       if (!targetAgent) return
       const targetChatId = String(target.chatId || '').trim()
       const targetTeamId = String(target.teamId || '').trim()
       const activeTeamId = currentTeamIdRef.current
       const requiresTeamSwitch = Boolean(targetTeamId && targetTeamId !== activeTeamId)
+      // minispec 04 approach C: when the app embed is live (App requests
+      // `keepNavItem`) and no team switch is needed, surface the conversation IN
+      // the drawer instead of ejecting to the full-screen chat route. A team
+      // switch tears the embed down, so that case keeps the full-screen path.
+      const stayInDrawer = Boolean(options.keepNavItem) && !requiresTeamSwitch
 
       try {
         if (requiresTeamSwitch) {
           await ensureTeamContext({ teamId: targetTeamId })
+        }
+
+        if (stayInDrawer) {
+          // handleSelectChatAgent(keepNavItem) sets the active chat without
+          // flipping `navItem` (and imperatively switches for the same-agent
+          // case); the drawer reconciler (approach A) syncs the switcher tab.
+          handleSelectChatAgent(targetAgent, {
+            selectLatest: false,
+            keepNavItem: true,
+            ...(targetChatId ? { chatId: targetChatId } : {}),
+          })
+          return
         }
 
         // Same imperative-fast-path guard as handleSelectChatAgent: `switchToChat`
@@ -1046,6 +1055,7 @@ export function useAppController() {
       chat.switchToChat,
       ensureTeamContext,
       fullSetStatus,
+      handleSelectChatAgent,
       nav.navItem,
       nav.selectedAgent,
       nav.setNavItem,
@@ -1188,7 +1198,7 @@ export function useAppController() {
 
   // ─── Cross-domain: handleOpenNotification ───
   const handleOpenNotification = useCallback(
-    async (notification: AppNotification) => {
+    async (notification: AppNotification, options: { keepNavItem?: boolean } = {}) => {
       notif.markNotificationRead(notification.id)
       if (notification.kind === 'workflow_completed') {
         await openWorkflowCompletionTarget(notification)
@@ -1198,7 +1208,9 @@ export function useAppController() {
         await openSdkNotificationTarget(notification)
         return
       }
-      await openAgentConversationTarget(notification)
+      // `keepNavItem` (App passes it when the app embed is live) only reaches the
+      // agent-conversation surface — workflow/SDK targets navigate elsewhere.
+      await openAgentConversationTarget(notification, options)
     },
     [
       notif.markNotificationRead,
@@ -1291,22 +1303,13 @@ export function useAppController() {
     navItem: nav.navItem,
     selectedAgent: nav.selectedAgent,
     selectedAgentRoute: nav.selectedAgentRoute,
-    selectedContext: nav.selectedContext,
-    selectedContextTab: nav.selectedContextTab,
-    selectedTeam: nav.selectedTeam,
     setSelectedAgent: nav.setSelectedAgent,
-    setSelectedContext: nav.setSelectedContext,
-    setSelectedTeam: nav.setSelectedTeam,
     handleNavSelect,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId,
     handleBackToAgents: nav.handleBackToAgents,
-    handleOpenContextDetails: nav.handleOpenContextDetails,
-    handleBackToContexts: nav.handleBackToContexts,
-    handleOpenTeamDetails: nav.handleOpenTeamDetails,
-    handleBackToTeams: nav.handleBackToTeams,
     handleRefreshWorkspaceData: refreshWorkspaceDataForRoute,
 
     // Notifications

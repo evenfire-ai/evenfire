@@ -29,6 +29,35 @@ function renderTable({
 }
 
 describe('CommunicationChannelsTable', () => {
+  it('navigates the durable record row without activating from its action menu', () => {
+    const onOpenChannel = vi.fn()
+    render(
+      <ToastProvider>
+        <CommunicationChannelsTable
+          items={[
+            {
+              metadata: { name: 'channel-a', namespace: 'channels' },
+              spec: { hostRef: 'agent-a' },
+            },
+          ]}
+          onChanged={vi.fn().mockResolvedValue(undefined)}
+          onOpenChannel={onOpenChannel}
+        />
+      </ToastProvider>
+    )
+
+    const row = screen.getByText('channel-a').closest('tr')
+    expect(row).toHaveAttribute('tabindex', '0')
+    fireEvent.click(row!)
+    fireEvent.keyDown(row!, { key: 'Enter' })
+    fireEvent.keyDown(row!, { key: ' ' })
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for channel channel-a' }))
+    expect(onOpenChannel).toHaveBeenCalledTimes(3)
+    expect(screen.getAllByRole('menuitem')[0]).toHaveTextContent('View details')
+  })
+
   it('shows configured provider types in one column', () => {
     renderTable({
       items: [
@@ -168,14 +197,14 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     } as unknown as CommunicationChannelItem
   }
 
-  it('opens the kebab with Edit + Delete and routes Edit through the matching handler', () => {
-    const onEditChannel = vi.fn()
+  it('routes the View details menu item through the row navigation handler', () => {
+    const onOpenChannel = vi.fn()
     render(
       <ToastProvider>
         <CommunicationChannelsTable
           items={[teamsChannelItem()]}
           onChanged={vi.fn().mockResolvedValue(undefined)}
-          onEditChannel={onEditChannel}
+          onOpenChannel={onOpenChannel}
           onRefresh={vi.fn()}
           refreshing={false}
         />
@@ -184,12 +213,14 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
 
-    const editItem = screen.getByRole('menuitem', { name: 'Edit' })
+    const detailItems = screen.getAllByRole('menuitem', { name: 'View details' })
     const deleteItem = screen.getByRole('menuitem', { name: 'Delete' })
-    expect(deleteItem).toHaveClass('cu-kebab__item--danger')
+    expect(detailItems).toHaveLength(1)
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(deleteItem).toHaveClass('eft-row-actions__item--danger')
 
-    fireEvent.click(editItem)
-    expect(onEditChannel).toHaveBeenCalledWith('teams-channel')
+    fireEvent.click(detailItems[0])
+    expect(onOpenChannel).toHaveBeenCalledWith('teams-channel')
   })
 
   it('opens the confirm dialog when Delete is clicked on the kebab', () => {
@@ -198,7 +229,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
         <CommunicationChannelsTable
           items={[teamsChannelItem()]}
           onChanged={vi.fn().mockResolvedValue(undefined)}
-          onEditChannel={vi.fn()}
+          onOpenChannel={vi.fn()}
           onRefresh={vi.fn()}
           refreshing={false}
         />
@@ -211,7 +242,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
     expect(screen.getByRole('alertdialog')).toHaveTextContent(/Delete communication channel/)
   })
 
-  it('still renders the kebab without Edit when onEditChannel is omitted', () => {
+  it('still renders the kebab without a detail action when row navigation is omitted', () => {
     render(
       <ToastProvider>
         <CommunicationChannelsTable
@@ -225,7 +256,7 @@ describe('CommunicationChannelsTable — row actions kebab', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Actions for channel teams-channel' }))
 
-    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'View details' })).not.toBeInTheDocument()
     expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument()
   })
 

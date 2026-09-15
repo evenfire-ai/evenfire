@@ -19,7 +19,7 @@ export async function exerciseGfsPerHostIsolationJourney({
 }: PerHostIsolationJourneyInput): Promise<void> {
   await test.step('operator updates one first-party host without changing the other host grants', async () => {
     const panel = page.getByRole('dialog', {
-      name: `Manage folder ${fixture.name}`,
+      name: `Share folder ${fixture.name}`,
       exact: true,
     })
     const subjectSearch = panel.getByRole('combobox', {
@@ -31,20 +31,12 @@ export async function exerciseGfsPerHostIsolationJourney({
     await expect(targetHost).toBeVisible({ timeout: 20_000 })
     await targetHost.click()
 
-    await panel.getByRole('button', { name: 'Permissions', exact: true }).click()
-    await panel.getByRole('menuitemcheckbox', { name: 'Read', exact: true }).click()
-
     const grantResponsePromise = page.waitForResponse(
       response =>
         response.request().method() === 'PUT' &&
         response.url().includes('/control-api/api/v1/gfs/grants')
     )
-    await panel.getByRole('button', { name: 'Grant access', exact: true }).click()
-    const confirmation = page.getByRole('alertdialog')
-    await expect(confirmation).toContainText('Grant access?')
-    await expect(confirmation).toContainText(/1 subject/i)
-    await expect(confirmation).toContainText(/read/)
-    await confirmation.getByRole('button', { name: 'Grant' }).click()
+    await panel.getByRole('button', { name: 'Share', exact: true }).click()
 
     const grantResponse = await grantResponsePromise
     expect(grantResponse.status(), `${grantResponse.url()} ${await grantResponse.text()}`).toBe(200)
@@ -56,7 +48,7 @@ export async function exerciseGfsPerHostIsolationJourney({
     expect(submittedBody.subject).toBeUndefined()
     expect(submittedBody.subjects).toEqual([{ type: 'host', id: TARGET_HOST_SUBJECT_ID }])
     expect(submittedBody.permissions).toEqual(['read'])
-    await expect(page.getByText('Grant saved.').last()).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByText('Access shared.').last()).toBeVisible({ timeout: 15_000 })
 
     await expect
       .poll(

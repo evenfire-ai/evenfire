@@ -5,57 +5,51 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "${SCRIPT_DIR}/e2e-lib.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/wrc-networkpolicy-convergence.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_lib/wrc-fixtures.sh"
 
-raw_run_id="${E2E_RUN_ID:-$(date +%H%M%S)-$$}"
-RUN_ID="$(printf "%s" "$raw_run_id" | tr '[:upper:]' '[:lower:]' \
-  | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g' | cut -c1-20)"
-[ -n "$RUN_ID" ] || RUN_ID="run-$$"
+[ "$#" -eq 0 ] || {
+  fail 'This suite accepts no arguments; cleanup is restricted to resources created by this invocation'
+  exit 2
+}
+wrc_fixture_init
 
-RECIPE_NAME="${E2E_RECIPE_NAME:-e2e-wrc-intdep-${RUN_ID}}"
-SOURCE_ID="${E2E_SOURCE_ID:-src-${RUN_ID}}"
-BACKEND_ID="${E2E_BACKEND_ID:-be-${RUN_ID}}"
-DENIED_POD="${E2E_DENIED_POD:-deny-${RUN_ID}}"
+RECIPE_NAME="e2e-intdep-${E2E_RUN_ID}"
+SOURCE_ID="src-${E2E_RUN_ID}"
+BACKEND_ID="be-${E2E_RUN_ID}"
+DENIED_POD="deny-${E2E_RUN_ID}"
+PROBE_EGRESS_POLICY="intdep-probe-egress-${E2E_RUN_ID}"
+PROBE_INGRESS_POLICY="intdep-probe-ingress-${E2E_RUN_ID}"
 BACKEND_PORT="${E2E_BACKEND_PORT:-8080}"
-CONNECT_TIMEOUT="${E2E_CONNECT_TIMEOUT:-6}"
+STABILITY_SECONDS="${E2E_NP_STABILITY_SECONDS:-20}"
 SOURCE_DEPLOYMENT="$SOURCE_ID"
 BACKEND_DEPLOYMENT="$BACKEND_ID"
-CREATED=0
+CLEANUP_DONE=0
 
 cleanup() {
-  local status=0
-  kctl delete pod "$DENIED_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false \
-    >/dev/null 2>&1 || status=1
-  kctl delete workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
-  wait_for_workflowrecipe_deleted "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" "$TIMEOUT_DELETE" \
-    >/dev/null 2>&1 || status=1
-  kctl delete deployment "$SOURCE_DEPLOYMENT" "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" \
-    --ignore-not-found --wait=false >/dev/null 2>&1 || status=1
-  kctl delete service "$SOURCE_DEPLOYMENT" "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" \
-    --ignore-not-found >/dev/null 2>&1 || status=1
-  kctl delete networkpolicy -n "$SANDBOX_NS" \
-    -l "clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=${RECIPE_NAME}" \
-    --ignore-not-found >/dev/null 2>&1 || status=1
-  return "$status"
+  wrc_cleanup_owned
 }
 
 on_exit() {
   local status=$?
-  if [ "$CREATED" = "1" ] && [ "${E2E_KEEP_RESOURCES:-0}" != "1" ]; then
-    cleanup >/dev/null 2>&1 || {
-      [ "$status" -ne 0 ] && warn "issue #485 E2E cleanup left resources behind"
-      [ "$status" -eq 0 ] && fail "issue #485 E2E cleanup left resources behind" && status=1
-    }
+  if [ "$CLEANUP_DONE" -ne 1 ] && ! cleanup; then
+    if [ "$status" -ne 0 ]; then
+      warn 'Internal dependency E2E cleanup also failed; original failure is preserved'
+    else
+      fail 'Internal dependency E2E cleanup failed'
+      status=1
+    fi
   fi
   exit "$status"
 }
 trap on_exit EXIT
 
-if [ "${1:-}" = "--cleanup-only" ]; then
-  cleanup
-  exit $?
-fi
+[[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT" -gt 0 ] &&
+  [ "$BACKEND_PORT" -le 65535 ] || { fail 'Invalid E2E_BACKEND_PORT'; exit 1; }
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 && ok "Command '$1' available" && return
@@ -170,29 +164,31 @@ log "Context=$(current_e2e_context || true)"
 header "Phase 0 - Safety"
 need_cmd "$KUBECTL_BIN"
 require_safe_kube_context
-kctl cluster-info >/dev/null 2>&1 && ok "Kubernetes cluster reachable" || {
+if ! kctl cluster-info >/dev/null 2>&1; then
   fail "Kubernetes cluster not reachable"
   exit 1
-}
+fi
+ok "Kubernetes cluster reachable"
 for ns in "$WORKFLOW_RECIPE_NS" "$SANDBOX_NS" "$CONTROL_NS"; do
-  kctl get ns "$ns" >/dev/null 2>&1 && ok "Namespace ${ns} exists" || {
+  if ! kctl get ns "$ns" >/dev/null 2>&1; then
     fail "Namespace ${ns} not found"
     exit 1
-  }
+  fi
+  ok "Namespace ${ns} exists"
 done
-kctl get crd workflowrecipes.clerum.io >/dev/null 2>&1 && ok "WorkflowRecipe CRD installed" || {
+if ! kctl get crd workflowrecipes.clerum.io >/dev/null 2>&1; then
   fail "WorkflowRecipe CRD not installed"
   exit 1
-}
-kctl -n "$CONTROL_NS" rollout status deploy/workflow-recipes --timeout=120s >/dev/null 2>&1 \
-  && ok "workflow-recipes rolled out" || {
+fi
+ok "WorkflowRecipe CRD installed"
+if ! kctl -n "$CONTROL_NS" rollout status deploy/workflow-recipes --timeout=120s >/dev/null 2>&1; then
     fail "workflow-recipes deployment is not ready"
     exit 1
-  }
+fi
+ok "workflow-recipes rolled out"
 
-header "Phase 1 - Apply isolated fixture"
-cleanup >/dev/null 2>&1 || true
-cat <<YAML | kctl apply -f -
+header "Phase 1 - Create isolated fixture"
+cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
 apiVersion: clerum.io/v1alpha1
 kind: WorkflowRecipe
 metadata:
@@ -220,12 +216,11 @@ spec:
       args:
         - "mkdir -p /www && printf 'issue485-ok\n' > /www/index.html && exec httpd -f -p ${BACKEND_PORT} -h /www"
 YAML
-CREATED=1
-ok "WorkflowRecipe fixture applied"
+ok "Run-owned WorkflowRecipe fixture created"
 
-if kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" \
-  -o jsonpath='{.spec.workloads[*].egressBindings}' | grep -q .; then
-  fail "Fixture contains egressBindings; that would hide the behavior under test"
+if ! kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" -o json \
+  | jq -e 'all(.spec.workloads[]; ((.egressBindings // []) | length) == 0)' >/dev/null; then
+  fail "Could not verify the live fixture has no egressBindings shortcut"
   exit 1
 fi
 ok "Fixture has no egressBindings shortcut"
@@ -239,22 +234,25 @@ BACKEND_DEPLOYMENT="$(wait_for_workload_instance "$BACKEND_ID" "$TIMEOUT_POD")" 
   fail "Backend workload instance was not assigned"
   exit 1
 }
-wait_for_deployment "$SANDBOX_NS" "$SOURCE_DEPLOYMENT" "$TIMEOUT_POD" && ok "Source deployment ready" || {
+if ! wait_for_deployment "$SANDBOX_NS" "$SOURCE_DEPLOYMENT" "$TIMEOUT_POD"; then
   fail "Source deployment not ready"
   exit 1
-}
-wait_for_deployment "$SANDBOX_NS" "$BACKEND_DEPLOYMENT" "$TIMEOUT_POD" && ok "Backend deployment ready" || {
+fi
+ok "Source deployment ready"
+if ! wait_for_deployment "$SANDBOX_NS" "$BACKEND_DEPLOYMENT" "$TIMEOUT_POD"; then
   fail "Backend deployment not ready"
   exit 1
-}
+fi
+ok "Backend deployment ready"
 wait_internal_ready "$TIMEOUT_POD"
 
 resolved_target="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- printenv TARGET_URL 2>/dev/null || true)"
 expected_target="http://${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/"
-[ "$resolved_target" = "$expected_target" ] && ok "TARGET_URL resolved to ${resolved_target}" || {
+if [ "$resolved_target" != "$expected_target" ]; then
   fail "TARGET_URL resolved to '${resolved_target}', expected '${expected_target}'"
   exit 1
-}
+fi
+ok "TARGET_URL resolved to ${resolved_target}"
 
 header "Phase 3 - wr-intdep policy shape"
 egress_selector="clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=${RECIPE_NAME},clerum.io/source-workload=${SOURCE_ID}"
@@ -265,24 +263,43 @@ assert_policy "$egress_ref" "egress" "$SOURCE_ID" "$BACKEND_ID"
 assert_policy "$ingress_ref" "ingress" "$BACKEND_ID" "$SOURCE_ID"
 
 header "Phase 4 - Positive packet flow"
-positive_output="$(kctl exec "deploy/${SOURCE_DEPLOYMENT}" -n "$SANDBOX_NS" -- \
-  sh -c 'wget -qO- --timeout='"$CONNECT_TIMEOUT"' --tries=1 "$TARGET_URL"' 2>/dev/null || true)"
-printf "%s" "$positive_output" | grep -Fq "issue485-ok" && \
-  ok "WRC source reached backend through inferred internal dependency" || {
-    fail "WRC source could not reach backend (output: ${positive_output})"
-    exit 1
-  }
+wrc_assert_http_allowed 'WRC source reached backend through inferred internal dependency' \
+  "$SANDBOX_NS" "deploy/${SOURCE_DEPLOYMENT}" \
+  "${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local" "$BACKEND_PORT" issue485-ok
 
-header "Phase 5 - Negative packet flow"
-kctl delete pod "$DENIED_POD" -n "$SANDBOX_NS" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-cat <<YAML | kctl apply -f - >/dev/null
+header "Phase 5 - Live drift repair and steady no-churn"
+egress_ns="${egress_ref%%/*}"
+egress_name="${egress_ref#*/}"
+ingress_ns="${ingress_ref%%/*}"
+ingress_name="${ingress_ref#*/}"
+egress_hash="$(wrc_np_spec_hash "$egress_ns" "$egress_name")"
+ingress_hash="$(wrc_np_spec_hash "$ingress_ns" "$ingress_name")"
+
+wrc_inject_selector_drift "$egress_ns" "$egress_name"
+wrc_inject_selector_drift "$ingress_ns" "$ingress_name"
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_wait_for_np_spec_hash "$egress_ns" "$egress_name" "$egress_hash" 120
+wrc_wait_for_np_spec_hash "$ingress_ns" "$ingress_name" "$ingress_hash" 120
+
+wrc_assert_http_allowed 'Internal dependency traffic recovered after live policy repair' \
+  "$SANDBOX_NS" "deploy/${SOURCE_DEPLOYMENT}" \
+  "${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local" "$BACKEND_PORT" issue485-ok
+
+wrc_begin_np_observation
+wrc_track_np "$egress_ns" "$egress_name" internal-dependency
+wrc_track_np "$ingress_ns" "$ingress_name" internal-dependency
+wrc_trigger_recipe_reconcile "$WORKFLOW_RECIPE_NS" "$RECIPE_NAME" 120
+wrc_assert_np_observation_clean "$STABILITY_SECONDS" 120
+
+header "Phase 6 - Negative packet flow"
+cat <<YAML | kctl create --dry-run=client -f - -o json | wrc_create_owned
 apiVersion: v1
 kind: Pod
 metadata:
   name: ${DENIED_POD}
   namespace: ${SANDBOX_NS}
   labels:
-    run: ${DENIED_POD}
+    e2e.clerum.io/probe: ${DENIED_POD}
     e2e.clerum.io/suite: wrc-internal-dependency-networkpolicy
 spec:
   restartPolicy: Never
@@ -301,24 +318,40 @@ spec:
         capabilities:
           drop: ["ALL"]
 YAML
-wait_for_pod "$SANDBOX_NS" "run=${DENIED_POD}" 60 && ok "Unlabeled negative pod ready" || {
-  fail "Unlabeled negative pod not ready"
-  exit 1
-}
-if kctl exec "$DENIED_POD" -n "$SANDBOX_NS" -- wget -qO- \
-  --timeout="$CONNECT_TIMEOUT" --tries=1 \
-  "http://${BACKEND_DEPLOYMENT}.${SANDBOX_NS}.svc.cluster.local:${BACKEND_PORT}/" >/dev/null 2>&1; then
-  fail "Unlabeled pod reached backend; policy is too broad or NetworkPolicy is not enforced"
+if ! wait_for_pod "$SANDBOX_NS" "e2e.clerum.io/probe=${DENIED_POD}" 60; then
+  fail "Rogue probe pod not ready"
   exit 1
 fi
-ok "Unlabeled pod cannot reach backend"
+ok "Rogue probe pod ready"
 
-header "Phase 6 - Cleanup"
+# The rogue source must have a working egress path before testing backend
+# ingress. Use the Service IP so denied DNS cannot masquerade as ingress denial.
+backend_ip="$(kctl get service "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" -o jsonpath='{.spec.clusterIP}')"
+[[ "$backend_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+  fail 'Backend Service has no IPv4 ClusterIP for the isolated ingress control'
+  exit 1
+}
+backend_pod_selector="$(kctl get deployment "$BACKEND_DEPLOYMENT" -n "$SANDBOX_NS" -o json \
+  | jq -ce '.spec.selector.matchLabels | select(type == "object" and length > 0)')"
+probe_pod_selector="$(jq -cn --arg probe "$DENIED_POD" '{"e2e.clerum.io/probe":$probe}')"
+wrc_create_connection_policy "$PROBE_EGRESS_POLICY" Egress \
+  "$SANDBOX_NS" "$probe_pod_selector" "$SANDBOX_NS" "$backend_pod_selector" "$BACKEND_PORT"
+wrc_create_connection_policy "$PROBE_INGRESS_POLICY" Ingress \
+  "$SANDBOX_NS" "$backend_pod_selector" "$SANDBOX_NS" "$probe_pod_selector" "$BACKEND_PORT"
+wrc_assert_http_allowed 'Same rogue source reaches healthy backend with temporary ingress' \
+  "$SANDBOX_NS" "$DENIED_POD" "$backend_ip" "$BACKEND_PORT" issue485-ok
+wrc_delete_owned "$SANDBOX_NS" NetworkPolicy "$PROBE_INGRESS_POLICY"
+wrc_assert_http_blocked 'Internal dependency ingress rejects a source outside its workload selector' \
+  "$SANDBOX_NS" "$DENIED_POD" "$backend_ip" "$BACKEND_PORT"
+wrc_create_connection_policy "$PROBE_INGRESS_POLICY" Ingress \
+  "$SANDBOX_NS" "$backend_pod_selector" "$SANDBOX_NS" "$probe_pod_selector" "$BACKEND_PORT"
+wrc_assert_http_allowed 'Same rogue source and backend remain healthy after the negative control' \
+  "$SANDBOX_NS" "$DENIED_POD" "$backend_ip" "$BACKEND_PORT" issue485-ok
+wrc_delete_owned "$SANDBOX_NS" NetworkPolicy "$PROBE_INGRESS_POLICY"
+
+header "Phase 7 - Cleanup"
 cleanup
-CREATED=0
-kctl get workflowrecipe "$RECIPE_NAME" -n "$WORKFLOW_RECIPE_NS" >/dev/null 2>&1 \
-  && fail "WorkflowRecipe still exists after cleanup" || ok "WorkflowRecipe removed"
-policy_refs "clerum.io/managed-by=workflow-recipes,clerum.io/policy-type=internal-dependency,clerum.io/recipe=${RECIPE_NAME}" \
-  | grep -q . && fail "wr-intdep policies still exist after cleanup" || ok "wr-intdep policies removed"
+CLEANUP_DONE=1
+ok 'Run-owned fixture resources removed with UID-checked cleanup'
 
 print_results

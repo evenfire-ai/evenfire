@@ -14,6 +14,7 @@ import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAd
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../core/adapters/toolRegistryAdapter'
 import { compactConversation } from '../core/conversation/compaction'
 import { ConversationManager } from '../core/conversation/conversation'
+import { deriveAutoTitle } from '../core/conversation/sessionTitle'
 import { LlmError, LlmErrorCode } from '../core/errors'
 import { ApprovalController } from '../core/extensions/approvalController'
 import type { ApprovalConfig } from '../core/extensions/approvalTypes'
@@ -398,6 +399,37 @@ export class TaskExecutor {
         }
       }
       const userInput = msg?.content || this.task.conversationHistory[0]?.content || ''
+      // Auto-title (spec 15): on turn 1 only, derive the server-authoritative
+      // session title. Security order is FIXED (§5): redact the FULL input with
+      // the operator secret list FIRST, then collapse+truncate — truncating
+      // first would split a secret across the cut and defeat the literal match.
+      // `sanitizeFreeformContent` (not `sanitizeOutput`) so we don't emit a log
+      // line per turn. Applies to channel sessions too (same sanitization).
+      //
+      // "Turn 1" gate: `turns.length === 0` is a RAM proxy for the durable
+      // turn-1 signal. It MUST stay in lock-step with the durable write gate in
+      // `SqliteConversationStore.persistTurnStart` (`turnNumber === 1`): if this
+      // set a RAM title on a turn the durable write skips, the memory store would
+      // project a title the SQLite store does not, breaking dual-store parity.
+      // The two agree today because a fresh session starts at `turns.length === 0`
+      // AND `nextTurnNumber === 1`, and a cold-load rehydrates both together.
+      // They would diverge only if compaction/LRU/paginated cold-load ever shrank
+      // `turns` without resetting the durable `turnNumber` — none of which exist
+      // yet. If any is enabled, gate this on the durable turn number instead
+      // (there is no clean durable turn-1 value at this call site today: the
+      // count lives in each store, so plumbing it up would change the
+      // ConversationStore contract — hence the proxy).
+      const derivedTitle =
+        this.conversation.turns.length === 0
+          ? deriveAutoTitle(
+              this.responseSafety.sanitizeFreeformContent(userInput, {
+                secretWarning: 'Potential secret detected in session title',
+              }).content
+            )
+          : ''
+      // Empty first input (or whitespace-only) → no title; let the client keep
+      // its placeholder rather than persisting an empty string via COALESCE.
+      const autoTitle = derivedTitle.length > 0 ? derivedTitle : undefined
       // D3 — awaited durability barrier: the user message must be durable
       // before the LLM loop runs (it is the replay anchor after a crash). A
       // rejected write rolls back the turn inside startTurn and lands in
@@ -406,7 +438,8 @@ export class TaskExecutor {
         this.conversation,
         userInput,
         this.taskId,
-        this.task.traceContext ?? null
+        this.task.traceContext ?? null,
+        autoTitle
       )
       this.turnTiming?.addSessionLoadMs(Date.now() - sessionLoadStart)
 

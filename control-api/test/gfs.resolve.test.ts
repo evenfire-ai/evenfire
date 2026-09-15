@@ -41,7 +41,14 @@ describe('parseGfsUri', () => {
 })
 
 function res(partial: Partial<ResolvedResource> & { resourceId: string }): ResolvedResource {
-  return { drive: 'main', name: 'n', kind: 'directory', pathCache: null, ...partial }
+  return {
+    drive: 'main',
+    name: 'n',
+    kind: 'directory',
+    pathCache: null,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...partial,
+  }
 }
 
 class FakeStore implements ResolveStore {
@@ -107,6 +114,7 @@ const row = (resourceId: string, name = 'n', kind = 'directory') => ({
   name,
   kind,
   path_cache: null,
+  updated_at: new Date('2026-01-01T00:00:00.000Z'),
 })
 
 describe('DbResolveStore', () => {
@@ -115,8 +123,10 @@ describe('DbResolveStore', () => {
     db.responses = [{ rows: [row('r1')] }]
     const out = await new DbResolveStore(db).getByRid('main', RID)
     expect(out?.resourceId).toBe('r1')
+    expect(out?.updatedAt).toBe('2026-01-01T00:00:00.000Z')
     expect(db.queries[0].text).toContain('resource_id = $2::uuid')
     expect(db.queries[0].text).toContain('deleted_at IS NULL')
+    expect(db.queries[0].text).toContain('updated_at')
   })
 
   it('getByRid returns null when there is no live row', async () => {

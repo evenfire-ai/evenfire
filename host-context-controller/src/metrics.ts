@@ -155,6 +155,11 @@ export const netPolResyncTicksSkippedTotal = counter({
   labelNames: ['reason'] as const,
 })
 
+export const contextMetadataOnlyEventsTotal = counter({
+  name: 'clerum_hcc_context_metadata_only_events_total',
+  help: 'Context MODIFIED watch events that did not move the desired revision, so Host and SharedFileSystem fan-out were skipped (#460 Loop A label churn absorbed by HCC). A rising rate here is the storm returning; it is deliberately a counter and not a log line, because the event fires on exactly the churn that made the logs unreadable (#492).',
+})
+
 export const netPolDefaultsOnlyTicksTotal = counter({
   name: 'clerum_hcc_netpol_defaults_only_ticks_total',
   help: 'NetworkPolicy defaults-only ticks by named result (success/error).',
@@ -292,6 +297,45 @@ export const hostFleetLifecycleCatchTotal = counter({
   help: 'Host fleet catch-path decisions while a CommunicationChannel lifecycle generation is in flight (applied when hostFailures is empty, retry otherwise).',
   labelNames: ['decision'] as const,
 })
+
+// Outcomes partition completed creates; sum created, conflict, and error for
+// completed attempts. The bounded kind inventory includes the read-first Secret.
+export const CREATE_KINDS = [
+  'NetworkPolicy',
+  'Service',
+  'Deployment',
+  'ConfigMap',
+  'PersistentVolumeClaim',
+  'ServiceAccount',
+  'Role',
+  'RoleBinding',
+  'PodDisruptionBudget',
+  'Secret',
+] as const
+export type CreateKind = (typeof CREATE_KINDS)[number]
+export const createsTotal = counter({
+  name: 'clerum_hcc_creates_total',
+  help: 'Kubernetes create outcomes by kind: created (resolved), conflict (409), error, or skipped after successful presence-based suppression; errors and cancellations are not skipped.',
+  labelNames: ['kind', 'outcome'] as const,
+})
+for (const kind of CREATE_KINDS) {
+  for (const outcome of ['created', 'conflict', 'error', 'skipped']) {
+    createsTotal.inc({ kind, outcome }, 0)
+  }
+}
+
+// Actual GETs in the documented create/converge paths, including retry reads.
+// LIST results and reused caller snapshots do not represent new requests.
+export const existenceReadsTotal = counter({
+  name: 'clerum_hcc_existence_reads_total',
+  help: 'Kubernetes existence GET outcomes in instrumented create/converge paths: found, absent (404), or error, by kind.',
+  labelNames: ['kind', 'outcome'] as const,
+})
+for (const kind of CREATE_KINDS) {
+  for (const outcome of ['found', 'absent', 'error']) {
+    existenceReadsTotal.inc({ kind, outcome }, 0)
+  }
+}
 
 // #493: successful replace() only, inside replaceWithConflictRetry. Kind is
 // next.kind ?? 'unknown'. Direct Role PUTs stay invisible until G5.

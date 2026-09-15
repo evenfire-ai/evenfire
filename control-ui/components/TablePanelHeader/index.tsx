@@ -1,28 +1,40 @@
 'use client'
 
-import React from 'react'
+import { DataViewHeader } from '@clerum/frontend-components'
 import { cn } from '@lib/cn'
 import type { TablePanelHeaderProps } from './types'
 
+/** Control UI compatibility adapter for the shared list header. */
 export function TablePanelHeader({
-  actions,
   actionsClassName,
+  primaryAction,
+  refreshAction,
+  search,
+  secondaryActions,
   subtitle,
   title,
   titleActions,
 }: TablePanelHeaderProps) {
   return (
-    <div className="cu-table-panel__head">
-      <div className="cu-table-panel__heading">
-        <div className="cu-table-panel__title-row">
-          <span className="cu-panel-title">{title}</span>
+    <DataViewHeader
+      actions={
+        secondaryActions || search || refreshAction || primaryAction ? (
+          <div className={cn('cu-table-panel__actions', actionsClassName)}>
+            {secondaryActions}
+            {search}
+            {refreshAction}
+            {primaryAction}
+          </div>
+        ) : undefined
+      }
+      className="cu-table-panel__head"
+      description={subtitle}
+      title={
+        <span className="cu-panel-title cu-table-panel__title-row">
+          {title}
           {titleActions}
-        </div>
-        {subtitle ? <p className="cu-table-panel__subtitle">{subtitle}</p> : null}
-      </div>
-      {actions ? (
-        <div className={cn('cu-table-panel__actions', actionsClassName)}>{actions}</div>
-      ) : null}
-    </div>
+        </span>
+      }
+    />
   )
 }

@@ -61,6 +61,14 @@ export class HttpMcpHostClient implements McpHostClient {
       capabilityFamily?: 'promptBridge' | 'clientNotifications'
       provider?: string
       model?: string
+      contractVersion?: 2 | 3
+      codexBinding?: {
+        connectionKey: string
+        catalogRevision: number
+        credentialRevision: number
+        model: string
+        bindingHash: string
+      } | null
     }
   ): Promise<{ status: number; body: Record<string, unknown> }> {
     const url = `${endpoint}${PLUGIN_SDK_BOOTSTRAP_PATH}`

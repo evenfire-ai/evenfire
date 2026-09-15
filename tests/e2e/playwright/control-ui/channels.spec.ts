@@ -40,9 +40,8 @@ test.describe('Control UI — External Channels', () => {
     authedPage,
   }) => {
     // CommunicationChannelsTable has its own CRUD — check what's visible
-    // The tab should NOT show the Hosts or Contexts specific buttons
+    // The tab should NOT show the Hosts-specific create button
     await expect(authedPage.locator(CUI_DASHBOARD.CREATE_HOST_BUTTON)).toBeHidden()
-    await expect(authedPage.locator(CUI_DASHBOARD.CREATE_CONTEXT_BUTTON)).toBeHidden()
   })
 
   test('shows the CommunicationChannel CRDs returned by the API', async ({ authedPage }) => {

@@ -308,74 +308,82 @@ export default function PluginWorkloadSdkPage() {
             </>
           }
           subtitle="Per-recipe capability grants, quota, and invocation audit for promptBridge and clientNotifications."
-          actions={
-            <>
-              {view === 'grants' ? (
-                <>
-                  <SectionSearchInput
-                    value={grantSearch}
-                    onChange={setGrantSearch}
-                    placeholder="Search grants"
-                    ariaLabel="Search grants"
-                    disabled={
-                      grantsInitialLoad ||
-                      legacyInventoryLoading ||
-                      Boolean(legacyInventoryError) ||
-                      Boolean(grantsError)
-                    }
-                  />
-                  <Button
-                    type="button"
-                    className="cu-btn--icon cu-btn--toolbar"
-                    onClick={() => void loadGrants()}
-                    disabled={grantsLoading}
-                    aria-label="Refresh grants"
-                  >
-                    <IconRefresh
-                      className={grantsLoading ? 'cu-spin' : undefined}
-                      width={18}
-                      height={18}
-                    />
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => setView('invocations')}
-                  >
-                    Invocations
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="primary"
-                    size="sm"
-                    onClick={() => setEditing('new')}
-                    disabled={
-                      grantsInitialLoad ||
-                      legacyInventoryLoading ||
-                      Boolean(legacyInventoryError) ||
-                      Boolean(grantsError)
-                    }
-                  >
-                    New grant
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  type="button"
-                  className="cu-btn--icon cu-btn--toolbar"
-                  onClick={() => void loadInvocations()}
-                  disabled={invocationsLoading}
-                  aria-label="Refresh invocations"
-                >
-                  <IconRefresh
-                    className={invocationsLoading ? 'cu-spin' : undefined}
-                    width={18}
-                    height={18}
-                  />
-                </Button>
-              )}
-            </>
+          secondaryActions={
+            view === 'grants' ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => setView('invocations')}
+              >
+                Invocations
+              </Button>
+            ) : undefined
+          }
+          refreshAction={
+            view === 'grants' ? (
+              <Button
+                type="button"
+                className="cu-btn--icon cu-btn--toolbar"
+                onClick={() => void loadGrants()}
+                disabled={grantsLoading}
+                aria-label="Refresh grants"
+              >
+                <IconRefresh
+                  className={grantsLoading ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                className="cu-btn--icon cu-btn--toolbar"
+                onClick={() => void loadInvocations()}
+                disabled={invocationsLoading}
+                aria-label="Refresh invocations"
+              >
+                <IconRefresh
+                  className={invocationsLoading ? 'cu-spin' : undefined}
+                  width={18}
+                  height={18}
+                />
+              </Button>
+            )
+          }
+          search={
+            view === 'grants' ? (
+              <SectionSearchInput
+                value={grantSearch}
+                onChange={setGrantSearch}
+                placeholder="Search grants"
+                ariaLabel="Search grants"
+                disabled={
+                  grantsInitialLoad ||
+                  legacyInventoryLoading ||
+                  Boolean(legacyInventoryError) ||
+                  Boolean(grantsError)
+                }
+              />
+            ) : undefined
+          }
+          primaryAction={
+            view === 'grants' ? (
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                onClick={() => setEditing('new')}
+                disabled={
+                  grantsInitialLoad ||
+                  legacyInventoryLoading ||
+                  Boolean(legacyInventoryError) ||
+                  Boolean(grantsError)
+                }
+              >
+                New grant
+              </Button>
+            ) : undefined
           }
         />
 
@@ -678,13 +686,14 @@ function GrantFormModal({
     setError('')
     // Edit mode: the upsert is a full-column overwrite, and the form does not expose
     // the quota fields. Round-trip every quota key from the original grant except the
-    // deprecated per-run keys (no longer enforced, issue #348) so editing does not
-    // silently wipe values configured outside this form.
+    // deprecated ones (per-run: issue #348; maxOutputTokens — no longer enforced)
+    // so editing does not silently wipe values configured outside this form.
     const quotaLimits: PluginWorkloadSdkGrantInput['quotaLimits'] = {}
     if (grant) {
       const {
         maxRequestsPerRun: _d1,
         maxNotificationsPerRun: _d2,
+        maxOutputTokens: _d3,
         ...keptQuotaLimits
       } = grant.quotaLimits
       Object.assign(quotaLimits, keptQuotaLimits)

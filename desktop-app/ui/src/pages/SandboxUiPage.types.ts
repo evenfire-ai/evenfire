@@ -26,15 +26,21 @@ export type SandboxUiPageProps = {
   headerShellOverlayOpen?: boolean
   sidebarShellOverlayOpen?: boolean
   toastShellOverlayOpen?: boolean
+  deepLinkShellOverlayOpen?: boolean
   shortcutApp?: ActiveSandboxUiApp | null
   shortcutOpenRequestId?: number
   localSearchRequestId?: number
+  chatDrawerOpen?: boolean
+  titlebarLeadingContainer?: HTMLElement | null
+  onToggleChatDrawer?: () => void
   onBackToConversation?: () => void | Promise<void>
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void
   onEmbeddedAppRemoved?: () => void
   onEmbedBoundsApplied?: () => void
+  onEmbedSlotTopChange?: (topPx: number) => void
+  onEmbedSlotRightChange?: (rightPx: number) => void
   onNotify?: (message: string, tone: Tone) => void
   onShortcutOpenResult?: (
     requestId: number,

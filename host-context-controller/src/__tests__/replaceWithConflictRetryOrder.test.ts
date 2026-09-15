@@ -107,9 +107,16 @@ describe('replaceWithConflictRetry order and retry', () => {
       expect(replace.mock.calls[0][0].metadata?.resourceVersion).toBe('9')
       expect(replace.mock.calls[1][0].metadata?.resourceVersion).toBe('10')
       const updated = log.mock.calls
-        .map((call: unknown[]) => String(call[0]))
-        .filter((line: string) => line.includes('[Test] Updated Service "svc"'))
-      expect(updated).toEqual(['[Test] Updated Service "svc" (after 2 attempts)'])
+        .map((call: unknown[]) => JSON.parse(String(call[0])))
+        .filter(entry => entry.msg === 'Kubernetes resource updated')
+      expect(updated).toEqual([
+        expect.objectContaining({
+          level: 'info',
+          scope: '[Test]',
+          description: 'Service "svc"',
+          attempt: 2,
+        }),
+      ])
     } finally {
       log.mockRestore()
     }
@@ -355,9 +362,13 @@ describe('replaceWithConflictRetry order and retry', () => {
 
     expect(replace).not.toHaveBeenCalled()
     expect(await readWritesTotal('Service')).toBe(before)
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringMatching(/disappeared \(404\); skipping replace/)
-    )
+    expect(warn).toHaveBeenCalledOnce()
+    expect(JSON.parse(String(warn.mock.calls[0][0]))).toMatchObject({
+      level: 'warn',
+      msg: 'Kubernetes resource disappeared; skipping replace',
+      scope: '[Test]',
+      description: 'Service "svc"',
+    })
     warn.mockRestore()
   })
 

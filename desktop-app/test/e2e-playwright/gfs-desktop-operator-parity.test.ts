@@ -461,7 +461,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await expect.poll(() => operatorJourney.findGrant(ordinaryFolder.resourceId)).toBeNull()
   })
 
-  test('@gfs-operator/grant-share-lifecycle visible Desktop grant/share create, list, revoke removes recipient access', async ({
+  test('@gfs-operator/grant-lifecycle Desktop hides share creation and revokes grants', async ({
     operatorJourney,
   }, testInfo) => {
     const page = await operatorJourney.launchOperatorDesktop()
@@ -497,18 +497,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
     await dialog
       .getByRole('button', { name: `Options for ${shareFolder.name}`, exact: true })
       .click()
-    await dialog.getByRole('menuitem', { name: 'Create share', exact: true }).click()
-    await expectToast(page, '1 share created')
-    await expect
-      .poll(() => operatorJourney.findShare(shareFolder.resourceId), {
-        timeout: 30_000,
-        intervals: [250, 500, 1_000],
-      })
-      .not.toBeNull()
-    const share = operatorJourney.findShare(shareFolder.resourceId)!
-    await expect(page.getByTestId(`gfs-access-row-share-${share.id}`)).toContainText(
-      operatorJourney.ordinaryName
-    )
+    await expect(dialog.getByRole('menuitem', { name: 'Create share', exact: true })).toHaveCount(0)
     await closeManageDialog(page)
 
     const ordinary = await operatorJourney.launchOrdinaryDesktop(testInfo)
@@ -516,20 +505,13 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
       await operatorJourney.openFiles(ordinary.page)
       await expect(ordinary.page.getByTestId('gfs-view-shared')).toBeVisible()
       await expect(resourceRow(ordinary.page, grantFolder)).toBeVisible()
-      await expect(resourceRow(ordinary.page, shareFolder)).toBeVisible()
+      await expect(resourceRow(ordinary.page, shareFolder)).toHaveCount(0)
 
       await ensureOperatorRoot(page)
       await openResourceManage(page, grantFolder)
       await page.getByTestId(`gfs-revoke-grant-${grant.id}`).click()
       await expectToast(page, `Access revoked for ${operatorJourney.ordinaryName}`)
       await expect.poll(() => operatorJourney.findGrant(grantFolder.resourceId)).toBeNull()
-      await closeManageDialog(page)
-
-      await ensureOperatorRoot(page)
-      await openResourceManage(page, shareFolder)
-      await page.getByTestId(`gfs-revoke-share-${share.id}`).click()
-      await expectToast(page, `Shared access revoked for ${operatorJourney.ordinaryName}`)
-      await expect.poll(() => operatorJourney.findShare(shareFolder.resourceId)).toBeNull()
       await closeManageDialog(page)
 
       await ordinary.page.getByTestId('nav-chat').click()
@@ -552,14 +534,7 @@ test.describe.serial('GFS Desktop linked-operator parity', () => {
             .map(row => row.op),
         { timeout: 30_000, intervals: [250, 500, 1_000] }
       )
-      .toEqual(
-        expect.arrayContaining([
-          'grant.put[read]',
-          'grant.delete',
-          'share.create[read]',
-          'share.delete',
-        ])
-      )
+      .toEqual(expect.arrayContaining(['grant.put[read]', 'grant.delete']))
   })
 
   test('@gfs-operator/live-control-ui-unlink visible Control UI revoke immediately denies same Electron session', async ({

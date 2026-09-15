@@ -30,7 +30,7 @@ function operatorRunErrorMessage(err: unknown): string {
     return 'This cluster is still running an older Control API that blocks operator runs for approval-gated workflows. Redeploy control-api and retry.'
   }
   if (message.includes('workflow_runtime_not_ready')) {
-    return 'Workflow runtime infrastructure is still preparing. Wait for the recipe workload, MCP server, Context allowlist, and ready endpoints, then retry.'
+    return 'Workflow runtime infrastructure is still preparing. Wait for the recipe workload, MCP server, connector access, and ready endpoints, then retry.'
   }
   return message
 }

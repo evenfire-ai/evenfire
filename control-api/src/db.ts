@@ -22,6 +22,8 @@ import {
 import {
   applyLlmProviderAttemptConnectionIdSchema,
   applyLlmProviderAttemptSchema,
+  applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  applyLlmProviderAttemptSdkLinkSchema,
   applyLlmProviderAttemptTicketSchema,
 } from './services/llmProviderAttemptStore.js'
 import { applyMemberRegistrationCredentialsSchema } from './services/memberRegistrationCredentialsSchema.js'
@@ -6003,6 +6005,14 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0091_oauth_grants_owner_generalization',
     ],
     apply: applyOAuthGrantsOwnerGeneralization,
+  },
+  {
+    version: '0107_llm_provider_attempts_sdk_link',
+    apply: applyLlmProviderAttemptSdkLinkSchema,
+  },
+  {
+    version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
+    apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   },
 ]
 

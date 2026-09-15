@@ -30,6 +30,7 @@ describe('chatStoreBinding', () => {
   })
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     unbindChatStore()
     await fs.rm(tmpBase, { recursive: true, force: true })
   })

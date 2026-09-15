@@ -9,12 +9,31 @@ body,
   min-height: 100%;
 }
 
-/* Layout-transparent wrapper around the app/auth tree. It only exists so the
-   BootSplash overlay can mark the whole background subtree `inert` during the
-   startup/loading window, removing hidden controls from the tab order and
-   accessibility tree until the splash exits. */
+.app-frame {
+  /* Published on the common ancestor of the title bar and the sidebar so the
+     title bar's leading slot can align its actions to the app content's left
+     edge (= sidebar width). Mirrors .left-nav / .left-nav.collapsed widths;
+     App.tsx toggles data-sidebar-collapsed from the same sidebarCollapsed state
+     that drives the sidebar's .collapsed class. */
+  --sidebar-width: 328px;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: var(--window-titlebar-height) minmax(0, 1fr);
+  background: var(--topbar-gradient);
+}
+
+.app-frame[data-sidebar-collapsed] {
+  --sidebar-width: 74px;
+}
+
+/* Root wrapper around the app/auth tree. It exists so the BootSplash overlay
+   can mark the whole background subtree `inert` during the startup/loading
+   window, removing hidden controls from the tab order and accessibility tree
+   until the splash exits. */
 .app-root {
-  display: contents;
+  min-height: 0;
+  display: block;
+  background: var(--bg);
 }
 
 body {
@@ -62,12 +81,400 @@ h3 {
 }
 
 .app-shell {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0;
   padding: 0;
   width: 100%;
+}
+
+.window-titlebar {
+  position: relative;
+  /* Sit above the sidebar's own stacking layer (.left-nav uses
+     --sidebar-flyout-layer = --layer-dropdown + 1000) so the leading slot's
+     downward hover flyout paints over the sidebar column instead of behind it.
+     Still below dialogs/toasts (2300+), which correctly cover the whole chrome.
+     The title bar never vertically overlaps lower chrome, so this only affects
+     that flyout. */
+  z-index: calc(var(--layer-dropdown) + 1010);
+  isolation: isolate;
+  height: var(--window-titlebar-height);
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 var(--space-2);
+  background: var(--topbar-gradient);
+  border-bottom: 1px solid var(--titlebar-divider-border);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+/* Titlebar actions are portalled outside the content panel. Raise their owning
+   stacking context while the fixed chat drawer is present so search and inbox
+   overlays remain usable above that drawer. */
+.app-frame:has(.chat-drawer) > .window-titlebar {
+  z-index: var(--layer-dropdown);
+}
+
+.window-titlebar__actions {
+  --titlebar-action-border: var(--titlebar-control-border);
+  --titlebar-action-ink: var(--titlebar-control-ink);
+  --titlebar-action-muted-ink: var(--titlebar-control-ink);
+  --titlebar-action-surface: var(--titlebar-control-surface);
+
+  position: fixed;
+  top: 0;
+  right: var(--space-2);
+  left: calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4));
+  z-index: calc(var(--layer-header) + 1);
+  height: var(--window-titlebar-height);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  pointer-events: none;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions {
+  --titlebar-action-border: var(--titlebar-control-border);
+  --titlebar-action-ink: var(--titlebar-control-ink);
+  --titlebar-action-muted-ink: var(--titlebar-control-ink);
+  --titlebar-action-surface: var(--titlebar-control-surface);
+}
+
+.window-titlebar__actions .top-bar {
+  position: static;
+  inset: auto;
+  height: var(--window-titlebar-height);
+  width: 100%;
+  z-index: auto;
+  align-items: center;
+  gap: var(--space-2);
+  pointer-events: auto;
+}
+
+.window-titlebar__actions .header-left {
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.window-titlebar__actions .header-utilities {
+  flex: 0 0 auto;
+}
+
+.window-titlebar__actions .global-search {
+  --global-search-expanded: clamp(160px, 20vw, 280px);
+  --global-search-expanded-min: 0;
+  flex: 0 1 var(--global-search-expanded);
+  width: var(--global-search-expanded);
+  min-width: 0;
+  max-width: min(var(--global-search-expanded), 100%);
+  margin-right: 0;
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__actions .global-search:focus-within,
+.window-titlebar__actions .global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: 0;
+}
+
+.window-titlebar__actions .search-input {
+  height: 30px;
+  min-height: 30px;
+  padding-left: 34px;
+  border-color: var(--titlebar-action-border);
+  background: var(--titlebar-action-surface);
+  color: var(--titlebar-action-ink);
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08);
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__actions .global-search::before {
+  inset: 0 auto 0 11px;
+  place-items: center;
+  color: var(--titlebar-action-ink);
+  font-size: var(--font-size-lg);
+}
+
+.window-titlebar__actions .search-input::placeholder {
+  color: var(--titlebar-action-muted-ink);
+  opacity: 1;
+}
+
+.window-titlebar__actions .search-input:focus {
+  border-color: rgba(var(--focus-rgb), 0.85);
+  box-shadow:
+    0 0 0 2px rgba(var(--focus-rgb), 0.2),
+    0 6px 14px rgba(var(--overlay-rgb), 0.1);
+}
+
+.window-titlebar__actions .global-search-results {
+  top: calc(100% + var(--space-1));
+  right: 0;
+  width: min(720px, calc(100vw - var(--space-4)));
+}
+
+/* Ghost affordance, matching the chat drawer's new-chat / close IconButtons:
+   no border or fill at rest, an accent border + neutral fill on hover. */
+.window-titlebar__actions .notification-bell {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.window-titlebar__actions .notification-bell svg {
+  width: 16px;
+  height: 16px;
+  color: var(--titlebar-action-ink);
+}
+
+.window-titlebar__actions .notification-bell:hover {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: var(--surface-hover);
+}
+
+.window-titlebar__actions .notification-bell:hover svg,
+.window-titlebar__actions .notification-bell:focus-visible svg {
+  color: var(--text);
+}
+
+.window-titlebar__controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-1);
+  min-width: calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2));
+  -webkit-app-region: no-drag;
+}
+
+.window-control-button {
+  position: relative;
+  width: var(--window-titlebar-control-size);
+  min-width: var(--window-titlebar-control-size);
+  height: var(--window-titlebar-control-size);
+  min-height: var(--window-titlebar-control-size);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  -webkit-app-region: no-drag;
+}
+
+.window-control-button:hover:enabled {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.window-control-button:focus-visible {
+  border-color: rgba(var(--focus-rgb), 0.6);
+  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.24);
+}
+
+.window-control-icon {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  color: currentColor;
+}
+
+.window-control-icon--minimize::before {
+  content: '';
+  position: absolute;
+  left: 1px;
+  right: 1px;
+  bottom: 3px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.window-control-icon--toggleMaximize::before,
+.window-control-icon--toggleMaximize::after {
+  content: '';
+  position: absolute;
+  border: 1.5px solid currentColor;
+}
+
+.window-control-icon--toggleMaximize::before {
+  inset: 1px;
+}
+
+.window-control-icon--restore::before {
+  inset: 4px 1px 1px 4px;
+}
+
+.window-control-icon--restore::after {
+  inset: 1px 4px 4px 1px;
+}
+
+.window-control-icon--close::before,
+.window-control-icon--close::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  left: 1px;
+  width: 10px;
+  border-bottom: 1.5px solid currentColor;
+}
+
+.window-control-icon--close::before {
+  transform: rotate(45deg);
+}
+
+.window-control-icon--close::after {
+  transform: rotate(-45deg);
+}
+
+.window-titlebar--platform-mac .window-titlebar__controls {
+  gap: var(--space-1);
+  min-width: calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2));
+}
+
+.window-titlebar--platform-mac .window-titlebar__actions {
+  left: calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4));
+}
+
+.window-titlebar--platform-mac .window-control-button {
+  width: var(--window-titlebar-mac-control-size);
+  min-width: var(--window-titlebar-mac-control-size);
+  height: var(--window-titlebar-mac-control-size);
+  min-height: var(--window-titlebar-mac-control-size);
+  border-color: var(--window-control-mac-border);
+  border-radius: 999px;
+}
+
+.window-titlebar--platform-mac .window-control-button--close {
+  background: var(--window-control-mac-close);
+}
+
+.window-titlebar--platform-mac .window-control-button--minimize {
+  background: var(--window-control-mac-minimize);
+}
+
+.window-titlebar--platform-mac .window-control-button--toggleMaximize {
+  background: var(--window-control-mac-expand);
+}
+
+.window-titlebar--platform-mac .window-control-button:hover:enabled {
+  border-color: var(--window-control-mac-border);
+}
+
+.window-titlebar--platform-mac .window-control-icon {
+  opacity: 0;
+  transform: scale(0.72);
+  color: rgba(var(--overlay-rgb), 0.72);
+}
+
+.window-titlebar--platform-mac .window-titlebar__controls:hover .window-control-icon,
+.window-titlebar--platform-mac .window-control-button:focus-visible .window-control-icon {
+  opacity: 1;
+}
+
+/* Leading slot: mounted-app actions live here (icon-only), packed just after
+   the window controls in the same title-bar row so they sit at the top-left,
+   over the sidebar's content column and clear of the macOS traffic lights. The
+   header search + bell keep the right edge via .window-titlebar__actions. */
+.window-titlebar__leading {
+  /* Fixed so its left edge tracks the app content's left edge (= the sidebar
+     width, which changes with collapse) instead of flowing a fixed gap after
+     the window controls. The window controls sit on the LEFT on every platform,
+     so the left edge is clamped to clear them (same offset as
+     .window-titlebar__actions): collapsed the sidebar (74px) is narrower than
+     the controls, so the clamp wins; expanded it aligns to the 328px content
+     edge. The mac override uses the smaller traffic-light size. z-index keeps it
+     above .window-titlebar__actions' fixed, full-width .top-bar so that band
+     can't intercept pointer events over these actions. */
+  position: fixed;
+  top: 0;
+  left: max(
+    calc((var(--window-titlebar-control-size) * 3) + (var(--space-1) * 2) + var(--space-4)),
+    var(--sidebar-width)
+  );
+  z-index: calc(var(--layer-header) + 2);
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--window-titlebar-height);
+  /* Chromium unions all `-webkit-app-region` rects in DOCUMENT ORDER and, where
+     they overlap, the LAST one wins (z-index, position and pointer-events do not
+     enter into it). The only `drag` region is the root `.window-titlebar`; every
+     control that must stay clickable carves itself out as `no-drag`. This slot
+     sits over that root drag band, so it declares `no-drag` to lift the whole
+     leading area (and its descendant buttons) out of it. It must NOT declare
+     `drag` here: a later-in-document `drag` box covering another control would
+     re-union over it and make that control draggable again. */
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+/* mac: never overlap the traffic-light semaphore, even when the sidebar is
+   narrower than the controls (collapsed). */
+.window-titlebar--platform-mac .window-titlebar__leading {
+  left: max(
+    calc((var(--window-titlebar-mac-control-size) * 3) + (var(--space-1) * 2) + var(--space-4)),
+    var(--sidebar-width)
+  );
+}
+
+/* Narrow/mobile layout: the sidebar collapses into a full-width top bar, so
+   there is no left content column to track. Zero the tracked width so the
+   leading actions fall back to just clearing the window controls (the max()
+   clamp above), instead of anchoring to the now-irrelevant 328/74 px. */
+@media (max-width: 900px) {
+  .app-frame,
+  .app-frame[data-sidebar-collapsed] {
+    --sidebar-width: 0px;
+  }
+}
+
+.window-titlebar__leading-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  pointer-events: auto;
+}
+
+.window-titlebar__leading .titlebar-leading-action {
+  display: inline-flex;
+}
+
+/* Ghost affordance matching the title-bar bell / chat-drawer IconButtons:
+   no border or fill at rest, accent border + neutral fill on hover or when
+   the toggle is pressed. */
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--titlebar-control-ink);
+  /* Restate no-drag on the clickable button itself. The leading slot is already
+     no-drag and propagates, so this is idempotent — kept for clarity next to the
+     interactive control, and harmless because it never widens a drag region. */
+  -webkit-app-region: no-drag;
+}
+
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button:hover:enabled,
+.window-titlebar__leading .titlebar-leading-action__btn.ui-icon-button[aria-pressed='true'] {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .top-bar {
@@ -100,25 +507,63 @@ h3 {
 
 .global-search {
   position: relative;
-  width: var(--app-notification-drawer-width);
-  min-width: 220px;
+  /* Collapsed to just the magnifier until focused, then expands to the full
+     search width. The expanded size is carried in custom props so each
+     breakpoint retunes it without re-declaring the collapsed state. Collapsed
+     width matches the 40px input height so the icon sits in a square. */
+  --global-search-expanded: var(--app-notification-drawer-width);
+  --global-search-expanded-min: 220px;
+  width: 40px;
+  min-width: 40px;
   max-width: 100%;
+  /* Collapsed, the 40px pill sits one gap from the notification bell, whose
+     hover fill would otherwise crowd it — add a gap's worth of separation,
+     dropped back to 0 once expanded (the wide field already reads clear of it). */
+  margin-right: var(--space-2);
+  transition:
+    width var(--motion-medium),
+    min-width var(--motion-medium),
+    margin-right var(--motion-medium);
 }
 
+/* Stay expanded whenever the field is focused OR the results are open, so the
+   collapse is tied to "closed", not merely "unfocused": tabbing out while the
+   dropdown is still open must not hide the typed query behind the 40px box. */
+.global-search:focus-within,
+.global-search.is-open {
+  width: var(--global-search-expanded);
+  min-width: var(--global-search-expanded-min);
+  margin-right: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-search {
+    transition: none;
+  }
+}
+
+/* Collapsed: the glyph fills the square and is centered both axes, so it reads
+   as a balanced icon button instead of a small mark with dead space beside it. */
 .global-search::before {
   content: '⌕';
   position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 16px;
-  height: 16px;
+  inset: 0;
+  display: grid;
+  place-items: center;
   background-image: none;
   color: var(--text-dim);
-  font-size: var(--font-size-lg);
+  font-size: var(--font-size-xl);
   font-weight: 600;
   line-height: 1;
   pointer-events: none;
+}
+
+/* Expanded: pin the glyph to the left edge (ahead of the input's 40px left pad)
+   and drop back to the in-field size so it aligns with the typed text. */
+.global-search:focus-within::before,
+.global-search.is-open::before {
+  inset: 0 auto 0 12px;
+  font-size: var(--font-size-lg);
 }
 
 .search-input {
@@ -158,7 +603,7 @@ h3 {
   border-radius: var(--radius-md);
   border: 1px solid rgba(var(--edge-rgb), 0.36);
   background: rgba(var(--panel-rgb), 0.98);
-  box-shadow: 0 18px 28px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-hard);
   padding: var(--space-2);
 }
 
@@ -176,6 +621,7 @@ h3 {
 }
 
 .search-results-loading,
+.search-results-prompt,
 .search-results-empty {
   margin: 0;
   font-size: var(--font-size-sm);
@@ -361,14 +807,16 @@ h3 {
   text-overflow: ellipsis;
 }
 
+/* Ghost affordance: no border or fill at rest, a border + neutral fill only on
+   hover — same behavior as the drawer's new-chat / close IconButtons. Border,
+   fill and radius come from the shared ghost .ui-icon-button base; this rule
+   only sets the bell's own box metrics so it must NOT reimpose a persistent
+   border/background or a pill radius. */
 .notification-bell {
   width: 36px;
   height: 36px;
   min-height: 36px;
   padding: 0;
-  border-radius: 999px;
-  border: 1px solid rgba(var(--edge-rgb), 0.36);
-  background: var(--surface-soft);
   display: grid;
   place-items: center;
   cursor: pointer;
@@ -389,6 +837,7 @@ h3 {
 .notification-bell-wrapper {
   position: relative;
   z-index: var(--layer-dropdown);
+  -webkit-app-region: no-drag;
 }
 
 .notification-bell.has-attention svg {
@@ -431,11 +880,19 @@ h3 {
 
 .notification-menu--app-drawer {
   position: fixed;
-  top: calc(var(--space-4) + 36px + var(--space-2));
+  /* Anchored just below the window title bar, where the notification bell now
+     lives on every route, so the drawer opens flush under the bell instead of
+     floating over the panel. */
+  top: calc(var(--window-titlebar-height) + var(--space-2));
   right: var(--space-4);
   bottom: var(--space-4);
   width: var(--app-notification-drawer-width);
   max-height: none;
+}
+
+.notification-menu--app-drawer.notification-menu--embed-aligned {
+  left: var(--notification-drawer-left);
+  width: auto;
 }
 
 .notification-menu-title-row {
@@ -950,8 +1407,8 @@ h3 {
   display: flex;
   align-items: center;
   gap: var(--space-1-5);
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--edge-rgb), 0.4);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: rgba(var(--edge-rgb), 0.1);
   padding: var(--space-1) var(--space-2);
   font-size: var(--font-size-sm);
@@ -1016,12 +1473,12 @@ h3 {
   overflow: visible;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
 }
 
 .left-nav {
   --sidebar-flyout-layer: calc(var(--layer-dropdown) + 1000);
-  --sidebar-height: 100vh;
+  --sidebar-height: calc(100vh - var(--window-titlebar-height));
   --sidebar-logo-brand-gap: 4px;
   --sidebar-logo-pad-top: 8px;
   --sidebar-nav-parent-pad-x: var(--space-1);
@@ -1034,7 +1491,7 @@ h3 {
   width: 328px;
   min-width: 328px;
   max-width: 328px;
-  padding: var(--space-2);
+  padding: 0 var(--space-2) var(--space-2);
   display: flex;
   flex-direction: column;
   background: var(--sidebar-gradient);
@@ -1130,8 +1587,12 @@ h3 {
   align-items: center;
   gap: var(--space-2-5);
   padding: var(--sidebar-logo-pad-top) var(--space-1) var(--space-2);
-  margin-bottom: var(--space-2);
+  margin-bottom: var(--space-1);
   min-height: 56px;
+  /* It's a logo, not selectable copy — hovering/clicking must not blue-highlight
+     the wordmark as a text selection. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-link {
@@ -1147,6 +1608,20 @@ h3 {
   font: inherit;
   min-width: 0;
   border-radius: var(--radius-md);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
+   outranks .sidebar-logo-link's background: none by specificity and paints the
+   wordmark accent on hover. The logo has no hover affordance by design; keep it flat.
+   Same leak already guarded on .nav-latest-session__main. */
+.sidebar-logo-link:hover:enabled,
+.sidebar-logo-link:active {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: inherit;
 }
 
 .sidebar-logo-link:focus-visible {
@@ -1184,6 +1659,12 @@ h3 {
   flex-shrink: 0;
   background: transparent;
   display: none;
+  /* An <img>: user-select alone doesn't stop the blue image selection/drag ghost
+     on hover/click. Make it inert so the <button> parent owns the interaction. */
+  pointer-events: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-lockup {
@@ -1199,6 +1680,12 @@ h3 {
   object-position: left center;
   flex-shrink: 0;
   background: transparent;
+  /* An <img> (logotype SVG): make it inert so hover/click can't blue-highlight
+     it as an image selection/drag; the <button> parent owns the click. */
+  pointer-events: none;
+  -webkit-user-drag: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .sidebar-logo-lockup--dark {
@@ -1356,8 +1843,14 @@ h3 {
   text-align: left;
 }
 
+/* __main is a bare <button>, so the global button:hover:enabled accent fill
+   leaks onto it on hover and paints the row accent-blue over the neutral row
+   hover. Reset it back to transparent so the row's own neutral hover shows
+   through — the menu-button already has the same guard below. */
 .nav-latest-session:hover .nav-latest-session__main,
 .nav-latest-session:hover .nav-latest-session__menu-button {
+  background: transparent;
+  border-color: transparent;
   color: var(--text);
 }
 
@@ -1662,29 +2155,6 @@ h3 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.sidebar-data-submenu {
-  position: absolute;
-  left: calc(100% - 1px);
-  top: auto;
-  bottom: 0;
-  width: 220px;
-  display: none;
-  gap: var(--space-0-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.4);
-  border-radius: var(--radius-lg);
-  background: var(--panel);
-  box-shadow: 0 16px 28px rgba(var(--overlay-rgb), 0.4);
-  backdrop-filter: none;
-  padding: var(--space-1-5);
-  z-index: calc(var(--sidebar-flyout-layer) + 30);
-}
-
-.sidebar-settings-menu-item-wrapper--data:hover .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data:focus-within .sidebar-data-submenu,
-.sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-  display: grid;
 }
 
 .sidebar-footer-row {
@@ -2101,11 +2571,6 @@ h3 {
   z-index: calc(var(--sidebar-flyout-layer) + 60);
 }
 
-.left-nav.collapsed .sidebar-data-submenu {
-  top: auto;
-  bottom: 0;
-}
-
 .left-nav.collapsed .sidebar-profile-menu-wrapper {
   flex: 0 0 auto;
 }
@@ -2158,9 +2623,14 @@ h3 {
 
 .content-panel {
   --app-notification-drawer-width: clamp(280px, 42vw, 420px);
-  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-2) + 36px);
+  --app-header-utilities-width: calc(var(--app-notification-drawer-width) + var(--space-4));
+  /* Chat drawer owns its own width, decoupled from the notification drawer.
+     React sets `--chat-drawer-width` inline (session-only, drag-resizable); this
+     clamp is only the pre-mount / closed-state fallback. Floor 340px == the
+     drawer's min-width (see useChatDrawerResize). */
+  --chat-drawer-width: clamp(340px, 32vw, 420px);
 
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   min-height: 0;
   overflow: hidden;
   overflow-x: hidden;
@@ -2183,7 +2653,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-4) var(--space-4) 0;
   gap: 0;
 }
@@ -2201,9 +2671,23 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
-  padding: var(--space-4) var(--space-4) 0 calc(var(--space-4) / 2);
+  height: calc(100vh - var(--window-titlebar-height));
+  /* Top pad clears the absolute top-bar: its space-2 top offset + the header's
+     own height + a bit of gap below it. space-2 * 5 is the smallest step of the
+     spacing scale that covers that stack; the other three sides are just space-2. */
+  padding: calc(var(--space-2) * 5) var(--space-2) var(--space-2) var(--space-2);
   gap: 0;
+}
+
+/* The absolute top-bar aligns to the panel's own space-2 edges here (the panel
+   owns the extra top breathing room via its padding, not the header). */
+.content-panel.content-panel--agent-chat > .top-bar {
+  top: var(--space-2);
+  right: var(--space-2);
+}
+
+.content-panel.content-panel--agent-chat.content-panel--titlebar-actions {
+  padding-top: var(--space-1);
 }
 
 .content-panel.content-panel--agent-chat > .agent-page {
@@ -2218,7 +2702,7 @@ h3 {
   flex-direction: column;
   overflow: hidden;
   min-height: 0;
-  height: 100vh;
+  height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-4) var(--space-4) 0;
   gap: var(--space-2-5);
 }
@@ -2249,7 +2733,6 @@ h3 {
   flex: 0 0 auto;
   display: grid;
   gap: 4px;
-  padding-right: clamp(480px, 54vw, 620px);
 }
 
 .page-header h2 {
@@ -2302,28 +2785,9 @@ h3 {
   padding-bottom: 2px;
 }
 
-.page-tab,
-.agents-fleet-tab,
-.context-tab,
-.team-tab {
-  min-height: 32px;
-  padding: 0 10px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: var(--font-size-lg);
-  font-weight: 600;
-}
-
-.page-tab.active,
-.agents-fleet-tab.active,
-.context-tab.active,
-.team-tab.active {
-  border-bottom-color: rgba(var(--accent-rgb), 0.72);
-  color: var(--text);
-}
+/* .page-tab / .agents-fleet-tab / .context-tab / .team-tab share the
+   .ui-tab-button design language (base, hover, active, focus grouped in the
+   Common controls section). Only the container spacing lives here. */
 
 .badge-row {
   display: flex;
@@ -2332,20 +2796,26 @@ h3 {
   margin-top: var(--space-1-5);
 }
 
-.badge {
+/* Shared square-chip base for Badge and ReferenceTag (§5 chip consolidation).
+   Identical geometry + edge; each keeps its own tone / kind accents and the
+   Pill is the fully-rounded variant. */
+.badge,
+.reference-tag {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   width: fit-content;
   max-width: 22ch;
   height: 22px;
+  min-height: 22px;
+  box-sizing: border-box;
   overflow: hidden;
-  border-radius: 20px;
-  border: 1px solid rgba(var(--edge-rgb), 0.44);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
   line-height: 1;
-  padding: 0 8px;
+  padding: 0 var(--space-1-5);
   color: var(--text-muted);
   background: rgba(var(--edge-rgb), 0.12);
   text-overflow: ellipsis;
@@ -2358,10 +2828,29 @@ h3 {
   background: rgba(var(--success-rgb), 0.18);
 }
 
+/* tone-accent is the blue accent (was mis-mapped to --success). */
 .badge.tone-accent {
-  color: color-mix(in srgb, var(--success) 72%, var(--text) 28%);
-  border-color: rgba(var(--success-rgb), 0.22);
-  background: rgba(var(--success-rgb), 0.055);
+  color: color-mix(in srgb, var(--accent) 72%, var(--text) 28%);
+  border-color: rgba(var(--accent-rgb), 0.34);
+  background: rgba(var(--accent-rgb), 0.12);
+}
+
+.badge.tone-warning {
+  color: color-mix(in srgb, var(--warning) 42%, var(--text) 58%);
+  border-color: rgba(var(--warning-rgb), 0.34);
+  background: rgba(var(--warning-rgb), 0.16);
+}
+
+.badge.tone-danger {
+  color: var(--danger);
+  border-color: rgba(var(--danger-rgb), 0.32);
+  background: rgba(var(--danger-rgb), 0.14);
+}
+
+.badge.tone-info {
+  color: color-mix(in srgb, var(--info) 48%, var(--text) 52%);
+  border-color: rgba(var(--info-rgb), 0.34);
+  background: rgba(var(--info-rgb), 0.16);
 }
 
 .badge.tone-accent::before {
@@ -3023,7 +3512,7 @@ h3 {
   border-radius: var(--radius-sm);
   border: 1px solid rgba(var(--edge-rgb), 0.38);
   background: rgba(var(--panel-rgb), 0.98);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-soft);
   padding: var(--space-1);
   z-index: 3200;
 }
@@ -3157,7 +3646,7 @@ h3 {
   font-size: var(--font-size-xs);
   font-weight: 500;
   line-height: 1.3;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-soft);
   opacity: 0;
   pointer-events: none;
   transition: opacity 80ms ease;
@@ -3559,6 +4048,9 @@ h3 {
   max-width: 160px;
   padding-inline: var(--space-2);
   gap: var(--space-1-5);
+  /* Square control radius (F1 §5): the base Pill is fully rounded, but in the
+     composer footer this chip is a control, not a status pill. */
+  border-radius: var(--radius-control);
   border-color: rgba(var(--edge-rgb), 0.32);
   background: var(--surface-soft);
   color: var(--text-muted);
@@ -3999,12 +4491,11 @@ h3 {
   font-family: inherit;
   font-size: var(--font-size-xs);
   cursor: pointer;
-  opacity: 0.7;
-  transition: opacity 0.15s;
+  transition: color var(--motion-fast);
 }
 
 .stepper-details-toggle:hover {
-  opacity: 1;
+  color: var(--text-muted);
 }
 
 .stepper-details-chevron {
@@ -4430,7 +4921,7 @@ h3 {
   border: 1px solid rgba(var(--edge-rgb), 0.38);
   border-radius: var(--radius-sm);
   background: rgba(var(--panel-rgb), 0.98);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-soft);
   z-index: calc(var(--layer-dropdown) + 20);
 }
 
@@ -4532,7 +5023,7 @@ h3 {
   font-size: var(--font-size-xs);
   font-weight: 500;
   line-height: 1.2;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-soft);
   opacity: 0;
   pointer-events: none;
   transition: opacity 80ms ease;
@@ -6148,8 +6639,8 @@ h3 {
   max-height: none;
   overflow: auto;
   display: grid;
-  gap: var(--space-2);
-  padding: 16px;
+  gap: var(--space-3);
+  padding: var(--space-3);
 }
 
 .chat-thread-dedicated {
@@ -6196,7 +6687,7 @@ h3 {
 
 .virtualized-message-chunk {
   display: grid;
-  gap: var(--space-2);
+  gap: var(--space-3);
   min-width: 0;
   content-visibility: auto;
   contain-intrinsic-size: auto 720px;
@@ -6323,7 +6814,6 @@ h3 {
 
 .chat-bubble {
   max-width: min(760px, 74ch);
-  min-width: 320px;
   padding: var(--space-2-5);
   border-radius: var(--radius-lg);
   border: 1px solid rgba(var(--edge-rgb), 0.3);
@@ -6338,19 +6828,33 @@ h3 {
   width: 100%;
 }
 
+/* D-2: the user turn is the single turn with a fill. The band wraps ONLY the
+   message text — the meta row (timestamp) rides below it, outside the fill,
+   mirroring VS Code. So the bubble is a transparent, right-aligned column and
+   the fill lives on the .message-block child, not the bubble container. */
 .chat-group.user .chat-bubble {
   justify-self: end;
-  border-color: rgba(var(--accent-rgb), 0.2);
-  background: rgba(var(--accent-rgb), 0.08);
-  margin-bottom: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
   min-width: 0;
 }
 
+/* The fill band: a solid neutral surface (not an accent tint), small control
+   radius, shrink-wrapped to the message and right-aligned by the column above.
+   Uses the solid --surface-3 (widget) level: --surface-soft is a translucent
+   panel and the thread sits ON --panel, so it composited to the same color and
+   read as an invisible container. */
 .chat-group.user .chat-bubble .message-block {
+  max-width: 100%;
+  padding: var(--space-2-5);
   border: none;
-  background: transparent;
-  padding: 0;
-  border-radius: 0;
+  border-radius: var(--radius-control);
+  background: var(--surface-3);
 }
 
 .message-attachments-list {
@@ -6474,12 +6978,11 @@ h3 {
   margin-top: var(--space-1);
 }
 
+/* The user meta-row rides in normal flow at the foot of the band (mirroring the
+   assistant row), right-aligned. Inherits margin-top: var(--space-1) from the
+   base row. */
 .chat-message-meta-row--user {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  margin-top: 0;
-  z-index: 1;
+  justify-content: flex-end;
   white-space: nowrap;
 }
 
@@ -6714,19 +7217,16 @@ h3 {
   max-height: none;
 }
 
+/* §8: prose is a single voice — sans, body size, no box. The box (mono + fill +
+   border + radius) is reserved for code/JSON, applied via `.json-content`, not
+   the turn container. Assistant prose adds `.markdown-content` (already sans);
+   user prose is a bare `.message-block` and inherits this default. */
 .message-block {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
-    monospace;
-  font-size: var(--font-size-sm);
-  line-height: 18px;
-  padding: var(--space-2-5);
-  border-radius: var(--radius-md);
-  background: rgba(var(--panel-rgb), 0.92);
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  font-size: var(--font-size-md);
+  line-height: 1.55;
 }
 
 .json-content {
@@ -6735,6 +7235,14 @@ h3 {
     monospace;
   font-size: var(--font-size-sm);
   line-height: 18px;
+}
+
+/* Code/JSON is the boxed voice: mono content in a subtle framed surface. */
+.message-block.json-content {
+  padding: var(--space-2-5);
+  border-radius: var(--radius-md);
+  background: rgba(var(--panel-rgb), 0.66);
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
 }
 
 .markdown-content {
@@ -6856,16 +7364,6 @@ h3 {
   opacity: 1;
 }
 
-.chat-group.user .chat-bubble::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  height: 34px;
-  pointer-events: auto;
-}
-
 .message-copy-button:focus-visible {
   outline: 1px solid rgba(var(--focus-rgb), 0.7);
   outline-offset: 2px;
@@ -6936,7 +7434,7 @@ h3 {
   border-radius: var(--radius-md);
   font-size: var(--font-size-lg);
   line-height: 20px;
-  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   resize: none;
 }
@@ -6945,7 +7443,7 @@ h3 {
   position: relative;
   display: grid;
   gap: var(--space-1-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
   background: var(--surface-soft);
   box-shadow: 0 1px 6px rgba(var(--overlay-rgb), 0.08);
@@ -6958,9 +7456,7 @@ h3 {
 
 .composer-input-shell:focus-within {
   border-color: rgba(var(--focus-rgb), 0.76);
-  box-shadow:
-    0 0 0 1px rgba(var(--focus-rgb), 0.56),
-    0 0 0 3px rgba(var(--focus-rgb), 0.22);
+  box-shadow: 0 0 0 1px rgba(var(--focus-rgb), 0.56);
 }
 
 .composer-input-shell--drag-active textarea {
@@ -7043,7 +7539,7 @@ h3 {
   min-height: 36px;
   min-width: 36px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   display: inline-grid;
   place-items: center;
 }
@@ -7545,7 +8041,7 @@ h3 {
   border-radius: var(--radius-md);
   border: 1px solid rgba(var(--edge-rgb), 0.45);
   background: rgba(var(--surface-rgb), 0.97);
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-hard);
   padding: var(--space-4);
   display: grid;
   gap: var(--space-2-5);
@@ -7630,14 +8126,9 @@ h3 {
   grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
 }
 
-/* `.contexts-fleet-page` / `.mcp-servers-page` were legacy layout hooks.
-   They were removed from list-page JSX in favor of `.page`, so the only
-   remaining page-specific hooks are `context-detail-page` / `team-detail-page`
-   (used for scoped token overrides). */
-
 /* Card that frames the connectors `da-table` (which renders frameless + full
-   bleed), mirroring `.contexts-board-card`: the page-card supplies the single
-   frame; the table lays out inside it. */
+   bleed): the page-card supplies the single frame; the table lays out inside
+   it. */
 .mcp-servers-board-card {
   min-height: 0;
   min-width: 0;
@@ -7714,28 +8205,8 @@ h3 {
   flex-wrap: wrap;
 }
 
-.reference-tag {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  width: fit-content;
-  max-width: 22ch;
-  height: 22px;
-  overflow: hidden;
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: 20px;
-  background: rgba(var(--edge-rgb), 0.12);
-  color: var(--text-muted);
-  padding: 0 8px;
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  line-height: 1;
-  min-height: 22px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  box-sizing: border-box;
-}
-
+/* .reference-tag base geometry is shared with .badge in the chip base rule
+   (§5 chip consolidation). Only the interactive/kind deltas live here. */
 .reference-tag--button {
   appearance: none;
   border-style: solid;
@@ -7773,7 +8244,7 @@ h3 {
 }
 
 .reference-tag--disabled {
-  opacity: 0.64;
+  opacity: 0.5;
 }
 
 .reference-tag__icon {
@@ -7827,48 +8298,8 @@ h3 {
 }
 
 .reference-tag--button:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.56);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.16);
-}
-
-.contexts-board-card,
-.contexts-details-section {
-  min-height: 0;
-  min-width: 0;
-  display: grid;
-  align-content: start;
-}
-
-/* `.workflows-list-card` is a standalone-grid card — the da-grid itself owns
-   the visual frame (border/radius/bg). Remove the redundant page-card frame
-   so there is only one border around the table. */
-.workflows-list-card {
-  border: none;
-  background: transparent;
-  box-shadow: none;
-  padding: 0;
-  gap: var(--space-2);
-}
-
-/* Subtler `--list-item-*` palette so multiple board listings share the same
-   understated visual instead of the stronger default `--grid-card-*` look. */
-.contexts-board-card .da-grid,
-.context-detail-page .da-grid,
-.team-detail-page .da-grid,
-.workflows-list-card .da-grid {
-  --grid-card-bg: var(--list-item-bg);
-  --grid-card-border: rgba(var(--edge-rgb), 0.14);
-  --grid-card-bg-hover: var(--list-item-hover-bg);
-  --grid-card-border-hover: rgba(var(--accent-rgb), 0.34);
-  --grid-card-bg-selected: var(--list-item-selected-bg);
-  --grid-card-border-selected: var(--list-item-selected-border);
-}
-
-.contexts-board-card .da-grid__row,
-.context-detail-page .da-grid__row,
-.team-detail-page .da-grid__row,
-.workflows-list-card .da-grid__row {
-  border-radius: var(--radius-lg); /* 12px — matches legacy `.context-table-row` */
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* `.context-id-cell` is the first column in the contexts/agents/workflows
@@ -7894,50 +8325,27 @@ h3 {
   flex: 0 0 auto;
 }
 
-.workflows-list-card .workflow-row--expanded {
-  border-bottom-right-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.workflows-detail-extension {
-  display: grid;
-  gap: var(--space-3);
-  margin-top: calc(-1 * var(--grid-row-gap));
-  padding: var(--space-3) var(--space-4) var(--space-4);
-  border: 1px solid var(--grid-card-border-selected);
-  border-top: 0;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
-  background: rgba(var(--accent-rgb), 0.06);
-}
-
-.workflows-detail-extension__header {
+/* Compact "Recent Runs" cell for the flat Plugins table (spec 12 §5.F):
+   latest run summary on one line, its artifact download buttons wrapping below.
+   Replaces the old inline accordion detail panel. */
+.workflow-recent-runs {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.workflows-detail-extension__title {
-  margin: 0;
-  color: var(--text);
-  font-size: var(--font-size-lg);
-  line-height: var(--line-height-tight);
-}
-
-.workflows-detail-extension__title-group {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+  flex-direction: column;
+  gap: var(--space-1-5);
   min-width: 0;
 }
 
-.workflows-detail-extension__section {
-  display: grid;
-  gap: var(--space-2);
+.workflow-recent-runs__summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
 }
 
-.workflows-detail-extension__section h4 {
-  margin: 0;
+.workflow-recent-runs__artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 /* When `.context-id-cell` is the first cell of a `.da-grid__row`, every
@@ -8060,16 +8468,6 @@ h3 {
   gap: var(--space-2);
 }
 
-.workflow-run-row {
-  align-items: flex-start;
-}
-
-.workflow-run-main {
-  min-width: 0;
-  display: grid;
-  gap: var(--space-1-5);
-}
-
 .workflow-run-artifacts {
   display: flex;
   flex-wrap: wrap;
@@ -8118,19 +8516,6 @@ h3 {
 
 .contexts-footnote {
   font-size: var(--font-size-sm);
-}
-
-/* `.teams-page` was a legacy layout hook; removed from list-page JSX. */
-
-.team-detail-page {
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
-.context-detail-page {
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  gap: var(--space-2-5);
 }
 
 .teams-detail-page-card {
@@ -8580,7 +8965,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .team-member-avatar-chip:hover .team-member-initial-avatar {
   background: var(--surface-hover);
   border-color: rgba(var(--accent-rgb), 0.5);
-  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--shadow-soft);
 }
 
 .team-member-avatar-chip:focus-visible .team-member-initial-avatar {
@@ -8755,7 +9140,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .detail-row {
   border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   padding: var(--space-1-5) var(--space-2);
   display: grid;
   gap: var(--space-0-5);
@@ -9171,8 +9556,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-control--dense {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: var(--control-height-lg);
+  padding: 0 var(--space-2);
   font-size: var(--font-size-md);
 }
 
@@ -9183,10 +9568,10 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-dropdown-select__trigger.ui-button {
   min-width: 0;
-  min-height: 42px;
+  min-height: var(--control-height);
   padding-inline: var(--space-2-5);
   border-color: var(--control-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   background: var(--control-bg-strong);
   color: var(--text);
   font-size: var(--font-size-md);
@@ -9202,8 +9587,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-dropdown-select__trigger.ui-button:hover:enabled,
 .ui-dropdown-select__trigger.ui-button[aria-expanded='true'] {
-  border-color: rgba(var(--accent-rgb), 0.62);
-  background: rgba(var(--accent-rgb), 0.09);
+  border-color: var(--control-border-hover);
+  background: var(--surface-hover);
 }
 
 .ui-dropdown-select__placeholder {
@@ -9239,6 +9624,11 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   scrollbar-width: thin;
 }
 
+.ui-dropdown-select__menu--portal {
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 40);
+}
+
 .ui-dropdown-select__option.ui-menu-item {
   min-height: 38px;
   padding-inline: var(--space-2);
@@ -9254,6 +9644,10 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .ui-button,
 .ui-icon-button,
 .ui-tab-button,
+.page-tab,
+.agents-fleet-tab,
+.context-tab,
+.team-tab,
 .ui-menu-item,
 .ui-nav-item,
 .ui-selectable-option {
@@ -9283,7 +9677,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   justify-content: center;
   gap: var(--space-1);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   border: 1px solid transparent;
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
@@ -9335,8 +9729,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-button--solid.ui-button--primary {
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .ui-button--solid.ui-button--danger {
@@ -9367,7 +9761,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 
 .ui-button--solid:hover:enabled {
   border-color: rgba(var(--accent-rgb), 0.45);
-  background: color-mix(in srgb, var(--accent-strong) 72%, var(--surface-strong) 28%);
+  background: var(--accent-strong);
 }
 
 .ui-button--solid.ui-button--neutral:hover:enabled,
@@ -9502,11 +9896,25 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 .ui-button:focus-visible,
 .ui-icon-button:focus-visible,
 .ui-tab-button:focus-visible,
+.page-tab:focus-visible,
+.agents-fleet-tab:focus-visible,
+.context-tab:focus-visible,
+.team-tab:focus-visible,
 .ui-menu-item:focus-visible,
 .ui-nav-item:focus-visible,
 .ui-selectable-option:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.68);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.24);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.ui-button:disabled,
+.ui-icon-button:disabled,
+.ui-tab-button:disabled,
+.ui-menu-item:disabled,
+.ui-nav-item:disabled,
+.ui-selectable-option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .ui-icon-button {
@@ -9518,7 +9926,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   place-items: center;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-muted);
 }
@@ -9552,8 +9960,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .ui-icon-button--solid {
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
-  color: var(--text-inverse);
+  background: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .ui-icon-button--solid.ui-icon-button--neutral,
@@ -9579,6 +9987,12 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--text);
 }
 
+.ui-icon-button--solid:hover:enabled {
+  background: var(--accent-strong);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--accent-contrast);
+}
+
 .ui-icon-button--solid.ui-icon-button--neutral:hover:enabled,
 .ui-icon-button--solid.ui-icon-button--secondary:hover:enabled {
   background: var(--surface-hover);
@@ -9593,8 +10007,12 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   color: var(--danger);
 }
 
-.ui-tab-button {
-  min-height: 32px;
+.ui-tab-button,
+.page-tab,
+.agents-fleet-tab,
+.context-tab,
+.team-tab {
+  min-height: var(--control-height-lg);
   padding: 0 var(--space-2);
   border: 0;
   border-bottom: 2px solid transparent;
@@ -9616,12 +10034,20 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   font-size: var(--font-size-xl);
 }
 
-.ui-tab-button:hover:enabled {
+.ui-tab-button:hover:enabled,
+.page-tab:hover:enabled,
+.agents-fleet-tab:hover:enabled,
+.context-tab:hover:enabled,
+.team-tab:hover:enabled {
   background: rgba(var(--accent-rgb), 0.08);
   color: var(--text);
 }
 
-.ui-tab-button.active {
+.ui-tab-button.active,
+.page-tab.active,
+.agents-fleet-tab.active,
+.context-tab.active,
+.team-tab.active {
   border-bottom-color: rgba(var(--accent-rgb), 0.72);
   color: var(--text);
 }
@@ -9634,7 +10060,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   gap: var(--space-2);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-muted);
   font-size: var(--font-size-md);
@@ -9717,8 +10143,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   align-items: center;
   justify-content: center;
   gap: var(--space-0-5);
-  border: 1px solid rgba(var(--edge-rgb), 0.3);
-  border-radius: 999px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
   color: var(--text-muted);
   font-weight: var(--font-weight-semibold);
@@ -9781,8 +10207,8 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: grid;
   gap: var(--space-1);
   text-align: left;
-  border-radius: var(--radius-md);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   color: var(--text);
 }
@@ -9821,7 +10247,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2-5);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   border: 1px dashed rgba(var(--edge-rgb), 0.3);
   background: var(--surface-strong);
 }
@@ -9872,14 +10298,14 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: inline-grid;
   place-items: center;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--status-dot-bg);
   font-size: var(--font-size-xs);
   flex-shrink: 0;
 }
 
 .toast-stack {
   position: fixed;
-  top: 16px;
+  top: calc(var(--window-titlebar-height) + var(--space-2));
   right: 16px;
   z-index: 4000;
   display: grid;
@@ -9892,7 +10318,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   display: flex;
   align-items: flex-start;
   gap: var(--space-1-5);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   border: 1px solid rgba(var(--edge-rgb), 0.3);
   background: var(--surface-strong);
   padding: var(--space-2) var(--space-2-5);
@@ -9908,7 +10334,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   place-items: center;
   font-size: var(--font-size-xs);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--status-dot-bg);
   margin-top: 1px;
 }
 
@@ -9921,7 +10347,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
 }
 
 .auth-page {
-  min-height: 100vh;
+  min-height: calc(100vh - var(--window-titlebar-height));
   padding: var(--space-5);
   display: grid;
   place-items: center;
@@ -9954,7 +10380,7 @@ button.page-breadcrumb-link--plain-action:hover:enabled {
   --boot-exit-duration: 240ms;
 
   position: fixed;
-  inset: 0;
+  inset: var(--window-titlebar-height) 0 0 0;
   z-index: 9999;
   display: grid;
   place-items: center;
@@ -10573,7 +10999,7 @@ select,
 button {
   width: 100%;
   border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   background: var(--control-bg);
   color: var(--text);
   font: inherit;
@@ -10584,24 +11010,30 @@ button {
     background var(--motion-fast);
 }
 
+/* Single-line controls carry the shared control height as a floor. */
+input,
+select {
+  min-height: var(--control-height);
+}
+
 textarea {
   background: var(--control-bg-strong);
 }
 
 button {
   width: auto;
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
+  background: var(--accent);
   border-color: transparent;
-  min-height: 36px;
-  padding: 0 14px;
-  border-radius: 9px;
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
   font-size: var(--font-size-md);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   cursor: pointer;
-  color: var(--text-inverse);
+  color: var(--accent-contrast);
 }
 
 button:hover:enabled {
+  background: var(--accent-strong);
   transform: none;
   filter: none;
 }
@@ -10639,18 +11071,16 @@ button:hover:enabled {
 }
 
 button:disabled {
-  opacity: 0.7;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
-input:focus,
-textarea:focus,
-select:focus,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
 button:focus-visible {
-  border-color: rgba(var(--focus-rgb), 0.76);
-  box-shadow:
-    0 0 0 1px rgba(var(--focus-rgb), 0.56),
-    0 0 0 3px rgba(var(--focus-rgb), 0.22);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 pre {
@@ -10759,6 +11189,12 @@ pre {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* Sidebar is gone and the aside spans the full top, so the extra top
+     breathing room (space-2 * 5) is no longer needed — drop it to space-2. */
+  .content-panel.content-panel--agent-chat {
+    padding-top: var(--space-2);
+  }
+
   .left-nav {
     position: sticky;
     top: 0;
@@ -10768,6 +11204,7 @@ pre {
     height: auto;
     min-height: 0;
     max-height: none;
+    padding-top: var(--space-2);
     border-right: 0;
     border-bottom: 1px solid rgba(var(--edge-rgb), 0.38);
     overflow: visible;
@@ -10804,6 +11241,14 @@ pre {
     z-index: 1;
   }
 
+  /* Bare <button>: the global button:hover:enabled accent fill (--accent-strong)
+     outranks the overlay background above by specificity and would flash the whole
+     backdrop accent-blue on hover. It is a dismiss target, not an affordance; hold
+     the overlay tint. Same leak class already guarded on .nav-latest-session__main. */
+  .sidebar-mobile-backdrop:hover:enabled {
+    background: rgba(var(--overlay-rgb), 0.72);
+  }
+
   .left-nav.mobile-open .sidebar-mobile-backdrop {
     display: block;
   }
@@ -10820,7 +11265,11 @@ pre {
     transform: rotate(180deg);
   }
 
-  .sidebar-collapse-toggle {
+  /* Match the base rule's `.sidebar-collapse-toggle.ui-icon-button` specificity:
+     media queries don't add specificity, so a bare `.sidebar-collapse-toggle`
+     loses to it and the toggle would stay visible. In this viewport the sidebar
+     is an overlay menu with no persistent rail, so collapsing it is meaningless. */
+  .sidebar-collapse-toggle.ui-icon-button {
     display: none;
   }
 
@@ -10861,7 +11310,19 @@ pre {
     display: none;
   }
 
-  .left-nav.collapsed .sidebar-logo-lockup {
+  /* Reveal the wordmark in the collapsed mobile bar, but keep the light/dark
+     toggle. Targeting the shared `.sidebar-logo-lockup` (0,3,0) would outrank
+     `.sidebar-logo-lockup--dark { display: none }` (0,1,0) and paint both
+     variants at once (double logo), so drive the variants directly. */
+  .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: block;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--light {
+    display: none;
+  }
+
+  :root[data-theme='dark'] .left-nav.collapsed .sidebar-logo-lockup--dark {
     display: block;
   }
 
@@ -10905,21 +11366,6 @@ pre {
     box-shadow: none;
   }
 
-  .sidebar-data-submenu {
-    position: static;
-    width: auto;
-    margin-top: var(--space-1);
-    box-shadow: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data:not(.is-open) .sidebar-data-submenu {
-    display: none;
-  }
-
-  .sidebar-settings-menu-item-wrapper--data.is-open .sidebar-data-submenu {
-    display: grid;
-  }
-
   .nav-tooltip {
     display: none;
   }
@@ -10940,9 +11386,21 @@ pre {
   }
 
   .global-search {
+    /* Header is a full-width row here — the search fills it and never
+       collapses; expanded props match so :focus-within keeps it at 100%. */
     width: 100%;
     min-width: 0;
     max-width: none;
+    margin-right: 0;
+    --global-search-expanded: 100%;
+    --global-search-expanded-min: 0;
+  }
+
+  /* Never collapses here, so the icon stays left-pinned even when unfocused —
+     without this the centered collapsed-state glyph floats mid-bar. */
+  .global-search::before {
+    inset: 0 auto 0 12px;
+    font-size: var(--font-size-lg);
   }
 
   .page-header,
@@ -10957,17 +11415,6 @@ pre {
   .search-result-tag {
     white-space: normal;
     text-align: right;
-  }
-
-  /* Responsive: tighten 4-col contexts/agents/teams-tab listings. Workflows
-     is excluded (3 columns). */
-  .contexts-board-card .da-grid__head,
-  .contexts-board-card .da-grid__row,
-  .context-detail-page .da-grid__head,
-  .context-detail-page .da-grid__row,
-  .team-detail-page .da-grid__head,
-  .team-detail-page .da-grid__row {
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
   }
 
   /* Responsive behavior now comes from `.page-card__header`. */
@@ -11214,9 +11661,9 @@ pre {
 
 .da-table-filter__select {
   width: 150px;
-  min-height: 30px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
+  min-height: var(--control-height);
+  border-radius: var(--radius-control);
+  border: 1px solid var(--control-border);
   background: var(--surface-soft);
   color: var(--text);
   font-size: var(--font-size-sm);
@@ -11227,13 +11674,12 @@ pre {
 
 .da-table-filter__select:hover {
   background: var(--surface-hover);
-  border-color: rgba(var(--accent-rgb), 0.38);
+  border-color: var(--control-border-hover);
 }
 
 .da-table-filter__select:focus-visible {
-  outline: none;
-  border-color: rgba(var(--focus-rgb), 0.62);
-  box-shadow: 0 0 0 2px rgba(var(--focus-rgb), 0.2);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .da-table-filter--icon {
@@ -11424,46 +11870,6 @@ pre {
   background: var(--surface-strong);
 }
 
-.status-banner {
-  border-color: rgba(var(--edge-rgb), 0.4);
-  background: rgba(var(--edge-rgb), 0.1);
-}
-
-.status-banner.tone-info {
-  color: var(--text);
-  background: color-mix(in srgb, var(--panel) 78%, var(--accent) 22%);
-}
-
-.status-banner.tone-success {
-  color: color-mix(in srgb, var(--success) 20%, var(--text) 80%);
-  background: color-mix(in srgb, var(--panel) 80%, var(--success) 20%);
-  border-color: rgba(var(--success-rgb), 0.36);
-}
-
-.status-banner.tone-error {
-  color: color-mix(in srgb, var(--danger) 26%, var(--text) 74%);
-  background: color-mix(in srgb, var(--panel) 78%, var(--danger) 22%);
-  border-color: rgba(var(--danger-rgb), 0.36);
-}
-
-.badge {
-  border-color: rgba(var(--edge-rgb), 0.44);
-  color: var(--text-muted);
-  background: rgba(var(--edge-rgb), 0.12);
-}
-
-.badge.tone-success {
-  color: color-mix(in srgb, var(--success) 20%, var(--text) 80%);
-  border-color: rgba(var(--success-rgb), 0.46);
-  background: rgba(var(--success-rgb), 0.18);
-}
-
-.badge.tone-accent {
-  color: color-mix(in srgb, var(--success) 72%, var(--text) 28%);
-  border-color: rgba(var(--success-rgb), 0.22);
-  background: rgba(var(--success-rgb), 0.055);
-}
-
 .da-table__row--selected {
   background: var(--table-row-selected-bg);
 }
@@ -11486,7 +11892,7 @@ pre {
 }
 
 .mcp-servers-data-table {
-  min-width: 860px;
+  min-width: 680px;
 }
 
 .context-agents-data-table,
@@ -11671,7 +12077,6 @@ pre {
   display: grid;
   gap: var(--space-2);
   justify-items: start;
-  padding-right: var(--app-header-utilities-width);
 }
 
 .apps-page-header-text h2 {
@@ -12068,7 +12473,7 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-bubble,
-:root[data-theme='dark'] .message-block,
+:root[data-theme='dark'] .message-block.json-content,
 :root[data-theme='dark'] pre {
   background: rgba(var(--panel-rgb), 0.94);
   border-color: rgba(var(--edge-rgb), 0.34);
@@ -12080,8 +12485,12 @@ pre {
 }
 
 :root[data-theme='dark'] .chat-group.user .chat-bubble {
-  background: rgba(var(--accent-rgb), 0.18);
-  border-color: rgba(var(--accent-rgb), 0.36);
+  background: transparent;
+  border-color: transparent;
+}
+
+:root[data-theme='dark'] .chat-group.user .chat-bubble .message-block {
+  background: var(--surface-3);
 }
 
 :root[data-theme='dark'] .chat-thread::-webkit-scrollbar-thumb {
@@ -12541,114 +12950,408 @@ pre {
   }
 }
 
-/* Tight single-row header for the mounted sandbox-ui app view. Keep the
-   Close button away from the absolute global top-bar controls. */
-.sandbox-ui-mounted-header {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: var(--space-2);
-  min-width: 0;
-  padding-top: var(--space-4);
-  padding-right: var(--app-header-utilities-width);
-}
-
-.sandbox-ui-conversation-btn,
-.sandbox-ui-close-btn,
-.sandbox-ui-copy-link-btn,
-.sandbox-ui-refresh-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  border-color: rgba(var(--accent-rgb), 0.45);
-  background: rgba(var(--panel-rgb), 0.95);
-}
-
-.sandbox-ui-conversation-btn {
-  min-width: 0;
-  max-width: min(280px, 40vw);
-}
-
-.sandbox-ui-conversation-btn span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sandbox-ui-conversation-btn svg,
-.sandbox-ui-close-btn svg,
-.sandbox-ui-copy-link-btn svg,
-.sandbox-ui-refresh-btn svg {
-  width: 16px;
-  height: 16px;
-}
-
 /* Pull the embed up and let it fill the column: tighten the page-shell gap,
    trim the content-panel top padding, and switch the page to a flex column
    so the embed slot's flex: 1 stretches to the available height instead of
-   relying on a hardcoded min-height. The :has() selectors only fire when
-   the mounted-header is in the tree — the picker view (no header) keeps the
-   standard page chrome. */
-.page:has(.sandbox-ui-mounted-header) {
+   relying on a hardcoded min-height. The app actions moved to the title bar's
+   leading slot, so these :has() selectors now anchor on the embed slot itself
+   — present only in the mounted/minting view, never in the picker. */
+.page:has(.sandbox-ui-embed-slot) {
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
   min-height: 0;
 }
 
-.content-panel:has(.sandbox-ui-mounted-header) {
-  padding: var(--space-4) 0 0;
+.content-panel:has(.sandbox-ui-embed-slot) {
+  padding: var(--space-2) 0 0;
   align-content: stretch;
 }
 
-.content-panel:has(.sandbox-ui-mounted-header) > .top-bar {
+.content-panel:has(.sandbox-ui-embed-slot) > .top-bar {
   right: var(--space-4);
 }
 
-.content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-mounted-header) {
+.content-panel.content-panel--app-notification-drawer-open > .page:has(.sandbox-ui-embed-slot) {
   padding-right: var(--app-header-utilities-width);
 }
 
-.content-panel.content-panel--app-notification-drawer-open .sandbox-ui-mounted-header {
-  padding-right: 0;
+/* Chat drawer — Cursor-style chat column beside the live app embed. It shrinks
+   the embed with the same `--app-header-utilities-width` gutter the notification
+   drawer uses, but derives that gutter from its OWN width (`--chat-drawer-width`)
+   so resizing the chat drawer never disturbs the notification drawer. The two
+   drawer-open states are mutually exclusive (see App.tsx notificationTrayUsesDrawer),
+   so this higher-specificity override is unambiguous. */
+.content-panel.content-panel--chat-drawer-open {
+  /* Docked drawer: the embed shrinks by exactly the drawer's width so its right
+     edge meets the drawer's left edge at the 1px resize seam — no transparent
+     gutter between them. (The drag/clamp math in useChatDrawerResize keeps its
+     own, deliberately more conservative, embed-floor reserve; this value only
+     drives the visual padding.) */
+  --app-header-utilities-width: var(--chat-drawer-width);
 }
 
-.sandbox-ui-mounted-header {
-  padding-left: var(--space-4);
+.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-embed-slot) {
+  padding-right: var(--app-header-utilities-width);
+}
+
+.chat-drawer {
+  position: fixed;
+  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
+     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
+     header wraps in a narrow window. The fallback keeps the pre-measure/test
+     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
+  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
+  /* Docked, VS Code secondary-side-bar style: flush to the panel's right and
+     bottom edges (no floating inset), square corners, no shadow. The only
+     visible edge is the 1px resize seam on the LEFT (see __resize-handle::after),
+     which owns the border between the embed and the drawer — the drawer itself
+     carries no border. */
+  right: 0;
+  bottom: 0;
+  width: var(--chat-drawer-width);
+  z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Pairs with the sidebar surface so the drawer reads as a secondary side bar,
+     distinct from the editor/embed zone (which is --surface-0/--panel). */
+  background: var(--surface-3);
+  overflow: hidden;
+  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
+     mirroring the notification drawer's bounds-ack gate. */
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-drawer.is-ready {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Drag handle on the drawer's LEFT edge. A comfortable ~8px grab strip (the
+   hit-area) whose ::after paints the docked seam: a persistent 1px rule at rest
+   that thickens to a 2px accent on hover / during a drag. Sits inside the drawer
+   (which clips overflow), above the header/surface content. */
+.chat-drawer__resize-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 8px;
+  height: 100%;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+
+.chat-drawer__resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 100%;
+  background: var(--zone-border);
+  transition: background var(--motion-fast);
+}
+
+.chat-drawer__resize-handle:hover::after,
+.chat-drawer.is-resizing .chat-drawer__resize-handle::after {
+  width: 2px;
+  background: rgba(var(--accent-rgb), 0.55);
+}
+
+/* Compact chrome — narrow-column only. Scoped entirely under `.chat-drawer`, so
+   the full-screen chat route (which renders the same <ChatPage> OUTSIDE this
+   ancestor) is untouched. Trims the padding/margins that read as "loose" in the
+   slim column and neutralizes the full-height grid the workspace uses in
+   full-screen (which would overflow this fixed rail and leave odd gaps). */
+.chat-drawer .agent-page {
+  height: 100%;
+}
+
+.chat-drawer .agent-workspace-shell .chat-thread {
+  padding: var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .chat-empty-state {
+  padding: var(--space-4) 0 var(--space-2);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-top {
+  padding: var(--space-1) var(--space-2);
+}
+
+/* The workspace head (session breadcrumb + token/context indicators) lives in
+   the nav-stack, which — unlike the thread, top and tabs below — had no
+   drawer-scoped inset, so its title and token pills sat flush against the slim
+   column's top-left edge. Give it the same horizontal rhythm the other sections
+   use so the breadcrumb aligns with the thread text; full-screen gets this inset
+   from `.content-panel--agent-chat` instead, which the drawer's <ChatPage>
+   renders outside of. Keep the nav-stack's sticky `padding-bottom` intact. */
+.chat-drawer .agent-workspace-shell .agent-chat-nav-stack {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.chat-drawer .agent-workspace-shell .agent-workspace-tabs {
+  padding: 0 var(--space-2);
+}
+
+/* New-chat greeting ("New chat with [agent ▾]"). Like the nav-stack head above,
+   this row has zero horizontal padding by design — full-screen chat insets it
+   via `.content-panel--agent-chat` (which the drawer's <ChatPage> renders
+   outside of) and its 1120px max-width + `margin: 0 auto` centers it there. In
+   the slim column neither applies, so the title sat flush against the left
+   edge. Give it the same `var(--space-2)` horizontal rhythm the thread and head
+   use; keep the base rule's hero top offset and bottom padding intact. */
+.chat-drawer .agent-workspace-shell .agent-workspace-greeting-row {
+  padding-inline: var(--space-2);
+}
+
+.chat-drawer .composer {
+  margin-top: var(--space-1);
+  padding: var(--space-2);
+}
+
+/* Tighter table cells so the data table breathes in the slim column; the
+   `.da-table__scroll` horizontal overflow still handles anything too wide. */
+.chat-drawer .da-table {
+  --table-cell-padding-x: var(--space-1-5);
+  --table-cell-padding-y: var(--space-1);
+}
+
+.chat-drawer__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.24);
+  flex: 0 0 auto;
+}
+
+.chat-drawer__header-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-drawer__header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+}
+
+/* The base .ui-icon-button sizes the button but never the glyph — each call
+   site sets its own svg size. Match the app's standard 16px icon inside a 30px
+   (sm) icon button so the new-chat / close controls line up with the rest of
+   the app instead of rendering the raw 24-viewbox artwork oversized. */
+.chat-drawer__header-actions .ui-icon-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-drawer__title {
+  display: block;
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-drawer__surface {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Open-chats selector in the drawer header — a thin dropdown over chatViewTabs.
+   The narrow drawer column can't host a horizontal tab strip, so the switcher
+   lists chats vertically with their status badge. */
+.chat-switcher {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.chat-switcher__trigger {
+  min-width: 0;
+}
+
+.chat-switcher__trigger-main {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-switcher__chevron {
+  flex: 0 0 auto;
+  margin-left: var(--space-1);
+  color: var(--text-dim);
+}
+
+.chat-switcher__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-switcher__menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  left: 0;
+  right: 0;
+  z-index: calc(var(--layer-dropdown) + 10);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-hard);
+  padding: var(--space-1);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.chat-switcher__options {
+  display: grid;
+  gap: var(--space-0-5);
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.chat-switcher__option {
+  min-width: 0;
+  gap: var(--space-1-5);
+}
+
+.chat-switcher__option.is-active {
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.chat-switcher__footer {
+  border-top: 1px solid rgba(var(--edge-rgb), 0.24);
+  padding-top: var(--space-1);
+}
+
+/* Overlay confinement (spec §6). The native app view paints above ALL DOM, so
+   any chat overlay that crosses the embed's rect is hidden behind it. The drawer
+   is RIGHT-docked, so the embed sits to its LEFT. The composer reference menu is
+   anchored at the composer's left edge and its submenu flies RIGHT
+   (`left: calc(100% + …)`) — i.e. INTO the drawer, away from the embed — so it is
+   already off the app rect. Pin that rightward direction inside the drawer so a
+   future global LEFT flip can't leak the submenu over the embed and be occluded.
+   (The spec's suggested LEFT flip is inverted for a right-docked drawer: leftward
+   pushes the submenu over the embed, not off it. See report.) */
+.chat-drawer .composer-reference-submenu {
+  left: calc(100% + var(--space-1));
+  right: auto;
+}
+
+.chat-drawer .composer-reference-menu-panel {
+  left: 0;
+  right: auto;
 }
 
 @media (min-width: 901px) and (max-width: 1220px) {
-  .content-panel {
-    --app-header-utilities-width: calc(
-      clamp(160px, 32vw, var(--app-notification-drawer-width)) + var(--space-2) + 36px
-    );
-  }
-
-  .content-panel.content-panel--app-notification-drawer-open {
-    --app-header-utilities-width: calc(
-      var(--app-notification-drawer-width) + var(--space-2) + 36px
-    );
-  }
-
   .global-search {
-    width: clamp(160px, 32vw, var(--app-notification-drawer-width));
-    min-width: 160px;
-  }
-
-  .apps-page-header {
-    padding-right: 0;
+    --global-search-expanded: clamp(160px, 32vw, var(--app-notification-drawer-width));
+    --global-search-expanded-min: 160px;
   }
 }
 
-@media (max-width: 900px) {
-  .apps-page-header,
-  .sandbox-ui-mounted-header {
-    padding-right: 0;
-  }
+.window-titlebar__actions .search-input {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  color: var(--titlebar-action-ink) !important;
+  box-shadow: 0 6px 14px rgba(var(--overlay-rgb), 0.08) !important;
+  -webkit-text-fill-color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .search-input--titlebar {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+  -webkit-text-fill-color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .global-search::before,
+.window-titlebar__actions .global-search--titlebar::before {
+  color: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .global-search--titlebar::before {
+  content: none !important;
+}
+
+.window-titlebar__actions .global-search__titlebar-icon {
+  position: absolute;
+  inset: 0 auto 0 11px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  color: var(--titlebar-action-ink) !important;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.window-titlebar__actions .search-input__titlebar-placeholder {
+  position: absolute;
+  inset: 0 auto 0 34px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  color: var(--titlebar-action-ink) !important;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+  pointer-events: none;
+}
+
+.window-titlebar__actions .search-input::placeholder,
+.window-titlebar__actions .search-input--titlebar::placeholder {
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+}
+
+.window-titlebar__actions .search-input--titlebar::placeholder {
+  color: transparent !important;
+}
+
+/* The titlebar bell is a ghost control: border and fill live on :hover only
+   (see the .window-titlebar__actions .notification-bell block above). Only its
+   icon ink is pinned here so the glyph stays legible against the title bar. */
+.window-titlebar__actions .notification-bell--titlebar {
+  color: var(--titlebar-action-ink) !important;
+  opacity: 1 !important;
+}
+
+.window-titlebar__actions .notification-bell svg,
+.window-titlebar__actions .notification-bell--titlebar svg {
+  color: var(--titlebar-action-ink) !important;
+  stroke: var(--titlebar-action-ink) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input {
+  border-color: var(--titlebar-action-border) !important;
+  background: var(--titlebar-action-surface) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input,
+:root[data-theme='dark'] .window-titlebar__actions .global-search::before,
+:root[data-theme='dark'] .window-titlebar__actions .notification-bell svg {
+  color: var(--titlebar-action-ink) !important;
+}
+
+:root[data-theme='dark'] .window-titlebar__actions .search-input::placeholder {
+  color: var(--titlebar-action-ink) !important;
 }
 
 /* Agent Files tab - read-only browser of attached SharedFileSystems */
@@ -12866,7 +13569,7 @@ pre {
   width: 34px;
   min-width: 34px;
   height: 34px;
-  border-radius: 999px;
+  border-radius: var(--radius-control);
   line-height: 0;
 }
 
@@ -13414,7 +14117,7 @@ pre {
 .status-banner--compact {
   padding: var(--space-0-5) var(--space-1-5);
   font-size: var(--font-size-xs);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
 }
 
 /* Sidebar chat-state badges — icon/dot-only (no text children) */
@@ -13677,12 +14380,79 @@ pre {
   font-weight: 700;
 }
 
+.da-gfs-inline-rename {
+  min-width: 0;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.da-gfs-inline-rename__input.ui-control {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.da-gfs-inline-rename__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-0-5);
+  flex: 0 0 auto;
+}
+
+.da-gfs-inline-rename__actions .ui-icon-button {
+  flex: 0 0 auto;
+}
+
+.da-gfs-inline-rename__actions svg {
+  width: calc(var(--space-3) + var(--space-0-5));
+  height: calc(var(--space-3) + var(--space-0-5));
+}
+
+.da-gfs-inline-rename__confirm.ui-icon-button {
+  border-color: rgba(var(--success-rgb), 0.34);
+  color: var(--success);
+}
+
+.da-gfs-inline-rename__confirm.ui-icon-button:hover:enabled,
+.da-gfs-inline-rename__confirm.ui-icon-button:focus-visible {
+  border-color: rgba(var(--success-rgb), 0.58);
+  background: rgba(var(--success-rgb), 0.24);
+  color: var(--success);
+}
+
+.da-gfs-inline-rename__cancel.ui-icon-button {
+  color: var(--text-muted);
+}
+
+.da-gfs-drive__inline-rename {
+  width: min(20rem, 100%);
+}
+
+.da-gfs-current-file__inline-rename {
+  flex: 1 1 auto;
+}
+
 .da-gfs-list__actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: var(--space-2);
   justify-self: end;
+}
+
+.da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast);
+}
+
+.da-gfs-drive__grid .da-grid__row:hover .da-gfs-list__actions > .ui-icon-button,
+.da-gfs-drive__grid .da-grid__row:focus-within .da-gfs-list__actions > .ui-icon-button,
+.da-gfs-drive__grid .da-gfs-list__actions > .ui-icon-button:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .da-gfs-list__rid {
@@ -13711,13 +14481,27 @@ pre {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(150px, 0.32fr);
   gap: var(--space-2);
-  align-items: start;
+  align-items: stretch;
+}
+
+.da-gfs-delegation:not(.da-gfs-delegation--details) .da-gfs-delegation__composer {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.da-gfs-delegation__composer > .ui-dropdown-select {
+  min-width: 150px;
 }
 
 .da-gfs-subject-picker,
 .da-gfs-permission-dropdown {
   position: relative;
   min-width: 0;
+  display: flex;
+}
+
+.da-gfs-subject-picker__field,
+.da-gfs-permission-dropdown__trigger.ui-button {
+  flex: 1;
 }
 
 .da-gfs-subject-picker__field {
@@ -14030,6 +14814,8 @@ pre {
 .da-gfs-drive__header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-1);
   flex: 0 0 auto;
 }
@@ -14129,6 +14915,7 @@ pre {
 }
 
 .da-gfs-drive__grid {
+  container-type: inline-size;
   min-height: 0;
   flex: 1 1 auto;
   width: auto;
@@ -14157,6 +14944,28 @@ pre {
 
 .da-gfs-drive__grid .da-grid__row:last-child {
   border-bottom: 0;
+}
+
+.da-gfs-drive__grid .da-grid__row[data-dragging='true'] {
+  opacity: 0.55;
+}
+
+.da-gfs-drive__grid .da-grid__row[data-drop-target='true'] {
+  outline: 2px solid rgba(var(--accent-rgb), 0.72);
+  outline-offset: -2px;
+  background: rgba(var(--accent-rgb), 0.14);
+}
+
+.da-gfs-drive__grid .da-grid__row[data-drop-target='true']:hover {
+  background: rgba(var(--accent-rgb), 0.18);
+}
+
+.da-gfs-drive__grid .da-grid__row[draggable='true'] {
+  cursor: grab;
+}
+
+.da-gfs-drive__grid .da-grid__row[draggable='true']:active {
+  cursor: grabbing;
 }
 
 .da-gfs-drive__grid .da-grid__row--clickable:hover:enabled {
@@ -14265,19 +15074,103 @@ pre {
 }
 
 .da-gfs-resource-menu__panel {
-  position: absolute;
-  top: calc(100% + var(--space-1));
-  right: 0;
-  z-index: calc(var(--layer-dropdown) + 30);
-  width: max-content;
-  min-width: 180px;
+  position: fixed;
+  /* The persistent sidebar owns dropdown + 1000. Resource menus are portaled
+     to body and must remain above it while the navigation expands/collapses. */
+  z-index: calc(var(--layer-dropdown) + 1100);
+  width: min(360px, calc(100vw - (var(--space-4) * 2)));
+  max-height: calc(100vh - (var(--space-4) * 2));
   display: grid;
-  gap: var(--space-0-5);
-  padding: var(--space-1);
-  border: 1px solid rgba(var(--edge-rgb), 0.38);
+  gap: 0;
+  overflow-y: auto;
+  padding: var(--space-1-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.46);
   border-radius: var(--radius-md);
   background: var(--bg-elev-2);
   box-shadow: var(--shadow-hard);
+  scrollbar-width: thin;
+}
+
+.da-gfs-resource-menu__submenu {
+  position: fixed;
+  z-index: calc(var(--layer-dropdown) + 1101);
+  width: min(240px, calc(100vw - (var(--space-4) * 2)));
+  max-height: calc(100vh - (var(--space-4) * 2));
+  display: grid;
+  gap: 0;
+  overflow-y: auto;
+  padding: var(--space-1-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.46);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-2);
+  box-shadow: var(--shadow-hard);
+  scrollbar-width: thin;
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item,
+.da-gfs-resource-menu__submenu .ui-menu-item {
+  min-height: 44px;
+  padding: 0 var(--space-2-5);
+  gap: var(--space-2);
+  border-radius: calc(var(--radius-sm) - 2px);
+  color: var(--text);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-normal);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item:hover:enabled,
+.da-gfs-resource-menu__panel .ui-menu-item:focus-visible,
+.da-gfs-resource-menu__submenu .ui-menu-item:hover:enabled,
+.da-gfs-resource-menu__submenu .ui-menu-item:focus-visible {
+  border-color: transparent;
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item__icon,
+.da-gfs-resource-menu__submenu .ui-menu-item__icon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  color: var(--text-dim);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item__icon svg,
+.da-gfs-resource-menu__submenu .ui-menu-item__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item__trailing {
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item__trailing svg {
+  width: 18px;
+  height: 18px;
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item--danger,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger {
+  color: var(--danger);
+}
+
+.da-gfs-resource-menu__panel .ui-menu-item--danger:hover:enabled,
+.da-gfs-resource-menu__panel .ui-menu-item--danger:focus-visible,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger:hover:enabled,
+.da-gfs-resource-menu__submenu .ui-menu-item--danger:focus-visible {
+  background: rgba(var(--danger-rgb), 0.12);
+  color: var(--danger);
+}
+
+.da-gfs-resource-menu__separator {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: rgba(var(--edge-rgb), 0.32);
 }
 
 .da-gfs-link-modal {
@@ -14382,7 +15275,7 @@ pre {
 .da-gfs-image-preview-dialog,
 .da-gfs-markdown-preview-dialog,
 .da-gfs-video-preview-dialog {
-  width: min(960px, 96vw);
+  width: min(960px, 100%);
   height: min(760px, 92vh);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -14411,6 +15304,34 @@ pre {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.da-gfs-image-preview-dialog__close.ui-button,
+.da-gfs-markdown-preview-dialog__close.ui-button,
+.da-gfs-video-preview-dialog__close.ui-button {
+  width: 2.25rem;
+  min-width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.da-gfs-image-preview-dialog__copy.ui-button,
+.da-gfs-markdown-preview-dialog__copy.ui-button {
+  height: 2.25rem;
+  padding-inline: var(--space-3);
+  border-radius: 999px;
+  color: var(--text-muted);
+}
+
+.da-gfs-image-preview-dialog__copy.ui-button:hover:enabled,
+.da-gfs-markdown-preview-dialog__copy.ui-button:hover:enabled {
+  color: color-mix(in srgb, var(--accent-strong) 62%, var(--text-muted) 38%);
+}
+
+.da-gfs-preview-button__label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
 }
 
 .da-gfs-text-preview__content {
@@ -14563,6 +15484,14 @@ pre {
 }
 
 .da-gfs-manage-dialog {
+  /* Keep every Share-dialog accent in the blue family while preserving the
+     global semantic palette used by the rest of Desktop. */
+  --success: var(--accent);
+  --success-rgb: var(--accent-rgb);
+  --warning: var(--accent-strong);
+  --warning-rgb: var(--accent-rgb);
+  --danger: var(--accent-strong);
+  --danger-rgb: var(--accent-rgb);
   width: min(720px, 96vw);
   max-height: min(760px, 92vh);
   display: grid;
@@ -14609,23 +15538,13 @@ pre {
 .da-gfs-manage-dialog__heading h3 {
   margin: 0;
   overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-size: var(--font-size-2xl);
   font-weight: var(--font-weight-semibold);
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.da-gfs-manage-dialog__title-row {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-}
-
-.da-gfs-manage-dialog__title-row h3 {
-  min-width: 0;
+  white-space: normal;
 }
 
 .da-gfs-manage-dialog__title-edit {
@@ -14826,60 +15745,332 @@ pre {
   background: var(--surface-soft);
 }
 
-/* Page-level rename confirmation (row/header menus): a narrow dialog over the
-   manage-modal overlay, so a row rename never needs the manage dialog. */
-.da-gfs-manage-dialog--confirm {
-  width: min(440px, 94vw);
-  max-height: none;
-  padding: var(--space-4) var(--space-5);
+.da-gfs-new-folder-modal {
+  z-index: calc(var(--layer-chat-overlay) + 3);
 }
 
-.da-gfs-manage-dialog--confirm .da-gfs-manage-dialog__body {
+.da-gfs-new-folder-dialog {
+  width: min(420px, 94vw);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.42);
+  border-radius: var(--radius-xl);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-hard);
+}
+
+.da-gfs-new-folder-dialog__header h3,
+.da-gfs-new-folder-dialog__copy {
+  margin: 0;
+}
+
+.da-gfs-new-folder-dialog__header h3 {
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-new-folder-dialog__copy {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-new-folder-dialog__form,
+.da-gfs-new-folder-dialog__field {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.da-gfs-new-folder-dialog__field > span {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-new-folder-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/* Compact Drive-style move picker. The hierarchy stays inline, but rows read
+   as a folder list rather than large cards. */
+.da-gfs-move-dialog {
+  width: min(680px, 94vw);
+  max-height: min(620px, 90vh);
+  overflow: hidden;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__header {
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-bottom: 0;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__icon {
+  width: 28px;
+  height: 28px;
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__heading h3 {
+  font-size: var(--font-size-xl);
+}
+
+.da-gfs-move-dialog .da-gfs-manage-dialog__body {
+  grid-template-rows: auto auto minmax(180px, 1fr) auto auto;
+  gap: 0;
+  overflow: hidden;
   padding: 0;
 }
 
-/* Move-to-folder picker: full-width dialog with a scrollable folder list. */
-.da-gfs-move-dialog__list {
-  min-height: var(--space-8);
-  max-height: min(320px, 40vh);
-  display: grid;
-  align-content: start;
-  gap: var(--space-1);
-  overflow-y: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2);
-  background: var(--surface-soft);
+.da-gfs-move-dialog__current-location {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-5) var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
-.da-gfs-move-dialog__row {
+.da-gfs-move-dialog__location-pill {
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--control-bg-strong);
+  color: var(--text);
+}
+
+.da-gfs-move-dialog__location-pill svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--text-muted);
+}
+
+.da-gfs-move-dialog__location-pill strong {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-move-dialog__tree-heading {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 var(--space-5);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.2);
+  border-bottom: 1px solid rgba(var(--edge-rgb), 0.2);
+}
+
+.da-gfs-move-dialog__tree-heading-copy {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-0-5);
+}
+
+.da-gfs-move-dialog__tree-heading-copy strong {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-move-dialog__tree {
+  min-height: 180px;
+  max-height: min(360px, 48vh);
+  overflow-y: auto;
+  padding: var(--space-1) var(--space-3);
+  background: var(--bg-elev);
+  scrollbar-width: thin;
+}
+
+.da-gfs-move-dialog__tree-root,
+.da-gfs-move-dialog__tree-group {
+  display: grid;
+  align-content: start;
+  gap: 0;
+}
+
+.da-gfs-move-dialog__tree-group {
+  margin-left: 28px;
+  padding-left: var(--space-1);
+  border-left: 1px solid rgba(var(--edge-rgb), 0.24);
+}
+
+.da-gfs-move-dialog__tree-item {
+  min-width: 0;
+}
+
+.da-gfs-move-dialog__tree-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.da-gfs-move-dialog__tree-toggle.ui-icon-button {
+  width: 28px;
+  min-width: 28px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.da-gfs-move-dialog__tree-toggle.ui-icon-button:hover:enabled,
+.da-gfs-move-dialog__tree-toggle.ui-icon-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-strong);
+}
+
+.da-gfs-move-dialog__tree-toggle svg {
+  width: 16px;
+  height: 16px;
+  transition: transform var(--motion-fast);
+}
+
+.da-gfs-move-dialog__tree-toggle.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.da-gfs-move-dialog__tree-toggle-placeholder {
+  width: 28px;
+  height: 34px;
+}
+
+.da-gfs-move-dialog__tree-select.ui-button {
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-0-5) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition:
+    background var(--motion-fast),
+    border-color var(--motion-fast),
+    box-shadow var(--motion-fast);
+}
+
+.da-gfs-move-dialog__tree-select.ui-button:hover:enabled,
+.da-gfs-move-dialog__tree-select.ui-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.38);
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: none;
+}
+
+.da-gfs-move-dialog__tree-select.ui-button[aria-selected='true'] {
+  border-color: rgba(var(--accent-rgb), 0.52);
+  background: rgba(var(--accent-rgb), 0.14);
+  box-shadow: none;
+}
+
+.da-gfs-move-dialog__tree-folder-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--warning);
+}
+
+.da-gfs-move-dialog__tree-folder-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.da-gfs-move-dialog__tree-folder-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-move-dialog__tree-selected-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  color: var(--accent-strong);
+}
+
+.da-gfs-move-dialog__tree-selected-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.da-gfs-move-dialog__tree-group > .muted,
+.da-gfs-move-dialog__tree > .muted {
+  margin: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-move-dialog__tree-more {
+  display: flex;
+  justify-content: flex-start;
+  padding: var(--space-1) 0 0;
+}
+
+.da-gfs-move-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid rgba(var(--edge-rgb), 0.2);
+}
+
+.da-gfs-move-dialog__selection {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-move-dialog__selection strong {
+  color: var(--text);
+  font-weight: var(--font-weight-semibold);
+}
+
+.da-gfs-move-dialog__action-buttons {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
 
-.da-gfs-move-dialog__more {
-  display: flex;
-  justify-content: center;
-  padding-top: var(--space-1);
-}
-
-.da-gfs-move-dialog__row-icon {
-  display: grid;
-  place-items: center;
-  color: var(--warning);
-}
-
-.da-gfs-move-dialog__row-icon svg {
-  width: var(--font-size-lg);
-  height: var(--font-size-lg);
-}
-
-.da-gfs-move-dialog__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
+.da-gfs-move-dialog__action-buttons .ui-button {
+  border-radius: 999px;
 }
 
 .da-gfs-manage-section--actions .da-gfs-inline-form__field {
@@ -14940,7 +16131,7 @@ pre {
 
 .da-gfs-grant-list {
   display: grid;
-  gap: var(--space-1);
+  gap: var(--space-2);
   max-height: calc(((var(--space-5) + var(--space-4) + var(--space-2)) * 3) + (var(--space-1) * 2));
   margin: 0;
   overflow-y: auto;
@@ -14954,15 +16145,42 @@ pre {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-2);
-  border: 1px solid var(--border-soft);
+  min-height: 52px;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
   border-radius: var(--radius-md);
-  background: var(--surface-soft);
+  background: transparent;
+}
+
+.da-gfs-grant-list__avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.18);
+  color: var(--accent-strong);
+}
+
+.da-gfs-grant-list__avatar--team {
+  background: rgba(var(--warning-rgb), 0.15);
+  color: var(--warning);
+}
+
+.da-gfs-grant-list__avatar--agent,
+.da-gfs-grant-list__avatar--workflow {
+  background: rgba(var(--success-rgb), 0.16);
+  color: var(--success);
+}
+
+.da-gfs-grant-list__avatar svg {
+  width: var(--space-4);
+  height: var(--space-4);
 }
 
 .da-gfs-grant-list__identity {
   display: grid;
-  gap: var(--space-0-5);
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -14976,17 +16194,39 @@ pre {
   white-space: nowrap;
 }
 
-.da-gfs-grant-list__subject-type {
-  color: var(--text-muted);
-  font-size: var(--font-size-xs);
-  text-transform: capitalize;
-}
-
 .da-gfs-grant-list__meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-1);
+}
+
+.da-gfs-grant-list__role {
+  width: 112px;
+  flex: 0 0 112px;
+}
+
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button {
+  min-height: 32px;
+  padding-inline: var(--space-2);
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button:hover:enabled,
+.da-gfs-grant-list__role .ui-dropdown-select__trigger.ui-button[aria-expanded='true'] {
+  border-color: var(--control-border);
+  background: var(--control-bg-strong);
+}
+
+.da-gfs-grant-list__role-label {
+  min-width: 112px;
+  padding-inline: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
 }
 
 .da-gfs-grant-list__chips {
@@ -14995,19 +16235,13 @@ pre {
   gap: var(--space-1);
 }
 
-.da-gfs-grant-list__revoke.ui-icon-button {
-  color: var(--danger);
-  border-color: transparent;
-  background: transparent;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+.da-gfs-access-row-menu {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
-.da-gfs-grant-list__revoke.ui-icon-button:hover:enabled,
-.da-gfs-grant-list__revoke.ui-icon-button:focus-visible {
-  border-color: transparent;
-  background: transparent;
-  color: var(--danger);
+.da-gfs-access-row-menu__panel.da-gfs-resource-menu__panel {
+  width: min(184px, calc(100vw - (var(--space-4) * 2)));
 }
 
 @media (max-width: 940px) {
@@ -15043,7 +16277,7 @@ pre {
   }
 
   .da-gfs-drive__header-actions {
-    justify-content: space-between;
+    justify-content: flex-end;
   }
 
   .da-gfs-drive__grid {
@@ -15052,7 +16286,7 @@ pre {
 
   .da-gfs-drive__grid .da-grid__head,
   .da-gfs-drive__grid .da-grid__row {
-    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 4.5rem;
+    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 9.5rem;
   }
 
   .da-gfs-drive__size-column,
@@ -15067,6 +16301,18 @@ pre {
   .da-gfs-manage-dialog {
     width: 100%;
     max-height: 96vh;
+  }
+}
+
+@container (max-width: 720px) {
+  .da-gfs-drive__grid .da-grid__head,
+  .da-gfs-drive__grid .da-grid__row {
+    grid-template-columns: calc(var(--space-5) + var(--space-1)) minmax(0, 1fr) 9.5rem;
+  }
+
+  .da-gfs-drive__size-column,
+  .da-gfs-drive__size {
+    display: none;
   }
 }
 
@@ -15124,6 +16370,25 @@ pre {
 
   .da-gfs-manage-dialog__body {
     padding: var(--space-2);
+  }
+
+  .da-gfs-move-dialog__tree-heading {
+    align-items: start;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .da-gfs-move-dialog__tree-heading > .muted {
+    text-align: left;
+  }
+
+  .da-gfs-move-dialog__actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .da-gfs-move-dialog__action-buttons {
+    justify-content: flex-end;
   }
 
   .da-gfs-manage-section--actions .da-gfs-inline-form {
@@ -15194,6 +16459,25 @@ pre {
   z-index: 1;
 }
 
+/* Bottom shelf of the tab strip. It lives on the non-scrolling container (not
+   the scroller/list) so it stays under the whole visible strip when the tabs
+   overflow and scroll — a shelf on the scrolling list only spans the initial
+   viewport and slides away on scroll. z-index:-1 keeps it below the opaque
+   tabs (so it only shows through the gaps between them); each inactive tab
+   draws its own matching bottom border, and the active tab omits it to notch
+   through and merge with the surface below. */
+.chat-view-tabs::after {
+  background: var(--chat-view-selected-border);
+  bottom: 0;
+  content: '';
+  height: 1px;
+  left: 0;
+  pointer-events: none;
+  position: absolute;
+  right: 0;
+  z-index: -1;
+}
+
 .chat-view-tabs__scroller {
   min-width: 0;
   overflow-x: auto;
@@ -15208,41 +16492,39 @@ pre {
   min-width: 100%;
   position: relative;
   transform: rotateX(180deg);
-  width: max-content;
-}
-
-.chat-view-tabs__list::after {
-  background: var(--chat-view-selected-border);
-  bottom: 0;
-  content: '';
-  height: 1px;
-  left: 0;
-  pointer-events: none;
-  position: absolute;
-  right: 0;
+  width: 100%;
 }
 
 .chat-view-tab {
   align-items: center;
   background: var(--surface-soft);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-radius: 0;
   display: flex;
-  flex: 0 0 220px;
-  min-width: 0;
+  flex: 1 1 var(--chat-tab-max);
+  min-width: var(--chat-tab-min);
+  max-width: var(--chat-tab-max);
   transition: background var(--motion-fast);
-  width: 220px;
 }
 
+/* Flat VS Code tabs: inactive tabs drop their side/top edges and read only as a
+   surface; the shared bottom shelf border is kept (it is the strip baseline). */
 .chat-view-tab:not(.is-active) {
-  border-bottom: 0;
-  border-color: color-mix(in srgb, var(--border-soft) 25%, transparent);
+  border-bottom: 1px solid var(--chat-view-selected-border);
+  border-left-color: transparent;
+  border-right-color: transparent;
+  border-top-color: transparent;
 }
 
+/* The active tab is set apart by a stronger surface plus a top accent bar, not
+   by an accent outline on every edge. The bar is an inset shadow so it adds no
+   layout box. */
 .chat-view-tab.is-active {
-  background: linear-gradient(var(--surface-strong), var(--surface-strong)), var(--panel);
-  border-color: var(--chat-view-selected-border);
+  background: var(--surface-strong);
+  border-color: transparent;
   border-bottom: 0;
+  box-shadow: inset 0 2px 0 0 var(--accent);
+  flex-shrink: 0.4;
   position: relative;
   z-index: 1;
 }
@@ -15252,7 +16534,7 @@ pre {
 }
 
 .chat-view-tab.is-active:hover {
-  background: linear-gradient(var(--surface-hover), var(--surface-hover)), var(--panel);
+  background: var(--surface-strong);
 }
 
 .chat-view-tab .chat-view-tab__select.ui-button:hover:enabled,
@@ -15296,7 +16578,6 @@ pre {
   border-color: var(--chat-view-selected-border);
   border-style: solid;
   border-width: 0 1px 1px;
-  border-radius: 0 var(--radius-sm) 0 0;
   display: flex;
   flex: 1 1 0;
   flex-direction: column;
@@ -15337,7 +16618,7 @@ pre {
   align-self: flex-end;
   background: var(--surface-strong);
   border: 1px solid var(--border-soft);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-control);
   display: flex;
   gap: var(--space-1);
   margin: var(--space-2) var(--space-3) 0;
@@ -15374,4 +16655,685 @@ pre {
     color: HighlightText;
     forced-color-adjust: none;
   }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Progress stepper (migrated from the legacy component-level ProgressStepper.css
+   into shared styles — hardcoded dark-only literals replaced with tokens so the
+   surface renders in both themes; selectors and effects unchanged).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.progress-stepper {
+  margin-top: var(--space-2);
+  border: 1px solid rgba(var(--edge-rgb), 0.22);
+  border-radius: var(--radius-md);
+  background: transparent;
+  padding: var(--space-2) var(--space-2-5);
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New',
+    monospace;
+  font-size: var(--font-size-sm);
+  line-height: 18px;
+  overflow: hidden;
+  animation: stepper-fade-in 0.25s ease-out;
+}
+
+@keyframes stepper-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Completed tools collapse to a single dim line (see the chat-scoped override
+   below), not a dimmed card — no opacity fade, no collapse animation. */
+.progress-stepper.status-completed {
+  padding: var(--space-1) var(--space-2-5);
+}
+
+.stepper-completed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.stepper-completed-summary {
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.stepper-expand-btn {
+  background: rgba(var(--accent-rgb), 0.12);
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: var(--font-size-2xs);
+  font-family: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.stepper-expand-btn:hover {
+  background: rgba(var(--accent-rgb), 0.22);
+  border-color: rgba(var(--accent-rgb), 0.4);
+}
+
+.status-completed .stepper-step-list {
+  margin-top: 8px;
+  animation: stepper-fade-in 0.2s ease-out;
+}
+
+.stepper-completed-icon {
+  color: var(--success);
+  font-size: var(--font-size-sm);
+}
+
+.stepper-completed-tools {
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-completed-tools-inline {
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stepper-details-toggle-icon {
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.stepper-completed-duration {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stepper-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.stepper-counter {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.stepper-intent {
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-thinking {
+  min-width: 0;
+  flex: 1;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stepper-connecting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stepper-running-row {
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stepper-cancel-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.stepper-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stepper-thinking-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.7);
+  animation: stepper-thinking-bounce 1s ease-in-out infinite;
+}
+
+.stepper-thinking-dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.stepper-thinking-dots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes stepper-thinking-bounce {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+.status-suspended {
+  border-color: rgba(var(--warning-rgb), 0.34);
+}
+
+.stepper-suspended-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.stepper-suspended-icon {
+  color: var(--warning);
+  font-size: var(--font-size-lg);
+}
+
+.stepper-suspended-label {
+  min-width: 0;
+  flex: 1;
+  color: var(--warning);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-approval-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  margin-bottom: 2px;
+  justify-content: flex-end;
+}
+
+.stepper-btn {
+  font-family: inherit;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  padding: 4px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    opacity 0.15s;
+}
+
+.stepper-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.stepper-btn-approve {
+  background: rgba(var(--success-rgb), 0.18);
+  border-color: rgba(var(--success-rgb), 0.4);
+  color: var(--success);
+}
+
+.stepper-btn-approve:hover:not(:disabled) {
+  background: rgba(var(--success-rgb), 0.3);
+  border-color: rgba(var(--success-rgb), 0.6);
+}
+
+.stepper-btn-deny {
+  background: rgba(var(--danger-rgb), 0.12);
+  border-color: rgba(var(--danger-rgb), 0.3);
+  color: var(--danger);
+}
+
+.stepper-btn-deny:hover:not(:disabled) {
+  background: rgba(var(--danger-rgb), 0.22);
+  border-color: rgba(var(--danger-rgb), 0.5);
+}
+
+.stepper-error-status {
+  color: var(--danger);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}
+
+.stepper-step-list {
+  display: grid;
+  gap: 4px;
+}
+
+.stepper-step {
+  display: grid;
+  grid-template-columns: 18px 1fr auto auto;
+  gap: 6px;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  animation: stepper-step-slide 0.2s ease-out;
+}
+
+@keyframes stepper-step-slide {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.stepper-step-icon {
+  display: inline-grid;
+  place-items: center;
+  font-size: var(--font-size-sm);
+  width: 18px;
+  height: 18px;
+}
+
+.stepper-step-icon.state-completed {
+  color: var(--success);
+}
+
+.stepper-step-icon.state-running {
+  color: var(--accent);
+  animation: stepper-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes stepper-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+.stepper-step-icon.state-error {
+  color: var(--danger);
+}
+
+.stepper-step-name {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-step-fn {
+  color: var(--text-dim);
+  font-weight: 400;
+}
+
+.stepper-step-fn::before {
+  content: ' · ';
+  color: var(--text-dim);
+}
+
+.stepper-step-duration {
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stepper-step-duration.state-running {
+  color: var(--accent);
+}
+
+.stepper-step-duration.state-error {
+  color: var(--danger);
+  font-size: var(--font-size-2xs);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepper-step-error-detail {
+  grid-column: 2 / -1;
+  margin-left: 24px;
+  padding: 4px 8px;
+  background: rgba(var(--danger-rgb), 0.12);
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: var(--font-size-2xs);
+  line-height: 14px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.stepper-iteration-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.stepper-iteration-divider::before,
+.stepper-iteration-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: rgba(var(--edge-rgb), 0.2);
+}
+
+/* ─── Input Preview (own row below tool name) ──────────── */
+
+.stepper-step-input-preview {
+  grid-column: 2 / -1;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  margin-top: -2px;
+  padding-left: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ─── Expand Chevron ────────────────────────────────────── */
+
+.stepper-step-chevron {
+  color: var(--text-dim);
+  font-size: var(--font-size-2xs);
+  transition:
+    transform 0.15s ease-out,
+    color 0.15s;
+  flex-shrink: 0;
+}
+
+.stepper-step-chevron--open {
+  transform: rotate(90deg);
+  color: var(--text-muted);
+}
+
+/* ─── Expandable Step Row ───────────────────────────────── */
+
+.stepper-step-expandable {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.stepper-step-expandable:hover {
+  background: rgba(var(--edge-rgb), 0.1);
+}
+
+.stepper-step-expandable:hover .stepper-step-chevron {
+  color: var(--text-muted);
+}
+
+/* ─── Output Panel ──────────────────────────────────────── */
+
+.stepper-step-output {
+  margin-left: 24px;
+  margin-bottom: 4px;
+  border-left: 2px solid var(--border);
+  padding: 6px 10px;
+  border-radius: 0 4px 4px 0;
+  background: rgba(var(--edge-rgb), 0.16);
+  animation: stepper-output-reveal 0.15s ease-out;
+}
+
+.stepper-step-output--error {
+  border-left-color: var(--danger);
+  background: rgba(var(--danger-rgb), 0.08);
+}
+
+@keyframes stepper-output-reveal {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.stepper-step-output-code {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.stepper-step-output--error .stepper-step-output-code {
+  color: var(--danger);
+}
+
+/* ─── Completed state: keep output readable ─────────────── */
+
+.status-completed .stepper-step-output {
+  opacity: calc(1 / 0.7);
+}
+
+/* ─── Cancelled terminal state ──────────────────────────── */
+
+.progress-stepper.status-cancelled {
+  padding: var(--space-1) var(--space-2-5);
+  opacity: 0.7;
+  border-color: rgba(var(--text-dim-rgb), 0.3);
+}
+
+.stepper-cancelled-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.stepper-cancelled-badge {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: rgba(var(--edge-rgb), 0.18);
+  border: 1px solid rgba(var(--edge-rgb), 0.3);
+  border-radius: 4px;
+  padding: 1px 7px;
+}
+
+.stepper-cancelled-reason {
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Stop agent button ────────────────────────────────── */
+
+.progress-cancel-btn {
+  margin-top: 0;
+  margin-left: auto;
+  width: var(--control-height);
+  min-width: var(--control-height);
+  height: var(--control-height);
+  min-height: var(--control-height);
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--text-dim-rgb), 0.08);
+  border-color: rgba(var(--edge-rgb), 0.3);
+  color: var(--text-dim);
+}
+
+.stepper-stop-symbol {
+  display: inline-block;
+  font-size: var(--font-size-sm);
+  line-height: 1;
+  vertical-align: middle;
+}
+
+.progress-cancel-btn:hover:not(:disabled) {
+  background: rgba(var(--danger-rgb), 0.1);
+  border-color: rgba(var(--danger-rgb), 0.25);
+  color: var(--danger);
+}
+
+/* ==========================================================================
+   F2 · Shell — VS Code app frame
+   Structural surfaces (title bar / activity bar / sidebar / editor) read as
+   flat zones with a single crisp 1px separation border, no translucent "glass"
+   edges or backdrop blur. This block lands last so it wins by source order over
+   the earlier per-surface declarations it supersedes.
+   ========================================================================== */
+
+/* --- Zone separation: one solid 1px border, no backdrop blur ------------- */
+.window-titlebar {
+  border-bottom: 1px solid var(--zone-border);
+}
+
+.left-nav {
+  border-right: 1px solid var(--zone-border);
+  /* Structural zone: drop the .glass-card blur so the sidebar reads as an
+     opaque VS Code activity-bar surface, not a frosted overlay. */
+  backdrop-filter: none;
+}
+
+/* --- Title bar command center: search + notifications grouped at the right - */
+.window-titlebar__actions .top-bar {
+  position: relative;
+  justify-content: flex-end;
+}
+
+.window-titlebar__actions .header-left {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+/* Search pill and the notification bell sit together at the right edge, in
+   flow (the .top-bar gap separates them). Drop the base margin-left:auto so the
+   bell hugs the search instead of being pushed to the far edge. */
+.window-titlebar__actions .header-utilities {
+  margin-left: 0;
+}
+
+.window-titlebar__actions .global-search {
+  --global-search-expanded: var(--titlebar-search-width);
+  flex: 0 0 auto;
+  width: var(--titlebar-search-width);
+  max-width: 100%;
+  margin-right: 0;
+}
+
+.window-titlebar__actions .global-search:focus-within,
+.window-titlebar__actions .global-search.is-open {
+  width: var(--titlebar-search-width);
+}
+
+/* --- Windows/Linux close control: red destructive hover ------------------ */
+.window-titlebar--platform-windows .window-control-button--close:hover:enabled,
+.window-titlebar--platform-linux .window-control-button--close:hover:enabled {
+  background: var(--window-control-close-hover-bg);
+  border-color: var(--window-control-close-hover-bg);
+  color: var(--window-control-close-hover-ink);
+}
+
+/* --- Sidebar: accent bar on the active item (expanded AND collapsed) ------ */
+/* VS Code marks the active destination with a 2px vertical accent bar at the
+   left edge, in both the labeled list (328px) and the icon-only activity bar
+   (74px). Anchors to .nav-link (position: relative); the active class sits on
+   the row wrapper for Chat/Apps and on the bare row otherwise. */
+.nav-link.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 2px;
+  height: 60%;
+  border-radius: var(--radius-xs);
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* --- Sidebar item states: neutral VS Code fills (dark AND light) ----------
+   Bug fix: hover/active of sidebar rows previously painted an ACCENT tint under
+   the label (rgba(accent,.16/.22), and the accent-based --list-item and
+   --surface-hover tokens). On the translucent sidebar surface that blue wash
+   crushed label contrast. The active destination is marked by the vertical
+   accent bar (.nav-link.active::before) plus a NEUTRAL raised fill and full
+   text — never an accent fill. Values are neutral edge overlays measured to
+   clear AA (>=4.5:1) for the label in both themes. Scoped to .left-nav so the
+   global --list-item-* / --surface-hover tokens (tables, grids, menus) are
+   untouched. */
+.left-nav .nav-link:hover,
+.left-nav .nav-link--with-toggle:hover,
+.left-nav .nav-available-app:hover:enabled,
+.left-nav .nav-latest-session:hover,
+.left-nav .nav-latest-sessions__toggle:hover:enabled,
+.left-nav .sidebar-settings-trigger:hover:enabled,
+.left-nav .sidebar-settings-trigger.open {
+  background: rgba(var(--edge-rgb), 0.16);
+}
+
+.left-nav .nav-link.active,
+.left-nav .nav-available-app.active,
+.left-nav .nav-latest-session.active {
+  background: rgba(var(--edge-rgb), 0.26);
+  border-color: transparent;
+  color: var(--text);
+}
+
+/* The nested session label carries its own explicit color, so lift it to full
+   text on the selected row (the row-level color above cannot reach it). */
+.left-nav .nav-latest-session.active .nav-latest-session__main {
+  color: var(--text);
 }

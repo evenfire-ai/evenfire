@@ -59,7 +59,6 @@ export default function CommunicationChannelsPage() {
           onCreateChannel={() => router.push(CONTROL_ROUTES.externalChannels.new())}
           onCopyChannel={copyChannel}
           onOpenChannel={name => router.push(CONTROL_ROUTES.externalChannels.edit(name))}
-          onEditChannel={name => router.push(CONTROL_ROUTES.externalChannels.edit(name))}
         />
       </DashboardLayout>
     </AuthGate>

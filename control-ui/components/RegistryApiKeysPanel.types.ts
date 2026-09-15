@@ -5,4 +5,9 @@ export type RegistryApiKeysPanelProps = {
    * double border on the Marketplace org area.
    */
   embedded?: boolean
+  hideHeader?: boolean
+  search?: string
+  refreshSignal?: number
+  createSignal?: number
+  onCreateAvailabilityChange?: (available: boolean) => void
 }

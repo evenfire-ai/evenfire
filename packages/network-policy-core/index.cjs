@@ -68,18 +68,123 @@ const TRANSIENT_DNS_CODES = new Set([
 ])
 
 /**
+ * The subset that means "the resolver answered, and the answer was empty". Split
+ * out because the two permanent shapes need different words to the operator: a
+ * name with no records is not the same event as a name the resolver refused to
+ * query, and reporting both as "no A or AAAA records" sends someone hunting for
+ * missing records on a query that was never sent.
+ */
+const NO_RECORDS_DNS_CODES = Object.freeze(['ENODATA', 'ENOTFOUND'])
+
+/**
+ * DNS codes that are a POSITIVE permanent verdict about the NAME (issue #513):
+ * the two genuine no-records answers, plus EBADNAME — c-ares refused to send
+ * the query because the name is malformed. EBADNAME is reachable from user
+ * input through exactly one field today: `spec.ui.egress.external[].fqdn`, whose
+ * CRD pattern admits labels over 63 octets and which no controller validates
+ * further. (The other two hostname fields do not reach it: HCC's
+ * `isPublicDnsHostname` and WRC's workload-binding validator both apply a
+ * per-label regex before resolving.) A malformed name is the operator's
+ * misconfiguration — not a resolver outage, not a controller fault — so it
+ * prunes and is reported as rejected exactly like NXDOMAIN.
+ *
+ * Every other non-transient code stays OUT on purpose: EBADFAMILY, EBADFLAGS,
+ * EBADHINTS, ENONAME, EBADQUERY and EBADSTR describe arguments neither
+ * controller derives from user data, so if one of them fires the call is ours.
+ * `classifyDnsError` still defaults those to 'permanent' — its contract is
+ * pinned by this package's tests — which is exactly why the controllers gate on
+ * THIS set to decide what may reach the sliding-window classifier, and rethrow
+ * the rest instead of laundering a fault into a prune.
+ */
+/**
+ * Frozen array rather than a Set: a `Set` exported from a CommonJS module is a
+ * live mutable object, and `Object.freeze` does not stop `.add()` on one — the
+ * `ReadonlySet<string>` in index.d.ts would have been a claim the runtime did not
+ * back. Membership goes through `isPermanentDnsCode`.
+ */
+const PERMANENT_DNS_CODES = Object.freeze([...NO_RECORDS_DNS_CODES, 'EBADNAME'])
+
+/**
+ * True only for a code in PERMANENT_DNS_CODES. Takes a CODE, not an Error —
+ * `isPermanentDnsCode(err)` is always false, which would silently route every
+ * permanent DNS answer into the caller's fault branch. Pair it with `dnsCodeOf`.
+ */
+function isPermanentDnsCode(code) {
+  return typeof code === 'string' && PERMANENT_DNS_CODES.includes(code)
+}
+
+/**
+ * The one extraction of `.code` off a rejection value (issue #567 review, R1-M2).
+ * Both egress gates need "what code did this rejection carry", and a hand-written
+ * unwrap in each process is the drift surface this package exists to remove;
+ * `classifyDnsError` reads through here too, so there is a single answer.
+ *
+ * Deliberately narrower than `classifyDnsError`, which ALSO accepts a bare code
+ * string: this returns undefined for a string input. A rejection whose value IS
+ * the string 'ENOTFOUND' therefore yields no code and lands in the caller's fault
+ * branch rather than being classified. `node:dns` rejects with Error objects, so
+ * that shape does not occur; the asymmetry is kept because widening it would
+ * invent a string-rejection path no caller reaches.
+ *
+ * Non-string `.code` values return undefined rather than propagating: the
+ * declared type is `string | undefined` and every caller string-checks anyway.
+ */
+function dnsCodeOf(err) {
+  if (typeof err !== 'object' || err === null) return undefined
+  return typeof err.code === 'string' ? err.code : undefined
+}
+
+/**
+ * Classify one value rejected by the DNS promise at the resolver boundary.
+ * Unlike classifyDnsError, this is a total trust-boundary verdict: an unknown,
+ * missing, or non-object rejection is a controller fault, never an implicit
+ * negative DNS answer. The caller must invoke this only in the catch that wraps
+ * the DNS operation itself; a code cannot prove where an exception originated.
+ */
+function classifyDnsRejection(value) {
+  const code = dnsCodeOf(value)
+  if (typeof code === 'string' && TRANSIENT_DNS_CODES.has(code)) {
+    return { kind: 'transient', code }
+  }
+  if (typeof code === 'string' && NO_RECORDS_DNS_CODES.includes(code)) {
+    return { kind: 'negative', reason: 'no-records', code }
+  }
+  if (code === 'EBADNAME') {
+    return { kind: 'negative', reason: 'invalid-name', code }
+  }
+  return {
+    kind: 'fault',
+    ...(typeof code === 'string' ? { code } : {}),
+    cause: value,
+  }
+}
+
+/** True for the two genuine no-records answers, false for every other code. */
+function isNoRecordsDnsCode(code) {
+  return typeof code === 'string' && NO_RECORDS_DNS_CODES.includes(code)
+}
+
+/**
+ * Seam worth knowing about, not a defect today: this set and TRANSIENT_DNS_CODES
+ * decide what the egress gates treat as a DNS verdict, while WRC's downstream
+ * retry classifier keys on a DIFFERENT set — RETRYABLE_SOCKET_CODES in
+ * `workflow-recipes/src/reconciler/k8sErrors.ts`. Codes in the gap
+ * (EHOSTUNREACH, ENETDOWN, EPIPE, UND_ERR_*) would be called a controller fault
+ * here and then re-rescued into a retry there. Unreachable in practice: c-ares
+ * emits ETIMEOUT/ENETUNREACH, both already transient. It is recorded because two
+ * sources of truth for "which failures are worth retrying" drifting apart is the
+ * same class of bug as issue #513 itself — one question's answer reused for
+ * another question.
+ */
+
+/**
  * Classify a DNS failure as 'transient' or 'permanent'. Accepts a raw code
  * string or an Error carrying `.code`. Unknown/missing codes default to
  * 'permanent' (matches the WRC resolver): only a recognized transient code
  * freezes the accumulated set.
  */
 function classifyDnsError(errOrCode) {
-  const code =
-    typeof errOrCode === 'string'
-      ? errOrCode
-      : errOrCode && typeof errOrCode === 'object'
-        ? errOrCode.code
-        : undefined
+  const code = typeof errOrCode === 'string' ? errOrCode : dnsCodeOf(errOrCode)
   return typeof code === 'string' && TRANSIENT_DNS_CODES.has(code) ? 'transient' : 'permanent'
 }
 
@@ -404,6 +509,87 @@ function parseState(annotations, now, config, declarations) {
   return { entries: [] }
 }
 
+/**
+ * Strict current-format parser for authorization decisions. Unlike parseState,
+ * this never falls back to legacy data and never drops malformed entries while
+ * returning success. It is intentionally separate so migration/availability
+ * callers can keep parseState's tolerant behavior without making corrupt or
+ * over-cap state authoritative.
+ */
+function parseStateStrict(annotations, config, declarations) {
+  const raw = annotations && annotations[STATE_ANNOTATION]
+  if (typeof raw !== 'string' || raw.length === 0) return { kind: 'absent' }
+
+  let value
+  try {
+    value = JSON.parse(raw)
+  } catch (_error) {
+    return { kind: 'invalid', reason: 'state annotation is not valid JSON' }
+  }
+  if (!Array.isArray(value)) {
+    return { kind: 'invalid', reason: 'state annotation is not an array' }
+  }
+  if (value.length > config.maxEntries) {
+    return { kind: 'invalid', reason: 'state annotation exceeds maxEntries' }
+  }
+
+  const declarationIds = Array.isArray(declarations)
+    ? new Set(
+        declarations
+          .filter(declaration => declaration && typeof declaration.fqdn === 'string')
+          .map(declaration =>
+            idOf(declaration.fqdn, declaration.port, declaration.protocol || DEFAULT_PROTOCOL)
+          )
+      )
+    : null
+  const entries = []
+  const seen = new Set()
+  for (const entry of value) {
+    if (
+      !entry ||
+      !isValidIpv4(entry.ip) ||
+      !Number.isInteger(entry.port) ||
+      entry.port < 1 ||
+      entry.port > 65535 ||
+      typeof entry.fqdn !== 'string' ||
+      entry.fqdn.length === 0 ||
+      typeof entry.protocol !== 'string' ||
+      entry.protocol.length === 0 ||
+      !Number.isFinite(entry.expiresAt) ||
+      !Number.isFinite(entry.lastObservedAt) ||
+      !Number.isFinite(new Date(entry.lastObservedAt).getTime())
+    ) {
+      return { kind: 'invalid', reason: 'state annotation contains a malformed entry' }
+    }
+    if (declarationIds && !declarationIds.has(idOf(entry.fqdn, entry.port, entry.protocol))) {
+      return { kind: 'invalid', reason: 'state annotation contains an undeclared identity' }
+    }
+    const normalized = {
+      ip: entry.ip,
+      port: entry.port,
+      protocol: entry.protocol,
+      fqdn: entry.fqdn,
+      expiresAt: entry.expiresAt,
+      lastObservedAt: entry.lastObservedAt,
+    }
+    const key = keyOf(normalized)
+    if (seen.has(key)) {
+      return { kind: 'invalid', reason: 'state annotation contains a duplicate entry' }
+    }
+    seen.add(key)
+    entries.push(normalized)
+  }
+  entries.sort(byKey)
+  const serialized = serializeState({ entries })
+  const combinedBytes =
+    Buffer.byteLength(serialized[STATE_ANNOTATION], 'utf8') +
+    Buffer.byteLength(serialized[TARGETS_ANNOTATION], 'utf8')
+  if (combinedBytes > MAX_ANNOTATION_BYTES) {
+    return { kind: 'invalid', reason: 'state annotation exceeds the byte budget' }
+  }
+  return { kind: 'valid', state: { entries } }
+}
+
 module.exports = {
   STATE_ANNOTATION,
   TARGETS_ANNOTATION,
@@ -416,5 +602,11 @@ module.exports = {
   stateHash,
   serializeState,
   parseState,
+  parseStateStrict,
   classifyDnsError,
+  PERMANENT_DNS_CODES,
+  isPermanentDnsCode,
+  isNoRecordsDnsCode,
+  dnsCodeOf,
+  classifyDnsRejection,
 }

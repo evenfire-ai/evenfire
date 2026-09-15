@@ -66,6 +66,7 @@ export interface ResolvedResource {
   name: string
   kind: string
   pathCache: string | null
+  updatedAt: string
 }
 
 export interface ResolveStore {
@@ -98,7 +99,16 @@ export interface ResolveDb {
   query(text: string, values?: unknown[]): Promise<{ rows: unknown[] }>
 }
 
-const SELECT_COLS = 'resource_id, drive, name, kind, path_cache'
+const SELECT_COLS = 'resource_id, drive, name, kind, path_cache, updated_at'
+
+function toIsoTimestamp(value: unknown): string {
+  if (value instanceof Date) return value.toISOString()
+  if (typeof value === 'string' && value.length > 0) {
+    const parsed = new Date(value)
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString()
+  }
+  throw new Error('gfs_resources.updated_at is required')
+}
 
 function rowToResource(row: unknown): ResolvedResource {
   const r = row as {
@@ -107,6 +117,7 @@ function rowToResource(row: unknown): ResolvedResource {
     name: unknown
     kind: unknown
     path_cache: unknown
+    updated_at: unknown
   }
   return {
     resourceId: String(r.resource_id),
@@ -114,6 +125,7 @@ function rowToResource(row: unknown): ResolvedResource {
     name: String(r.name),
     kind: String(r.kind),
     pathCache: r.path_cache == null ? null : String(r.path_cache),
+    updatedAt: toIsoTimestamp(r.updated_at),
   }
 }
 

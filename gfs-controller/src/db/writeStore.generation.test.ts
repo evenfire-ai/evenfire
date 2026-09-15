@@ -30,6 +30,7 @@ function row(over: Record<string, unknown> = {}): Record<string, unknown> {
     blob_key: null,
     content_sha256: null,
     deleted_at: null,
+    updated_at: new Date("2026-01-01T00:00:00.000Z"),
     ...over,
   };
 }

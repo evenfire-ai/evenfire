@@ -12,6 +12,7 @@ import type {
 // desktopCommands.test.ts, matching the existing sandbox embed-preload pattern.
 const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'chat.newTab',
+  'chat.switcher',
   'chat.closeTab',
   'tabs.select1',
   'tabs.select2',
@@ -36,8 +37,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'navigate.agents',
   'notifications.open',
   'navigate.plugins',
-  'navigate.contexts',
-  'navigate.teams',
   'navigate.connectors',
   'navigate.files',
   'sidebar.toggle',
@@ -458,6 +457,10 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:getHostModels', { hostRef, chatId, hostRefs }),
     setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
+    // Spec 15 Fase B — explicit user rename. No `hostRefs` fleet arg: the main
+    // process scopes the write token to this single host.
+    renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
+      ipcRenderer.invoke('rpc:renameSession', { hostRef, agent, chatId, title }),
     getTokenMetadata: () => ipcRenderer.invoke('rpc:getTokenMetadata'),
     // U5 (mcp-oauth reactive consent): "Connect <server>" — open the provider
     // authorize-URL for a task that suspended with `connect_required`. Host-bound
@@ -515,6 +518,10 @@ const clerum = Object.freeze({
   },
   window: {
     getVisibility: () => ipcRenderer.invoke('window:getVisibility'),
+    getControlsState: () => ipcRenderer.invoke('window:getControlsState'),
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+    close: () => ipcRenderer.invoke('window:close'),
     onVisibilityChange: (callback: (state: { visible: boolean; focused: boolean }) => void) => {
       const listener = (
         _event: Electron.IpcRendererEvent,
@@ -522,6 +529,16 @@ const clerum = Object.freeze({
       ) => callback(state)
       ipcRenderer.on('window:visibility', listener)
       return () => ipcRenderer.off('window:visibility', listener)
+    },
+    onControlsStateChange: (
+      callback: (state: { fullscreen: boolean; maximized: boolean }) => void
+    ) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        state: { fullscreen: boolean; maximized: boolean }
+      ) => callback(state)
+      ipcRenderer.on('window:controlsState', listener)
+      return () => ipcRenderer.off('window:controlsState', listener)
     },
   },
   system: {

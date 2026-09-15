@@ -1,7 +1,15 @@
 import * as k8s from '@kubernetes/client-node'
 import type { GfsK8sApi } from '../gfsReconciler'
+import { createsTotal } from '../metrics'
 import type { GlobalFileSystemStatus } from '../types'
-import { applyNetworkPolicy, getErrorCode, replaceWithConflictRetry } from '../utils'
+import {
+  applyNetworkPolicy,
+  ensureResource,
+  getErrorCode,
+  observeCreate,
+  observeExistenceRead,
+  replaceWithConflictRetry,
+} from '../utils'
 import { GFS_TEMPLATE_HASH_ANNOTATION } from './gfsFactory'
 
 const GROUP = 'clerum.io'
@@ -36,19 +44,30 @@ export class K8sGfsApi implements GfsK8sApi {
   }
 
   async applyPvc(pvc: k8s.V1PersistentVolumeClaim, namespace: string): Promise<void> {
-    try {
-      await this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
-    } catch (err) {
-      // A PVC spec is immutable once bound; an existing one is left as-is.
-      if (getErrorCode(err) !== 409) throw err
-    }
+    const name = pvc.metadata?.name ?? ''
+    await ensureResource<k8s.V1PersistentVolumeClaim>({
+      read: () =>
+        observeExistenceRead('PersistentVolumeClaim', () =>
+          this.coreApi.readNamespacedPersistentVolumeClaim({ name, namespace })
+        ),
+      create: () =>
+        observeCreate('PersistentVolumeClaim', () =>
+          this.coreApi.createNamespacedPersistentVolumeClaim({ namespace, body: pvc })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'PersistentVolumeClaim', outcome: 'skipped' }),
+      // Bound PVCs stay unchanged. A create conflict must consume a fresh read;
+      // disappearance remains benign, while permission/transport failures propagate.
+      converge: read => this.ignoreNotFound(read),
+    })
   }
 
   async deploymentNeedsUpdate(dep: k8s.V1Deployment, namespace: string): Promise<boolean> {
     const name = dep.metadata?.name ?? ''
     const desired = dep.metadata?.annotations?.[GFS_TEMPLATE_HASH_ANNOTATION]
     try {
-      const existing = await this.appsApi.readNamespacedDeployment({ name, namespace })
+      const existing = await observeExistenceRead('Deployment', () =>
+        this.appsApi.readNamespacedDeployment({ name, namespace })
+      )
       const current = existing.metadata?.annotations?.[GFS_TEMPLATE_HASH_ANNOTATION]
       return !desired || current !== desired
     } catch (err) {
@@ -87,47 +106,67 @@ export class K8sGfsApi implements GfsK8sApi {
 
   async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<void> {
     const name = dep.metadata?.name ?? ''
-    try {
-      await this.appsApi.createNamespacedDeployment({ namespace, body: dep })
-      return
-    } catch (err) {
-      if (getErrorCode(err) !== 409) throw err
-    }
-    await replaceWithConflictRetry<k8s.V1Deployment>({
-      description: `deployment "${name}" in ${namespace}`,
-      logPrefix: LOG,
-      body: dep,
-      read: () => this.appsApi.readNamespacedDeployment({ name, namespace }),
-      replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
+    await ensureResource<k8s.V1Deployment>({
+      read: () =>
+        observeExistenceRead('Deployment', () =>
+          this.appsApi.readNamespacedDeployment({ name, namespace })
+        ),
+      create: () =>
+        observeCreate('Deployment', () =>
+          this.appsApi.createNamespacedDeployment({ namespace, body: dep })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Deployment', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry<k8s.V1Deployment>({
+          description: `deployment "${name}" in ${namespace}`,
+          logPrefix: LOG,
+          body: dep,
+          read,
+          replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
+        }),
     })
   }
 
   async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget, namespace: string): Promise<void> {
     const name = pdb.metadata?.name ?? ''
-    try {
-      await this.policyApi.createNamespacedPodDisruptionBudget({ namespace, body: pdb })
-      return
-    } catch (err) {
-      if (getErrorCode(err) !== 409) throw err
-    }
-    await replaceWithConflictRetry<k8s.V1PodDisruptionBudget>({
-      description: `pod disruption budget "${name}" in ${namespace}`,
-      logPrefix: LOG,
-      body: pdb,
-      read: () => this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace }),
-      replace: body =>
-        this.policyApi.replaceNamespacedPodDisruptionBudget({ name, namespace, body }),
+    await ensureResource<k8s.V1PodDisruptionBudget>({
+      read: () =>
+        observeExistenceRead('PodDisruptionBudget', () =>
+          this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace })
+        ),
+      create: () =>
+        observeCreate('PodDisruptionBudget', () =>
+          this.policyApi.createNamespacedPodDisruptionBudget({ namespace, body: pdb })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'PodDisruptionBudget', outcome: 'skipped' }),
+      converge: read =>
+        replaceWithConflictRetry<k8s.V1PodDisruptionBudget>({
+          description: `pod disruption budget "${name}" in ${namespace}`,
+          logPrefix: LOG,
+          body: pdb,
+          read,
+          replace: body =>
+            this.policyApi.replaceNamespacedPodDisruptionBudget({ name, namespace, body }),
+        }),
     })
   }
 
   async applyService(svc: k8s.V1Service, namespace: string): Promise<void> {
-    try {
-      await this.coreApi.createNamespacedService({ namespace, body: svc })
-    } catch (err) {
-      // clusterIP is immutable; the gfsc Service spec is stable, so an existing
-      // Service is left in place rather than risking an invalid replace.
-      if (getErrorCode(err) !== 409) throw err
-    }
+    const name = svc.metadata?.name ?? ''
+    await ensureResource<k8s.V1Service>({
+      read: () =>
+        observeExistenceRead('Service', () =>
+          this.coreApi.readNamespacedService({ name, namespace })
+        ),
+      create: () =>
+        observeCreate('Service', () =>
+          this.coreApi.createNamespacedService({ namespace, body: svc })
+        ),
+      onSkipped: () => createsTotal.inc({ kind: 'Service', outcome: 'skipped' }),
+      // Preserve the stable Service, including its immutable clusterIP. Read
+      // through a create conflict without introducing an update or another POST.
+      converge: read => this.ignoreNotFound(read),
+    })
   }
 
   async applyNetworkPolicy(np: k8s.V1NetworkPolicy, namespace: string): Promise<void> {

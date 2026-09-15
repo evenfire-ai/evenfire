@@ -138,9 +138,10 @@ test.describe('Control UI — Hosts', () => {
 
   test('Create Host button opens the create-agent page', async ({ authedPage }) => {
     await authedPage.click(CUI_DASHBOARD.CREATE_HOST_BUTTON)
-    // The create flow is a canonical page (/hosts/new) titled "Create agent",
-    // not a modal — assert the route AND the page heading.
-    await expect(authedPage).toHaveURL(/\/hosts\/new/, { timeout: 10_000 })
+    // The create flow is a canonical page (permanently redirected from
+    // /hosts/new to /agents/new) titled "Create agent", not a modal — assert
+    // the route AND the page heading.
+    await expect(authedPage).toHaveURL(/\/agents\/new/, { timeout: 10_000 })
     await expect(
       authedPage.getByRole('heading', { name: 'Create agent', exact: true })
     ).toBeVisible({ timeout: 10_000 })
@@ -148,11 +149,11 @@ test.describe('Control UI — Hosts', () => {
 
   test('create-agent page can be left via Back to agents', async ({ authedPage }) => {
     await authedPage.click(CUI_DASHBOARD.CREATE_HOST_BUTTON)
-    await expect(authedPage).toHaveURL(/\/hosts\/new/, { timeout: 10_000 })
+    await expect(authedPage).toHaveURL(/\/agents\/new/, { timeout: 10_000 })
     await dismissAdminEmailPromptIfPresent(authedPage)
     await authedPage.getByRole('button', { name: 'Back to agents' }).click()
-    // Back on the hosts list, the create action is available again
-    await expect(authedPage).toHaveURL(/\/hosts(?!\/new)/, { timeout: 10_000 })
+    // Back on the agents list, the create action is available again
+    await expect(authedPage).toHaveURL(/\/agents(?!\/new)/, { timeout: 10_000 })
     await expect(authedPage.locator(CUI_DASHBOARD.CREATE_HOST_BUTTON)).toBeVisible()
   })
 
@@ -169,8 +170,9 @@ test.describe('Control UI — Hosts', () => {
  * Stateless Agents (Host spec.lifecycle.stateless)
  *
  * Covers the three lifecycle flows added with the Agent type selector:
- *   a) create flow — selecting "Stateless (suspends when idle)" in the wizard
- *      lands spec.lifecycle.stateless=true on the created Host CR
+ *   a) create flow — the "Stateless (suspends when idle)" selector is NOT
+ *      offered on create (SHOW_STATELESS_AGENT_SELECTOR=false), so the wizard
+ *      lands a stateful Host CR
  *   b) edit flow — saving an unrelated field on a stateless host preserves the
  *      flag (the admin facade full-replaces the spec)
  *   c) channel ingress — a CommunicationChannel remains attachable to a
@@ -215,7 +217,7 @@ test.describe('Control UI — Stateless Agents', () => {
     await expect(authedPage.locator(CUI_DASHBOARD.HEADING)).toBeVisible()
   })
 
-  test('create flow: Stateless selection lands spec.lifecycle.stateless=true on the Host CR', async ({
+  test('create flow: wizard offers no stateless selector and lands a stateful Host CR', async ({
     authedPage,
   }) => {
     test.setTimeout(180_000)
@@ -224,7 +226,7 @@ test.describe('Control UI — Stateless Agents', () => {
     const secretName = `${agentName}-secret`
     try {
       // PRECONDITION (labeled setup): a managed host secret for the picker.
-      // The wizard's "Use existing secret" list is label-filtered
+      // The wizard's "Use an existing LLM Secret" list is label-filtered
       // (clerum.io/host-secret) and a fresh profile has none -- depending on
       // pre-existing environment secrets would be shared-state flakiness.
       await controlApi.createHostSecret(secretName, {
@@ -232,24 +234,23 @@ test.describe('Control UI — Stateless Agents', () => {
       })
 
       await authedPage.click(CUI_DASHBOARD.CREATE_HOST_BUTTON)
-      await expect(authedPage).toHaveURL(/\/hosts\/new/, { timeout: 10_000 })
+      await expect(authedPage).toHaveURL(/\/agents\/new/, { timeout: 10_000 })
       await expect(
         authedPage.getByRole('heading', { name: 'Create agent', exact: true })
       ).toBeVisible({ timeout: 10_000 })
       await dismissAdminEmailPromptIfPresent(authedPage)
 
-      // Step 0 — agent name + Agent type
+      // Step 0 — agent name only: the Agent type (stateless) selector is not
+      // offered on create while SHOW_STATELESS_AGENT_SELECTOR is false.
       await authedPage.getByPlaceholder('agent-name').fill(agentName)
-      const statelessRadio = authedPage.getByRole('radio', {
-        name: /Stateless \(suspends when idle\)/,
-      })
-      await statelessRadio.check()
-      await expect(statelessRadio).toBeChecked()
+      await expect(
+        authedPage.getByRole('radio', { name: /Stateless \(suspends when idle\)/ })
+      ).toHaveCount(0)
       await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
 
       // Step 1 — keep the default model, reuse the first existing secret
-      await authedPage.getByRole('radio', { name: /Use existing secret/ }).check()
-      await authedPage.getByRole('button', { name: /Select secret/ }).click()
+      await authedPage.getByRole('radio', { name: 'Use an existing LLM Secret' }).check()
+      await authedPage.getByRole('button', { name: 'Select LLM Secret...' }).click()
       // Deterministic pick: the exact secret this test seeded, never .first()
       const seededSecret = authedPage.getByRole('option', { name: new RegExp(secretName) })
       await expect(seededSecret).toBeVisible({ timeout: 10_000 })
@@ -259,19 +260,19 @@ test.describe('Control UI — Stateless Agents', () => {
       // Step 2 — access grants are optional
       await authedPage.getByRole('button', { name: 'Next', exact: true }).click()
 
-      // Step 3 — no connector is needed for this flag-only flow.
+      // Step 3 — no connector is needed for this flow.
       await authedPage.getByRole('button', { name: 'Create Agent', exact: true }).click()
       // Completion leaves the create page (canonical routing) — the CR poll
       // below is the business signal; this asserts the UI transition.
-      await expect(authedPage).not.toHaveURL(/\/hosts\/new/, { timeout: 30_000 })
+      await expect(authedPage).not.toHaveURL(/\/agents\/new/, { timeout: 30_000 })
 
       const created = await waitForHostCr(
         agentName,
-        host => host.spec?.lifecycle?.stateless === true,
-        'spec.lifecycle.stateless=true'
+        host => Boolean(host.metadata?.name),
+        'Host CR created'
       )
       contextName = String(created.spec?.contextRef || '')
-      expect(created.spec?.lifecycle?.stateless).toBe(true)
+      expect(created.spec?.lifecycle?.stateless).not.toBe(true)
     } finally {
       await controlApi.ensureHostDeleted(agentName)
       if (contextName) await controlApi.ensureContextDeleted(contextName)
@@ -311,9 +312,9 @@ test.describe('Control UI — Stateless Agents', () => {
       })
 
       // Edit an UNRELATED field and save — the flag must survive the full replace
-      await authedPage.getByRole('button', { name: 'Edit', exact: true }).first().click()
-      await authedPage.getByLabel('Display ID').fill(`${agentName}-updated`)
-      await authedPage.getByRole('button', { name: 'Save', exact: true }).click()
+      await authedPage.getByRole('button', { name: 'Edit agent name' }).first().click()
+      await authedPage.getByLabel('Agent name').fill(`${agentName}-updated`)
+      await authedPage.getByRole('button', { name: 'Save agent name' }).click()
       const savedToast = authedPage.getByText('Agent configuration saved.')
       try {
         await expect(savedToast).toBeVisible({ timeout: 15_000 })
@@ -326,9 +327,9 @@ test.describe('Control UI — Stateless Agents', () => {
         await expect(authedPage.getByText('Stateless (suspends when idle)')).toBeVisible({
           timeout: 15_000,
         })
-        await authedPage.getByRole('button', { name: 'Edit', exact: true }).first().click()
-        await authedPage.getByLabel('Display ID').fill(`${agentName}-updated`)
-        await authedPage.getByRole('button', { name: 'Save', exact: true }).click()
+        await authedPage.getByRole('button', { name: 'Edit agent name' }).first().click()
+        await authedPage.getByLabel('Agent name').fill(`${agentName}-updated`)
+        await authedPage.getByRole('button', { name: 'Save agent name' }).click()
         await expect(savedToast).toBeVisible({ timeout: 15_000 })
       }
 
@@ -437,7 +438,7 @@ test.describe('Control UI — Concurrent edit protection (AP-6)', () => {
   //   (a) the facade retries the stale payload into the server: the business
   //       signal (controlApi.getHost) would see the out-of-band change
   //       overwritten by the stale form echo;
-  //   (b) the UI silently exits edit mode on 409: the Display ID input
+  //   (b) the UI silently exits edit mode on 409: the Agent name input
   //       visibility + draft-value assertions fail;
   //   (c) the conflict banner never renders: the visible-UI assertion fails;
   //   (d) recovery-after-reload is broken: reload → edit → save no longer
@@ -477,8 +478,8 @@ test.describe('Control UI — Concurrent edit protection (AP-6)', () => {
       await expect(authedPage.getByText('Stateless (suspends when idle)')).toBeVisible({
         timeout: 15_000,
       })
-      await authedPage.getByRole('button', { name: 'Edit', exact: true }).first().click()
-      const displayIdInput = authedPage.getByLabel('Display ID')
+      await authedPage.getByRole('button', { name: 'Edit agent name' }).first().click()
+      const displayIdInput = authedPage.getByLabel('Agent name')
       await expect(displayIdInput).toBeVisible()
 
       // OUT-OF-BAND CHANGE (labeled precondition of the collision, NOT a
@@ -494,7 +495,7 @@ test.describe('Control UI — Concurrent edit protection (AP-6)', () => {
 
       // Back in the UI: change an UNRELATED field on the stale form and save.
       await displayIdInput.fill(staleDraftDisplayId)
-      await authedPage.getByRole('button', { name: 'Save', exact: true }).click()
+      await authedPage.getByRole('button', { name: 'Save agent name' }).click()
 
       // ASSERT (a) visible UI — the conflict banner renders and the edit form
       // stays open with the operator's draft intact.
@@ -517,9 +518,9 @@ test.describe('Control UI — Concurrent edit protection (AP-6)', () => {
       await expect(authedPage.getByText(`Agent: ${agentName}`)).toBeVisible({ timeout: 15_000 })
       // The out-of-band change is now visible in the form (flag removed).
       await expect(authedPage.getByText('Stateful (always on)')).toBeVisible({ timeout: 15_000 })
-      await authedPage.getByRole('button', { name: 'Edit', exact: true }).first().click()
-      await authedPage.getByLabel('Display ID').fill(recoveredDisplayId)
-      await authedPage.getByRole('button', { name: 'Save', exact: true }).click()
+      await authedPage.getByRole('button', { name: 'Edit agent name' }).first().click()
+      await authedPage.getByLabel('Agent name').fill(recoveredDisplayId)
+      await authedPage.getByRole('button', { name: 'Save agent name' }).click()
       await expect(authedPage.getByText('Agent configuration saved.')).toBeVisible({
         timeout: 15_000,
       })

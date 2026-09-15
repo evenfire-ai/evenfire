@@ -13,19 +13,23 @@ const mockIsVisible = vi.fn().mockReturnValue(true)
 const mockMaximize = vi.fn()
 const mockShow = vi.fn()
 
-const mockBrowserWindow = vi.fn().mockImplementation(() => ({
-  loadURL: mockLoadURL,
-  on: mockOn,
-  once: mockOnce,
-  focus: mockFocus,
-  close: mockClose,
-  destroy: mockDestroy,
-  isDestroyed: mockIsDestroyed,
-  isVisible: mockIsVisible,
-  maximize: mockMaximize,
-  show: mockShow,
-  webContents: { session: { cookies: { set: mockSetCookie } } },
-}))
+function createMockBrowserWindow() {
+  return {
+    loadURL: mockLoadURL,
+    on: mockOn,
+    once: mockOnce,
+    focus: mockFocus,
+    close: mockClose,
+    destroy: mockDestroy,
+    isDestroyed: mockIsDestroyed,
+    isVisible: mockIsVisible,
+    maximize: mockMaximize,
+    show: mockShow,
+    webContents: { session: { cookies: { set: mockSetCookie } } },
+  }
+}
+
+const mockBrowserWindow = vi.fn(createMockBrowserWindow)
 
 const mockFromPartition = vi.fn().mockReturnValue({
   cookies: { set: mockSetCookie },
@@ -52,19 +56,7 @@ describe('desktopWindow', () => {
     vi.clearAllMocks()
     mockIsDestroyed.mockReturnValue(false)
     mockFromPartition.mockReturnValue({ cookies: { set: mockSetCookie } })
-    mockBrowserWindow.mockImplementation(() => ({
-      loadURL: mockLoadURL,
-      on: mockOn,
-      once: mockOnce,
-      focus: mockFocus,
-      close: mockClose,
-      destroy: mockDestroy,
-      isDestroyed: mockIsDestroyed,
-      isVisible: mockIsVisible,
-      maximize: mockMaximize,
-      show: mockShow,
-      webContents: { session: { cookies: { set: mockSetCookie } } },
-    }))
+    mockBrowserWindow.mockImplementation(createMockBrowserWindow)
     // Re-import to reset module-level state
     vi.resetModules()
     const mod = await import('./desktopWindow.js')

@@ -1097,6 +1097,15 @@ t2_mutation_lock() {
   else
     t2_lock_acquire
   fi
+  # A disruptive local gate can outlive its process (SIGKILL/API outage). The
+  # profile lease is transient; its durable recovery obligation is not. Never
+  # certify or reconcile over an unfinished DNS intervention.
+  if ! node "$T2_SCRIPT_DIR/../e2e/_lib/wrc-egress-lifecycle.cjs" "$T2_PROJECT_DIR" "$T2_PROFILE"; then
+    t2_lock_release 0 || true
+    T2_NEXT_COMMAND='run the owned test-e2e-wrc-egress-recover target, then retry the original operation'
+    t2_fail WRC_EGRESS_RECOVERY_REQUIRED 'an unfinished WRC fault-injection journal prevents profile mutation or certification'
+    return 1
+  fi
 }
 
 t2_lock_release() {

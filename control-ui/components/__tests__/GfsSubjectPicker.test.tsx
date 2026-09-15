@@ -54,8 +54,6 @@ describe('GfsSubjectPicker', () => {
     expect(
       screen.getByRole('option', { name: 'Workflow runtime' }).querySelector('svg')
     ).not.toBeNull()
-    expect(screen.getByRole('option', { name: 'Ada Lovelace' }).textContent).toContain(
-      'Ada Lovelace'
-    )
+    expect(screen.getByRole('option', { name: 'Ada Lovelace' }).querySelector('svg')).not.toBeNull()
   })
 })

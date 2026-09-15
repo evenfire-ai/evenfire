@@ -10,8 +10,8 @@
 // empty/loading/error states and only hard-asserts on the shell, which always
 // exists for an authenticated user.
 //
-// Contract: docs/testing/optional-playwright-qa-recorder.md ("Extending the
-// recorder"). This journey performs NO writes, messages, or paid calls, so it
+// Contract: docs/testing/desktop-headful-journeys.md. This journey performs NO
+// writes, messages, or paid calls, so it
 // needs no confirmation flag — but it still guards both target URLs up front.
 import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
 import {

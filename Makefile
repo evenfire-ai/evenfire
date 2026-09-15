@@ -47,6 +47,7 @@ SERVICES := \
 	profile-ui \
 	mcp-servers \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/llm-provider-attempt-contract
@@ -69,6 +70,7 @@ TEST_SERVICES := \
 	desktop-app \
 	mcp-servers \
 	packages/desktop-app-links \
+	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
@@ -671,6 +673,19 @@ minikube-t2: ## Full orchestrator: T0, Real PostgreSQL T1, then exact-head T2
 
 .PHONY: minikube-t2-np08-hcc-authorization
 minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including the required deployed NP-08 Host-to-HCC authorization journey
+# Dedicated #604 certification: the bounded health lane runs the real
+# policy lifecycle, business invocation and three watch reconnections.
+.PHONY: minikube-t2-hcc-networkpolicy-lifecycle
+minikube-t2-hcc-networkpolicy-lifecycle: ## Run canonical T2 with the HCC NetworkPolicy lifecycle and watch-reconnection health gate
+	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
+		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
+
+.PHONY: minikube-t2-hcc-watch-recovery
+minikube-t2-hcc-watch-recovery: ## Certify PR A recovery omission, runtime repair and API-gate recovery in owned Minikube
+	@bash scripts/tests/test-hcc-watch-api-proxy.sh
+	@bash scripts/tests/test-hcc-watch-pr-a.sh
+	@E2E_HCC_PR_A=1 $(MAKE) minikube-t2-hcc-networkpolicy-lifecycle
+
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
 	@T2_RUN_T0=false T2_RUN_T1=false \
@@ -1083,7 +1098,7 @@ test-contracts: test-e2e-deps ## Run contract tests only
 test-e2e-bash: ## Run bash-based E2E suites (scripts/e2e/*.sh)
 	@echo "Running bash E2E suites..."
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-runtime-gate.sh
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-workflow-backend-compat.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-legacy-job-cleanup.sh
 	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-sfs-security.sh
@@ -1096,7 +1111,19 @@ test-e2e-workflow-runtime: ## Run workflow runtime E2E gate
 .PHONY: test-e2e-wrc-internal-dependency-networkpolicy
 test-e2e-wrc-internal-dependency-networkpolicy: ## Run issue #485 WRC internal-dependency NetworkPolicy E2E gate
 	@echo "Running WRC internal-dependency NetworkPolicy E2E gate..."
-	KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-internal-dependency-networkpolicy.sh
+
+.PHONY: test-e2e-wrc-networkpolicy-live-convergence
+test-e2e-wrc-networkpolicy-live-convergence: ## Run all PR #580 WRC NetworkPolicy family, route, repair, owner, and no-churn E2E gates
+	@echo "Running WRC NetworkPolicy live-convergence E2E gate..."
+	KUBECONTEXT="$(E2E_KUBECONTEXT)" MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" CONTROL_API_REAL_PG_CONTEXT="$(E2E_KUBECONTEXT)" bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-networkpolicy-live-convergence.sh
+
+.PHONY: test-wrc-networkpolicy-contracts
+test-wrc-networkpolicy-contracts: ## Run hermetic WRC NetworkPolicy runner, probe, observation, and fixture contracts
+	bash scripts/tests/test-wrc-networkpolicy-live-convergence-e2e.sh
+	bash scripts/tests/test-wrc-networkpolicy-probe-contract.sh
+	bash scripts/tests/test-wrc-fixtures.sh
+	bash scripts/tests/test-wrc-fixtures-parent-ownership.sh
 
 .PHONY: test-e2e-codex-subscription-network-boundary
 test-e2e-codex-subscription-network-boundary: ## Codex LLM proxy NetworkPolicy boundary (exit 3 before deploy)
@@ -1136,11 +1163,57 @@ test-e2e-plugin-workload-sdk-desktop: ## Run the explicit opt-in Electron/WebCon
 	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
 	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_EXPECT_PROVIDER:-}" || { echo "Refusing Desktop Plugin Workload SDK E2E: set E2E_PLUGIN_SDK_EXPECT_PROVIDER to the provider this run must exercise (openai | claude | codex-subscription)" >&2; exit 1; }; \
 	. scripts/e2e/e2e-lib.sh; \
 	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
-	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; URLs supplied by the branch profile"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK gate: context=$$ctx; expected provider=$${E2E_PLUGIN_SDK_EXPECT_PROVIDER}; URLs supplied by the branch profile"; \
 	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 npm run build && \
-	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_EXPECT_PROVIDER="$$E2E_PLUGIN_SDK_EXPECT_PROVIDER" ./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-sandbox-ui.spec.ts
+
+.PHONY: test-e2e-plugin-workload-sdk-desktop-no-grant
+test-e2e-plugin-workload-sdk-desktop-no-grant: ## Run the no-grant Codex guard (#533 regression) against its own ungranted SDK-only recipe
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME:-}" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME to a Codex SDK-only recipe whose execution binding is missing (never the granted happy-path recipe)" >&2; exit 1; }; \
+	test -n "$${E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE:-}" || { echo "Refusing Desktop Plugin Workload SDK no-grant guard: set E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE to the ungranted app's Desktop catalog title" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK no-grant guard: context=$$ctx; recipe=$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE:-sandbox-recipes}/$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME}; URLs supplied by the branch profile"; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_NO_GRANT=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_NO_GRANT=1 \
+		E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME="$$E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAME" \
+		E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE="$${E2E_PLUGIN_SDK_NO_GRANT_RECIPE_NAMESPACE:-sandbox-recipes}" \
+		E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE="$$E2E_PLUGIN_SDK_NO_GRANT_APP_TITLE" \
+		./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-no-grant-guard.spec.ts
+
+.PHONY: test-e2e-plugin-workload-sdk-desktop-codex-fallback
+test-e2e-plugin-workload-sdk-desktop-codex-fallback: ## Run the Codex -> authorized fallback journey (#533 acceptance criterion 8); stops codex-llm-proxy and restores it
+	@set -eu; \
+	ctx="$${KUBECONTEXT:-$(E2E_KUBECONTEXT)}"; \
+	test -n "$$ctx" || { echo "Refusing Desktop Plugin Workload SDK fallback journey: explicit Kubernetes context is required" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_WRITE_CONFIRM:-}" = 1 || { echo "Refusing Desktop Plugin Workload SDK fallback journey: set E2E_PLUGIN_SDK_WRITE_CONFIRM=1" >&2; exit 1; }; \
+	test -n "$${CONTROL_UI_BASE_URL:-}" || { echo "CONTROL_UI_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${CONTROL_API_BASE_URL:-}" || { echo "CONTROL_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${EXTERNAL_REST_API_BASE_URL:-}" || { echo "EXTERNAL_REST_API_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test -n "$${RPC_PROXY_BASE_URL:-}" || { echo "RPC_PROXY_BASE_URL must be set to the branch-owned random port" >&2; exit 1; }; \
+	test "$${E2E_PLUGIN_SDK_EXPECT_PROVIDER:-}" = codex-subscription || { echo "Refusing Desktop Plugin Workload SDK fallback journey: set E2E_PLUGIN_SDK_EXPECT_PROVIDER=codex-subscription; this journey exists only for the Codex primary" >&2; exit 1; }; \
+	. scripts/e2e/e2e-lib.sh; \
+	require_branch_profile_urls "$$ctx" "$${CLERUM_PROFILE_PORTS_ENV:-$${E2E_PROFILE_PORTS_ENV:-}}"; \
+	echo "[E2E-GUARD] Desktop Plugin Workload SDK fallback journey: context=$$ctx; recipe=$${E2E_PLUGIN_SDK_RECIPE_NAMESPACE:-sandbox-recipes}/$${E2E_PLUGIN_SDK_RECIPE_NAME:-evenfire-prompt-notify-app}; codex-llm-proxy will be stopped and restored"; \
+	trap 'kubectl --context "$$ctx" -n control-plane scale deployment/codex-llm-proxy --replicas=1 >/dev/null || echo "[E2E-GUARD] FAILED to restore control-plane/codex-llm-proxy to replicas=1 — restore it before running any other lane on this profile" >&2' EXIT; \
+	cd desktop-app && KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_CODEX_FALLBACK=1 npm run build && \
+	KUBECONTEXT="$$ctx" E2E_K8S_CONTEXT="$$ctx" E2E_PLUGIN_SDK_DESKTOP=1 E2E_PLUGIN_SDK_CODEX_FALLBACK=1 \
+		E2E_PLUGIN_SDK_EXPECT_PROVIDER="$$E2E_PLUGIN_SDK_EXPECT_PROVIDER" \
+		E2E_PLUGIN_SDK_RECIPE_NAME="$${E2E_PLUGIN_SDK_RECIPE_NAME:-evenfire-prompt-notify-app}" \
+		E2E_PLUGIN_SDK_RECIPE_NAMESPACE="$${E2E_PLUGIN_SDK_RECIPE_NAMESPACE:-sandbox-recipes}" \
+		E2E_PLUGIN_SDK_APP_TITLE="$${E2E_PLUGIN_SDK_APP_TITLE:-Prompt & Notify}" \
+		./node_modules/.bin/playwright test --config test/e2e-playwright/playwright.config.ts plugin-workload-sdk-codex-fallback.spec.ts
 
 .PHONY: test-e2e-cron-tab-validation
 test-e2e-cron-tab-validation: ## Run recipe cron tab E2E (set E2E_CRON_TAB_FIX_REQUIRED=1 when the fix must be present)
@@ -1215,6 +1288,23 @@ test-e2e-hcc-communicationchannel-watch-recovery: ## Run isolated minikube HCC w
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_WATCH_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-communicationchannel-watch-recovery.sh
 
+.PHONY: test-e2e-wrc-egress-degradation
+test-e2e-wrc-egress-degradation: ## Prove valid UI/workload services survive transient DNS while removed/raced egress is contracted
+	@echo "Running WRC external-egress degradation gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		E2E_WRC_EGRESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/e2e-wrc-egress-degradation.sh
+
+.PHONY: test-e2e-wrc-egress-recover
+test-e2e-wrc-egress-recover: ## Restore only the recorded, owned WRC DNS fault intervention; never certify the interrupted gate
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(E2E_KUBECONTEXT)" T2_CONTEXT="$(E2E_KUBECONTEXT)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		MINIKUBE_PROFILE="$(E2E_KUBECONTEXT)" KUBECONTEXT="$(E2E_KUBECONTEXT)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh --recover-wrc-egress
+
 .PHONY: test-e2e-hcc-readiness-bootstrap
 test-e2e-hcc-readiness-bootstrap: ## Prove HCC readiness while its initial Host fleet pass remains active
 	@echo "Running HCC initial-fleet readiness gate..."
@@ -1232,6 +1322,14 @@ test-e2e-hcc-mcp-context-readiness: ## Prove HCC readiness during exact MCP/Cont
 	@echo "Running HCC MCP/Context/NetworkPolicy readiness gate..."
 	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
 	E2E_HCC_MCP_READINESS_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) bash scripts/e2e/e2e-hcc-mcp-context-readiness.sh
+
+.PHONY: test-e2e-wrc-hcc-context-noop-resync
+test-e2e-wrc-hcc-context-noop-resync: ## Prove WRC Context no-op plus HCC periodic policy self-heal (PR #568 T14)
+	@echo "Running WRC/HCC Context no-op and periodic NetworkPolicy resync gate..."
+	@test -n "$(E2E_EXPECTED_PRE_GATE_GATE)" || { echo "Set E2E_EXPECTED_PRE_GATE_GATE to the gate recorded by the branch-owned pre-gate sync" >&2; exit 1; }
+	E2E_WRC_HCC_CONTEXT_FAULT_INJECTION=1 E2E_EXPECTED_PRE_GATE_GATE="$(E2E_EXPECTED_PRE_GATE_GATE)" \
+	  MINIKUBE_PROFILE=$(E2E_KUBECONTEXT) KUBECONTEXT=$(E2E_KUBECONTEXT) \
+	  bash scripts/e2e/e2e-wrc-hcc-context-noop-resync.sh
 
 .PHONY: test-e2e-hcc-rollout-readiness
 test-e2e-hcc-rollout-readiness: ## Measure the HCC Recreate rollout window (D1/c4). EXPECT_STUCK=1 reproduces the D1b outage; EXPECT_RECOVERY=1 proves the evenfire#391 rollout-undo path. The two flags are EXCLUSIVE; default both 0 = healthy measurement.

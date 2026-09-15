@@ -21,6 +21,7 @@ import {
   isRunnableLlmModelId,
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
+import { readVerifiedSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -105,6 +106,14 @@ export interface McpHostClient {
       capabilityFamily?: 'promptBridge' | 'clientNotifications'
       provider?: string
       model?: string
+      contractVersion?: 2 | 3
+      codexBinding?: {
+        connectionKey: string
+        catalogRevision: number
+        credentialRevision: number
+        model: string
+        bindingHash: string
+      } | null
     }
   ): Promise<{ status: number; body: Record<string, unknown> }>
 }
@@ -228,7 +237,14 @@ export class ModelConfigHandler {
     model: string | undefined,
     mcpHostEndpoint: string,
     wrcConfigureToken: string,
-    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge'
+    capabilityFamily: 'promptBridge' | 'clientNotifications' = 'promptBridge',
+    codexBinding?: {
+      connectionKey: string
+      catalogRevision: number
+      credentialRevision: number
+      model: string
+      bindingHash: string
+    } | null
   ): Promise<ConfigureModelResult> {
     if (
       capabilityFamily === 'promptBridge' &&
@@ -247,6 +263,9 @@ export class ModelConfigHandler {
           ...(capabilityFamily === 'clientNotifications' ? { capabilityFamily } : {}),
           ...(provider ? { provider } : {}),
           ...(model ? { model } : {}),
+          ...(provider === 'codex-subscription'
+            ? { contractVersion: 3, ...(codexBinding ? { codexBinding } : {}) }
+            : { contractVersion: 2 }),
         }
       )
       if (result.status >= 400) {
@@ -258,10 +277,11 @@ export class ModelConfigHandler {
             typeof result.body.policyReady === 'boolean' &&
             typeof result.body.policyState === 'string'
           : isBootstrapIdentityProof(result.body)
+      const expectedContractVersion = provider === 'codex-subscription' ? 3 : 2
       if (
         result.body.configured !== true ||
         result.body.ready !== true ||
-        result.body.contractVersion !== 2 ||
+        result.body.contractVersion !== expectedContractVersion ||
         (capabilityFamily === 'clientNotifications'
           ? result.body.capabilityFamily !== capabilityFamily
           : result.body.capabilityFamily !== undefined &&
@@ -270,12 +290,36 @@ export class ModelConfigHandler {
           (result.body.provider !== provider || result.body.model !== model)) ||
         !familyProofValid
       ) {
+        // A host that configured itself successfully but answered v2 to a
+        // Codex bootstrap is running a pre-v3 image — a stale workload, not a
+        // broker outage. Tag it so WRC can report `codex_bootstrap_contract_stale`
+        // instead of burning the configure budget into "provider unavailable".
+        const codexContractStale =
+          expectedContractVersion === 3 &&
+          result.body.configured === true &&
+          result.body.ready === true &&
+          result.body.contractVersion === 2
         return {
           status: 502,
-          body: { error: 'mcp_host bootstrap identity is not Plugin Workload SDK v2' },
+          body: {
+            error:
+              expectedContractVersion === 3
+                ? 'mcp_host bootstrap identity is not Plugin Workload SDK v3'
+                : 'mcp_host bootstrap identity is not Plugin Workload SDK v2',
+            ...(codexContractStale ? { policyReason: 'codex_bootstrap_contract_stale' } : {}),
+          },
         }
       }
       const policyProof = capabilityFamily === 'promptBridge' && isBootstrapPolicyProof(result.body)
+      // Shape alone is not proof: re-derive the policy hash and pin the model
+      // so a host cannot echo a well-formed binding for another model or with
+      // a hash that does not match its own five fields.
+      // Without a model there is no pin to apply, and an unpinned
+      // binding could be for another model. Refuse it rather than accept it
+      // blind — the pin is the point of this call.
+      const verifiedCodexBinding = model
+        ? readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
+        : null
       return {
         status: 202,
         body: {
@@ -283,8 +327,9 @@ export class ModelConfigHandler {
           ready: true,
           provider,
           model,
-          contractVersion: 2,
+          contractVersion: expectedContractVersion,
           capabilityFamily,
+          ...(verifiedCodexBinding ? { codexBinding: verifiedCodexBinding } : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),
@@ -735,10 +780,11 @@ function mcpHostConfigureRejected(result: {
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
+  const expectedVersion = body.provider === 'codex-subscription' ? 3 : 2
   return (
     body.configured === true &&
     body.ready === true &&
-    body.contractVersion === 2 &&
+    body.contractVersion === expectedVersion &&
     typeof body.provider === 'string' &&
     body.provider.length > 0 &&
     typeof body.model === 'string' &&
