@@ -985,34 +985,41 @@ export default function TeamDetailsPage() {
                   </div>
                 ) : (
                   <RecordList>
-                    {effectiveAgentNames.map(agentName => (
-                      <RecordListRow key={agentName} className="cu-access-row">
-                        <button
-                          type="button"
-                          className="cu-link"
-                          onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
-                        >
-                          {agentName}
-                        </button>
-                        <RowActionMenu
-                          ariaLabel={`Actions for agent ${agentName}`}
-                          actions={[
-                            {
-                              key: 'view',
-                              label: 'View agent details',
-                              onSelect: () => router.push(CONTROL_ROUTES.agents.detail(agentName)),
-                            },
-                            {
-                              key: 'revoke',
-                              label: 'Revoke agent access',
-                              danger: true,
-                              disabled: busy,
-                              onSelect: () => void revokeAgentAccess(agentName),
-                            },
-                          ]}
-                        />
-                      </RecordListRow>
-                    ))}
+                    {effectiveAgentNames.map(agentName => {
+                      // Rename propagation: display name (spec.host) — same
+                      // resolution as the add-agent picker on this page. Links
+                      // and actions stay keyed by the immutable slug.
+                      const agentDisplayName = getAgentDisplayName(agentName, hosts)
+                      return (
+                        <RecordListRow key={agentName} className="cu-access-row">
+                          <button
+                            type="button"
+                            className="cu-link"
+                            onClick={() => router.push(CONTROL_ROUTES.agents.detail(agentName))}
+                          >
+                            {agentDisplayName}
+                          </button>
+                          <RowActionMenu
+                            ariaLabel={`Actions for agent ${agentDisplayName}`}
+                            actions={[
+                              {
+                                key: 'view',
+                                label: 'View agent details',
+                                onSelect: () =>
+                                  router.push(CONTROL_ROUTES.agents.detail(agentName)),
+                              },
+                              {
+                                key: 'revoke',
+                                label: 'Revoke agent access',
+                                danger: true,
+                                disabled: busy,
+                                onSelect: () => void revokeAgentAccess(agentName),
+                              },
+                            ]}
+                          />
+                        </RecordListRow>
+                      )
+                    })}
                   </RecordList>
                 )}
               </>

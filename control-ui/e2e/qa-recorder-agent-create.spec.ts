@@ -92,7 +92,11 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await cleanupAgentFlowResources(sessionRequest, { agentName })
 
       await page.getByRole('link', { name: 'Agents', exact: true }).click()
-      await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
+      // TASK-229: creation lands on the new agent's detail page (header shows
+      // the agent's name + route URL), not back on the agents list.
+      await expect(page).toHaveURL(
+        new RegExp(`\\/(?:hosts|agents)\\/${agentName}(?:\\/overview)?$`)
+      )
 
       const createAgent = page.getByRole('button', { name: 'Create agent', exact: true })
       await expect(createAgent).toBeEnabled()
@@ -100,7 +104,7 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await expect(page).toHaveURL(/\/(?:hosts|agents)\/new$/)
       await expect(page.getByRole('heading', { name: 'Create agent', exact: true })).toBeVisible()
 
-      await page.getByPlaceholder('agent-name').fill(agentName)
+      await page.getByLabel('Agent name', { exact: true }).fill(agentName)
       await clickWizardNext(page)
 
       await expect(page.getByText('Model & credentials', { exact: true })).toBeVisible()
@@ -124,7 +128,11 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await expect(submitAgent).toBeEnabled()
       await submitAgent.click()
 
-      await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
+      // TASK-229: creation lands on the new agent's detail page (header shows
+      // the agent's name + route URL), not back on the agents list.
+      await expect(page).toHaveURL(
+        new RegExp(`\\/(?:hosts|agents)\\/${agentName}(?:\\/overview)?$`)
+      )
       const created = await waitForAgent(sessionRequest, agentName)
       expect((created.metadata as { name?: string } | undefined)?.name).toBe(agentName)
       contextName = String((created.spec as { contextRef?: string } | undefined)?.contextRef || '')
