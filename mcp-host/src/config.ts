@@ -714,8 +714,8 @@ export const config: Config = {
   ),
 
   // Agent configuration
-  agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '100')!, 10),
-  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '1800000')!, 10),
+  agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '3')!, 10),
+  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '18000000')!, 10),
   agentMaxToolCallsPerTask: parseInt(getEnv('CLERUM_AGENT_MAX_TOOL_CALLS', '1000')!, 10),
   agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
   // 0 = disabled (default): an unresolved approval never auto-denies in memory,
