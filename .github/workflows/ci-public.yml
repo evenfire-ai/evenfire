@@ -97,19 +97,11 @@ jobs:
         working-directory: packages/workflow-runtime-core
         run: npm run build
 
-      # These consumer suites execute the real producer source from a sibling
-      # deployable service. Install that producer's declared dependencies so
-      # Node resolves file dependencies from the producer directory in the
-      # same service-isolated shape used by CI.
-      - name: Install Control API producer dependencies
-        if: matrix.service == 'rpc-proxy'
-        working-directory: control-api
-        run: npm ci
-
-      - name: Install RPC Proxy producer dependencies
-        if: matrix.service == 'mcp-host'
-        working-directory: rpc-proxy
-        run: npm ci
+      # Producer-backed suites execute real sibling source/tooling. Discover
+      # those dependencies from the test references so new consumers cannot
+      # silently fall outside a hand-maintained service matrix.
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh "${{ matrix.service }}"
 
       # keytar is a native Desktop dependency. When its prebuild is unavailable,
       # node-gyp requires libsecret development metadata on Linux.
@@ -214,6 +206,9 @@ jobs:
       - name: Build workflow-runtime-core
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh control-api
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
@@ -484,6 +479,9 @@ jobs:
             fi
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
+
+      - name: Test producer-backed dependency materialization
+        run: bash scripts/tests/test-ci-producer-dependency-materialization.sh
 
       - name: Validate governed tracing operations gate orchestration
         run: bash scripts/tests/test-governed-tracing-operations-gate.sh
