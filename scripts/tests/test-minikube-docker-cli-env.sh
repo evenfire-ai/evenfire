@@ -467,7 +467,8 @@ assert_sequential_build_manifest_provenance() {
   printf '{}\n' >"$state"
   revision_before="$(git -C "$fixture" rev-parse HEAD)"
 
-  for selector in codex-llm-proxy codex-approved-tools-proxy-e2e \
+  for selector in control-api codex-approved-tools-control-api-e2e \
+    codex-llm-proxy codex-approved-tools-proxy-e2e \
     workflow-custom-sdk-e2e codex-approved-tools-workflow-e2e; do
     if ! FAKE_DOCKER_IMAGE_STATE="$state" MINIKUBE_PRELOAD_BASE_IMAGES=false \
       bash "$fixture/scripts/minikube/build-images.sh" "--only=$selector" \
@@ -505,9 +506,15 @@ assert.equal(m.sourceRevisions[workflowBase], before)
 assert.equal(m.sourceRevisions[workflowDerived], before)
 assert.match(m.images[workflowDerived], /^sha256:[0-9a-f]{64}$/)
 assert.deepEqual(m.derivedFrom[workflowDerived], { ref: workflowBase, id: m.images[workflowBase] })
+const controlBase = 'clerum/control-api:test'
+const controlDerived = 'clerum/codex-approved-tools-control-api-e2e:test'
+assert.equal(m.sourceRevisions[controlBase], before)
+assert.equal(m.sourceRevisions[controlDerived], before)
+assert.match(m.images[controlDerived], /^sha256:[0-9a-f]{64}$/)
+assert.deepEqual(m.derivedFrom[controlDerived], { ref: controlBase, id: m.images[controlBase] })
 NODE
   then
-    pass "five sequential --only builds preserve prior revisions and both exact derived-base bindings"
+    pass "seven sequential --only builds preserve prior revisions and all exact derived-base bindings"
   else
     fail "sequential --only builds lost or restamped prior provenance"
     return

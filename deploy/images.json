@@ -307,6 +307,13 @@
       "deployed_to_minikube": true
     },
     {
+      "name": "codex-approved-tools-control-api-e2e",
+      "path": "tests/e2e/fixtures/codex-subscription/approved-tools-oauth",
+      "rooted": true,
+      "published": false,
+      "deployed_to_minikube": false
+    },
+    {
       "name": "codex-approved-tools-mcp-e2e",
       "path": "tests/e2e/fixtures/codex-subscription/approved-tools",
       "rooted": true,

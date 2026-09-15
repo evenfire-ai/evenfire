@@ -4,6 +4,23 @@ import fs from 'node:fs'
 import net from 'node:net'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import {
+  createFixtureIdentityJournal,
+  recordFixtureConnection,
+} from '../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.mjs'
+import {
+  connectionCaptureName,
+  validateConnectionCapture,
+} from './approved-tools-connection-journal.mjs'
+import {
+  captureControlApi,
+  controlApiFixtureEnv,
+  controlApiFixtureImage,
+  controlApiPatch,
+  recoverControlApiForCleanup,
+  restoreControlApi,
+  validateControlApiPatch,
+} from './approved-tools-control-api-lifecycle.mjs'
 import { buildApprovedToolsImageProof } from './approved-tools-image-proof.mjs'
 import {
   cleanupJournaledFixtureResources,
@@ -17,6 +34,7 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const sizes = [83, 150, 250]
 const fixtureImage = 'clerum/codex-approved-tools-mcp-e2e:test'
 const proxyImage = 'clerum/codex-approved-tools-proxy-e2e:test'
+export const controlApiMarkerCheck = `const fs = require('node:fs'); const marker = JSON.parse(fs.readFileSync('/tmp/approved-tools-oauth-active.json', 'utf8')); if (marker.pid !== 1 || process.env.NODE_ENV !== 'test' || process.env.EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE !== '1' || marker.run !== process.env.APPROVED_TOOLS_RUN_ID || marker.profile !== process.env.MINIKUBE_PROFILE || marker.profile !== process.env.CONTROL_API_REAL_PG_CONTEXT || !process.env.KUBERNETES_SERVICE_HOST) throw Error('Invalid fixture marker'); process.kill(marker.pid, 0); process.stdout.write(JSON.stringify(marker))`
 const proxyRunAnnotation = 'evenfire.ai/codex-tools-fixture-run'
 const workflowImage = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
 const workflowFeatureCheck = `process.stdout.write(JSON.stringify(process.env.WRC_ENABLE_CUSTOM_COORDINATOR_IMAGE === 'true' && process.env.WRC_REQUIRE_COORDINATOR_IMAGE_DIGEST === 'false' && (process.env.WRC_ALLOWED_COORDINATOR_IMAGE_PREFIXES || '').split(',').some(prefix => prefix.trim() && '${workflowImage}'.startsWith(prefix.trim()))))`
@@ -438,7 +456,9 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     operation[4] === '-o' &&
     operation[5] === 'json' &&
     ((namespace === 'control-plane' &&
-      ['deployment/codex-llm-proxy', 'service/codex-llm-proxy'].includes(resource)) ||
+      ['deployment/codex-llm-proxy', 'service/codex-llm-proxy', 'deployment/control-api'].includes(
+        resource
+      )) ||
       (namespace === 'mcp-host' && resource === 'configmap/mcp-host-config'))
   )
     return args
@@ -447,11 +467,23 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
     operation[5] === '--timeout=180s' &&
     ((verb === 'rollout' && resource === 'status') ||
       (verb === 'wait' && resource === '--for=create')) &&
-    ((namespace === 'control-plane' && operation[4] === 'deployment/codex-llm-proxy') ||
+    ((namespace === 'control-plane' &&
+      ['deployment/codex-llm-proxy', 'deployment/control-api'].includes(operation[4])) ||
       (namespace === 'mcp-server' &&
         /^deployment\/approved-tools-[a-f0-9]{12}-mcp-(83|150|250|workflow)$/.test(operation[4])))
   )
     return args
+  if (
+    namespace === 'control-plane' &&
+    verb === 'patch' &&
+    resource === 'deployment/control-api' &&
+    operation.length === 7 &&
+    operation[4] === '--type=strategic' &&
+    operation[5] === '-p'
+  ) {
+    validateControlApiPatch(JSON.parse(operation[6]), profile)
+    return args
+  }
   if (
     namespace === 'control-plane' &&
     verb === 'patch' &&
@@ -533,6 +565,8 @@ export function validateKubectlArgs(args, profile, { input, resourceCleanup } = 
       operation[5] === 'node' &&
       operation[6] === '-e'
     ) {
+      if (resource === 'deployment/control-api' && operation[7] === controlApiMarkerCheck)
+        return args
       if (resource === 'deployment/workflow-recipes' && operation[7] === workflowFeatureCheck)
         return args
       const keys =
@@ -709,6 +743,72 @@ async function waitHttp(url, accept) {
 // state.headAudit. Proxy patching keeps its UID/image guards; forward cleanup
 // uses the ownership-checked cleanup path and runs even when the proxy step
 // fails. restored is set only when proxy and every cleanup complete.
+export function parseIdentityJournal(output, expected, status) {
+  if (typeof output !== 'string' || Buffer.byteLength(output) > 256 * 1024)
+    throw new Error('Invalid identity result size')
+  let result
+  for (const line of output.split('\n')) {
+    try {
+      const value = JSON.parse(line)
+      if (value?.e2eIdentity) result = value.e2eIdentity
+    } catch {
+      /* Service logs are not identity operation results. */
+    }
+  }
+  const fields = [
+    'version',
+    'mode',
+    'run',
+    'profile',
+    'context',
+    'users',
+    'team',
+    'grants',
+    'connections',
+  ]
+  if (
+    !result ||
+    result.status !== status ||
+    fields.some(key => JSON.stringify(result[key]) !== JSON.stringify(expected[key])) ||
+    Object.keys(result).some(key => ![...fields, 'status', 'cleanupOutcome'].includes(key))
+  )
+    throw new Error('Identity operation result does not match recorded intent')
+  return result
+}
+
+export function ingestFixtureConnections(state, read, save) {
+  const input = {
+    mode: 'deterministic',
+    run: state.run,
+    profile: state.profile,
+    context: state.profile,
+    scenarios: [...state.scenarios, state.workflowScenario],
+  }
+  const env = Object.fromEntries(
+    controlApiFixtureEnv(state.run, state.profile).map(e => [e.name, e.value])
+  )
+  for (const scenario of ['83', '150', '250', 'workflow']) {
+    const raw = read(connectionCaptureName(scenario))
+    if (raw === null) continue
+    const binding = {
+      run: state.run,
+      profile: state.profile,
+      context: state.profile,
+      scenario,
+      fixtureUserId: state.identityJournal.users[0].id,
+    }
+    const evidence = validateConnectionCapture(JSON.parse(raw), binding)
+    const existing = state.identityJournal.connections.find(entry => entry.scenario === scenario)
+    if (existing) {
+      if (JSON.stringify(existing) !== JSON.stringify(evidence))
+        throw new Error('Conflicting recorded connection capture')
+      continue
+    }
+    recordFixtureConnection(input, state.identityJournal, { env }, evidence)
+    save()
+  }
+}
+
 export async function restoreOwnedFixture({
   state,
   profile,
@@ -719,6 +819,8 @@ export async function restoreOwnedFixture({
   waitProxyRollout,
   cleanupForward,
   cleanupResources,
+  cleanupIdentities,
+  restoreApi,
 }) {
   if (!state || state.profile !== profile || state.worktree !== worktree)
     throw new Error('Fixture ownership mismatch')
@@ -768,12 +870,33 @@ export async function restoreOwnedFixture({
       cleanupErrors.push(error)
     }
   }
+  let resourcesFailed = false
   try {
     if (state.resources?.length && !cleanupResources)
       throw new Error('Resource cleanup adapter is required')
     if (cleanupResources) await cleanupResources()
   } catch (error) {
+    resourcesFailed = true
     cleanupErrors.push(error)
+  }
+  if (state.identitySeedStarted) {
+    try {
+      if (resourcesFailed) throw new Error('Resources remain; identity cleanup deferred')
+      if (!cleanupIdentities) throw new Error('Identity cleanup adapter is required')
+      await cleanupIdentities()
+      if (state.identityJournal?.status !== 'cleaned')
+        throw new Error('Fixture identity cleanup is incomplete')
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+  }
+  if (state.controlApi) {
+    try {
+      if (!restoreApi) throw new Error('Control API restore adapter is required')
+      await restoreApi()
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
   }
   if (proxyError || cleanupErrors.length > 0) {
     throw proxyError ?? cleanupErrors[0]
@@ -854,12 +977,82 @@ async function main() {
     fs.writeSync(stateFile.fd, data, 0, data.length, 0)
     fs.fsyncSync(stateFile.fd)
   }
+  const verifyApiMarker = () => {
+    const marker = JSON.parse(
+      kubectl([
+        '-n',
+        'control-plane',
+        'exec',
+        'deployment/control-api',
+        '--',
+        'node',
+        '-e',
+        controlApiMarkerCheck,
+      ])
+    )
+    if (marker.run !== state.run || marker.profile !== profile || marker.pid !== 1)
+      throw new Error('Control API live fixture marker mismatch')
+    const live = getApi()
+    if (
+      live.metadata.uid !== state.controlApi.metadata.uid ||
+      live.spec.template.metadata?.annotations?.[proxyRunAnnotation] !== state.run ||
+      live.spec.template.spec.containers.find(c => c.name === 'control-api')?.image !==
+        controlApiFixtureImage
+    )
+      throw new Error('Control API live fixture deployment mismatch')
+  }
+  const runIdentityOperation = input => {
+    verifyApiMarker()
+    const source = readOwnedFile(
+      path.join(repo, 'tests/e2e/fixtures/codex-subscription/approved-tools-setup'),
+      'seed.mjs',
+      128 * 1024
+    )
+    const output = kubectl(
+      [
+        '-n',
+        'control-plane',
+        'exec',
+        '-i',
+        'deployment/control-api',
+        '--',
+        'node',
+        '--input-type=module',
+        '--eval',
+        source,
+      ],
+      { input: JSON.stringify(input), timeout: 90_000 }
+    )
+    state.identityJournal = parseIdentityJournal(
+      output,
+      state.identityJournal,
+      input.action === 'create' ? 'created' : 'cleaned'
+    )
+    save()
+  }
   const getOwnedResource = entry => {
     const output = kubectl(fixtureResourceGetArgs(entry, state.run), {
       resourceCleanup: { entry, run: state.run },
     }).trim()
     return output === '' ? null : JSON.parse(output)
   }
+  const getApi = () =>
+    JSON.parse(kubectl(['-n', 'control-plane', 'get', 'deployment/control-api', '-o', 'json']))
+  const patchApi = patch =>
+    kubectl([
+      '-n',
+      'control-plane',
+      'patch',
+      'deployment/control-api',
+      '--type=strategic',
+      '-p',
+      JSON.stringify(patch),
+    ])
+  const waitApi = () =>
+    kubectl(
+      ['-n', 'control-plane', 'rollout', 'status', 'deployment/control-api', '--timeout=180s'],
+      { timeout: 190_000 }
+    )
   async function restore() {
     try {
       await restoreOwnedFixture({
@@ -914,6 +1107,48 @@ async function main() {
             String(binding.localPort),
             String(binding.remotePort),
           ]),
+        restoreApi: () =>
+          restoreControlApi({ state, profile, get: getApi, patch: patchApi, wait: waitApi }),
+        cleanupIdentities: async () => {
+          ingestFixtureConnections(
+            state,
+            name => {
+              let file
+              try {
+                file = openOwnedFile(evidence, name, { maxBytes: 4096 })
+              } catch (error) {
+                if (error.code === 'ENOENT') return null
+                throw error
+              }
+              try {
+                if ((fs.fstatSync(file.fd).mode & 0o777) !== 0o600)
+                  throw new Error('Connection capture must have mode 0600')
+                return readOwnedDescriptor(file)
+              } finally {
+                fs.closeSync(file.fd)
+              }
+            },
+            save
+          )
+          const pending = await recoverControlApiForCleanup({
+            state,
+            profile,
+            get: getApi,
+            patch: patchApi,
+            wait: waitApi,
+            verify: verifyApiMarker,
+          })
+          if (!pending) return
+          runIdentityOperation({
+            action: 'cleanup',
+            mode: 'deterministic',
+            run: state.run,
+            profile,
+            context: profile,
+            scenarios: [...state.scenarios, state.workflowScenario],
+            initialJournal: state.identityJournal,
+          })
+        },
         cleanupResources: () =>
           cleanupJournaledFixtureResources({
             journal: state.resources,
@@ -963,25 +1198,25 @@ async function main() {
     throw new Error(
       'Synthetic preparation is deterministic-only; real accounts require separate authorized preconditions'
     )
+  // Both sources are mandatory before any fixture mutation. A seed alone
+  // cannot provide the external consent flow exercised by the browser.
+  readOwnedFile(
+    path.join(repo, 'tests/e2e/fixtures/codex-subscription/approved-tools-oauth'),
+    'provider.mjs',
+    128 * 1024
+  )
   const seedFile = path.join(
     repo,
     'tests/e2e/fixtures/codex-subscription/approved-tools-setup/seed.mjs'
   )
-  const seedSource = readOwnedFile(path.dirname(seedFile), path.basename(seedFile), 128 * 1024)
+  readOwnedFile(path.dirname(seedFile), path.basename(seedFile), 128 * 1024)
   for (const name of [
     'TEST_ADMIN_USERNAME',
     'TEST_ADMIN_PASSWORD',
-    'TEST_USER_EMAIL',
     'TEST_USER_PASSWORD',
-    'APPROVED_TOOLS_UNAUTHORIZED_EMAIL',
     'APPROVED_TOOLS_UNAUTHORIZED_PASSWORD',
   ])
     required(name)
-  if (
-    required('TEST_USER_EMAIL').trim().toLowerCase() ===
-    required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL').trim().toLowerCase()
-  )
-    throw new Error('Unauthorized login fixture must be a distinct fresh identity')
   // The supported Minikube overlays enable these already. Refuse a stale or
   // differently configured runtime; fixture setup must not weaken feature gates.
   for (const [deploymentName, keys] of [
@@ -1045,6 +1280,9 @@ async function main() {
     images: observedImages,
   })
   const run = 'approved-tools-' + randomBytes(6).toString('hex')
+  // The same fresh identity names feed both setup and the visible login runner.
+  process.env.TEST_USER_EMAIL = `${run}@example.test`
+  process.env.APPROVED_TOOLS_UNAUTHORIZED_EMAIL = `${run}-unauthorized@example.test`
   const ports = []
   while (ports.length < 5) {
     const port = await freePort()
@@ -1082,6 +1320,23 @@ async function main() {
     throw new Error('Unsupported explicit NODE_ENV binding')
   // Refuse an unsupported original image before any fixture resource is created.
   validateProxyImage(container.image, container.imagePullPolicy)
+  const controlApi = captureControlApi(getApi(), profile)
+  const identityBinding = {
+    mode: 'deterministic',
+    run,
+    profile,
+    context: profile,
+    scenarios: allScenarios,
+  }
+  const identityJournal = createFixtureIdentityJournal(identityBinding, {
+    env: {
+      NODE_ENV: 'test',
+      EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE: '1',
+      APPROVED_TOOLS_RUN_ID: run,
+      MINIKUBE_PROFILE: profile,
+      CONTROL_API_REAL_PG_CONTEXT: profile,
+    },
+  })
   state = {
     profile,
     worktree: repo,
@@ -1092,6 +1347,9 @@ async function main() {
     workflowScenario,
     forwards: [],
     resources: [],
+    identityJournal,
+    identitySeedStarted: false,
+    controlApi,
     originalProxyImage: container.image,
     originalImagePullPolicy: container.imagePullPolicy,
     originalNodeEnv,
@@ -1151,6 +1409,17 @@ async function main() {
     validateForward(binding)
   }
   try {
+    patchApi(
+      controlApiPatch({
+        metadata: controlApi.metadata,
+        image: controlApiFixtureImage,
+        imagePullPolicy: 'Never',
+        env: controlApiFixtureEnv(run, profile),
+        run,
+      })
+    )
+    waitApi()
+    verifyApiMarker()
     await createJournaledFixtureResources({
       resources,
       run,
@@ -1245,6 +1514,9 @@ async function main() {
       )
     }
     const seedInput = {
+      action: 'create',
+      ...identityBinding,
+      initialJournal: state.identityJournal,
       mode: 'deterministic',
       profile,
       scenarios: allScenarios,
@@ -1257,21 +1529,9 @@ async function main() {
       unauthorizedEmail: required('APPROVED_TOOLS_UNAUTHORIZED_EMAIL'),
       unauthorizedPassword: required('APPROVED_TOOLS_UNAUTHORIZED_PASSWORD'),
     }
-    kubectl(
-      [
-        '-n',
-        'control-plane',
-        'exec',
-        '-i',
-        'deployment/control-api',
-        '--',
-        'node',
-        '--input-type=module',
-        '--eval',
-        seedSource,
-      ],
-      { input: JSON.stringify(seedInput), timeout: 90_000 }
-    )
+    state.identitySeedStarted = true
+    save()
+    runIdentityOperation(seedInput)
     fs.writeFileSync(
       path.join(evidence, 'scenarios.json'),
       JSON.stringify(scenarios, null, 2) + '\n',
@@ -1285,6 +1545,7 @@ async function main() {
     state.ready = true
     save()
     if (action === 'run') {
+      process.env.APPROVED_TOOLS_FIXTURE_USER_ID = state.identityJournal.users[0].id
       process.env.APPROVED_TOOLS_SCENARIOS = JSON.stringify(scenarios)
       process.env.APPROVED_TOOLS_WORKFLOW_SCENARIO = JSON.stringify(workflowScenario)
       command('runner', [], {

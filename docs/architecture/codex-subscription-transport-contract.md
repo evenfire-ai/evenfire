@@ -119,12 +119,17 @@ ordinary unknown names retain the Host registry's authorization checks.
 
 ### Selected MCP argument validation
 
-For tasks whose provider chain includes Codex, the Host validates selected MCP
+For interactive task tool loops whose provider chain includes Codex, the Host validates selected MCP
 arguments before approval and rechecks the live schema immediately before
 dispatch. Other provider chains retain server-side argument validation. Missing `$schema` uses JSON Schema 2020-12;
 explicit draft-07 and 2019-09 are also supported, including HTTP/HTTPS URI aliases. Unsupported dialects and
 unresolved references fail explicitly. Validation never coerces types, applies
 defaults, removes arguments, or loads remote references.
+
+This validation applies to the task adapter path, including resolved discovery
+calls. Workflow steps that call MCP directly retain their existing server-side
+validation. The adapter checks the manager's registered catalog schema; it does
+not claim to validate a distinct schema returned only by a per-user OAuth client.
 
 Compilation and evaluation run in disposable Node workers, outside the Host
 event loop. Each operation has a two-second deadline and V8 heap/stack limits;

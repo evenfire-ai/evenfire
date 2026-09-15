@@ -5,6 +5,7 @@
  * Real-account mode uses the explicitly prepared existing grant unchanged.
  */
 import { type Page, type Route, expect } from '@playwright/test'
+import { beginConnectionCapture } from '../../../../scripts/e2e/approved-tools-connection-journal.mjs'
 import { ControlUiShell, SecretsLlmSubscriptionsPage } from '../pages/codex-subscription'
 import { type Scenario, required } from './approved-tools-scenarios'
 
@@ -18,7 +19,23 @@ export async function prepareSubscriptionVisible(page: Page, scenario: Scenario)
   }
   await new ControlUiShell(page).openSecretsLlmSubscriptions()
   const subscriptions = new SecretsLlmSubscriptionsPage(page)
-  const connectionKey = await subscriptions.createGrant(scenario.subscriptionName)
+  const scenarioLabel = scenario.runId.split('-').at(-1)!
+  const run = scenario.runId.slice(0, -(scenarioLabel.length + 1))
+  const capture = beginConnectionCapture(required('APPROVED_TOOLS_EVIDENCE_DIR'), {
+    run,
+    profile: required('MINIKUBE_PROFILE'),
+    context: required('CONTROL_API_REAL_PG_CONTEXT'),
+    scenario: scenarioLabel,
+    fixtureUserId: required('APPROVED_TOOLS_FIXTURE_USER_ID'),
+  })
+  let connectionKey: string
+  try {
+    connectionKey = await subscriptions.createGrant(scenario.subscriptionName, metadata =>
+      capture.record(metadata)
+    )
+  } finally {
+    capture.close()
+  }
   expect(connectionKey).not.toBe('unassigned')
   const context = page.context()
   const externalConsent = async (route: Route) => {

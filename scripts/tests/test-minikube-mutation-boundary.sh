@@ -265,17 +265,20 @@ NODE
   printf 'PASS: WRC direct entry, pending journal and dedicated recovery enforce the real inherited lease\n'
 }
 
-# The #627 real-tool targets are the only mutation targets whose recipes call a
-# reviewed external builder directly. They must forward the same explicit
+# The #627 real-tool and approved-tools targets must forward the same explicit
 # profile/context/lease passthrough as every sibling target; without it a
 # makefile-variable profile (`MINIKUBE_PROFILE ?=`, never exported) never
 # reaches the wrapper and the transition fails before it can run.
 assert_627_targets_forward_the_profile_and_lease() {
-  local target plan problem=""
+  local target plan before_build problem=""
   for target in \
     minikube-install-627-real-tools \
     minikube-build-627-worktracker \
-    minikube-build-627-github; do
+    minikube-build-627-github \
+    minikube-build-codex-approved-tools-fixtures \
+    minikube-prepare-codex-approved-tools \
+    minikube-run-codex-approved-tools \
+    minikube-restore-codex-approved-tools; do
     # Inspect the rendered boundary with a known Make value. Explicit recipe
     # assignments also support values defined by included Makefiles, which are
     # not automatically exported like command-line assignments are.
@@ -296,11 +299,15 @@ assert_627_targets_forward_the_profile_and_lease() {
     [[ "${plan}" == *"T2_LOCK_TOKEN="* ]] \
       || problem+="${target} does not forward T2_LOCK_TOKEN; "
   done
+  plan="$(dry_run_make minikube-build-codex-approved-tools-fixtures-body MINIKUBE_PROFILE="${PROFILE}")"
+  before_build="${plan%%build-images.sh*}"
+  [[ "${plan}" == *"build-images.sh"* && "${before_build}" == *"require-t2-mutation-lock.sh"* ]] \
+    || problem+='approved-tools fixture body does not validate its inherited lease before image builds; '
   if [[ -n "${problem}" ]]; then
     printf 'FAIL: #627 mutation targets: %s\n' "${problem}" >&2
     exit 1
   fi
-  printf 'PASS: the #627 real-tool targets forward the explicit profile, context and inherited lease\n'
+  printf 'PASS: the #627 real-tool and four approved-tools targets forward profile/context/lease; fixture body guards its builds\n'
 }
 
 

@@ -6,7 +6,8 @@
  * E2E_GUARDIAN_ENTRY_POINT: Control UI starts at its application root.
  * E2E_GUARDIAN_IPC_FLOW: Desktop uses real main-process login and chat IPC.
  * Completed messages and MCP evidence replace renderer response waits. Tests
- * never inject IPC calls or authentication. Only the external model is faked.
+ * never inject IPC calls or authentication. Only the external OAuth and model
+ * providers are simulated in deterministic mode.
  */
 import { type Page, expect, test } from '@playwright/test'
 import {

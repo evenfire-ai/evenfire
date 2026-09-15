@@ -166,6 +166,37 @@ branch-profile/context variables; it never defaults to the shared
 retries to 1-10, and retry delay to 0-300 seconds; empty successful
 `minikube docker-env` output is a hard failure.
 
+### Codex approved-tools test fixture lifecycle
+
+These four targets are development-only and require Node 24, the verified
+branch-owned `MINIKUBE_PROFILE`, and matching explicit
+`CONTROL_API_REAL_PG_CONTEXT`. Each target acquires or validates the same
+mutation lease. They must not target production, staging, or a shared profile.
+Use the [setup instructions](../../tests/e2e/fixtures/codex-subscription/approved-tools-setup/README.md)
+for the required environment and a fresh evidence directory under the canonical
+checkout's ignored `.local-notes/infra/runs/` path.
+
+1. `make minikube-build-codex-approved-tools-fixtures` acquires seven images:
+   the normal Control API, Codex proxy and custom-workflow SDK bases, plus the
+   Control API OAuth, proxy, MCP and workflow test fixtures. The private body
+   validates the inherited lease before building. Fixture tags never replace
+   production tags. Acquisition changes the manifest timestamp, so complete the
+   supported reconcile and exact-HEAD validation sequence before preparation.
+2. `make minikube-run-codex-approved-tools` prepares the isolated resources,
+   runs the visible deterministic Playwright journey, and restores the recorded
+   Control API/proxy images and environments and cleans up owned resources and
+   forwards. It can run as the T2 Playwright command after image acquisition and
+   reconciliation; a successful hermetic test alone is not a runtime verdict.
+3. For investigation, `make minikube-prepare-codex-approved-tools` leaves the
+   test fixtures active. Finish with `make minikube-restore-codex-approved-tools`
+   using the same evidence directory. Restoration verifies run ownership;
+   incomplete cleanup must be resolved before another run or T2 certification.
+
+The synthetic lane requires deterministic upstream mode. It does not establish
+real-subscription interoperability or authorize real account use. The four
+public targets and the guarded build body have hermetic boundary coverage in
+`scripts/tests/test-minikube-mutation-boundary.sh`.
+
 ### Orphaned lock recovery
 
 If `PROFILE_BUSY` reports that the lock has no valid owner PID, or that a stale

@@ -276,6 +276,8 @@ minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fi
 
 minikube-build-codex-approved-tools-fixtures-body:
 	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=control-api
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-control-api-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-llm-proxy
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-proxy-e2e
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e

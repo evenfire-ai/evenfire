@@ -652,36 +652,40 @@ PY
   fi
 }
 
-# Readiness alone does not prove that a journey restored the production proxy.
+# Readiness alone does not prove that a journey restored its production images.
 # The planner may reconcile; certifying preflight requires the live baseline.
-t2_proxy_runtime_check() {
+t2_restored_runtime_check() {
   [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
-  local deployments="$1" pods inventory pod_names pod_name environment_check
-  if ! pods="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pods -l app=codex-llm-proxy -o json)"; then
-    t2_fail PROXY_RUNTIME_MISMATCH 'unable to observe running proxy identity'
+  local deployments="$1" service="$2" failure_code="$3" fixture_flags="$4" marker_file="$5"
+  local pods inventory pod_names pod_name environment_check
+  if ! pods="$(t2_kc -n "$T2_CONTROL_NAMESPACE" get pods -l app="$service" -o json)"; then
+    t2_fail "$failure_code" "unable to observe running $service identity"
     return 1
   fi
   if ! inventory="$(t2_mk image ls --format=json)"; then
-    t2_fail PROXY_RUNTIME_MISMATCH 'unable to observe profile image inventory'
+    t2_fail "$failure_code" 'unable to observe profile image inventory'
     return 1
   fi
-  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" <<'PY_PROXY'
+  if ! pod_names="$(python3 - "$T2_IMAGE_MANIFEST" "$T2_PROFILE" "$T2_CONTROL_NAMESPACE" "$deployments" "$pods" "$inventory" "$service" "$fixture_flags" <<'PY_RUNTIME'
 import json
 import re
 import sys
 from pathlib import Path
 
+service = sys.argv[7]
+fixture_flags = set(sys.argv[8].split())
+
 def require(condition):
     if not condition:
-        raise ValueError("unproven production proxy")
+        raise ValueError("unproven production service")
 
 def clean(template):
     require("evenfire.ai/codex-tools-fixture-run" not in (template.get("metadata", {}).get("annotations") or {}))
-    containers = [c for c in template["spec"]["containers"] if c.get("name") == "codex-llm-proxy"]
+    containers = [c for c in template["spec"]["containers"] if c.get("name") == service]
     require(len(containers) == 1)
     container = containers[0]
     for entry in container.get("env", []):
-        require(entry.get("name") not in {"CODEX_APPROVED_TOOLS_TEST_ONLY", "CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE"})
+        require(entry.get("name") not in fixture_flags)
         require(entry.get("name") != "NODE_ENV" or entry.get("value") != "test")
     return container
 
@@ -690,7 +694,7 @@ try:
     require(manifest.get("profile") == sys.argv[2])
     images = manifest["images"]
     # Both acquisition modes record this production alias and Docker config ID.
-    baseline = images["clerum/codex-llm-proxy:test"]
+    baseline = images[f"clerum/{service}:test"]
     require(isinstance(baseline, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", baseline))
     inventory = json.loads(sys.argv[6])
     require(isinstance(inventory, list))
@@ -705,7 +709,7 @@ try:
             observed[ref] = identity
     deployments = [d for d in json.loads(sys.argv[4])["items"] if
                    d.get("metadata", {}).get("namespace") == sys.argv[3] and
-                   d.get("metadata", {}).get("name") == "codex-llm-proxy"]
+                   d.get("metadata", {}).get("name") == service]
     require(len(deployments) == 1)
     deployment = deployments[0]
     desired = deployment["spec"].get("replicas", 1)
@@ -713,6 +717,8 @@ try:
     target = clean(deployment["spec"]["template"])
     require(images.get(target["image"]) == baseline)
     ref = target["image"]
+    require(re.fullmatch(r"(?:clerum/|ghcr\.io/evenfire-ai/)" + re.escape(service) +
+                         r"(?::[A-Za-z0-9._-]+|@sha256:[0-9a-f]{64})", ref))
     canonical = "docker.io/" + ref if ref.startswith("clerum/") else ref
     require(observed.get(canonical) == baseline)
     pods = json.loads(sys.argv[5])["items"]
@@ -723,7 +729,7 @@ try:
         require(pod["metadata"].get("namespace") == sys.argv[3])
         container = clean(pod)
         require(container["image"] == target["image"])
-        statuses = [c for c in pod["status"]["containerStatuses"] if c.get("name") == "codex-llm-proxy"]
+        statuses = [c for c in pod["status"]["containerStatuses"] if c.get("name") == service]
         require(len(statuses) == 1 and statuses[0].get("ready") is True)
         require(bool(statuses[0].get("state", {}).get("running")))
         # Resolve a repository digest through the owned profile inventory;
@@ -741,23 +747,35 @@ try:
         names.append(name)
     print("\n".join(names))
 except (OSError, ValueError, KeyError, TypeError, AttributeError):
-    raise SystemExit("production proxy identity, fixture markers, or baseline evidence did not match")
-PY_PROXY
+    raise SystemExit("production service identity, fixture markers, or baseline evidence did not match")
+PY_RUNTIME
   )"; then
-    T2_NEXT_COMMAND="restore the production proxy and retry MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2-runtime"
-    t2_fail PROXY_RUNTIME_MISMATCH 'live proxy does not prove the recorded production baseline'
+    T2_NEXT_COMMAND="restore production $service and retry MINIKUBE_PROFILE=$T2_PROFILE make minikube-t2-runtime"
+    t2_fail "$failure_code" "live $service does not prove the recorded production baseline"
     return 1
   fi
   # Read only fixture predicates, including envFrom/image-level variables;
   # never emit the environment or secret-bearing objects as evidence.
   while IFS= read -r pod_name; do
-    if ! environment_check="$(t2_kc -n "$T2_CONTROL_NAMESPACE" exec "$pod_name" -c codex-llm-proxy -- node -e \
-      'process.stdout.write(String(!("CODEX_APPROVED_TOOLS_TEST_ONLY" in process.env) && !("CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE" in process.env) && process.env.NODE_ENV !== "test"))')" ||
+    if ! environment_check="$(t2_kc -n "$T2_CONTROL_NAMESPACE" exec "$pod_name" -c "$service" -- node -e \
+      'const [flags, marker] = process.argv.slice(1); process.stdout.write(String(flags.split(" ").every(name => !(name in process.env)) && process.env.NODE_ENV !== "test" && (!marker || !require("node:fs").existsSync(marker))))' "$fixture_flags" "$marker_file")" ||
       [ "$environment_check" != true ]; then
-      t2_fail PROXY_RUNTIME_MISMATCH 'running proxy environment is unknown or retains fixture configuration'
+      t2_fail "$failure_code" "running $service environment is unknown or retains fixture configuration"
       return 1
     fi
   done <<< "$pod_names"
+}
+
+# Keep callers explicit about which production workload they certify.
+t2_proxy_runtime_check() {
+  t2_restored_runtime_check "$1" codex-llm-proxy PROXY_RUNTIME_MISMATCH \
+    'CODEX_APPROVED_TOOLS_TEST_ONLY CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE' ''
+}
+
+t2_control_api_runtime_check() {
+  t2_restored_runtime_check "$1" control-api CONTROL_API_RUNTIME_MISMATCH \
+    'EVENFIRE_APPROVED_TOOLS_OAUTH_FIXTURE APPROVED_TOOLS_RUN_ID' \
+    '/tmp/approved-tools-oauth-active.json'
 }
 
 t2_deployment_check() {

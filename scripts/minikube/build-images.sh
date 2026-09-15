@@ -358,6 +358,10 @@ KNOWN_BUILD_NAMES=(
 
 # These isolated test images are opt-in only. Their acquisition must happen
 # before T2 reconciliation, never inside the final Playwright command.
+if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
+  ALL_IMAGES+=("clerum/codex-approved-tools-control-api-e2e:test")
+  KNOWN_BUILD_NAMES+=(codex-approved-tools-control-api-e2e)
+fi
 if [ "$ONLY_SVC" = codex-approved-tools-mcp-e2e ]; then
   ALL_IMAGES+=("clerum/codex-approved-tools-mcp-e2e:test")
   KNOWN_BUILD_NAMES+=(codex-approved-tools-mcp-e2e)
@@ -992,6 +996,10 @@ build_image() {
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
+  if [ "$name" = codex-approved-tools-control-api-e2e ]; then
+    docker_args+=(--build-arg CONTROL_API_IMAGE=clerum/control-api:test)
+    derived_base="clerum/control-api:test"
+  fi
   if [ "$name" = codex-approved-tools-proxy-e2e ]; then
     # The public target builds this production tag immediately beforehand under
     # the same profile lease. The test image never replaces that tag.
@@ -1206,6 +1214,11 @@ build_image "codex-llm-proxy" \
   "clerum/codex-llm-proxy:test" \
   "${PROJECT_DIR}/codex-llm-proxy/Dockerfile"
 
+if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
+  build_image codex-approved-tools-control-api-e2e "${PROJECT_DIR}" \
+    clerum/codex-approved-tools-control-api-e2e:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/codex-subscription/approved-tools-oauth/Dockerfile"
+fi
 if [ "$ONLY_SVC" = codex-approved-tools-mcp-e2e ]; then
   build_image codex-approved-tools-mcp-e2e "${PROJECT_DIR}" \
     clerum/codex-approved-tools-mcp-e2e:test \
@@ -1599,7 +1612,7 @@ done
 # ---- Carry verified records forward from the previous manifest ----
 #
 # This writer replaces the whole file, and a partial run stages only the refs in
-# its own ALL_IMAGES. Without carrying, the fixture target -- five --only
+# its own ALL_IMAGES. Without carrying, the fixture target -- sequential --only
 # invocations in a row -- would leave a manifest holding only the last fixture,
 # and the prepare step that swaps the proxy onto a fixture would have nothing to
 # verify against.

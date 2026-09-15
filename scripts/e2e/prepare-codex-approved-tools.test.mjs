@@ -207,7 +207,9 @@ test('missing seed and lease fail before first cluster mutation; no image acquis
   )
   const mutation = source.indexOf("kubectl(['create'")
   const lease = source.indexOf("command('lease', [])")
-  const seedRead = source.indexOf('const seedSource = readOwnedFile(')
+  const seedRead = source.indexOf(
+    'readOwnedFile(path.dirname(seedFile), path.basename(seedFile), 128 * 1024)'
+  )
   assert.ok(lease >= 0 && lease < mutation)
   assert.ok(seedRead >= 0 && seedRead < mutation)
   assert.equal(source.includes('build-images.sh'), false)

@@ -1,13 +1,8 @@
 // Provenance proof for the optional Codex approved-tools fixture images.
 //
-// The fixture lane swaps the running codex-llm-proxy Deployment onto a locally
-// built fixture image, and the workflow scenario runs a locally built
-// coordinator fixture. Those refs are acquired by
-// `make minikube-build-codex-approved-tools-fixtures`, which runs
-// scripts/minikube/build-images.sh five times with --only. Each run rewrites
-// deploy/minikube/.image-manifest.json, two of the fixtures are BUILT FROM the
-// normal proxy image and the normal workflow coordinator image, and any of the
-// five can still be the one an earlier commit built.
+// The fixture lane uses locally built Control API, proxy, MCP and coordinator
+// images. The acquisition target builds each base and fixture with --only,
+// preserving source revisions and exact derived-base IDs across partial builds.
 //
 // A ref that merely EXISTS is not proof that the delegation test exercised the
 // code under review, and a fixture built from a stale base embeds that stale
@@ -47,17 +42,18 @@ function localImageRef(name) {
   return localRef(entry)
 }
 
-// The three fixture refs the prepare step swaps in, and the two normal images
-// they are built from. All five must belong to the reviewed commit.
+// Every fixture and its base must belong to the reviewed commit.
 export const FIXTURE_IMAGES = Object.freeze([
   localImageRef('codex-approved-tools-mcp-e2e'),
   localImageRef('codex-approved-tools-proxy-e2e'),
   localImageRef('codex-approved-tools-workflow-e2e'),
+  localImageRef('codex-approved-tools-control-api-e2e'),
 ])
 
 export const BASE_IMAGES = Object.freeze([
   localImageRef('codex-llm-proxy'),
   localImageRef('workflow-custom-sdk-e2e'),
+  localImageRef('control-api'),
 ])
 
 export const EXPECTED_IMAGES = Object.freeze([...FIXTURE_IMAGES, ...BASE_IMAGES])
@@ -72,6 +68,7 @@ export const DERIVED_FIXTURES = Object.freeze([
     ref: localImageRef('codex-approved-tools-workflow-e2e'),
     base: localImageRef('workflow-custom-sdk-e2e'),
   },
+  { ref: localImageRef('codex-approved-tools-control-api-e2e'), base: localImageRef('control-api') },
 ])
 
 function isRecord(value) {

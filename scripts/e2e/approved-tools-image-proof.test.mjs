@@ -6,12 +6,13 @@
 // digest is generated, not copied.
 //
 // Real-builder coverage lives in scripts/tests/test-minikube-docker-cli-env.sh:
-// sequential partial builds, both derived-image bindings, stale/missing images,
+// sequential partial builds, derived-image bindings, stale/missing images,
 // profile mismatch, malformed prior JSON, and preservation of a good manifest
 // when late inventory queries fail. Neither suite certifies a live deployment.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
+import { publishedImages, pullInGhcrMode, minikubeVerifyRefs } from '../release/images-manifest.mjs'
 import {
   BASE_IMAGES,
   DERIVED_FIXTURES,
@@ -61,7 +62,7 @@ function certify({ profile = PROFILE, sourceHead = HEAD, manifest, images }) {
   return buildApprovedToolsImageProof({ profile, sourceHead, manifest, images })
 }
 
-test('certifies the three fixture refs and both base refs at the reviewed commit', () => {
+test('certifies every fixture and base ref at the reviewed commit', () => {
   const images = recordedImages()
   const proof = certify({ manifest: manifestFor(images), images: observedEntries(images) })
   assert.deepEqual(Object.keys(proof.images).sort(), [...EXPECTED_IMAGES].sort())
@@ -239,7 +240,7 @@ test('refuses a ref with no recorded source revision', () => {
 
 test('refuses a fixture or a base that was built at a different commit', () => {
   const images = recordedImages()
-  for (const stale of [PROXY_FIXTURE, WORKFLOW_FIXTURE, PROXY_BASE, WORKFLOW_BASE]) {
+  for (const stale of EXPECTED_IMAGES) {
     const manifest = manifestFor(images)
     manifest.sourceRevisions[stale] = OTHER_HEAD
     assert.throws(
@@ -273,4 +274,35 @@ test('refuses a fixture whose recorded base is absent, different or no longer cu
     () => certify({ manifest: staleBase, images: observedEntries(images) }),
     /IMAGE_PROOF_BASE_MISMATCH/
   )
+})
+
+// The OAuth image is an optional derived fixture, but mandatory for this lane.
+test('requires the Control API OAuth fixture and its current exact base', () => {
+  const ref = 'clerum/codex-approved-tools-control-api-e2e:test'
+  const base = 'clerum/control-api:test'
+  assert.ok(FIXTURE_IMAGES.includes(ref))
+  assert.ok(BASE_IMAGES.includes(base))
+  assert.ok(DERIVED_FIXTURES.some(entry => entry.ref === ref && entry.base === base))
+  const images = recordedImages()
+  for (const missing of [ref, base]) {
+    assert.throws(
+      () => certify({ manifest: manifestFor(images), images: observedEntries(images).filter(entry => entry.ref !== missing) }),
+      /IMAGE_PROOF_IMAGE_MISSING/
+    )
+  }
+  const manifest = manifestFor(images)
+  manifest.derivedFrom[ref].id = digest('previous-control-api-base')
+  assert.throws(
+    () => certify({ manifest, images: observedEntries(images) }),
+    /IMAGE_PROOF_BASE_MISMATCH/
+  )
+})
+
+test('keeps the OAuth fixture out of publication, pulls and default runtime verification', () => {
+  const name = 'codex-approved-tools-control-api-e2e'
+  const ref = `clerum/${name}:test`
+  assert.ok(!publishedImages().some(image => image.name === name))
+  assert.ok(!pullInGhcrMode().some(image => image.name === name))
+  assert.ok(!minikubeVerifyRefs({ mode: 'local' }).includes(ref))
+  assert.ok(!minikubeVerifyRefs({ mode: 'ghcr', tag: HEAD, includeE2eFixtures: true }).includes(ref))
 })
