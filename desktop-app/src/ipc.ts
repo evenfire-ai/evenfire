@@ -12,6 +12,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
 import { requireChatStore } from './chatStoreBinding.js'
+import { assertSafeRouteSegment } from './pathSafety.js'
 import {
   PLUGIN_SDK_CAPABILITIES_CHANNEL,
   PLUGIN_SDK_CONSENT_RESOLVE_CHANNEL,
@@ -1305,6 +1306,32 @@ export function registerIpcHandlers(service: AppService): void {
         throw new Error('hostRef, chatId, and model are required')
       }
       return service.setHostModel(hostRef, chatId, model, payload?.hostRefs)
+    }
+  )
+
+  // Spec 15 Fase B — propagate an explicit user rename to the server.
+  ipcMain.handle(
+    'rpc:renameSession',
+    async (event, payload: { hostRef: string; agent: string; chatId: string; title: string }) => {
+      assertTrustedSender(event)
+      const hostRef = sanitizeString(payload?.hostRef)
+      const agent = sanitizeString(payload?.agent)
+      const chatId = sanitizeString(payload?.chatId)
+      // `sanitizeString` is only trim(); the authoritative title contract (NFC +
+      // strip \p{C} + collapse + cap 120cp/512B) is enforced server-side by
+      // mcp-host (spec 15 §5). A cheap trim + non-empty reject here just avoids a
+      // round-trip for an obviously empty rename; content validity is the server.
+      const title = sanitizeString(payload?.title)
+      if (!hostRef || !agent || !chatId) {
+        throw new Error('hostRef, agent, and chatId are required')
+      }
+      if (!title) throw new Error('title is required')
+      // Never trust route segments minted by the renderer, and never accept a
+      // `hostRefs` fleet list from it (the token is scoped to this single host).
+      assertSafeRouteSegment('hostRef', hostRef)
+      assertSafeRouteSegment('agent', agent, { maxLength: 200, allowColon: false })
+      assertSafeRouteSegment('chatId', chatId)
+      return service.renameSession(hostRef, agent, chatId, title)
     }
   )
 

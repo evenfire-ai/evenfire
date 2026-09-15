@@ -221,6 +221,14 @@ export function useChatStore() {
     hostModelRequests.delete(hostModelKey(hostRef, chatId))
     return result
   }, [])
+  // Spec 15 Fase B — propagate an explicit user rename to the server. In this app
+  // hostRef === agent === agentRef (same key used by listSessions). Rejections
+  // propagate so the pending-rename queue can branch on the HTTP status.
+  const renameSession = useCallback(
+    (agentRef: string, chatId: string, title: string) =>
+      window.clerum.rpc.renameSession(agentRef, agentRef, chatId, title),
+    []
+  )
   const clearCachedRemoteData = useCallback(() => {
     sessionCatalogRequests.clear()
     hostModelRequests.clear()
@@ -295,6 +303,7 @@ export function useChatStore() {
     getContextBreakdown,
     getHostModels,
     setHostModel,
+    renameSession,
     clearCachedRemoteData,
     setRemoteCacheScope,
     setPendingModel,
