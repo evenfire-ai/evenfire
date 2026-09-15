@@ -39,5 +39,7 @@ assert_packages external-rest-api control-api rpc-proxy
 assert_packages mcp-host control-api rpc-proxy
 assert_packages control-api workflow-recipes
 assert_packages packages/action-context-contracts
+assert_packages control-ui
+assert_packages desktop-app
 
 echo 'PASS: CI materializes producer dependencies derived from producer-backed tests'

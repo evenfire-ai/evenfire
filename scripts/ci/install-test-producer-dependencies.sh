@@ -13,11 +13,11 @@ if [[ ! -f "${ROOT_DIR}/${SERVICE}/package.json" ]]; then
   exit 2
 fi
 
-contains_reference() {
+contains_executable_reference() {
   local needle="$1"
   local source_file
   while IFS= read -r -d '' source_file; do
-    if grep -Fq -- "${needle}" "${source_file}"; then
+    if grep -F -- "${needle}" "${source_file}" | grep -Eqv '^[[:space:]]*(//|/\*|\*)'; then
       return 0
     fi
   done < <(
@@ -43,9 +43,9 @@ add_producer() {
 # Producer-backed tests are the canonical dependency declaration. Discover the
 # sibling package that owns each real fixture/tool instead of maintaining a
 # second service matrix in the workflow.
-contains_reference 'control-api/test/fixtures/' && add_producer control-api
-contains_reference 'rpc-proxy/node_modules/.bin/tsx' && add_producer rpc-proxy
-contains_reference 'workflow-recipes/src/' && add_producer workflow-recipes
+contains_executable_reference 'control-api/test/fixtures/' && add_producer control-api
+contains_executable_reference 'rpc-proxy/node_modules/.bin/tsx' && add_producer rpc-proxy
+contains_executable_reference 'workflow-recipes/src/' && add_producer workflow-recipes
 
 if [[ "${#producers[@]}" -eq 0 ]]; then
   exit 0
