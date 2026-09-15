@@ -715,7 +715,7 @@ export const config: Config = {
 
   // Agent configuration
   agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '3')!, 10),
-  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '18000000')!, 10),
+  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '86400000')!, 10),
   agentMaxToolCallsPerTask: parseInt(getEnv('CLERUM_AGENT_MAX_TOOL_CALLS', '1000')!, 10),
   agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
   // 0 = disabled (default): an unresolved approval never auto-denies in memory,
@@ -905,8 +905,8 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: parseInt(getEnv('CLERUM_SHELL_TIMEOUT', '600000')!, 10),
-    toolTimeout: parseInt(getEnv('CLERUM_TOOL_TIMEOUT', '660000')!, 10),
+    shellTimeout: parseInt(getEnv('CLERUM_SHELL_TIMEOUT', '1500000')!, 10),
+    toolTimeout: parseInt(getEnv('CLERUM_TOOL_TIMEOUT', '1500000')!, 10),
     toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')

@@ -83,7 +83,7 @@ export interface AgentConfig {
  * Default agent configuration.
  */
 export const DEFAULT_AGENT_CONFIG: AgentConfig = {
-  maxTaskDuration: 5 * 60 * 60 * 1000, // 5 hours; not currently enforced
+  maxTaskDuration: 24 * 60 * 60 * 1000, // 24 hours; not currently enforced
   maxToolCallsPerTask: 1000,
   autoStart: true,
   taskDelay: 3, // 3ms; not currently consumed by SessionProcessor
