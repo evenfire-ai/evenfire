@@ -1092,6 +1092,7 @@ export default function HostDetailsPage() {
           <HostOverviewTab
             hostName={routeName}
             displayName={hostDisplaySaved || hostDisplayDraft}
+            loadingName={!overviewReady}
             editingName={editingDisplayName}
             nameDraft={hostDisplayDraft}
             onNameDraftChange={setHostDisplayDraft}

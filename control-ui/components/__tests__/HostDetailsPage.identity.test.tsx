@@ -144,6 +144,15 @@ describe('HostDetailsPage identity integration', () => {
     expect(screen.queryByText('Agent: foo')).toBeNull()
     expect(screen.queryByText('/agents/foo')).toBeNull()
 
+    // QA follow-up: the Overview tab's editable identity card skeletons its
+    // name too (two skeletons total) — the slug never flashes there either —
+    // and the edit pencil stays hidden until a real name is on screen.
+    expect(document.querySelectorAll('.cu-agent-detail-title-skeleton')).toHaveLength(2)
+    expect(document.querySelector('.cu-host-overview-identity__name')?.textContent).not.toContain(
+      'foo'
+    )
+    expect(screen.queryByRole('button', { name: 'Edit agent name' })).not.toBeInTheDocument()
+
     resolveBundle({
       host,
       contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
@@ -157,6 +166,14 @@ describe('HostDetailsPage identity integration', () => {
     expect(await screen.findByRole('heading', { name: 'Agent: foo-display' })).toBeInTheDocument()
     expect(document.querySelector('.cu-agent-detail-title-skeleton')).toBeNull()
     expect(screen.queryByText('/agents/foo')).toBeNull()
+
+    // Overview identity card now shows the display name with its edit control.
+    expect(
+      await screen.findByText('foo-display', {
+        selector: '.cu-host-overview-identity__name',
+      })
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit agent name' })).toBeInTheDocument()
   })
 
   it('renders the agent detail tabs in order', async () => {
