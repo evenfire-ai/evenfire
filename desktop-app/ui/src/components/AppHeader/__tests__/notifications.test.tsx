@@ -22,10 +22,16 @@ type AgentsCatalogStub = null | {
   teamAgentNames: string[]
   agentDisplayByName: Record<string, string>
 }
-const agentsCatalogMock = vi.hoisted(() => ({ catalog: null as AgentsCatalogStub }))
+const agentsCatalogMock = vi.hoisted(() => ({
+  catalog: null as AgentsCatalogStub,
+  loading: false,
+}))
 
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
-  useAgentsDataController: () => ({ accessCatalog: agentsCatalogMock.catalog }),
+  useAgentsDataController: () => ({
+    accessCatalog: agentsCatalogMock.catalog,
+    loading: agentsCatalogMock.loading,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -91,6 +97,7 @@ describe('AppHeader notification tray presentation', () => {
     cleanup()
     notificationMocks.notifications.length = 0
     agentsCatalogMock.catalog = null
+    agentsCatalogMock.loading = false
     vi.clearAllMocks()
     vi.unstubAllGlobals()
   })
@@ -130,6 +137,32 @@ describe('AppHeader notification tray presentation', () => {
       screen.getByText('Research agent', { selector: '.notification-menu-agent' })
     ).toBeTruthy()
     expect(screen.getByText('Workflows', { selector: '.notification-menu-agent' })).toBeTruthy()
+    expect(
+      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
+    ).toBeNull()
+  })
+
+  // QA parity with the control-ui header fix: while the access catalog (the
+  // display-name map) is still loading, the tray agent line is a skeleton —
+  // never a flash of the raw slug.
+  it('skeletonizes the tray agent line while the access catalog loads', () => {
+    agentsCatalogMock.loading = true
+    notificationMocks.notifications.push({
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'research-agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    })
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const agentLine = screen
+      .getByTestId('notification-menu-item')
+      .querySelector('.notification-menu-agent')
+    expect(agentLine?.querySelector('.notification-menu-agent-skeleton')).not.toBeNull()
     expect(
       screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
     ).toBeNull()

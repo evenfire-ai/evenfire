@@ -91,7 +91,8 @@ export const HeaderActions = React.memo(function HeaderActions({
   onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
 }: HeaderActionsProps) {
-  const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
+  const { accessCatalog: agentsAccessCatalog, loading: agentsCatalogLoading } =
+    useAgentsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
@@ -849,7 +850,18 @@ export const HeaderActions = React.memo(function HeaderActions({
                         >
                           <div className="notification-menu-item-header">
                             <p className="notification-menu-agent">
-                              {notificationAgentDisplay(notification.agentName)}
+                              {/* While the access catalog is still loading the
+                               * display-name map is unknown — skeleton the line
+                               * instead of flashing the raw slug (QA parity with
+                               * the control-ui header fix). */}
+                              {agentsCatalogLoading ? (
+                                <span
+                                  className="notification-menu-agent-skeleton"
+                                  aria-label="Loading agent name"
+                                />
+                              ) : (
+                                notificationAgentDisplay(notification.agentName)
+                              )}
                             </p>
                             <span className="notification-menu-time">
                               {formatNotificationTime(notification.timestamp)}
