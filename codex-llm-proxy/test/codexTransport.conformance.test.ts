@@ -673,6 +673,82 @@ describe('streamCodexCompletion', () => {
     expect(body).not.toHaveProperty('temperature')
   })
 
+  it.each(['service.with.dots__read', `generated_server_${'x'.repeat(70)}__read`])(
+    'roundtrips the canonical tool name %s without changing authorization identity',
+    async name => {
+      const request = {
+        ...REQUEST,
+        tools: [{ name, description: 'Read one record', parameters: { type: 'object' } }],
+        messages: [
+          ...REQUEST.messages,
+          {
+            role: 'assistant' as const,
+            content: '',
+            toolCalls: [{ id: 'previous', name, arguments: {} }],
+          },
+          { role: 'tool' as const, content: 'previous result', toolCallId: 'previous', name },
+        ],
+      }
+      const requestHash = hashCodexCompletionRequestV1(request)
+      const original = structuredClone(request)
+      const emitted: unknown[] = []
+      const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body))
+        const wireName = body.tools[0].name
+        expect(wireName).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
+        expect(wireName).not.toBe(name)
+        expect(
+          body.input.find((item: { type?: string }) => item.type === 'function_call').name
+        ).toBe(wireName)
+        expect(
+          body.input.find((item: { type?: string }) => item.type === 'function_call_output')
+        ).toEqual({
+          type: 'function_call_output',
+          call_id: 'previous',
+          output: 'previous result',
+        })
+        return sseResponse([
+          `data: ${JSON.stringify({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: 'item-new',
+              call_id: 'new-call',
+              name: wireName,
+              arguments: '{}',
+            },
+          })}\n\n`,
+          'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+        ])
+      })
+      const result = await streamCodexCompletion({
+        executionTicket: 'ticket-name-map',
+        requestHash,
+        request,
+        ticket: {
+          jti: 'name-map',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash,
+          providerAttemptId: 'att-name-map',
+        },
+        redeem: async () => redeemSuccess(),
+        finalize: async () => ({
+          providerAttemptId: 'att-name-map',
+          outcome: 'success' as const,
+          duplicate: false,
+        }),
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => emitted.push(frame),
+      })
+      expect(result.outcome).toBe('success')
+      expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
+      expect(request).toEqual(original)
+      expect(hashCodexCompletionRequestV1(request)).toBe(requestHash)
+    }
+  )
+
   it('omits Notify-like generation fields on the Responses wire', async () => {
     const fetchFn = vi.fn(async () =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])

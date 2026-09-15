@@ -97,6 +97,24 @@ only the sender is insufficient. For rollback, restore the old sender first,
 drain outstanding incompatible attempts, then restore older validators. An old
 sender reintroduces the known connector exclusion and is not a correction.
 
+### Transport tool names
+
+Canonical Evenfire tool names remain unchanged in authorization, request hashes,
+Host dispatch and stored history. At the proxy boundary, names outside
+`[A-Za-z0-9_-]{1,64}` receive deterministic, reversible aliases. Compliant names
+are reserved first; bounded collision handling also covers legitimate names
+that resemble generated aliases. The map includes active definitions and
+historical assistant calls, and restores canonical names before emitting calls
+to the Host. Call IDs and function-call outputs remain unchanged.
+
+This uses the conservative function-name envelope documented by the
+[official OpenAI SDK](https://github.com/openai/openai-python/blob/main/src/openai/types/shared_params/function_definition.py).
+It is not evidence of a measured rejection by the ChatGPT Codex endpoint.
+The transformation preserves all tools; no name is truncated or omitted.
+If an inventory change introduces an alias collision, the request remaps its
+entire history consistently. Unknown generated aliases fail explicitly;
+ordinary unknown names retain the Host registry's authorization checks.
+
 ### Selected MCP argument validation
 
 The Host validates selected MCP arguments before approval and rechecks the live

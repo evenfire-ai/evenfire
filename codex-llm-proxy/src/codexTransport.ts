@@ -16,6 +16,7 @@ import {
   fetchFrozenOrigin,
 } from './originPolicy.js'
 import { assertBoundedDeadline } from './requestLimits.js'
+import { ToolNameMap } from './toolNameMap.js'
 import { type SafeUsage, parseSafeUsage } from './usage.js'
 
 export type StreamFrame =
@@ -205,6 +206,12 @@ async function readUpstreamStream(input: {
       'Codex access token is missing ChatGPT account id'
     )
   }
+  const names = new ToolNameMap([
+    ...(input.request.tools ?? []).map(tool => tool.name),
+    ...input.request.messages.flatMap(message =>
+      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
+    ),
+  ])
   const response = await fetchFrozenOrigin({
     url,
     fetchFn: input.fetchFn,
@@ -213,7 +220,7 @@ async function readUpstreamStream(input: {
       method: 'POST',
       signal,
       headers,
-      body: JSON.stringify(toUpstreamPayload(input.request)),
+      body: JSON.stringify(toUpstreamPayload(input.request, names)),
     },
   })
   if (!response.ok || !response.body) {
@@ -237,10 +244,13 @@ async function readUpstreamStream(input: {
     }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
-  return consumeSse(response.body, input.onFrame, signal)
+  return consumeSse(response.body, input.onFrame, signal, names)
 }
 
-function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, unknown> {
+function toUpstreamPayload(
+  request: CodexCompletionRequestV1,
+  names: ToolNameMap
+): Record<string, unknown> {
   const instructions = request.messages
     .filter(message => message.role === 'system' && message.content.trim())
     .map(message => message.content)
@@ -264,7 +274,7 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
         input.push({
           type: 'function_call',
           call_id: call.id,
-          name: call.name,
+          name: names.toWire(call.name),
           arguments: JSON.stringify(call.arguments ?? {}),
         })
       }
@@ -282,7 +292,7 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
   if (request.tools && request.tools.length > 0) {
     payload.tools = request.tools.map(tool => ({
       type: 'function',
-      name: tool.name,
+      name: names.toWire(tool.name),
       description: tool.description,
       parameters: tool.parameters,
     }))
@@ -306,7 +316,8 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: ((frame: StreamFrame) => void) | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  names: ToolNameMap
 ): Promise<StreamCodexCompletionResult> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
@@ -328,7 +339,14 @@ async function consumeSse(
           `tool calls exceed ${LIMITS.maxToolCalls}`
         )
       }
-      toolFrames.push(frame)
+      const canonicalName = names.fromWire(frame.name)
+      if (canonicalName === undefined) {
+        throw new CodexTransportError(
+          'provider_unavailable',
+          'upstream returned an unknown tool name'
+        )
+      }
+      toolFrames.push({ ...frame, name: canonicalName })
     } else if (frame) onFrame?.(frame)
   }
   let buffer = ''
