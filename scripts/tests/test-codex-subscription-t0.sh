@@ -144,7 +144,7 @@ run_node_group() {
   [[ ${#files[@]} -gt 0 ]] || { fail "$name: group listed no suite files"; return 1; }
   log="$(mktemp)"
   echo "── ${name} ──"
-  if ! node --test --test-reporter=tap "${files[@]}" >"$log" 2>&1; then
+  if ! node "$ROOT/scripts/tests/run-node-test-files.mjs" "${files[@]}" >"$log" 2>&1; then
     fail "$name: command failed"
     cat "$log"
     rm -f "$log"
@@ -197,6 +197,7 @@ run_group "shared-contract" "packages/llm-provider-attempt-contract" "index.test
 run_group "codex-catalog-projection" "packages/codex-catalog-projection" "index.test.cjs"
 
 run_node_group "approved-tools-fixtures-and-runner" \
+  "scripts/tests/run-node-test-files.test.mjs" \
   "tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs" \
   "scripts/e2e/prepare-codex-approved-tools.test.mjs" \
   "scripts/e2e/run-codex-approved-tools.test.mjs" \
