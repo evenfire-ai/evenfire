@@ -127,8 +127,12 @@ describe('useAgentChatController — characterization (D.0)', () => {
       // Server is source of truth → replace, not append.
       expect(clerum.chat.replaceMessages).toHaveBeenCalled()
       expect(clerum.chat.appendMessages).not.toHaveBeenCalled()
-      // Auto-title from the first user turn.
-      expect(clerum.chat.rename).toHaveBeenCalledWith('agent-x', 'chat-2', 'remote question')
+      // spec 15 §2.2/A19: the first-turn auto-title is shown EPHEMERALLY in the
+      // sidebar (observable output, T4) but is NOT persisted via rename — the
+      // server title is authoritative and a persisted client-derived title would
+      // linger as a stale case-D fallback.
+      expect(clerum.chat.rename).not.toHaveBeenCalled()
+      expect(result.current.chatList.find(c => c.id === 'chat-2')?.title).toBe('remote question')
       expect(result.current.chatMessages).toHaveLength(2)
       expect(result.current.activeChatId).toBe('chat-2')
     })

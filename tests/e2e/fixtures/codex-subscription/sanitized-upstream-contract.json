@@ -42,7 +42,7 @@
   "limits": {
     "maxRequestBodyBytes": 1048576,
     "maxMessages": 128,
-    "maxTools": 32,
+    "maxToolCalls": 32,
     "maxOutputTokens": 16384,
     "maxStreamDurationMs": 300000,
     "maxDeadlineMs": 300000,

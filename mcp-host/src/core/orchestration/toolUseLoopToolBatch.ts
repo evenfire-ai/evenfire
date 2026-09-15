@@ -221,7 +221,11 @@ export async function executeToolCalls(
     if (rewritten === 'handled') continue
     call = rewritten
 
-    const validation = config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
+    let validation = config.toolOutputProcessor.beforeExecution(call.name, call.arguments)
+    if (validation.is_valid) {
+      validation =
+        (await config.toolRegistry.get(call.name)?.validateParams?.(call.arguments)) ?? validation
+    }
     if (!validation.is_valid) {
       events.emit({
         type: 'safety:input_blocked',

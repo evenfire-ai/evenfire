@@ -322,6 +322,14 @@ export interface Conversation {
   created_at: Date
   updated_at: Date
   /**
+   * Server-authoritative session title (spec 15). Materialized on turn 1 from
+   * the first user input (redacted + truncated) and projected to the desktop
+   * catalog. RAM mirror of the durable `sessions.title` column, rehydrated on
+   * cold-load (`reconstruct.ts`). Kept in RAM for dual-store projection parity.
+   * `undefined` until the first turn materializes it (or a future rename sets it).
+   */
+  title?: string
+  /**
    * D.1 — task currently in flight for this conversation. Set on `startTurn`,
    * cleared on any terminal transition (complete/fail/cancel). Lives in RAM
    * (like `state` / `pending_approval`) and is mirrored to the durable

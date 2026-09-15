@@ -12,6 +12,7 @@ export type WindowControlsState = {
 export type WindowTitleBarProps = {
   actions?: React.ReactNode
   actionsRef?: React.Ref<HTMLDivElement>
+  leadingRef?: React.Ref<HTMLDivElement>
 }
 
 export type TitlebarActionsPortalProps = {

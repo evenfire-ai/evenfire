@@ -98,8 +98,15 @@ export interface ConversationSessionSummary {
   cache_read_tokens?: number
   cache_write_tokens?: number
   cacheTokensReported?: boolean
+  /** Server-authoritative session title (spec 15). `undefined` until turn 1. */
+  title?: string
 }
 
+// NOTE (spec 15 debt): `ConversationSessionMessages` inherits `title?` from the
+// summary via Omit, but the messages projections (`getSessionMessagesByKey`) do
+// NOT populate it and the `/messages` wire does not emit it — Fase A only
+// projects `title` on the LIST endpoint. Left unpopulated on purpose; threading
+// it through the two messages paths would add surface with no observable effect.
 export interface ConversationSessionMessages extends Omit<
   ConversationSessionSummary,
   'lastActivityAt' | 'turnCount' | 'messageCount'
@@ -317,6 +324,14 @@ export interface ConversationStore {
   persistModelSelections?(conv: Conversation): Promise<void> | void
 
   /**
+   * Spec 15 Fase B — persist a user rename (`sessions.title` overwrite). Async
+   * (enqueued via the worker), keyed by sessionKey. In-memory stores no-op (the
+   * title already lives on the Conversation object). Optional so legacy stores
+   * don't have to implement it.
+   */
+  persistTitle?(conv: Conversation): Promise<void> | void
+
+  /**
    * Accumulate the token usage of ONE LLM call into the durable per-session
    * counters. Additive (`col = col + delta`). Async (enqueued via the worker);
    * a slow DB never blocks the LLM path. In-memory stores no-op. Optional so
@@ -421,6 +436,8 @@ export class InMemoryConversationStore implements ConversationStore {
         cache_read_tokens: conversation.cache_read_tokens,
         cache_write_tokens: conversation.cache_write_tokens,
         cacheTokensReported: conversation.cacheTokensReported,
+        // Auto-title (spec 15) — hot/memory projection.
+        title: conversation.title,
       })
     }
 
@@ -489,6 +506,10 @@ export class InMemoryConversationStore implements ConversationStore {
 
   persistModelSelections(_conv: Conversation): void {
     /* no-op — RAM-only store keeps the selection on the Conversation object */
+  }
+
+  persistTitle(_conv: Conversation): void {
+    /* no-op — RAM-only store keeps the title on the Conversation object */
   }
 
   persistSessionUsage(_conv: Conversation, _usage: SessionTokenUsage): void {

@@ -35,6 +35,7 @@ import {
   handleSessionSearchRoute,
   handleSessionsListRoute,
   handleSetModelRoute,
+  handleSetTitleRoute,
   handleStatusRoute,
   handleTaskResultRoute,
   handleTelegramWorkflowApprovalVerificationRoute,
@@ -63,6 +64,7 @@ import type {
   SessionSearchHandler,
   SessionsListHandler,
   SetModelHandler,
+  SetTitleHandler,
   StatusHandler,
   TaskResultHandler,
   TelegramWorkflowApprovalVerificationHandler,
@@ -123,6 +125,7 @@ export type {
   SessionSearchRequest,
   SessionSearchResponse,
   SetModelResult,
+  SetTitleResult,
 } from './server/types'
 
 export class RPCServer {
@@ -160,6 +163,7 @@ export class RPCServer {
   private compactionHandler: CompactionHandler | null = null
   private modelsListHandler: ModelsListHandler | null = null
   private setModelHandler: SetModelHandler | null = null
+  private setTitleHandler: SetTitleHandler | null = null
   private workflowRouter: ReturnType<typeof createWorkflowRouter> | null = null
   private artifactSecretEntriesProvider: (() => ArtifactSecretEntry[]) | null = null
   private lifecycleGate: RuntimeLifecycleGate | null = null
@@ -437,6 +441,15 @@ export class RPCServer {
     this.app.post('/v1/runtime/model', runtimeEdgeGuard(['rpc-proxy']), async (req, res) => {
       await handleSetModelRoute(req, res, this.routeDeps())
     })
+    // Spec 15 Fase B — per-session rename. Behind the same edge guard: rpc-proxy
+    // has enforced host:session:write and injects the verified edge user + hostRef.
+    this.app.patch(
+      '/v1/runtime/sessions/:agent/:chatId/name',
+      runtimeEdgeGuard(['rpc-proxy']),
+      async (req, res) => {
+        await handleSetTitleRoute(req, res, this.routeDeps())
+      }
+    )
 
     this.app.get('/v1/runtime/cron/results', runtimeEdgeGuard(['channel-reader']), (req, res) => {
       handleCronResultsRoute(req, res, this.routeDeps())
@@ -695,6 +708,10 @@ export class RPCServer {
     this.setModelHandler = handler
   }
 
+  onSetTitle(handler: SetTitleHandler): void {
+    this.setTitleHandler = handler
+  }
+
   /** Activate workflow mode — mounts /api/v1/workflow/* routes. */
   setWorkflowService(service: WorkflowService): void {
     this.workflowRouter = createWorkflowRouter(service)
@@ -736,6 +753,7 @@ export class RPCServer {
       compactionHandler: this.compactionHandler,
       modelsListHandler: this.modelsListHandler,
       setModelHandler: this.setModelHandler,
+      setTitleHandler: this.setTitleHandler,
     }
   }
 

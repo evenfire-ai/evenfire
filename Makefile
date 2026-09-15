@@ -254,6 +254,52 @@ minikube-build-custom-coordinator-fixture-body:
 	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
 
 .PHONY: minikube-build-e2e-fixtures minikube-build-e2e-fixtures-body
+
+.PHONY: minikube-install-627-real-tools
+minikube-install-627-real-tools: ## Install real Worktracker and Wikipedia baseline under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/install-627-real-tools.mjs
+
+.PHONY: minikube-build-627-worktracker
+minikube-build-627-worktracker: ## Build the reviewed Worktracker sources locally without registry credentials or publication
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-worktracker.sh
+
+.PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
+minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-codex-approved-tools-fixtures-body
+
+minikube-build-codex-approved-tools-fixtures-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=control-api
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-control-api-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-llm-proxy
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-proxy-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-mcp-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=workflow-custom-sdk-e2e
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=codex-approved-tools-workflow-e2e
+
+.PHONY: minikube-prepare-codex-approved-tools minikube-run-codex-approved-tools minikube-restore-codex-approved-tools
+minikube-prepare-codex-approved-tools: ## Prepare isolated deterministic tools fixtures; requires prior image acquisition and fresh run directory
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs prepare
+
+minikube-run-codex-approved-tools: ## Prepare, run visible deterministic E2E and restore production proxy image in owned Minikube
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs run
+
+minikube-restore-codex-approved-tools: ## Restore recorded proxy image/env and close only this fixture run's owned forwards
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/prepare-codex-approved-tools.mjs restore
+
 minikube-build-e2e-fixtures: ## Build the two unpublished coordinator E2E fixtures under one mutation lease
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
@@ -679,6 +725,12 @@ minikube-t2-np08-hcc-authorization: minikube-t2 ## Run canonical T2 including th
 minikube-t2-hcc-networkpolicy-lifecycle: ## Run canonical T2 with the HCC NetworkPolicy lifecycle and watch-reconnection health gate
 	@T2_HEALTHCHECK_COMMAND='bash scripts/e2e/e2e-hcc-networkpolicy-lifecycle.sh' \
 		T2_HEALTHCHECK_TIMEOUT_SECONDS=900 T2_HEALTHCHECK_KILL_GRACE_SECONDS=300 $(MAKE) minikube-t2
+
+.PHONY: minikube-t2-hcc-watch-recovery
+minikube-t2-hcc-watch-recovery: ## Certify PR A recovery omission, runtime repair and API-gate recovery in owned Minikube
+	@bash scripts/tests/test-hcc-watch-api-proxy.sh
+	@bash scripts/tests/test-hcc-watch-pr-a.sh
+	@E2E_HCC_PR_A=1 $(MAKE) minikube-t2-hcc-networkpolicy-lifecycle
 
 .PHONY: minikube-t2-runtime
 minikube-t2-runtime: ## Exact-head T2 after T0 and T1 already passed on this HEAD and profile
@@ -1426,3 +1478,9 @@ run-platform-security-gates: ## Execute the revised platform security gate runne
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
+
+.PHONY: minikube-build-627-github
+minikube-build-627-github: ## Build the reviewed GitHub MCP locally for the owned profile architecture
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-github.sh
