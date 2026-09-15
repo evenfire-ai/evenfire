@@ -2,7 +2,7 @@
 export type CodexToolPresentation = 'auto' | 'direct' | 'discovery'
 
 export function parseCodexToolPresentation(raw: string | undefined): CodexToolPresentation {
-  if (raw === undefined) return 'auto'
+  if (raw === undefined) return 'direct'
   if (raw === 'auto' || raw === 'direct' || raw === 'discovery') return raw
   throw new Error('CODEX_TOOL_PRESENTATION must be auto, direct, or discovery')
 }
@@ -27,7 +27,7 @@ export function resolveToolPresentation(
     provider === 'codex-subscription' ||
     fallbacks.some(entry => entry.provider === 'codex-subscription')
   ) {
-    const codexMode = config.codexToolPresentation ?? 'auto'
+    const codexMode = config.codexToolPresentation ?? 'direct'
     return { bridgeEnabled: codexMode !== 'direct', codexMode }
   }
   return { bridgeEnabled: config.dynamicToolsEnabled }
