@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { logger } from '../../logger'
 import { MessageQueue } from '../../queue/messageQueue'
 import { Task } from '../../queue/types'
 import { AgentStateMachine } from '../stateMachine'
@@ -170,7 +171,9 @@ describe('AgentStateMachine — task processing', () => {
     await agent.executeTask(task)
 
     expect(task.responseCallback).toHaveBeenCalledWith(
-      expect.objectContaining({ response: 'Max iterations reached' })
+      expect.objectContaining({
+        error: expect.objectContaining({ code: 'TASK_ITERATION_LIMIT', retryable: false }),
+      })
     )
   })
 })
@@ -500,7 +503,7 @@ describe('AgentStateMachine — clearPendingApproval retry queue', () => {
 
     // Burn through MAX_ATTEMPTS + 1 attempts; the last one should clear the
     // entry (gave up) rather than re-schedule.
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
     const max = (agent.constructor as any).CLEAR_RETRY_MAX_ATTEMPTS as number
     for (let i = 0; i < max + 1; i++) {
       ;(agent as any).tryClearPendingApproval('session-Z')
@@ -508,7 +511,47 @@ describe('AgentStateMachine — clearPendingApproval retry queue', () => {
     }
     expect((agent as any).clearPendingApprovalRetries.has('session-Z')).toBe(false)
     // Final attempt logged the "exhausted" message.
-    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/exhausted.*retries/))
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ attempts: max }),
+      expect.stringMatching(/exhausted.*retries/)
+    )
     errSpy.mockRestore()
   })
+})
+
+describe('interrupted task artifact delivery', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+  })
+  it.each([false, true])(
+    'delivers artifacts once, retaining failure status (callback rejects=%s)',
+    async rejects => {
+      const { agent } = setupAgent()
+      const task = createTestTask('Exhaust with output')
+      const attachment = {
+        id: 'result',
+        kind: 'image' as const,
+        mimeType: 'image/png',
+        encoding: 'base64' as const,
+        dataBase64: 'eA==',
+      }
+      const callback = vi.fn(async () => {
+        if (rejects) throw new Error('client unavailable')
+      })
+      task.responseCallback = callback
+      vi.mocked(runToolUseLoop).mockResolvedValue({
+        type: 'exhaustion',
+        iterations: 1000,
+        message: 'limit',
+        attachments: [attachment],
+      })
+      await agent.executeTask(task)
+      expect(task.status).toBe('failed')
+      expect(callback).toHaveBeenCalledExactlyOnceWith({
+        error: expect.objectContaining({ code: 'TASK_ITERATION_LIMIT' }),
+        attachments: [attachment],
+      })
+    }
+  )
 })
