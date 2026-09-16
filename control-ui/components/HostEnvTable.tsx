@@ -227,7 +227,7 @@ export function HostEnvTable({
 
   return (
     <section className="cu-host-env-tab">
-      <div className="cu-host-env-tab__header">
+      <div>
         <div>
           <p className="cu-muted" style={{ margin: 0, fontSize: '0.85rem' }}>
             Operator-managed env vars for this Host. Applied within ~1 second; no pod restart.
