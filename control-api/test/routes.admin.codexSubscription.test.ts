@@ -159,6 +159,32 @@ describe('admin Codex subscription routes', () => {
     vi.mocked(pool.query).mockReset()
   })
 
+  it('returns 404 not_found for a static-credentials provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/openai/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    assertNoLeak(res.body)
+  })
+
+  it('returns 404 not_found for an unknown provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/not-a-provider/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+  })
+
+  it('returns 404 not_found for grok-subscription until that adapter is mounted', async () => {
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+  })
+
+  it('returns 404 disabled for the connections list when the Codex flag is off', async () => {
+    config.codexSubscriptionEnabled = false
+    const res = await request(app).get('/admin/llm/providers/codex-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+  })
+
   it('returns 404 while the feature flag is off', async () => {
     oauth.getConnection.mockRejectedValue(new CodexSubscriptionOAuthError('disabled', 'off'))
     const res = await request(app).get('/admin/llm/providers/codex-subscription/connection')

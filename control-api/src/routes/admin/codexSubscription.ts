@@ -1,4 +1,6 @@
 import { Router } from 'express'
+import type { NextFunction, Request, Response } from 'express'
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -57,7 +59,30 @@ import {
 import type { StaleModelWarning } from './staleModelWarning.js'
 
 const log = rootLogger.child({ module: 'admin-codex-subscription' })
-const BASE = '/admin/llm/providers/codex-subscription'
+export const SUBSCRIPTION_ADMIN_BASE = '/admin/llm/providers/:providerId'
+const BASE = SUBSCRIPTION_ADMIN_BASE
+
+export function mountSubscriptionAdminRoutes(
+  router: Router,
+  options: { providerId: string; enabled: () => boolean }
+): void {
+  router.use(SUBSCRIPTION_ADMIN_BASE, (req: Request, res: Response, next: NextFunction) => {
+    const providerId = typeof req.params.providerId === 'string' ? req.params.providerId : ''
+    if (!isLlmProviderId(providerId) || PROVIDER_AUTH_MODE[providerId] !== 'oauth-broker') {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    if (providerId !== options.providerId) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    if (!options.enabled()) {
+      res.status(404).json({ error: 'disabled' })
+      return
+    }
+    next()
+  })
+}
 
 function dbClient() {
   return { query: (text: string, values?: unknown[]) => pool.query(text, values) }
@@ -192,6 +217,10 @@ export function createAdminCodexSubscriptionRouter(
   gateway?: K8sGateway
 ): Router {
   const router = Router()
+  mountSubscriptionAdminRoutes(router, {
+    providerId: 'codex-subscription',
+    enabled: () => config.codexSubscriptionEnabled,
+  })
 
   async function listHostsOrUnavailable(): Promise<HostRecord[] | null> {
     if (!gateway) return null

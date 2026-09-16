@@ -1,3 +1,4 @@
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import {
   PluginWorkloadError,
@@ -17,6 +18,10 @@ import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
  * (5xx, network), plus a 50%-over-30s circuit breaker that short-circuits
  * to provider_unavailable while open (resets after 60s without calls).
  */
+
+function isOauthBrokerProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+}
 
 export interface ControlApiClientOptions {
   baseUrl: string
@@ -632,7 +637,7 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    const binding = expectedProvider === 'codex-subscription' ? readSdkOnlyCodexBinding() : null
+    const binding = isOauthBrokerProvider(expectedProvider) ? readSdkOnlyCodexBinding() : null
     const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
     const contractReady =
       capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
@@ -654,7 +659,7 @@ export class PluginWorkloadSdkControlApiClient {
         capabilities.defaultCatalogRevision === binding.catalogRevision &&
         capabilities.defaultCredentialRevision === binding.credentialRevision)
     const codexBindingReady =
-      expectedProvider !== 'codex-subscription' ||
+      !isOauthBrokerProvider(expectedProvider) ||
       (reservationOnlyReady &&
         contractReady &&
         binding !== null &&
@@ -683,19 +688,19 @@ export class PluginWorkloadSdkControlApiClient {
             ? 'policy_revoking'
             : capabilities.policyState === 'disabled'
               ? 'policy_disabled'
-              : expectedProvider === 'codex-subscription' && !codexBindingReady
+              : isOauthBrokerProvider(expectedProvider) && !codexBindingReady
                 ? 'codex_execution_binding_missing'
                 : capabilities.v2Ready
                   ? 'bootstrap_target_mismatch'
                   : 'policy_not_ready'
     return {
       ready: true,
-      contractVersion: expectedProvider === 'codex-subscription' ? 3 : 2,
+      contractVersion: isOauthBrokerProvider(expectedProvider) ? 3 : 2,
       provider: expectedProvider,
       model: expectedModel,
       policyReady,
       policyState: capabilities.policyState,
-      ...(expectedProvider === 'codex-subscription' ? { codexBindingReady } : {}),
+      ...(isOauthBrokerProvider(expectedProvider) ? { codexBindingReady } : {}),
       ...(policyReason ? { policyReason } : {}),
       ...(capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&
