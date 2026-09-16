@@ -107,6 +107,15 @@ private predicate isImportedCall(CallExpr call, string path, string importedName
   isImportedValue(call.getCallee(), path, importedName)
 }
 
+private predicate isImportedPackageValue(Expr value, string packagePath, string importedName) {
+  exists(ImportSpecifier spec, VarAccess access |
+    spec.getImportedName() = importedName and
+    spec.getImportDeclaration().getImportedPathString() = packagePath and
+    access = spec.getLocal().getVariable().getAnAccess() and
+    value = access
+  )
+}
+
 private predicate isCanonicalExternalRpcLimiterStage(CallExpr middleware, string stage) {
   exists(CallExpr options |
     isImportedCall(middleware, "control-api/src/middleware/rateLimitMiddleware.ts",
@@ -625,6 +634,110 @@ private predicate hasPr2DistributedAdmissionGuard(Routing::Node useSite) {
   )
 }
 
+/**
+ * The rpc-proxy artifact edge guard is intentionally narrower than generic
+ * express-rate-limit recognition. It is the only composition that proves the
+ * durable Control API budget's verified subject plus canonical Host boundary
+ * before either artifact effect.
+ */
+private predicate isCanonicalRpcArtifactReadLimiter(Expr value) {
+  exists(
+    VariableDeclarator declaration, VarDecl binding, Variable variable, VarAccess access,
+    CallExpr factory, ObjectExpr options, Property window, Property limit, VarAccess limitValue,
+    VariableDeclarator limitDeclaration, VarDecl limitBinding, Property standardHeaders,
+    Property keyGenerator, PropAccess subject, PropAccess auth, PropAccess hostName,
+    PropAccess artifactHost, Property handler, MethodCallExpr tooManyRequests
+  |
+    declaration.getBindingPattern() = binding and
+    variable = binding.getVariable() and
+    access.getVariable() = variable and
+    value = access and
+    declaration.getDeclStmt() instanceof ConstDeclStmt and
+    declaration.getInit() = factory and
+    isImportedPackageValue(factory.getCallee(), "express-rate-limit", "rateLimit") and
+    factory.getArgument(0) = options and
+    window = options.getPropertyByName("windowMs") and
+    window.getInit().getIntValue() = 60000 and
+    limit = options.getPropertyByName("limit") and
+    limit.getInit() = limitValue and
+    limitValue.getVariable() = limitBinding.getVariable() and
+    limitBinding.getVariable().getName() = "HOST_ARTIFACT_READ_LIMIT_PER_MIN" and
+    limitDeclaration.getBindingPattern() = limitBinding and
+    limitDeclaration.getDeclStmt() instanceof ConstDeclStmt and
+    limitDeclaration.getInit().getIntValue() = 30 and
+    standardHeaders = options.getPropertyByName("standardHeaders") and
+    standardHeaders.getInit().getStringValue() = "draft-7" and
+    keyGenerator = options.getPropertyByName("keyGenerator") and
+    subject.getPropertyName() = "sub" and
+    subject.getBase() = auth and
+    auth.getPropertyName() = "auth" and
+    subject.getParentExpr*() = keyGenerator.getInit() and
+    hostName.getPropertyName() = "name" and
+    hostName.getBase() = artifactHost and
+    artifactHost.getPropertyName() = "artifactReadHost" and
+    hostName.getParentExpr*() = keyGenerator.getInit() and
+    handler = options.getPropertyByName("handler") and
+    tooManyRequests.getMethodName() = "status" and
+    tooManyRequests.getArgument(0).getIntValue() = 429 and
+    tooManyRequests.getParentExpr*() = handler.getInit()
+  )
+}
+
+private predicate isCanonicalRpcArtifactHostResolver(Expr value) {
+  exists(
+    VariableDeclarator declaration, VarDecl binding, Variable variable, VarAccess access,
+    Function resolver, CallExpr resolution, AssignExpr installed, PropAccess artifactHost
+  |
+    declaration.getBindingPattern() = binding and
+    variable = binding.getVariable() and
+    access.getVariable() = variable and
+    value = access and
+    declaration.getDeclStmt() instanceof ConstDeclStmt and
+    declaration.getInit() = resolver and
+    resolution.getEnclosingFunction() = resolver and
+    isImportedCall(resolution, "rpc-proxy/src/services/mcpProxyService.ts",
+      "resolveArtifactReadHostConnectionForUser") and
+    installed.getEnclosingFunction() = resolver and
+    installed.getLhs() = artifactHost and
+    artifactHost.getPropertyName() = "artifactReadHost"
+  )
+}
+
+private predicate isCanonicalRpcArtifactReadPath(Expr value) {
+  value.getStringValue() in [
+    "/rpc/hosts/:hostRef/artifacts",
+    "/rpc/hosts/:hostRef/artifacts/:filename/download"
+  ]
+}
+
+private predicate hasCanonicalRpcArtifactReadLimiterGuard(Routing::Node useSite) {
+  exists(
+    MethodCallExpr registration, VarAccess rpcAuth, CallExpr scope, VarAccess resolver,
+    VarAccess limiter, Function handler, int authIndex, int scopeIndex, int resolverIndex,
+    int limiterIndex, int handlerIndex, int useIndex
+  |
+    registration.getMethodName() = "get" and
+    isCanonicalRpcArtifactReadPath(registration.getArgument(0)) and
+    registeredRouteContainsNodeAtIndex(registration, useSite, useIndex) and
+    rpcAuth = registration.getArgument(authIndex) and
+    scope = registration.getArgument(scopeIndex) and
+    resolver = registration.getArgument(resolverIndex) and
+    limiter = registration.getArgument(limiterIndex) and
+    handler = registration.getArgument(handlerIndex) and
+    authIndex < scopeIndex and
+    scopeIndex < resolverIndex and
+    resolverIndex < limiterIndex and
+    limiterIndex < handlerIndex and
+    (useIndex = authIndex or useIndex = scopeIndex or useIndex = resolverIndex or
+      useIndex = limiterIndex or useIndex = handlerIndex) and
+    isImportedValue(rpcAuth, "rpc-proxy/src/middleware/auth.ts", "requireRpcAuth") and
+    isImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
+    scope.getArgument(0).getStringValue() = "host:task:read" and
+    isCanonicalRpcArtifactHostResolver(resolver) and
+    isCanonicalRpcArtifactReadLimiter(limiter)
+  )
+}
+
 private predicate hasReferenceBoundPr2DistributedAdmissionGuard(
   Routing::Node useSite, DataFlow::Node reference
 ) {
@@ -642,6 +755,8 @@ private predicate hasLocalRateLimitingGuard(Routing::Node useSite) {
   )
   or
   hasEvenfireRateLimitingGuard(useSite)
+  or
+  hasCanonicalRpcArtifactReadLimiterGuard(useSite)
 }
 
 from
