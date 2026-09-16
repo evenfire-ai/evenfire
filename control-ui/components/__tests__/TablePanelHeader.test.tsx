@@ -141,4 +141,34 @@ describe('TablePanelHeader', () => {
       clientHeight.mockRestore()
     }
   })
+
+  it('re-measures when a subtitle is replaced', () => {
+    let truncated = false
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockImplementation(function () {
+        return this.classList.contains('cu-table-panel__description-value') && truncated ? 48 : 32
+      })
+    const clientHeight = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockImplementation(function () {
+        return this.classList.contains('cu-table-panel__description-value') ? 32 : 0
+      })
+
+    try {
+      const { rerender } = render(<TablePanelHeader subtitle="Short text" title="Agents" />)
+      expect(document.querySelector('.cu-table-panel__description')).not.toHaveAttribute('tabindex')
+
+      truncated = true
+      rerender(<TablePanelHeader subtitle="A longer replacement subtitle" title="Agents" />)
+
+      expect(document.querySelector('.cu-table-panel__description')).toHaveAttribute(
+        'tabindex',
+        '0'
+      )
+    } finally {
+      scrollHeight.mockRestore()
+      clientHeight.mockRestore()
+    }
+  })
 })
