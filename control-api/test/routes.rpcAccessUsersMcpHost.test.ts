@@ -36,6 +36,12 @@ const svc = vi.hoisted(() => ({
 
 vi.mock('../src/services/directory/index.js', () => svc)
 
+const rateLimiterMock = vi.hoisted(() => ({
+  checkAndIncrement: vi.fn(),
+}))
+
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiterMock)
+
 // Bypass the middleware chain — we are testing the handler logic specifically.
 // The middleware's own tests live in middleware.rpcAccessAuth.test.ts.
 //
@@ -267,6 +273,14 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
   beforeEach(() => {
     svc.getUserAgents.mockReset()
     svc.getTeamAgents.mockReset()
+    rateLimiterMock.checkAndIncrement.mockReset()
+    rateLimiterMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
   })
 
   it('returns 200 with connection URL when user has row AND host exists AND host is not disabled', async () => {
@@ -322,6 +336,34 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
     })
     const { app } = buildApp([{ metadata: { name: 'multi-word-agent' }, spec: {} }])
     await request(app).get(`/rpc/access/users/user-a/mcp-hosts/multi-word-agent`).expect(200)
+  })
+})
+
+describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () => {
+  it('uses the shared authenticated user and canonical Host bucket', async () => {
+    const userId = 'user-a'
+    const hostRef = 'chatllm'
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
+    rateLimiterMock.checkAndIncrement.mockResolvedValue({
+      allowed: false,
+      remaining: 0,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 31,
+    })
+    const { app } = buildApp([{ metadata: { name: hostRef }, spec: { enabled: true } }])
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
+      .expect(429)
+      .expect(({ body }) => {
+        expect(body.error).toBe('Too Many Requests')
+      })
+
+    expect(rateLimiterMock.checkAndIncrement).toHaveBeenCalledWith(
+      `host-artifact-read:${userId}:${hostRef}`,
+      30
+    )
   })
 })
 

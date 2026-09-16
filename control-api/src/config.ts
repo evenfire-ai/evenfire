@@ -197,6 +197,9 @@ type Config = {
   // Stateless-agent wake endpoint: per-host wake rate limit + server-side
   // coalescence window for the wake-annotation projection.
   hostWakeRlPerMin: number
+  // Host artifact reads have an independent, user-and-Host-scoped budget.
+  // It is deliberately separate from the capacity-impacting wake budget.
+  hostArtifactReadRlPerMin: number
   hostWakeCoalesceWindowMs: number
   approvalMediumChallengeTtlSec: number
   telegramProviderEventChallengeTtlSec: number
@@ -958,6 +961,10 @@ export const config: Config = {
   // bursts from a few concurrent devices (4 x 3 = 12) plus a real message.
   // Derivation is regression-guarded by test/config.hostWakeRateLimit.test.ts.
   hostWakeRlPerMin: Number(process.env.CONTROL_API_HOST_WAKE_RL_PER_MIN || 30),
+  // Owner-approved Host artifact-read policy. This durable control-plane
+  // budget is enforced after live user/Host authorization and is shared by
+  // list and download reads across rpc-proxy replicas.
+  hostArtifactReadRlPerMin: 30,
   hostWakeCoalesceWindowMs: Number(process.env.CONTROL_API_HOST_WAKE_COALESCE_WINDOW_MS || 2000),
   approvalMediumChallengeTtlSec: Number(
     process.env.WORKFLOW_APPROVAL_MEDIUM_CHALLENGE_TTL_SEC || 60 * 60
