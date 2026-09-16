@@ -320,7 +320,10 @@ export class IncomingMessageHandler {
     priorStatus: TaskStatus
   }): MessageResponse {
     const { reason, priorTaskId, priorStatus } = admission
-    logger.warn({ taskId: this.task.id, reason }, 'Duplicate delivery suppressed')
+    logger.warn(
+      { taskId: this.task.id, reason, priorTaskId, priorStatus },
+      'Duplicate delivery suppressed'
+    )
     const record = this.deps.taskLifecycle.get(priorTaskId)
     if (priorStatus === 'completed') {
       return {

@@ -217,6 +217,7 @@ export function exhaustionResult(
   })
   return {
     type: 'exhaustion',
+    reason: 'iteration_limit',
     message,
     iterations: maxIterations,
     attachments: attachments.length > 0 ? attachments : undefined,

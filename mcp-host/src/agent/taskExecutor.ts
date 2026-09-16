@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 /**
  * TaskExecutor — runs a single task through the LLM tool-use loop.
  *
@@ -6,6 +5,7 @@ import { randomUUID } from 'node:crypto'
  * Holds per-task state (task, conversation, tool count) that was previously
  * singleton on the AgentStateMachine.
  */
+import { randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'

@@ -13,7 +13,7 @@ afterEach(() => {
   vi.resetModules()
 })
 
-describe('execution limit empty-value policy', () => {
+describe('execution limit validation', () => {
   it.each(names)('rejects an explicitly empty %s', async name => {
     vi.resetModules()
     vi.stubEnv(name, '')
@@ -26,6 +26,21 @@ describe('execution limit empty-value policy', () => {
       expect(() => resolveMcpRequestTimeoutMs()).toThrow(name)
     }
   )
+  it.each(
+    names.flatMap(name => ['abc', '-1', '1.5', '2147483648'].map(value => ({ name, value })))
+  )('rejects $name=$value', async ({ name, value }) => {
+    vi.resetModules()
+    vi.stubEnv(name, value)
+    await expect(import('./config')).rejects.toThrow(name)
+  })
+  it.each(
+    ['CLERUM_MCP_TOOL_TIMEOUT_MS', 'CLERUM_MCP_TOOL_MAX_TOTAL_TIMEOUT_MS'].flatMap(name =>
+      ['abc', '-1', '1.5', '2147483648'].map(value => ({ name, value }))
+    )
+  )('rejects $name=$value', ({ name, value }) => {
+    vi.stubEnv(name, value)
+    expect(() => resolveMcpRequestTimeoutMs()).toThrow(name)
+  })
   it('keeps defaults when execution variables are absent', async () => {
     vi.resetModules()
     for (const name of [

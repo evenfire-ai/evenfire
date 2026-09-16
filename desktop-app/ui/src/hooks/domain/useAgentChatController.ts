@@ -1696,13 +1696,14 @@ export function useAgentChatController({
         const message = typeof durableError === 'string' ? durableError : durableError.message
         const errorCode = typeof durableError === 'string' ? undefined : durableError.code
         const errorProvider = typeof durableError === 'string' ? undefined : durableError.provider
+        const attachments = buildResponseFileAttachments(taskResult)
         await appendAssistantMessage(agentRef, chatId, {
           id: crypto.randomUUID(),
           role: 'assistant',
           content: message,
           timestamp: Date.now(),
           task_id: taskIdHint,
-          attachments: buildResponseFileAttachments(taskResult),
+          ...(attachments.length ? { attachments } : {}),
           isError: true,
           ...(errorCode ? { errorCode } : {}),
           ...(errorProvider ? { errorProvider } : {}),
@@ -1992,6 +1993,7 @@ export function useAgentChatController({
             const errorCode = typeof durableError === 'string' ? undefined : durableError.code
             const errorProvider =
               typeof durableError === 'string' ? undefined : durableError.provider
+            const attachments = buildResponseFileAttachments(taskResult)
             dropActivity()
             await appendAssistantMessage(agentRef, chatId, {
               id: crypto.randomUUID(),
@@ -1999,7 +2001,7 @@ export function useAgentChatController({
               content: message,
               timestamp: Date.now(),
               task_id: state.taskId,
-              attachments: buildResponseFileAttachments(taskResult),
+              ...(attachments.length ? { attachments } : {}),
               isError: true,
               ...(errorCode ? { errorCode } : {}),
               ...(errorProvider ? { errorProvider } : {}),
