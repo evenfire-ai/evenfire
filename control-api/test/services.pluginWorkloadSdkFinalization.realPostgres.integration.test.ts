@@ -9,6 +9,7 @@ import {
   type PromptBridgeFinalizationInput,
   finalizePromptBridgeInTransaction,
 } from '../src/services/pluginWorkloadSdkFinalization.js'
+import { createPostgresPoolErrorGuard } from './poolErrorGuard.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -58,6 +59,7 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
   )
   let adminPool: Pool
   let dbPool: Pool
+  const poolErrorGuard = createPostgresPoolErrorGuard()
 
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
@@ -65,25 +67,33 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     dbPool = new Pool({ connectionString })
     // The pool holds idle connections; when afterAll terminates backends
     // before DROP DATABASE, a client that is still mid-shutdown surfaces a
-    // 57P01 FATAL on the pool. Absorb it so teardown is clean (the pool is
-    // being torn down anyway).
-    dbPool.on('error', () => {})
+    // 57P01 FATAL on the pool. The guard absorbs ONLY that expected teardown
+    // error — any other pool error stays recorded and fails the lane in
+    // afterAll instead of being swallowed (false-green guard).
+    dbPool.on('error', error => poolErrorGuard.onPoolError(error))
     await initDb({ connect: () => dbPool.connect() })
   })
 
   afterAll(async () => {
+    // A pool error from the test phase is a real failure: fail here, before
+    // anything is torn down, so it cannot hide behind a green suite.
+    poolErrorGuard.assertNoUnexpectedErrors()
+    poolErrorGuard.beginTeardown()
     await dbPool?.end()
     if (adminPool) {
       await adminPool.query(
         `SELECT pg_terminate_backend(pid)
            FROM pg_stat_activity
-          WHERE datname = $1
-            AND pid <> pg_backend_pid()`,
+           WHERE datname = $1
+             AND pid <> pg_backend_pid()`,
         [database]
       )
       await adminPool.query(`DROP DATABASE IF EXISTS "${database.replace(/"/g, '""')}"`)
       await adminPool.end()
     }
+    // Only the expected 57P01 was absorbed during teardown; anything else
+    // (e.g. ECONNRESET from a genuinely broken server) still fails the lane.
+    poolErrorGuard.assertNoUnexpectedErrors()
   })
 
   const CODEX_TARGET = {
