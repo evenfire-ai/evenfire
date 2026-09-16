@@ -227,6 +227,7 @@ run_group "control-api" "control-api" \
   "test/services.codexSubscriptionConnection.test.ts" \
   "test/services.llmAllowedModelsConfigMap.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
+  "test/services.grokSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.grok.test.ts" \
@@ -283,6 +284,7 @@ run_group "workflow-runtime-core" "packages/workflow-runtime-core" \
 
 run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \
+  "src/workflow/codexRecipeVerdict.test.ts" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \

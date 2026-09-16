@@ -20,6 +20,11 @@ import {
   assertCodexConnectionKey,
   isCodexUnassignedConnectionKey,
 } from '../../services/codexSubscriptionConnection.js'
+import { isGrokAssignmentAllowed } from '../../services/grokSubscriptionCatalog.js'
+import {
+  assertGrokConnectionKey,
+  isGrokUnassignedConnectionKey,
+} from '../../services/grokSubscriptionConnection.js'
 import { listEnabledModelsWithStaleForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
@@ -296,12 +301,20 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       // a previously stored Codex target can be edited without inventing a
       // grant. Spend still fail-closes at authorize until the operator picks
       // a live connection. Malformed keys stay rejected.
-      if (connectionRef && !isCodexUnassignedConnectionKey(connectionRef)) {
+      const unassigned =
+        provider === 'grok-subscription'
+          ? isGrokUnassignedConnectionKey(connectionRef)
+          : isCodexUnassignedConnectionKey(connectionRef)
+      if (connectionRef && !unassigned) {
         try {
-          assertCodexConnectionKey(connectionRef)
+          if (provider === 'grok-subscription') assertGrokConnectionKey(connectionRef)
+          else assertCodexConnectionKey(connectionRef)
         } catch {
           res.status(400).json({
-            error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
+            error:
+              provider === 'grok-subscription'
+                ? `promptTargets[${index}].connectionRef must name an existing Grok subscription connection`
+                : `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
           })
           return null
         }
@@ -341,6 +354,13 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       credentialSlot,
       ...(brokerBacked ? { connectionRef } : {}),
     })
+  }
+  const brokerProviders = new Set(
+    targets.filter(target => isBrokerBackedProvider(target.provider)).map(target => target.provider)
+  )
+  if (brokerProviders.size > 1) {
+    res.status(400).json({ error: 'oauth_broker_provider_conflict' })
+    return null
   }
   const brokerKeys = new Set(
     targets
@@ -388,6 +408,7 @@ async function publishPromptBridgeGrantIdentity(input: {
   recipeNamespace: string
   recipeName: string
   nextRef: string
+  provider?: string
 }): Promise<{ error?: { status: number; error: string } }> {
   let next = input.nextRef
   if (!next) {
@@ -403,11 +424,11 @@ async function publishPromptBridgeGrantIdentity(input: {
     } catch (err) {
       log.error(
         { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
-        'failed to read WorkflowRecipe before publishing Codex grant identity'
+        'failed to read WorkflowRecipe before publishing grant identity'
       )
       return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
     }
-    if (recipeAgent === 'codex-subscription') {
+    if (recipeAgent === 'codex-subscription' || recipeAgent === 'grok-subscription') {
       return {}
     }
     next = 'unassigned'
@@ -418,6 +439,7 @@ async function publishPromptBridgeGrantIdentity(input: {
       namespace: input.recipeNamespace,
       name: input.recipeName,
       next,
+      ...(input.provider ? { provider: input.provider } : {}),
     })
   } catch (err) {
     if (err instanceof RecipeCodexGrantIdentityError) {
@@ -601,20 +623,24 @@ export function createAdminPluginWorkloadSdkRouter(
       // before (serialization only, no accept/reject change): a disabled model
       // reachable solely through `allowed_models` (no promptTarget) is a
       // PRE-EXISTING gap, out of R1-H3 scope.
-      const brokerConnectionRef =
-        promptTargets.find(
-          target =>
-            isBrokerBackedProvider(target.provider) &&
-            target.connectionRef &&
-            !isCodexUnassignedConnectionKey(target.connectionRef)
-        )?.connectionRef ?? ''
-      const hasBrokerTarget = promptTargets.some(target => isBrokerBackedProvider(target.provider))
+      const brokerTargets = promptTargets.filter(target => isBrokerBackedProvider(target.provider))
+      const brokerProviders = [...new Set(brokerTargets.map(target => target.provider))]
+      const brokerTarget = brokerTargets.find(
+        target =>
+          target.connectionRef &&
+          !(target.provider === 'grok-subscription'
+            ? isGrokUnassignedConnectionKey(target.connectionRef)
+            : isCodexUnassignedConnectionKey(target.connectionRef))
+      )
+      const brokerConnectionRef = brokerTarget?.connectionRef ?? ''
+      const hasBrokerTarget = brokerTargets.length > 0
       if (capabilityFamily === 'promptBridge' && deps.gateway && hasBrokerTarget) {
         const published = await publishPromptBridgeGrantIdentity({
           gateway: deps.gateway,
           recipeNamespace,
           recipeName,
           nextRef: brokerConnectionRef,
+          provider: brokerTarget?.provider ?? brokerProviders[0],
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })
@@ -645,13 +671,23 @@ export function createAdminPluginWorkloadSdkRouter(
             for (const target of promptTargets) {
               if (!isBrokerBackedProvider(target.provider)) continue
               const connectionRef = target.connectionRef ?? ''
-              if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
+              const unassigned =
+                target.provider === 'grok-subscription'
+                  ? isGrokUnassignedConnectionKey(connectionRef)
+                  : isCodexUnassignedConnectionKey(connectionRef)
+              if (!connectionRef || unassigned) {
                 continue
               }
-              const allowed = await isCodexAssignmentAllowed(db, connectionRef, target.model)
+              const allowed =
+                target.provider === 'grok-subscription'
+                  ? await isGrokAssignmentAllowed(db, connectionRef, target.model)
+                  : await isCodexAssignmentAllowed(db, connectionRef, target.model)
               if (!allowed) {
                 throw new GrantModelGateError({
-                  error: 'codex_connection_not_allowed',
+                  error:
+                    target.provider === 'grok-subscription'
+                      ? 'grok_connection_not_allowed'
+                      : 'codex_connection_not_allowed',
                   connectionRef: target.connectionRef ?? '',
                   model: target.model,
                 })
@@ -870,20 +906,22 @@ export function createAdminPluginWorkloadSdkRouter(
       }
       if (deps.gateway) {
         const remaining = await listGrants({ recipeNamespace, recipeName })
-        const remainingRef =
-          remaining
-            .flatMap(grant => grant.promptTargets)
-            .find(
-              target =>
-                isBrokerBackedProvider(target.provider) &&
-                target.connectionRef &&
-                !isCodexUnassignedConnectionKey(target.connectionRef)
-            )?.connectionRef ?? ''
+        const remainingTarget = remaining
+          .flatMap(grant => grant.promptTargets)
+          .find(
+            target =>
+              isBrokerBackedProvider(target.provider) &&
+              target.connectionRef &&
+              !(target.provider === 'grok-subscription'
+                ? isGrokUnassignedConnectionKey(target.connectionRef)
+                : isCodexUnassignedConnectionKey(target.connectionRef))
+          )
         const published = await publishPromptBridgeGrantIdentity({
           gateway: deps.gateway,
           recipeNamespace,
           recipeName,
-          nextRef: remainingRef,
+          nextRef: remainingTarget?.connectionRef ?? '',
+          provider: remainingTarget?.provider,
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })

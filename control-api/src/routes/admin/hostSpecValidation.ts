@@ -13,6 +13,12 @@ import {
   isCodexUnassignedConnectionKey,
   readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
+import { isGrokAssignmentAllowed } from '../../services/grokSubscriptionCatalog.js'
+import {
+  GROK_UNASSIGNED_CONNECTION_KEY,
+  isGrokUnassignedConnectionKey,
+  readHostGrokConnectionRef,
+} from '../../services/grokSubscriptionConnection.js'
 import {
   getModelAllowlistState as getModelAllowlistStateDefault,
   isModelAllowed as isModelAllowedDefault,
@@ -62,6 +68,16 @@ function isCodexSubscriptionEnabled(): boolean {
   return process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED === 'true'
 }
 
+function isGrokSubscriptionEnabled(): boolean {
+  return process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true'
+}
+
+function oauthBrokerFlagEnabled(provider: string): boolean {
+  if (provider === 'codex-subscription') return isCodexSubscriptionEnabled()
+  if (provider === 'grok-subscription') return isGrokSubscriptionEnabled()
+  return true
+}
+
 type HostLlmTarget = {
   provider: string
   field: string
@@ -103,16 +119,23 @@ function validateCodexBrokerAdmission(
   spec: Record<string, unknown>
 ): { errors: Array<{ field: string; message: string }> } | null {
   const targets = collectHostLlmTargets(spec)
-  const enabled = isCodexSubscriptionEnabled()
   for (const target of targets) {
-    if (target.provider !== 'codex-subscription') continue
-    if (!enabled) {
+    if (
+      !isLlmProviderId(target.provider) ||
+      PROVIDER_AUTH_MODE[target.provider] !== 'oauth-broker'
+    ) {
+      continue
+    }
+    if (!oauthBrokerFlagEnabled(target.provider)) {
+      const flag =
+        target.provider === 'grok-subscription'
+          ? 'CONTROL_API_GROK_SUBSCRIPTION_ENABLED'
+          : 'CONTROL_API_CODEX_SUBSCRIPTION_ENABLED'
       return {
         errors: [
           {
             field: target.field,
-            message:
-              'provider "codex-subscription" is disabled (set CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true)',
+            message: `provider "${target.provider}" is disabled (set ${flag}=true)`,
           },
         ],
       }
@@ -204,7 +227,9 @@ export function createHostValidationDeps(db: DbClient): HostSpecValidationDeps {
     isModelAllowed: (provider, model, connectionRef) =>
       provider === 'codex-subscription'
         ? isCodexAssignmentAllowed(db, readHostCodexConnectionRef(connectionRef), model)
-        : isModelAllowedDefault(provider, model, db),
+        : provider === 'grok-subscription'
+          ? isGrokAssignmentAllowed(db, readHostGrokConnectionRef(connectionRef), model)
+          : isModelAllowedDefault(provider, model, db),
     getModelAllowlistState: (provider, model) => getModelAllowlistStateDefault(provider, model, db),
   }
 }
@@ -379,13 +404,23 @@ export async function validateHostSpec(
       }
     }
     const connectionRef =
-      provider === 'codex-subscription' ? resolvedCodexConnectionRef(model) : undefined
+      provider === 'codex-subscription'
+        ? resolvedCodexConnectionRef(model)
+        : provider === 'grok-subscription'
+          ? readHostGrokConnectionRef(
+              typeof model.connectionRef === 'string' ? model.connectionRef : undefined
+            )
+          : undefined
     if (provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)) {
       // Persist the sentinel so empty and unassigned are not two Host states.
       model.connectionRef = CODEX_UNASSIGNED_CONNECTION_KEY
     }
+    if (provider === 'grok-subscription' && isGrokUnassignedConnectionKey(connectionRef)) {
+      model.connectionRef = GROK_UNASSIGNED_CONNECTION_KEY
+    }
     const skipCodexAllowlist =
-      provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)
+      (provider === 'codex-subscription' && isCodexUnassignedConnectionKey(connectionRef)) ||
+      (provider === 'grok-subscription' && isGrokUnassignedConnectionKey(connectionRef))
     const allowed = skipCodexAllowlist
       ? true
       : await deps.isModelAllowed(provider, name, connectionRef)

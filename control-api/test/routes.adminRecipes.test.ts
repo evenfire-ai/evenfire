@@ -275,6 +275,26 @@ describe.sequential('routes/admin/recipes', () => {
     })
   })
 
+  it('POST /admin/recipes — rejects mixed oauth-broker providers on agent and steps', async () => {
+    const res = await api.post('/admin/recipes').send({
+      metadata: { name: 'mixed-broker' },
+      spec: {
+        agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [
+          {
+            id: 'draft',
+            instruction: 'Write',
+            timeoutSeconds: 600,
+            agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          },
+        ],
+      },
+    })
+    expect(res.status).toBe(422)
+    expect(res.body.errors[0].message).toMatch(/at most one oauth-broker/)
+  })
+
   it('POST /admin/recipes — rejects a Codex recipe without a named grant', async () => {
     const res = await api
       .post('/admin/recipes')

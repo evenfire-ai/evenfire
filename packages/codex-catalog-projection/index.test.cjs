@@ -557,7 +557,9 @@ test('toEligibleGrokPolicyBinding mints only for an assigned eligible Grok model
     model: 'grok-4.6',
   })
   assert.equal(projection.toEligibleGrokPolicyBinding(cm, 'unassigned', 'grok-4.6').reason, 'unassigned')
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, 'unassigned', 'grok-4.6').binding, null)
   assert.equal(projection.toEligibleGrokPolicyBinding(cm, '', 'grok-4.6').reason, 'unassigned')
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, '', 'grok-4.6').binding, null)
   assert.equal(
     projection.toEligibleGrokPolicyBinding(cm, 'team-grok', 'missing-model').binding,
     null

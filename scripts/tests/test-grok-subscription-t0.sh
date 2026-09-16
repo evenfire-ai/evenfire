@@ -89,10 +89,15 @@ require_file control-api/test/services.grokProviderAttemptRedemption.test.ts
 require_file control-api/test/db.grokSubscriptionMigration.test.ts
 require_file control-api/test/services.llmProviderAttemptAuthorizer.grok.test.ts
 require_file control-api/test/subscriptionGrantIdentity.test.ts
+require_file control-api/test/routes.adminPluginWorkloadSdk.test.ts
+require_file control-api/test/services.recipeCodexGrantIdentity.test.ts
+require_file control-api/test/hostSpecValidation.codexSubscription.test.ts
 require_file scripts/tests/test-grok-llm-proxy-deploy-contract.sh
 require_file tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json
 require_file workflow-recipes/src/workflow/codexRecipeVerdict.test.ts
 require_file workflow-recipes/src/workflow/sdkOnlyGrokBinding.test.ts
+require_file workflow-recipes/src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts
+require_file workflow-recipes/tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts
 require_file mcp-host/src/pluginWorkloadSdk/bootstrapIdentity.test.ts
 require_file packages/codex-catalog-projection/index.test.cjs
 require_file control-ui/components/__tests__/PluginWorkloadSdkPage.test.tsx
@@ -130,7 +135,7 @@ run_group "grok-llm-proxy freeze+origin" \
   bash -lc "cd '${ROOT}/grok-llm-proxy' && npx vitest run test/contractFreeze.test.ts test/originPolicy.test.ts --no-file-parallelism"
 
 run_group "control-api grok grant/oauth/redeem/authorize" \
-  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts --no-file-parallelism"
+  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts test/routes.adminPluginWorkloadSdk.test.ts test/services.recipeCodexGrantIdentity.test.ts test/hostSpecValidation.codexSubscription.test.ts --no-file-parallelism"
 
 run_group "workflow-recipes grok SDK" \
   bash -lc "cd '${ROOT}/workflow-recipes' && npx vitest run src/workflow/codexRecipeVerdict.test.ts src/workflow/sdkOnlyGrokBinding.test.ts src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts src/reconciler/pluginWorkloadSdkValidator.test.ts tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts --no-file-parallelism"

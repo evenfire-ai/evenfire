@@ -4,6 +4,7 @@ import request from 'supertest'
 import { pool } from '../src/db.js'
 import { createAdminPluginWorkloadSdkRouter } from '../src/routes/admin/pluginWorkloadSdk.js'
 import { isCodexAssignmentAllowed } from '../src/services/codexSubscriptionCatalog.js'
+import { isGrokAssignmentAllowed } from '../src/services/grokSubscriptionCatalog.js'
 import * as sdkDb from '../src/services/pluginWorkloadSdkDb.js'
 import { checkAndIncrement } from '../src/services/rateLimiterService.js'
 import {
@@ -54,6 +55,10 @@ vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
 // contract without a live codex_subscription_connections table.
 vi.mock('../src/services/codexSubscriptionCatalog.js', () => ({
   isCodexAssignmentAllowed: vi.fn(),
+}))
+
+vi.mock('../src/services/grokSubscriptionCatalog.js', () => ({
+  isGrokAssignmentAllowed: vi.fn(),
 }))
 
 vi.mock('../src/services/recipeCodexGrantIdentity.js', async () => {
@@ -125,6 +130,8 @@ beforeEach(() => {
   vi.mocked(pool.query).mockResolvedValue({ rows: [{ model: 'glm-4.7' }], rowCount: 1 } as never)
   vi.mocked(isCodexAssignmentAllowed).mockReset()
   vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(false)
+  vi.mocked(isGrokAssignmentAllowed).mockReset()
+  vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(false)
   getResource.mockReset()
   getResource.mockResolvedValue({ spec: { pluginWorkloadSdk: {} } })
   updateResource.mockReset()
@@ -647,6 +654,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         namespace: 'sandbox-recipes',
         name: 'sdk-recipe',
         next: 'team-plus',
+        provider: 'codex-subscription',
       })
       expect(publishRecipeGrantIdentity.mock.invocationCallOrder[0]).toBeLessThan(
         vi.mocked(sdkDb.upsertGrant).mock.invocationCallOrder[0]!
@@ -746,6 +754,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         namespace: 'sandbox-recipes',
         name: 'sdk-recipe',
         next: 'unassigned',
+        provider: 'codex-subscription',
       })
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
@@ -765,6 +774,7 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         namespace: 'sandbox-recipes',
         name: 'sdk-recipe',
         next: 'unassigned',
+        provider: 'codex-subscription',
       })
       expect(sdkDb.upsertGrant).toHaveBeenCalled()
     })
@@ -833,6 +843,97 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
         '11111111-1111-4111-8111-111111111111',
         expect.anything() // carrier transaction client (R1-H3 fase 2)
       )
+    })
+  })
+
+  describe('grok-subscription promptTargets', () => {
+    const grokGrantBody = {
+      ...validGrantBody,
+      provider: 'grok-subscription',
+      allowedModels: ['grok-4.6'],
+      promptTargets: [
+        {
+          targetRef: 'grok-primary',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          credentialSlot: '',
+          connectionRef: 'team-grok',
+        },
+      ],
+      defaultTargetRef: 'grok-primary',
+    }
+
+    it('accepts a Grok target bound to a permitted Grok grant', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-grok' } as never)
+      vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(grokGrantBody)
+      expect(res.status).toBe(200)
+      expect(isGrokAssignmentAllowed).toHaveBeenCalledWith(
+        expect.anything(),
+        'team-grok',
+        'grok-4.6'
+      )
+      expect(isCodexAssignmentAllowed).not.toHaveBeenCalled()
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'team-grok',
+        provider: 'grok-subscription',
+      })
+    })
+
+    it('fails closed when the Grok grant is unknown or does not offer the model', async () => {
+      vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(false)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(grokGrantBody)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({
+        error: 'grok_connection_not_allowed',
+        connectionRef: 'team-grok',
+        model: 'grok-4.6',
+      })
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects reserved deployment-default on a Grok target', async () => {
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...grokGrantBody,
+          promptTargets: [
+            { ...grokGrantBody.promptTargets[0]!, connectionRef: 'deployment-default' },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toContain('Grok subscription connection')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
+
+    it('rejects mixed Codex and Grok promptTargets', async () => {
+      vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
+      vi.mocked(isCodexAssignmentAllowed).mockResolvedValue(true)
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send({
+          ...grokGrantBody,
+          promptTargets: [
+            grokGrantBody.promptTargets[0]!,
+            {
+              targetRef: 'codex-fallback',
+              provider: 'codex-subscription',
+              model: 'gpt-5.3-codex',
+              credentialSlot: '',
+              connectionRef: 'team-plus',
+            },
+          ],
+        })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('oauth_broker_provider_conflict')
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
     })
   })
 

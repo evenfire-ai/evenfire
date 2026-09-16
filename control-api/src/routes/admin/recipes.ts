@@ -34,6 +34,7 @@ import { K8sNotFoundError } from '../../services/resourceService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
 import {
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  collectRecipeOauthBrokerProviders,
   readSubscriptionConnectionRef,
 } from '../../services/subscriptionGrantIdentity.js'
 import {
@@ -884,6 +885,14 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
     return errors // no point checking spec fields if spec is invalid
   }
   errors.push(...validateWorkflowRecipeLimits(body.spec))
+  const brokerIds = collectRecipeOauthBrokerProviders(body.spec as Record<string, unknown>)
+  if (brokerIds.length > 1) {
+    errors.push({
+      field: 'spec.agent.provider',
+      message:
+        'a WorkflowRecipe may declare at most one oauth-broker provider across agent and steps',
+    })
+  }
 
   const runRetention = body.spec.runRetention
   if (runRetention !== undefined) {

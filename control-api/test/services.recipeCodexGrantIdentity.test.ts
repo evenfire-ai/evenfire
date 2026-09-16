@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSafeCodexSubscriptionConnection } from '../src/services/codexSubscriptionConnection.js'
+import { getSafeGrokSubscriptionConnection } from '../src/services/grokSubscriptionConnection.js'
 import {
   publishRecipeGrantIdentity,
   readRecipeGrantIdentity,
@@ -13,6 +14,16 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
   return {
     ...actual,
     getSafeCodexSubscriptionConnection: vi.fn(),
+  }
+})
+
+vi.mock('../src/services/grokSubscriptionConnection.js', async () => {
+  const actual = await vi.importActual<
+    typeof import('../src/services/grokSubscriptionConnection.js')
+  >('../src/services/grokSubscriptionConnection.js')
+  return {
+    ...actual,
+    getSafeGrokSubscriptionConnection: vi.fn(),
   }
 })
 
@@ -32,6 +43,11 @@ describe('recipe Codex grant identity', () => {
     updateResource.mockReset()
     vi.mocked(getSafeCodexSubscriptionConnection).mockReset()
     vi.mocked(getSafeCodexSubscriptionConnection).mockResolvedValue(liveGrant as never)
+    vi.mocked(getSafeGrokSubscriptionConnection).mockReset()
+    vi.mocked(getSafeGrokSubscriptionConnection).mockResolvedValue({
+      ...liveGrant,
+      connectionKey: 'team-grok',
+    } as never)
   })
 
   it('reads empty and blank annotations as unassigned', () => {
@@ -144,5 +160,56 @@ describe('recipe Codex grant identity', () => {
         next: 'team-plus',
       })
     ).rejects.toMatchObject({ status: 409, error: 'conflict' })
+  })
+
+  it('publishes a Grok grant on the canonical annotation and clears the Codex alias', async () => {
+    getResource.mockResolvedValue({
+      metadata: {
+        resourceVersion: '4',
+        annotations: { 'clerum.io/codex-connection-ref': 'leftover' },
+      },
+      spec: { agent: { provider: 'grok-subscription' } },
+    })
+    await expect(
+      publishRecipeGrantIdentity({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'grok-recipe',
+        next: 'team-grok',
+        provider: 'grok-subscription',
+      })
+    ).resolves.toMatchObject({ published: 'team-grok', noop: false })
+    expect(getSafeGrokSubscriptionConnection).toHaveBeenCalledWith(expect.anything(), 'team-grok')
+    expect(getSafeCodexSubscriptionConnection).not.toHaveBeenCalled()
+    expect(updateResource).toHaveBeenCalledWith(
+      'workflowrecipes',
+      'grok-recipe',
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          annotations: {
+            'clerum.io/codex-connection-ref': '',
+            'clerum.io/subscription-connection-ref': 'team-grok',
+          },
+        }),
+      }),
+      'sandbox-recipes'
+    )
+  })
+
+  it('rejects a named Grok publish when the Grok grant is not live', async () => {
+    vi.mocked(getSafeGrokSubscriptionConnection).mockResolvedValueOnce(null)
+    await expect(
+      publishRecipeGrantIdentity({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'grok-recipe',
+        next: 'team-grok',
+        provider: 'grok-subscription',
+      })
+    ).rejects.toMatchObject({
+      status: 422,
+      error: 'grok_connection_not_allowed',
+    })
+    expect(getResource).not.toHaveBeenCalled()
   })
 })

@@ -9,9 +9,21 @@ const crdsDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../charts/c
 
 afterEach(() => {
   delete process.env.CONTROL_API_CODEX_SUBSCRIPTION_ENABLED
+  delete process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED
 })
 
 describe('codex-subscription Host admission', () => {
+  it('rejects a Grok target when the Grok management flag is absent or false', async () => {
+    const isModelAllowed = vi.fn().mockResolvedValue(true)
+    const res = await validateHostSpec(
+      { model: { provider: 'grok-subscription', name: 'grok-4.6' } },
+      { isModelAllowed }
+    )
+    expect(res).not.toBeNull()
+    expect(res!.errors[0].message).toMatch(/CONTROL_API_GROK_SUBSCRIPTION_ENABLED/)
+    expect(isModelAllowed).not.toHaveBeenCalled()
+  })
+
   it('rejects a Codex target when the management flag is absent or false', async () => {
     const isModelAllowed = vi.fn().mockResolvedValue(true)
     const res = await validateHostSpec(
