@@ -18,6 +18,7 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.5.1",
     "http-proxy": "^1.18.1",
     "jsonwebtoken": "^9.0.2"
   },

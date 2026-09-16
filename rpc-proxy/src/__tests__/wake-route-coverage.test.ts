@@ -18,6 +18,7 @@ const serviceMock = vi.hoisted(() => ({
   listAllowedServersForUser: vi.fn(),
   resolveServerConnectionForUser: vi.fn(),
   resolveHostConnectionForUser: vi.fn(),
+  resolveArtifactReadHostConnectionForUser: vi.fn(),
   validateRpcRequest: vi.fn(),
   forwardRpcToServer: vi.fn(),
   forwardHostMessageToHost: vi.fn(),
@@ -107,6 +108,7 @@ const originalFetch = globalThis.fetch
 beforeEach(() => {
   vi.clearAllMocks()
   serviceMock.resolveHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
+  serviceMock.resolveArtifactReadHostConnectionForUser.mockResolvedValue({ ...HOST_CONNECTION })
   controlApiMock.requestHostWakeFromControlApi.mockResolvedValue({
     kind: 'active',
     wakeGeneration: null,
