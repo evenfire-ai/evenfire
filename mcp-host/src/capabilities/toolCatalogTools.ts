@@ -27,6 +27,9 @@ export type CatalogProvider = () => McpTool[]
  * index even with a 290-tool catalog. */
 const DEFAULT_SEARCH_LIMIT = 20
 const MAX_SEARCH_LIMIT = 50
+// Bound context per discovery result, not the size of the approved catalog.
+const MAX_SEARCH_BYTES = 32 * 1024
+const MAX_DESCRIPTION_BYTES = 512
 
 export interface ToolSearchResultEntry {
   name: string
@@ -40,6 +43,8 @@ export interface ToolSearchResponse {
   /** Number of tools actually returned (`results.length`); `<= found`. */
   returned: number
   results: ToolSearchResultEntry[]
+  /** Continue with the same query/filter and this offset; absent on the last page. */
+  nextOffset?: number
   /** Optional hint set when the query was empty/whitespace-only. */
   message?: string
 }
@@ -84,6 +89,27 @@ function tokenize(text: string): string[] {
     .filter(t => t.length > 0)
 }
 
+function compactDescription(text: string): string {
+  if (Buffer.byteLength(text, 'utf8') <= MAX_DESCRIPTION_BYTES) return text
+  let result = ''
+  let bytes = 0
+  for (const character of text) {
+    const size = Buffer.byteLength(character, 'utf8')
+    if (bytes + size > MAX_DESCRIPTION_BYTES - 3) break
+    result += character
+    bytes += size
+  }
+  return `${result}…`
+}
+
+function searchOffset(value: unknown): number {
+  if (value === undefined) return 0
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('offset must be a non-negative safe integer')
+  }
+  return value
+}
+
 /**
  * Simple, dependency-free keyword overlap scorer. Counts how many distinct
  * query tokens appear (as substrings of tokens) in the tool's name+description.
@@ -119,8 +145,9 @@ function scoreTool(queryTokens: string[], name: string, description: string): nu
 export function buildToolSearchResponse(
   catalog: McpTool[],
   query: string,
-  options: { server?: string; limit?: number }
+  options: { server?: string; limit?: number; offset?: number; enumerate?: boolean }
 ): ToolSearchResponse {
+  const offset = searchOffset(options.offset)
   const queryTokens = tokenize(query)
   const serverFilter = options.server?.trim()
   // Fall back to the default for non-finite limits (e.g. NaN) — `slice(0, NaN)`
@@ -136,21 +163,37 @@ export function buildToolSearchResponse(
     if (serverFilter && server !== serverFilter) continue
     const description = tool.description ?? ''
     const score = scoreTool(queryTokens, tool.name, description)
-    if (score <= 0) continue
-    scored.push({ entry: { name: tool.name, server, description }, score })
+    if (score <= 0 && !(options.enumerate === true && queryTokens.length === 0)) continue
+    scored.push({
+      entry: { name: tool.name, server, description: compactDescription(description) },
+      score,
+    })
   }
 
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
-    return a.entry.name.localeCompare(b.entry.name)
+    // Code-point ordering stays identical across runtime locales.
+    return a.entry.name < b.entry.name ? -1 : a.entry.name > b.entry.name ? 1 : 0
   })
 
-  const results = scored.slice(0, limit).map(s => s.entry)
-  // `found` is the TOTAL number of matches (before the limit slice); `returned`
-  // is how many we actually return. Exposing both lets the model tell when the
-  // result set was truncated (`found > returned`) and refine the query or raise
-  // `limit`, instead of reading the capped count as "all there is".
-  return { found: scored.length, returned: results.length, results }
+  if (offset > scored.length)
+    throw new Error('offset exceeds matching catalog; restart at offset 0')
+  const payload: ToolSearchResponse = { found: scored.length, returned: 0, results: [] }
+  for (const { entry } of scored.slice(offset, offset + limit)) {
+    payload.results.push(entry)
+    payload.returned = payload.results.length
+    payload.nextOffset =
+      offset + payload.returned < scored.length ? offset + payload.returned : undefined
+    if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > MAX_SEARCH_BYTES) {
+      payload.results.pop()
+      payload.returned = payload.results.length
+      if (payload.returned === 0)
+        throw new Error('Tool identifier exceeds discovery page byte budget')
+      payload.nextOffset = offset + payload.returned
+      break
+    }
+  }
+  return payload
 }
 
 export function buildToolDescribeResponse(catalog: McpTool[], name: string): ToolDescribeResponse {
@@ -181,7 +224,11 @@ export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolD
       'their input schemas. Use this to discover tools that are not listed ' +
       'directly, then call `clerum__tool_describe` to fetch the schema of one. ' +
       '`found` is the total number of matches; `returned` may be smaller when ' +
-      'capped at `limit` — refine the query or raise `limit` if `found > returned`.',
+      'bounded by count and bytes. Prefer precise queries; use `nextOffset` as ' +
+      '`offset` with the same query and server to continue. Set `enumerate: true` ' +
+      'with an empty query to list a page when keywords are unknown. Pages read ' +
+      'the live catalog: restart at offset 0 after connections or permissions ' +
+      'change. Reuse a known schema instead of repeatedly searching/describing.',
     parameters: {
       type: 'object',
       properties: {
@@ -193,6 +240,17 @@ export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolD
         limit: {
           type: 'number',
           description: `Optional: max results to return (default ${DEFAULT_SEARCH_LIMIT}, capped at ${MAX_SEARCH_LIMIT}).`,
+        },
+        offset: {
+          type: 'integer',
+          minimum: 0,
+          description:
+            'Optional: nextOffset from the preceding page, default 0. Keep query and server unchanged.',
+        },
+        enumerate: {
+          type: 'boolean',
+          description:
+            'Optional: explicitly list tools for an empty query. Prefer keyword search for a specific task.',
         },
       },
       required: ['query'],
@@ -206,9 +264,13 @@ export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolD
         const query = typeof args.query === 'string' ? args.query : ''
         const server = typeof args.server === 'string' ? args.server : undefined
         const limit = typeof args.limit === 'number' ? args.limit : undefined
+        const offset = searchOffset(args.offset)
+        if (args.enumerate !== undefined && typeof args.enumerate !== 'boolean') {
+          throw new Error('enumerate must be a boolean')
+        }
         // Empty/whitespace-only query: return an informative result rather than a
         // bare `{ found: 0 }`, which reads like "no tools exist" to the model.
-        if (query.trim().length === 0) {
+        if (query.trim().length === 0 && args.enumerate !== true) {
           const payload: ToolSearchResponse = {
             found: 0,
             returned: 0,
@@ -217,7 +279,12 @@ export function createToolSearchTool(getCatalog: CatalogProvider): InternalToolD
           }
           return { success: true, content: JSON.stringify(payload) }
         }
-        const payload = buildToolSearchResponse(getCatalog(), query, { server, limit })
+        const payload = buildToolSearchResponse(getCatalog(), query, {
+          server,
+          limit,
+          offset,
+          enumerate: args.enumerate === true,
+        })
         return { success: true, content: JSON.stringify(payload) }
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) }

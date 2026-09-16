@@ -92,6 +92,9 @@ export interface Tool {
   execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput>
   requiresSanitization(): boolean
   requiresApproval(): boolean
+  /** Optional live parameter validation, run before approval and rechecked by
+   * the implementation at dispatch when its schema can change while suspended. */
+  validateParams?(params: Record<string, unknown>): ValidationResult | Promise<ValidationResult>
   /**
    * Safe, producer-owned classification for governed replay. This must never
    * include tool arguments or output. Native tools may omit it and are then
