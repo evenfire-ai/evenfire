@@ -174,13 +174,21 @@ the grant; revoke of one key fail-closes only that assignment.
 ## Tool presentation in the agent
 
 `CODEX_TOOL_PRESENTATION=auto|direct|discovery` controls presentation, not access.
-Auto is the default when the primary or an allowed fallback uses Codex: it
-uses discovery above the existing `CLERUM_DYNAMIC_TOOLS_THRESHOLD` (60) or
-`CODEX_TOOL_DISCOVERY_BYTES` (32768 serialized MCP definition bytes). These
+Direct is the default when the primary or an allowed fallback uses Codex. It
+presents all approved definitions without the search/describe/call discovery bridge,
+regardless of the discovery thresholds or legacy dynamic-tools flag.
+Explicitly selecting auto uses discovery above the existing
+`CLERUM_DYNAMIC_TOOLS_THRESHOLD` (60) or `CODEX_TOOL_DISCOVERY_BYTES`
+(32768 serialized MCP definition bytes). These
 are optimization thresholds; no tools are discarded from the local registry.
 Direct retains all definitions subject to the bounded request contract.
 Discovery exposes the stable native set and search/describe/call bridge.
 The same presentation is usable across a configured failover chain.
+
+All Codex modes emit the structured `tool-presentation` diagnostic when the
+presentation counts change, including the first refresh. It reports the mode,
+strategy, native/MCP counts and presented/deferred counts without tool definitions.
+Direct mode reports `strategy: direct` and `deferredCount: 0`.
 
 Search results contain bounded compact descriptions and no schemas. Follow
 `nextOffset` with the same query/filter to continue; explicit `enumerate`
