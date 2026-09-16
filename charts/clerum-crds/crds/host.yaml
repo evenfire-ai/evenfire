@@ -28,10 +28,12 @@ spec:
                 - host
                 - contextRef
               x-kubernetes-validations:
-                - rule: "(has(self.model) && self.model.provider == 'codex-subscription' && (!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider != 'codex-subscription'))) || (has(self.secretRef) && size(self.secretRef) > 0)"
-                  message: spec.secretRef is required unless every LLM target is the Codex subscription broker
-                - rule: "!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider == 'codex-subscription' && has(f.credentialSlot))"
+                - rule: "(has(self.model) && self.model.provider == 'codex-subscription' && (!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider != 'codex-subscription'))) || (has(self.model) && self.model.provider == 'grok-subscription' && (!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, f.provider != 'grok-subscription'))) || (has(self.secretRef) && size(self.secretRef) > 0)"
+                  message: spec.secretRef is required unless every LLM target is the same oauth-broker provider
+                - rule: "!has(self.llmPolicy) || !has(self.llmPolicy.fallbacks) || !self.llmPolicy.fallbacks.exists(f, (f.provider == 'codex-subscription' || f.provider == 'grok-subscription') && has(f.credentialSlot))"
                   message: credentialSlot is not supported for oauth-broker providers
+                - rule: "!(((has(self.model) && self.model.provider == 'codex-subscription') || (has(self.llmPolicy) && has(self.llmPolicy.fallbacks) && self.llmPolicy.fallbacks.exists(f, f.provider == 'codex-subscription')) || (has(self.allowedModels) && self.allowedModels.exists(m, m.provider == 'codex-subscription'))) && ((has(self.model) && self.model.provider == 'grok-subscription') || (has(self.llmPolicy) && has(self.llmPolicy.fallbacks) && self.llmPolicy.fallbacks.exists(f, f.provider == 'grok-subscription')) || (has(self.allowedModels) && self.allowedModels.exists(m, m.provider == 'grok-subscription'))))"
+                  message: a Host may declare at most one oauth-broker provider
               properties:
                 host:
                   type: string
@@ -84,6 +86,7 @@ spec:
                         - minimax
                         - azure
                         - codex-subscription
+                        - grok-subscription
                       description: LLM provider to use.
                     name:
                       type: string
@@ -100,6 +103,7 @@ spec:
                         fields, so this property must be applied before control-api
                         or Control UI persist spec.model.connectionRef.
                 allowedModels:
+                  maxItems: 32
                   # Per-host model allowlist subset (spec v2 Topic 3a). OPTIONAL,
                   # ADDITIVE: when absent or empty, the host offers the FULL global
                   # operator allowlist for its provider(s) — existing hosts are
@@ -177,6 +181,7 @@ spec:
                     fallbacks:
                       type: array
                       minItems: 1
+                      maxItems: 8
                       description: >-
                         Ordered fallback list, tried in order. The engine advances
                         to the next entry when the current one also fails.
@@ -212,6 +217,7 @@ spec:
                               - minimax
                               - azure
                               - codex-subscription
+                              - grok-subscription
                             description: >-
                               Fallback LLM provider. Same enum as spec.model.provider.
                           model:

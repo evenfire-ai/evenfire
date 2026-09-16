@@ -29,6 +29,7 @@ export declare const PROVIDER_IDS: readonly [
   'minimax',
   'azure',
   'codex-subscription',
+  'grok-subscription',
 ]
 
 /** Union of the canonical provider ids. */
@@ -109,7 +110,7 @@ export interface ProviderDescriptor {
 
 export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
-export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription']
+export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
 export declare function buildProviderMaps(
   ids: readonly string[],
   brokerIds: readonly string[],

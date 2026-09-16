@@ -53,6 +53,7 @@ const PROVIDER_IDS = Object.freeze([
   'azure',
   // OAuth-broker subscription provider. Not part of env-key autodetection.
   'codex-subscription',
+  'grok-subscription',
 ])
 
 // Model identifiers are transport selectors, not arbitrary user text. Keep
@@ -119,8 +120,9 @@ const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
   minimax: apiKeySlot('minimax-api-key', 'MINIMAX_API_KEY'),
   // Azure: one API key, sent via the `api-key` header (driver concern, not here).
   azure: apiKeySlot('azure-openai-api-key', 'AZURE_OPENAI_API_KEY'),
-  // Subscription broker: zero Secret slots. Env autodetection must never pick it.
+  // Subscription brokers: zero Secret slots. Env autodetection must never pick them.
   'codex-subscription': Object.freeze([]),
+  'grok-subscription': Object.freeze([]),
 })
 
 /**
@@ -151,6 +153,7 @@ const PROVIDER_DISPLAY_LABELS = Object.freeze({
   minimax: 'MiniMax',
   azure: 'Azure OpenAI',
   'codex-subscription': 'OpenAI Codex Subscription',
+  'grok-subscription': 'xAI Grok Subscription',
 })
 
 /**
@@ -193,6 +196,7 @@ const PROVIDER_NON_SECRET_ENV = Object.freeze({
     Object.freeze({ envName: 'AZURE_OPENAI_API_VERSION', required: false }),
   ]),
   'codex-subscription': Object.freeze([]),
+  'grok-subscription': Object.freeze([]),
 })
 
 // SECURITY: use an own-property check, NOT `in`. `in` walks the prototype chain
@@ -221,7 +225,7 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
   return canonical.includes(credentialSlot)
 }
 
-const OAUTH_BROKER_IDS = Object.freeze(['codex-subscription'])
+const OAUTH_BROKER_IDS = Object.freeze(['codex-subscription', 'grok-subscription'])
 
 /**
  * Pure map builder so tests can inject a second broker id without editing
@@ -251,16 +255,19 @@ const { PROVIDER_AUTH_MODE, PROVIDER_MODEL_CATALOG_MODE } = buildProviderMaps(
 /** @type {Record<string, string | undefined>} */
 const PROVIDER_EXECUTE_SCOPE = Object.freeze({
   'codex-subscription': 'llm:codex:execute',
+  'grok-subscription': 'llm:grok:execute',
 })
 
 /** @type {Record<string, string | undefined>} */
 const PROVIDER_PROXY_APP = Object.freeze({
   'codex-subscription': 'codex-llm-proxy',
+  'grok-subscription': 'grok-llm-proxy',
 })
 
 /** @type {Record<string, string | undefined>} */
 const PROVIDER_PROXY_SERVICE = Object.freeze({
   'codex-subscription': 'codex-llm-proxy',
+  'grok-subscription': 'grok-llm-proxy',
 })
 
 function providerDescriptor(id) {

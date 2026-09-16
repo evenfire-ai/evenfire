@@ -51,7 +51,8 @@ SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/llm-provider-attempt-contract \
-	packages/llm-providers
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -76,7 +77,8 @@ TEST_SERVICES := \
 	packages/workflow-sdk \
 	packages/network-policy-core \
 	packages/llm-provider-attempt-contract \
-	packages/llm-providers
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
 
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
