@@ -47,7 +47,7 @@ export function ClampedDescription({ children }: { children: ReactNode }) {
           <span className="sr-only" id={descriptionId}>
             {tooltipText}
           </span>
-          <span aria-hidden="true" className="cu-table-panel__description-tooltip" role="tooltip">
+          <span aria-hidden="true" className="cu-table-panel__description-tooltip">
             {tooltipText}
           </span>
         </>
