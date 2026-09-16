@@ -11,7 +11,11 @@ import {
   createMockNetworkingApi,
 } from '../test/__fixtures__/testMocks'
 import { MANAGED_BY_LABEL, MCPSERVER_LABEL, WRC_MANAGED_BY_VALUE } from './constants'
-import { McpServerReconciler } from './reconciler'
+import {
+  McpServerReconciler,
+  RUNTIME_NOT_DESIRED_DISABLED_MESSAGE,
+  RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE,
+} from './reconciler'
 import { McpServerCRD } from './types'
 
 describe.each(['Deployment', 'Service'] as const)('read-first %s contract', kind => {
@@ -142,9 +146,6 @@ type StatusConditionFixture = {
   lastTransitionTime: string
   observedGeneration?: number
 }
-
-const RUNTIME_NOT_DESIRED_DISABLED = 'McpServer is disabled; HCC does not run its runtime'
-const RUNTIME_NOT_DESIRED_FAIL_CLOSED = 'Env Secret validation failed; HCC does not run its runtime'
 
 /** Secret.data form. Do not write `password: 'literal'` — public-boundary rejects it. */
 function storedSecret(value: string): string {
@@ -915,7 +916,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
           condition =>
             condition.type === 'DeploymentReady' &&
             condition.reason === 'RuntimeNotDesired' &&
-            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
         )
       )
     ).toBe(true)
@@ -950,7 +951,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
           condition =>
             condition.type === 'DeploymentReady' &&
             condition.reason === 'RuntimeNotDesired' &&
-            condition.message === RUNTIME_NOT_DESIRED_DISABLED
+            condition.message === RUNTIME_NOT_DESIRED_DISABLED_MESSAGE
         )
       )
     ).toBe(true)
@@ -1046,7 +1047,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
           condition.type === 'DeploymentReady' &&
           condition.status === 'False' &&
           condition.reason === 'RuntimeNotDesired' &&
-          condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+          condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
       )
     )
     expect(retirementIndex).toBeGreaterThanOrEqual(0)
@@ -1077,7 +1078,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
           condition =>
             condition.type === 'DeploymentReady' &&
             condition.reason === 'RuntimeNotDesired' &&
-            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+            condition.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
         )
       )
     ).toBe(true)
@@ -1105,7 +1106,7 @@ describe('PR-B B1 — validateSecret result shape', () => {
           condition.type === 'DeploymentReady' &&
           condition.status === 'False' &&
           condition.reason === 'RuntimeNotDesired' &&
-          condition.message === RUNTIME_NOT_DESIRED_DISABLED
+          condition.message === RUNTIME_NOT_DESIRED_DISABLED_MESSAGE
       )
     )
     expect(retirementIndex).toBeGreaterThanOrEqual(0)
@@ -1284,7 +1285,7 @@ describe('PR-B B1 — writeStatusCondition', () => {
             type: 'DeploymentReady',
             status: 'False',
             reason: 'RuntimeNotDesired',
-            message: RUNTIME_NOT_DESIRED_FAIL_CLOSED,
+            message: RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE,
             lastTransitionTime: '2020-01-01T00:00:00.000Z',
           },
         ],

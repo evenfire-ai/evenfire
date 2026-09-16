@@ -8,7 +8,7 @@ import {
   createMockCoreApi,
   createMockCustomApi,
 } from '../../test/__fixtures__/testMocks'
-import { McpServerReconciler } from '../reconciler'
+import { McpServerReconciler, RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE } from '../reconciler'
 import { McpServerCRD } from '../types'
 
 vi.mock('../config', () => ({
@@ -71,8 +71,6 @@ function replacedDeployment(appsApi: ReturnType<typeof createMockAppsApi>): k8s.
 function credentialsRevisionOf(deployment: k8s.V1Deployment): string | undefined {
   return deployment.spec?.template?.metadata?.annotations?.[CREDENTIALS_REVISION_ANNOTATION]
 }
-
-const RUNTIME_NOT_DESIRED_FAIL_CLOSED = 'Env Secret validation failed; HCC does not run its runtime'
 
 function readinessPollsOf(reconciler: McpServerReconciler): Map<string, unknown> {
   return (reconciler as unknown as { readinessPolls: Map<string, unknown> }).readinessPolls
@@ -817,7 +815,7 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
       await reconcileFailClosed(reconciler, coreApi)
       const lastAfterRetirement = deploymentReadyWrites(customApi).at(-1)
       expect(lastAfterRetirement?.reason).toBe('RuntimeNotDesired')
-      expect(lastAfterRetirement?.message).toBe(RUNTIME_NOT_DESIRED_FAIL_CLOSED)
+      expect(lastAfterRetirement?.message).toBe(RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE)
       const warnsAfterRetirement = warn.mock.calls.length
       const writesAfterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
 
@@ -852,7 +850,8 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
     expect(
       deploymentReadyWrites(customApi).some(
         write =>
-          write.reason === 'RuntimeNotDesired' && write.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED
+          write.reason === 'RuntimeNotDesired' &&
+          write.message === RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE
       )
     ).toBe(true)
     const afterRetirement = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
@@ -914,7 +913,13 @@ describe('the readiness poll must publish its verdict on the CRD (issue #223)', 
 
     const failClosed = reconcileFailClosed(reconciler, coreApi)
     try {
-      await retractPatchGate
+      // Race the held retract PATCH against reconcile return so a missing
+      // RuntimeNotDesired write fails here instead of hanging the suite.
+      const retractSeen = await Promise.race([
+        retractPatchGate.then(() => 'retract' as const),
+        failClosed.then(() => 'finished' as const),
+      ])
+      expect(retractSeen).toBe('retract')
       expect(releaseRetractPatch).toBeDefined()
       const writesWhileRetractHeld = customApi.patchNamespacedCustomObjectStatus.mock.calls.length
 

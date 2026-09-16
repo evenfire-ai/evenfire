@@ -141,8 +141,9 @@ const DEFAULT_FULL_RECONCILE_MAX_CONCURRENCY = 10
 const STATUS_CONDITION_WRITE_MAX_ATTEMPTS = 3
 /** Types HCC no longer writes and strips from every status write (#606). A future writer must not reuse `NetworkReady`; remove the entry first. */
 const RETIRED_STATUS_CONDITION_TYPES = ['NetworkReady'] as const
-const RUNTIME_NOT_DESIRED_DISABLED_MESSAGE = 'McpServer is disabled; HCC does not run its runtime'
-const RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE =
+export const RUNTIME_NOT_DESIRED_DISABLED_MESSAGE =
+  'McpServer is disabled; HCC does not run its runtime'
+export const RUNTIME_NOT_DESIRED_FAIL_CLOSED_MESSAGE =
   'Env Secret validation failed; HCC does not run its runtime'
 
 function isRetiredStatusConditionType(type: string): boolean {
