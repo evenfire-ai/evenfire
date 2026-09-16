@@ -215,10 +215,7 @@ export class ConversationManager {
 
   private assertSessionOwner(conversation: Conversation, expectedUserId?: string): void {
     if (expectedUserId !== undefined && conversation.user_id !== expectedUserId) {
-      throw new ConversationError(
-        'Session access denied',
-        ConversationErrorCode.OwnershipMismatch
-      )
+      throw new ConversationError('Session access denied', ConversationErrorCode.OwnershipMismatch)
     }
   }
 
@@ -237,7 +234,15 @@ export class ConversationManager {
     conversation: Conversation,
     userInput: string,
     taskId: string,
-    traceContext: TraceContextV1 | null = null
+    traceContext: TraceContextV1 | null = null,
+    /**
+     * Server-authoritative auto-title (spec 15), already redacted + truncated by
+     * the caller (TaskExecutor, which owns the secret list). Only supplied on
+     * turn 1. Applied with `??=` so it never clobbers a title already set (a
+     * future rename); `persistTurnStart` gates the durable COALESCE write on the
+     * durable `turnNumber === 1`, so an out-of-turn value is harmless.
+     */
+    autoTitle?: string
   ): Promise<Turn> {
     if (conversation.state !== ConversationState.Idle) {
       throw new ConversationError(
@@ -247,6 +252,7 @@ export class ConversationManager {
     }
 
     const previousTraceContext = conversation.traceContext
+    const previousTitle = conversation.title
     conversation.state = ConversationState.Processing
     // D.1 — record the in-flight task so it can be exposed via /sessions and
     // mirrored to sessions.active_task_id by persistTurnStart.
@@ -256,6 +262,11 @@ export class ConversationManager {
 
     // Clear per-turn wildcard approval — each new message requires fresh approval
     conversation.auto_approved_tools.delete('*')
+
+    // Materialize the auto-title (spec 15) in RAM before persisting so the
+    // dual-store projection and the durable COALESCE write agree. `??=` keeps
+    // any title already set.
+    if (autoTitle !== undefined) conversation.title ??= autoTitle
 
     const turn: Turn = {
       number: conversation.turns.length + 1,
@@ -276,6 +287,9 @@ export class ConversationManager {
       conversation.state = ConversationState.Idle
       conversation.activeTaskId = undefined
       conversation.traceContext = previousTraceContext
+      // Roll back the auto-title too, so a failed turn-1 write leaves no RAM
+      // title that SQLite never persisted (would break dual-store parity).
+      conversation.title = previousTitle
       conversation.updated_at = new Date()
       throw err
     }
@@ -642,6 +656,19 @@ export class ConversationManager {
   setModelSelection(conversation: Conversation, provider: string, model: string): void {
     conversation.modelSelections = { ...(conversation.modelSelections ?? {}), [provider]: model }
     void Promise.resolve(this.store.persistModelSelections?.(conversation))
+  }
+
+  /**
+   * Spec 15 Fase B — overwrite the session title from an explicit user rename
+   * and write it through to the durable `sessions.title` column. Unlike the
+   * auto-title (`??=` on turn 1), a rename always wins. Caller
+   * (`applySessionTitle`) has already sanitized + validated `title`. Does NOT
+   * bump `updated_at`: a rename must not reorder the catalog (mirrors
+   * `setModelSelection`).
+   */
+  setTitle(conversation: Conversation, title: string): void {
+    conversation.title = title
+    void Promise.resolve(this.store.persistTitle?.(conversation))
   }
 
   /**

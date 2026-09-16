@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
 import {
   requestEffectiveWorkflowList,
@@ -12,6 +15,8 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
+import { PromptCache } from '../../llm/promptCache'
+import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
@@ -19,6 +24,10 @@ import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../
 vi.mock('../../config', () => ({
   config: {
     devMode: true,
+    dynamicToolsEnabled: false,
+    dynamicToolsThreshold: 60,
+    codexToolPresentation: 'auto',
+    codexToolDiscoveryBytes: 32768,
     enableApproval: false,
     nudgeMaxIterations: 3,
     devModelName: 'test-model',
@@ -241,7 +250,10 @@ describe('TaskExecutor', () => {
       expect.objectContaining({
         ...traceContext,
         sessionId: expect.stringMatching(/^conv-user-1:telegram:test-channel:default-/),
-      })
+      }),
+      // spec 15 — turn 1 derives the auto-title from the first input (channel
+      // sessions included); a short input passes through deriveAutoTitle intact.
+      'Hello'
     )
     expect(task.traceContext?.sessionId).toMatch(/^conv-user-1:telegram:test-channel:default-/)
   })
@@ -1603,5 +1615,157 @@ describe('executionModeForSource (§6.3)', () => {
   it('never labels an autonomous source interactive', () => {
     const autonomous: TaskSource[] = ['cron', 'internal']
     expect(autonomous.map(executionModeForSource)).not.toContain('interactive')
+  })
+})
+
+describe('TaskExecutor Codex presentation wiring', () => {
+  function makeExecutor(provider = 'codex-subscription', manager?: unknown) {
+    const deps = createDeps({
+      llmProvider: { getProviderType: () => provider } as any,
+      ...(manager ? { mcpManager: manager as any } : {}),
+    })
+    const task = createTask()
+    task.sourceMessage!.channelType = 'rpc'
+    const executor = new TaskExecutor(task, deps) as any
+    executor.conversation = { id: 'presentation-session' }
+    return { executor, deps }
+  }
+
+  it('wires the real native registry, bridge and live presentation with legacy flag off', async () => {
+    let count = 0
+    const manager = {
+      getAllTools: () =>
+        Array.from({ length: count }, (_, i) => ({
+          name: `fixture__tool_${i}`,
+          serverName: 'fixture',
+          inputSchema: { type: 'object', properties: {} },
+        })),
+      callTool: vi.fn(),
+    }
+    const { executor } = makeExecutor('codex-subscription', manager)
+    const { registry, loopController, bridge } = await executor.createToolRegistry()
+    const initial = await loopController.refreshTools(registry.listDefinitions())
+    expect(initial.map((t: any) => t.name)).toEqual(
+      expect.arrayContaining(['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'])
+    )
+    expect(bridge).toBeDefined()
+    for (const n of [83, 150, 250]) {
+      count = n
+      const full = registry.listDefinitions()
+      expect(full).toHaveLength(initial.length + n)
+      expect(JSON.stringify(await loopController.refreshTools(full))).toBe(JSON.stringify(initial))
+      expect(bridge.getDeferrableCatalogNames().size).toBe(n)
+      expect(registry.get(`fixture__tool_${n - 1}`)).not.toBeNull()
+    }
+  })
+
+  it.each([
+    ['zai', 'codex-subscription'],
+    ['codex-subscription', 'zai'],
+  ])('keeps 250 tools selectively reachable for %s -> %s failover', async (primary, fallback) => {
+    const manager = {
+      getAllTools: () =>
+        Array.from({ length: 250 }, (_, i) => ({
+          name: `fixture__tool_${i}`,
+          serverName: 'fixture',
+          inputSchema: { type: 'object' },
+        })),
+    }
+    const { executor, deps } = makeExecutor(primary, manager)
+    deps.failover = { policy: { fallbacks: [{ provider: fallback, model: 'test-model' }] } } as any
+    const { registry, loopController, bridge } = await executor.createToolRegistry()
+    const advertised = await loopController.refreshTools(registry.listDefinitions())
+    expect(bridge).toBeDefined()
+    expect(advertised.some((tool: any) => tool.name.startsWith('fixture__'))).toBe(false)
+    expect(advertised.some((tool: any) => tool.name === 'clerum__tool_call')).toBe(true)
+    expect(bridge.getDeferrableCatalogNames().size).toBe(250)
+    expect(registry.get('fixture__tool_249')).not.toBeNull()
+  })
+
+  it.each(['codex-subscription', 'zai'])(
+    'default direct for %s logs the catalog without a bridge',
+    async primary => {
+      const previousMode = appConfig.codexToolPresentation
+      const previousFlag = appConfig.dynamicToolsEnabled
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      appConfig.codexToolPresentation = parseCodexToolPresentation(undefined)
+      appConfig.dynamicToolsEnabled = true
+      try {
+        const manager = {
+          getAllTools: () =>
+            Array.from({ length: 83 }, (_, i) => ({
+              name: `fixture__tool_${i}`,
+              inputSchema: { type: 'object' },
+            })),
+        }
+        const { executor, deps } = makeExecutor(primary, manager)
+        if (primary !== 'codex-subscription') {
+          deps.failover = {
+            policy: { fallbacks: [{ provider: 'codex-subscription', model: 'test-model' }] },
+          } as any
+        }
+        const { registry, loopController, bridge } = await executor.createToolRegistry()
+        expect(bridge).toBeUndefined()
+        const full = registry.listDefinitions()
+        expect(full.length).toBeGreaterThan(83)
+        expect(
+          full.filter((tool: any) =>
+            ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'].includes(
+              tool.name
+            )
+          )
+        ).toEqual([])
+        expect(await loopController.refreshTools(full)).toEqual(full)
+        expect(info).toHaveBeenCalledWith(
+          {
+            component: 'tool-presentation',
+            mode: 'direct',
+            strategy: 'direct',
+            nativeCount: full.length - 83,
+            mcpCount: 83,
+            presentedCount: full.length,
+            deferredCount: 0,
+          },
+          'Tool presentation selected'
+        )
+      } finally {
+        appConfig.codexToolPresentation = previousMode
+        appConfig.dynamicToolsEnabled = previousFlag
+        info.mockRestore()
+      }
+    }
+  )
+
+  it('rebuilds cached discovery guidance on same-model provider switches, preserving daily snapshot', async () => {
+    const previous = appConfig.promptCacheEnabled
+    appConfig.promptCacheEnabled = true
+    try {
+      const { executor, deps } = makeExecutor('openai')
+      deps.promptCache = new PromptCache()
+      deps.workspaceService = {
+        readIdentityFiles: vi.fn(async () => ({ identity: '', soul: '', agents: '', user: '' })),
+        snapshotDailyLogs: vi.fn(async () => 'daily snapshot'),
+      } as any
+      executor.conversation.session_key = 'presentation-session'
+      const native = [{ name: 'shell_exec', description: 'shell', parameters: {} }]
+      const first = await executor.maybeGetOrBuildParts(native)
+      expect(JSON.stringify(first)).not.toContain(TOOL_DISCOVERY_TEXT)
+      deps.llmProvider = { getProviderType: () => 'codex-subscription' } as any
+      const tools = [
+        ...native,
+        { name: 'clerum__tool_search', description: 'search', parameters: {} },
+      ]
+      const second = await executor.maybeGetOrBuildParts(tools)
+      expect(JSON.stringify(second)).toContain(TOOL_DISCOVERY_TEXT)
+      expect(second).not.toBe(first)
+      expect(await executor.maybeGetOrBuildParts(tools)).toBe(second)
+      expect(deps.workspaceService!.snapshotDailyLogs).toHaveBeenCalledTimes(1)
+      deps.llmProvider = { getProviderType: () => 'openai' } as any
+      expect(JSON.stringify(await executor.maybeGetOrBuildParts(native))).not.toContain(
+        TOOL_DISCOVERY_TEXT
+      )
+    } finally {
+      appConfig.promptCacheEnabled = previous
+    }
   })
 })

@@ -421,10 +421,13 @@ describe('LlmModelTable provider groups', () => {
       },
     ])
 
-    fireEvent.change(screen.getByLabelText('Search models'), {
+    const searchInput = screen.getByLabelText('Search models')
+    searchInput.focus()
+    fireEvent.change(searchInput, {
       target: { value: 'gpt-5' },
     })
 
+    expect(searchInput).toHaveFocus()
     expect(screen.getByText('gpt-5')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Anthropic models/ })).toBeNull()
     expect(

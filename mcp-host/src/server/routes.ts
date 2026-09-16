@@ -28,6 +28,7 @@ import type {
   SessionSearchHandler,
   SessionsListHandler,
   SetModelHandler,
+  SetTitleHandler,
   StatusHandler,
   TaskResultHandler,
   TelegramWorkflowApprovalVerificationHandler,
@@ -63,6 +64,7 @@ export type RouteHandlers = {
   compactionHandler?: CompactionHandler | null
   modelsListHandler?: ModelsListHandler | null
   setModelHandler?: SetModelHandler | null
+  setTitleHandler?: SetTitleHandler | null
 }
 
 function isSessionOwnershipError(error: unknown): boolean {
@@ -164,6 +166,8 @@ export function runtimeApiInfo() {
       'DELETE /v1/runtime/cron/results/:id': 'Acknowledge cron result delivery',
       'GET /v1/runtime/sessions': 'List active sessions for the authenticated user',
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'Get message history for a session',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/name':
+        'Rename a session (server-authoritative title)',
       'GET /v1/runtime/sessions/search':
         'Full-text search across past messages of the authenticated user',
       'GET /v1/runtime/models': 'List selectable models for the session (per-session selection)',
@@ -194,6 +198,7 @@ export function runtimeApiInfo() {
       'DELETE /v1/runtime/cron/results/:id': 'onCronResultAck(handler)',
       'GET /v1/runtime/sessions': 'onSessionsList(handler)',
       'GET /v1/runtime/sessions/:agent/:chatId/messages': 'onSessionMessages(handler)',
+      'PATCH /v1/runtime/sessions/:agent/:chatId/name': 'onSetTitle(handler)',
       'GET /v1/runtime/sessions/search': 'onSessionSearch(handler)',
       'GET /v1/runtime/models': 'onModelsList(handler)',
       'POST /v1/runtime/model': 'onSetModel(handler)',
@@ -1427,6 +1432,55 @@ export async function handleSetModelRoute(
       json(res, 403, { error: 'session access denied' })
       return
     }
+    json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
+  }
+}
+
+/**
+ * Spec 15 Fase B — PATCH /v1/runtime/sessions/:agent/:chatId/name `{ title }`.
+ * Overwrites the session title from an explicit user rename. `:agent`/`:chatId`
+ * come from the path (same key derivation as the read routes); the title comes
+ * from the body and is sanitized + validated by the shared core. Uniform 404 for
+ * missing / foreign / channel sessions (anti-enumeration). The raw title is NEVER
+ * logged — user content (§5).
+ */
+export async function handleSetTitleRoute(
+  req: Request,
+  res: Response,
+  handlers: RouteHandlers
+): Promise<void> {
+  try {
+    const caller = getRuntimeCallerContext(req)
+    if (caller?.caller !== 'rpc-proxy' || !caller.userId) {
+      json(res, 401, { error: 'Missing rpc edge caller context' })
+      return
+    }
+    const agent = String(req.params.agent || '').trim()
+    const chatId = String(req.params.chatId || '').trim()
+    if (!isSafeAgentRouteSegment(agent) || !isSafeRouteSegment(chatId)) {
+      badRequest(res, 'Invalid agent or chatId')
+      return
+    }
+    if (!handlers.setTitleHandler) {
+      json(res, 501, { error: 'Set title handler not configured' })
+      return
+    }
+    const body = (req.body as Record<string, unknown>) || {}
+    // All title-validity logic (sanitize, non-empty, cap) lives in the core so
+    // it stays single-sourced (D4); a non-string body.title becomes '' → invalid.
+    const rawTitle = typeof body.title === 'string' ? body.title : ''
+    const result = await handlers.setTitleHandler(caller.userId, agent, chatId, rawTitle)
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        json(res, 404, { error: 'session not found' })
+        return
+      }
+      json(res, 400, { error: 'invalid title' })
+      return
+    }
+    json(res, 200, { ok: true, title: result.title })
+  } catch (error) {
+    console.error('[Server] Error setting session title:', error)
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }

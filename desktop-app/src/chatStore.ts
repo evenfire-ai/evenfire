@@ -1758,9 +1758,10 @@ export class ChatStore {
    * Deliberately does NOT create entries for server-only sessions: the sidebar's
    * in-memory merge (`useChatListController`) already surfaces those, and a local
    * `deleteChat` doesn't remove the server session — eagerly re-persisting it
-   * would resurrect a chat the user just deleted. Titles are never touched (the
-   * server has none; the client derives them on open). Returns the count of
-   * entries reconciled.
+   * would resurrect a chat the user just deleted. Titles are never touched here:
+   * the server title is applied by the in-memory §2.2 catalog merge in
+   * `useChatListController`, not persisted into this local index. Returns the
+   * count of entries reconciled.
    */
   async upsertServerSessions(
     agentRef: string,

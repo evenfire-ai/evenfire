@@ -58,6 +58,7 @@ function makeApp(convManager: ConversationManager) {
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => convManager,
     redactToolError: (_toolName, rawError) => rawError,
+    redactTitle: rawTitle => rawTitle,
   })
   const handlers = makeHandlers({
     sessionsListHandler: handleSessionsList,

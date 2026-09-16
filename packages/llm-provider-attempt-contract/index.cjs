@@ -15,7 +15,8 @@ const TICKET_TYP = 'codex-execution-ticket'
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
   maxMessages: 128,
-  maxTools: 32,
+  // Bound calls in each assistant message independently of advertised definitions.
+  maxToolCalls: 32,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
@@ -123,6 +124,12 @@ function isBoundedId(value) {
   return typeof value === 'string' && ID_PATTERN.test(value)
 }
 
+// Tool names are opaque registry keys, not authorization/request identifiers.
+// Their size is bounded by maxRequestBodyBytes; transport aliases apply later.
+function isToolName(value) {
+  return typeof value === 'string' && value.length > 0 && !/[\p{Cc}\p{Cs}]/u.test(value)
+}
+
 function rejectUnknown(obj, allowed, label) {
   const extra = unknownKeys(obj, allowed)
   if (extra.length === 0) return null
@@ -175,7 +182,7 @@ function parseMessages(raw) {
     if (typeof item.content !== 'string') return fail('invalid', `messages[${i}].content must be a string`)
     const message = { role: item.role, content: item.content }
     if (item.name !== undefined) {
-      if (!isBoundedId(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
+      if (!isToolName(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
       message.name = item.name
     }
     if (item.toolCallId !== undefined) {
@@ -189,8 +196,8 @@ function parseMessages(raw) {
       if (!Array.isArray(item.toolCalls) || item.toolCalls.length === 0) {
         return fail('invalid', `messages[${i}].toolCalls must be a non-empty array`)
       }
-      if (item.toolCalls.length > LIMITS.maxTools) {
-        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxTools}`)
+      if (item.toolCalls.length > LIMITS.maxToolCalls) {
+        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxToolCalls}`)
       }
       const toolCalls = []
       for (let j = 0; j < item.toolCalls.length; j++) {
@@ -203,7 +210,7 @@ function parseMessages(raw) {
         if (!isBoundedId(call.id)) {
           return fail('invalid', `messages[${i}].toolCalls[${j}].id is invalid`)
         }
-        if (!isBoundedId(call.name)) {
+        if (!isToolName(call.name)) {
           return fail('invalid', `messages[${i}].toolCalls[${j}].name is invalid`)
         }
         if (!isPlainObject(call.arguments)) {
@@ -227,14 +234,15 @@ function parseTools(raw) {
   if (raw === undefined) return ok(undefined)
   if (!Array.isArray(raw)) return fail('invalid', 'tools must be an array')
   if (raw.length === 0) return ok(undefined)
-  if (raw.length > LIMITS.maxTools) return fail('limit', `tools exceed ${LIMITS.maxTools}`)
+  // The complete request is byte-bounded before parsing; definition count is
+  // not an access limit for an approved connector catalog.
   const tools = []
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i]
     if (!isPlainObject(item)) return fail('invalid', `tools[${i}] must be an object`)
     const extra = rejectUnknown(item, TOOL_KEYS, `tools[${i}]`)
     if (extra) return extra
-    if (!isBoundedId(item.name)) return fail('invalid', `tools[${i}].name is invalid`)
+    if (!isToolName(item.name)) return fail('invalid', `tools[${i}].name is invalid`)
     if (typeof item.description !== 'string') {
       return fail('invalid', `tools[${i}].description must be a string`)
     }

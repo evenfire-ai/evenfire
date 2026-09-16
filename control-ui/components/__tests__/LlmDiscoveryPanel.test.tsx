@@ -146,6 +146,12 @@ describe('LlmDiscoveryPanel merged lifecycle workflow', () => {
     expect(cssRuleBody('.cu-table__cell-actions')).toMatch(/\bwidth:\s*3\.5rem\b/)
   })
 
+  it('keeps the nested discovery model cell inset after the selection checkbox', () => {
+    const selector = '.cu-llm-review-table__children .cu-llm-model-row > .cu-px-model'
+
+    expect(cssRuleBody(selector)).toMatch(/\bpadding-left:\s*var\(--cu-space-2\)/)
+  })
+
   it('does not render a dedicated stale-model management section', () => {
     render(
       <LlmDiscoveryPanel

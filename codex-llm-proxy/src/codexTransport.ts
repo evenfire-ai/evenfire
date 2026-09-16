@@ -1,21 +1,23 @@
 import {
+  type CodexCompletionRequestV1,
+  LIMITS,
   hashCodexCompletionRequestV1,
   parseCodexCompletionRequestV1,
-  type CodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
+import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
 import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
 import { logger } from './logger.js'
 import {
   CODEX_CATALOG_ORIGIN,
   CODEX_COMPLETIONS_ORIGIN,
   OriginDeniedError,
+  type OriginPolicyOptions,
   assertAllowedUpstreamUrl,
   fetchFrozenOrigin,
-  type OriginPolicyOptions,
 } from './originPolicy.js'
 import { assertBoundedDeadline } from './requestLimits.js'
-import { parseSafeUsage, type SafeUsage } from './usage.js'
-import { chatgptUpstreamHeaders } from './chatgptUpstreamHeaders.js'
+import { ToolNameMap } from './toolNameMap.js'
+import { type SafeUsage, parseSafeUsage } from './usage.js'
 
 export type StreamFrame =
   | { type: 'text'; text: string }
@@ -204,6 +206,12 @@ async function readUpstreamStream(input: {
       'Codex access token is missing ChatGPT account id'
     )
   }
+  const names = new ToolNameMap([
+    ...(input.request.tools ?? []).map(tool => tool.name),
+    ...input.request.messages.flatMap(message =>
+      message.role === 'assistant' ? (message.toolCalls ?? []).map(call => call.name) : []
+    ),
+  ])
   const response = await fetchFrozenOrigin({
     url,
     fetchFn: input.fetchFn,
@@ -212,7 +220,7 @@ async function readUpstreamStream(input: {
       method: 'POST',
       signal,
       headers,
-      body: JSON.stringify(toUpstreamPayload(input.request)),
+      body: JSON.stringify(toUpstreamPayload(input.request, names)),
     },
   })
   if (!response.ok || !response.body) {
@@ -236,10 +244,13 @@ async function readUpstreamStream(input: {
     }
     throw new CodexTransportError('provider_unavailable', 'upstream completion failed')
   }
-  return consumeSse(response.body, input.onFrame, signal)
+  return consumeSse(response.body, input.onFrame, signal, names)
 }
 
-function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, unknown> {
+function toUpstreamPayload(
+  request: CodexCompletionRequestV1,
+  names: ToolNameMap
+): Record<string, unknown> {
   const instructions = request.messages
     .filter(message => message.role === 'system' && message.content.trim())
     .map(message => message.content)
@@ -263,7 +274,7 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
         input.push({
           type: 'function_call',
           call_id: call.id,
-          name: call.name,
+          name: names.toWire(call.name),
           arguments: JSON.stringify(call.arguments ?? {}),
         })
       }
@@ -281,9 +292,12 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
   if (request.tools && request.tools.length > 0) {
     payload.tools = request.tools.map(tool => ({
       type: 'function',
-      name: tool.name,
+      name: names.toWire(tool.name),
       description: tool.description,
       parameters: tool.parameters,
+      // Codex can normalize omission to strict mode and require optional MCP
+      // fields. Preserve the source schema's optionality explicitly.
+      strict: false,
     }))
     payload.parallel_tool_calls = true
   }
@@ -305,11 +319,39 @@ function toUpstreamPayload(request: CodexCompletionRequestV1): Record<string, un
 async function consumeSse(
   body: ReadableStream<Uint8Array>,
   onFrame: ((frame: StreamFrame) => void) | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  names: ToolNameMap
 ): Promise<StreamCodexCompletionResult> {
   const reader = body.getReader()
   const decoder = new TextDecoder()
   const pending = new Map<string, PendingToolCall>()
+  // Text stays streaming. Calls become executable only once the entire
+  // response succeeds and its independent call budget has been validated.
+  const toolFrames: Array<Extract<StreamFrame, { type: 'tool_call' }>> = []
+  const acceptFrame = (frame?: StreamFrame) => {
+    if (pending.size > LIMITS.maxToolCalls) {
+      throw new CodexTransportError(
+        'provider_unavailable',
+        `tool calls exceed ${LIMITS.maxToolCalls}`
+      )
+    }
+    if (frame?.type === 'tool_call') {
+      if (toolFrames.length >= LIMITS.maxToolCalls) {
+        throw new CodexTransportError(
+          'provider_unavailable',
+          `tool calls exceed ${LIMITS.maxToolCalls}`
+        )
+      }
+      const canonicalName = names.fromWire(frame.name)
+      if (canonicalName === undefined) {
+        throw new CodexTransportError(
+          'provider_unavailable',
+          'upstream returned an unknown tool name'
+        )
+      }
+      toolFrames.push({ ...frame, name: canonicalName })
+    } else if (frame) onFrame?.(frame)
+  }
   let buffer = ''
   let completed = false
   let failed = false
@@ -327,7 +369,7 @@ async function consumeSse(
       buffer = parts.pop() ?? ''
       for (const part of parts) {
         const mapped = ingestSseBlock(part, pending)
-        if (mapped.frame) onFrame?.(mapped.frame)
+        acceptFrame(mapped.frame)
         if (mapped.usage) usage = mapped.usage
         if (mapped.completed) completed = true
         if (mapped.failed) failed = true
@@ -337,25 +379,31 @@ async function consumeSse(
     buffer += decoder.decode().replace(/\r\n/g, '\n').replace(/\r/g, '\n')
     if (buffer.trim()) {
       const mapped = ingestSseBlock(buffer, pending)
-      if (mapped.frame) onFrame?.(mapped.frame)
+      acceptFrame(mapped.frame)
       if (mapped.usage) usage = mapped.usage
       if (mapped.completed) completed = true
       if (mapped.failed) failed = true
     }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
   } finally {
     reader.releaseLock()
   }
   for (const call of pending.values()) {
     if (call.emitted) continue
     const args = parseToolArguments(call.arguments)
-    onFrame?.({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
+    acceptFrame({ type: 'tool_call', id: call.id, name: call.name, arguments: args })
     call.emitted = true
   }
   if (signal.aborted) return { outcome: 'canceled', usage }
   if (failed) {
     throw new CodexTransportError('provider_unavailable', 'upstream response failed')
   }
-  if (completed) return { outcome: 'success', usage }
+  if (completed) {
+    for (const frame of toolFrames) onFrame?.(frame)
+    return { outcome: 'success', usage }
+  }
   return { outcome: 'unknown', usage }
 }
 
@@ -399,7 +447,11 @@ function mapUpstreamEvent(
   if (type === 'response.output_text.delta' && typeof row.delta === 'string') {
     return { frame: { type: 'text', text: row.delta } }
   }
-  if (type === 'response.output_item.added' && isPlainObject(row.item) && row.item.type === 'function_call') {
+  if (
+    type === 'response.output_item.added' &&
+    isPlainObject(row.item) &&
+    row.item.type === 'function_call'
+  ) {
     const call = upsertPendingTool(pending, row.item)
     if (isCompleteJson(call.arguments)) return { frame: emitToolCall(call) }
     return {}
@@ -415,7 +467,9 @@ function mapUpstreamEvent(
   }
   if (
     type === 'response.function_call_arguments.done' ||
-    (type === 'response.output_item.done' && isPlainObject(row.item) && row.item.type === 'function_call')
+    (type === 'response.output_item.done' &&
+      isPlainObject(row.item) &&
+      row.item.type === 'function_call')
   ) {
     const source = isPlainObject(row.item) ? row.item : row
     const call = upsertPendingTool(pending, source)
@@ -449,7 +503,9 @@ function upsertPendingTool(
   if (typeof source.name === 'string' && source.name.trim()) current.name = source.name
   const rawArgs = source.arguments
   if (typeof rawArgs === 'string') {
-    current.arguments = source.append ? `${current.arguments}${rawArgs}` : rawArgs || current.arguments
+    current.arguments = source.append
+      ? `${current.arguments}${rawArgs}`
+      : rawArgs || current.arguments
   } else if (isPlainObject(rawArgs) && !source.append) {
     current.arguments = JSON.stringify(rawArgs)
   }
@@ -497,7 +553,10 @@ export async function listCodexModels(input: {
   accessToken: string
   fetchFn: typeof fetch
   lookup?: OriginPolicyOptions['lookup']
-}): Promise<{ outcome: 'ready' | 'auth-rejected' | 'unavailable'; models: Array<{ model: string; displayName?: string }> }> {
+}): Promise<{
+  outcome: 'ready' | 'auth-rejected' | 'unavailable'
+  models: Array<{ model: string; displayName?: string }>
+}> {
   const url = assertAllowedUpstreamUrl(CODEX_CATALOG_ORIGIN, 'catalog')
   const headers = chatgptUpstreamHeaders(input.accessToken, { accept: 'application/json' })
   const response = await fetchFrozenOrigin({
@@ -509,7 +568,8 @@ export async function listCodexModels(input: {
       headers,
     },
   })
-  if (response.status === 401 || response.status === 403) return { outcome: 'auth-rejected', models: [] }
+  if (response.status === 401 || response.status === 403)
+    return { outcome: 'auth-rejected', models: [] }
   if (!response.ok) {
     logger.warn(
       {
@@ -547,7 +607,12 @@ function normalizeModels(body: unknown): Array<{ model: string; displayName?: st
     if (!isPlainObject(row)) continue
     const model = String(row.model || row.slug || row.id || '').trim()
     if (!model) continue
-    const displayName = typeof row.displayName === 'string' ? row.displayName : typeof row.title === 'string' ? row.title : undefined
+    const displayName =
+      typeof row.displayName === 'string'
+        ? row.displayName
+        : typeof row.title === 'string'
+          ? row.title
+          : undefined
     models.push(displayName ? { model, displayName } : { model })
   }
   return models
