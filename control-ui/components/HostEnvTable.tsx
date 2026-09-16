@@ -108,9 +108,8 @@ export function HostEnvTable({
     setOpen(true)
   }, [])
 
-  useEffect(() => {
-    if (!onActionsChange) return
-    onActionsChange(
+  const actions = useMemo(
+    () => (
       <>
         <button
           type="button"
@@ -127,9 +126,15 @@ export function HostEnvTable({
           Add variable
         </button>
       </>
-    )
+    ),
+    [load, openCreate, refreshing]
+  )
+
+  useEffect(() => {
+    if (!onActionsChange) return
+    onActionsChange(actions)
     return () => onActionsChange(null)
-  }, [load, onActionsChange, openCreate, refreshing])
+  }, [actions, onActionsChange])
 
   function openEdit(entry: HostEnvEntry) {
     setEditingKey(entry.key)
@@ -229,6 +234,7 @@ export function HostEnvTable({
             Provider keys live in the LLM Secrets tab.
           </p>
         </div>
+        {!onActionsChange ? <div className="cu-table-panel__actions">{actions}</div> : null}
       </div>
 
       {error ? <div className="cu-banner cu-banner--error">{error}</div> : null}
