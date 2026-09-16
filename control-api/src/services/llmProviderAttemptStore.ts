@@ -1,6 +1,10 @@
 import type { DbClient } from '../db.js'
 
 export const LLM_PROVIDER_ATTEMPT_PROVIDER = 'codex-subscription' as const
+export const GROK_PROVIDER_ATTEMPT_PROVIDER = 'grok-subscription' as const
+export type LlmProviderAttemptProvider =
+  | typeof LLM_PROVIDER_ATTEMPT_PROVIDER
+  | typeof GROK_PROVIDER_ATTEMPT_PROVIDER
 
 export type LlmProviderAttemptStatus = 'authorized' | 'redeemed' | 'finalized'
 export type LlmProviderAttemptTicketStatus = 'issued' | 'redeemed' | 'finalized'
@@ -23,11 +27,12 @@ export type LlmProviderAttemptInsert = {
   connectionId?: string | null
   correlationId?: string | null
   pluginWorkloadSdkProviderAttemptId?: string | null
+  provider?: LlmProviderAttemptProvider
 }
 
-export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
+export type LlmProviderAttemptRow = Omit<LlmProviderAttemptInsert, 'provider'> & {
   id: string
-  provider: typeof LLM_PROVIDER_ATTEMPT_PROVIDER
+  provider: LlmProviderAttemptProvider
   status: LlmProviderAttemptStatus
   outcome: LlmProviderAttemptOutcome | null
   usageInputTokens?: number | null
@@ -233,8 +238,8 @@ export async function insertLlmProviderAttempt(
        policy_revision, policy_hash, budget_reservation_id, connection_revision,
        connection_id, plugin_workload_sdk_provider_attempt_id, status, correlation_id
      ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7, 'codex-subscription', $8, $9, $10, $11, $12, $13,
-       $14, $15, 'authorized', $16
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+       $15, $16, 'authorized', $17
      )
      RETURNING id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
                attempt_generation, provider_attempt_index, provider, model, request_hash,
@@ -249,6 +254,7 @@ export async function insertLlmProviderAttempt(
       input.invocationId,
       input.attemptGeneration,
       input.providerAttemptIndex,
+      input.provider ?? LLM_PROVIDER_ATTEMPT_PROVIDER,
       input.model,
       input.requestHash,
       input.policyRevision,
@@ -274,7 +280,10 @@ function mapLlmProviderAttemptRow(row: Record<string, unknown>): LlmProviderAtte
     invocationId: String(row.invocation_id),
     attemptGeneration: Number(row.attempt_generation),
     providerAttemptIndex: Number(row.provider_attempt_index),
-    provider: LLM_PROVIDER_ATTEMPT_PROVIDER,
+    provider:
+      row.provider === GROK_PROVIDER_ATTEMPT_PROVIDER
+        ? GROK_PROVIDER_ATTEMPT_PROVIDER
+        : LLM_PROVIDER_ATTEMPT_PROVIDER,
     model: String(row.model),
     requestHash: String(row.request_hash),
     policyRevision: Number(row.policy_revision),
@@ -349,6 +358,30 @@ export async function loadLlmProviderAttemptBySdkAttemptId(
   return row ? mapLlmProviderAttemptRow(row) : null
 }
 
+function mapTicketRow(row: Record<string, unknown>): LlmProviderAttemptTicketRow {
+  return {
+    jti: String(row.jti),
+    providerAttemptId: String(row.provider_attempt_id),
+    status: row.status as LlmProviderAttemptTicketStatus,
+    expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(String(row.expires_at)),
+    receiptHash: (row.receipt_hash as string | null) ?? null,
+  }
+}
+
+export async function peekLlmProviderAttemptTicket(
+  db: DbClient,
+  jti: string
+): Promise<LlmProviderAttemptTicketRow | null> {
+  const result = await db.query(
+    `SELECT jti::text, provider_attempt_id::text, status, expires_at, receipt_hash
+       FROM llm_provider_attempt_tickets
+      WHERE jti = $1`,
+    [jti]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapTicketRow(row) : null
+}
+
 export async function lockLlmProviderAttemptTicket(
   db: DbClient,
   jti: string
@@ -361,14 +394,7 @@ export async function lockLlmProviderAttemptTicket(
     [jti]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) return null
-  return {
-    jti: String(row.jti),
-    providerAttemptId: String(row.provider_attempt_id),
-    status: row.status as LlmProviderAttemptTicketStatus,
-    expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(String(row.expires_at)),
-    receiptHash: (row.receipt_hash as string | null) ?? null,
-  }
+  return row ? mapTicketRow(row) : null
 }
 
 export async function markLlmProviderAttemptTicketRedeemed(

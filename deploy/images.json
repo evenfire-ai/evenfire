@@ -3,14 +3,18 @@
     {
       "name": "channel-reader",
       "path": "channel-reader",
-      "source_paths": ["channel-reader/**"],
+      "source_paths": [
+        "channel-reader/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "workflow-approval-request-reader",
       "path": "workflow-approval-request-reader",
-      "source_paths": ["workflow-approval-request-reader/**"],
+      "source_paths": [
+        "workflow-approval-request-reader/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -24,7 +28,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/image-policy/**",
         "packages/display-field/**",
-        "packages/llm-provider-attempt-contract/**"
+        "packages/llm-provider-attempt-contract/**",
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -46,7 +51,9 @@
     {
       "name": "external-rest-api",
       "path": "external-rest-api",
-      "source_paths": ["external-rest-api/**"],
+      "source_paths": [
+        "external-rest-api/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -71,7 +78,8 @@
       "source_paths": [
         "mcp-host/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -84,7 +92,8 @@
       "source_paths": [
         "mcp-host/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -97,7 +106,8 @@
       "source_paths": [
         "mcp-host/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -110,7 +120,8 @@
       "source_paths": [
         "mcp-host/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/codex-catalog-projection/**"
+        "packages/codex-catalog-projection/**",
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": false
@@ -118,21 +129,27 @@
     {
       "name": "mcp-proxy",
       "path": "mcp-proxy",
-      "source_paths": ["mcp-proxy/**"],
+      "source_paths": [
+        "mcp-proxy/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "gfs-controller",
       "path": "gfs-controller",
-      "source_paths": ["gfs-controller/**"],
+      "source_paths": [
+        "gfs-controller/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "nginx-egress-proxy",
       "path": "nginx-egress-proxy",
-      "source_paths": ["nginx-egress-proxy/**"],
+      "source_paths": [
+        "nginx-egress-proxy/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -151,7 +168,9 @@
     {
       "name": "rpc-proxy",
       "path": "rpc-proxy",
-      "source_paths": ["rpc-proxy/**"],
+      "source_paths": [
+        "rpc-proxy/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -236,21 +255,27 @@
     {
       "name": "stdio-bridge",
       "path": "stdio-bridge",
-      "source_paths": ["stdio-bridge/**"],
+      "source_paths": [
+        "stdio-bridge/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "workspace-files-controller",
       "path": "workspace-files-controller",
-      "source_paths": ["workspace-files-controller/**"],
+      "source_paths": [
+        "workspace-files-controller/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "airtable-mcp-server",
       "path": "mcp-servers/airtable",
-      "source_paths": ["mcp-servers/airtable/**"],
+      "source_paths": [
+        "mcp-servers/airtable/**"
+      ],
       "published": true,
       "deployed_to_minikube": false
     },
@@ -258,7 +283,9 @@
       "name": "playwright-server",
       "path": "mcp-servers/playwright",
       "local_name": "playwright-mcp-server",
-      "source_paths": ["mcp-servers/playwright/**"],
+      "source_paths": [
+        "mcp-servers/playwright/**"
+      ],
       "published": true,
       "deployed_to_minikube": false
     },
@@ -266,35 +293,45 @@
       "name": "web-search-mcp",
       "path": "mcp-servers/web-search",
       "local_tag": "v1",
-      "source_paths": ["mcp-servers/web-search/**"],
+      "source_paths": [
+        "mcp-servers/web-search/**"
+      ],
       "published": true,
       "deployed_to_minikube": false
     },
     {
       "name": "mock-mcp-server",
       "path": "tests/e2e/fixtures/mock-mcp-server",
-      "source_paths": ["tests/e2e/fixtures/mock-mcp-server/**"],
+      "source_paths": [
+        "tests/e2e/fixtures/mock-mcp-server/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "mock-stdio-mcp-server",
       "path": "tests/e2e/fixtures/mock-stdio-mcp-server",
-      "source_paths": ["tests/e2e/fixtures/mock-stdio-mcp-server/**"],
+      "source_paths": [
+        "tests/e2e/fixtures/mock-stdio-mcp-server/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "webhook-gateway",
       "path": "webhook-gateway",
-      "source_paths": ["webhook-gateway/**"],
+      "source_paths": [
+        "webhook-gateway/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
     {
       "name": "webhook-proxy",
       "path": "webhook-proxy",
-      "source_paths": ["webhook-proxy/**"],
+      "source_paths": [
+        "webhook-proxy/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },
@@ -302,7 +339,21 @@
       "name": "codex-llm-proxy",
       "path": "codex-llm-proxy",
       "rooted": true,
-      "source_paths": ["codex-llm-proxy/**", "packages/llm-provider-attempt-contract/**"],
+      "source_paths": [
+        "codex-llm-proxy/**",
+        "packages/llm-provider-attempt-contract/**"
+      ],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "grok-llm-proxy",
+      "path": "grok-llm-proxy",
+      "rooted": true,
+      "source_paths": [
+        "grok-llm-proxy/**",
+        "packages/grok-provider-attempt-contract/**"
+      ],
       "published": true,
       "deployed_to_minikube": true
     },

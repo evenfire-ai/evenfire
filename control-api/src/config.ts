@@ -325,7 +325,22 @@ function parseInternalServiceTokens(input: string): Record<string, string> {
     assertNotPlaceholder(`CONTROL_API_INTERNAL_SERVICE_TOKENS[${key}]`, value)
     result[key] = value
   }
+  assertDistinctBrokerProxyTokens(result)
   return result
+}
+
+function assertDistinctBrokerProxyTokens(tokens: Record<string, string>): void {
+  const brokers = ['codex-llm-proxy', 'grok-llm-proxy']
+  const seen = new Map<string, string>()
+  for (const name of brokers) {
+    const token = tokens[name]
+    if (!token) continue
+    const owner = seen.get(token)
+    if (owner) {
+      throw new Error(`internal service tokens for "${owner}" and "${name}" must be distinct`)
+    }
+    seen.set(token, name)
+  }
 }
 
 function parseCsvList(input: string): string[] {
@@ -653,7 +668,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token,grok-llm-proxy=dev-grok-llm-proxy-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',

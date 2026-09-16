@@ -40,3 +40,14 @@ OAuth `device/code` and `token` use `redirect: 'manual'`; any 3xx is an error.
 
 Owned by `@clerum/grok-provider-attempt-contract`. Independent of Codex
 `LIMITS` (`maxToolCalls` is 64, not 32).
+
+## Identity headers
+
+Stamped in `grok-llm-proxy`, never taken from mcp-host or the hashed request:
+
+- `user-agent: evenfire-grok-subscription`
+- `accept: text/event-stream` on stream
+
+CLI impersonation headers (`x-xai-token-auth`, `x-grok-client-identifier`) stay
+off until a recorded SuperGrok probe requires them. Do not send `OpenAI-Beta`
+or `service_tier`. `max_output_tokens` is bindable on this wire.

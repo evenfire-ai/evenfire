@@ -1,0 +1,59 @@
+import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  CATALOG_ORIGIN,
+  COMPLETIONS_ORIGIN,
+  LIMITS,
+  TRANSPORT_PROTOCOL_VERSION,
+} from '@clerum/grok-provider-attempt-contract'
+import {
+  GROK_CATALOG_ORIGIN,
+  GROK_COMPLETIONS_ORIGIN,
+  GROK_TRANSPORT_PROTOCOL,
+} from '../src/originPolicy.js'
+import { GROK_UPSTREAM_USER_AGENT } from '../src/grokUpstreamHeaders.js'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const fixturePath = join(
+  here,
+  '../../tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json'
+)
+
+describe('grok-subscription contract freeze', () => {
+  it('imports the origin-policy constants the proxy actually enforces', () => {
+    expect(GROK_COMPLETIONS_ORIGIN).toBe(COMPLETIONS_ORIGIN)
+    expect(GROK_CATALOG_ORIGIN).toBe(CATALOG_ORIGIN)
+    expect(GROK_TRANSPORT_PROTOCOL).toBe(TRANSPORT_PROTOCOL_VERSION)
+
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      protocolVersion: string
+      origins: Record<string, string>
+      supportedOperations: string[]
+      oauthScopes: string[]
+      limits: Record<string, number>
+      identityHeaders: { 'user-agent': string; cliImpersonation: boolean }
+      forbiddenOrigins: string[]
+    }
+
+    expect(fixture.protocolVersion).toBe(GROK_TRANSPORT_PROTOCOL)
+    expect(fixture.origins.completions).toBe(GROK_COMPLETIONS_ORIGIN)
+    expect(fixture.origins.catalog).toBe(GROK_CATALOG_ORIGIN)
+    expect(fixture.origins.oauthDevice).toBe('https://auth.x.ai/oauth2/device/code')
+    expect(fixture.origins.oauthToken).toBe('https://auth.x.ai/oauth2/token')
+    expect(fixture.supportedOperations).not.toContain('oauth_browser')
+    expect(fixture.supportedOperations).toContain('oauth_device')
+    expect(fixture.limits.maxToolCalls).toBe(LIMITS.maxToolCalls)
+    expect(fixture.limits.maxToolCalls).toBe(64)
+    expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
+    expect(fixture.identityHeaders['user-agent']).toBe(GROK_UPSTREAM_USER_AGENT)
+    expect(fixture.identityHeaders.cliImpersonation).toBe(false)
+    expect(fixture.oauthScopes).toEqual(
+      expect.arrayContaining(['openid', 'offline_access', 'grok-cli:access', 'api:access'])
+    )
+    expect(fixture.forbiddenOrigins).toEqual(expect.arrayContaining(['https://api.x.ai']))
+    expect(GROK_COMPLETIONS_ORIGIN).not.toContain('api.x.ai')
+    expect(GROK_CATALOG_ORIGIN).not.toContain('api.x.ai')
+  })
+})

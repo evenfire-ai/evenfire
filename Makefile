@@ -40,6 +40,7 @@ SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -66,6 +67,7 @@ TEST_SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -133,6 +135,10 @@ test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts,
 .PHONY: test-llm-subscription-extract-t0
 test-llm-subscription-extract-t0: ## Run the wave-1 oauth-broker extract T0 aggregator
 	@bash scripts/tests/test-llm-subscription-extract-t0.sh
+
+.PHONY: test-grok-subscription-t0
+test-grok-subscription-t0: ## Run the Grok subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-grok-subscription-t0.sh
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight

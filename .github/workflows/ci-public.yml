@@ -73,6 +73,7 @@ jobs:
           - packages/grok-provider-attempt-contract
           - packages/codex-catalog-projection
           - codex-llm-proxy
+          - grok-llm-proxy
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

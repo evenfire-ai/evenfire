@@ -1,0 +1,275 @@
+import {
+  CATALOG_ORIGIN,
+  COMPLETIONS_ORIGIN,
+  TRANSPORT_PROTOCOL_VERSION,
+} from '@clerum/grok-provider-attempt-contract'
+import { config } from '../config.js'
+import { type DbClient, pool, withTransaction } from '../db.js'
+import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
+import { rootLogger } from '../observability/logger.js'
+import { verifyGrokExecutionTicket } from './grokProviderAttemptTicket.js'
+import {
+  getSafeGrokSubscriptionConnectionById,
+  loadGrokSubscriptionSecrets,
+} from './grokSubscriptionConnection.js'
+import { GrokSubscriptionOAuthError, ensureFreshGrokAccessToken } from './grokSubscriptionOAuth.js'
+import { opaqueAttemptReceipt } from './llmProviderAttemptRedemption.js'
+import {
+  loadLlmProviderAttempt,
+  lockLlmProviderAttemptTicket,
+  markLlmProviderAttemptTicketRedeemed,
+  peekLlmProviderAttemptTicket,
+} from './llmProviderAttemptStore.js'
+
+const log = rootLogger.child({ module: 'grok-provider-attempt-redemption' })
+
+export const GROK_COMPLETIONS_ORIGIN = COMPLETIONS_ORIGIN
+export const GROK_CATALOG_ORIGIN = CATALOG_ORIGIN
+export const GROK_TRANSPORT_PROTOCOL = TRANSPORT_PROTOCOL_VERSION
+export const GROK_MAX_STREAM_DURATION_MS = 300_000
+
+export type GrokProviderAttemptRedeemErrorCode =
+  | 'disabled'
+  | 'ticket_invalid'
+  | 'ticket_replayed'
+  | 'ticket_expired'
+  | 'request_hash_mismatch'
+  | 'connection_unavailable'
+  | 'no_grant'
+  | 'provider_unavailable'
+
+export class GrokProviderAttemptRedeemError extends Error {
+  constructor(
+    readonly code: GrokProviderAttemptRedeemErrorCode,
+    message: string
+  ) {
+    super(message)
+    this.name = 'GrokProviderAttemptRedeemError'
+  }
+}
+
+export type RedeemGrokAttemptSuccess = {
+  accessToken: string
+  transport: {
+    protocolVersion: typeof GROK_TRANSPORT_PROTOCOL
+    completionsOrigin: typeof GROK_COMPLETIONS_ORIGIN
+    catalogOrigin: typeof GROK_CATALOG_ORIGIN
+    operation: 'completion_stream' | 'completion_cancel' | 'connection_test'
+    servedModel: string
+    maxStreamDurationMs: number
+  }
+  expiryClass: 'short_lived' | 'upstream_managed'
+  attemptReceipt: string
+}
+
+export type RedeemGrokAttemptInput = {
+  executionTicket: string
+  requestHash: string
+  model?: string
+  hostRef?: string
+  operation?: 'completion_stream' | 'completion_cancel' | 'connection_test'
+}
+
+export type RedeemGrokAttemptDeps = {
+  enabled: boolean
+  db: DbClient
+  withTransaction: typeof withTransaction
+  loadSecrets: typeof loadGrokSubscriptionSecrets
+  getConnectionById: typeof getSafeGrokSubscriptionConnectionById
+  encryptionKey: Buffer
+  ensureFreshAccessToken?: (connectionKey?: string) => Promise<void>
+}
+
+const defaultRedeemDeps = (): RedeemGrokAttemptDeps => ({
+  enabled: config.grokSubscriptionEnabled,
+  db: pool,
+  withTransaction,
+  loadSecrets: loadGrokSubscriptionSecrets,
+  getConnectionById: getSafeGrokSubscriptionConnectionById,
+  encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+  ensureFreshAccessToken: connectionKey =>
+    ensureFreshGrokAccessToken({
+      db: { query: (text, values) => pool.query(text, values) },
+      encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+      fetchFn: fetch,
+      clientId: config.grokOAuthClientId,
+      enabled: config.grokSubscriptionEnabled,
+      connectionKey: connectionKey ?? '',
+    }),
+})
+
+export async function redeemGrokProviderAttempt(
+  input: RedeemGrokAttemptInput,
+  deps: RedeemGrokAttemptDeps = defaultRedeemDeps()
+): Promise<RedeemGrokAttemptSuccess> {
+  if (!deps.enabled) {
+    throw new GrokProviderAttemptRedeemError('disabled', 'Grok subscription is disabled')
+  }
+  const claims = verifyGrokExecutionTicket(input.executionTicket)
+  if (!claims) {
+    throw new GrokProviderAttemptRedeemError('ticket_invalid', 'execution ticket is invalid')
+  }
+  if (claims.provider !== 'grok-subscription') {
+    throw new GrokProviderAttemptRedeemError(
+      'ticket_invalid',
+      'ticket provider is not grok-subscription'
+    )
+  }
+  if (claims.requestHash !== input.requestHash) {
+    throw new GrokProviderAttemptRedeemError(
+      'request_hash_mismatch',
+      'requestHash does not match the ticket'
+    )
+  }
+  if (input.model && input.model !== claims.model) {
+    throw new GrokProviderAttemptRedeemError('ticket_invalid', 'model does not match the ticket')
+  }
+  if (input.hostRef && input.hostRef !== claims.hostRef) {
+    throw new GrokProviderAttemptRedeemError('ticket_invalid', 'hostRef does not match the ticket')
+  }
+
+  const previewTicket = await peekLlmProviderAttemptTicket(deps.db, claims.jti)
+  if (!previewTicket) {
+    throw new GrokProviderAttemptRedeemError('ticket_invalid', 'execution ticket is not registered')
+  }
+  if (previewTicket.status !== 'issued') {
+    throw new GrokProviderAttemptRedeemError('ticket_replayed', 'execution ticket already used')
+  }
+  const previewAttempt = await loadLlmProviderAttempt(deps.db, previewTicket.providerAttemptId)
+  if (
+    !previewAttempt ||
+    previewAttempt.provider !== 'grok-subscription' ||
+    previewAttempt.connectionId !== claims.connectionId
+  ) {
+    throw new GrokProviderAttemptRedeemError(
+      'ticket_invalid',
+      'ticket provider or connectionId does not match the attempt'
+    )
+  }
+
+  if (deps.ensureFreshAccessToken) {
+    try {
+      const assigned = await deps.getConnectionById(deps.db, claims.connectionId)
+      await deps.ensureFreshAccessToken(assigned?.connectionKey)
+    } catch (err) {
+      if (err instanceof GrokSubscriptionOAuthError) {
+        throw new GrokProviderAttemptRedeemError(
+          err.code === 'no_grant' || err.code === 'not_connected'
+            ? 'no_grant'
+            : err.code === 'provider_unavailable'
+              ? 'provider_unavailable'
+              : 'connection_unavailable',
+          'Grok access token could not be refreshed'
+        )
+      }
+      throw err
+    }
+  }
+
+  return deps.withTransaction(async tx => {
+    const ticket = await lockLlmProviderAttemptTicket(tx, claims.jti)
+    if (!ticket) {
+      throw new GrokProviderAttemptRedeemError(
+        'ticket_invalid',
+        'execution ticket is not registered'
+      )
+    }
+    if (ticket.status !== 'issued') {
+      throw new GrokProviderAttemptRedeemError('ticket_replayed', 'execution ticket already used')
+    }
+    if (ticket.expiresAt.getTime() <= Date.now()) {
+      throw new GrokProviderAttemptRedeemError('ticket_expired', 'execution ticket expired')
+    }
+
+    const attempt = await loadLlmProviderAttempt(tx, ticket.providerAttemptId)
+    if (!attempt || attempt.status !== 'authorized') {
+      throw new GrokProviderAttemptRedeemError(
+        'ticket_invalid',
+        'provider attempt is not redeemable'
+      )
+    }
+    if (attempt.provider !== 'grok-subscription' || attempt.connectionId !== claims.connectionId) {
+      throw new GrokProviderAttemptRedeemError(
+        'ticket_invalid',
+        'ticket provider or connectionId does not match the attempt'
+      )
+    }
+    if (
+      attempt.requestHash !== claims.requestHash ||
+      attempt.model !== claims.model ||
+      attempt.hostRef !== claims.hostRef ||
+      attempt.invocationId !== claims.invocationId ||
+      attempt.attemptGeneration !== claims.attemptGeneration ||
+      attempt.policyHash !== claims.policyHash ||
+      attempt.policyRevision !== claims.policyRevision ||
+      attempt.budgetReservationId !== claims.budgetReservationId ||
+      attempt.connectionRevision !== claims.connectionRevision
+    ) {
+      throw new GrokProviderAttemptRedeemError(
+        'no_grant',
+        'ticket bindings no longer match the attempt'
+      )
+    }
+
+    if (!attempt.connectionId) {
+      throw new GrokProviderAttemptRedeemError(
+        'connection_unavailable',
+        'Grok attempt is missing a connection binding'
+      )
+    }
+    const connection = await getSafeGrokSubscriptionConnectionById(tx, attempt.connectionId)
+    if (
+      !connection ||
+      connection.status !== 'connected' ||
+      connection.revokedAt ||
+      connection.credentialRevision !== attempt.connectionRevision ||
+      connection.id !== attempt.connectionId
+    ) {
+      throw new GrokProviderAttemptRedeemError(
+        'connection_unavailable',
+        'Grok subscription connection is not usable'
+      )
+    }
+
+    const redeemed = await markLlmProviderAttemptTicketRedeemed(tx, claims.jti)
+    if (!redeemed) {
+      throw new GrokProviderAttemptRedeemError('ticket_replayed', 'execution ticket already used')
+    }
+
+    const secrets = await deps.loadSecrets(tx, deps.encryptionKey, connection.connectionKey)
+    if (!secrets?.accessToken) {
+      throw new GrokProviderAttemptRedeemError(
+        'connection_unavailable',
+        'no usable access token is available'
+      )
+    }
+
+    const expiryClass =
+      secrets.accessTokenExpiresAt &&
+      secrets.accessTokenExpiresAt.getTime() - Date.now() < 3_600_000
+        ? 'short_lived'
+        : 'upstream_managed'
+
+    log.info(
+      { event: 'grok_attempt_redeemed', providerAttemptId: attempt.id },
+      'redeemed Grok execution ticket'
+    )
+    return {
+      accessToken: secrets.accessToken,
+      transport: {
+        protocolVersion: GROK_TRANSPORT_PROTOCOL,
+        completionsOrigin: GROK_COMPLETIONS_ORIGIN,
+        catalogOrigin: GROK_CATALOG_ORIGIN,
+        operation: input.operation ?? 'completion_stream',
+        servedModel: attempt.model,
+        maxStreamDurationMs: GROK_MAX_STREAM_DURATION_MS,
+      },
+      expiryClass,
+      attemptReceipt: opaqueAttemptReceipt({
+        jti: claims.jti,
+        providerAttemptId: attempt.id,
+        requestHash: attempt.requestHash,
+      }),
+    }
+  })
+}
