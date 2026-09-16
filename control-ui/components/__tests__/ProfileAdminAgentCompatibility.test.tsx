@@ -171,6 +171,68 @@ describe('profile-admin agent compatibility access', () => {
     expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
   })
 
+  // Review R1-H1: display names are not unique. Two agents sharing one display
+  // name must stay distinguishable in the member Agents tab — slug visible as
+  // secondary identity, action labels disambiguated — and revoking one row's
+  // access must still target exactly that row's slug.
+  it('distinguishes duplicate member agent display names by their slug', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-dup-a' },
+          spec: { contextRef: 'ctx-alpha', host: 'Duplicate Bot' },
+        },
+        {
+          metadata: { name: 'agent-dup-b' },
+          spec: { contextRef: 'ctx-beta', host: 'Duplicate Bot' },
+        },
+      ],
+    })
+    vi.mocked(api.getAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-dup-a', 'agent-dup-b'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserAgents).mockResolvedValue({
+      userId: 'user-1',
+      agentNames: ['agent-dup-b'],
+      deletedAgentNames: ['agent-dup-a'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminUserContexts).mockResolvedValue({
+      userId: 'user-1',
+      contextIds: ['ctx-beta'],
+    })
+
+    renderUserDetails()
+
+    // Same display name twice, each row carrying its own immutable slug.
+    expect(await screen.findAllByRole('button', { name: 'Duplicate Bot' })).toHaveLength(2)
+    expect(screen.getAllByText('agent-dup-a', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+    expect(screen.getAllByText('agent-dup-b', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+
+    // The action menu of the first row is labeled with its slug; revoking it
+    // removes exactly agent-dup-a and keeps agent-dup-b.
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for Duplicate Bot (agent-dup-a)' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke access' }))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(confirmDialog).toHaveTextContent('agent-dup-a')
+    fireEvent.click(confirmDialog.querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminUserAgents).toHaveBeenCalledWith(
+        'user-1',
+        ['agent-dup-b'],
+        expect.arrayContaining(['agent-dup-a', 'agent-dup-b'])
+      )
+    })
+    expect(api.updateAdminUserContexts).toHaveBeenCalledWith('user-1', ['ctx-beta'])
+  })
   // Same rename propagation on the team Agents tab.
   it('shows agent display names in the team Agents tab, falling back to the identifier', async () => {
     vi.mocked(api.getHosts).mockResolvedValue({
@@ -198,6 +260,67 @@ describe('profile-admin agent compatibility access', () => {
     expect(await screen.findByRole('button', { name: 'Alpha Bot' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'agent-beta' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'agent-alpha' })).not.toBeInTheDocument()
+  })
+
+  // Review R1-H1 on the team Agents tab: duplicate display names stay
+  // distinguishable via the visible slug, and revoking one row targets
+  // exactly that row's slug.
+  it('distinguishes duplicate team agent display names by their slug', async () => {
+    vi.mocked(api.getHosts).mockResolvedValue({
+      items: [
+        {
+          metadata: { name: 'agent-dup-a' },
+          spec: { contextRef: 'ctx-alpha', host: 'Duplicate Bot' },
+        },
+        {
+          metadata: { name: 'agent-dup-b' },
+          spec: { contextRef: 'ctx-beta', host: 'Duplicate Bot' },
+        },
+      ],
+    })
+    vi.mocked(api.getAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-alpha', 'ctx-beta'],
+    })
+    vi.mocked(api.getAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-dup-a', 'agent-dup-b'],
+      deletedAgentNames: [],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamAgents).mockResolvedValue({
+      teamId: 'team-1',
+      agentNames: ['agent-dup-b'],
+      deletedAgentNames: ['agent-dup-a'],
+      deletedHistoryLimit: 10,
+    })
+    vi.mocked(api.updateAdminTeamContexts).mockResolvedValue({
+      teamId: 'team-1',
+      contextIds: ['ctx-beta'],
+    })
+
+    renderTeamDetails()
+
+    expect(await screen.findAllByRole('button', { name: 'Duplicate Bot' })).toHaveLength(2)
+    expect(screen.getAllByText('agent-dup-a', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+    expect(screen.getAllByText('agent-dup-b', { selector: '.cu-access-agent-id' })).toHaveLength(1)
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for agent Duplicate Bot (agent-dup-a)' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Revoke agent access' }))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(confirmDialog).toHaveTextContent('agent-dup-a')
+    fireEvent.click(confirmDialog.querySelector('.cu-btn--danger')!)
+
+    await waitFor(() => {
+      expect(api.updateAdminTeamAgents).toHaveBeenCalledWith(
+        'team-1',
+        ['agent-dup-b'],
+        expect.arrayContaining(['agent-dup-a', 'agent-dup-b'])
+      )
+    })
+    expect(api.updateAdminTeamContexts).toHaveBeenCalledWith('team-1', ['ctx-beta'])
   })
 
   it('removes only owned Context grants when a member loses final agent access', async () => {
