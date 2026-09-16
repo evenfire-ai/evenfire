@@ -1,6 +1,6 @@
 'use client'
 
-import { Children, isValidElement, useLayoutEffect, useRef, useState } from 'react'
+import { Children, isValidElement, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 function getDescriptionText(node: ReactNode): string {
@@ -11,6 +11,7 @@ function getDescriptionText(node: ReactNode): string {
 
 export function ClampedDescription({ children }: { children: ReactNode }) {
   const contentRef = useRef<HTMLSpanElement>(null)
+  const descriptionId = useId()
   const [isTruncated, setIsTruncated] = useState(false)
 
   const tooltipText = Children.toArray(children).map(getDescriptionText).join('')
@@ -33,14 +34,23 @@ export function ClampedDescription({ children }: { children: ReactNode }) {
   }, [children])
 
   return (
-    <span className="cu-table-panel__description" tabIndex={isTruncated ? 0 : undefined}>
+    <span
+      aria-describedby={isTruncated ? descriptionId : undefined}
+      className="cu-table-panel__description"
+      tabIndex={isTruncated ? 0 : undefined}
+    >
       <span ref={contentRef} className="cu-table-panel__description-value">
         {children}
       </span>
       {isTruncated ? (
-        <span aria-hidden="true" className="cu-table-panel__description-tooltip" role="tooltip">
-          {tooltipText}
-        </span>
+        <>
+          <span className="sr-only" id={descriptionId}>
+            {tooltipText}
+          </span>
+          <span aria-hidden="true" className="cu-table-panel__description-tooltip" role="tooltip">
+            {tooltipText}
+          </span>
+        </>
       ) : null}
     </span>
   )

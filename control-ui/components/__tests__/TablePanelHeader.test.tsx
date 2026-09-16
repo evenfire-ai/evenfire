@@ -113,6 +113,10 @@ describe('TablePanelHeader', () => {
 
       const description = document.querySelector('.cu-table-panel__description')
       expect(description).toHaveAttribute('tabindex', '0')
+      expect(description).toHaveAttribute('aria-describedby')
+      expect(
+        document.getElementById(description?.getAttribute('aria-describedby') || '')
+      ).toHaveTextContent('A longer description that cannot fit within two lines.')
       expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent(
         'A longer description that cannot fit within two lines.'
       )
