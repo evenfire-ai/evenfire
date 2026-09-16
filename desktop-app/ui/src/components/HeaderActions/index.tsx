@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigationContext } from '@contexts/NavigationContext'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import ReactMarkdown from 'react-markdown'
@@ -91,7 +91,8 @@ export const HeaderActions = React.memo(function HeaderActions({
   onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
 }: HeaderActionsProps) {
-  const { accessCatalog: agentsAccessCatalog } = useAgentsDataController()
+  const { accessCatalog: agentsAccessCatalog, loading: agentsCatalogLoading } =
+    useAgentsDataController()
   const { globalMcpServers, mcpServersByAgent } = useMcpServersDataController()
   const {
     teams,
@@ -322,6 +323,17 @@ export const HeaderActions = React.memo(function HeaderActions({
         teamNames: [...details.teamNames].sort((a, b) => a.localeCompare(b)),
       }))
   }, [accessCatalog, currentTeamId, currentTeamName, teamDirectory, teams])
+
+  // Visible name for a notification's agent: the catalog display name
+  // (spec.host) with the raw identifier as fallback. Pseudo-agents that are
+  // not catalog agents ('Workflows', recipe names) pass through untouched.
+  const notificationAgentDisplay = useCallback(
+    (agentName: string): string => {
+      const map = accessCatalog?.agentDisplayByName
+      return (map && map[agentName]) || agentName
+    },
+    [accessCatalog]
+  )
 
   const filteredAgents = useMemo(
     () =>
@@ -837,7 +849,20 @@ export const HeaderActions = React.memo(function HeaderActions({
                           tabIndex={notification.kind === 'approval_required' ? undefined : 0}
                         >
                           <div className="notification-menu-item-header">
-                            <p className="notification-menu-agent">{notification.agentName}</p>
+                            <p className="notification-menu-agent">
+                              {/* While the access catalog is still loading the
+                               * display-name map is unknown — skeleton the line
+                               * instead of flashing the raw slug (QA parity with
+                               * the control-ui header fix). */}
+                              {agentsCatalogLoading ? (
+                                <span
+                                  className="notification-menu-agent-skeleton"
+                                  aria-label="Loading agent name"
+                                />
+                              ) : (
+                                notificationAgentDisplay(notification.agentName)
+                              )}
+                            </p>
                             <span className="notification-menu-time">
                               {formatNotificationTime(notification.timestamp)}
                             </span>

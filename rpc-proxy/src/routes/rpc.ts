@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import type { Response as ExpressResponse, NextFunction } from 'express'
 import { randomUUID } from 'crypto'
+import { rateLimit } from 'express-rate-limit'
 import { actionAuthorityCacheKey, authorizeActionV2 } from '../actionAuthorityV2.js'
 import { config } from '../config.js'
 import {
@@ -27,6 +28,7 @@ import {
   forwardRpcToServer,
   forwardTaskResultFromHost,
   listAllowedServersForUser,
+  resolveArtifactReadHostConnectionForUser,
   resolveHostConnectionForUser,
   resolveServerConnectionForUser,
   validateRpcRequest,
@@ -47,6 +49,11 @@ const RFC1123_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 const SESSIONS_LIMIT_CAP = 100
 const MESSAGES_LIMIT_CAP = 200
 const SESSION_SEARCH_LIMIT_CAP = 50
+const HOST_ARTIFACT_READ_LIMIT_PER_MIN = 30
+
+type ArtifactReadRequest = AuthedRequest & {
+  artifactReadHost?: Awaited<ReturnType<typeof resolveArtifactReadHostConnectionForUser>>
+}
 
 function isSafeUpstreamPathSegment(value: string): boolean {
   return (
@@ -131,6 +138,16 @@ function controlApiHostAccessRejectionStatus(error: unknown): 401 | 403 | 409 | 
   }
   const status = (error as Error & { status?: unknown }).status
   return status === 401 || status === 403 || status === 409 ? status : null
+}
+
+function controlApiArtifactReadRetryAfterSeconds(error: unknown): number | null {
+  if (!(error instanceof Error) || error.name !== 'ControlApiArtifactReadRateLimitedError') {
+    return null
+  }
+  const retryAfterSeconds = (error as Error & { retryAfterSeconds?: unknown }).retryAfterSeconds
+  return typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
+    ? Math.max(1, Math.ceil(retryAfterSeconds))
+    : null
 }
 
 export function respondControlApiHostAccessRejection(
@@ -221,6 +238,70 @@ async function readArtifactResponseBuffer(response: Response): Promise<Buffer> {
 
 export function createRpcRouter(): Router {
   const router = Router()
+
+  // Control API owns the durable, cross-replica artifact budget. This edge
+  // backstop uses the same verified identity + canonical Host key so route
+  // analysis can prove both artifact reads are bounded without replacing the
+  // authoritative PG limiter or consuming Host wake capacity.
+  const artifactReadEdgeRateLimit = rateLimit({
+    windowMs: 60_000,
+    limit: HOST_ARTIFACT_READ_LIMIT_PER_MIN,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    keyGenerator: req => {
+      const artifactRead = req as ArtifactReadRequest
+      const subject = artifactRead.auth?.sub
+      const hostRef = artifactRead.artifactReadHost?.name
+      return `host-artifact-read:${subject ?? '__missing_subject__'}:${hostRef ?? '__missing_host__'}`
+    },
+    handler: (_req, res) => {
+      const raw = res.getHeader('Retry-After')
+      const retryAfterSeconds =
+        typeof raw === 'string' && /^\d+$/.test(raw) ? Math.max(1, Number(raw)) : 60
+      res.status(429).json({ error: 'Too Many Requests', retryAfterSeconds })
+    },
+  })
+
+  const resolveArtifactReadHost = async (
+    req: ArtifactReadRequest,
+    res: ExpressResponse,
+    next: NextFunction
+  ) => {
+    try {
+      const auth = req.auth!
+      const hostRef = String(req.params.hostRef || '').trim()
+      if (!hostRef) {
+        res.status(400).json({ error: 'hostRef is required' })
+        return
+      }
+      if (!RFC1123_RE.test(hostRef)) {
+        res.status(400).json({ error: 'Invalid host reference' })
+        return
+      }
+      req.artifactReadHost = await resolveArtifactReadHostConnectionForUser(
+        auth.sub,
+        hostRef,
+        extractAuthToken(req),
+        { teamId: auth.teamId }
+      )
+      if (!req.artifactReadHost) {
+        res.status(403).json({ error: 'Forbidden: user cannot access this host' })
+        return
+      }
+      next()
+    } catch (error) {
+      const retryAfterSeconds = controlApiArtifactReadRetryAfterSeconds(error)
+      if (retryAfterSeconds !== null) {
+        res.setHeader('Retry-After', String(retryAfterSeconds))
+        res.status(429).json({
+          error: 'Too Many Requests',
+          retryAfterSeconds,
+        })
+        return
+      }
+      guardedNext(res, next, error)
+    }
+  }
 
   router.get(
     '/rpc/servers',
@@ -1522,29 +1603,14 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/artifacts',
     requireRpcAuth,
     requireScope('host:task:read'),
+    resolveArtifactReadHost,
+    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!RFC1123_RE.test(hostRef)) {
-          res.status(400).json({ error: 'Invalid host reference' })
-          return
-        }
-        const host = await resolveHostConnectionForUser(
-          auth.sub,
-          hostRef,
-          rpcAccessToken,
-          runtimeHostEdgeContext(req)
-        )
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
+        const host = (req as ArtifactReadRequest).artifactReadHost!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         const attempt = async () => {
@@ -1582,40 +1648,29 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/artifacts/:filename/download',
     requireRpcAuth,
     requireScope('host:task:read'),
+    (req: AuthedRequest, res, next) => {
+      const filename = String(req.params.filename || '').trim()
+      if (
+        !filename ||
+        filename.includes('..') ||
+        filename.includes('/') ||
+        filename.includes('\\') ||
+        filename.includes('\0')
+      ) {
+        res.status(400).json({ error: 'Invalid filename' })
+        return
+      }
+      next()
+    },
+    resolveArtifactReadHost,
+    artifactReadEdgeRateLimit,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
         const rpcAccessToken = extractAuthToken(req)
         const hostRef = String(req.params.hostRef || '').trim()
         const filename = String(req.params.filename || '').trim()
-        if (!hostRef) {
-          res.status(400).json({ error: 'hostRef is required' })
-          return
-        }
-        if (!RFC1123_RE.test(hostRef)) {
-          res.status(400).json({ error: 'Invalid host reference' })
-          return
-        }
-        if (
-          !filename ||
-          filename.includes('..') ||
-          filename.includes('/') ||
-          filename.includes('\\') ||
-          filename.includes('\0')
-        ) {
-          res.status(400).json({ error: 'Invalid filename' })
-          return
-        }
-        const host = await resolveHostConnectionForUser(
-          auth.sub,
-          hostRef,
-          rpcAccessToken,
-          runtimeHostEdgeContext(req)
-        )
-        if (!host) {
-          res.status(403).json({ error: 'Forbidden: user cannot access this host' })
-          return
-        }
+        const host = (req as ArtifactReadRequest).artifactReadHost!
         const baseUrl = host.url.replace(/\/+$/, '')
         // Wake-eligible finite operation (§11.4): scope stays host:task:read.
         // The success path only commits (`res.send`) at the very end, so a
