@@ -177,7 +177,7 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
       }
       setState(prev => ({ ...prev, activeField: key }))
     },
-    [anyDirty, confirm, discardEdits, saveActiveField, state.activeField]
+    [anyDirty, choose, discardEdits, saveActiveField, state.activeField]
   )
 
   useEffect(() => {
