@@ -64,7 +64,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
     icon: <IconFolder />,
     children: [
       {
-        label: 'Global File System',
+        label: 'EvenDrive',
         href: CONTROL_ROUTES.globalFileSystem,
         icon: <IconPaperclip />,
       },

@@ -14,6 +14,7 @@ import { FileUploadModal } from '@components/FileUploadModal'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { GfsMarkdownPreview } from '@components/GfsMarkdownPreview'
 import { GfsMoveDialog } from '@components/GfsMoveDialog'
+import { GfsOpenLinkModal } from '@components/GfsOpenLinkModal'
 import { GfsVideoPreview } from '@components/GfsVideoPreview'
 import {
   IconDocumentText,
@@ -77,6 +78,11 @@ interface Crumb {
   id: string | null
   rid: string | null
   name: string
+  /** Folder crumbs carry the identity their ⋯ menu actions need; the
+   *  synthetic root has none and gets no menu. */
+  kind?: 'directory'
+  gfsUri?: string
+  version?: number
 }
 
 const DRIVE = 'main'
@@ -220,6 +226,10 @@ export function GfsBrowser(): React.JSX.Element {
   const [renameName, setRenameName] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // "Open EvenDrive link" dialog launched from the folder ⋯ menus.
+  const [openLinkOpen, setOpenLinkOpen] = useState(false)
+  const [openLinkResolving, setOpenLinkResolving] = useState(false)
+  const [openLinkError, setOpenLinkError] = useState<string | null>(null)
   // New-folder dialog (replaces the native window.prompt flow).
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [creatingFolder, setCreatingFolder] = useState(false)
@@ -353,7 +363,7 @@ export function GfsBrowser(): React.JSX.Element {
         if (!isSilentApiError(err)) {
           // Background revalidation keeps the (stale) rows visible but still
           // surfaces the failure instead of silently ignoring it.
-          setError(err instanceof Error ? err.message : 'Failed to load the Global File System')
+          setError(err instanceof Error ? err.message : 'Failed to load EvenDrive')
         }
       } finally {
         if (seq === loadSeqRef.current) {
@@ -477,7 +487,17 @@ export function GfsBrowser(): React.JSX.Element {
   function openDirectory(child: GfsChild): void {
     if (child.kind !== 'directory') return
     setRenameTarget(null)
-    setCrumbs(prev => [...prev, { id: child.resourceId, rid: child.rid, name: child.name }])
+    setCrumbs(prev => [
+      ...prev,
+      {
+        id: child.resourceId,
+        rid: child.rid,
+        name: child.name,
+        kind: 'directory',
+        gfsUri: child.gfsUri,
+        version: child.version,
+      },
+    ])
     const cached = childCacheRef.current.get(child.resourceId)
     if (cached) {
       // Render the cached listing instantly; the effect-driven background
@@ -532,9 +552,9 @@ export function GfsBrowser(): React.JSX.Element {
   async function copyGfsUri(uri: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(uri)
-      showToast('GFS link copied.', { tone: 'success' })
+      showToast('EvenDrive link copied.', { tone: 'success' })
     } catch {
-      showToast('Could not copy the GFS link.', { tone: 'error' })
+      showToast('Could not copy the EvenDrive link.', { tone: 'error' })
     }
   }
 
@@ -981,6 +1001,80 @@ export function GfsBrowser(): React.JSX.Element {
     setRenameName(child.name)
   }
 
+  /** Adapt a folder crumb for the row-action handlers (share, rename, move,
+   *  delete) so a breadcrumb menu acts on exactly the same shape a
+   *  parent-view row does. Returns null for the synthetic root. */
+  function crumbToChild(crumb: Crumb): GfsChild | null {
+    if (!crumb.id || !crumb.rid || crumb.kind !== 'directory') return null
+    return {
+      resourceId: crumb.id,
+      rid: crumb.rid,
+      gfsUri: crumb.gfsUri ?? `gfs://${DRIVE}/${crumb.rid}`,
+      name: crumb.name,
+      kind: crumb.kind,
+      path: null,
+      bytes: 0,
+      version: crumb.version ?? 0,
+    }
+  }
+
+  /** Single construction path for a FOLDER's ⋯ menu. Parent-view rows and
+   *  breadcrumb crumb menus both build their props here, so their option
+   *  lists cannot drift apart. File-only actions stay on the file rows. */
+  function folderMenuProps(folder: GfsChild) {
+    return {
+      resourceName: folder.name,
+      resourceUri: folder.gfsUri,
+      onManage: () => openManage(folder),
+      onCopyLink: () => void copyGfsUri(folder.gfsUri),
+      onOpenLink: () => setOpenLinkOpen(true),
+      onRename: () => openRowRename(folder),
+      onMove: () => openMove(folder),
+      onDelete: () => openManage(folder, 'delete'),
+    }
+  }
+
+  /** "Open EvenDrive link": resolve a pasted gfs:// URI through control-api
+   *  and navigate the breadcrumb straight to that folder, mirroring the
+   *  Desktop Files flow. */
+  async function openEvenDriveLink(uri: string): Promise<void> {
+    setOpenLinkError(null)
+    setOpenLinkResolving(true)
+    try {
+      const view = (await apiGet('/api/v1/gfs/resolve', { uri })) as {
+        resourceId: string
+        rid: string
+        gfsUri: string
+        name: string
+        kind: string
+      }
+      if (view.kind !== 'directory') {
+        setOpenLinkError('Only folder links can be opened here.')
+        return
+      }
+      setRenameTarget(null)
+      setSelected(null)
+      setRenameOpen(false)
+      setDeleteOpen(false)
+      setCrumbs([
+        { id: null, rid: null, name: '/' },
+        {
+          id: view.resourceId,
+          rid: view.rid,
+          name: view.name,
+          kind: 'directory',
+          gfsUri: view.gfsUri,
+        },
+      ])
+      setLoading(true)
+      setOpenLinkOpen(false)
+    } catch (err) {
+      setOpenLinkError(err instanceof Error ? err.message : 'Could not open the EvenDrive link.')
+    } finally {
+      setOpenLinkResolving(false)
+    }
+  }
+
   async function renameResource(child: GfsChild, requestedName: string): Promise<void> {
     if (!requestedName.trim() || renaming) return
     setRenaming(true)
@@ -998,6 +1092,11 @@ export function GfsBrowser(): React.JSX.Element {
         { drive: DRIVE }
       )
       showToast('Resource renamed.', { tone: 'success' })
+      // A crumb rename must retitle the breadcrumb segment too, not just the
+      // listing rows refreshed below.
+      setCrumbs(prev =>
+        prev.map(crumb => (crumb.id === child.resourceId ? { ...crumb, name } : crumb))
+      )
       setRenameOpen(false)
       setRenameTarget(null)
       setSelected(null)
@@ -1113,6 +1212,13 @@ export function GfsBrowser(): React.JSX.Element {
       if (child.kind === 'directory') childCacheRef.current.delete(child.resourceId)
       showToast('Resource deleted.', { tone: 'success' })
       setSelected(null)
+      // Deleting a breadcrumb folder removes the open location with it —
+      // navigate up to its parent instead of refreshing a dead trail.
+      const crumbIndex = crumbs.findIndex(crumb => crumb.id === child.resourceId)
+      if (crumbIndex >= 0) {
+        goToCrumb(crumbIndex - 1)
+        return
+      }
       await refreshCurrent()
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not delete resource.', {
@@ -1121,10 +1227,19 @@ export function GfsBrowser(): React.JSX.Element {
     }
   }
 
+  /** Move-dialog navigation context. Rows keep the full trail; a crumb target
+   *  ends the trail at ITS parent so the dialog's current-location pill and
+   *  no-op guard match the parent-view row semantics. */
+  const moveTargetCrumbIndex = moveTarget
+    ? crumbs.findIndex(crumb => crumb.id === moveTarget.resourceId)
+    : -1
+  const moveDialogCrumbs =
+    moveTargetCrumbIndex >= 0 ? crumbs.slice(0, moveTargetCrumbIndex) : crumbs
+
   return (
     <section
       className="cu-gfs"
-      aria-label="Global File System browser"
+      aria-label="EvenDrive browser"
       aria-busy={loading || droppedUploadCount > 0 || movingResourceId !== null}
     >
       <div
@@ -1137,7 +1252,7 @@ export function GfsBrowser(): React.JSX.Element {
         <TablePanelHeader
           title={
             <>
-              <IconPaperclip /> Global File System
+              <IconPaperclip /> EvenDrive
             </>
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
@@ -1162,30 +1277,37 @@ export function GfsBrowser(): React.JSX.Element {
         <div className="cu-gfs-panel">
           <div className="cu-gfs-panel__toolbar">
             <nav aria-label="Breadcrumb" className="cu-gfs-breadcrumb">
-              {crumbs.map((crumb, index) => (
-                <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
-                  {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
-                  <button
-                    className={`cu-gfs-breadcrumb__button${
-                      crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
-                    }`}
-                    type="button"
-                    onClick={() => goToCrumb(index)}
-                    aria-current={index === crumbs.length - 1 ? 'page' : undefined}
-                  >
-                    {crumb.name === '/' ? (
-                      <>
-                        <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
-                          <IconFolder />
-                        </span>
-                        <span>{DRIVE}</span>
-                      </>
-                    ) : (
-                      crumb.name
-                    )}
-                  </button>
-                </span>
-              ))}
+              {crumbs.map((crumb, index) => {
+                // Only the ACTIVE folder segment carries a ⋯ menu — mounted to
+                // the right of its name, mirroring the Desktop Files pattern.
+                // The synthetic drive root and ancestor crumbs stay plain.
+                const activeFolder = index === crumbs.length - 1 ? crumbToChild(crumb) : null
+                return (
+                  <span className="cu-gfs-breadcrumb__item" key={`${crumb.id ?? 'root'}-${index}`}>
+                    {index > 0 ? <IconChevronRight width={14} height={14} /> : null}
+                    <button
+                      className={`cu-gfs-breadcrumb__button${
+                        crumb.name === '/' ? ' cu-gfs-breadcrumb__button--root' : ''
+                      }`}
+                      type="button"
+                      onClick={() => goToCrumb(index)}
+                      aria-current={index === crumbs.length - 1 ? 'page' : undefined}
+                    >
+                      {crumb.name === '/' ? (
+                        <>
+                          <span className="cu-gfs-breadcrumb__drive-icon" aria-hidden="true">
+                            <IconFolder />
+                          </span>
+                          <span>{DRIVE}</span>
+                        </>
+                      ) : (
+                        crumb.name
+                      )}
+                    </button>
+                    {activeFolder ? <GfsResourceMenu {...folderMenuProps(activeFolder)} /> : null}
+                  </span>
+                )
+              })}
             </nav>
             <div className="cu-gfs-panel__actions">
               <Button
@@ -1386,27 +1508,27 @@ export function GfsBrowser(): React.JSX.Element {
                         >
                           <IconPencil width={16} height={16} />
                         </Button>
-                        <GfsResourceMenu
-                          resourceName={child.name}
-                          resourceUri={child.gfsUri}
-                          downloading={downloadingIds.has(child.resourceId)}
-                          onManage={() => openManage(child)}
-                          onPreview={
-                            isGfsPreviewFile(child.name) ? () => openFilePreview(child) : undefined
-                          }
-                          onDownload={
-                            child.kind !== 'directory' ? () => void downloadFile(child) : undefined
-                          }
-                          onReplace={
-                            child.kind !== 'directory'
-                              ? file => void replaceFile(child, file)
-                              : undefined
-                          }
-                          onCopyLink={() => void copyGfsUri(child.gfsUri)}
-                          onRename={() => openRowRename(child)}
-                          onMove={() => openMove(child)}
-                          onDelete={() => openManage(child, 'delete')}
-                        />
+                        {child.kind === 'directory' ? (
+                          <GfsResourceMenu {...folderMenuProps(child)} />
+                        ) : (
+                          <GfsResourceMenu
+                            resourceName={child.name}
+                            resourceUri={child.gfsUri}
+                            downloading={downloadingIds.has(child.resourceId)}
+                            onManage={() => openManage(child)}
+                            onPreview={
+                              isGfsPreviewFile(child.name)
+                                ? () => openFilePreview(child)
+                                : undefined
+                            }
+                            onDownload={() => void downloadFile(child)}
+                            onReplace={file => void replaceFile(child, file)}
+                            onCopyLink={() => void copyGfsUri(child.gfsUri)}
+                            onRename={() => openRowRename(child)}
+                            onMove={() => openMove(child)}
+                            onDelete={() => openManage(child, 'delete')}
+                          />
+                        )}
                       </span>
                     </li>
                   )
@@ -1502,6 +1624,7 @@ export function GfsBrowser(): React.JSX.Element {
                     name: selected.name,
                     gfsUri: selected.gfsUri,
                     kind: selected.kind,
+                    path: selected.path,
                   }}
                 />
               </section>
@@ -1557,10 +1680,22 @@ export function GfsBrowser(): React.JSX.Element {
         />
       ) : null}
 
+      {openLinkOpen ? (
+        <GfsOpenLinkModal
+          pending={openLinkResolving}
+          error={openLinkError}
+          onOpen={uri => void openEvenDriveLink(uri)}
+          onCancel={() => {
+            setOpenLinkOpen(false)
+            setOpenLinkError(null)
+          }}
+        />
+      ) : null}
+
       {moveTarget ? (
         <GfsMoveDialog
           busy={movingResourceId === moveTarget.resourceId}
-          initialCrumbs={crumbs}
+          initialCrumbs={moveDialogCrumbs}
           onClose={() => setMoveTarget(null)}
           onMove={async (destinationId, destinationName) => {
             await moveResource(

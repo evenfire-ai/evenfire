@@ -12337,7 +12337,11 @@ button.cu-gfs-tree__button:focus-visible,
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: var(--cu-bg-elevated);
-  overflow: visible;
+  /* The viewport-fill card clips overflow and the app layout locks page
+     scrolling, so this frame is the file list's scroll container (same
+     contract as `.cu-table-wrap` for semantic tables). Without it, long
+     listings overflow visibly and get cut off at the card edge. */
+  overflow: auto;
 }
 
 .cu-gfs-loading {
@@ -12400,6 +12404,9 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: var(--cu-space-2) var(--cu-space-3);
   padding-inline: calc(var(--cu-space-3) + var(--cu-space-2));
   border-bottom: 1px solid var(--cu-border-subtle);
@@ -13890,6 +13897,19 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
   font-weight: 500;
+}
+
+.cu-gfs-existing-access__item--inherited .cu-gfs-existing-access__subject {
+  color: var(--cu-text-soft);
+  font-weight: 400;
+}
+
+.cu-gfs-existing-access__inherited-from {
+  overflow: hidden;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cu-gfs-existing-access__chips {

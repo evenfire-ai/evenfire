@@ -327,7 +327,7 @@ async function expectNoDisclosureDenial(
 
 async function openFilesBrowser(page: Page): Promise<Locator> {
   await openResourcesNavItem(page, 'nav-files')
-  const browser = page.getByRole('region', { name: 'Global File System browser' })
+  const browser = page.getByRole('region', { name: 'EvenDrive browser' })
   await expect(browser).toBeVisible({ timeout: 20_000 })
   return browser
 }

@@ -349,7 +349,7 @@ export function GfsMoveDialog({
           <div
             className="da-gfs-move-dialog__tree"
             role="tree"
-            aria-label="GFS destination folders"
+            aria-label="EvenDrive destination folders"
           >
             {loadingRoots ? (
               <p className="muted" role="status">

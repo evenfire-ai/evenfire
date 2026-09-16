@@ -126,7 +126,7 @@ describe('GfsMoveDialog pagination', () => {
     renderDialog({ listAccessible, listChildren }, { onMove })
 
     const dialog = await screen.findByRole('dialog', { name: 'Move file notes.txt' })
-    const tree = within(dialog).getByRole('tree', { name: 'GFS destination folders' })
+    const tree = within(dialog).getByRole('tree', { name: 'EvenDrive destination folders' })
     expect(await within(tree).findByRole('button', { name: 'Product' })).toBeTruthy()
 
     await fireEvent.click(within(tree).getByRole('button', { name: 'Expand Product' }))

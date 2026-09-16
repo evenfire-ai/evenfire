@@ -33,7 +33,7 @@ export function GfsFilePicker({
         void submit()
       }}
     >
-      <Field label="GFS URI" htmlFor="gfs-uri-input">
+      <Field label="EvenDrive link" htmlFor="gfs-uri-input">
         <div className="da-gfs-file-picker__row">
           <div className="da-gfs-file-picker__input">
             <span className="da-gfs-file-picker__scheme" aria-hidden="true">
@@ -42,7 +42,7 @@ export function GfsFilePicker({
             <TextInput
               autoFocus
               id="gfs-uri-input"
-              aria-label="gfs URI"
+              aria-label="EvenDrive link"
               placeholder="gfs://main/<rid>"
               value={uri}
               onChange={e => setUri(e.target.value)}

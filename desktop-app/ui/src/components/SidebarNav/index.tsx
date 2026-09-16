@@ -548,22 +548,22 @@ export function SidebarNav({
 
             <div
               className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
-              title={collapsed ? 'Files' : undefined}
-              data-tooltip="Files"
+              title={collapsed ? 'EvenDrive' : undefined}
+              data-tooltip="EvenDrive"
             >
               <NavItemControl
                 data-testid="nav-files"
                 className="nav-link-main"
                 onClick={() => handleSelect(DESKTOP_ROUTES.files)}
-                aria-label="Files"
+                aria-label="EvenDrive"
                 leadingIcon={<IconContexts />}
                 trailingIcon={
                   <span className="nav-tooltip" role="tooltip">
-                    Files
+                    EvenDrive
                   </span>
                 }
               >
-                Files
+                EvenDrive
               </NavItemControl>
             </div>
           </nav>

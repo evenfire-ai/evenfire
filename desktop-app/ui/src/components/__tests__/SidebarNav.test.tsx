@@ -106,12 +106,12 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
 
-  it('renders Files as a top-level nav item labelled Files (not under Resources)', () => {
+  it('renders EvenDrive as a top-level nav item labelled EvenDrive (not under Resources)', () => {
     render(<SidebarNav {...baseProps()} />)
 
-    // Files is always visible as a primary nav destination — no menu opening needed.
+    // EvenDrive is always visible as a primary nav destination — no menu opening needed.
     const filesItem = screen.getByTestId('nav-files')
-    expect(filesItem.textContent).toContain('Files')
+    expect(filesItem.textContent).toContain('EvenDrive')
     expect(filesItem.textContent).not.toContain('Global File System')
 
     // Files is a top-level nav item, never nested inside the Settings popover.

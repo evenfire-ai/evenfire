@@ -104,7 +104,7 @@ describe('Sidebar publisher gating', () => {
   it.each([
     ['/agent-outputs/recipe-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
     ['/agent-outputs/desktop-app-artifacts', 'Agent Outputs', '/agent-outputs/recipe-artifacts'],
-    ['/global-file-system', 'Global File System', '/global-file-system'],
+    ['/global-file-system', 'EvenDrive', '/global-file-system'],
   ])('selects the matching Files child for %s', (pathname, label, href) => {
     vi.mocked(hook.usePublishScope).mockReturnValue(
       publishScopeState({ scope: null, loading: false, error: false })
@@ -126,7 +126,7 @@ describe('Sidebar publisher gating', () => {
     )
     render(<Sidebar currentTab="directories" />)
 
-    for (const label of ['Agent Outputs', 'Global File System']) {
+    for (const label of ['Agent Outputs', 'EvenDrive']) {
       const child = screen.getByRole('link', { name: label })
       expect(child.querySelector('.cu-sidebar__subitem-icon svg')).toBeInTheDocument()
     }
@@ -185,7 +185,7 @@ describe('Sidebar publisher gating', () => {
     navigationState.pathname = '/global-file-system'
     render(<Sidebar currentTab="directories" />)
 
-    const globalFileSystem = screen.getByRole('link', { name: 'Global File System' })
+    const globalFileSystem = screen.getByRole('link', { name: 'EvenDrive' })
     expect(globalFileSystem.querySelector('path')).toHaveAttribute(
       'd',
       'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'
@@ -211,7 +211,7 @@ describe('Sidebar publisher gating', () => {
       'LLM Prices',
     ])
     expect(SIDEBAR_TABS.directories.children?.map(child => child.label)).toEqual([
-      'Global File System',
+      'EvenDrive',
       'Agent Outputs',
     ])
   })

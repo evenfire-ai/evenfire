@@ -137,12 +137,12 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       accessibleNotice:
-        'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.',
+        'Automatic EvenDrive discovery is not available in this desktop runtime. You can still open any EvenDrive link you have.',
     })
 
     renderFilesPage()
 
-    const notice = screen.getByText(/Automatic GFS discovery is not available/i)
+    const notice = screen.getByText(/Automatic EvenDrive discovery is not available/i)
     expect(notice.closest('.status-banner')?.className).toContain('tone-info')
     expect(screen.queryByText(/window\.clerum/i)).toBeNull()
     expect(screen.queryByText(/listAccessible is not a function/i)).toBeNull()
@@ -158,7 +158,7 @@ describe('FilesPage', () => {
     expect(
       screen.getByText('Resources shared directly with you or your teams will appear here.')
     ).toBeTruthy()
-    expect(screen.queryByText(/Automatic GFS discovery is not available/i)).toBeNull()
+    expect(screen.queryByText(/Automatic EvenDrive discovery is not available/i)).toBeNull()
     expect(screen.queryByText(/Error invoking remote method/i)).toBeNull()
   })
 
@@ -641,12 +641,12 @@ describe('FilesPage', () => {
     const uploadButton = screen.getByRole('button', { name: 'Upload file' })
     expect(toolbar?.contains(newFolderButton)).toBe(true)
     expect(toolbar?.contains(uploadButton)).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    expect(screen.getByRole('dialog', { name: 'Open GFS link' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close GFS link dialog' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
 
     fireEvent.click(newFolderButton)
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
@@ -741,7 +741,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const image = new File(['desktop image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Desktop notes'], 'notes.markdown', { type: 'text/markdown' })
     const video = new File(['desktop video'], 'clip.mov', { type: 'video/quicktime' })
@@ -807,7 +807,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: {
         dropEffect: 'none',
         files: [
@@ -906,7 +906,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: {
         dropEffect: 'none',
         files: [new File(['report'], 'report.txt', { type: 'text/plain' })],
@@ -948,7 +948,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const firstDrop = {
       dropEffect: 'none',
       files: [new File(['# First'], 'first.md', { type: 'text/markdown' })],
@@ -1026,7 +1026,7 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockImplementation(useChangingFolderController)
 
     renderFilesPage()
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
       files: [
@@ -1070,7 +1070,7 @@ describe('FilesPage', () => {
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
@@ -1106,7 +1106,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage()
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
       files: [new File(['# Notes'], 'notes.md', { type: 'text/markdown' })],
@@ -1143,7 +1143,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const image = new File(['desktop image'], 'restricted.png', { type: 'image/png' })
     const dataTransfer = { dropEffect: 'none', files: [image], types: ['Files'] }
     const reason =
@@ -3038,17 +3038,19 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
     renderFilesPage()
 
-    expect(screen.queryByRole('button', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
-    fireEvent.change(within(dialog).getByLabelText('gfs URI'), {
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/resource-1' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull())
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
+    )
   })
 
   it('opens an SVG GFS link in preview without leaving the browser on a file-only route', async () => {
@@ -3095,9 +3097,9 @@ describe('FilesPage', () => {
 
     renderFilesPage()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
-    fireEvent.change(within(linkDialog).getByLabelText('gfs URI'), {
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(linkDialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/svg-1' },
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
@@ -3108,7 +3110,7 @@ describe('FilesPage', () => {
     )
     expect(download).toHaveBeenCalledWith('gfs://main/svg-1')
     expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/svg+xml' }))
-    expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
 
     fireEvent.click(within(preview).getByRole('button', { name: 'Close image preview' }))
     expect(screen.queryByRole('heading', { name: 'architecture.svg' })).toBeNull()
@@ -3153,6 +3155,159 @@ describe('FilesPage', () => {
     expect(goToCrumb).toHaveBeenCalledWith(0)
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Shared with me' }))
     expect(reset).toHaveBeenCalledOnce()
+  })
+
+  it('mounts the ⋯ menu only on the active folder beside the breadcrumb, never on crumbs or the open file', async () => {
+    const fullBits = {
+      held: ['read', 'write', 'delete', 'manage_acl'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }
+    const parentViewRowOptions = [
+      'Share',
+      'Open folder',
+      'Open EvenDrive link',
+      'Rename',
+      'Move to…',
+      'Delete',
+    ]
+    // The active folder is already open, so its menu is the row menu minus the
+    // navigation item — exactly the pre-existing beside-the-breadcrumb menu.
+    const activeFolderOptions = parentViewRowOptions.filter(option => option !== 'Open folder')
+
+    // Phase 1 — the parent view: a fully-permissioned folder row's ⋯ menu.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-2',
+          rid: 'folder-2',
+          gfsUri: 'gfs://main/folder-2',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Team folder',
+          kind: 'directory' as const,
+          path: '/Product/Team folder',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      rowAffordancesByResourceId: { 'folder-2': fullBits },
+    })
+    const parentView = renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
+    })
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(
+      parentViewRowOptions
+    )
+    parentView.unmount()
+
+    // Phase 2 — a file is open: no crumb (folder or file) carries a menu in
+    // the breadcrumb, and the breadcrumb title row has none for the file.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.md',
+        kind: 'file',
+        version: 3,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        {
+          resourceId: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'report.md',
+          kind: 'file',
+          version: 3,
+        },
+      ],
+    })
+    renderFilesPage()
+
+    let breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    let titleRow = document.querySelector('.da-gfs-drive__title-row')
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
+    expect(within(titleRow!).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
+    cleanup()
+
+    // Phase 3 — a folder is open: exactly one ⋯ menu, for the ACTIVE folder,
+    // sitting to the right of the breadcrumb (after the nav), while the
+    // ancestor folder crumb stays plain.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-2',
+        gfsUri: 'gfs://main/folder-2',
+        name: 'Nested',
+        kind: 'directory',
+        version: 2,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        {
+          resourceId: 'folder-2',
+          gfsUri: 'gfs://main/folder-2',
+          name: 'Nested',
+          kind: 'directory',
+          version: 2,
+        },
+      ],
+      affordances: fullBits,
+    })
+    renderFilesPage()
+
+    breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    titleRow = document.querySelector('.da-gfs-drive__title-row')
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Nested' })).toBeNull()
+
+    const activeMenuTrigger = within(titleRow!).getByRole('button', { name: 'Options for Nested' })
+    const activeMenuWrapper = activeMenuTrigger.closest('.da-gfs-resource-menu')
+    expect(activeMenuWrapper?.previousElementSibling).toBe(breadcrumbs)
+
+    await act(async () => {
+      fireEvent.click(activeMenuTrigger)
+    })
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(
+      activeFolderOptions
+    )
+
+    // "Open EvenDrive link" is present and opens the link dialog.
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {

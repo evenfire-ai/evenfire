@@ -34,6 +34,7 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
+import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { type GfsCrumb, useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
@@ -573,10 +574,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const handleCopyLink = async (uri: string) => {
     try {
       await navigator.clipboard.writeText(uri)
-      pushToast?.('GFS link copied', 'success')
+      pushToast?.('EvenDrive link copied', 'success')
     } catch (clipboardError) {
       pushToast?.(
-        clipboardError instanceof Error ? clipboardError.message : 'Could not copy the GFS link',
+        clipboardError instanceof Error
+          ? clipboardError.message
+          : 'Could not copy the EvenDrive link',
         'error'
       )
     }
@@ -1003,6 +1006,42 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     setRenameDraft(target.name)
   }
 
+  /** Adapt the open folder crumb for the row-action handlers so the active
+   *  folder's menu (the one beside the breadcrumb) runs on the same shape a
+   *  parent-view row does. */
+  const crumbAsResource = (crumb: GfsCrumb): GfsDriveResource => ({
+    resourceId: crumb.resourceId,
+    rid: crumb.resourceId.replace(/-/g, '').toLowerCase(),
+    gfsUri: crumb.gfsUri,
+    drive: GFS_DRIVE_MAIN,
+    parentResourceId: null,
+    name: crumb.name,
+    kind: 'directory',
+    path: null,
+    version: crumb.version,
+    bytes: crumb.bytes,
+  })
+
+  /** Single construction path for a FOLDER's ⋯ menu. The parent-view row menu
+   *  and the active folder's breadcrumb menu both build their props here, so
+   *  their option lists cannot drift apart; only the gates (permission source)
+   *  and the open-navigation action differ per surface. */
+  const folderMenuPropsFor = (
+    folder: GfsDriveResource,
+    gates: { canManage: boolean; canRename: boolean; canDelete: boolean },
+    actions: { onOpen?: () => void; onOpenChange?: (open: boolean) => void } = {}
+  ) => ({
+    resourceName: folder.name,
+    onManage: gates.canManage ? () => openManage(folder) : undefined,
+    onCopyLink: () => void handleCopyLink(folder.gfsUri),
+    onOpen: actions.onOpen,
+    onOpenGfsLink: () => setOpenLinkOpen(true),
+    onOpenChange: actions.onOpenChange,
+    onRename: gates.canRename ? () => openRenameTarget(folder) : undefined,
+    onMove: () => setMoveTarget(folder),
+    onDelete: gates.canDelete ? () => setDeleteTarget(folder) : undefined,
+  })
+
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
     return [...resources].sort((left, right) => {
@@ -1068,7 +1107,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       <div className="page-layout da-gfs-layout">
         <section
           className="page-card da-gfs-drive"
-          aria-label="Global File System browser"
+          aria-label="EvenDrive browser"
           aria-busy={visibleLoading || droppedUploadCount > 0}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
@@ -1135,22 +1174,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               ) : null}
               {current && !currentIsFile && !currentIsBeingRenamed ? (
                 <GfsResourceMenu
-                  resourceName={current.name}
-                  onManage={
-                    canManageCurrent
-                      ? () => {
-                          setCreateFolderOpen(false)
-                          setRenameOpen(false)
-                          setDeleteOpen(false)
-                          setManageOpen(true)
-                        }
-                      : undefined
-                  }
-                  onCopyLink={() => void handleCopyLink(current.gfsUri)}
-                  onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
-                  onOpenGfsLink={() => setOpenLinkOpen(true)}
-                  onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
-                  onMove={requestMoveCurrent}
+                  {...folderMenuPropsFor(crumbAsResource(current), {
+                    canManage: canManageCurrent,
+                    canRename: canWriteCurrent,
+                    canDelete: canDeleteCurrent,
+                  })}
                 />
               ) : null}
             </div>
@@ -1275,7 +1303,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 <p className="muted">
                   {currentPreviewAvailable
                     ? 'Preview this file again or use the menu to manage and download it.'
-                    : 'Use the menu to manage, download, or copy this file’s GFS link.'}
+                    : 'Use the menu to manage, download, or copy this file’s EvenDrive link.'}
                 </p>
               </div>
             </div>
@@ -1436,34 +1464,53 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                             <IconEdit width={16} height={16} />
                           </IconButton>
                         ) : null}
-                        <GfsResourceMenu
-                          resourceName={resource.name}
-                          onManage={rowCanManage(resource) ? () => openManage(resource) : undefined}
-                          onCopyLink={() => void handleCopyLink(resource.gfsUri)}
-                          onDelete={
-                            rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
-                          }
-                          onOpen={
-                            resource.kind === 'directory' ? () => openResource(resource) : undefined
-                          }
-                          onOpenChange={open =>
-                            ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                          }
-                          onRename={
-                            rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
-                          }
-                          onMove={() => setMoveTarget(resource)}
-                          onPreview={
-                            isGfsPreviewFile(resource.name)
-                              ? () => void openFilePreview(resource)
-                              : undefined
-                          }
-                          onDownload={
-                            resource.kind === 'file'
-                              ? () => void handleDownload(resource.gfsUri, resource.name)
-                              : undefined
-                          }
-                        />
+                        {resource.kind === 'directory' ? (
+                          <GfsResourceMenu
+                            {...folderMenuPropsFor(
+                              resource,
+                              {
+                                canManage: rowCanManage(resource),
+                                canRename: rowCanRename(resource),
+                                canDelete: rowCanDelete(resource),
+                              },
+                              {
+                                onOpen: () => openResource(resource),
+                                onOpenChange: open =>
+                                  ctrl.setRowAffordancesResourceId(
+                                    open ? resource.resourceId : null
+                                  ),
+                              }
+                            )}
+                          />
+                        ) : (
+                          <GfsResourceMenu
+                            resourceName={resource.name}
+                            onManage={
+                              rowCanManage(resource) ? () => openManage(resource) : undefined
+                            }
+                            onCopyLink={() => void handleCopyLink(resource.gfsUri)}
+                            onDelete={
+                              rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
+                            }
+                            onOpenChange={open =>
+                              ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
+                            }
+                            onRename={
+                              rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
+                            }
+                            onMove={() => setMoveTarget(resource)}
+                            onPreview={
+                              isGfsPreviewFile(resource.name)
+                                ? () => void openFilePreview(resource)
+                                : undefined
+                            }
+                            onDownload={
+                              resource.kind === 'file'
+                                ? () => void handleDownload(resource.gfsUri, resource.name)
+                                : undefined
+                            }
+                          />
+                        )}
                       </span>
                     </div>
                   )
@@ -1507,13 +1554,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               </span>
               <span className="da-gfs-link-dialog__heading">
                 <span className="da-gfs-eyebrow">Direct access</span>
-                <h3 id="gfs-link-dialog-title">Open GFS link</h3>
+                <h3 id="gfs-link-dialog-title">Open EvenDrive link</h3>
                 <span className="muted">
-                  Paste a GFS URI to jump directly to a shared resource.
+                  Paste an EvenDrive link to jump directly to a shared resource.
                 </span>
               </span>
               <IconButton
-                label="Close GFS link dialog"
+                label="Close EvenDrive link dialog"
                 onClick={() => setOpenLinkOpen(false)}
                 size="sm"
                 variant="ghost"
@@ -1664,8 +1711,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   <GfsGrantList
                     agents={agentSubjects}
                     error={grantsError}
+                    inheritedItems={ctrl.inheritedAccess}
                     items={ctrl.grants}
-                    loading={ctrl.loadingGrants || ctrl.loadingShares}
+                    loading={
+                      ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
+                    }
                     onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}

@@ -75,9 +75,9 @@ async function loginControlUi(page: Page): Promise<void> {
 async function openControlGfs(page: Page): Promise<void> {
   await loginControlUi(page)
   await page.getByRole('button', { name: 'Directories', exact: true }).click()
-  await page.getByRole('link', { name: /Global File System/i }).click()
+  await page.getByRole('link', { name: /EvenDrive/i }).click()
   await expect(page).toHaveURL(/\/global-file-system(?:$|\?)/, { timeout: 15_000 })
-  await expect(page.getByRole('region', { name: 'Global File System browser' })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'EvenDrive browser' })).toBeVisible()
 }
 
 async function expectCopyButtonWritesClipboard(
@@ -365,9 +365,9 @@ test.describe('GFS Desktop user journey', () => {
           await expect(
             ownerSession.page.getByRole('region', { name: 'GFS resources shared with you' })
           ).toBeVisible()
-          await expect(ownerSession.page.getByLabel('gfs URI')).toBeVisible()
+          await expect(ownerSession.page.getByLabel('EvenDrive link')).toBeVisible()
           await expect(
-            ownerSession.page.getByText(/Automatic GFS discovery is not available/i)
+            ownerSession.page.getByText(/Automatic EvenDrive discovery is not available/i)
           ).toHaveCount(0)
         })
 
@@ -394,7 +394,7 @@ test.describe('GFS Desktop user journey', () => {
           })
           await shared.getByRole('button', { name: fixture.name, exact: true }).click()
           const browser = ownerSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toBeVisible({ timeout: 30_000 })
           await expect(
@@ -413,10 +413,10 @@ test.describe('GFS Desktop user journey', () => {
         })
 
         await test.step('user can still open a direct gfs:// link manually', async () => {
-          await ownerSession.page.getByLabel('gfs URI').fill(fixture.uri)
+          await ownerSession.page.getByLabel('EvenDrive link').fill(fixture.uri)
           await ownerSession.page.getByRole('button', { name: 'Open', exact: true }).click()
           const browser = ownerSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toContainText(fixture.childName, { timeout: 30_000 })
         })
@@ -435,7 +435,7 @@ test.describe('GFS Desktop user journey', () => {
 
         await test.step('user creates, uploads, renames, replaces, and deletes with their own GFS permissions', async () => {
           const browser = ownerSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser.getByRole('button', { name: 'New folder' })).toBeVisible()
           await expect(browser.locator('label:has-text("Upload file")')).toBeVisible()
@@ -559,7 +559,7 @@ test.describe('GFS Desktop user journey', () => {
             .toMatchObject({ deleted: true })
           await expect(browser.getByRole('heading', { name: renamedName })).toHaveCount(0)
 
-          await ownerSession.page.getByLabel('gfs URI').fill(fixture.uri)
+          await ownerSession.page.getByLabel('EvenDrive link').fill(fixture.uri)
           await ownerSession.page.getByRole('button', { name: 'Open', exact: true }).click()
           await expect(browser).toContainText(fixture.childName, { timeout: 30_000 })
         })
@@ -597,7 +597,7 @@ test.describe('GFS Desktop user journey', () => {
           })
           await shared.getByRole('button', { name: shareChainFixture.name, exact: true }).click()
           const browser = ownerSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toContainText(shareChainFixture.childName, { timeout: 30_000 })
 
@@ -611,7 +611,7 @@ test.describe('GFS Desktop user journey', () => {
           })
           await shared.getByRole('button', { name: teamFixture.name, exact: true }).click()
           const browser = ownerSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toContainText(teamFixture.childName, { timeout: 30_000 })
 
@@ -662,7 +662,7 @@ test.describe('GFS Desktop user journey', () => {
             delegateSession.page.getByRole('heading', { name: 'Files', exact: true })
           ).toBeVisible({ timeout: 20_000 })
           await expect(
-            delegateSession.page.getByText(/Automatic GFS discovery is not available/i)
+            delegateSession.page.getByText(/Automatic EvenDrive discovery is not available/i)
           ).toHaveCount(0)
           const shared = delegateSession.page.getByRole('region', {
             name: 'GFS resources shared with you',
@@ -684,7 +684,7 @@ test.describe('GFS Desktop user journey', () => {
           })
           await shared.getByRole('button', { name: fixture.childName, exact: true }).click()
           const browser = delegateSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toBeVisible({ timeout: 30_000 })
           await expect(browser).toContainText(fixture.childName)
@@ -700,10 +700,10 @@ test.describe('GFS Desktop user journey', () => {
         })
 
         await test.step('second user opens an authorized share from a direct gfs:// URI', async () => {
-          await delegateSession.page.getByLabel('gfs URI').fill(fixture.childUri)
+          await delegateSession.page.getByLabel('EvenDrive link').fill(fixture.childUri)
           await delegateSession.page.getByRole('button', { name: 'Open', exact: true }).click()
           const browser = delegateSession.page.getByRole('region', {
-            name: 'Global File System browser',
+            name: 'EvenDrive browser',
           })
           await expect(browser).toContainText(fixture.childName, { timeout: 30_000 })
           const delegation = delegateSession.page.getByRole('region', { name: 'Delegate access' })
@@ -728,7 +728,7 @@ test.describe('GFS Desktop user journey', () => {
         })
 
         await test.step('second user cannot open an unrelated direct file link', async () => {
-          await delegateSession.page.getByLabel('gfs URI').fill(fileFixture.fileUri)
+          await delegateSession.page.getByLabel('EvenDrive link').fill(fileFixture.fileUri)
           await delegateSession.page.getByRole('button', { name: 'Open', exact: true }).click()
           await expect(delegateSession.page.getByText(/forbidden|denied|403/i)).toBeVisible({
             timeout: 20_000,

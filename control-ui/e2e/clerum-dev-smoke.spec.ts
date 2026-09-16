@@ -168,7 +168,7 @@ test.describe('example-dev — cluster smoke', () => {
   test('S7. GFS — sidebar navigation loads through Control UI proxy and live cluster resources exist', async () => {
     await login(page)
     await page.goto(BASE_UI)
-    const globalFileSystemLink = page.getByRole('link', { name: /Global File System/i })
+    const globalFileSystemLink = page.getByRole('link', { name: /EvenDrive/i })
     await expect(globalFileSystemLink).toBeVisible()
 
     const treeResponse = page.waitForResponse(
@@ -179,7 +179,7 @@ test.describe('example-dev — cluster smoke', () => {
 
     await globalFileSystemLink.click()
     await expect(page).toHaveURL(/\/global-file-system$/)
-    await expect(page.getByRole('heading', { name: 'Global File System' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'EvenDrive' })).toBeVisible()
     await expect(page.getByText('Drive', { exact: true })).toBeVisible()
     await expect(page.getByText('main', { exact: true }).first()).toBeVisible()
 
