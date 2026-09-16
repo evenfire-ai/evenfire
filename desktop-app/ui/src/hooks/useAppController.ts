@@ -299,6 +299,13 @@ export function useAppController() {
   })
 
   // ─── Agent Chat ───
+  // Human-visible agent name (spec.host display name) for chat notification
+  // titles. Total over catalog agents at the producer; the identifier is the
+  // sanctioned fallback (Decision #6).
+  const agentDisplayName = useCallback(
+    (agentName: string) => agentsData.agentDisplayByName[agentName] ?? agentName,
+    [agentsData.agentDisplayByName]
+  )
   const chat = useAgentChatController({
     selectedAgent: nav.selectedAgent,
     agentNames: agentsData.agentNames,
@@ -310,6 +317,7 @@ export function useAppController() {
     navItem: nav.navItem,
     pushToast,
     pushNotification: notif.pushNotification,
+    agentDisplayName,
     canDeliverChatResponseNotification: notificationSettings.canDeliverChatResponseNotification,
     showDesktopNotification: notificationSettings.showDesktopNotification,
     openAgentConversationFromNotification,
