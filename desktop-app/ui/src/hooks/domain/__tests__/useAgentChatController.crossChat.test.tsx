@@ -108,6 +108,7 @@ function AgentChatHarness() {
     navItem: 'chat',
     pushToast: vi.fn(),
     pushNotification: vi.fn(),
+    agentDisplayName: (agentName: string) => agentName,
     canDeliverChatResponseNotification: vi.fn(() => false),
     showDesktopNotification: vi.fn(async () => 'unsupported' as const),
     openAgentConversationFromNotification: vi.fn(async () => undefined),

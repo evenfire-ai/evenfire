@@ -21,6 +21,7 @@ import { FinishReason } from '../../types'
 import { DeferrableToolController } from '../deferrableToolController'
 import { SimpleEventEmitter } from '../eventEmitter'
 import { DefaultLoopController, buildLoopConfig } from '../loopConfig'
+import { parseCodexToolPresentation } from '../toolPresentationPolicy'
 import { validateToolLinkages } from '../toolUseLoopLinkages'
 import { executeToolCalls } from '../toolUseLoopToolBatch'
 
@@ -563,28 +564,36 @@ describe('approved catalog across presentation and lifecycle', () => {
     )
   })
 
-  it.each(['approve', 'direct', 'deny', 'cancel', 'revoke', 'schema-change'] as const)(
+  it.each(['approve', 'direct', 'default', 'deny', 'cancel', 'revoke', 'schema-change'] as const)(
     'TaskExecutor %s uses the actual loop and never duplicates the MCP call',
     async decision => {
+      const direct = decision === 'direct' || decision === 'default'
       const saved = {
         enableApproval: appConfig.enableApproval,
         codexToolPresentation: appConfig.codexToolPresentation,
+        dynamicToolsEnabled: appConfig.dynamicToolsEnabled,
         contextMaxTokens: appConfig.contextMaxTokens,
         promptCacheEnabled: appConfig.promptCacheEnabled,
       }
       Object.assign(appConfig, {
         enableApproval: true,
-        codexToolPresentation: decision === 'direct' ? 'direct' : 'discovery',
+        // Exercise the unset environment default through the real execution loop.
+        codexToolPresentation:
+          decision === 'default'
+            ? parseCodexToolPresentation(undefined)
+            : direct
+              ? 'direct'
+              : 'discovery',
+        dynamicToolsEnabled: true,
         contextMaxTokens: 100000,
         promptCacheEnabled: false,
       })
       try {
         const { manager } = await setup(83)
         const target = 'alpha__record__read_082'
-        const call: ToolCall =
-          decision === 'direct'
-            ? { id: 'durable-call', name: target, arguments: {} }
-            : bridgeCall(target, 'durable-call')
+        const call: ToolCall = direct
+          ? { id: 'durable-call', name: target, arguments: {} }
+          : bridgeCall(target, 'durable-call')
         const providerCalls: ChatMessage[][] = []
         const provider: SingleTurnProvider = {
           getProviderType: () => 'codex-subscription',
@@ -596,13 +605,11 @@ describe('approved catalog across presentation and lifecycle', () => {
           },
           completeSingleTurnWithTools: async (messages, tools) => {
             providerCalls.push(structuredClone(messages))
-            expect(tools.some(tool => tool.name === 'clerum__tool_call')).toBe(
-              decision !== 'direct'
-            )
+            expect(tools.some(tool => tool.name === 'clerum__tool_call')).toBe(!direct)
             const connectorDefinitions = tools.filter(
               tool => tool.name.startsWith('alpha__') || tool.name.startsWith('beta__')
             )
-            expect(connectorDefinitions.length).toBe(decision === 'direct' ? 83 : 0)
+            expect(connectorDefinitions.length).toBe(direct ? 83 : 0)
             const usage = { input_tokens: 1, output_tokens: 1, total_tokens: 2 }
             if (providerCalls.length === 1)
               return {
@@ -684,7 +691,7 @@ describe('approved catalog across presentation and lifecycle', () => {
         const approvalId = executor.pendingApproval!.request_id
         expect(approvalId).toBeTruthy()
         expect(remote.calls).not.toHaveBeenCalled()
-        if (decision === 'approve' || decision === 'direct') {
+        if (decision === 'approve' || direct) {
           await executor.resumeAfterApproval(false)
           expect(executor.executorState).toBe('completed')
           expect(remote.calls).toHaveBeenCalledTimes(1)

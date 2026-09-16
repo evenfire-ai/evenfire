@@ -40,8 +40,8 @@ describe('CODEX_TOOL_DISCOVERY_BYTES import-time configuration', () => {
 })
 
 describe('CODEX_TOOL_PRESENTATION import-time configuration', () => {
-  it('defaults to auto when unset', async () => {
-    expect((await loadConfig(undefined)).codexToolPresentation).toBe('auto')
+  it('defaults to direct when unset', async () => {
+    expect((await loadConfig(undefined)).codexToolPresentation).toBe('direct')
   })
 
   it.each(['auto', 'direct', 'discovery'] as const)('loads explicit %s', async value => {
