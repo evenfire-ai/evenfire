@@ -5,6 +5,7 @@ import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
 import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
+  requireRpcTokenHostMatch,
   requireRpcTokenUserMatch,
   requireValidRpcAccessToken,
   requireValidRpcAccessTokenAny,
@@ -219,13 +220,23 @@ export function createRpcAccessUsersRouter(
     }
   )
 
-  // Artifact reads can wake a Host and pull bounded but potentially expensive
-  // responses. Their durable PG bucket is independent of Host wake capacity
-  // and is keyed only after the live authorization above establishes the
-  // verified subject and canonical enabled Host.
+  // The subject-wide durable PG bucket protects the expensive live Host
+  // authorization below. Claim-match middleware runs first so malformed,
+  // mismatched, or unsigned Host selectors do not consume admission and
+  // caller-controlled Host refs cannot expand bucket cardinality.
   router.get(
     `${hostAccessPath}/artifact-read`,
     requireValidRpcAccessTokenAny(['host:task:read']),
+    requireRpcTokenUserMatch(),
+    requireRpcTokenHostMatch(),
+    rateLimitMiddleware({
+      bucketType: 'host_artifact_pre_admission',
+      maxPerMinute: config.hostArtifactReadRlPerMin,
+      getBucketKey: req => {
+        const subject = (req as ArtifactReadRequest).rpcAuth?.sub
+        return subject ? `host-artifact-pre-admission:${subject}` : null
+      },
+    }),
     async (req: ArtifactReadRequest, res, next) => {
       try {
         const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
@@ -236,6 +247,9 @@ export function createRpcAccessUsersRouter(
         next(error)
       }
     },
+    // Preserve R29-H1: after live authorization establishes the canonical
+    // Host, consume its independent subject+Host budget before returning the
+    // artifact connection. Host wake capacity remains separate.
     rateLimitMiddleware({
       bucketType: 'host_artifact_read',
       maxPerMinute: config.hostArtifactReadRlPerMin,
