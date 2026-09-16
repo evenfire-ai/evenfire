@@ -23,6 +23,7 @@ function quoteIdent(value: string): string {
 describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   const database = `rate_limiter_${randomBytes(6).toString('hex')}`
   const bucketKey = `real-pg:${randomBytes(8).toString('hex')}`
+  const preAdmissionKey = `host-artifact-pre-admission:user-${randomBytes(8).toString('hex')}`
   const connectionString = databaseUrl(
     adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
     database
@@ -39,7 +40,9 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
   }, 60_000)
 
   afterAll(async () => {
-    await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = $1', [bucketKey])
+    await pool?.query('DELETE FROM rate_limit_buckets WHERE bucket_key = ANY($1)', [
+      [bucketKey, preAdmissionKey],
+    ])
     await pool?.end()
     if (!adminPool) return
     await adminPool.query(
@@ -70,6 +73,38 @@ describeRealPostgres('rate limiter atomicity on real PostgreSQL', () => {
       [bucketKey, windowStartMs]
     )
     expect(Number(persisted.rows[0]?.count)).toBe(32)
+  })
+
+  it('shares subject-only artifact admission atomically across independent PostgreSQL sessions', async () => {
+    const clients = [await pool.connect(), await pool.connect()]
+    try {
+      const results = []
+      for (let round = 0; round < 16; round += 1) {
+        const concurrentResults = await Promise.all(
+          clients.map(client =>
+            checkAndIncrementWithQuery(
+              (text, values) => client.query(text, values),
+              preAdmissionKey,
+              30,
+              windowStartMs,
+              1
+            )
+          )
+        )
+        results.push(...concurrentResults)
+      }
+      const counts = results.map(result => result.count).sort((a, b) => a - b)
+      expect(counts).toEqual(Array.from({ length: 32 }, (_, index) => index + 1))
+      expect(results.filter(result => result.allowed)).toHaveLength(30)
+
+      const persisted = await pool.query<{ count: string }>(
+        'SELECT count FROM rate_limit_buckets WHERE bucket_key = $1 AND window_start_ms = $2',
+        [preAdmissionKey, windowStartMs]
+      )
+      expect(Number(persisted.rows[0]?.count)).toBe(32)
+    } finally {
+      clients.forEach(client => client.release())
+    }
   })
 
   it('serializes the production bounded advisory lease across independent PostgreSQL sessions', async () => {
