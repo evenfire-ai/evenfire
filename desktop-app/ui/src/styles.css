@@ -11158,7 +11158,11 @@ pre {
   }
 
   .agent-workspace-body-slot > .composer,
-  .agent-workspace-body-slot > .composer-inline {
+  .agent-workspace-body-slot > .composer-inline,
+  /* The new-chat landing wraps its inline composer in
+   * `.agent-workspace-new-chat`; without this arm the wrapper breaks the
+   * direct-child chain and the composer goes full-bleed (no gutter). */
+  .agent-workspace-body-slot > .agent-workspace-new-chat > .composer-inline {
     width: min(calc(100% - (var(--space-3) * 2)), 1024px);
     max-width: min(calc(100% - (var(--space-3) * 2)), 1024px);
     margin-left: auto;
