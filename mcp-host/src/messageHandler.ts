@@ -2,6 +2,7 @@ import { AgentStateMachine } from './agent'
 import { LlmErrorCode } from './core/errors'
 import type { Attachment } from './core/types'
 import type { TaskLifecycle } from './lifecycle/taskLifecycle'
+import { logger } from './logger'
 import { MessageQueue, Task, TaskResponsePayload } from './queue'
 import type { TaskError, TaskStatus } from './queue'
 import { ResultStore } from './resultStore'
@@ -156,7 +157,7 @@ export class IncomingMessageHandler {
         // SessionProcessor, so register here to satisfy Invariant I12.
         this.deps.taskLifecycle.register(this.task)
       }
-      console.log(`[Main] Message queued as task ${this.task.id}`)
+      logger.info({ taskId: this.task.id }, 'Message queued')
 
       // Dispatch to SessionProcessor if available
       if (this.deps.sessionProcessor) {
@@ -199,10 +200,9 @@ export class IncomingMessageHandler {
     this.task.responseCallback = async payload => {
       const attachments = this.deps.sanitizeAttachments(payload.attachments)
       const status: PendingTaskEntry['status'] = payload.error ? 'failed' : 'completed'
-      console.log(
-        `[Main] Storing async result for task ${this.task.id} (status=${status}, attachments=${
-          attachments?.length ?? 0
-        })`
+      logger.info(
+        { taskId: this.task.id, status, attachmentCount: attachments?.length ?? 0 },
+        'Storing async result'
       )
       this.deps.pendingTaskResults.set(this.task.id, {
         status,
@@ -224,7 +224,7 @@ export class IncomingMessageHandler {
       const onApproval = (event: { data: unknown }) => {
         const data = event.data as Record<string, unknown>
         if (data.taskId !== this.task.id) return
-        console.log(`[Main] Storing async approval notification for task ${this.task.id}`)
+        logger.info({ taskId: this.task.id }, 'Storing async approval notification')
         this.deps.pendingTaskResults.set(this.task.id, {
           status: 'waiting_approval',
           model: this.deps.getModel(),
@@ -253,9 +253,9 @@ export class IncomingMessageHandler {
       const onApprovalConsumed = (event: { data: unknown }) => {
         const data = event.data as Record<string, unknown>
         if (data.taskId !== this.task.id) return
-        console.log(
-          `[Main] Clearing stale approval entry for task ${this.task.id} ` +
-            `(request: ${data.requestId})`
+        logger.info(
+          { taskId: this.task.id, requestId: data.requestId },
+          'Clearing stale approval entry'
         )
         this.deps.pendingTaskResults.delete(this.task.id)
       }
@@ -281,7 +281,7 @@ export class IncomingMessageHandler {
       this.deps.messageQueue.on('task:failed', onFinalFailure)
     }
 
-    console.log(`[Main] Message queued as async task ${this.task.id}`)
+    logger.info({ taskId: this.task.id }, 'Message queued asynchronously')
 
     // Dispatch to SessionProcessor if available
     if (this.deps.sessionProcessor) {
@@ -320,11 +320,7 @@ export class IncomingMessageHandler {
     priorStatus: TaskStatus
   }): MessageResponse {
     const { reason, priorTaskId, priorStatus } = admission
-    console.warn(
-      `[Main] duplicate delivery suppressed (${reason}) — message ` +
-        `${this.message.channelType}:${this.message.channelId}:${this.message.messageId} ` +
-        `is already task ${priorTaskId} (status=${priorStatus}); no new execution started`
-    )
+    logger.warn({ taskId: this.task.id, reason }, 'Duplicate delivery suppressed')
     const record = this.deps.taskLifecycle.get(priorTaskId)
     if (priorStatus === 'completed') {
       return {
@@ -394,6 +390,7 @@ export class IncomingMessageHandler {
         this.resolve({
           success: false,
           error: payload.error,
+          ...(attachments?.length ? { attachments } : {}),
           model: this.deps.getModel(),
         })
       } else {
@@ -406,7 +403,7 @@ export class IncomingMessageHandler {
         })
       }
     } else {
-      console.log(`[Main] Storing post-approval result for task ${this.task.id}`)
+      logger.info({ taskId: this.task.id }, 'Storing post-approval result')
       // Compute the terminal status from the payload (parity with the sync
       // branch above and executeAsync): a post-approval turn can FAIL, and
       // hardcoding 'completed' here made the poll report success:false with
@@ -435,7 +432,7 @@ export class IncomingMessageHandler {
 
       if (!this.resolved) {
         this.resolved = true
-        console.log(`[Main] Returning approval notification for task ${this.task.id}`)
+        logger.info({ taskId: this.task.id }, 'Returning approval notification')
         this.resolve({
           success: true,
           status: 'waiting_approval',
@@ -449,8 +446,9 @@ export class IncomingMessageHandler {
           model: this.deps.getModel(),
         })
       } else {
-        console.log(
-          `[Main] Storing approval notification for task ${this.task.id} (request: ${data.requestId})`
+        logger.info(
+          { taskId: this.task.id, requestId: data.requestId },
+          'Storing approval notification'
         )
         this.deps.pendingTaskResults.set(this.task.id, {
           status: 'waiting_approval',
@@ -480,9 +478,9 @@ export class IncomingMessageHandler {
     this.onApprovalConsumed = (event: { data: unknown }) => {
       const data = event.data as Record<string, unknown>
       if (data.taskId !== this.task.id) return
-      console.log(
-        `[Main] Clearing stale approval entry for task ${this.task.id} ` +
-          `(request: ${data.requestId})`
+      logger.info(
+        { taskId: this.task.id, requestId: data.requestId },
+        'Clearing stale approval entry'
       )
       this.deps.pendingTaskResults.delete(this.task.id)
     }

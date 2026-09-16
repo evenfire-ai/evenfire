@@ -43,6 +43,10 @@ import {
   runToolUseLoop,
   validateToolLinkages,
 } from '../core/orchestration/toolUseLoop'
+import {
+  collectToolAttachments,
+  mergeCollectedAttachments,
+} from '../core/orchestration/toolUseLoopMessages'
 import { buildTurnContextBlock } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
@@ -235,7 +239,7 @@ export interface TaskExecutorDeps {
   // Callbacks to coordinator
   onApprovalNeeded: (requestId: string, taskId: string, approval: PendingApproval) => void
   onComplete: (task: Task) => void
-  onFail: (task: Task, error: TaskError) => void
+  onFail: (task: Task, error: TaskError, attachments?: Attachment[]) => void
 }
 
 export class TaskExecutor {
@@ -248,6 +252,7 @@ export class TaskExecutor {
   private abortController = new AbortController()
   private readonly executionBudget: TaskExecutionBudget
   private legacyApprovalBudget = false
+  private readonly completedAttachments: Attachment[] = []
   private toolRegistryPromise: Promise<{
     registry: ToolRegistry
     loopController: LoopController
@@ -526,7 +531,11 @@ export class TaskExecutor {
         'Task failed'
       )
       this.state = 'failed'
-      this.deps.onFail(this.task, taskError)
+      if (error instanceof TaskLimitError && this.completedAttachments.length > 0) {
+        this.deps.onFail(this.task, taskError, [...this.completedAttachments])
+      } else {
+        this.deps.onFail(this.task, taskError)
+      }
       this.resolveCompletion?.()
     } finally {
       this.executionBudget.pause()
@@ -555,6 +564,9 @@ export class TaskExecutor {
         return
       }
 
+      const savedApproval = this.conversation.pending_approval
+      mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
+      collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
       this.executionBudget.start(this.abortController)
       const approvalBeforeResolution = this.conversation.pending_approval
       if (this.legacyApprovalBudget && approvalBeforeResolution) {
@@ -691,6 +703,7 @@ export class TaskExecutor {
       const execStart = Date.now()
       this.executionBudget.assertTime()
       const toolResult = await executeSingleTool(suspendedCall, loopConfig)
+      collectToolAttachments([toolResult], this.completedAttachments)
       this.executionBudget.assertTime()
 
       if (reporter) {
@@ -847,7 +860,11 @@ export class TaskExecutor {
         'Resume failed'
       )
       this.state = 'failed'
-      this.deps.onFail(this.task, taskError)
+      if (error instanceof TaskLimitError && this.completedAttachments.length > 0) {
+        this.deps.onFail(this.task, taskError, [...this.completedAttachments])
+      } else {
+        this.deps.onFail(this.task, taskError)
+      }
       this.resolveCompletion?.()
     } finally {
       this.executionBudget.pause()
@@ -1057,6 +1074,12 @@ export class TaskExecutor {
   }
 
   private async handleLoopResult(result: LoopResult): Promise<void> {
+    if (result.type === 'need_approval') {
+      mergeCollectedAttachments(this.completedAttachments, result.approval.attachments ?? [])
+      collectToolAttachments(result.approval.completed_results ?? [], this.completedAttachments)
+    } else if ('attachments' in result) {
+      mergeCollectedAttachments(this.completedAttachments, result.attachments ?? [])
+    }
     if (this.abortController.signal.reason instanceof TaskLimitError)
       throw this.abortController.signal.reason
     if (result.type !== 'cancelled') this.executionBudget.assertTime()
@@ -1071,7 +1094,7 @@ export class TaskExecutor {
         if (result.type === 'exhaustion' && result.reason !== 'task_budget')
           throw new TaskLimitError(
             'TASK_ITERATION_LIMIT',
-            `Task stopped before completion after ${this.deps.config.maxToolCallsPerTask} iterations. Continuation requires a new budget.`
+            `Task stopped before completion after ${this.executionBudget.maxIterations} iterations. Continuation requires a new budget.`
           )
         const rawContent = result.type === 'response' ? result.content : result.message
         const guardedContent = await withAbort(
@@ -1098,9 +1121,9 @@ export class TaskExecutor {
         // need_approval pattern below: fail the turn and rethrow so run()'s
         // catch surfaces a clean failure — the client never gets an ACK for a
         // turn that was not persisted.
+        this.executionBudget.assertTime()
+        this.executionBudget.pause()
         try {
-          this.executionBudget.assertTime()
-          this.executionBudget.pause()
           await this.deps.conversationManager.completeTurn(this.conversation!, content)
         } catch (err) {
           await this.deps.conversationManager.failTurn(this.conversation!)
@@ -1204,9 +1227,9 @@ export class TaskExecutor {
       })
     }
     // D3 — same barrier-before-ACK contract as handleLoopResult 'response'.
+    this.executionBudget.assertTime()
+    this.executionBudget.pause()
     try {
-      this.executionBudget.assertTime()
-      this.executionBudget.pause()
       await this.deps.conversationManager.completeTurn(this.conversation!, content)
     } catch (err) {
       await this.deps.conversationManager.failTurn(this.conversation!)
@@ -1425,6 +1448,8 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.onAttachments = attachments =>
+      mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
     // Undefined when no rules are configured (no-config compatibility, §5); a
     // malformed set throws here (fail-closed admission, §3/§5).
@@ -1949,7 +1974,8 @@ export class TaskExecutor {
       : baseController
 
     const mcpManager = this.deps.mcpManager
-    if (!presentation.bridgeEnabled) {
+    // Codex direct still observes the live catalog; observation must not enable discovery.
+    if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
       return { registry: compositeRegistry, loopController: innerController }
     }
 
@@ -1978,20 +2004,21 @@ export class TaskExecutor {
     )
 
     // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
-    // deferrable catalog. Only wired when an McpManager is present — otherwise
-    // there is nothing to defer and the intercept stays inert.
-    const bridge: LoopConfig['bridge'] = mcpManager
-      ? {
-          nativeNames,
-          getDeferrableCatalogNames: () =>
-            new Set(
-              mcpManager
-                .getAllTools()
-                .map(t => t.name)
-                .filter(name => !nativeNames.has(name))
-            ),
-        }
-      : undefined
+    // deferrable catalog. Direct mode observes presentation without installing
+    // discovery interception or registering bridge tools.
+    const bridge: LoopConfig['bridge'] =
+      presentation.bridgeEnabled && mcpManager
+        ? {
+            nativeNames,
+            getDeferrableCatalogNames: () =>
+              new Set(
+                mcpManager
+                  .getAllTools()
+                  .map(t => t.name)
+                  .filter(name => !nativeNames.has(name))
+              ),
+          }
+        : undefined
 
     return { registry: compositeRegistry, loopController, bridge }
   }
@@ -2072,11 +2099,7 @@ export class TaskExecutor {
 
   private collectAttachments(results: ToolResult[]): Attachment[] {
     const attachments: Attachment[] = []
-    for (const r of results) {
-      if (r.attachments) {
-        attachments.push(...r.attachments)
-      }
-    }
+    collectToolAttachments(results, attachments)
     return attachments
   }
 

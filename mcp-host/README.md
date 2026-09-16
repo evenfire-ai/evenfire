@@ -367,3 +367,9 @@ is granted. Newly written or malformed accounting is never treated as legacy.
 `CLERUM_AGENT_TASK_DELAY=3` is a 3-millisecond minimum between task dispatches,
 not seconds and not a delay between tool iterations. Zero disables dispatch
 spacing. Invalid or overflowing execution limits fail configuration validation.
+
+Execution-limit defaults apply only when their environment variable is absent.
+Explicit empty strings, whitespace, zero (except task dispatch spacing), malformed
+numbers and timer overflows are rejected. Incomplete duration/iteration outcomes
+retain already-produced, provenance-checked attachments in the failure response;
+this does not turn the interrupted task into a successful completion.

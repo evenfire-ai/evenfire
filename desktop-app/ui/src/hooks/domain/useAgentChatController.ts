@@ -1690,6 +1690,7 @@ export function useAgentChatController({
           content: message,
           timestamp: Date.now(),
           task_id: taskIdHint,
+          attachments: buildResponseFileAttachments(taskResult),
           isError: true,
           ...(errorCode ? { errorCode } : {}),
           ...(errorProvider ? { errorProvider } : {}),
@@ -1986,6 +1987,7 @@ export function useAgentChatController({
               content: message,
               timestamp: Date.now(),
               task_id: state.taskId,
+              attachments: buildResponseFileAttachments(taskResult),
               isError: true,
               ...(errorCode ? { errorCode } : {}),
               ...(errorProvider ? { errorProvider } : {}),
@@ -2182,6 +2184,7 @@ export function useAgentChatController({
             timestamp: Date.now(),
             task_id: state.taskId,
             isError: true,
+            ...(result.attachments?.length ? { attachments: result.attachments } : {}),
             errorCode: result.code,
             errorProvider: result.provider,
           })

@@ -3,6 +3,7 @@ import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
@@ -15,6 +16,7 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { PromptCache } from '../../llm/promptCache'
+import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
@@ -1680,30 +1682,59 @@ describe('TaskExecutor Codex presentation wiring', () => {
     expect(registry.get('fixture__tool_249')).not.toBeNull()
   })
 
-  it('direct preserves a catalog over32 and does not activate the bridge despite the legacy flag', async () => {
-    const previousMode = appConfig.codexToolPresentation
-    const previousFlag = appConfig.dynamicToolsEnabled
-    appConfig.codexToolPresentation = 'direct'
-    appConfig.dynamicToolsEnabled = true
-    try {
-      const manager = {
-        getAllTools: () =>
-          Array.from({ length: 83 }, (_, i) => ({
-            name: `fixture__tool_${i}`,
-            inputSchema: { type: 'object' },
-          })),
+  it.each(['codex-subscription', 'zai'])(
+    'default direct for %s logs the catalog without a bridge',
+    async primary => {
+      const previousMode = appConfig.codexToolPresentation
+      const previousFlag = appConfig.dynamicToolsEnabled
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      appConfig.codexToolPresentation = parseCodexToolPresentation(undefined)
+      appConfig.dynamicToolsEnabled = true
+      try {
+        const manager = {
+          getAllTools: () =>
+            Array.from({ length: 83 }, (_, i) => ({
+              name: `fixture__tool_${i}`,
+              inputSchema: { type: 'object' },
+            })),
+        }
+        const { executor, deps } = makeExecutor(primary, manager)
+        if (primary !== 'codex-subscription') {
+          deps.failover = {
+            policy: { fallbacks: [{ provider: 'codex-subscription', model: 'test-model' }] },
+          } as any
+        }
+        const { registry, loopController, bridge } = await executor.createToolRegistry()
+        expect(bridge).toBeUndefined()
+        const full = registry.listDefinitions()
+        expect(full.length).toBeGreaterThan(83)
+        expect(
+          full.filter((tool: any) =>
+            ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'].includes(
+              tool.name
+            )
+          )
+        ).toEqual([])
+        expect(await loopController.refreshTools(full)).toEqual(full)
+        expect(info).toHaveBeenCalledWith(
+          {
+            component: 'tool-presentation',
+            mode: 'direct',
+            strategy: 'direct',
+            nativeCount: full.length - 83,
+            mcpCount: 83,
+            presentedCount: full.length,
+            deferredCount: 0,
+          },
+          'Tool presentation selected'
+        )
+      } finally {
+        appConfig.codexToolPresentation = previousMode
+        appConfig.dynamicToolsEnabled = previousFlag
+        info.mockRestore()
       }
-      const { executor } = makeExecutor('codex-subscription', manager)
-      const { registry, loopController, bridge } = await executor.createToolRegistry()
-      expect(bridge).toBeUndefined()
-      const full = registry.listDefinitions()
-      expect(full.length).toBeGreaterThan(83)
-      expect(await loopController.refreshTools(full)).toEqual(full)
-    } finally {
-      appConfig.codexToolPresentation = previousMode
-      appConfig.dynamicToolsEnabled = previousFlag
     }
-  })
+  )
 
   it('rebuilds cached discovery guidance on same-model provider switches, preserving daily snapshot', async () => {
     const previous = appConfig.promptCacheEnabled
@@ -1920,5 +1951,125 @@ describe('TaskExecutor exhaustion and cancellation contracts', () => {
     expect(deps.onFail).not.toHaveBeenCalled()
     expect(executeSingleTool).not.toHaveBeenCalled()
     await expect(executor.waitForCompletion()).resolves.toBeUndefined()
+  })
+})
+
+describe('adversarial review regressions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  afterEach(() => vi.restoreAllMocks())
+  it.each([false, true])(
+    'persists interruption when final sanitization crosses deadline (static=%s)',
+    async isStatic => {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      const deps = createDeps()
+      deps.config.maxTaskDuration = 10000
+      const task = createTask(isStatic ? 'list workflows' : 'Finish the work')
+      const executor = new TaskExecutor(task, deps)
+      const failTurn = vi.spyOn(deps.conversationManager, 'failTurn')
+      const safety = executor['responseSafety']
+      const sanitize = safety.sanitizeAssistantResponse.bind(safety)
+      vi.spyOn(safety, 'sanitizeAssistantResponse').mockImplementation(content => {
+        const result = sanitize(content)
+        now = 10001 // Cross the boundary synchronously, before the timer callback can run.
+        return result
+      })
+      if (isStatic) {
+        vi.spyOn(executor as any, 'prepareChannelWorkflowCallerContext').mockImplementation(
+          async () => {
+            executor['workflowAccessDeniedResponse'] = 'Access denied'
+          }
+        )
+      }
+      vi.mocked(runToolUseLoop).mockResolvedValue({
+        type: 'response',
+        content: 'Final answer',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      })
+      await executor.run()
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+      )
+      expect(deps.onComplete).not.toHaveBeenCalled()
+      expect(failTurn).not.toHaveBeenCalled()
+      const conversation = deps.conversationManager.getSessionByKey(executor.sessionKey!)
+      expect(conversation?.turns.at(-1)?.response).toContain('stopped before completion')
+    }
+  )
+  it('retains exhaustion attachments and reports the restored effective limit', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment()
+    const executor = new TaskExecutor(task, deps)
+    executor['executionBudget'].restore({
+      elapsedActiveMs: 0,
+      iterationsUsed: 2,
+      durationMs: 300000,
+      maxIterations: 2,
+    })
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      iterations: 0,
+      message: 'limit',
+      attachments: [attachment],
+    })
+    await executor.run()
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({
+        code: 'TASK_ITERATION_LIMIT',
+        message: expect.stringContaining('after 2 iterations'),
+      }),
+      [attachment]
+    )
+    expect(deps.onComplete).not.toHaveBeenCalled()
+  })
+  it('retains saved artifacts when restored time is already exhausted', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment()
+    const key = 'user-1:telegram:test-channel'
+    const conversation = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
+    await deps.conversationManager.startTurn(conversation, 'work', task.id)
+    const approval = {
+      request_id: 'expired-budget',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'confirm',
+      context_snapshot: [],
+      attachments: [attachment],
+      completed_results: [
+        {
+          tool_call_id: 'prior',
+          name: 'image',
+          content: 'done',
+          is_error: false,
+          attachments: [attachment],
+        },
+      ],
+      task_budget: {
+        elapsedActiveMs: 300000,
+        iterationsUsed: 1,
+        durationMs: 300000,
+        maxIterations: 10,
+      },
+    }
+    await deps.conversationManager.suspendForApproval(conversation, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval(key, approval)
+    await executor.resumeAfterApproval(false)
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({ code: 'TASK_DURATION_LIMIT' }),
+      [attachment]
+    )
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    expect(runToolUseLoop).not.toHaveBeenCalled()
   })
 })

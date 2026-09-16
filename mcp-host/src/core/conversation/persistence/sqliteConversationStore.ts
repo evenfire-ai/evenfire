@@ -252,7 +252,7 @@ export class SqliteConversationStore implements ConversationStore {
 
   pin(key: string): void {
     if (!this.cache.has(key)) {
-      logger.warn({}, 'Cannot pin unknown conversation')
+      logger.warn({ ...this.cache.stats() }, 'Cannot pin unknown conversation')
       return
     }
     this.cache.pin(key)

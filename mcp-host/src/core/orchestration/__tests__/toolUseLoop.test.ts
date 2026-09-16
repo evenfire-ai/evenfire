@@ -2285,3 +2285,96 @@ describe('tool presentation failure boundary', () => {
     expect(reasoning.respondWithTools).not.toHaveBeenCalled()
   })
 })
+
+describe('interrupted loop artifact collection', () => {
+  it.each(['iteration', 'model', 'batch', 'admission', 'validation'] as const)(
+    'retains trusted files at %s boundary',
+    async boundary => {
+      const attachment: Attachment = {
+        id: 'report',
+        kind: 'file',
+        mimeType: 'text/markdown',
+        encoding: 'base64',
+        dataBase64: 'IyByZXBvcnQ=',
+        filename: 'report.md',
+        sourceTool: 'clerum__generate_markdown',
+        lane: 'internal_generated_artifact',
+        producer: 'mcp-host-internal-tool',
+        artifactFormat: 'md',
+      }
+      const artifactTool = createMockTool('clerum__generate_markdown', {
+        attachments: [attachment],
+      })
+      const controller = new AbortController()
+      const abortTool = createMockTool('stop')
+      vi.mocked(abortTool.execute).mockImplementation(async () => {
+        controller.abort(new Error('task deadline'))
+        return { content: 'interrupted', duration_ms: 0, is_error: true }
+      })
+      const calls = [{ id: 'report-call', name: artifactTool.name(), arguments: {} }]
+      if (boundary === 'batch' || boundary === 'validation')
+        calls.push({ id: 'stop-call', name: abortTool.name(), arguments: {} })
+      const reasoning = createMockReasoning([{ type: 'tool_calls', calls }])
+      reasoning.continueWithToolResults = vi.fn(async () => {
+        controller.abort(new Error('task deadline'))
+        return { type: 'text' as const, content: 'late reply' }
+      })
+      if (boundary === 'validation')
+        abortTool.validateParams = async () => {
+          throw new Error('validation deadline')
+        }
+      const events = new SimpleEventEmitter()
+      if (boundary === 'admission') {
+        const forward = events.emit.bind(events)
+        events.emit = event => {
+          if (event.type === 'loop:iteration' && event.data.iteration === 1)
+            throw new Error('admission deadline')
+          forward(event)
+        }
+      }
+      const config = buildLoopConfig({
+        reasoning,
+        toolRegistry: createMockRegistry([artifactTool, abortTool]),
+        safety: new BasicSafety(),
+        events,
+        conversation: makeFakeConversation(),
+        maxIterations: boundary === 'iteration' ? 1 : 2,
+      })
+      config.abortSignal = controller.signal
+      const collected = vi.fn()
+      config.onAttachments = collected
+      const pending = runToolUseLoop(config, [{ role: 'user', content: 'produce a report' }])
+      if (boundary === 'admission' || boundary === 'validation')
+        await expect(pending).rejects.toThrow(`${boundary} deadline`)
+      else expect((await pending).type).toBe(boundary === 'iteration' ? 'exhaustion' : 'cancelled')
+      expect(collected.mock.calls.flatMap(call => call[0])).toContainEqual(attachment)
+      expect(collected.mock.calls.flatMap(call => call[0]).every(item => item === attachment)).toBe(
+        true
+      )
+    }
+  )
+  it('does not collect file output with untrusted provenance on interruption', async () => {
+    const untrusted: Attachment = {
+      id: 'bad',
+      kind: 'file',
+      mimeType: 'text/markdown',
+      encoding: 'base64',
+      dataBase64: 'eA==',
+      filename: 'report.md',
+    }
+    const tool = createMockTool('external__tool', { attachments: [untrusted] })
+    const config = buildLoopConfig({
+      reasoning: createMockReasoning([
+        { type: 'tool_calls', calls: [{ id: 'call', name: tool.name(), arguments: {} }] },
+      ]),
+      toolRegistry: createMockRegistry([tool]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+      maxIterations: 1,
+    })
+    config.onAttachments = vi.fn()
+    await runToolUseLoop(config, [{ role: 'user', content: 'work' }])
+    expect(config.onAttachments).toHaveBeenCalledExactlyOnceWith([])
+  })
+})

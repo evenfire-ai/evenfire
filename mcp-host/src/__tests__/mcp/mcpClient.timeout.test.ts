@@ -396,16 +396,19 @@ describe('McpClient SDK request timeouts', () => {
     expect(c.isConnected).toBe(true)
   })
 
-  it('fails closed for invalid timeout env before SDK tool discovery', async () => {
-    vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', '0')
-    const c = client()
+  it.each(['', ' ', '0', '-1', '2147483648'])(
+    'fails closed for invalid timeout env %j before SDK tool discovery',
+    async value => {
+      vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', value)
+      const c = client()
 
-    await expect(c.connect()).rejects.toThrow(
-      'CLERUM_MCP_TOOL_TIMEOUT_MS must be a positive safe integer'
-    )
-    expect(sdkState.listToolsCalls).toHaveLength(0)
-    expect(sdkState.callToolCalls).toHaveLength(0)
-  })
+      await expect(c.connect()).rejects.toThrow(
+        'CLERUM_MCP_TOOL_TIMEOUT_MS must be a positive safe integer'
+      )
+      expect(sdkState.listToolsCalls).toHaveLength(0)
+      expect(sdkState.callToolCalls).toHaveLength(0)
+    }
+  )
 
   it('allows a lower caller budget to override env max/per-call contradiction', async () => {
     vi.stubEnv('CLERUM_MCP_TOOL_TIMEOUT_MS', '3600000')

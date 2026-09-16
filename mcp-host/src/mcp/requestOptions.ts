@@ -21,7 +21,7 @@ export interface McpSdkRequestOptions {
 
 function readPositiveSafeIntegerEnv(name: string, defaultValue: number): number {
   const raw = process.env[name]
-  if (raw === undefined || raw === '') return defaultValue
+  if (raw === undefined) return defaultValue
   if (!/^\d+$/.test(raw)) throw new Error(`${name} must be a positive safe integer`)
   const value = Number.parseInt(raw, 10)
   if (!Number.isSafeInteger(value) || value < 1 || value > 2_147_483_647) {
