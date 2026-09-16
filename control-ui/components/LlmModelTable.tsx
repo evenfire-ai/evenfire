@@ -207,11 +207,14 @@ export function LlmModelTable({
   useEffect(() => {
     if (!normalizedSearch) return
     setExpandedProviders(current => {
-      const next = new Set(current)
+      let next: Set<string> | null = null
       for (const provider of visibleProviderKeys.split('\u0000')) {
-        if (provider) next.add(provider)
+        if (provider && !current.has(provider)) {
+          next ??= new Set(current)
+          next.add(provider)
+        }
       }
-      return next
+      return next ?? current
     })
   }, [normalizedSearch, visibleProviderKeys])
 
