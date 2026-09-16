@@ -92,11 +92,9 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await cleanupAgentFlowResources(sessionRequest, { agentName })
 
       await page.getByRole('link', { name: 'Agents', exact: true }).click()
-      // TASK-229: creation lands on the new agent's detail page (header shows
-      // the agent's name + route URL), not back on the agents list.
-      await expect(page).toHaveURL(
-        new RegExp(`\\/(?:hosts|agents)\\/${agentName}(?:\\/overview)?$`)
-      )
+      // Pre-creation (review R1-M1): this is still the Agents LIST — the detail
+      // URL is only asserted after Create Agent completes below.
+      await expect(page).toHaveURL(/\/(?:hosts|agents)$/)
 
       const createAgent = page.getByRole('button', { name: 'Create agent', exact: true })
       await expect(createAgent).toBeEnabled()
@@ -128,8 +126,9 @@ test.describe('optional QA recorder: Control UI agent creation', () => {
       await expect(submitAgent).toBeEnabled()
       await submitAgent.click()
 
-      // TASK-229: creation lands on the new agent's detail page (header shows
-      // the agent's name + route URL), not back on the agents list.
+      // TASK-229 (review R1-M1): only NOW — after Create Agent succeeds — does
+      // the wizard land on the new agent's detail page (header leads with the
+      // display name while its data loads; no route-URL eyebrow is rendered).
       await expect(page).toHaveURL(
         new RegExp(`\\/(?:hosts|agents)\\/${agentName}(?:\\/overview)?$`)
       )
