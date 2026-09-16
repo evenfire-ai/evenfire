@@ -2230,3 +2230,48 @@ describe('executeSingleTool — progress watcher', () => {
     vi.useRealTimers()
   })
 })
+
+describe('tool presentation failure boundary', () => {
+  it('does not disclose the full local catalog or call reasoning when presentation fails', async () => {
+    const reasoning = createMockReasoning([{ type: 'text', content: 'should not run' }])
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry(
+        Array.from({ length: 250 }, (_, i) => createMockTool(`server__tool_${i}`))
+      ),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    const error = new Error('presentation unavailable')
+    vi.spyOn(config.loopController, 'refreshTools').mockRejectedValue(error)
+    expect(await runToolUseLoop(config, [{ role: 'user', content: 'Find one task' }])).toEqual({
+      type: 'error',
+      error,
+    })
+    expect(reasoning.respondWithTools).not.toHaveBeenCalled()
+    expect(reasoning.continueWithToolResults).not.toHaveBeenCalled()
+  })
+
+  it('retains cancellation when the pending refresh rejects after abort', async () => {
+    const reasoning = createMockReasoning([])
+    const abort = new AbortController()
+    const config = buildLoopConfig({
+      reasoning,
+      toolRegistry: createMockRegistry([]),
+      safety: new BasicSafety(),
+      events: new SimpleEventEmitter(),
+      conversation: makeFakeConversation(),
+    })
+    config.abortSignal = abort.signal
+    vi.spyOn(config.loopController, 'refreshTools').mockImplementation(async () => {
+      abort.abort()
+      throw new Error('aborted')
+    })
+    expect(await runToolUseLoop(config, [{ role: 'user', content: 'hello' }])).toEqual({
+      type: 'cancelled',
+      reason: 'signal_aborted',
+    })
+    expect(reasoning.respondWithTools).not.toHaveBeenCalled()
+  })
+})

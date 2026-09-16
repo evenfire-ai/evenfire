@@ -202,19 +202,16 @@ JSON
   rm -rf "$d"
 }
 
-assert_unpublished_images_are_exactly_the_known_two() {
+assert_unpublished_images_are_exactly_the_known_fixtures() {
   local got
   got="$(node -e '
     import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(m =>
       console.log(m.IMAGES.filter(i=>!i.published).map(i=>i.name).sort().join(",")))' 2>/dev/null)"
-  # Verified by anonymous ghcr probe: these two return `denied`. playwright-server
-  # IS published (an earlier draft wrongly listed it as a gap; the probe that said
-  # otherwise was missing its Accept header). doc-generator-mcp used to be the
-  # third; it has no manifest row at all now (see
-  # assert_doc_generator_mcp_has_been_removed_from_the_image_system).
-  local want="workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
+  # Only these local E2E fixtures are unpublished. Keep the exact set explicit
+  # so a production image cannot silently disappear from publication.
+  local want="codex-approved-tools-control-api-e2e,codex-approved-tools-mcp-e2e,codex-approved-tools-proxy-e2e,codex-approved-tools-workflow-e2e,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
   if [ "$got" = "$want" ]; then
-    pass "the unpublished set is exactly the known two"
+    pass "the unpublished set is exactly the known fixtures"
   else
     fail "unpublished set is '$got', expected '$want'"
   fi
@@ -1332,7 +1329,7 @@ assert_every_local_image_maps_to_exactly_one_row
 assert_pull_in_ghcr_mode_is_derived_not_stored
 assert_a_published_image_with_no_source_paths_is_rejected
 assert_an_invalid_image_name_is_rejected
-assert_unpublished_images_are_exactly_the_known_two
+assert_unpublished_images_are_exactly_the_known_fixtures
 assert_matrix_fields_match_manifest
 assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters

@@ -162,7 +162,15 @@ export class SecretsLlmSubscriptionsPage {
    * Create a named grant. After the 201 the sync dialog stays open
    * (Sign in visible). Callers that leave Secrets must closeConnectModal first.
    */
-  async createGrant(displayName: string): Promise<string> {
+  async createGrant(
+    displayName: string,
+    onCreated?: (metadata: {
+      id?: unknown
+      connectionKey?: unknown
+      displayName?: unknown
+      createdBy?: unknown
+    }) => void | Promise<void>
+  ): Promise<string> {
     await this.page.getByRole('button', { name: 'Add subscription' }).click()
     await this.page.getByLabel('Name', { exact: true }).fill(displayName)
     const created = this.page.waitForResponse(
@@ -173,8 +181,20 @@ export class SecretsLlmSubscriptionsPage {
     )
     await this.page.getByRole('button', { name: 'Create', exact: true }).click()
     const response = await created
+    const body = (await response.json()) as {
+      id?: unknown
+      connectionKey?: string
+      displayName?: unknown
+      createdBy?: unknown
+    }
+    if (response.status() === 201 && onCreated)
+      await onCreated({
+        id: body.id,
+        connectionKey: body.connectionKey,
+        displayName: body.displayName,
+        createdBy: body.createdBy,
+      })
     expect(response.status(), `create grant must return 201, got ${response.status()}`).toBe(201)
-    const body = (await response.json()) as { connectionKey?: string }
     expect(body.connectionKey).toBeTruthy()
     await this.expectConnectModal()
     return String(body.connectionKey)
