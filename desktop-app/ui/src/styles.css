@@ -1103,6 +1103,24 @@ h3 {
   white-space: nowrap;
 }
 
+/* Placeholder while the access catalog (display-name map) is still loading —
+ * same shimmer family as .chat-skeleton-line. */
+.notification-menu-agent-skeleton {
+  display: inline-block;
+  width: 7.5rem;
+  height: var(--font-size-sm);
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(var(--edge-rgb), 0.12) 0%,
+    rgba(var(--edge-rgb), 0.26) 46%,
+    rgba(var(--edge-rgb), 0.12) 100%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+  vertical-align: middle;
+}
+
 .notification-menu-text {
   margin: 0;
   font-size: var(--font-size-sm);
