@@ -34,3 +34,10 @@ export function readRecipeCodexConnectionRef(
   if (!result.ok) return CODEX_UNASSIGNED_CONNECTION_KEY
   return result.connectionKey
 }
+
+/** Canonical Grok grant. Leftover Codex alias fails closed to `unassigned`. */
+export function readRecipeGrokConnectionRef(
+  annotations: Record<string, string> | undefined
+): string {
+  return readRecipeCodexConnectionRef(annotations, 'grok-subscription')
+}

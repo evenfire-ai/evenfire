@@ -74,6 +74,19 @@ function verdictFor(opts: {
     },
     hostBinding: binding,
     hostBindingReason: binding ? 'eligible' : 'unassigned',
+    grokProjection: {
+      targets: [],
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresCodexProxyEgress: false,
+      requiresGrokProxyEgress: false,
+      catalogContentHash: null,
+      catalogRevision: null,
+      connectionRevision: null,
+      eligibility: 'ineligible',
+      reason: 'static_only',
+      driftHashInput: '{}',
+    },
   }
 }
 

@@ -49,7 +49,10 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
-import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
+import {
+  readRecipeCodexConnectionRef,
+  readRecipeGrokConnectionRef,
+} from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -1283,6 +1286,7 @@ export class WorkflowRecipeReconciler {
       claimedParent: this.claimedCodexParent(recipe),
       parentSpec: parent.spec,
       connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
+      grokConnectionKey: readRecipeGrokConnectionRef(grantAnnotations),
     })
   }
 

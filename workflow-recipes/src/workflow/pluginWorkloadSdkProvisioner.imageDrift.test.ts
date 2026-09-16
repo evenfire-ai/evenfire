@@ -159,6 +159,19 @@ const decidedVerdict: CodexRecipeVerdict = {
   },
   hostBinding: null,
   hostBindingReason: 'unassigned',
+  grokProjection: {
+    targets: [],
+    eligibleTargets: [],
+    derivedScopes: [],
+    requiresCodexProxyEgress: false,
+    requiresGrokProxyEgress: false,
+    catalogContentHash: null,
+    catalogRevision: null,
+    connectionRevision: null,
+    eligibility: 'ineligible',
+    reason: 'static_only',
+    driftHashInput: '{}',
+  },
 }
 
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
@@ -730,6 +743,19 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
             },
             hostBinding: null,
             hostBindingReason: 'provenance_uncertain',
+            grokProjection: {
+              targets: [],
+              eligibleTargets: [],
+              derivedScopes: [],
+              requiresCodexProxyEgress: false,
+              requiresGrokProxyEgress: false,
+              catalogContentHash: null,
+              catalogRevision: null,
+              connectionRevision: null,
+              eligibility: 'ineligible',
+              reason: 'static_only',
+              driftHashInput: '{}',
+            },
           } satisfies CodexRecipeVerdict,
         }
       )

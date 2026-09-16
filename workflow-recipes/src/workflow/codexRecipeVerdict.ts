@@ -1,8 +1,11 @@
 import {
   CODEX_PROVIDER,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   type CodexCatalogSnapshot,
   type CodexConfigMapView,
   type CodexExecutionProjection,
+  parseGrokAllowedModelsSnapshot,
+  projectGrokExecution,
   snapshotForAssignedCodexGrant,
   toEligiblePolicyBinding,
 } from '@clerum/codex-catalog-projection'
@@ -10,6 +13,7 @@ import type { WorkflowRecipeSpec } from '../types'
 import {
   type CodexProvenance,
   projectRecipeCodexExecution,
+  recipeToCodexHostSpec,
   resolveCodexAuthoritativeSpec,
 } from './codexExecutionProjection'
 import {
@@ -54,6 +58,12 @@ export type CodexReconcileContext = {
    * only producer (`bindCodexReconcileContext`) always fills it.
    */
   connectionKey: string
+  /**
+   * Canonical Grok grant key. Codex alias leftovers fail closed to
+   * `unassigned` at the reader. Optional so existing Codex-only callers
+   * keep compiling; missing is `unassigned` and cannot spend Grok.
+   */
+  grokConnectionKey?: string
 }
 
 /**
@@ -83,6 +93,7 @@ export type CodexRecipeVerdict = {
    */
   readonly hostBinding: PluginWorkloadSdkCodexBindingProof | null
   readonly hostBindingReason: string
+  readonly grokProjection: CodexExecutionProjection & { requiresGrokProxyEgress: boolean }
 }
 
 export function projectCodexRecipeVerdict(input: {
@@ -109,12 +120,16 @@ export function projectCodexRecipeVerdict(input: {
     view.snapshot
   )
   const projection = projectRecipeCodexExecution(resolved.spec, snapshot, resolved.provenance)
+  const grokKey = context.grokConnectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY
+  const grokSnapshot = parseGrokAllowedModelsSnapshot(view.configMap, grokKey)
+  const grokProjection = projectGrokExecution(recipeToCodexHostSpec(resolved.spec), grokSnapshot)
 
   const base = {
     provenance: resolved.provenance,
     provenanceReason: resolved.reason,
     connectionKey: context.connectionKey,
     projection,
+    grokProjection,
   } as const
 
   if (projection.eligibility !== 'eligible') {

@@ -9,6 +9,7 @@ import {
   type CodexExecutionProjection,
   assignedHostCodexConnectionRef,
   projectCodexExecution,
+  projectGrokExecution,
 } from './codexExecutionProjection'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
@@ -33,6 +34,7 @@ import {
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   parseAllowedModelsSnapshot,
+  parseGrokAllowedModelsSnapshot,
   snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
@@ -1246,7 +1248,8 @@ export class HostReconciler {
     host: HostCRD,
     hasChannelIngress = false,
     frontsOAuthServer = false,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): string {
     // Hash the EFFECTIVE (resolved) scopes — what actually gets minted into the
     // control token — so change-detection matches the default-fallback applied
@@ -1254,21 +1257,24 @@ export class HostReconciler {
     // carries the first-party defaults, and the two drift). Uses the SAME
     // `resolveRuntimeControlScopes` as the mint path (see
     // `resolveEffectiveControlScopesForHost`) so the hashed set and the minted
-    // set — including the derive-only `oauth:user-token` and the codex
-    // projection's derived scopes — can never diverge.
+    // set — including the derive-only `oauth:user-token` and broker
+    // projections' derived scopes — can never diverge.
     const runtimeScopes = [
       ...resolveRuntimeControlScopes(host.spec.workflowControl, {
         hasChannelIngress,
         frontsOAuthServer,
       }),
     ].sort()
-    const derived = projection?.derivedScopes ?? []
+    const derived = [...(projection?.derivedScopes ?? []), ...(grokProjection?.derivedScopes ?? [])]
     if (derived.length === 0) {
       return HostReconciler.shortHash(runtimeScopes)
     }
     return HostReconciler.shortHash({
       scopes: [...runtimeScopes, ...derived].sort(),
-      drift: projection?.driftHashInput,
+      drift: {
+        codex: projection?.driftHashInput,
+        grok: grokProjection?.driftHashInput,
+      },
     })
   }
 
@@ -1297,7 +1303,8 @@ export class HostReconciler {
     hasChannelIngress = false,
     frontsOAuthServer = false,
     preservedHostUid?: string,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
       ? Math.max(0, tokens.refreshExpiresInSeconds)
@@ -1316,7 +1323,8 @@ export class HostReconciler {
         host,
         hasChannelIngress,
         frontsOAuthServer,
-        projection
+        projection,
+        grokProjection
       ),
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
@@ -1348,7 +1356,8 @@ export class HostReconciler {
     nowMs: number,
     hasChannelIngress = false,
     frontsOAuthServer = false,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): { refresh: boolean; rolloutRequired: boolean; reason: string; refreshTokenExpMs?: number } {
     const labels = secret.metadata?.labels ?? {}
     if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== host.name) {
@@ -1367,7 +1376,8 @@ export class HostReconciler {
       host,
       hasChannelIngress,
       frontsOAuthServer,
-      projection
+      projection,
+      grokProjection
     )
     const hasContractMetadata =
       RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION in annotations ||
@@ -1588,6 +1598,14 @@ export class HostReconciler {
     return projectCodexExecution(host.spec, snapshot)
   }
 
+  private projectGrokForHost(host: HostCRD): CodexExecutionProjection & {
+    requiresGrokProxyEgress: boolean
+  } {
+    const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
+    const snapshot = parseGrokAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
+    return projectGrokExecution(host.spec, snapshot)
+  }
+
   private resolveEffectiveControlScopesForHost(
     host: HostCRD,
     frontsOAuthServer: boolean,
@@ -1598,9 +1616,10 @@ export class HostReconciler {
       hasChannelIngress,
       frontsOAuthServer
     )
-    const derived = this.projectCodexForHost(host).derivedScopes.filter(
-      scope => !workflow.includes(scope as HostWorkflowControlScope)
-    )
+    const derived = [
+      ...this.projectCodexForHost(host).derivedScopes,
+      ...this.projectGrokForHost(host).derivedScopes,
+    ].filter(scope => !workflow.includes(scope as HostWorkflowControlScope))
     return [...workflow, ...derived] as EffectiveMcpHostControlScope[]
   }
 
@@ -1613,7 +1632,8 @@ export class HostReconciler {
       host,
       hasChannelIngress,
       frontsOAuthServer,
-      this.projectCodexForHost(host)
+      this.projectCodexForHost(host),
+      this.projectGrokForHost(host)
     )
   }
 
@@ -1694,11 +1714,13 @@ export class HostReconciler {
         // hash never diverge.
         const frontsOAuthServer = await this.frontsOAuthServer(host)
         const projection = this.projectCodexForHost(host)
+        const grokProjection = this.projectGrokForHost(host)
         const scopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           hasChannelIngress,
           frontsOAuthServer,
-          projection
+          projection,
+          grokProjection
         )
         let decision: {
           refresh: boolean
@@ -1712,7 +1734,8 @@ export class HostReconciler {
               nowMs,
               hasChannelIngress,
               frontsOAuthServer,
-              projection
+              projection,
+              grokProjection
             )
           : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
         if (
@@ -1884,7 +1907,8 @@ export class HostReconciler {
               hasChannelIngress,
               frontsOAuthServer,
               existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION],
-              projection
+              projection,
+              grokProjection
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
@@ -4215,6 +4239,84 @@ export class HostReconciler {
     await this.deleteMcpHostCodexProxyEgressNetworkPolicy(host)
   }
 
+  private async ensureMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-grok-proxy`
+    const policy: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: policyName,
+        namespace: host.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [HOST_LABEL]: host.name,
+          'clerum.io/policy-type': 'grok-proxy-egress',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: {
+            [HOST_LABEL]: host.name,
+            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+                },
+                podSelector: {
+                  matchLabels: { app: 'grok-llm-proxy' },
+                },
+              },
+            ],
+            ports: [{ port: 8080, protocol: 'TCP' }],
+          },
+        ],
+      },
+    }
+    await applyNetworkPolicy(
+      this.networkingApi,
+      policyName,
+      host.namespace,
+      policy,
+      '[HostReconciler]'
+    )
+  }
+
+  private async deleteMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-grok-proxy`
+    await this.deleteIfHccOwned(
+      'NetworkPolicy',
+      policyName,
+      host.namespace,
+      host.name,
+      () =>
+        this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        }),
+      () =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        })
+    )
+  }
+
+  private async reconcileMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const projection = this.projectGrokForHost(host)
+    if (projection.eligibility === 'uncertain') return
+    if (projection.requiresGrokProxyEgress) {
+      await this.ensureMcpHostGrokProxyEgressNetworkPolicy(host)
+      return
+    }
+    await this.deleteMcpHostGrokProxyEgressNetworkPolicy(host)
+  }
+
   /**
    * Delete per-Host NetworkPolicies created by this reconciler.
    * 404-tolerant — safe to call even if NPs were never created or already gone.
@@ -4227,6 +4329,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
       { name: `mcp-host-${name}-egress-codex-proxy`, namespace },
+      { name: `mcp-host-${name}-egress-grok-proxy`, namespace },
       { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
@@ -4482,6 +4585,7 @@ export class HostReconciler {
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
+      await this.reconcileMcpHostGrokProxyEgressNetworkPolicy(host)
       // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
       // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
       // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
