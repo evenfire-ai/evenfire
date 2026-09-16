@@ -323,6 +323,13 @@ interface UseAgentChatControllerParams {
   navItem: NavItem
   pushToast: (msg: string, tone: Tone) => void
   pushNotification: (n: PushNotificationInput) => void
+  /**
+   * Human-visible name for an agent identifier (catalog `spec.host` display
+   * name, identifier fallback). Used for desktop toast titles only — supplied
+   * by the host (useAppController) so this controller keeps zero TanStack
+   * Query coupling.
+   */
+  agentDisplayName: (agentName: string) => string
   canDeliverChatResponseNotification: (
     channel: 'inApp' | 'desktop',
     context: { activeChatVisible: boolean }
@@ -347,6 +354,7 @@ export function useAgentChatController({
   navItem,
   pushToast,
   pushNotification,
+  agentDisplayName,
   canDeliverChatResponseNotification,
   showDesktopNotification,
   openAgentConversationFromNotification,
@@ -597,6 +605,10 @@ export function useAgentChatController({
       activeChatVisibilityRef,
       currentTeamId,
       currentTeamName,
+      // Catalog display-name resolver (spec.host) for desktop toast titles.
+      // Reads the shared cache-backed catalog query — no new fetch. The
+      // notification payloads themselves stay keyed by the identifier.
+      agentDisplayName,
       pushNotification,
       canDeliverChatResponseNotification,
       showDesktopNotification,
