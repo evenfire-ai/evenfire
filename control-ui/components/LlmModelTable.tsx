@@ -1,7 +1,13 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
-import { DataTable, TableStateRow, TableViewport, useTableSort } from '@clerum/frontend-components'
+import {
+  DataTable,
+  GroupedTableBody,
+  TableStateRow,
+  TableViewport,
+  useTableSort,
+} from '@clerum/frontend-components'
 import type { LlmAllowedModel } from '@lib/api'
 import { catalogGroupKey, formatContextWindow, getProviderDisplayLabel } from '@lib/llm'
 import { isUnpricedAllowedModel } from '@lib/llmModelUnpriced'
@@ -19,7 +25,6 @@ import { IconRefresh } from './icons'
 import { SelectInput } from './ui'
 
 type ModelSortKey =
-  | 'provider'
   | 'model'
   | 'credential'
   | 'vendor'
@@ -81,6 +86,7 @@ export function LlmModelTable({
   const [providerFilter, setProviderFilter] = useState<string>(ALL_PROVIDERS)
   const [enabledFilter, setEnabledFilter] = useState<EnabledFilter>('all')
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set())
   const normalizedSearch = searchQuery.trim().toLowerCase()
 
   const providerOptions = useMemo(() => {
@@ -167,11 +173,10 @@ export function LlmModelTable({
   }, [filteredItems])
   const modelSort = useTableSort<DisplayModel, ModelSortKey>({
     rows: displayItems,
-    defaultKey: 'provider',
+    defaultKey: 'model',
     defaultDirections: { contextWindow: 'desc' },
     identity: model => model.id,
     accessors: {
-      provider: model => getProviderDisplayLabel(catalogGroupKey(model.provider)),
       model: model => model.model,
       credential: model => model.credentialLabel,
       vendor: model => model.vendor,
@@ -181,6 +186,37 @@ export function LlmModelTable({
       source: model => `${model.source ?? 'manual'}/${model.stale ? 'stale' : 'current'}`,
     },
   })
+
+  const groupedItems = useMemo(() => {
+    const groups = new Map<string, DisplayModel[]>()
+    for (const model of modelSort.sortedRows) {
+      const family = catalogGroupKey(model.provider)
+      const group = groups.get(family)
+      if (group) group.push(model)
+      else groups.set(family, [model])
+    }
+    return Array.from(groups.entries()).sort(([left], [right]) =>
+      getProviderDisplayLabel(left).localeCompare(getProviderDisplayLabel(right))
+    )
+  }, [modelSort.sortedRows])
+  const visibleProviderKeys = groupedItems.map(([provider]) => provider).join('\u0000')
+
+  // Search results must be visible without requiring another disclosure action.
+  // Keep those groups in the manual set so clearing the query preserves the
+  // operator's working context.
+  useEffect(() => {
+    if (!normalizedSearch) return
+    setExpandedProviders(current => {
+      let next: Set<string> | null = null
+      for (const provider of visibleProviderKeys.split('\u0000')) {
+        if (provider && !current.has(provider)) {
+          next ??= new Set(current)
+          next.add(provider)
+        }
+      }
+      return next ?? current
+    })
+  }, [normalizedSearch, visibleProviderKeys])
 
   const hasActiveFilter =
     Boolean(normalizedSearch) ||
@@ -192,11 +228,21 @@ export function LlmModelTable({
 
   function handleProviderFilterChange(nextProvider: string) {
     setProviderFilter(nextProvider)
+    if (nextProvider === ALL_PROVIDERS) return
+    setExpandedProviders(current => new Set(current).add(nextProvider))
+  }
+
+  function setProviderExpanded(provider: string, expanded: boolean) {
+    setExpandedProviders(current => {
+      const next = new Set(current)
+      if (expanded) next.add(provider)
+      else next.delete(provider)
+      return next
+    })
   }
 
   const modelColumns: TableHeaderColumn[] = (
     [
-      { key: 'provider', label: 'Provider', minWidth: '9rem' },
       { key: 'model', label: 'Model', minWidth: '15rem' },
       { key: 'credential', label: 'Credential', width: '11rem' },
       { key: 'vendor', label: 'Vendor', width: '10rem' },
@@ -216,6 +262,13 @@ export function LlmModelTable({
           onSort: () => modelSort.sortBy(column.key as ModelSortKey),
         }
   )
+
+  const providerColumns: TableHeaderColumn[] = [
+    { key: 'provider', label: 'Provider' },
+    { key: 'models', label: 'Models' },
+    { key: 'availability', label: 'Availability' },
+    { key: 'actions', label: 'Actions', align: 'right' },
+  ]
 
   return (
     <div className="cu-card cu-card--viewport-fill cu-section-card">
@@ -298,139 +351,206 @@ export function LlmModelTable({
       />
       {navigation}
       <TableViewport className="cu-table-wrap cu-table-wrap--sticky-header">
-        <DataTable className="eft-table cu-table cu-table--header-band cu-llm-model-table">
+        <DataTable
+          className="eft-table cu-table cu-table--header-band cu-llm-model-table"
+          variant="grouped"
+        >
           <thead>
-            <TableHeaderRow columns={modelColumns} />
+            <TableHeaderRow columns={providerColumns} />
           </thead>
-          <tbody className="cu-llm-model-group">
-            {isInitialLoad ? (
+          {isInitialLoad ? (
+            <tbody>
               <TableStateRow
-                colSpan={modelColumns.length}
+                colSpan={providerColumns.length}
                 kind="loading"
                 message="Loading models…"
               />
-            ) : filteredItems.length === 0 ? (
+            </tbody>
+          ) : filteredItems.length === 0 ? (
+            <tbody>
               <TableStateRow
-                colSpan={modelColumns.length}
+                colSpan={providerColumns.length}
                 message={
                   hasActiveFilter
                     ? 'No models match this filter.'
                     : 'No models in the allowlist yet. Add one to let agents and runtime use it.'
                 }
               />
-            ) : (
-              modelSort.sortedRows.map((model: DisplayModel) => (
-                <tr key={model.id} className="cu-table__row cu-llm-model-row">
-                  <td className="cu-llm-provider-cell">
-                    <span className="cu-inline-icon-label">
-                      <LlmProviderIcon
-                        provider={catalogGroupKey(model.provider)}
-                        label={getProviderDisplayLabel(catalogGroupKey(model.provider))}
-                      />
-                      {getProviderDisplayLabel(catalogGroupKey(model.provider))}
-                    </span>
-                  </td>
-                  <td className="cu-px-model">
-                    <span className="cu-px-model-content">
-                      {model.model}
-                      {isUnpricedAllowedModel(model, unpricedKeys) ? (
-                        <MissingPriceWarning provider={model.provider} model={model.model} />
-                      ) : null}
-                    </span>
-                  </td>
-                  <td>{model.credentialLabel || '—'}</td>
-                  <td>{model.vendor || '—'}</td>
-                  <td>{model.display_name || '—'}</td>
-                  <td className="cu-px-num">{formatContextWindow(model.context_window_tokens)}</td>
-                  <td>
-                    <span
-                      className={
-                        model.enabled
-                          ? 'cu-px-badge cu-px-badge--on'
-                          : 'cu-px-badge cu-px-badge--off'
-                      }
-                    >
-                      {model.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td>
-                    <>
-                      <span
-                        className={
-                          model.source === 'discovery'
-                            ? 'cu-px-badge cu-px-badge--info'
-                            : 'cu-px-badge cu-px-badge--off'
-                        }
-                      >
-                        {model.source === 'discovery' ? 'Discovered' : 'Manual'}
-                      </span>
-                      {model.stale ? (
+            </tbody>
+          ) : (
+            groupedItems.map(([provider, models]) => {
+              const providerLabel = getProviderDisplayLabel(provider)
+              const providerModels = collapseFamilyRows(
+                provider,
+                items.filter(model => catalogGroupKey(model.provider) === provider)
+              )
+              const enabledCount = providerModels.filter(model => model.enabled).length
+              const staleCount = providerModels.filter(model => model.stale).length
+              const hasFilteredModels = models.length !== providerModels.length
+              const expanded = expandedProviders.has(provider)
+
+              return (
+                <GroupedTableBody
+                  childBodyClassName="cu-llm-model-group__children"
+                  childHeader={<TableHeaderRow columns={modelColumns} />}
+                  childTableClassName="cu-llm-model-table__children"
+                  className="cu-llm-model-group"
+                  colSpan={providerColumns.length}
+                  disclosureClassName="cu-llm-model-group__toggle"
+                  disclosureLabel={isExpanded =>
+                    `${isExpanded ? 'Collapse' : 'Expand'} ${providerLabel} models`
+                  }
+                  expanded={expanded}
+                  groupId={provider}
+                  key={provider}
+                  nestedChildTable
+                  onExpandedChange={nextExpanded => setProviderExpanded(provider, nextExpanded)}
+                  summaryCells={[
+                    {
+                      key: 'provider',
+                      content: (
                         <>
-                          {' '}
-                          <span className="cu-px-badge cu-px-badge--warn">Stale</span>
+                          <LlmProviderIcon provider={provider} label={providerLabel} />
+                          <span className="cu-llm-model-group__provider">{providerLabel}</span>
                         </>
-                      ) : null}
-                    </>
-                  </td>
-                  <td className="cu-px-actions">
-                    <RowActionsMenu
-                      ariaLabel={`Actions for model ${model.provider}/${model.model}`}
-                      horizontalTrigger
-                      actions={
-                        model.apiKeyRow && model.subscriptionRow
-                          ? [
-                              {
-                                key: 'edit-api-key',
-                                label: 'Edit API key',
-                                onClick: () => onEdit(model.apiKeyRow!.id),
-                              },
-                              {
-                                key: 'edit-subscription',
-                                label: 'Edit subscription',
-                                onClick: () => onEdit(model.subscriptionRow!.id),
-                              },
-                              {
-                                key: 'delete-api-key',
-                                label:
-                                  deletingId === model.apiKeyRow.id
-                                    ? 'Deleting…'
-                                    : 'Delete API key',
-                                danger: true,
-                                disabled: deletingId === model.apiKeyRow.id,
-                                onClick: () => void onDelete(model.apiKeyRow!),
-                              },
-                              {
-                                key: 'delete-subscription',
-                                label:
-                                  deletingId === model.subscriptionRow.id
-                                    ? 'Deleting…'
-                                    : 'Delete subscription',
-                                danger: true,
-                                disabled: deletingId === model.subscriptionRow.id,
-                                onClick: () => void onDelete(model.subscriptionRow!),
-                              },
-                            ]
-                          : [
-                              {
-                                key: 'edit',
-                                label: 'Edit',
-                                onClick: () => onEdit(model.id),
-                              },
-                              {
-                                key: 'delete',
-                                label: deletingId === model.id ? 'Deleting…' : 'Delete',
-                                danger: true,
-                                disabled: deletingId === model.id,
-                                onClick: () => void onDelete(model),
-                              },
-                            ]
-                      }
-                    />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
+                      ),
+                    },
+                    {
+                      key: 'models',
+                      content: (
+                        <span className="cu-llm-model-group__count">
+                          {providerModels.length} model{providerModels.length === 1 ? '' : 's'}
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'availability',
+                      content: (
+                        <span className="cu-llm-model-group__summary">
+                          {enabledCount} enabled
+                          {staleCount > 0 ? ` · ${staleCount} stale` : ''}
+                          {hasFilteredModels ? ` · ${models.length} matching` : ''}
+                        </span>
+                      ),
+                    },
+                    {
+                      key: 'actions',
+                      className: 'cu-llm-model-group__action-cell',
+                      content: (
+                        <span className="cu-llm-model-group__action" aria-hidden="true">
+                          {expanded ? 'Hide models' : 'Show models'}
+                        </span>
+                      ),
+                    },
+                  ]}
+                >
+                  {models.map((model: DisplayModel) => (
+                    <tr key={model.id} className="cu-table__row cu-llm-model-row">
+                      <td className="cu-px-model">
+                        <span className="cu-px-model-content">
+                          {model.model}
+                          {isUnpricedAllowedModel(model, unpricedKeys) ? (
+                            <MissingPriceWarning provider={model.provider} model={model.model} />
+                          ) : null}
+                        </span>
+                      </td>
+                      <td>{model.credentialLabel || '—'}</td>
+                      <td>{model.vendor || '—'}</td>
+                      <td>{model.display_name || '—'}</td>
+                      <td className="cu-px-num">
+                        {formatContextWindow(model.context_window_tokens)}
+                      </td>
+                      <td>
+                        <span
+                          className={
+                            model.enabled
+                              ? 'cu-px-badge cu-px-badge--on'
+                              : 'cu-px-badge cu-px-badge--off'
+                          }
+                        >
+                          {model.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </td>
+                      <td>
+                        <>
+                          <span
+                            className={
+                              model.source === 'discovery'
+                                ? 'cu-px-badge cu-px-badge--info'
+                                : 'cu-px-badge cu-px-badge--off'
+                            }
+                          >
+                            {model.source === 'discovery' ? 'Discovered' : 'Manual'}
+                          </span>
+                          {model.stale ? (
+                            <>
+                              {' '}
+                              <span className="cu-px-badge cu-px-badge--warn">Stale</span>
+                            </>
+                          ) : null}
+                        </>
+                      </td>
+                      <td className="cu-px-actions">
+                        <RowActionsMenu
+                          ariaLabel={`Actions for model ${model.provider}/${model.model}`}
+                          horizontalTrigger
+                          actions={
+                            model.apiKeyRow && model.subscriptionRow
+                              ? [
+                                  {
+                                    key: 'edit-api-key',
+                                    label: 'Edit API key',
+                                    onClick: () => onEdit(model.apiKeyRow!.id),
+                                  },
+                                  {
+                                    key: 'edit-subscription',
+                                    label: 'Edit subscription',
+                                    onClick: () => onEdit(model.subscriptionRow!.id),
+                                  },
+                                  {
+                                    key: 'delete-api-key',
+                                    label:
+                                      deletingId === model.apiKeyRow.id
+                                        ? 'Deleting…'
+                                        : 'Delete API key',
+                                    danger: true,
+                                    disabled: deletingId === model.apiKeyRow.id,
+                                    onClick: () => void onDelete(model.apiKeyRow!),
+                                  },
+                                  {
+                                    key: 'delete-subscription',
+                                    label:
+                                      deletingId === model.subscriptionRow.id
+                                        ? 'Deleting…'
+                                        : 'Delete subscription',
+                                    danger: true,
+                                    disabled: deletingId === model.subscriptionRow.id,
+                                    onClick: () => void onDelete(model.subscriptionRow!),
+                                  },
+                                ]
+                              : [
+                                  {
+                                    key: 'edit',
+                                    label: 'Edit',
+                                    onClick: () => onEdit(model.id),
+                                  },
+                                  {
+                                    key: 'delete',
+                                    label: deletingId === model.id ? 'Deleting…' : 'Delete',
+                                    danger: true,
+                                    disabled: deletingId === model.id,
+                                    onClick: () => void onDelete(model),
+                                  },
+                                ]
+                          }
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </GroupedTableBody>
+              )
+            })
+          )}
         </DataTable>
       </TableViewport>
     </div>
