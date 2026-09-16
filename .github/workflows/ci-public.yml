@@ -132,6 +132,26 @@ jobs:
         working-directory: ${{ matrix.service }}
         run: npm test
 
+      # These node:test suites live outside service packages and resolve the MCP
+      # SDK from mcp-host's installed dependencies.
+      - name: Test Codex approved-tools fixtures and runner
+        if: matrix.service == 'mcp-host'
+        run: |
+          node scripts/tests/run-node-test-files.mjs \
+            scripts/tests/run-node-test-files.test.mjs \
+            tests/e2e/fixtures/codex-subscription/approved-tools/server.test.mjs \
+            scripts/e2e/prepare-codex-approved-tools.test.mjs \
+            scripts/e2e/run-codex-approved-tools.test.mjs \
+            scripts/e2e/desktop-login-seed.test.mjs \
+            scripts/e2e/approved-tools-image-proof.test.mjs \
+            scripts/e2e/approved-tools-restoration.test.mjs \
+            scripts/e2e/approved-tools-control-api-lifecycle.test.mjs \
+            scripts/e2e/approved-tools-connection-journal.test.mjs \
+            tests/e2e/fixtures/codex-subscription/approved-tools-setup/identity-lifecycle.test.mjs \
+            tests/e2e/fixtures/codex-subscription/approved-tools-oauth/provider.test.mjs \
+            scripts/e2e/approved-tools-resource-cleanup.test.mjs \
+            tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs
+
       # Typecheck against the base tsconfig (covers src + test dirs).
       # This catches errors in test files that tsconfig.build.json may exclude.
       #
@@ -590,6 +610,8 @@ jobs:
         run: bash scripts/tests/test-minikube-makefile.sh
 
       - name: Test local Minikube T0/T1/T2 contract
+        # Includes test-minikube-docker-cli-env.sh: the real image-manifest
+        # writer's hermetic sequential-build and derived-base provenance checks.
         run: bash scripts/tests/test-minikube-t2-contract.sh
 
       - name: Test local Minikube T2 setup handoff
