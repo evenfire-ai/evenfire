@@ -20,6 +20,6 @@
   },
   "scripts": {
     "build": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx",
-    "test": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx"
+    "test": "tsc --noEmit --skipLibCheck --types react,react-dom --jsx react-jsx --module esnext --moduleResolution bundler --target es2022 src/index.tsx src/public-api.test.ts"
   }
 }

@@ -10,6 +10,12 @@ export type HostTabKey = 'access' | 'model' | 'connectors'
 export type HostOverviewTabProps = {
   hostName: string
   displayName: string
+  /**
+   * True while the header/identity data is still loading. The editable name
+   * renders a skeleton instead of falling back to the slug (QA: no flash),
+   * and the edit affordance is hidden until a real name is on screen.
+   */
+  loadingName?: boolean
   description: string
   statusLabel: string
   statusTone: 'active' | 'inactive' | 'unknown'

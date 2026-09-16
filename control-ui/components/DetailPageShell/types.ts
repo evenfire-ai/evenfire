@@ -21,6 +21,8 @@ export type DetailPageShellProps<T extends string> = {
   tabAriaLabel: string
   tabClassName?: string
   tabs?: TabBarOption<T>[]
-  title: string
+  // ReactNode (not just string) so detail pages can render a loading
+  // skeleton in the title slot while their header data loads.
+  title: ReactNode
   titleActions?: ReactNode
 }
