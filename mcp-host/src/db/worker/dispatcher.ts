@@ -574,7 +574,34 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'insert_pending_approval':
       return withBusyRetry(() => {
         const tx = db.transaction((row: PendingApprovalRow) => {
-          s.insertPendingApproval.run(row)
+          let sourceMessage = row.source_message
+          if (op.replaceRequestId) {
+            const previous = db
+              .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+              .get(op.replaceRequestId) as PendingApprovalRow | undefined
+            if (
+              !previous ||
+              previous.session_id !== row.session_id ||
+              previous.task_id !== row.task_id ||
+              previous.task_budget !== 'legacy'
+            ) {
+              throw new Error('Approval renewal binding mismatch')
+            }
+            sourceMessage = previous.source_message
+            db.prepare('DELETE FROM pending_approvals WHERE request_id = ?').run(
+              op.replaceRequestId
+            )
+          }
+          s.insertPendingApproval.run({
+            ...row,
+            source_message: sourceMessage,
+            task_budget: row.task_budget ?? null,
+          })
+          if (op.markAwaitingApproval)
+            db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(
+              'awaiting_approval',
+              row.session_id
+            )
         })
         tx.immediate(op.payload)
         return { ok: true }

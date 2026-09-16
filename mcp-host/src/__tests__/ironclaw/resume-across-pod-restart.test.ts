@@ -63,6 +63,12 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
       description: 'queued before restart',
       tool_call_id: `tc_${opts.requestId}`,
       context_snapshot: [],
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
     }
     const manager = agent.getConversationManager()
     const conv = await manager.getOrCreate(opts.sessionKey)
@@ -101,6 +107,12 @@ describe('IronClaw invariant #3: resume across Pod restart', () => {
               description: 'queued before restart',
               tool_call_id: 'tc_r1',
               context_snapshot: [],
+              task_budget: {
+                elapsedActiveMs: 0,
+                iterationsUsed: 1,
+                durationMs: 86400000,
+                maxIterations: 1000,
+              },
             },
             source_message: {
               sender: 'alice',

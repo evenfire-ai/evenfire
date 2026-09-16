@@ -1,10 +1,13 @@
 import { EventEmitter } from 'events'
 import type { BudgetVerdict } from '../budget/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
+import { logger } from '../logger'
 import type { Task } from '../queue/types'
 
 export interface SessionProcessorConfig {
   maxConcurrent: number
+  /** Minimum interval between task dispatches, not between tool iterations. */
+  taskDelayMs?: number
   /**
    * Execute a task. Returns true if the session should stay locked
    * (e.g., task is awaiting approval), false if the session is free.
@@ -42,10 +45,16 @@ export class SessionProcessor extends EventEmitter {
   private activeSessions = new Set<string>()
   private suspendedSessions = new Set<string>()
   private config: SessionProcessorConfig
+  private nextDispatchAt = 0
+  private dispatchTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(config: SessionProcessorConfig) {
     super()
     this.config = config
+    const delay = config.taskDelayMs ?? 0
+    if (!Number.isSafeInteger(delay) || delay < 0 || delay > 2_147_483_647) {
+      throw new Error('Invalid task dispatch delay')
+    }
   }
 
   get activeCount(): number {
@@ -91,6 +100,15 @@ export class SessionProcessor extends EventEmitter {
       return
     }
 
+    const remainingDelay = this.nextDispatchAt - Date.now()
+    if (remainingDelay > 0) {
+      if (!this.dispatchTimer)
+        this.dispatchTimer = setTimeout(() => {
+          this.dispatchTimer = undefined
+          this.tryProcessNext()
+        }, remainingDelay)
+      return
+    }
     const queue = this.sessionQueues.get(readySession)!
     const task = queue.shift()!
 
@@ -110,6 +128,7 @@ export class SessionProcessor extends EventEmitter {
       return
     }
 
+    this.nextDispatchAt = Date.now() + (this.config.taskDelayMs ?? 0)
     this.activeSessions.add(readySession)
     this.emit('task:started', { sessionKey: readySession, task })
 
@@ -117,6 +136,7 @@ export class SessionProcessor extends EventEmitter {
     // synchronously — no await happens before dispatch, so behavior matches the
     // pre-budget path exactly.
     void this.dispatchWithBudgetCheck(readySession, task)
+    this.tryProcessNext()
   }
 
   /**
@@ -133,10 +153,7 @@ export class SessionProcessor extends EventEmitter {
       } catch (err) {
         // Defense in depth — the callback is already fail-open, but a budget
         // check must never block a task on an unexpected throw (§0.2).
-        console.warn('[SessionProcessor] budget check threw; failing open', {
-          taskId: task.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
+        logger.warn({ taskId: task.id, err }, 'Task budget check failed open')
         verdict = { allowed: true }
       }
       // Informational ops signal (does NOT affect allow/deny). control-api
@@ -163,11 +180,10 @@ export class SessionProcessor extends EventEmitter {
    */
   private logUnpricedUsage(task: Task, verdict: BudgetVerdict): void {
     if (!verdict.unpriced?.length) return
-    console.warn('[SessionProcessor] budget_unpriced_usage', {
-      taskId: task.id,
-      source: task.source,
-      pairs: verdict.unpriced,
-    })
+    logger.warn(
+      { taskId: task.id, source: task.source, pairs: verdict.unpriced },
+      'Unpriced task usage'
+    )
   }
 
   /**
@@ -210,7 +226,7 @@ export class SessionProcessor extends EventEmitter {
       .catch(error => {
         this.activeSessions.delete(sessionKey)
         // TaskLifecycle is now authoritative — removed task.status === 'cancelled' band-aid (spec §4.3)
-        console.error(`[SessionProcessor] Task ${task.id} failed in session ${sessionKey}:`, error)
+        logger.error({ taskId: task.id, err: error }, 'Session task failed')
         this.emit('task:failed', { sessionKey, task, error })
         this.tryProcessNext()
       })

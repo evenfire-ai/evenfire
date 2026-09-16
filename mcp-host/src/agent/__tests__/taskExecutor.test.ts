@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
@@ -1767,5 +1767,309 @@ describe('TaskExecutor Codex presentation wiring', () => {
     } finally {
       appConfig.promptCacheEnabled = previous
     }
+  })
+})
+
+describe('TaskExecutor effective limits', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  it('keeps an iteration budget through approval and cold rehydration', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    deps.config.maxToolCallsPerTask = 2
+    const maxima: number[] = []
+    vi.mocked(runToolUseLoop).mockImplementation(async config => {
+      maxima.push(config.maxIterations)
+      if (config.maxIterations === 0) return { type: 'exhaustion', message: 'limit', iterations: 0 }
+      config.events.emit({ type: 'loop:iteration', data: { iteration: 0 }, timestamp: new Date() })
+      return {
+        type: 'need_approval',
+        approval: {
+          request_id: `r${maxima.length}`,
+          tool_name: 'test',
+          tool_call_id: 'tc',
+          parameters: {},
+          description: 'confirm',
+          context_snapshot: [
+            { role: 'user', content: 'work' },
+            {
+              role: 'assistant',
+              content: '',
+              tool_calls: [{ id: 'tc', name: 'test', arguments: {} }],
+            },
+          ],
+        },
+      }
+    })
+    vi.mocked(executeSingleTool).mockResolvedValue({
+      tool_call_id: 'tc',
+      name: 'test',
+      content: 'done',
+      is_error: false,
+    })
+    const first = new TaskExecutor(task, deps)
+    await first.run()
+    const approval = first.pendingApproval!
+    expect(approval.task_budget?.iterationsUsed).toBe(1)
+    const restored = new TaskExecutor(task, deps)
+    await restored.rehydrateWaitingApproval(first.sessionKey!, approval)
+    await restored.resumeAfterApproval(false)
+    expect(restored.pendingApproval?.task_budget?.iterationsUsed).toBe(2)
+    await restored.resumeAfterApproval(false)
+    expect(maxima).toEqual([2, 1, 0])
+    expect(executeSingleTool).toHaveBeenCalledTimes(2)
+    expect(deps.onComplete).not.toHaveBeenCalled()
+    expect(deps.onFail).toHaveBeenCalledWith(
+      task,
+      expect.objectContaining({ code: 'TASK_ITERATION_LIMIT' })
+    )
+  })
+  it('renews a legacy approval on the same task before executing anything', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    const conv = await deps.conversationManager.getOrCreate('user-1:telegram:test-channel', {
+      userId: 'user-1',
+    })
+    await deps.conversationManager.startTurn(conv, 'work', task.id)
+    const approval = {
+      request_id: 'legacy',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'old approval',
+      context_snapshot: [],
+      legacy_budget: true,
+    }
+    await deps.conversationManager.suspendForApproval(conv, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval('user-1:telegram:test-channel', approval)
+    await executor.resumeAfterApproval(false)
+    expect(executor.taskId).toBe(task.id)
+    expect(executor.pendingApproval?.request_id).not.toBe('legacy')
+    expect(executor.pendingApproval?.task_budget?.iterationsUsed).toBe(0)
+    expect(executor.executorState).toBe('waiting_approval')
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    expect(runToolUseLoop).not.toHaveBeenCalled()
+  })
+})
+
+describe('TaskExecutor active duration', () => {
+  afterEach(() => vi.useRealTimers())
+  it.each([false, true])(
+    'fails exactly once during an uncooperative LLM call (persistence failure=%s)',
+    async persistFails => {
+      vi.clearAllMocks()
+      vi.useFakeTimers()
+      const actual = await vi.importActual<typeof import('../../core/orchestration/toolUseLoop')>(
+        '../../core/orchestration/toolUseLoop'
+      )
+      vi.mocked(runToolUseLoop).mockImplementation(actual.runToolUseLoop)
+      const task = createTask(),
+        deps = createDeps()
+      deps.config.maxTaskDuration = 100
+      if (persistFails)
+        vi.spyOn(deps.conversationManager, 'completeTurn').mockRejectedValue(
+          new Error('storage unavailable')
+        )
+      let started!: () => void
+      const dispatched = new Promise<void>(resolve => {
+        started = resolve
+      })
+      vi.mocked(deps.llmProvider.completeSingleTurnWithTools).mockImplementation(async () => {
+        started()
+        return new Promise(() => {}) // Deliberately ignores abort; the task boundary must still stop.
+      })
+      const executor = new TaskExecutor(task, deps)
+      const running = executor.run()
+      await dispatched
+      await vi.advanceTimersByTimeAsync(100)
+      await running
+      expect(executor.executorState).toBe('failed')
+      expect(deps.onFail).toHaveBeenCalledTimes(1)
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+      )
+      expect(deps.onComplete).not.toHaveBeenCalled()
+      const conv = deps.conversationManager.getSessionByKey(executor.sessionKey!)
+      if (!persistFails) expect(conv?.turns.at(-1)?.response).toContain('stopped before completion')
+      await expect(executor.waitForCompletion()).resolves.toBeUndefined()
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  )
+})
+
+describe('TaskExecutor exhaustion and cancellation contracts', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  it('preserves the separate cost brake response and accumulated attachments', async () => {
+    const deps = createDeps(),
+      task = createTask()
+    const attachment = createImageAttachment()
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      reason: 'task_budget',
+      message: 'Configured budget reached',
+      iterations: 1,
+      attachments: [attachment],
+    })
+    await new TaskExecutor(task, deps).run()
+    expect(task.responseCallback).toHaveBeenCalledWith({
+      response: 'Configured budget reached',
+      attachments: [attachment],
+    })
+    expect(deps.onFail).not.toHaveBeenCalled()
+  })
+  it('does not resurrect a cancelled legacy approval', async () => {
+    const task = createTask(),
+      deps = createDeps()
+    deps.taskLifecycle.register(task)
+    const key = 'user-1:telegram:test-channel'
+    const conv = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
+    await deps.conversationManager.startTurn(conv, 'work', task.id)
+    const approval = {
+      request_id: 'legacy-cancel',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'old',
+      context_snapshot: [],
+      legacy_budget: true,
+    }
+    await deps.conversationManager.suspendForApproval(conv, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval(key, approval)
+    executor.abort()
+    await executor.resumeAfterApproval(false)
+    expect(deps.onApprovalNeeded).not.toHaveBeenCalled()
+    expect(deps.onFail).not.toHaveBeenCalled()
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    await expect(executor.waitForCompletion()).resolves.toBeUndefined()
+  })
+})
+
+describe('adversarial review regressions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(runToolUseLoop).mockReset()
+    vi.mocked(executeSingleTool).mockReset()
+  })
+  afterEach(() => vi.restoreAllMocks())
+  it.each([false, true])(
+    'persists interruption when final sanitization crosses deadline (static=%s)',
+    async isStatic => {
+      let now = 0
+      vi.spyOn(performance, 'now').mockImplementation(() => now)
+      const deps = createDeps()
+      deps.config.maxTaskDuration = 10000
+      const task = createTask(isStatic ? 'list workflows' : 'Finish the work')
+      const executor = new TaskExecutor(task, deps)
+      const failTurn = vi.spyOn(deps.conversationManager, 'failTurn')
+      const safety = executor['responseSafety']
+      const sanitize = safety.sanitizeAssistantResponse.bind(safety)
+      vi.spyOn(safety, 'sanitizeAssistantResponse').mockImplementation(content => {
+        const result = sanitize(content)
+        now = 10001 // Cross the boundary synchronously, before the timer callback can run.
+        return result
+      })
+      if (isStatic) {
+        vi.spyOn(executor as any, 'prepareChannelWorkflowCallerContext').mockImplementation(
+          async () => {
+            executor['workflowAccessDeniedResponse'] = 'Access denied'
+          }
+        )
+      }
+      vi.mocked(runToolUseLoop).mockResolvedValue({
+        type: 'response',
+        content: 'Final answer',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      })
+      await executor.run()
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({ code: 'TASK_DURATION_LIMIT' })
+      )
+      expect(deps.onComplete).not.toHaveBeenCalled()
+      expect(failTurn).not.toHaveBeenCalled()
+      const conversation = deps.conversationManager.getSessionByKey(executor.sessionKey!)
+      expect(conversation?.turns.at(-1)?.response).toContain('stopped before completion')
+    }
+  )
+  it('retains exhaustion attachments and reports the restored effective limit', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment()
+    const executor = new TaskExecutor(task, deps)
+    executor['executionBudget'].restore({
+      elapsedActiveMs: 0,
+      iterationsUsed: 2,
+      durationMs: 300000,
+      maxIterations: 2,
+    })
+    vi.mocked(runToolUseLoop).mockResolvedValue({
+      type: 'exhaustion',
+      iterations: 0,
+      message: 'limit',
+      attachments: [attachment],
+    })
+    await executor.run()
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({
+        code: 'TASK_ITERATION_LIMIT',
+        message: expect.stringContaining('after 2 iterations'),
+      }),
+      [attachment]
+    )
+    expect(deps.onComplete).not.toHaveBeenCalled()
+  })
+  it('retains saved artifacts when restored time is already exhausted', async () => {
+    const deps = createDeps(),
+      task = createTask(),
+      attachment = createImageAttachment()
+    const key = 'user-1:telegram:test-channel'
+    const conversation = await deps.conversationManager.getOrCreate(key, { userId: 'user-1' })
+    await deps.conversationManager.startTurn(conversation, 'work', task.id)
+    const approval = {
+      request_id: 'expired-budget',
+      tool_name: 'test',
+      tool_call_id: 'tc',
+      parameters: {},
+      description: 'confirm',
+      context_snapshot: [],
+      attachments: [attachment],
+      completed_results: [
+        {
+          tool_call_id: 'prior',
+          name: 'image',
+          content: 'done',
+          is_error: false,
+          attachments: [attachment],
+        },
+      ],
+      task_budget: {
+        elapsedActiveMs: 300000,
+        iterationsUsed: 1,
+        durationMs: 300000,
+        maxIterations: 10,
+      },
+    }
+    await deps.conversationManager.suspendForApproval(conversation, approval)
+    const executor = new TaskExecutor(task, deps)
+    await executor.rehydrateWaitingApproval(key, approval)
+    await executor.resumeAfterApproval(false)
+    expect(deps.onFail).toHaveBeenCalledExactlyOnceWith(
+      task,
+      expect.objectContaining({ code: 'TASK_DURATION_LIMIT' }),
+      [attachment]
+    )
+    expect(executeSingleTool).not.toHaveBeenCalled()
+    expect(runToolUseLoop).not.toHaveBeenCalled()
   })
 })

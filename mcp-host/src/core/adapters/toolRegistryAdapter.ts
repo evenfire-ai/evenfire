@@ -1,7 +1,7 @@
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
 import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
-import { Tool, ToolRegistry } from '../interfaces'
+import { ExecutionContext, Tool, ToolRegistry } from '../interfaces'
 import { Attachment, ToolDefinition, ToolOutput, ValidationResult } from '../types'
 import {
   BoundedJsonError,
@@ -217,7 +217,7 @@ class McpToolAdapter implements Tool {
     }
   }
 
-  async execute(params: Record<string, unknown>): Promise<ToolOutput> {
+  async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
       // An approval may have been suspended with an older adapter/schema.
@@ -244,6 +244,8 @@ class McpToolAdapter implements Tool {
       // another user's broker token.
       const result = await this.mcpManager.callTool(this.fullName, params, {
         userId: this.userId,
+        ...(context?.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
+        ...(context?.signal ? { signal: context.signal } : {}),
       })
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
