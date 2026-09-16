@@ -545,3 +545,21 @@ test('projectGrokExecution mints llm:grok:execute only for an eligible Grok targ
   assert.deepEqual(staticOnly.derivedScopes, [])
   assert.equal(staticOnly.requiresGrokProxyEgress, false)
 })
+
+test('toEligibleGrokPolicyBinding mints only for an assigned eligible Grok model', () => {
+  const cm = grokView('team-grok', ['grok-4.6'])
+  const eligible = projection.toEligibleGrokPolicyBinding(cm, 'team-grok', 'grok-4.6')
+  assert.equal(eligible.eligibility, 'eligible')
+  assert.deepEqual(eligible.binding, {
+    connectionKey: 'team-grok',
+    catalogRevision: 5,
+    credentialRevision: 2,
+    model: 'grok-4.6',
+  })
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, 'unassigned', 'grok-4.6').reason, 'unassigned')
+  assert.equal(projection.toEligibleGrokPolicyBinding(cm, '', 'grok-4.6').reason, 'unassigned')
+  assert.equal(
+    projection.toEligibleGrokPolicyBinding(cm, 'team-grok', 'missing-model').binding,
+    null
+  )
+})

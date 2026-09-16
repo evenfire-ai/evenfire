@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CodexConfigMapView } from '@clerum/codex-catalog-projection'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import type { WorkflowRecipeSpec } from '../types'
 import {
@@ -30,6 +31,8 @@ const MODEL = 'gpt-5.6-luna'
 const GRANT = 'team-plus'
 const RECIPE = 'notify-app'
 const UNASSIGNED = 'unassigned'
+const GROK_MODEL = 'grok-4.6'
+const GROK_GRANT = 'team-grok'
 
 const codexSpec = (): WorkflowRecipeSpec =>
   ({ agent: { provider: 'codex-subscription', model: MODEL } }) as unknown as WorkflowRecipeSpec
@@ -222,6 +225,92 @@ describe('projectCodexRecipeVerdict', () => {
       if (v.projection.eligibility === 'uncertain') {
         expect(`${name}:${v.hostBinding === null}`).toBe(`${name}:true`)
       }
+      if (v.grokBinding !== null) {
+        expect(`${name}:${v.grokProjection.eligibility}`).toBe(`${name}:eligible`)
+        expect(`${name}:${v.provenance}`).toBe(`${name}:authoritative`)
+      }
+      if (v.grokProjection.eligibility === 'uncertain') {
+        expect(`${name}:${v.grokBinding === null}`).toBe(`${name}:true`)
+      }
     }
+  })
+})
+
+const grokSpec = (): WorkflowRecipeSpec =>
+  ({ agent: { provider: 'grok-subscription', model: GROK_MODEL } }) as unknown as WorkflowRecipeSpec
+
+function eligibleGrokConfigMap(): CodexConfigMapView {
+  return {
+    metadata: {
+      annotations: {
+        'clerum.io/grok-enabled': 'true',
+        'clerum.io/grok-connection-status': 'connected',
+        'clerum.io/grok-connections': JSON.stringify({
+          [GROK_GRANT]: {
+            status: 'connected',
+            catalogRevision: 5,
+            connectionRevision: 2,
+            models: [GROK_MODEL],
+          },
+        }),
+      },
+    },
+    data: {},
+  }
+}
+
+describe('projectCodexRecipeVerdict Grok mint', () => {
+  it('mints a Grok binding even when the Codex projection is ineligible', () => {
+    const v = projectCodexRecipeVerdict({
+      ownSpec: grokSpec(),
+      context: context({ connectionKey: UNASSIGNED, grokConnectionKey: GROK_GRANT }),
+      hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
+      view: viewFrom(eligibleGrokConfigMap()),
+    })
+    expect(v.projection.eligibility).not.toBe('eligible')
+    expect(v.hostBinding).toBeNull()
+    expect(v.grokProjection.eligibility).toBe('eligible')
+    expect(v.grokBinding).toEqual({
+      connectionKey: GROK_GRANT,
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: GROK_MODEL,
+      bindingHash: computeGrokPolicyHash({
+        model: GROK_MODEL,
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: GROK_GRANT,
+      }),
+    })
+  })
+
+  it('withholds Grok scope and binding when provenance is uncertain', () => {
+    const v = projectCodexRecipeVerdict({
+      ownSpec: grokSpec(),
+      context: context({
+        runtimeScopeRecipeName: 'parent-recipe',
+        parentSpec: null,
+        connectionKey: UNASSIGNED,
+        grokConnectionKey: GROK_GRANT,
+      }),
+      hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
+      view: viewFrom(eligibleGrokConfigMap()),
+    })
+    expect(v.grokProjection.eligibility).toBe('uncertain')
+    expect(v.grokProjection.reason).toBe('provenance_uncertain')
+    expect(v.grokProjection.requiresGrokProxyEgress).toBe(false)
+    expect(v.grokProjection.derivedScopes).toEqual([])
+    expect(v.grokBinding).toBeNull()
+  })
+
+  it('does not mint a Grok binding for an unassigned Grok grant', () => {
+    const v = projectCodexRecipeVerdict({
+      ownSpec: grokSpec(),
+      context: context({ connectionKey: UNASSIGNED, grokConnectionKey: UNASSIGNED }),
+      hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
+      view: viewFrom(eligibleGrokConfigMap()),
+    })
+    expect(v.grokBinding).toBeNull()
+    expect(v.grokBindingReason).toBe('unassigned')
   })
 })

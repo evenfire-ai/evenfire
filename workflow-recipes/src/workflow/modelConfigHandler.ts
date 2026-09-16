@@ -22,6 +22,7 @@ import {
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 import { readVerifiedSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -265,7 +266,12 @@ export class ModelConfigHandler {
           ...(model ? { model } : {}),
           ...(provider === 'codex-subscription'
             ? { contractVersion: 3, ...(codexBinding ? { codexBinding } : {}) }
-            : { contractVersion: 2 }),
+            : provider === 'grok-subscription'
+              ? {
+                  contractVersion: 3,
+                  ...(codexBinding ? { subscriptionBinding: codexBinding } : {}),
+                }
+              : { contractVersion: 2 }),
         }
       )
       if (result.status >= 400) {
@@ -277,7 +283,8 @@ export class ModelConfigHandler {
             typeof result.body.policyReady === 'boolean' &&
             typeof result.body.policyState === 'string'
           : isBootstrapIdentityProof(result.body)
-      const expectedContractVersion = provider === 'codex-subscription' ? 3 : 2
+      const expectedContractVersion =
+        provider === 'codex-subscription' || provider === 'grok-subscription' ? 3 : 2
       if (
         result.body.configured !== true ||
         result.body.ready !== true ||
@@ -320,6 +327,9 @@ export class ModelConfigHandler {
       const verifiedCodexBinding = model
         ? readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
         : null
+      const verifiedGrokBinding = model
+        ? readVerifiedSdkOnlyGrokBinding(result.body.subscriptionBinding, model)
+        : null
       return {
         status: 202,
         body: {
@@ -330,6 +340,7 @@ export class ModelConfigHandler {
           contractVersion: expectedContractVersion,
           capabilityFamily,
           ...(verifiedCodexBinding ? { codexBinding: verifiedCodexBinding } : {}),
+          ...(verifiedGrokBinding ? { subscriptionBinding: verifiedGrokBinding } : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),
@@ -780,7 +791,8 @@ function mcpHostConfigureRejected(result: {
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
-  const expectedVersion = body.provider === 'codex-subscription' ? 3 : 2
+  const expectedVersion =
+    body.provider === 'codex-subscription' || body.provider === 'grok-subscription' ? 3 : 2
   return (
     body.configured === true &&
     body.ready === true &&

@@ -4,9 +4,11 @@ import {
   type CodexCatalogSnapshot,
   type CodexConfigMapView,
   type CodexExecutionProjection,
+  GROK_PROVIDER,
   parseGrokAllowedModelsSnapshot,
   projectGrokExecution,
   snapshotForAssignedCodexGrant,
+  toEligibleGrokPolicyBinding,
   toEligiblePolicyBinding,
 } from '@clerum/codex-catalog-projection'
 import type { WorkflowRecipeSpec } from '../types'
@@ -20,6 +22,7 @@ import {
   type PluginWorkloadSdkCodexBindingProof,
   mintSdkOnlyCodexBindingProof,
 } from './sdkOnlyCodexBinding'
+import { mintSdkOnlyGrokBindingProof } from './sdkOnlyGrokBinding'
 
 /*
  * ONE Codex verdict per reconcile pass.
@@ -94,6 +97,8 @@ export type CodexRecipeVerdict = {
   readonly hostBinding: PluginWorkloadSdkCodexBindingProof | null
   readonly hostBindingReason: string
   readonly grokProjection: CodexExecutionProjection & { requiresGrokProxyEgress: boolean }
+  readonly grokBinding: PluginWorkloadSdkCodexBindingProof | null
+  readonly grokBindingReason: string
 }
 
 export function projectCodexRecipeVerdict(input: {
@@ -122,60 +127,127 @@ export function projectCodexRecipeVerdict(input: {
   const projection = projectRecipeCodexExecution(resolved.spec, snapshot, resolved.provenance)
   const grokKey = context.grokConnectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY
   const grokSnapshot = parseGrokAllowedModelsSnapshot(view.configMap, grokKey)
-  const grokProjection = projectGrokExecution(recipeToCodexHostSpec(resolved.spec), grokSnapshot)
+  const grokRaw = projectGrokExecution(recipeToCodexHostSpec(resolved.spec), grokSnapshot)
+  const grokProjection =
+    resolved.provenance === 'authoritative'
+      ? grokRaw
+      : {
+          ...grokRaw,
+          eligibleTargets: [],
+          derivedScopes: [],
+          requiresGrokProxyEgress: false,
+          eligibility: 'uncertain' as const,
+          reason: 'provenance_uncertain',
+        }
 
-  const base = {
+  const hostBinding = mintCodexHostBinding({
+    hostAgent: input.hostAgent,
+    connectionKey: context.connectionKey,
+    view,
+    projection,
+    log: input.log,
+  })
+  const grokBinding = mintGrokHostBinding({
+    hostAgent: input.hostAgent,
+    grokKey,
+    view,
+    grokProjection,
+    log: input.log,
+  })
+
+  if (
+    projection.eligibility === 'uncertain' &&
+    resolved.provenance !== 'authoritative' &&
+    input.hostAgent?.provider === CODEX_PROVIDER
+  ) {
+    input.log?.warn('Codex provenance is undecidable; withholding scope and binding', {
+      recipeName: context.recipeName,
+      connectionKey: context.connectionKey,
+      provenanceReason: resolved.reason,
+      reason: projection.reason,
+    })
+  }
+
+  return {
     provenance: resolved.provenance,
     provenanceReason: resolved.reason,
     connectionKey: context.connectionKey,
     projection,
     grokProjection,
-  } as const
-
-  if (projection.eligibility !== 'eligible') {
-    // Warn ONLY for a recipe that actually targets Codex, and
-    // only when the doubt is about provenance. An unreadable ConfigMap already
-    // produces three warns in `refreshCodexSnapshot`, and it makes EVERY recipe
-    // uncertain — including those with no Codex target — because the shared
-    // projection checks `snapshotError` before it checks whether the spec has
-    // any Codex target at all. Warning there buried the case this line exists
-    // to surface: a recipe wedged in awaiting_policy by a stray parent label.
-    if (
-      projection.eligibility === 'uncertain' &&
-      resolved.provenance !== 'authoritative' &&
-      input.hostAgent?.provider === CODEX_PROVIDER
-    ) {
-      input.log?.warn('Codex provenance is undecidable; withholding scope and binding', {
-        recipeName: context.recipeName,
-        connectionKey: context.connectionKey,
-        provenanceReason: resolved.reason,
-        reason: projection.reason,
-      })
-    }
-    return { ...base, hostBinding: null, hostBindingReason: projection.reason }
+    hostBinding: hostBinding.binding,
+    hostBindingReason: hostBinding.reason,
+    grokBinding: grokBinding.binding,
+    grokBindingReason: grokBinding.reason,
   }
+}
 
+function mintCodexHostBinding(input: {
+  hostAgent: { provider: string; model: string } | undefined
+  connectionKey: string
+  view: CodexAllowlistView
+  projection: CodexExecutionProjection
+  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
+}): { binding: PluginWorkloadSdkCodexBindingProof | null; reason: string } {
+  if (input.projection.eligibility !== 'eligible') {
+    return { binding: null, reason: input.projection.reason }
+  }
   if (!input.hostAgent || input.hostAgent.provider !== CODEX_PROVIDER) {
-    return { ...base, hostBinding: null, hostBindingReason: 'host_agent_not_codex' }
+    return { binding: null, reason: 'host_agent_not_codex' }
   }
-
-  // Reached only past the provenance + eligibility gate above, and re-parsing
-  // the SAME captured ConfigMap deterministically: a derivation of this
-  // verdict, not a second source of truth.
-  const { binding, reason } = toEligiblePolicyBinding(
-    view.configMap,
-    context.connectionKey,
+  const minted = toEligiblePolicyBinding(
+    input.view.configMap,
+    input.connectionKey,
     input.hostAgent.model
   )
-  if (!binding || binding.catalogRevision < 1 || binding.credentialRevision < 1) {
-    const withheld = binding ? 'revision_out_of_range' : reason
+  if (
+    !minted.binding ||
+    minted.binding.catalogRevision < 1 ||
+    minted.binding.credentialRevision < 1
+  ) {
+    const withheld = minted.binding ? 'revision_out_of_range' : minted.reason
     input.log?.debug('Codex execution binding withheld', {
-      recipeName: context.recipeName,
       model: input.hostAgent.model,
-      connectionKey: context.connectionKey,
+      connectionKey: input.connectionKey,
       reason: withheld,
     })
-    return { ...base, hostBinding: null, hostBindingReason: withheld }
+    return { binding: null, reason: withheld }
   }
-  return { ...base, hostBinding: mintSdkOnlyCodexBindingProof(binding), hostBindingReason: reason }
+  return { binding: mintSdkOnlyCodexBindingProof(minted.binding), reason: minted.reason }
+}
+
+function mintGrokHostBinding(input: {
+  hostAgent: { provider: string; model: string } | undefined
+  grokKey: string
+  view: CodexAllowlistView
+  grokProjection: CodexExecutionProjection
+  log?: { debug(msg: string, fields?: Record<string, unknown>): void }
+}): { binding: PluginWorkloadSdkCodexBindingProof | null; reason: string } {
+  if (input.grokKey === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return { binding: null, reason: 'unassigned' }
+  }
+  if (input.grokProjection.eligibility !== 'eligible') {
+    return { binding: null, reason: input.grokProjection.reason }
+  }
+  if (!input.hostAgent || input.hostAgent.provider !== GROK_PROVIDER) {
+    return { binding: null, reason: 'host_agent_not_grok' }
+  }
+  const minted = toEligibleGrokPolicyBinding(
+    input.view.configMap,
+    input.grokKey,
+    input.hostAgent.model
+  )
+  if (
+    !minted.binding ||
+    minted.binding.catalogRevision < 1 ||
+    minted.binding.credentialRevision < 1
+  ) {
+    const withheld = minted.binding ? 'revision_out_of_range' : minted.reason
+    input.log?.debug('Grok execution binding withheld', {
+      model: input.hostAgent.model,
+      connectionKey: input.grokKey,
+      reason: withheld,
+    })
+    return { binding: null, reason: withheld }
+  }
+  return { binding: mintSdkOnlyGrokBindingProof(minted.binding), reason: minted.reason }
 }

@@ -8,6 +8,7 @@ import type {
   PluginWorkloadSdkClientNotificationsBootstrapProof,
 } from './promptBridge/controlApiClient'
 import { readVerifiedSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyGrokBinding, replaceSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   /**
@@ -93,10 +94,15 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   }
   // Always integrity-check a supplied binding before the provider protocol
   // branch. Request-controlled provider/version must not skip this check.
-  const verifiedBinding = readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
+  const grok = req.provider === 'grok-subscription'
+  const verifiedBinding = grok
+    ? readVerifiedSdkOnlyGrokBinding(req.subscriptionBinding ?? req.codexBinding, model)
+    : readVerifiedSdkOnlyCodexBinding(req.codexBinding ?? req.subscriptionBinding, model)
+  const missingReason = grok ? 'execution_binding_missing' : 'codex_execution_binding_missing'
   if (isOauthBrokerProvider(req.provider)) {
     if (!verifiedBinding) {
       replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
       return {
         configured: true,
         ready: true,
@@ -106,13 +112,23 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
         contractVersion: 3,
         policyReady: false,
         policyState: 'binding_missing',
-        policyReason: 'codex_execution_binding_missing',
-        message: 'SDK-only Codex bootstrap requires a live v3 execution binding',
+        policyReason: missingReason,
+        ...(grok ? { bindingReady: false } : {}),
+        message: grok
+          ? 'SDK-only Grok bootstrap requires a live v3 execution binding'
+          : 'SDK-only Codex bootstrap requires a live v3 execution binding',
       }
     }
-    replaceSdkOnlyCodexBinding(verifiedBinding)
+    if (grok) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(verifiedBinding)
+    } else {
+      replaceSdkOnlyGrokBinding(null)
+      replaceSdkOnlyCodexBinding(verifiedBinding)
+    }
   } else {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
   }
   // The binding must be installed BEFORE this call — `deps.verify` reads the
   // live global to build its capabilities request. That ordering means a throw
@@ -125,11 +141,17 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   try {
     proof = deps.verify ? await deps.verify(req.provider, model) : null
   } catch (err) {
-    if (isOauthBrokerProvider(req.provider)) replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
+    }
     throw err
   }
   if (deps.verify && !proof) {
-    if (isOauthBrokerProvider(req.provider)) replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
+    }
     return {
       configured: false,
       ready: false,
@@ -140,9 +162,14 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   if (
     isOauthBrokerProvider(req.provider) &&
     proof &&
-    (proof.codexBindingReady === false || proof.policyReason === 'codex_execution_binding_missing')
+    (proof.codexBindingReady === false ||
+      proof.bindingReady === false ||
+      proof.policyReason === 'codex_execution_binding_missing' ||
+      proof.policyReason === 'execution_binding_missing')
   ) {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
+    const rejectedReason = grok ? 'execution_binding_missing' : 'codex_execution_binding_missing'
     return {
       configured: true,
       ready: true,
@@ -152,9 +179,13 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
       contractVersion: 3,
       policyReady: false,
       policyState: proof.policyState,
-      policyReason: 'codex_execution_binding_missing',
-      message: 'Control API rejected the SDK-only Codex execution binding',
-      ...(verifiedBinding ? { codexBinding: verifiedBinding } : {}),
+      policyReason: rejectedReason,
+      ...(grok ? { bindingReady: false } : {}),
+      message: grok
+        ? 'Control API rejected the SDK-only Grok execution binding'
+        : 'Control API rejected the SDK-only Codex execution binding',
+      ...(verifiedBinding && grok ? { subscriptionBinding: verifiedBinding } : {}),
+      ...(verifiedBinding && !grok ? { codexBinding: verifiedBinding } : {}),
     }
   }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
@@ -182,7 +213,10 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
       : {}),
-    ...(isOauthBrokerProvider(req.provider) && verifiedBinding
+    ...(isOauthBrokerProvider(req.provider) && verifiedBinding && grok
+      ? { subscriptionBinding: verifiedBinding, bindingReady: true }
+      : {}),
+    ...(isOauthBrokerProvider(req.provider) && verifiedBinding && !grok
       ? { codexBinding: verifiedBinding }
       : {}),
   }

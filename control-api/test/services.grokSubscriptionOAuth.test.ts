@@ -301,6 +301,31 @@ describe('grok subscription OAuth device broker', () => {
     expect(repos.persistRefresh).not.toHaveBeenCalled()
   })
 
+  it('maps refresh 402 to provider_unavailable', async () => {
+    repos.getSafe.mockResolvedValue({
+      connectionKey: CONNECTION_KEY,
+      status: 'connected',
+      credentialRevision: 3,
+      refreshLockHeld: true,
+    })
+    repos.acquireLock.mockResolvedValue(true)
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'old-refresh',
+      accessToken: null,
+      accessTokenExpiresAt: null,
+      credentialRevision: 3,
+    })
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 402,
+      json: async () => ({ error: 'payment_required' }),
+    })
+    await expect(refreshGrokSubscriptionConnection(deps(fetchFn))).rejects.toMatchObject({
+      code: 'provider_unavailable',
+    })
+    expect(repos.persistRefresh).not.toHaveBeenCalled()
+  })
+
   it('maps invalid_grant with unchanged lock and revision to reauth_required', async () => {
     repos.getSafe.mockResolvedValue({
       connectionKey: CONNECTION_KEY,

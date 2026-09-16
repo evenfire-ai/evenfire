@@ -26,6 +26,7 @@ import {
 import { issueRegisteredGrokExecutionTicket } from './grokProviderAttemptTicket.js'
 import { getGrokCatalogModelState } from './grokSubscriptionCatalog.js'
 import {
+  GROK_RESERVED_DEPLOYMENT_DEFAULT_KEY,
   GROK_UNASSIGNED_CONNECTION_KEY,
   getSafeGrokSubscriptionConnection,
   isGrokUnassignedConnectionKey,
@@ -306,7 +307,8 @@ async function authorizeGrokProviderAttempt(
   const connectionKey = attested.connectionKey
   if (
     isGrokUnassignedConnectionKey(connectionKey) ||
-    connectionKey === GROK_UNASSIGNED_CONNECTION_KEY
+    connectionKey === GROK_UNASSIGNED_CONNECTION_KEY ||
+    connectionKey === GROK_RESERVED_DEPLOYMENT_DEFAULT_KEY
   ) {
     throw new LlmProviderAttemptAuthorizeError(
       'unassigned_connection',

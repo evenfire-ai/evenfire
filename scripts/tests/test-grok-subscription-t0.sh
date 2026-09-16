@@ -87,17 +87,59 @@ require_file grok-llm-proxy/test/originPolicy.test.ts
 require_file control-api/test/services.grokSubscriptionOAuth.test.ts
 require_file control-api/test/services.grokProviderAttemptRedemption.test.ts
 require_file control-api/test/db.grokSubscriptionMigration.test.ts
+require_file control-api/test/services.llmProviderAttemptAuthorizer.grok.test.ts
+require_file control-api/test/subscriptionGrantIdentity.test.ts
 require_file scripts/tests/test-grok-llm-proxy-deploy-contract.sh
 require_file tests/e2e/fixtures/grok-subscription/sanitized-upstream-contract.json
+require_file workflow-recipes/src/workflow/codexRecipeVerdict.test.ts
+require_file workflow-recipes/src/workflow/sdkOnlyGrokBinding.test.ts
+require_file mcp-host/src/pluginWorkloadSdk/bootstrapIdentity.test.ts
+require_file packages/codex-catalog-projection/index.test.cjs
+require_file control-ui/components/__tests__/PluginWorkloadSdkPage.test.tsx
+
+expected_device_url='https://auth.x.ai/oauth2/device/code'
+expected_token_url='https://auth.x.ai/oauth2/token'
+expected_client_id='b1a00492-073a-47ea-816f-4c329264a828'
+api_device_url="$(
+  sed -n "s/^export const GROK_OAUTH_DEVICE_URL = '\\(.*\\)'$/\\1/p" \
+    "${ROOT}/control-api/src/services/grokSubscriptionOAuth.ts"
+)"
+api_token_url="$(
+  sed -n "s/^export const GROK_OAUTH_TOKEN_URL = '\\(.*\\)'$/\\1/p" \
+    "${ROOT}/control-api/src/services/grokSubscriptionOAuth.ts"
+)"
+api_client_id="$(
+  sed -n "s/^export const GROK_OAUTH_DEFAULT_CLIENT_ID = '\\(.*\\)'$/\\1/p" \
+    "${ROOT}/control-api/src/services/grokSubscriptionOAuth.ts"
+)"
+if [[ "${api_device_url}" == "${expected_device_url}" &&
+      "${api_token_url}" == "${expected_token_url}" &&
+      "${api_client_id}" == "${expected_client_id}" ]]; then
+  pass "Grok OAuth origin/client lock"
+else
+  fail "Grok OAuth origin/client lock (device=${api_device_url:-missing} token=${api_token_url:-missing} client=${api_client_id:-missing})"
+fi
 
 run_group "grok-provider-attempt-contract" \
   bash -lc "cd '${ROOT}/packages/grok-provider-attempt-contract' && node --test index.test.cjs"
 
+run_group "grok-catalog-projection" \
+  bash -lc "cd '${ROOT}/packages/codex-catalog-projection' && node --test index.test.cjs"
+
 run_group "grok-llm-proxy freeze+origin" \
   bash -lc "cd '${ROOT}/grok-llm-proxy' && npx vitest run test/contractFreeze.test.ts test/originPolicy.test.ts --no-file-parallelism"
 
-run_group "control-api grok grant/oauth/redeem" \
-  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts --no-file-parallelism"
+run_group "control-api grok grant/oauth/redeem/authorize" \
+  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts --no-file-parallelism"
+
+run_group "workflow-recipes grok SDK" \
+  bash -lc "cd '${ROOT}/workflow-recipes' && npx vitest run src/workflow/codexRecipeVerdict.test.ts src/workflow/sdkOnlyGrokBinding.test.ts src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts src/reconciler/pluginWorkloadSdkValidator.test.ts tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts --no-file-parallelism"
+
+run_group "mcp-host grok bootstrap" \
+  bash -lc "cd '${ROOT}/mcp-host' && npx vitest run src/pluginWorkloadSdk/bootstrapIdentity.test.ts --no-file-parallelism"
+
+run_group "control-ui grok SDK picker" \
+  bash -lc "cd '${ROOT}/control-ui' && npx vitest run components/__tests__/PluginWorkloadSdkPage.test.tsx --no-file-parallelism"
 
 if ! bash "${ROOT}/scripts/tests/test-grok-llm-proxy-deploy-contract.sh"; then
   fail "grok-llm-proxy deploy contract"
@@ -106,7 +148,7 @@ else
   pass "grok-llm-proxy deploy contract"
 fi
 
-if [[ "$GROUPS_RUN" -lt 4 ]]; then
+if [[ "$GROUPS_RUN" -lt 8 ]]; then
   fail "T0 ran too few groups (${GROUPS_RUN})"
 fi
 

@@ -229,6 +229,7 @@ run_group "control-api" "control-api" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
+  "test/services.llmProviderAttemptAuthorizer.grok.test.ts" \
   "test/services.llmProviderAttemptTicket.test.ts" \
   "test/services.llmProviderAttemptRedemption.test.ts" \
   "test/services.llmProviderAttemptFinalization.test.ts" \
@@ -286,6 +287,8 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \
   "src/workflow/sdkOnlyCodexBinding.test.ts" \
+  "src/workflow/sdkOnlyGrokBinding.test.ts" \
+  "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
   "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
@@ -298,7 +301,8 @@ run_group "control-ui" "control-ui" \
   "lib/__tests__/llmCredentialSelect.test.ts" \
   "components/__tests__/HostWizard.test.tsx" \
   "components/__tests__/HostDetailsPage.identity.test.tsx" \
-  "components/__tests__/RecipeEditor.test.tsx"
+  "components/__tests__/RecipeEditor.test.tsx" \
+  "components/__tests__/PluginWorkloadSdkPage.test.tsx"
 
 node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
 if [[ "${node_major}" != "24" ]]; then

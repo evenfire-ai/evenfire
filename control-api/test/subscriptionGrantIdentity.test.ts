@@ -67,6 +67,23 @@ describe('attestRequestedBrokerProvider', () => {
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.code).toBe('unassigned_connection')
   })
+
+  it('keeps empty Grok connectionRef unassigned and never aliases deployment-default', () => {
+    const empty = attestRequestedBrokerProvider({
+      requestedProvider: 'grok-subscription',
+      liveBrokerProviders: ['grok-subscription'],
+      liveConnectionRef: '',
+    })
+    expect(empty.ok).toBe(false)
+    if (!empty.ok) expect(empty.code).toBe('unassigned_connection')
+    const reserved = attestRequestedBrokerProvider({
+      requestedProvider: 'grok-subscription',
+      liveBrokerProviders: ['grok-subscription'],
+      liveConnectionRef: 'deployment-default',
+    })
+    expect(reserved.ok).toBe(false)
+    if (!reserved.ok) expect(reserved.code).toBe('unassigned_connection')
+  })
 })
 
 describe('readSubscriptionConnectionRef', () => {
@@ -95,6 +112,22 @@ describe('readSubscriptionConnectionRef', () => {
       annotations: { [CODEX_CONNECTION_REF_ANNOTATION]: 'team-plus' },
     })
     expect(result.ok).toBe(false)
+  })
+
+  it('fails closed when a Grok recipe still has the Codex alias leftover', () => {
+    const result = readSubscriptionConnectionRef({
+      provider: 'grok-subscription',
+      annotations: { [CODEX_CONNECTION_REF_ANNOTATION]: 'team-plus' },
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  it('reads only the canonical annotation for Grok', () => {
+    const result = readSubscriptionConnectionRef({
+      provider: 'grok-subscription',
+      annotations: { [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: 'team-grok' },
+    })
+    expect(result).toEqual({ ok: true, connectionKey: 'team-grok' })
   })
 })
 

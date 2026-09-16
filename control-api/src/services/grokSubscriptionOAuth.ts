@@ -581,7 +581,7 @@ async function exchangeRefreshToken(
     refresh_token: refreshToken,
     client_id: deps.clientId,
   })
-  if (result.status === 403) {
+  if (result.status === 402 || result.status === 403) {
     throw new GrokSubscriptionOAuthError('provider_unavailable', 'refresh was entitlement-denied')
   }
   if (!result.ok) {

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   type K8sSecretReader,
@@ -264,6 +265,67 @@ describe('ModelConfigHandler Plugin SDK per-attempt credential broker', () => {
     )
     expect(k8s.readConfigMapWithPresence).not.toHaveBeenCalled()
     expect(k8s.readSecret).not.toHaveBeenCalled()
+  })
+
+  it('publishes Grok SDK bootstrap as v3 with subscriptionBinding only', async () => {
+    const binding = {
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-4.6',
+      bindingHash: computeGrokPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    }
+    const mcpHost: McpHostClient = {
+      configure: vi.fn(async () => ({ status: 500, body: {} })),
+      configurePluginWorkloadSdkBootstrap: vi.fn(async () => ({
+        status: 200,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          contractVersion: 3,
+          policyReady: true,
+          policyState: 'active',
+          subscriptionBinding: { ...binding, leaked: 'drop-me' },
+        },
+      })),
+    }
+    const k8s = reader()
+    const handler = new ModelConfigHandler(k8s, mcpHost)
+    const result = await handler.configurePluginWorkloadSdkBootstrap(
+      'grok-subscription',
+      'grok-4.6',
+      'http://mcp-host:8090',
+      'wrc-token',
+      'promptBridge',
+      binding
+    )
+
+    expect(result.status).toBe(202)
+    expect(result.body).toMatchObject({
+      contractVersion: 3,
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      subscriptionBinding: binding,
+    })
+    expect(result.body).not.toHaveProperty('codexBinding')
+    expect(result.body.subscriptionBinding).not.toHaveProperty('leaked')
+    expect(mcpHost.configurePluginWorkloadSdkBootstrap).toHaveBeenCalledWith(
+      'http://mcp-host:8090',
+      'wrc-token',
+      {
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        contractVersion: 3,
+        subscriptionBinding: binding,
+      }
+    )
   })
 
   it('drops an echoed Codex binding whose hash does not verify', async () => {

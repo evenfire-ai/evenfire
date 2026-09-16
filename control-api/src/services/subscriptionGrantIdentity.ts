@@ -135,7 +135,8 @@ export function attestRequestedBrokerProvider(input: {
   const connectionKey = readHostCodexConnectionRef(input.liveConnectionRef)
   if (
     isCodexUnassignedConnectionKey(connectionKey) ||
-    connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY
+    connectionKey === CODEX_UNASSIGNED_CONNECTION_KEY ||
+    (input.requestedProvider === 'grok-subscription' && connectionKey === 'deployment-default')
   ) {
     return {
       ok: false,

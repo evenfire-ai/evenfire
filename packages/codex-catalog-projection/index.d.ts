@@ -148,6 +148,11 @@ export declare function toGrokPolicyBinding(
   cm: CodexConfigMapView | undefined | null,
   connectionKey?: string
 ): CodexPolicyBinding | null
+export declare function toEligibleGrokPolicyBinding(
+  cm: CodexConfigMapView | undefined | null,
+  connectionKey: string | undefined,
+  model: string
+): CodexEligiblePolicyBindingProjection
 /**
  * Structural revision view for the Host chat reader (`configStore`). It does
  * NOT decide eligibility: a transiently `unavailable`/`reauth-required`

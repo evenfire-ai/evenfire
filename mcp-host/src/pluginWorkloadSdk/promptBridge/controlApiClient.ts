@@ -108,8 +108,10 @@ export interface PluginWorkloadSdkBootstrapProof {
     | 'bootstrap_target_mismatch'
     | 'policy_not_ready'
     | 'codex_execution_binding_missing'
+    | 'execution_binding_missing'
   /** Control API attested the live Codex connection against the v3 binding. */
   codexBindingReady?: boolean
+  bindingReady?: boolean
   /**
    * Policy metadata is deliberately optional at identity bootstrap. A recipe
    * may be installed and publish an awaiting-policy SDK runtime before an

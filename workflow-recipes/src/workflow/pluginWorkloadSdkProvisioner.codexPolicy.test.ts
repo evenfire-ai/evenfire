@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import type { WorkflowRecipeSpec } from '../types'
 import type { CodexRecipeVerdict } from './codexRecipeVerdict'
@@ -15,6 +16,8 @@ const SANDBOX_NS = 'sandbox-recipes'
 const IMAGE = 'registry.example/clerum/mcp-host-slim:sha-current'
 const RECIPE = 'codex-sdk'
 const MODEL = 'gpt-5.3-codex'
+const GROK_RECIPE = 'grok-sdk'
+const GROK_MODEL = 'grok-4.6'
 
 const RUNTIME = {} as unknown as WorkflowRuntimePlan
 
@@ -34,6 +37,11 @@ const CODEX_SPEC = {
   pluginWorkloadSdk: { promptBridge: {} },
 } as unknown as WorkflowRecipeSpec
 
+const GROK_SPEC = {
+  agent: { provider: 'grok-subscription', model: GROK_MODEL },
+  pluginWorkloadSdk: { promptBridge: {} },
+} as unknown as WorkflowRecipeSpec
+
 function codexBinding(
   overrides: Partial<Omit<PluginWorkloadSdkCodexBindingProof, 'bindingHash'>> = {}
 ): PluginWorkloadSdkCodexBindingProof {
@@ -50,15 +58,34 @@ function codexBinding(
 const MINTED = codexBinding()
 
 /** Build the one verdict the provisioner reads, from a case's intent. */
+function grokBindingProof(
+  overrides: Partial<Omit<PluginWorkloadSdkCodexBindingProof, 'bindingHash'>> = {}
+): PluginWorkloadSdkCodexBindingProof {
+  const fields = {
+    connectionKey: 'team-grok',
+    catalogRevision: 5,
+    credentialRevision: 2,
+    model: GROK_MODEL,
+    ...overrides,
+  }
+  return { ...fields, bindingHash: computeGrokPolicyHash(fields) }
+}
+
+const GROK_MINTED = grokBindingProof()
+
 function verdictFor(opts: {
   codexBinding?: PluginWorkloadSdkCodexBindingProof | null
   codexBindingUndecidable?: boolean
+  grokBinding?: PluginWorkloadSdkCodexBindingProof | null
+  grokBindingUndecidable?: boolean
 }): CodexRecipeVerdict {
   const undecidable = opts.codexBindingUndecidable === true
+  const grokUndecidable = opts.grokBindingUndecidable === true
   const binding = opts.codexBinding ?? null
+  const grokBinding = opts.grokBinding ?? null
   return {
-    provenance: undecidable ? 'uncertain' : 'authoritative',
-    provenanceReason: undecidable ? 'parent_spec_unavailable' : 'standalone',
+    provenance: undecidable || grokUndecidable ? 'uncertain' : 'authoritative',
+    provenanceReason: undecidable || grokUndecidable ? 'parent_spec_unavailable' : 'standalone',
     connectionKey: 'team-plus',
     projection: {
       targets: [],
@@ -77,16 +104,22 @@ function verdictFor(opts: {
     grokProjection: {
       targets: [],
       eligibleTargets: [],
-      derivedScopes: [],
+      derivedScopes: grokBinding ? ['llm:grok:execute'] : [],
       requiresCodexProxyEgress: false,
-      requiresGrokProxyEgress: false,
+      requiresGrokProxyEgress: Boolean(grokBinding) && !grokUndecidable,
       catalogContentHash: null,
       catalogRevision: null,
       connectionRevision: null,
-      eligibility: 'ineligible',
-      reason: 'static_only',
+      eligibility: grokUndecidable ? 'uncertain' : grokBinding ? 'eligible' : 'ineligible',
+      reason: grokUndecidable ? 'provenance_uncertain' : grokBinding ? 'eligible' : 'static_only',
       driftHashInput: '{}',
     },
+    grokBinding: grokUndecidable ? null : grokBinding,
+    grokBindingReason: grokUndecidable
+      ? 'provenance_uncertain'
+      : grokBinding
+        ? 'eligible'
+        : 'static_only',
   }
 }
 
@@ -132,9 +165,52 @@ function desiredRuntimeContractHash(): string {
   )
 }
 
-function makeHarness(configureResult: unknown) {
+function grokRuntimeContractHash(): string {
+  return pluginWorkloadSdkRuntimeContractHash(
+    buildMcpHostPod(
+      GROK_RECIPE,
+      GROK_SPEC.agent,
+      TEST_CONFIG,
+      GROK_RECIPE,
+      SANDBOX_NS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      }
+    )
+  )
+}
+
+function readyGrokBootstrapBody(binding: PluginWorkloadSdkCodexBindingProof | null) {
+  return {
+    status: 202,
+    body: {
+      configured: true,
+      ready: true,
+      provider: 'grok-subscription',
+      model: GROK_MODEL,
+      contractVersion: 3,
+      policyReady: true,
+      policyState: 'active',
+      policyRevision: 7,
+      policyHash: 'b'.repeat(64),
+      defaultTargetRef: 'target/grok',
+      defaultProvider: 'grok-subscription',
+      defaultModel: GROK_MODEL,
+      ...(binding ? { subscriptionBinding: binding } : {}),
+    },
+  }
+}
+
+function makeHarness(configureResult: unknown, spec: WorkflowRecipeSpec = CODEX_SPEC) {
   let podUid = 'pod-uid-1'
-  const runtimeContractHash = desiredRuntimeContractHash()
+  const recipeName = spec === GROK_SPEC ? GROK_RECIPE : RECIPE
+  const runtimeContractHash =
+    spec === GROK_SPEC ? grokRuntimeContractHash() : desiredRuntimeContractHash()
   const readNamespacedPod = vi.fn().mockImplementation(async () => ({
     metadata: {
       uid: podUid,
@@ -174,13 +250,15 @@ function makeHarness(configureResult: unknown) {
   const reconcile = (opts: {
     codexBinding?: PluginWorkloadSdkCodexBindingProof | null
     codexBindingUndecidable?: boolean
+    grokBinding?: PluginWorkloadSdkCodexBindingProof | null
+    grokBindingUndecidable?: boolean
   }) =>
     provisioner.ensureEagerSdkMcpHost(
-      RECIPE,
+      recipeName,
       'recipe-uid',
       SANDBOX_NS,
-      RECIPE,
-      CODEX_SPEC,
+      recipeName,
+      spec,
       RUNTIME,
       {
         mcpHostPhase: 'Running',
@@ -379,5 +457,74 @@ describe('eager Codex policy gate', () => {
 
     expect(await harness.reconcile({ codexBinding: MINTED })).toBe('deploying')
     expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
+  })
+})
+
+describe('eager Grok policy gate', () => {
+  it('accepts a Grok hash on subscriptionBinding and reports ready', async () => {
+    const harness = makeHarness(readyGrokBootstrapBody(GROK_MINTED), GROK_SPEC)
+    expect(await harness.reconcile({ grokBinding: GROK_MINTED })).toBe('ready')
+    expect(harness.configure).toHaveBeenCalledWith(
+      'grok-subscription',
+      GROK_MODEL,
+      expect.any(String),
+      'configure-token',
+      'promptBridge',
+      GROK_MINTED
+    )
+    expect(harness.provisioner.getBootstrapProof(GROK_RECIPE)).toMatchObject({
+      contractVersion: 3,
+      provider: 'grok-subscription',
+      subscriptionBinding: GROK_MINTED,
+      policyReady: true,
+    })
+  })
+
+  it('skips reconfigure when Grok provenance is uncertain and the same pod still holds the binding', async () => {
+    const harness = makeHarness(readyGrokBootstrapBody(GROK_MINTED), GROK_SPEC)
+    expect(await harness.reconcile({ grokBinding: GROK_MINTED })).toBe('ready')
+    expect(harness.configure).toHaveBeenCalledTimes(1)
+    expect(
+      await harness.reconcile({ grokBinding: GROK_MINTED, grokBindingUndecidable: true })
+    ).toBe('ready')
+    expect(harness.configure).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects a Grok bootstrap whose hash is a Codex digest', async () => {
+    const forged = {
+      ...GROK_MINTED,
+      bindingHash: computeCodexPolicyHash({
+        model: GROK_MODEL,
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    }
+    const harness = makeHarness(readyGrokBootstrapBody(forged), GROK_SPEC)
+    expect(await harness.reconcile({ grokBinding: GROK_MINTED })).toBe('deploying')
+    expect(harness.provisioner.getBootstrapProof(GROK_RECIPE)).toBeUndefined()
+  })
+
+  it('accepts execution_binding_missing as awaiting_policy when Grok has no grant', async () => {
+    const harness = makeHarness(
+      {
+        status: 202,
+        body: {
+          configured: true,
+          ready: true,
+          provider: 'grok-subscription',
+          model: GROK_MODEL,
+          contractVersion: 3,
+          policyState: 'binding_missing',
+          policyReason: 'execution_binding_missing',
+        },
+      },
+      GROK_SPEC
+    )
+    expect(await harness.reconcile({ grokBinding: null })).toBe('awaiting_policy')
+    expect(harness.provisioner.getBootstrapProof(GROK_RECIPE)).toMatchObject({
+      policyReady: false,
+      policyReason: 'execution_binding_missing',
+    })
   })
 })

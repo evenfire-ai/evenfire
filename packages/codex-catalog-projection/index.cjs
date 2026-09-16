@@ -391,6 +391,41 @@ function toEligiblePolicyBinding(cm, connectionKey, model) {
   }
 }
 
+function toEligibleGrokPolicyBinding(cm, connectionKey, model) {
+  const key = assignedCodexConnectionKey(connectionKey)
+  const trimmedModel = typeof model === 'string' ? model.trim() : ''
+  if (key === CODEX_UNASSIGNED_CONNECTION_KEY) {
+    return { binding: null, eligibility: 'ineligible', reason: 'unassigned' }
+  }
+  if (!trimmedModel) {
+    return { binding: null, eligibility: 'ineligible', reason: 'model_missing' }
+  }
+  const snapshot = parseGrokAllowedModelsSnapshot(cm, key)
+  const projection = projectGrokExecution(
+    { model: { provider: GROK_PROVIDER, name: trimmedModel } },
+    snapshot
+  )
+  if (projection.eligibility !== 'eligible') {
+    return { binding: null, eligibility: projection.eligibility, reason: projection.reason }
+  }
+  if (
+    !Number.isInteger(snapshot.catalogRevision) ||
+    !Number.isInteger(snapshot.connectionRevision)
+  ) {
+    return { binding: null, eligibility: 'ineligible', reason: 'revision_missing' }
+  }
+  return {
+    binding: {
+      connectionKey: key,
+      catalogRevision: snapshot.catalogRevision,
+      credentialRevision: snapshot.connectionRevision,
+      model: trimmedModel,
+    },
+    eligibility: 'eligible',
+    reason: 'eligible',
+  }
+}
+
 function toGrokPolicyBinding(cm, connectionKey) {
   const key = assignedCodexConnectionKey(connectionKey)
   if (!cm || key === CODEX_UNASSIGNED_CONNECTION_KEY) return null
@@ -575,5 +610,6 @@ module.exports = {
   projectGrokExecution,
   toPolicyBinding,
   toGrokPolicyBinding,
+  toEligibleGrokPolicyBinding,
   toEligiblePolicyBinding,
 }

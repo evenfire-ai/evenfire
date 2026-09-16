@@ -172,6 +172,8 @@ const decidedVerdict: CodexRecipeVerdict = {
     reason: 'static_only',
     driftHashInput: '{}',
   },
+  grokBinding: null,
+  grokBindingReason: 'static_only',
 }
 
 describe('ensureEagerSdkMcpHost image-drift roll', () => {
@@ -756,6 +758,8 @@ describe('ensureEagerSdkMcpHost ConfigMap snapshot skip', () => {
               reason: 'static_only',
               driftHashInput: '{}',
             },
+            grokBinding: null,
+            grokBindingReason: 'static_only',
           } satisfies CodexRecipeVerdict,
         }
       )

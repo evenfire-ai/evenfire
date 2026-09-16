@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CODEX_UNASSIGNED_CONNECTION_KEY } from '@clerum/codex-catalog-projection'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
@@ -11,6 +12,7 @@ import {
   readVerifiedSdkOnlyCodexBinding,
   replaceSdkOnlyCodexBinding,
 } from './sdkOnlyCodexBinding'
+import { readSdkOnlyGrokBinding, replaceSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 
 describe('readVerifiedSdkOnlyCodexBinding', () => {
   const model = 'gpt-5.6-luna'
@@ -397,5 +399,77 @@ describe('Plugin Workload SDK bootstrap identity', () => {
     expect(result.codexBinding).toEqual(binding)
     expect(result.codexBinding).not.toHaveProperty('leaked')
     replaceSdkOnlyCodexBinding(null)
+  })
+
+  it('keeps Grok identity ready while the v3 execution binding is missing', async () => {
+    replaceSdkOnlyGrokBinding(null)
+    const verify = vi.fn()
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        contractVersion: 3,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
+      policyReady: false,
+      policyReason: 'execution_binding_missing',
+      bindingReady: false,
+    })
+    expect(result).not.toHaveProperty('codexBinding')
+    expect(verify).not.toHaveBeenCalled()
+    expect(readSdkOnlyGrokBinding()).toBeNull()
+  })
+
+  it('echoes subscriptionBinding and generic ready flags for a verified Grok proof', async () => {
+    const binding = {
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-4.6',
+      bindingHash: computeGrokPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    }
+    const verify = vi.fn().mockResolvedValue({
+      ready: true,
+      contractVersion: 3,
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      policyReady: true,
+      policyState: 'active',
+      bindingReady: true,
+    })
+    const result = await configurePluginWorkloadSdkBootstrapIdentity(
+      {
+        capabilityFamily: 'promptBridge',
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        contractVersion: 3,
+        subscriptionBinding: binding,
+      },
+      { capabilityFamily: 'promptBridge', verify }
+    )
+    expect(result).toMatchObject({
+      configured: true,
+      ready: true,
+      contractVersion: 3,
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      subscriptionBinding: binding,
+      bindingReady: true,
+    })
+    expect(result).not.toHaveProperty('codexBinding')
+    expect(readSdkOnlyGrokBinding()).toEqual(binding)
+    expect(readSdkOnlyCodexBinding()).toBeNull()
+    replaceSdkOnlyGrokBinding(null)
   })
 })

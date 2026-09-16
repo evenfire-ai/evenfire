@@ -36,8 +36,16 @@ import {
   listCodexSubscriptionConnections,
 } from '@lib/codexSubscription'
 import { isDisabledCapabilityError } from '@lib/codexSubscriptionFeature'
+import {
+  type GrokSubscriptionConnectionView,
+  isAssignableGrokGrant,
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '@lib/grokSubscription'
+import { loadGrokSubscriptionCapability } from '@lib/grokSubscriptionFeature'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
 import {
+  GROK_SUBSCRIPTION_PROVIDER,
   LLM_PROVIDER_OPTIONS,
   type LlmProvider,
   OPENAI_SUBSCRIPTION_PROVIDER,
@@ -473,8 +481,12 @@ function GrantFormModal({
   // catalog are listed, and the model picker narrows to that grant's enabled
   // non-stale models — the same "choose, don't create" lock Hosts follow.
   const isCodexProvider = modelProvider === OPENAI_SUBSCRIPTION_PROVIDER
+  const isGrokProvider = modelProvider === GROK_SUBSCRIPTION_PROVIDER
+  const isBrokerProvider = isCodexProvider || isGrokProvider
+  const [grokEnabled, setGrokEnabled] = useState(false)
   const [codexConnectionRef, setCodexConnectionRef] = useState('')
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [allowedEventTypes, setAllowedEventTypes] = useState(
     (grant?.allowedEventTypes ?? []).join(', ')
@@ -558,12 +570,45 @@ function GrantFormModal({
     }
   }, [isCodexProvider])
   useEffect(() => {
-    if (!isCodexProvider || !codexConnectionRef) {
+    let cancelled = false
+    loadGrokSubscriptionCapability()
+      .then(capability => {
+        if (!cancelled) setGrokEnabled(capability.enabled)
+      })
+      .catch(() => {
+        if (!cancelled) setGrokEnabled(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  useEffect(() => {
+    if (!isGrokProvider) return
+    let cancelled = false
+    listGrokSubscriptionConnections()
+      .then(connections => {
+        if (cancelled) return
+        setGrokConnections(connections.filter(isAssignableGrokGrant))
+      })
+      .catch(err => {
+        if (cancelled) return
+        setGrokConnections([])
+        if (!isDisabledCapabilityError(err)) {
+          setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [isGrokProvider])
+  useEffect(() => {
+    if (!isBrokerProvider || !codexConnectionRef) {
       setCodexModels([])
       return
     }
     let cancelled = false
-    listCodexConnectionModels(codexConnectionRef)
+    const loader = isGrokProvider ? listGrokConnectionModels : listCodexConnectionModels
+    loader(codexConnectionRef)
       .then(models => {
         if (cancelled) return
         setCodexModels(models.filter(row => row.enabled && !row.stale).map(row => row.model))
@@ -574,7 +619,7 @@ function GrantFormModal({
     return () => {
       cancelled = true
     }
-  }, [isCodexProvider, codexConnectionRef])
+  }, [isBrokerProvider, isGrokProvider, codexConnectionRef])
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -652,8 +697,8 @@ function GrantFormModal({
     hasWildcard(callersList)
 
   const providerModelOptions = useMemo(
-    () => (isCodexProvider ? codexModels : getModelOptions(allowedCatalog, modelProvider)),
-    [allowedCatalog, codexModels, isCodexProvider, modelProvider]
+    () => (isBrokerProvider ? codexModels : getModelOptions(allowedCatalog, modelProvider)),
+    [allowedCatalog, codexModels, isBrokerProvider, modelProvider]
   )
   const credentialSlotOptions = useMemo(
     () => getPromptBridgeCredentialSlotOptions(modelProvider, availableCredentialKeys),
@@ -742,7 +787,7 @@ function GrantFormModal({
     const ref = targetRef.trim() || `${modelProvider}-${model}-${promptTargets.length + 1}`
     // Codex targets bind a permitted subscription grant and carry no static
     // Secret slot; API-key targets keep requiring a provider-owned slot.
-    if (!model || !ref || (isCodexProvider ? !connectionRef : !slot)) return
+    if (!model || !ref || (isBrokerProvider ? !connectionRef : !slot)) return
     if (
       promptTargets.some(
         target =>
@@ -754,7 +799,7 @@ function GrantFormModal({
     }
     setPromptTargets(current => [
       ...current,
-      isCodexProvider
+      isBrokerProvider
         ? { targetRef: ref, provider: modelProvider, model, credentialSlot: '', connectionRef }
         : { targetRef: ref, provider: modelProvider, model, credentialSlot: slot },
     ])
@@ -879,7 +924,9 @@ function GrantFormModal({
                       setCodexConnectionRef('')
                     }}
                   >
-                    {LLM_PROVIDER_OPTIONS.map(option => (
+                    {LLM_PROVIDER_OPTIONS.filter(
+                      option => option.value !== GROK_SUBSCRIPTION_PROVIDER || grokEnabled
+                    ).map(option => (
                       <option key={option.value} value={option.value}>
                         {option.label}
                       </option>
@@ -911,12 +958,16 @@ function GrantFormModal({
                     ))}
                   </SelectInput>
                 </Field>
-                {isCodexProvider ? (
+                {isBrokerProvider ? (
                   <Field
-                    label="Codex subscription"
+                    label={isGrokProvider ? 'Grok subscription' : 'Codex subscription'}
                     htmlFor="sdk-codex-connection"
                     required
-                    description="Choose an existing connected ChatGPT subscription grant. Grants are created in Secrets & Connections; this policy only selects one, and only its enabled models can be added."
+                    description={
+                      isGrokProvider
+                        ? 'Choose an existing connected Grok subscription grant. Grants are created in Secrets & Connections; this policy only selects one.'
+                        : 'Choose an existing connected ChatGPT subscription grant. Grants are created in Secrets & Connections; this policy only selects one, and only its enabled models can be added.'
+                    }
                   >
                     <SelectInput
                       id="sdk-codex-connection"
@@ -928,7 +979,7 @@ function GrantFormModal({
                       }}
                     >
                       <option value="">Select connected subscription…</option>
-                      {codexConnections.map(connection => (
+                      {(isGrokProvider ? grokConnections : codexConnections).map(connection => (
                         <option key={connection.connectionKey} value={connection.connectionKey}>
                           {connection.displayName
                             ? `${connection.displayName} (${connection.connectionKey})`
@@ -980,7 +1031,7 @@ function GrantFormModal({
                       onClick={addPromptTarget}
                       disabled={
                         !targetModel.trim() ||
-                        (isCodexProvider ? !codexConnectionRef.trim() : !credentialSlot.trim())
+                        (isBrokerProvider ? !codexConnectionRef.trim() : !credentialSlot.trim())
                       }
                     >
                       Add target
@@ -996,7 +1047,7 @@ function GrantFormModal({
                           {target.targetRef}: {getProviderLabel(target.provider as LlmProvider)} /{' '}
                           {target.model} /{' '}
                           {target.connectionRef
-                            ? `sub:${target.connectionRef}`
+                            ? `sub:${target.provider}:${target.connectionRef}`
                             : target.credentialSlot}
                         </code>
                         <Button

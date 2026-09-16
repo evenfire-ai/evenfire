@@ -51,3 +51,18 @@ Stamped in `grok-llm-proxy`, never taken from mcp-host or the hashed request:
 CLI impersonation headers (`x-xai-token-auth`, `x-grok-client-identifier`) stay
 off until a recorded SuperGrok probe requires them. Do not send `OpenAI-Beta`
 or `service_tier`. `max_output_tokens` is bindable on this wire.
+
+## Allowlist ConfigMap republish
+
+control-api is `replicas: 1`. After rolling a new control-api that writes
+`clerum.io/grok-*` annotations, republish `clerum-llm-allowed-models` once the
+new pod is Ready so a mutation on the old pod cannot strip Grok annotations.
+
+Rollback: drop `llm:grok:execute` and Grok proxy NetworkPolicies in HCC/WRC
+before rolling control-api back. A new control-api republishes on boot.
+
+## SDK bootstrap
+
+Grok writers emit `subscriptionBinding` only. Readers accept `subscriptionBinding`
+or `codexBinding`. Grok missing-binding reason is `execution_binding_missing`.
+Codex keeps `codexBinding` and `codex_execution_binding_missing`.
