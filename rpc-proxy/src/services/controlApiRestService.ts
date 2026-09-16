@@ -48,6 +48,13 @@ export class ControlApiHostAccessRejectedError extends Error {
   }
 }
 
+export class ControlApiArtifactReadRateLimitedError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super(`Control API rate limited artifact reads for ${retryAfterSeconds} seconds`)
+    this.name = 'ControlApiArtifactReadRateLimitedError'
+  }
+}
+
 // Typed rejection for the connectors read-model, mirroring the host rail above.
 // A generic Error collapses to 500 in the app error handler, which the desktop
 // reads as non-refreshable — so an expired/rotated rpc access token (401) would
@@ -208,9 +215,39 @@ export async function fetchHostConnectionFromControlApi(
     fetchImpl?: typeof fetch
   } = {}
 ): Promise<ResolvedServerConnection | null> {
+  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, options)
+}
+
+/**
+ * Resolves a Host connection after Control API has enforced the durable,
+ * cross-replica artifact-read budget for this verified user and canonical Host.
+ */
+export async function fetchArtifactReadHostConnectionFromControlApi(
+  userId: string,
+  hostRef: string,
+  rpcAccessToken: string,
+  options: { fetchImpl?: typeof fetch } = {}
+): Promise<ResolvedServerConnection | null> {
+  return fetchHostConnectionForPath(userId, hostRef, rpcAccessToken, {
+    ...options,
+    artifactRead: true,
+  })
+}
+
+async function fetchHostConnectionForPath(
+  userId: string,
+  hostRef: string,
+  rpcAccessToken: string,
+  options: {
+    directRunBinding?: DirectRunBindingRequest
+    fetchImpl?: typeof fetch
+    artifactRead?: boolean
+  } = {}
+): Promise<ResolvedServerConnection | null> {
   const directRunBinding = options.directRunBinding
+  const hostAccessPath = `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`
   const response = await (options.fetchImpl ?? fetch)(
-    `${controlApiBaseUrl()}/rpc/access/users/${encodeURIComponent(userId)}/mcp-hosts/${encodeURIComponent(hostRef)}`,
+    options.artifactRead ? `${hostAccessPath}/artifact-read` : hostAccessPath,
     {
       method: directRunBinding ? 'POST' : 'GET',
       headers: {
@@ -222,6 +259,22 @@ export async function fetchHostConnectionFromControlApi(
     }
   )
 
+  if (options.artifactRead && response.status === 429) {
+    const retryAfterHeader = Number(response.headers.get('retry-after'))
+    let retryAfterBody = Number.NaN
+    try {
+      const body = (await response.json()) as { retryAfterSeconds?: unknown }
+      if (typeof body.retryAfterSeconds === 'number') retryAfterBody = body.retryAfterSeconds
+    } catch {
+      /* use the header below when the canonical JSON body is unavailable */
+    }
+    const retryAfterSeconds =
+      Number.isFinite(retryAfterHeader) && retryAfterHeader > 0 ? retryAfterHeader : retryAfterBody
+    if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
+      throw new Error('Control API artifact-read limit returned 429 without Retry-After')
+    }
+    throw new ControlApiArtifactReadRateLimitedError(retryAfterSeconds)
+  }
   if (!directRunBinding && (response.status === 403 || response.status === 404)) {
     return null
   }
