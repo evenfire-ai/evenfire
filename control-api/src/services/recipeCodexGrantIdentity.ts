@@ -6,9 +6,9 @@ import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
   isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
 } from './codexSubscriptionConnection.js'
 import { K8sConflictError } from './resourceService.js'
+import { readSubscriptionConnectionRef } from './subscriptionGrantIdentity.js'
 
 export class RecipeCodexGrantIdentityError extends Error {
   constructor(
@@ -22,7 +22,18 @@ export class RecipeCodexGrantIdentityError extends Error {
 }
 
 export function readRecipeGrantIdentity(annotations?: Record<string, string> | null): string {
-  return readHostCodexConnectionRef(annotations?.[CODEX_CONNECTION_REF_ANNOTATION])
+  const result = readSubscriptionConnectionRef({
+    provider: 'codex-subscription',
+    annotations,
+  })
+  if (!result.ok) {
+    throw new RecipeCodexGrantIdentityError(
+      422,
+      'subscription_annotations_disagree',
+      result.message
+    )
+  }
+  return result.connectionKey
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

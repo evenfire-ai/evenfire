@@ -8,6 +8,7 @@ const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
 const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
 const CODEX_CONNECTION_REF_ANNOTATION = 'clerum.io/codex-connection-ref'
+const SUBSCRIPTION_CONNECTION_REF_ANNOTATION = 'clerum.io/subscription-connection-ref'
 const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
 const CODEX_PROVIDER = 'codex-subscription'
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -20,6 +21,40 @@ function assignedCodexConnectionKey(value) {
 
 function isCodexUnassignedConnectionKey(value) {
   return assignedCodexConnectionKey(value) === CODEX_UNASSIGNED_CONNECTION_KEY
+}
+
+/**
+ * Dual-key grant reader. Codex alias is honored only when provider is
+ * `codex-subscription`. Disagree (both set, unequal) fails closed. A leftover
+ * Codex alias on any other provider fails closed.
+ */
+function readSubscriptionConnectionRef(input) {
+  const provider = input && typeof input.provider === 'string' ? input.provider : ''
+  const annotations = (input && input.annotations) || {}
+  const canonical =
+    typeof annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] === 'string'
+      ? annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION].trim()
+      : ''
+  const alias =
+    typeof annotations[CODEX_CONNECTION_REF_ANNOTATION] === 'string'
+      ? annotations[CODEX_CONNECTION_REF_ANNOTATION].trim()
+      : ''
+
+  if (provider === CODEX_PROVIDER) {
+    if (canonical && alias && canonical !== alias) {
+      return { ok: false, code: 'host_binding_mismatch', message: 'subscription connection annotations disagree' }
+    }
+    return { ok: true, connectionKey: assignedCodexConnectionKey(canonical || alias) }
+  }
+
+  if (alias) {
+    return {
+      ok: false,
+      code: 'host_binding_mismatch',
+      message: 'Codex connection annotation is not valid for this oauth-broker provider',
+    }
+  }
+  return { ok: true, connectionKey: assignedCodexConnectionKey(canonical) }
 }
 
 function snapshotFromConfigMapError(error) {
@@ -359,11 +394,13 @@ module.exports = {
   CODEX_ENABLED_ANNOTATION,
   CODEX_CONNECTIONS_ANNOTATION,
   CODEX_CONNECTION_REF_ANNOTATION,
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
   CODEX_UNASSIGNED_CONNECTION_KEY,
   CODEX_PROVIDER,
   CODEX_EXECUTE_SCOPE,
   assignedCodexConnectionKey,
   isCodexUnassignedConnectionKey,
+  readSubscriptionConnectionRef,
   snapshotFromConfigMapError,
   parseAllowedModelsSnapshot,
   snapshotForAssignedCodexGrant,

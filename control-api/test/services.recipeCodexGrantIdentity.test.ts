@@ -41,6 +41,18 @@ describe('recipe Codex grant identity', () => {
     expect(readRecipeGrantIdentity({ 'clerum.io/codex-connection-ref': 'team-plus' })).toBe(
       'team-plus'
     )
+    expect(
+      readRecipeGrantIdentity({ 'clerum.io/subscription-connection-ref': 'personal-pro' })
+    ).toBe('personal-pro')
+  })
+
+  it('rejects disagreeing subscription annotations', () => {
+    expect(() =>
+      readRecipeGrantIdentity({
+        'clerum.io/codex-connection-ref': 'team-plus',
+        'clerum.io/subscription-connection-ref': 'other-key',
+      })
+    ).toThrow(/disagree/)
   })
 
   it('rejects a named publish when the grant is not live', async () => {

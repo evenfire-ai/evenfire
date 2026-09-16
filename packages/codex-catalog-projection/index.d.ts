@@ -15,6 +15,7 @@ export declare const CODEX_CONNECTION_STATUS_ANNOTATION: 'clerum.io/codex-connec
 export declare const CODEX_ENABLED_ANNOTATION: 'clerum.io/codex-enabled'
 export declare const CODEX_CONNECTIONS_ANNOTATION: 'clerum.io/codex-connections'
 export declare const CODEX_CONNECTION_REF_ANNOTATION: 'clerum.io/codex-connection-ref'
+export declare const SUBSCRIPTION_CONNECTION_REF_ANNOTATION: 'clerum.io/subscription-connection-ref'
 export declare const CODEX_UNASSIGNED_CONNECTION_KEY: 'unassigned'
 export declare const CODEX_PROVIDER: 'codex-subscription'
 export declare const CODEX_EXECUTE_SCOPE: 'llm:codex:execute'
@@ -112,6 +113,15 @@ export declare function snapshotForAssignedCodexGrant(
   lastConfigMap: CodexConfigMapView | undefined | null,
   fallback: CodexCatalogSnapshot
 ): CodexCatalogSnapshot
+export type SubscriptionConnectionRefResult =
+  | { ok: true; connectionKey: string }
+  | { ok: false; code: 'host_binding_mismatch'; message: string }
+
+export declare function readSubscriptionConnectionRef(input: {
+  provider: string
+  annotations?: Record<string, string> | null
+}): SubscriptionConnectionRefResult
+
 export declare function collectCodexTargets(spec: CodexHostSpec): CodexTarget[]
 export declare function projectCodexExecution(
   spec: CodexHostSpec,

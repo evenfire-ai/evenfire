@@ -41,6 +41,49 @@ test('runtime exports stay aligned with the declaration file', () => {
   assert.deepEqual(Object.keys(projection).sort(), declared)
 })
 
+test('readSubscriptionConnectionRef dual-reads Codex alias and canonical annotation', () => {
+  const CANON = projection.SUBSCRIPTION_CONNECTION_REF_ANNOTATION
+  const ALIAS = projection.CODEX_CONNECTION_REF_ANNOTATION
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [ALIAS]: ' team-plus ' },
+    }).connectionKey,
+    'team-plus'
+  )
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [CANON]: 'personal-pro' },
+    }).connectionKey,
+    'personal-pro'
+  )
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: { [ALIAS]: 'team-plus', [CANON]: 'team-plus' },
+    }).connectionKey,
+    'team-plus'
+  )
+  const disagree = projection.readSubscriptionConnectionRef({
+    provider: 'codex-subscription',
+    annotations: { [ALIAS]: 'team-plus', [CANON]: 'other-key' },
+  })
+  assert.equal(disagree.ok, false)
+  const leftover = projection.readSubscriptionConnectionRef({
+    provider: 'openai',
+    annotations: { [ALIAS]: 'team-plus' },
+  })
+  assert.equal(leftover.ok, false)
+  assert.equal(
+    projection.readSubscriptionConnectionRef({
+      provider: 'codex-subscription',
+      annotations: {},
+    }).connectionKey,
+    'unassigned'
+  )
+})
+
 test('assignedCodexConnectionKey treats empty as unassigned and never invents deployment-default', () => {
   assert.equal(projection.assignedCodexConnectionKey(undefined), 'unassigned')
   assert.equal(projection.assignedCodexConnectionKey(''), 'unassigned')

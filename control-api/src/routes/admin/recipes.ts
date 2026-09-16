@@ -17,9 +17,9 @@ import {
 } from '../../secretOwnership.js'
 import {
   CODEX_CONNECTION_REF_ANNOTATION,
+  CODEX_UNASSIGNED_CONNECTION_KEY,
   assertCodexConnectionKey,
   isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
 } from '../../services/codexSubscriptionConnection.js'
 import {
   ensureRegistryPullSecrets,
@@ -27,6 +27,10 @@ import {
 } from '../../services/registryPullSecretService.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
+import {
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  readSubscriptionConnectionRef,
+} from '../../services/subscriptionGrantIdentity.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -1257,8 +1261,12 @@ function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
 }
 
 function readRequestedCodexRecipeGrant(body: RecipeBody): string {
-  const raw = body.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
-  return readHostCodexConnectionRef(typeof raw === 'string' ? raw : '')
+  const result = readSubscriptionConnectionRef({
+    provider: 'codex-subscription',
+    annotations: body.metadata?.annotations,
+  })
+  if (!result.ok) return CODEX_UNASSIGNED_CONNECTION_KEY
+  return result.connectionKey
 }
 
 function validateCodexRecipeGrant(
@@ -1293,9 +1301,10 @@ function validateCodexRecipeGrant(
 
 function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
   const annotations = body.metadata?.annotations
-  return Boolean(
-    annotations &&
-    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION)
+  if (!annotations) return false
+  return (
+    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION) ||
+    Object.prototype.hasOwnProperty.call(annotations, SUBSCRIPTION_CONNECTION_REF_ANNOTATION)
   )
 }
 

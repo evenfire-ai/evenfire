@@ -2,10 +2,6 @@
  * WRC REST endpoints for workflow status reporting and management.
  */
 import * as k8s from '@kubernetes/client-node'
-import {
-  CODEX_CONNECTION_REF_ANNOTATION,
-  assignedCodexConnectionKey,
-} from '@clerum/codex-catalog-projection'
 import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { loadConfig } from '../config'
 import type {
@@ -16,6 +12,7 @@ import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
 import { getErrorCode } from '../reconciler/k8sErrors'
 import { JwtTokenFactory } from './jwtTokenFactory'
+import { readRecipeCodexConnectionRef } from './llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from './modelConfigHandler'
 import {
   buildArtifactReaderUrl as buildWorkflowArtifactReaderUrl,
@@ -692,8 +689,9 @@ export function createWorkflowEndpointHandlers(
     } | null
     const handleOpts = {
       ...(validateDegraded ? { validateDegraded } : {}),
-      codexConnectionKey: assignedCodexConnectionKey(
-        recipe?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+      codexConnectionKey: readRecipeCodexConnectionRef(
+        recipe?.metadata?.annotations,
+        typeof body.provider === 'string' ? body.provider : 'codex-subscription'
       ),
     }
     // R5 F6 stop-point: `fallbacks`/`cooldownSeconds`/`triggerOn` are NOT

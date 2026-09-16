@@ -1,4 +1,4 @@
-import { isRunnableLlmModelId } from '@clerum/llm-providers'
+import { PROVIDER_AUTH_MODE, isLlmProviderId, isRunnableLlmModelId } from '@clerum/llm-providers'
 import type { PluginWorkloadSdkCapability } from '../config'
 import { isLlmProvider } from '../llm/registryCore'
 import type { LlmProvider } from '../llm/registryCore'
@@ -22,6 +22,10 @@ export interface PluginWorkloadSdkBootstrapIdentityDeps {
 }
 
 export type PluginWorkloadSdkBootstrapCapabilityFamily = 'promptBridge' | 'clientNotifications'
+
+function isOauthBrokerProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+}
 
 /**
  * Resolve the one bootstrap proof WRC is allowed to request from the
@@ -90,7 +94,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   // Always integrity-check a supplied binding before the provider protocol
   // branch. Request-controlled provider/version must not skip this check.
   const verifiedBinding = readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
-  if (req.provider === 'codex-subscription') {
+  if (isOauthBrokerProvider(req.provider)) {
     if (!verifiedBinding) {
       replaceSdkOnlyCodexBinding(null)
       return {
@@ -121,20 +125,20 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   try {
     proof = deps.verify ? await deps.verify(req.provider, model) : null
   } catch (err) {
-    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) replaceSdkOnlyCodexBinding(null)
     throw err
   }
   if (deps.verify && !proof) {
-    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) replaceSdkOnlyCodexBinding(null)
     return {
       configured: false,
       ready: false,
-      contractVersion: req.provider === 'codex-subscription' ? 3 : 2,
+      contractVersion: isOauthBrokerProvider(req.provider) ? 3 : 2,
       message: 'Plugin Workload SDK identity bootstrap contract is not ready',
     }
   }
   if (
-    req.provider === 'codex-subscription' &&
+    isOauthBrokerProvider(req.provider) &&
     proof &&
     (proof.codexBindingReady === false || proof.policyReason === 'codex_execution_binding_missing')
   ) {
@@ -154,7 +158,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     }
   }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
-  const contractVersion = req.provider === 'codex-subscription' ? 3 : 2
+  const contractVersion = isOauthBrokerProvider(req.provider) ? 3 : 2
   return {
     configured: true,
     ready: true,
@@ -178,7 +182,7 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
       : {}),
-    ...(req.provider === 'codex-subscription' && verifiedBinding
+    ...(isOauthBrokerProvider(req.provider) && verifiedBinding
       ? { codexBinding: verifiedBinding }
       : {}),
   }
