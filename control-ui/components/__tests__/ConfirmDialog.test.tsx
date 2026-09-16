@@ -1,6 +1,6 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useConfirmDialog } from '../ConfirmDialog'
 import type { ConfirmDialogOptions } from '../ConfirmDialog/types'
 
@@ -15,6 +15,22 @@ function ConfirmHarness({ options }: { options: ConfirmDialogOptions }) {
     void confirm(options)
   }, [confirm, options])
   return confirmDialog
+}
+
+function DismissHarness() {
+  const { confirm, confirmDialog } = useConfirmDialog()
+  const [outcome, setOutcome] = useState('pending')
+  useEffect(() => {
+    void confirm({ message: 'Discard this change?', title: 'Discard changes' }).then(result => {
+      setOutcome(result ? 'confirmed' : 'dismissed')
+    })
+  }, [confirm])
+  return (
+    <>
+      <output>{outcome}</output>
+      {confirmDialog}
+    </>
+  )
 }
 
 describe('ConfirmDialog accessibility', () => {
@@ -45,5 +61,13 @@ describe('ConfirmDialog accessibility', () => {
 
     const dialog = screen.getByRole('alertdialog')
     expect(dialog).toHaveAccessibleDescription('Proceed with the change?')
+  })
+
+  it('treats a backdrop click as dismissal instead of confirmation', async () => {
+    render(<DismissHarness />)
+
+    fireEvent.mouseDown(document.querySelector('.cu-modal-backdrop') as HTMLElement)
+
+    await waitFor(() => expect(screen.getByText('dismissed')).toBeInTheDocument())
   })
 })
