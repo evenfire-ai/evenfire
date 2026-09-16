@@ -376,10 +376,9 @@ async function readWorkflowTriggerAuthorityFence(input: {
   const lock = input.lock ? ' FOR SHARE' : ''
   const session = await input.db.query(
     `SELECT u.lifecycle_state, s.session_version, s.current_jti, s.revoked_at,
-            s.idle_expires_at, s.absolute_expires_at, aur.revision AS user_revision
+            s.idle_expires_at, s.absolute_expires_at
        FROM users u
        JOIN external_user_sessions s ON s.user_id = u.id AND s.sid = $2
-       JOIN authorization_user_revisions aur ON aur.user_id = u.id
       WHERE u.id = $1 AND s.session_version = $3${lock}`,
     [binding.userId, binding.sid, binding.sessionVersion]
   )
@@ -480,6 +479,13 @@ async function readWorkflowTriggerAuthorityFence(input: {
     throw new WorkflowAuthorityError(409, 'access_path_stale')
   }
 
+  // This fence deliberately snapshots authority inputs rather than the broad
+  // authorization_user_revisions activity counter. A workflow_runs insert bumps
+  // that counter for the actor, so including it would make an equivalent
+  // contender stale solely because the idempotency winner committed. Session,
+  // membership, grant, resource, relationship, and source-state remain fenced
+  // here; target, behavior, and expiry are retained by the validated
+  // delegation and phase-one authority verification.
   const snapshot = JSON.parse(
     JSON.stringify({
       session: session.rows,
