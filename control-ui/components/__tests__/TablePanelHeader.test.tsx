@@ -133,9 +133,9 @@ describe('TablePanelHeader', () => {
       expect(
         document.getElementById(description?.getAttribute('aria-describedby') || '')
       ).toHaveTextContent('A longer description that cannot fit within two lines.')
-      expect(document.querySelector('.cu-table-panel__description-tooltip')).toHaveTextContent(
-        'A longer description that cannot fit within two lines.'
-      )
+      const tooltip = document.querySelector('.cu-table-panel__description-tooltip')
+      expect(tooltip).not.toHaveAttribute('role')
+      expect(tooltip).toHaveTextContent('A longer description that cannot fit within two lines.')
     } finally {
       scrollHeight.mockRestore()
       clientHeight.mockRestore()
