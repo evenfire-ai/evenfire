@@ -1772,6 +1772,7 @@ async function initializeAgent(): Promise<void> {
   const maxConcurrent = parseInt(process.env.CLERUM_MAX_CONCURRENT_SESSIONS || '3', 10)
   sessionProcessor = new SessionProcessor({
     maxConcurrent,
+    taskDelayMs: config.agentTaskDelay,
     executor: async (task: Task) => {
       return agent!.executeTask(task)
     },

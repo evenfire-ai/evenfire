@@ -58,6 +58,7 @@ export type TaskTerminalResult =
   | {
       kind: 'error'
       source: 'failed' | 'result_fetch' | 'stream'
+      attachments?: ChatMessageAttachment[]
       message: string
       code?: string
       provider?: string

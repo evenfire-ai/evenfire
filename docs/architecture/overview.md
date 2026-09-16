@@ -669,9 +669,9 @@ stateDiagram-v2
 
 **Configurable limits**:
 
-- `maxToolCallsPerTask` (default: 50) - Prevents infinite tool calling loops
-- `maxTaskDuration` (default: 300000ms / 5 min) - Task timeout
-- `taskDelay` (default: 100ms) - Delay between processing tasks
+- `maxToolCallsPerTask` (default: 1000) - Bounds LLM/tool iterations per task; each iteration may call multiple tools
+- `maxTaskDuration` (default: 86400000ms / 24 hours) - Maximum active execution time; excludes approval waiting and persists across resumptions
+- `taskDelay` (default: 3ms) - Minimum interval between task dispatches
 
 ### LLM Providers
 
@@ -834,9 +834,9 @@ The HTTP response is held open until the agent finishes processing. The response
 | `BAILIAN_API_KEY`                     | -                | Bailian/DashScope key (dev mode)                                                            |
 | `CLERUM_HOST_CONFIG`                  | -                | JSON host config (dev mode)                                                                 |
 | `CLERUM_MCP_SERVERS`                  | -                | JSON MCP server array (dev mode)                                                            |
-| `CLERUM_AGENT_TASK_DELAY`             | `100`            | Delay between tasks (ms)                                                                    |
-| `CLERUM_AGENT_MAX_TASK_DURATION`      | `300000`         | Max task duration (ms)                                                                      |
-| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `50`             | Max tool calls per task                                                                     |
+| `CLERUM_AGENT_TASK_DELAY`             | `3`            | Delay between tasks (ms)                                                                    |
+| `CLERUM_AGENT_MAX_TASK_DURATION`      | `86400000`         | Max active task duration, excluding approval waits (ms)                                                                      |
+| `CLERUM_AGENT_MAX_TOOL_CALLS`         | `1000`             | Max LLM/tool iterations per task, configured per Host process                                |
 | `CLERUM_AGENT_MAX_QUEUE_SIZE`         | `100`            | Max pending queue size                                                                      |
 
 ### Dependencies

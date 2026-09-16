@@ -500,7 +500,11 @@ export class ConversationManager {
     approval: PendingApproval,
     sourceMessage?: Record<string, unknown>
   ): Promise<void> {
-    if (conversation.state !== ConversationState.Processing) {
+    const renewing =
+      conversation.state === ConversationState.AwaitingApproval &&
+      conversation.pending_approval?.legacy_budget === true &&
+      approval.replaces_request_id === conversation.pending_approval.request_id
+    if (conversation.state !== ConversationState.Processing && !renewing) {
       throw new ConversationError(
         `Cannot suspend: conversation is ${conversation.state}`,
         ConversationErrorCode.InvalidTransition
