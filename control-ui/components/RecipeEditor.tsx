@@ -33,7 +33,17 @@ import {
 import { isDisabledCapabilityError } from '../lib/codexSubscriptionFeature'
 import { analyzeWorkflowRecipeEgress } from '../lib/egressModel'
 import type { EgressBinding, EgressEditorStatus } from '../lib/egressModel'
-import { OPENAI_SUBSCRIPTION_PROVIDER, brokerBackedRecipeAuthoringError } from '../lib/llm'
+import {
+  type GrokSubscriptionConnectionView,
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  isAssignableGrokGrant,
+  listGrokSubscriptionConnections,
+} from '../lib/grokSubscription'
+import {
+  GROK_SUBSCRIPTION_PROVIDER,
+  OPENAI_SUBSCRIPTION_PROVIDER,
+  brokerBackedRecipeAuthoringError,
+} from '../lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '../lib/llmCredentialSelect'
 import { DEFAULT_OPERATOR_DEFAULTS, applyDefaults } from '../lib/recipeDefaults'
 import {
@@ -102,17 +112,37 @@ function readRecipeAgentProvider(spec: unknown): string {
 function readRecipeCodexGrantAnnotation(
   resource?: { metadata?: { annotations?: Record<string, string> } } | null
 ): string {
-  const raw = resource?.metadata?.annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+  const annotations = resource?.metadata?.annotations
+  const canonical = annotations?.[SUBSCRIPTION_CONNECTION_REF_ANNOTATION]
+  const alias = annotations?.[CODEX_CONNECTION_REF_ANNOTATION]
+  const raw = typeof canonical === 'string' && canonical.trim() ? canonical : alias
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
 function recipeGrantAnnotations(provider: string, connectionRef: string): Record<string, string> {
-  if (provider !== OPENAI_SUBSCRIPTION_PROVIDER) {
-    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+  const parsed = parseCredentialSelect(
+    credentialSelectValue(
+      '',
+      connectionRef,
+      provider === GROK_SUBSCRIPTION_PROVIDER ? GROK_SUBSCRIPTION_PROVIDER : 'codex-subscription'
+    )
+  )
+  const key = parsed.kind === 'subscription' ? parsed.connectionKey : ''
+  if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: '',
+      [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
+    }
   }
-  const parsed = parseCredentialSelect(credentialSelectValue('', connectionRef))
+  if (provider !== OPENAI_SUBSCRIPTION_PROVIDER) {
+    return {
+      [CODEX_CONNECTION_REF_ANNOTATION]: '',
+      [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: '',
+    }
+  }
   return {
-    [CODEX_CONNECTION_REF_ANNOTATION]: parsed.kind === 'subscription' ? parsed.connectionKey : '',
+    [CODEX_CONNECTION_REF_ANNOTATION]: key,
+    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
   }
 }
 
@@ -1603,6 +1633,25 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
           }
         }
       })
+    void listGrokSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) {
+          setGrokConnections(rows)
+          setGrokGrantLoadError('')
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setGrokConnections([])
+          if (!isDisabledCapabilityError(err)) {
+            setGrokGrantLoadError(
+              err instanceof Error ? err.message : 'Could not load Grok subscriptions'
+            )
+          } else {
+            setGrokGrantLoadError('')
+          }
+        }
+      })
     return () => {
       cancelled = true
     }
@@ -1628,6 +1677,8 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   })
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
   const [codexGrantLoadError, setCodexGrantLoadError] = useState('')
+  const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
+  const [grokGrantLoadError, setGrokGrantLoadError] = useState('')
   const [codexConnectionRef, setCodexConnectionRef] = useState(() =>
     readRecipeCodexGrantAnnotation(initial)
   )
@@ -1683,6 +1734,15 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     }
   }, [jsonInput])
 
+  const isGrokRecipe = useMemo(() => {
+    try {
+      const parsed = JSON.parse(jsonInput) as { spec?: unknown }
+      return readRecipeAgentProvider(parsed.spec) === GROK_SUBSCRIPTION_PROVIDER
+    } catch {
+      return false
+    }
+  }, [jsonInput])
+
   const codexGrantOptions = useMemo<LlmSecretSelectOption[]>(() => {
     const options: LlmSecretSelectOption[] = codexConnections
       .filter(isAssignableCodexGrant)
@@ -1710,6 +1770,34 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
     }
     return options
   }, [codexConnections, codexConnectionRef])
+
+  const grokGrantOptions = useMemo<LlmSecretSelectOption[]>(() => {
+    const options: LlmSecretSelectOption[] = grokConnections
+      .filter(isAssignableGrokGrant)
+      .map(row => ({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', row.connectionKey, GROK_SUBSCRIPTION_PROVIDER),
+        label: row.displayName || row.connectionKey,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      }))
+    if (
+      codexConnectionRef &&
+      codexConnectionRef !== CODEX_UNASSIGNED_CONNECTION_KEY &&
+      !grokConnections.some(
+        row => row.connectionKey === codexConnectionRef && isAssignableGrokGrant(row)
+      )
+    ) {
+      options.unshift({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', codexConnectionRef, GROK_SUBSCRIPTION_PROVIDER),
+        label: `${codexConnectionRef} (unavailable)`,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      })
+    }
+    return options
+  }, [grokConnections, codexConnectionRef])
 
   const deploying = deployPhase !== 'idle'
 
@@ -2542,7 +2630,8 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
             <div style={{ fontWeight: 700, marginBottom: 8 }}>ChatGPT grant</div>
             <p style={{ margin: '0 0 10px', color: 'var(--cu-text-muted)' }}>
               Choose an existing ChatGPT grant. The recipe stores it as{' '}
-              <code>clerum.io/codex-connection-ref</code>.
+              <code>clerum.io/codex-connection-ref</code> and{' '}
+              <code>clerum.io/subscription-connection-ref</code>.
             </p>
             <LlmSecretSelect
               id="codex-recipe-grant"
@@ -2558,6 +2647,32 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
             {codexGrantLoadError ? (
               <div className="cu-banner cu-banner--error" role="alert" style={{ marginTop: 10 }}>
                 {codexGrantLoadError}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {step === 'confirm' && isGrokRecipe ? (
+          <div className="cu-recipe-status-panel" data-testid="grok-recipe-grant">
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>Grok grant</div>
+            <p style={{ margin: '0 0 10px', color: 'var(--cu-text-muted)' }}>
+              Choose an existing Grok grant. The recipe stores it as{' '}
+              <code>clerum.io/subscription-connection-ref</code> only.
+            </p>
+            <LlmSecretSelect
+              id="grok-recipe-grant"
+              ariaLabel="Grok grant"
+              value={credentialSelectValue('', codexConnectionRef, GROK_SUBSCRIPTION_PROVIDER)}
+              onChange={value => {
+                const parsed = parseCredentialSelect(value)
+                setCodexConnectionRef(parsed.kind === 'subscription' ? parsed.connectionKey : '')
+              }}
+              options={grokGrantOptions}
+              placeholder="Choose a Grok grant"
+            />
+            {grokGrantLoadError ? (
+              <div className="cu-banner cu-banner--error" role="alert" style={{ marginTop: 10 }}>
+                {grokGrantLoadError}
               </div>
             ) : null}
           </div>

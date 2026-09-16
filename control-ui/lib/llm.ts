@@ -51,14 +51,28 @@ export const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> 
 
 /** Runtime broker id. Never offer this as a second Provider row in operator pickers. */
 export const OPENAI_SUBSCRIPTION_PROVIDER = 'codex-subscription' as const
+export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription' as const
 
 export function isOpenAiFamily(provider: string | undefined | null): boolean {
   return provider === 'openai' || provider === OPENAI_SUBSCRIPTION_PROVIDER
 }
 
+export function isOauthBrokerProvider(provider: string | undefined | null): boolean {
+  return provider === OPENAI_SUBSCRIPTION_PROVIDER || provider === GROK_SUBSCRIPTION_PROVIDER
+}
+
 /** Provider dropdown: one OpenAI entry. Runtime still persists `codex-subscription`. */
 export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> =
   LLM_PROVIDER_OPTIONS.filter(option => option.value !== OPENAI_SUBSCRIPTION_PROVIDER)
+
+/** Hide Grok until Control API proves the flag is on. */
+export function operatorProviderOptions(opts?: {
+  grokEnabled?: boolean
+}): Array<{ value: LlmProvider; label: string }> {
+  return OPERATOR_PROVIDER_OPTIONS.filter(
+    option => option.value !== GROK_SUBSCRIPTION_PROVIDER || opts?.grokEnabled === true
+  )
+}
 
 export function catalogGroupKey(provider: string): string {
   return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
@@ -288,18 +302,31 @@ export function brokerBackedRecipeAuthoringError(
     return null
   }
   const model = typeof record.model === 'string' ? record.model.trim() : ''
-  if (!model) return 'Codex subscription requires an explicit catalog model.'
+  const grok = provider === GROK_SUBSCRIPTION_PROVIDER
+  if (!model) {
+    return grok
+      ? 'Grok subscription requires an explicit catalog model.'
+      : 'Codex subscription requires an explicit catalog model.'
+  }
   if (record.secretRef != null) {
-    return 'Codex subscription recipes must not declare an LLM secretRef.'
+    return grok
+      ? 'Grok subscription recipes must not declare an LLM secretRef.'
+      : 'Codex subscription recipes must not declare an LLM secretRef.'
   }
   const budget = spec.budget
   if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
     const unit = (budget as Record<string, unknown>).unit
-    if (unit === 'cost') return 'Codex subscription budgets must use unit tokens, not cost.'
+    if (unit === 'cost') {
+      return grok
+        ? 'Grok subscription budgets must use unit tokens, not cost.'
+        : 'Codex subscription budgets must use unit tokens, not cost.'
+    }
   }
   const grant = typeof connectionRef === 'string' ? connectionRef.trim() : ''
   if (!grant || grant === CODEX_UNASSIGNED_CONNECTION_KEY) {
-    return 'Codex subscription recipes must choose an existing ChatGPT grant.'
+    return grok
+      ? 'Grok subscription recipes must choose an existing Grok grant.'
+      : 'Codex subscription recipes must choose an existing ChatGPT grant.'
   }
   return null
 }

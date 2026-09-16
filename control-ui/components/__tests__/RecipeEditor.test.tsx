@@ -10,6 +10,14 @@ import { RecipeEditor } from '../RecipeEditor'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports, factory runs lazily
+vi.mock('../../lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockRejectedValue({ status: 404 }),
+  }
+})
+
 vi.mock('../../lib/codexSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
   return {
@@ -888,7 +896,10 @@ describe('RecipeEditor — deploy flow', () => {
     const validationPayload = vi.mocked(api.validateRecipeServer).mock.calls[0][0]
     expect(validationPayload.metadata).toEqual({
       name: 'namespace-ignored',
-      annotations: { 'clerum.io/codex-connection-ref': '' },
+      annotations: {
+        'clerum.io/codex-connection-ref': '',
+        'clerum.io/subscription-connection-ref': '',
+      },
     })
     expect(validationPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
@@ -898,7 +909,10 @@ describe('RecipeEditor — deploy flow', () => {
     const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0]
     expect(createPayload.metadata).toEqual({
       name: 'namespace-ignored',
-      annotations: { 'clerum.io/codex-connection-ref': '' },
+      annotations: {
+        'clerum.io/codex-connection-ref': '',
+        'clerum.io/subscription-connection-ref': '',
+      },
     })
     expect(createPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
@@ -1759,6 +1773,7 @@ describe('RecipeEditor — grants in editor', () => {
     expect(createPayload.spec.agent?.secretRef).toBeUndefined()
     expect(createPayload.metadata?.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
     expect(onSaved).toHaveBeenCalled()
   })

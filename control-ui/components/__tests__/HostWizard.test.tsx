@@ -26,6 +26,15 @@ import { ToastProvider } from '../Toast'
  * These tests lock the new behavior so it cannot regress.
  */
 
+vi.mock('../../lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockRejectedValue({ status: 404 }),
+    listGrokConnectionModels: vi.fn().mockResolvedValue([]),
+  }
+})
+
 vi.mock('../../lib/codexSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
   return {

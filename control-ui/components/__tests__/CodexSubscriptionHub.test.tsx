@@ -30,6 +30,12 @@ vi.mock('@lib/codexSubscriptionFeature', () => ({
   loadCodexSubscriptionCapability: async () => ({ enabled: true }),
 }))
 
+vi.mock('@lib/grokSubscriptionFeature', () => ({
+  isGrokSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
+    capability?.enabled === true,
+  loadGrokSubscriptionCapability: async () => ({ enabled: false }),
+}))
+
 vi.mock('@lib/codexSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/codexSubscription')>()
   return {
@@ -43,6 +49,14 @@ vi.mock('@lib/codexSubscription', async importOriginal => {
     pollCodexDevice: vi.fn(),
     syncCodexSubscriptionCatalog: vi.fn(),
     revokeCodexSubscription: vi.fn(),
+  }
+})
+
+vi.mock('@lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockResolvedValue([]),
   }
 })
 

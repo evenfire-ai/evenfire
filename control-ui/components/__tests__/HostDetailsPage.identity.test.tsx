@@ -50,6 +50,15 @@ vi.mock('../../lib/codexSubscription', async importOriginal => {
   }
 })
 
+vi.mock('../../lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockRejectedValue({ status: 404 }),
+    listGrokConnectionModels: vi.fn().mockResolvedValue([]),
+  }
+})
+
 vi.mock('../../lib/api', () => ({
   apiGet: vi.fn(),
   apiSend: vi.fn(),
