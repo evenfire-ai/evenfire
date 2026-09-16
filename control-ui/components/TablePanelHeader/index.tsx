@@ -15,6 +15,17 @@ function flattenTitleNodes(title: ReactNode): ReactNode[] {
   )
 }
 
+function hasInteractiveDescendant(node: ReactNode): boolean {
+  if (!isValidElement<{ children?: ReactNode }>(node)) return false
+  if (
+    typeof node.type === 'string' &&
+    ['a', 'button', 'input', 'select', 'textarea'].includes(node.type)
+  ) {
+    return true
+  }
+  return Children.toArray(node.props.children).some(hasInteractiveDescendant)
+}
+
 /** Control UI compatibility adapter for the shared list header. */
 export function TablePanelHeader({
   actionsClassName,
@@ -47,7 +58,15 @@ export function TablePanelHeader({
         ) : undefined
       }
       className="cu-table-panel__head"
-      description={subtitle ? <ClampedDescription>{subtitle}</ClampedDescription> : undefined}
+      description={
+        subtitle ? (
+          hasInteractiveDescendant(subtitle) ? (
+            subtitle
+          ) : (
+            <ClampedDescription>{subtitle}</ClampedDescription>
+          )
+        ) : undefined
+      }
       title={
         <span className="cu-panel-title cu-table-panel__title-row">
           {titleIcon ? <span className="cu-table-panel__title-icon">{titleIcon}</span> : null}

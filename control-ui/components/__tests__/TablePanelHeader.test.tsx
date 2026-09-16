@@ -54,6 +54,22 @@ describe('TablePanelHeader', () => {
     expect(document.querySelector('.cu-table-panel__title-icon')).toBeNull()
   })
 
+  it('leaves interactive subtitle content unclamped and directly focusable', () => {
+    render(
+      <TablePanelHeader
+        subtitle={
+          <>
+            Read the <a href="/api-keys">API Keys</a> guide.
+          </>
+        }
+        title="Images"
+      />
+    )
+
+    expect(screen.getByRole('link', { name: 'API Keys' })).toBeVisible()
+    expect(document.querySelector('.cu-table-panel__description')).toBeNull()
+  })
+
   it('renders secondary actions, search, refresh, and the primary action in focus order', () => {
     render(
       <TablePanelHeader
