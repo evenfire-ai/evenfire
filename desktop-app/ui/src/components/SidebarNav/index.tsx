@@ -17,7 +17,6 @@ import {
   IconChat,
   IconChevronRight,
   IconConnectors,
-  IconContexts,
   IconMoreHorizontal,
   IconNewChat,
   IconSandboxUi,
