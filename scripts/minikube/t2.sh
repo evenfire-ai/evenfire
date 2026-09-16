@@ -397,8 +397,17 @@ run_healthcheck_if_requested() {
   fi
   # Export the already-validated shell value to the child; the CLI argument
   # intentionally expands that same existing value before the assignment.
+  # A user-facing journey may re-enter the canonical mutation wrapper for this
+  # profile (for example a `make` fixture target). This parent owns the lease, so
+  # pass its exact validated identity to the child and let the nested wrapper
+  # validate the inherited token instead of acquiring a second lock for the same
+  # profile. T2_SKIP_LOCK stays scoped to this invocation; the nested wrapper
+  # still revalidates the token and owner identity and fails closed on a mismatch.
   # shellcheck disable=SC2097,SC2098
   T2_HEALTHCHECK_KILL_GRACE_SECONDS="$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
+  T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+  T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" \
+  T2_PROJECT_DIR="$T2_PROJECT_DIR" T2_LOCK_ROOT="$T2_LOCK_ROOT" \
   node "$T2_DEADLINE_RUNNER" \
     --timeout-seconds "$T2_HEALTHCHECK_TIMEOUT_SECONDS" \
     --heartbeat-seconds 20 --kill-grace-seconds "$T2_HEALTHCHECK_KILL_GRACE_SECONDS" \
@@ -437,7 +446,13 @@ run_playwright_if_requested() {
     fi
     return 0
   fi
-  if bash -c "$T2_PLAYWRIGHT_COMMAND"; then
+  # See run_healthcheck_if_requested: the journey command may re-enter the
+  # canonical mutation wrapper, so scope this parent's validated lease identity
+  # to the child and keep T2_SKIP_LOCK out of the parent environment.
+  if T2_SKIP_LOCK=true T2_LOCK_TOKEN="$T2_LOCK_TOKEN" \
+    T2_PROFILE="$T2_PROFILE" T2_CONTEXT="$T2_CONTEXT" \
+    T2_PROJECT_DIR="$T2_PROJECT_DIR" T2_LOCK_ROOT="$T2_LOCK_ROOT" \
+    bash -c "$T2_PLAYWRIGHT_COMMAND"; then
     T2_PLAYWRIGHT_STATUS=PASS
     t2_evidence_write Playwright PASS \
       "user-visible journey command passed; duration=$((SECONDS - phase_started_seconds))s"
@@ -516,6 +531,9 @@ main() {
   run_np08_hcc_authorization
   run_healthcheck_if_requested
   run_playwright_if_requested
+  # Journeys may mutate the owned profile under the inherited lease. Certify
+  # the restored runtime after them, not only the state before they ran.
+  run_final_preflight
   # Health and Playwright run after the planner's initial ownership scan. A
   # forward can disappear, be replaced, or lose its binding during either
   # journey, so the exact PID/start-time/argv record must be revalidated before

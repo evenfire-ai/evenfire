@@ -38,7 +38,7 @@ const REQUIRED_OPERATIONS = [
 const REQUIRED_LIMIT_KEYS = [
   'maxRequestBodyBytes',
   'maxMessages',
-  'maxTools',
+  'maxToolCalls',
   'maxOutputTokens',
   'maxStreamDurationMs',
   'maxDeadlineMs',
@@ -152,6 +152,10 @@ describe('codex-subscription contract freeze', () => {
     for (const key of REQUIRED_LIMIT_KEYS) {
       assertFinitePositiveLimit(limits?.[key], `limits.${key}`)
     }
+
+    expect(limits).not.toHaveProperty('maxTools')
+    expect(limits?.maxToolCalls).toBe(32)
+    expect(limits?.maxRequestBodyBytes).toBe(1048576)
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)

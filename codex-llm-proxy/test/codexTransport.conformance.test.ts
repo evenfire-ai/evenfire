@@ -1,5 +1,8 @@
-import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
 import { describe, expect, it, vi } from 'vitest'
+import {
+  hashCodexCompletionRequestV1,
+  parseCodexCompletionRequestV1,
+} from '@clerum/llm-provider-attempt-contract'
 import { CodexTransportError, streamCodexCompletion } from '../src/codexTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
@@ -42,7 +45,11 @@ function redeemSuccess(overrides: Partial<RedeemAttemptSuccess> = {}): RedeemAtt
   }
 }
 
-function sseResponse(frames: string[], status = 200, headers: Record<string, string> = {}): Response {
+function sseResponse(
+  frames: string[],
+  status = 200,
+  headers: Record<string, string> = {}
+): Response {
   return new Response(frames.join(''), {
     status,
     headers: { 'content-type': 'text/event-stream', ...headers },
@@ -50,6 +57,88 @@ function sseResponse(frames: string[], status = 200, headers: Record<string, str
 }
 
 describe('streamCodexCompletion', () => {
+  it.each(['response.failed', 'unterminated'])(
+    'does not emit partial tool calls after %s',
+    async terminal => {
+      const emitted: Array<{ type: string }> = []
+      const frames = [
+        'data: {"type":"response.output_item.done","item":{"type":"function_call","id":"partial","name":"lookup","arguments":"{}"}}\n\n',
+      ]
+      if (terminal !== 'unterminated')
+        frames.push(`data: ${JSON.stringify({ type: terminal })}\n\n`)
+      const pending = streamCodexCompletion({
+        executionTicket: 'ticket-partial',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-partial',
+          hostRef: 'research-host',
+          model: REQUEST.model,
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-partial',
+        },
+        redeem: vi.fn(async () => redeemSuccess()),
+        finalize: vi.fn(async () => ({
+          providerAttemptId: 'att-partial',
+          outcome: 'success' as const,
+          duplicate: false,
+        })),
+        fetchFn: vi.fn(async () => sseResponse(frames)),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => emitted.push(frame),
+      })
+      if (terminal === 'unterminated') expect((await pending).outcome).toBe('unknown')
+      else await expect(pending).rejects.toThrow(/upstream response failed/)
+      expect(emitted).toEqual([])
+    }
+  )
+  it.each([32, 33])(
+    'validates the complete %s-call response before emitting executable calls',
+    async count => {
+      const emitted: Array<{ type: string }> = []
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: 'att-bound',
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const frames = Array.from(
+        { length: count },
+        (_, index) =>
+          `data: ${JSON.stringify({
+            type: 'response.output_item.done',
+            item: { type: 'function_call', id: `call-${index}`, name: 'lookup', arguments: '{}' },
+          })}\n\n`
+      )
+      frames.push('data: {"type":"response.completed"}\n\n')
+      const pending = streamCodexCompletion({
+        executionTicket: 'ticket-bound',
+        requestHash: REQUEST_HASH,
+        request: REQUEST,
+        ticket: {
+          jti: 'jti-bound',
+          hostRef: 'research-host',
+          model: REQUEST.model,
+          requestHash: REQUEST_HASH,
+          providerAttemptId: 'att-bound',
+        },
+        redeem: vi.fn(async () => redeemSuccess()),
+        finalize,
+        fetchFn: vi.fn(async () => sseResponse(frames)),
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => emitted.push(frame),
+      })
+      if (count === 32) {
+        expect((await pending).outcome).toBe('success')
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(32)
+      } else {
+        await expect(pending).rejects.toThrow(/tool calls exceed 32/)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
+        expect(finalize).toHaveBeenCalledWith(
+          expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+        )
+      }
+    }
+  )
   it('validates ticket bindings before redeem and maps stream frames including tool-call data', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({
@@ -101,7 +190,9 @@ describe('streamCodexCompletion', () => {
         receipt: expect.objectContaining({ outcome: 'success', requestHash: REQUEST_HASH }),
       })
     )
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(accessTokenFor('live'))
+    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+      accessTokenFor('live')
+    )
     expect(fetchFn.mock.calls[0]?.[1]?.headers?.['originator']).toBe('evenfire')
     expect(fetchFn.mock.calls[0]?.[1]?.headers?.['openai-beta']).toBe('responses=v1')
     expect(fetchFn.mock.calls[0]?.[1]?.headers?.['session_id']).toBe('req-001')
@@ -273,7 +364,9 @@ describe('streamCodexCompletion', () => {
         finalize: vi.fn(),
         fetchFn: vi.fn(),
       })
-    ).rejects.toMatchObject({ code: 'request_hash_mismatch' } satisfies Partial<CodexTransportError>)
+    ).rejects.toMatchObject({
+      code: 'request_hash_mismatch',
+    } satisfies Partial<CodexTransportError>)
     expect(redeem).not.toHaveBeenCalled()
   })
 
@@ -290,17 +383,23 @@ describe('streamCodexCompletion', () => {
           requestHash: REQUEST_HASH,
           providerAttemptId: 'att-1',
         },
-        redeem: async () => redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } }),
-        finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'error', duplicate: false })),
+        redeem: async () =>
+          redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } }),
+        finalize: vi.fn(async () => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error',
+          duplicate: false,
+        })),
         fetchFn: vi.fn(),
       })
     ).rejects.toMatchObject({ code: 'model_not_allowed' })
 
-    const fetchFn = vi.fn(async () =>
-      new Response(null, {
-        status: 302,
-        headers: { location: `https://${['127', '0', '0', '1'].join('.')}/steal` },
-      })
+    const fetchFn = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: `https://${['127', '0', '0', '1'].join('.')}/steal` },
+        })
     )
     await expect(
       streamCodexCompletion({
@@ -315,7 +414,11 @@ describe('streamCodexCompletion', () => {
           providerAttemptId: 'att-1',
         },
         redeem: async () => redeemSuccess(),
-        finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'error', duplicate: false })),
+        finalize: vi.fn(async () => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error',
+          duplicate: false,
+        })),
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
@@ -344,7 +447,11 @@ describe('streamCodexCompletion', () => {
         providerAttemptId: 'att-1',
       },
       redeem: async () => redeemSuccess(),
-      finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'success', duplicate: false })),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
@@ -366,7 +473,11 @@ describe('streamCodexCompletion', () => {
           providerAttemptId: 'att-1',
         },
         redeem: async () => redeemSuccess(),
-        finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'error', duplicate: false })),
+        finalize: vi.fn(async () => ({
+          providerAttemptId: 'att-1',
+          outcome: 'error',
+          duplicate: false,
+        })),
         fetchFn: vi.fn(async () => new Response('denied', { status: 401 })),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
@@ -441,7 +552,11 @@ describe('streamCodexCompletion', () => {
       request: REQUEST,
       ticket,
       redeem,
-      finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'success', duplicate: false })),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
@@ -451,17 +566,27 @@ describe('streamCodexCompletion', () => {
       request: REQUEST,
       ticket,
       redeem,
-      finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'success', duplicate: false })),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'success',
+        duplicate: false,
+      })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     expect(tokens).toEqual(['t-a', 't-b'])
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(accessTokenFor('t-a'))
-    expect(String(fetchFn.mock.calls[1]?.[1]?.headers?.['authorization'])).toContain(accessTokenFor('t-b'))
+    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+      accessTokenFor('t-a')
+    )
+    expect(String(fetchFn.mock.calls[1]?.[1]?.headers?.['authorization'])).toContain(
+      accessTokenFor('t-b')
+    )
   })
 
   it('does not retry after an ambiguous upstream response', async () => {
-    const fetchFn = vi.fn(async () => sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n']))
+    const fetchFn = vi.fn(async () =>
+      sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
+    )
     const result = await streamCodexCompletion({
       executionTicket: 'ticket-1',
       requestHash: REQUEST_HASH,
@@ -474,7 +599,11 @@ describe('streamCodexCompletion', () => {
         providerAttemptId: 'att-1',
       },
       redeem: async () => redeemSuccess(),
-      finalize: vi.fn(async () => ({ providerAttemptId: 'att-1', outcome: 'unknown', duplicate: false })),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-1',
+        outcome: 'unknown',
+        duplicate: false,
+      })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
@@ -499,7 +628,11 @@ describe('streamCodexCompletion', () => {
         },
         { role: 'tool' as const, content: 'ok', toolCallId: 'call-1' },
       ],
-      tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+      tools: Array.from({ length: 250 }, (_, index) => ({
+        name: index === 0 ? 'echo' : `approved_tool_${index}`,
+        description: `Approved tool ${index}`,
+        parameters: { type: 'object', properties: { x: { type: 'integer' } } },
+      })),
       generation: { toolChoice: 'auto' as const },
       transportHints: { promptCacheKey: 'sess-1' },
     }
@@ -530,6 +663,8 @@ describe('streamCodexCompletion', () => {
     const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.instructions).toBe('be brief')
     expect(body.store).toBe(false)
+    expect(body.tools).toEqual(request.tools.map(tool => ({ type: 'function', ...tool })))
+    expect(body.parallel_tool_calls).toBe(true)
     expect(body.tool_choice).toBe('auto')
     expect(body.prompt_cache_key).toBe('sess-1')
     expect(body.input).toEqual([
@@ -539,6 +674,148 @@ describe('streamCodexCompletion', () => {
     ])
     expect(body).not.toHaveProperty('max_output_tokens')
     expect(body).not.toHaveProperty('temperature')
+  })
+
+  it.each([
+    { name: 'service.with.dots__read', mode: 'alias' },
+    { name: `generated_server_${'x'.repeat(140)}__read`, mode: 'alias' },
+    { name: '工具@read record', mode: 'alias' },
+    { name: 'history@removed tool', mode: 'history-only' },
+    { name: 'service.with.dots__read', mode: 'canonical-echo' },
+  ])('roundtrips $name ($mode) without changing authorization identity', async ({ name, mode }) => {
+    const request = {
+      ...REQUEST,
+      ...(mode === 'history-only'
+        ? {}
+        : { tools: [{ name, description: 'Read one record', parameters: { type: 'object' } }] }),
+      messages: [
+        ...REQUEST.messages,
+        {
+          role: 'assistant' as const,
+          content: '',
+          toolCalls: [{ id: 'previous', name, arguments: {} }],
+        },
+        { role: 'tool' as const, content: 'previous result', toolCallId: 'previous', name },
+      ],
+    }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    expect(parseCodexCompletionRequestV1(request).ok).toBe(true)
+    const original = structuredClone(request)
+    const emitted: unknown[] = []
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      const wireName = body.input.find(
+        (item: { type?: string }) => item.type === 'function_call'
+      ).name
+      if (mode === 'history-only') expect(body.tools).toBeUndefined()
+      else expect(body.tools[0].name).toBe(wireName)
+      expect(wireName).toMatch(/^[A-Za-z0-9_-]{1,64}$/)
+      expect(wireName).not.toBe(name)
+      expect(body.input.find((item: { type?: string }) => item.type === 'function_call').name).toBe(
+        wireName
+      )
+      expect(
+        body.input.find((item: { type?: string }) => item.type === 'function_call_output')
+      ).toEqual({
+        type: 'function_call_output',
+        call_id: 'previous',
+        output: 'previous result',
+      })
+      return sseResponse([
+        `data: ${JSON.stringify({
+          type: 'response.output_item.done',
+          item: {
+            type: 'function_call',
+            id: 'item-new',
+            call_id: 'new-call',
+            name: mode === 'canonical-echo' ? name : wireName,
+            arguments: '{}',
+          },
+        })}\n\n`,
+        'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+      ])
+    })
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-name-map',
+      requestHash,
+      request,
+      ticket: {
+        jti: 'name-map',
+        hostRef: 'research-host',
+        model: request.model,
+        requestHash,
+        providerAttemptId: 'att-name-map',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: async () => ({
+        providerAttemptId: 'att-name-map',
+        outcome: 'success' as const,
+        duplicate: false,
+      }),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => emitted.push(frame),
+    })
+    expect(result.outcome).toBe('success')
+    expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
+    expect(request).toEqual(original)
+    expect(hashCodexCompletionRequestV1(request)).toBe(requestHash)
+  })
+
+  it('rejects an unregistered alias in a completed stream before emitting any calls', async () => {
+    const emitted: unknown[] = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-unknown-alias',
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const request = {
+      ...REQUEST,
+      tools: [{ name: 'known.read', description: 'Read a record', parameters: { type: 'object' } }],
+    }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body))
+      return sseResponse([
+        ...[body.tools[0].name, '__codex_tool_unregistered'].map(
+          (name, index) =>
+            `data: ${JSON.stringify({
+              type: 'response.output_item.done',
+              item: { type: 'function_call', id: `call-${index}`, name, arguments: '{}' },
+            })}\n\n`
+        ),
+        'data: {"type":"response.completed"}\n\n',
+      ])
+    })
+    await expect(
+      streamCodexCompletion({
+        executionTicket: 'ticket-unknown-alias',
+        requestHash,
+        request,
+        ticket: {
+          jti: 'unknown-alias',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash,
+          providerAttemptId: 'att-unknown-alias',
+        },
+        redeem: async () => redeemSuccess(),
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+        onFrame: frame => emitted.push(frame),
+      })
+    ).rejects.toMatchObject({
+      code: 'provider_unavailable',
+      message: 'upstream returned an unknown tool name',
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+    expect(emitted).toEqual([])
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        receipt: expect.objectContaining({ outcome: 'error' }),
+      })
+    )
   })
 
   it('omits Notify-like generation fields on the Responses wire', async () => {
@@ -677,6 +954,8 @@ describe('streamCodexCompletion', () => {
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       onFrame: frame => frames.push(frame),
     })
-    expect(frames).toEqual([{ type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } }])
+    expect(frames).toEqual([
+      { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },
+    ])
   })
 })

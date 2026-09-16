@@ -2,19 +2,22 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+# shellcheck source=scripts/tests/lib/minikube-fixture-repo.sh
 source "$ROOT/scripts/tests/lib/minikube-fixture-repo.sh"
 TMP_DIR="$(mktemp -d)"
 # Invoked indirectly by the EXIT trap.
 # shellcheck disable=SC2329
 cleanup_test_tmp() {
+  local result=$?
   if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
-    minikube_test_assert_host_unchanged
+    minikube_test_assert_host_unchanged || result=1
   fi
   if [[ "${KEEP_MINIKUBE_DOCKER_TEST_TMP:-false}" == true ]]; then
     printf 'Kept test fixtures at %s\n' "$TMP_DIR" >&2
   else
     rm -rf -- "$TMP_DIR"
   fi
+  return "$result"
 }
 trap cleanup_test_tmp EXIT
 
@@ -161,6 +164,31 @@ case "$operation_mode" in
 esac
 
 case "${1:-}" in
+  build|images|inspect)
+    # Optional daemon inventory for sequential manifest tests. The other
+    # cases retain their existing stateless failure-injection behavior.
+    if [[ -n "${FAKE_DOCKER_IMAGE_STATE:-}" ]]; then
+      node - "$FAKE_DOCKER_IMAGE_STATE" "$@" <<'NODE'
+const fs = require('node:fs')
+const crypto = require('node:crypto')
+const [file, operation, ...args] = process.argv.slice(2)
+const images = JSON.parse(fs.readFileSync(file, 'utf8'))
+const ref = operation === 'build' ? args[args.indexOf('-t') + 1] : args.at(-1)
+if (operation === 'build') {
+  images[ref] = 'sha256:' + crypto.createHash('sha256').update(ref).digest('hex')
+  fs.writeFileSync(file, JSON.stringify(images))
+} else if (images[ref]) {
+  process.stdout.write(images[ref] + '\n')
+} else if (operation === 'inspect') {
+  process.exit(1)
+}
+NODE
+      exit $?
+    fi
+    ;;
+esac
+
+case "${1:-}" in
   images)
     if [[ -n "${FAKE_DOCKER_IMAGES_PRESENT_MATCH:-}" \
       && "$*" == *"${FAKE_DOCKER_IMAGES_PRESENT_MATCH}"* ]]; then
@@ -240,11 +268,13 @@ docker_log_has_ambient_runtime_operation() {
 }
 
 prepare_fixture_repo() {
-  local fixture_root="$1" fixture
+  local fixture="$1"
+  if [[ -n "${MINIKUBE_TEST_HOST_ROOT:-}" ]]; then
+    minikube_test_assert_host_unchanged
+  fi
   MINIKUBE_TEST_PROFILE=fixture-profile \
     MINIKUBE_TEST_CONTEXT=fixture-profile \
-    minikube_test_fixture_repo_init "$ROOT" "$fixture_root"
-  fixture="$MINIKUBE_TEST_PROJECT_DIR"
+    minikube_test_fixture_repo_init "$ROOT" "$(dirname "$fixture")"
   mkdir -p "$fixture/scripts/minikube" "$fixture/scripts/release" \
     "$fixture/control-api" "$fixture/deploy/minikube"
   cp "$ROOT/scripts/minikube/build-images.sh" \
@@ -273,7 +303,7 @@ STUB
 }
 
 assert_dirty_source_tree_is_non_authoritative() {
-  local fixture="$TMP_DIR/dirty-repo" output="$TMP_DIR/dirty-build.out" status=0
+  local fixture="$TMP_DIR/dirty-repo/repo" output="$TMP_DIR/dirty-build.out" status=0
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
   printf '# uncommitted source\n' >>"$fixture/control-api/Dockerfile"
@@ -425,7 +455,7 @@ assert_all_original_docker_env_is_restored() {
 }
 
 assert_real_build_script_isolated() {
-  local fixture="$TMP_DIR/repo" output="$TMP_DIR/build.out" source_revision
+  local fixture="$TMP_DIR/repo/repo" output="$TMP_DIR/build.out" source_revision
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
   source_revision="$(git -C "$fixture" rev-parse HEAD)"
@@ -456,8 +486,158 @@ assert_real_build_script_isolated() {
   fi
 }
 
+assert_sequential_build_manifest_provenance() {
+  local fixture="$TMP_DIR/provenance-repo/repo" output="$TMP_DIR/provenance.out"
+  local state="$TMP_DIR/image-state.json" baseline="$TMP_DIR/provenance-baseline.json"
+  local manifest revision_before revision_after selector scenario operation status
+  prepare_fixture_repo "$fixture"
+  manifest="$fixture/deploy/minikube/.image-manifest.json"
+  mkdir -p "$fixture/codex-llm-proxy"
+  printf '{}\n' >"$state"
+  revision_before="$(git -C "$fixture" rev-parse HEAD)"
+
+  for selector in control-api codex-approved-tools-control-api-e2e \
+    codex-llm-proxy codex-approved-tools-proxy-e2e \
+    workflow-custom-sdk-e2e codex-approved-tools-workflow-e2e; do
+    if ! FAKE_DOCKER_IMAGE_STATE="$state" MINIKUBE_PRELOAD_BASE_IMAGES=false \
+      bash "$fixture/scripts/minikube/build-images.sh" "--only=$selector" \
+        >"$output" 2>&1; then
+      fail "sequential provenance setup failed for $selector: $(tail -20 "$output")"
+      return
+    fi
+  done
+  git -C "$fixture" commit --allow-empty -qm 'next fixture revision'
+  revision_after="$(git -C "$fixture" rev-parse HEAD)"
+  if ! FAKE_DOCKER_IMAGE_STATE="$state" MINIKUBE_PRELOAD_BASE_IMAGES=false \
+    bash "$fixture/scripts/minikube/build-images.sh" --only=codex-approved-tools-mcp-e2e \
+      >"$output" 2>&1; then
+    fail "sequential provenance follow-up failed: $(tail -20 "$output")"
+    return
+  fi
+  if node - "$manifest" "$revision_before" "$revision_after" <<'NODE'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const [file, before, after] = process.argv.slice(2)
+const m = JSON.parse(fs.readFileSync(file, 'utf8'))
+const base = 'clerum/codex-llm-proxy:test'
+const derived = 'clerum/codex-approved-tools-proxy-e2e:test'
+const newest = 'clerum/codex-approved-tools-mcp-e2e:test'
+assert.notEqual(before, after)
+assert.equal(m.gitHead, after)
+assert.equal(m.sourceRevisions[base], before)
+assert.equal(m.sourceRevisions[derived], before)
+assert.equal(m.sourceRevisions[newest], after)
+assert.match(m.images[derived], /^sha256:[0-9a-f]{64}$/)
+assert.deepEqual(m.derivedFrom[derived], { ref: base, id: m.images[base] })
+const workflowBase = 'clerum/workflow-custom-sdk-e2e:test'
+const workflowDerived = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
+assert.equal(m.sourceRevisions[workflowBase], before)
+assert.equal(m.sourceRevisions[workflowDerived], before)
+assert.match(m.images[workflowDerived], /^sha256:[0-9a-f]{64}$/)
+assert.deepEqual(m.derivedFrom[workflowDerived], { ref: workflowBase, id: m.images[workflowBase] })
+const controlBase = 'clerum/control-api:test'
+const controlDerived = 'clerum/codex-approved-tools-control-api-e2e:test'
+assert.equal(m.sourceRevisions[controlBase], before)
+assert.equal(m.sourceRevisions[controlDerived], before)
+assert.match(m.images[controlDerived], /^sha256:[0-9a-f]{64}$/)
+assert.deepEqual(m.derivedFrom[controlDerived], { ref: controlBase, id: m.images[controlBase] })
+NODE
+  then
+    pass "seven sequential --only builds preserve prior revisions and all exact derived-base bindings"
+  else
+    fail "sequential --only builds lost or restamped prior provenance"
+    return
+  fi
+  cp "$manifest" "$baseline"
+  cp "$state" "$TMP_DIR/image-state-baseline.json"
+
+  # A late failure while carrying a previously built fixture must leave the
+  # entire last good manifest intact, even after the new image was built.
+  for operation in 'images -q' 'inspect --format={{.Id}}'; do
+    cp "$baseline" "$manifest"
+    cp "$TMP_DIR/image-state-baseline.json" "$state"
+    status=0
+    FAKE_DOCKER_IMAGE_STATE="$state" MINIKUBE_PRELOAD_BASE_IMAGES=false \
+      FAKE_DOCKER_MODE=exit FAKE_DOCKER_EXIT_CODE=41 \
+      FAKE_DOCKER_MATCH="$operation clerum/codex-approved-tools-proxy-e2e:test" \
+      bash "$fixture/scripts/minikube/build-images.sh" --only=control-api \
+        >"$output" 2>&1 || status=$?
+    if [[ "$status" -eq 41 ]] && cmp -s "$baseline" "$manifest" \
+      && grep -Fq 'exitCode=41' "$output"; then
+      pass "manifest $operation failure preserves status and prior manifest bytes"
+    else
+      fail "manifest $operation failure changed prior manifest or status (status=$status)"
+    fi
+  done
+
+  for scenario in replaced missing profile-mismatch changed-base changed-workflow-base malformed; do
+    cp "$baseline" "$manifest"
+    cp "$TMP_DIR/image-state-baseline.json" "$state"
+    node - "$manifest" "$state" "$scenario" <<'NODE'
+const fs = require('node:fs')
+const [manifest, state, scenario] = process.argv.slice(2)
+const m = JSON.parse(fs.readFileSync(manifest, 'utf8'))
+const images = JSON.parse(fs.readFileSync(state, 'utf8'))
+const derived = 'clerum/codex-approved-tools-proxy-e2e:test'
+if (scenario === 'replaced') images[derived] = 'sha256:' + 'a'.repeat(64)
+if (scenario === 'missing') delete images[derived]
+if (scenario === 'profile-mismatch') m.profile = 'another-fixture-profile'
+if (scenario === 'changed-base') images['clerum/codex-llm-proxy:test'] = 'sha256:' + 'b'.repeat(64)
+if (scenario === 'changed-workflow-base') images['clerum/workflow-custom-sdk-e2e:test'] = 'sha256:' + 'c'.repeat(64)
+fs.writeFileSync(manifest, scenario === 'malformed' ? '{' : JSON.stringify(m))
+fs.writeFileSync(state, JSON.stringify(images))
+NODE
+    if ! FAKE_DOCKER_IMAGE_STATE="$state" MINIKUBE_PRELOAD_BASE_IMAGES=false \
+      bash "$fixture/scripts/minikube/build-images.sh" --only=control-api \
+        >"$output" 2>&1; then
+      fail "provenance $scenario build failed: $(tail -20 "$output")"
+      continue
+    fi
+    if node - "$manifest" "$scenario" "$revision_before" "$revision_after" <<'NODE'
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const [file, scenario, before, after] = process.argv.slice(2)
+const m = JSON.parse(fs.readFileSync(file, 'utf8'))
+const base = 'clerum/codex-llm-proxy:test'
+const derived = 'clerum/codex-approved-tools-proxy-e2e:test'
+const workflowBase = 'clerum/workflow-custom-sdk-e2e:test'
+const workflowDerived = 'clerum/workflow-custom-sdk-e2e:approved-tools-test'
+assert.equal(m.sourceRevisions['clerum/control-api:test'], after)
+if (scenario === 'changed-workflow-base') {
+  assert.equal(m.derivedFrom?.[workflowDerived], undefined)
+  assert.match(m.images[workflowDerived], /^sha256:[0-9a-f]{64}$/)
+  assert.equal(m.sourceRevisions[workflowDerived], before)
+  assert.equal(m.sourceRevisions[workflowBase], undefined)
+  assert.deepEqual(m.derivedFrom[derived], { ref: base, id: m.images[base] })
+} else if (scenario === 'changed-base') {
+  assert.equal(m.derivedFrom?.[derived], undefined)
+  assert.match(m.images[derived], /^sha256:[0-9a-f]{64}$/)
+  assert.equal(m.sourceRevisions[derived], before)
+  assert.equal(m.sourceRevisions[base], undefined)
+} else {
+  assert.equal(m.derivedFrom?.[derived], undefined)
+  assert.equal(m.images[derived], undefined)
+  assert.equal(m.sourceRevisions[derived], undefined)
+}
+if (scenario === 'profile-mismatch' || scenario === 'malformed') {
+  assert.equal(m.sourceRevisions[base], undefined)
+  assert.equal(m.images['clerum/codex-approved-tools-mcp-e2e:test'], undefined)
+  assert.equal(m.images[workflowDerived], undefined)
+  assert.equal(m.sourceRevisions[workflowBase], undefined)
+  assert.equal(m.sourceRevisions[workflowDerived], undefined)
+  assert.equal(m.derivedFrom?.[workflowDerived], undefined)
+}
+NODE
+    then
+      pass "sequential manifest rejects stale provenance: $scenario"
+    else
+      fail "sequential manifest retained stale provenance: $scenario"
+    fi
+  done
+}
+
 assert_public_pulls_are_isolated() {
-  local fixture="$TMP_DIR/public-repo" output="$TMP_DIR/public.out"
+  local fixture="$TMP_DIR/public-repo/repo" output="$TMP_DIR/public.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
@@ -479,7 +659,7 @@ assert_public_pulls_are_isolated() {
 assert_local_image_operations_preserve_status() {
   local fixture output status
 
-  fixture="$TMP_DIR/base-inspect-failure-repo"
+  fixture="$TMP_DIR/base-inspect-failure-repo/repo"
   output="$TMP_DIR/base-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -499,7 +679,7 @@ assert_local_image_operations_preserve_status() {
     fail "base-image inventory status/fallback contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/public-query-failure-repo"
+  fixture="$TMP_DIR/public-query-failure-repo/repo"
   output="$TMP_DIR/public-query-failure.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -519,7 +699,7 @@ assert_local_image_operations_preserve_status() {
     fail "docker images query status/fallback contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/post-build-inspect-failure-repo"
+  fixture="$TMP_DIR/post-build-inspect-failure-repo/repo"
   output="$TMP_DIR/post-build-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -538,7 +718,7 @@ assert_local_image_operations_preserve_status() {
     fail "post-build docker inspect status contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/manifest-inspect-failure-repo"
+  fixture="$TMP_DIR/manifest-inspect-failure-repo/repo"
   output="$TMP_DIR/manifest-inspect-failure.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -558,7 +738,7 @@ assert_local_image_operations_preserve_status() {
     fail "manifest docker inspect status contract failed (status=$status)"
   fi
 
-  fixture="$TMP_DIR/tag-failure-repo"
+  fixture="$TMP_DIR/tag-failure-repo/repo"
   output="$TMP_DIR/tag-failure.out"
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -579,7 +759,7 @@ assert_local_image_operations_preserve_status() {
 }
 
 assert_local_minikube_load_timeout_kills_descendants() {
-  local fixture="$TMP_DIR/load-timeout-repo" output="$TMP_DIR/load-timeout.out"
+  local fixture="$TMP_DIR/load-timeout-repo/repo" output="$TMP_DIR/load-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -659,7 +839,7 @@ assert_startup_probes_are_isolated_and_bounded() {
 }
 
 assert_verify_inventory_is_read_only_and_bounded() {
-  local fixture="$TMP_DIR/verify-repo" output="$TMP_DIR/verify-timeout.out"
+  local fixture="$TMP_DIR/verify-repo/repo" output="$TMP_DIR/verify-timeout.out"
   local status=0 descendant=""
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
@@ -723,7 +903,7 @@ assert_invalid_deadline_and_explicit_buildx_fail_closed() {
 }
 
 assert_private_registry_requires_explicit_config() {
-  local fixture="$TMP_DIR/private-repo" output="$TMP_DIR/private-missing.out" status=0
+  local fixture="$TMP_DIR/private-repo/repo" output="$TMP_DIR/private-missing.out" status=0
   prepare_fixture_repo "$fixture"
   fixture="$PREPARED_FIXTURE_REPO"
   : >"$DOCKER_LOG"
@@ -1010,6 +1190,7 @@ assert_config_only_rootless_context
 assert_all_original_docker_env_is_restored
 assert_real_build_script_isolated
 assert_dirty_source_tree_is_non_authoritative
+assert_sequential_build_manifest_provenance
 assert_public_pulls_are_isolated
 assert_local_image_operations_preserve_status
 assert_local_minikube_load_timeout_kills_descendants
