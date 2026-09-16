@@ -11276,6 +11276,10 @@ td.cu-registry-description {
   min-width: 48rem;
 }
 
+.cu-llm-review-table__children .cu-llm-model-row > .cu-px-model {
+  padding-left: var(--cu-space-2);
+}
+
 .cu-llm-review-table .cu-llm-model-row > td:first-child {
   padding-left: 0.85rem;
 }
