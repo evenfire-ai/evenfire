@@ -295,6 +295,9 @@ function toUpstreamPayload(
       name: names.toWire(tool.name),
       description: tool.description,
       parameters: tool.parameters,
+      // Codex can normalize omission to strict mode and require optional MCP
+      // fields. Preserve the source schema's optionality explicitly.
+      strict: false,
     }))
     payload.parallel_tool_calls = true
   }

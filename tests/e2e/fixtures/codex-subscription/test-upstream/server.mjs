@@ -11,6 +11,11 @@ import { createServer } from 'node:https'
 const PORT = Number(process.env.CODEX_TEST_UPSTREAM_PORT || 8443)
 const cert = readFileSync(process.env.CODEX_TEST_UPSTREAM_CERT_PATH, 'utf8')
 const key = readFileSync(process.env.CODEX_TEST_UPSTREAM_KEY_PATH, 'utf8')
+// Optional canned model reply for the hermetic transport test. No MCP tool is
+// executed; ordinary fixture runs retain the existing text-only response.
+const fixtureToolCall = process.env.CODEX_TEST_UPSTREAM_TOOL_CALL
+  ? JSON.parse(process.env.CODEX_TEST_UPSTREAM_TOOL_CALL)
+  : undefined
 
 const counters = {
   consent: 0,
@@ -107,6 +112,10 @@ const server = createServer({ cert, key }, async (request, response) => {
       })
     }
     if (request.method === 'POST' && url.pathname === '/backend-api/codex/responses') {
+      const body = JSON.parse((await readBody(request)) || '{}')
+      if (fixtureToolCall && !body.tools?.some(tool => tool.name === fixtureToolCall.name)) {
+        return json(response, 400, { error: 'fixture_tool_not_declared' })
+      }
       counters.streams += 1
       const streamId = `resp-${randomBytes(6).toString('hex')}`
       streams.set(streamId, { cancelled: false })
@@ -124,6 +133,19 @@ const server = createServer({ cert, key }, async (request, response) => {
           delta: 'hello',
         })}\n\n`
       )
+      if (fixtureToolCall) {
+        response.write(
+          `data: ${JSON.stringify({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              call_id: 'call-hermetic-optional',
+              name: fixtureToolCall.name,
+              arguments: JSON.stringify(fixtureToolCall.arguments),
+            },
+          })}\n\n`
+        )
+      }
       response.write(
         `event: response.completed\ndata: ${JSON.stringify({
           type: 'response.completed',
