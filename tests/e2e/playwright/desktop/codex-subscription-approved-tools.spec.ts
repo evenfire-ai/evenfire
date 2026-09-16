@@ -287,6 +287,7 @@ for (const scenario of cases) {
           for (const request of requests) {
             expect(request.connectorDefinitionCount).toBe(0)
             expect(request.leakedSchema).toBe(false)
+            expect(request.explicitNonStrictCount).toBe(request.definitionCount)
             expect(request.inputBytes).toBeGreaterThan(0)
             expect(request.definitionCount).toBeGreaterThanOrEqual(3)
             expect(request.definitionBytes).toBeGreaterThan(0)
@@ -356,6 +357,7 @@ for (const scenario of cases) {
           for (const request of requests) {
             expect(request.connectorDefinitionCount).toBe(0)
             expect(request.leakedSchema).toBe(false)
+            expect(request.explicitNonStrictCount).toBe(request.definitionCount)
           }
         }
         await testInfo.attach('repeat-task-metrics', {
@@ -474,6 +476,7 @@ for (const scenario of cases) {
           for (const request of requests) {
             expect(request.connectorDefinitionCount).toBe(0)
             expect(request.leakedSchema).toBe(false)
+            expect(request.explicitNonStrictCount).toBe(request.definitionCount)
           }
           await testInfo.attach('upstream-revocation-evidence', {
             body: JSON.stringify({ upstream: mode, requests }),

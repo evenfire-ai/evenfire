@@ -6,13 +6,22 @@ import {
 } from '../toolPresentationPolicy'
 
 describe('tool presentation configuration', () => {
-  it('defaults Codex to auto independently of the legacy flag', () => {
-    expect(parseCodexToolPresentation(undefined)).toBe('auto')
-    expect(resolveToolPresentation('codex-subscription', { dynamicToolsEnabled: false })).toEqual({
-      bridgeEnabled: true,
-      codexMode: 'auto',
-    })
+  it.each([false, true])('defaults Codex to direct with legacy flag %s', enabled => {
+    expect(parseCodexToolPresentation(undefined)).toBe('direct')
+    expect(resolveToolPresentation('codex-subscription', { dynamicToolsEnabled: enabled })).toEqual(
+      {
+        bridgeEnabled: false,
+        codexMode: 'direct',
+      }
+    )
     expect(parseCodexToolDiscoveryBytes(undefined)).toBe(32_768)
+  })
+  it.each([false, true])('defaults Codex fallback to direct with legacy flag %s', enabled => {
+    expect(
+      resolveToolPresentation('zai', { dynamicToolsEnabled: enabled }, [
+        { provider: 'codex-subscription' },
+      ])
+    ).toEqual({ bridgeEnabled: false, codexMode: 'direct' })
   })
   it.each(['auto', 'direct', 'discovery'] as const)('accepts explicit %s', mode => {
     expect(parseCodexToolPresentation(mode)).toBe(mode)

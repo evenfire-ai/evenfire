@@ -6,6 +6,8 @@ import {
 import { CodexTransportError, streamCodexCompletion } from '../src/codexTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
 import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
+import { ToolNameMap } from '../src/toolNameMap.js'
+import { eventaskUpdateTool, optionalMcpTools, webSearchTool } from './fixtures/optionalMcpTools.js'
 
 const REQUEST = {
   schemaVersion: 'codex-completion-request.v1' as const,
@@ -57,6 +59,133 @@ function sseResponse(
 }
 
 describe('streamCodexCompletion', () => {
+  it('preserves real MCP optional schemas with explicit non-strict upstream tools', async () => {
+    const request = {
+      ...REQUEST,
+      tools: optionalMcpTools.map(tool => ({
+        ...structuredClone(tool),
+        // Exercise existing aliasing with the second real schema.
+        name: tool === webSearchTool ? 'web.search__web_search' : tool.name,
+      })),
+    }
+    const original = structuredClone(request)
+    const requestHash = hashCodexCompletionRequestV1(request)
+    const fetchFn = vi.fn(async () => sseResponse(['data: {"type":"response.completed"}\n\n']))
+    await streamCodexCompletion({
+      executionTicket: 'ticket-optionality',
+      requestHash,
+      request,
+      ticket: {
+        jti: 'jti-optionality',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash,
+        providerAttemptId: 'att-optionality',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-optionality',
+        outcome: 'success',
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+    const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+    const names = new ToolNameMap(request.tools.map(tool => tool.name))
+    expect(body.tools).toHaveLength(2)
+    expect(body.tools).toEqual(
+      request.tools.map(tool => ({
+        type: 'function',
+        name: names.toWire(tool.name),
+        description: tool.description,
+        parameters: tool.parameters,
+        strict: false,
+      }))
+    )
+    expect(body.tools[0].parameters.required).toEqual(['key', 'actor'])
+    expect(body.tools[1].parameters.required).toEqual(['query'])
+    expect(request).toEqual(original)
+    expect(hashCodexCompletionRequestV1(request)).toBe(requestHash)
+  })
+
+  it.each([
+    {
+      label: 'absent optional fields',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', description: 'Updated description' },
+    },
+    {
+      label: 'explicit null',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', dueDate: null },
+    },
+    {
+      label: 'empty array',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', labels: [] },
+    },
+    { label: 'empty arguments', tool: eventaskUpdateTool, args: {} },
+    {
+      label: 'wrong object type',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', labels: {} },
+    },
+    {
+      label: 'unknown property',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', unexpected: true },
+    },
+    {
+      label: 'contradictory labels',
+      tool: eventaskUpdateTool,
+      args: { key: 'BUG-1', actor: 'test-agent', labels: [], addLabels: [], removeLabels: [] },
+    },
+    {
+      label: 'plugin default not requested',
+      tool: webSearchTool,
+      args: { query: 'MCP optional parameters' },
+    },
+  ])('does not repair or default provider arguments: $label', async ({ tool, args }) => {
+    // Even invalid provider output must reach normal host/plugin validation
+    // unchanged; the transport must never silently make a call look valid.
+    const canonical = `plugin.v2__${tool.name}`
+    const names = new ToolNameMap([canonical])
+    const request = { ...REQUEST, tools: [{ ...tool, name: canonical }] }
+    const requestHash = hashCodexCompletionRequestV1(request)
+    const frames: unknown[] = []
+    await streamCodexCompletion({
+      executionTicket: 'ticket-arguments',
+      requestHash,
+      request,
+      ticket: {
+        jti: 'jti-arguments',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash,
+        providerAttemptId: 'att-arguments',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-arguments',
+        outcome: 'success',
+        duplicate: false,
+      })),
+      fetchFn: vi.fn(async () =>
+        sseResponse([
+          `data: ${JSON.stringify({ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'call-optional', name: names.toWire(canonical), arguments: JSON.stringify(args) } })}\n\n`,
+          'data: {"type":"response.completed"}\n\n',
+        ])
+      ),
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => frames.push(frame),
+    })
+    expect(frames).toEqual([
+      { type: 'tool_call', id: 'call-optional', name: canonical, arguments: args },
+    ])
+  })
+
   it.each(['response.failed', 'unterminated'])(
     'does not emit partial tool calls after %s',
     async terminal => {
@@ -663,7 +792,9 @@ describe('streamCodexCompletion', () => {
     const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.instructions).toBe('be brief')
     expect(body.store).toBe(false)
-    expect(body.tools).toEqual(request.tools.map(tool => ({ type: 'function', ...tool })))
+    expect(body.tools).toEqual(
+      request.tools.map(tool => ({ type: 'function', ...tool, strict: false }))
+    )
     expect(body.parallel_tool_calls).toBe(true)
     expect(body.tool_choice).toBe('auto')
     expect(body.prompt_cache_key).toBe('sess-1')

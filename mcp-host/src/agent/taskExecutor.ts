@@ -1813,7 +1813,8 @@ export class TaskExecutor {
       : baseController
 
     const mcpManager = this.deps.mcpManager
-    if (!presentation.bridgeEnabled) {
+    // Codex direct still observes the live catalog; observation must not enable discovery.
+    if (!presentation.bridgeEnabled && presentation.codexMode === undefined) {
       return { registry: compositeRegistry, loopController: innerController }
     }
 
@@ -1842,20 +1843,21 @@ export class TaskExecutor {
     )
 
     // The bridge intercept (executeToolCalls) needs `nativeNames` + the live
-    // deferrable catalog. Only wired when an McpManager is present — otherwise
-    // there is nothing to defer and the intercept stays inert.
-    const bridge: LoopConfig['bridge'] = mcpManager
-      ? {
-          nativeNames,
-          getDeferrableCatalogNames: () =>
-            new Set(
-              mcpManager
-                .getAllTools()
-                .map(t => t.name)
-                .filter(name => !nativeNames.has(name))
-            ),
-        }
-      : undefined
+    // deferrable catalog. Direct mode observes presentation without installing
+    // discovery interception or registering bridge tools.
+    const bridge: LoopConfig['bridge'] =
+      presentation.bridgeEnabled && mcpManager
+        ? {
+            nativeNames,
+            getDeferrableCatalogNames: () =>
+              new Set(
+                mcpManager
+                  .getAllTools()
+                  .map(t => t.name)
+                  .filter(name => !nativeNames.has(name))
+              ),
+          }
+        : undefined
 
     return { registry: compositeRegistry, loopController, bridge }
   }
