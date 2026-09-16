@@ -2,7 +2,11 @@ import { classifyTier } from '@hooks/useTaskTier'
 import { buildResponseFileAttachments } from '@lib/chatMessageAttachments'
 import { extractAssistantReply } from '@lib/format'
 import type { ProgressStep } from '@/uiTypes'
-import type { SessionTokensLite, TaskProgressStreamEvent } from '../../../../src/types'
+import type {
+  ChatMessageAttachment,
+  SessionTokensLite,
+  TaskProgressStreamEvent,
+} from '../../../../src/types'
 import {
   type AgentTaskTracker,
   type AttachOptions,
@@ -619,12 +623,23 @@ export class TaskTracker implements AgentTaskTracker {
           return
         }
         if (td.status === 'failed' && td.error?.message) {
+          const failedTaskId = state.taskId
+          let attachments: ChatMessageAttachment[] = []
+          try {
+            const { agentRef } = parseTaskKey(key)
+            const result = await window.clerum.rpc.getTaskResult(agentRef, failedTaskId, [agentRef])
+            attachments = buildResponseFileAttachments(result)
+          } catch {
+            // Preserve the authoritative terminal error if artifact retrieval fails.
+          }
+          if (this.states.get(key)?.taskId !== failedTaskId) return
           this.mutate(key, s => {
             s.status = 'failed'
             s.terminalResult = {
               kind: 'error',
               source: 'failed',
               message: td.error!.message!,
+              ...(attachments.length ? { attachments } : {}),
               code: td.error!.code,
               provider: td.error!.provider,
             }

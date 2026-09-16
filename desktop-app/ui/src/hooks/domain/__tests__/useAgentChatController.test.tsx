@@ -1715,3 +1715,48 @@ describe('useAgentChatController — characterization (D.0)', () => {
     })
   })
 })
+
+describe('interrupted generated-file contract', () => {
+  it('persists a generated-file attachment on the failed assistant message', async () => {
+    clerum.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'task-file' })
+    clerum.rpc.getTaskResult.mockResolvedValue({
+      success: false,
+      error: { message: 'Task interrupted', code: 'TASK_ITERATION_LIMIT' },
+      attachments: [
+        {
+          id: 'report',
+          kind: 'file',
+          filename: 'report.md',
+          mimeType: 'text/markdown',
+          encoding: 'base64',
+          dataBase64: 'IyByZXBvcnQ=',
+        },
+      ],
+    })
+    const { result } = renderController()
+    await settleMount()
+    const send = act(async () => {
+      await result.current.handleSendAgentMessage('Create a report')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-file')).toBe(true))
+    await act(async () => {
+      clerum.emitTaskProgress('task-file', {
+        type: 'terminal',
+        data: {
+          taskId: 'task-file',
+          status: 'failed',
+          error: { message: 'Task interrupted', code: 'TASK_ITERATION_LIMIT' },
+        },
+      })
+    })
+    await send
+    const saved = clerum.chat.appendMessages.mock.calls.at(-1)?.[2]
+    expect(saved).toEqual([
+      expect.objectContaining({
+        isError: true,
+        errorCode: 'TASK_ITERATION_LIMIT',
+        attachments: [expect.objectContaining({ type: 'response_file', label: 'report.md' })],
+      }),
+    ])
+  })
+})
