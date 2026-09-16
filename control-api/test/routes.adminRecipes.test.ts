@@ -271,6 +271,7 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(201)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
   })
 
@@ -304,6 +305,7 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(200)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': '',
     })
   })
 
@@ -324,6 +326,7 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(200)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
     expect(res.body.spec.steps[0].instruction).toBe('Write v2')
   })

@@ -19,6 +19,11 @@ export declare const SUBSCRIPTION_CONNECTION_REF_ANNOTATION: 'clerum.io/subscrip
 export declare const CODEX_UNASSIGNED_CONNECTION_KEY: 'unassigned'
 export declare const CODEX_PROVIDER: 'codex-subscription'
 export declare const CODEX_EXECUTE_SCOPE: 'llm:codex:execute'
+export declare const GROK_PROVIDER: 'grok-subscription'
+export declare const GROK_EXECUTE_SCOPE: 'llm:grok:execute'
+export declare const GROK_ENABLED_ANNOTATION: 'clerum.io/grok-enabled'
+export declare const GROK_CONNECTIONS_ANNOTATION: 'clerum.io/grok-connections'
+export declare const GROK_CONNECTION_STATUS_ANNOTATION: 'clerum.io/grok-connection-status'
 
 export type CodexConfigMapView = {
   metadata?: { annotations?: Record<string, string> | null } | null
@@ -127,6 +132,22 @@ export declare function projectCodexExecution(
   spec: CodexHostSpec,
   snapshot: CodexCatalogSnapshot
 ): CodexExecutionProjection
+export declare function parseGrokAllowedModelsSnapshot(
+  cm: CodexConfigMapView | undefined | null,
+  connectionKey?: string
+): CodexCatalogSnapshot
+export declare function projectGrokExecution(
+  spec: CodexHostSpec,
+  snapshot: CodexCatalogSnapshot
+): CodexExecutionProjection & { requiresGrokProxyEgress: boolean }
+/**
+ * Grok Host-chat revision view. Reads only `clerum.io/grok-connections`.
+ * Never falls back to Codex annotations or the flat catalog.
+ */
+export declare function toGrokPolicyBinding(
+  cm: CodexConfigMapView | undefined | null,
+  connectionKey?: string
+): CodexPolicyBinding | null
 /**
  * Structural revision view for the Host chat reader (`configStore`). It does
  * NOT decide eligibility: a transiently `unavailable`/`reauth-required`

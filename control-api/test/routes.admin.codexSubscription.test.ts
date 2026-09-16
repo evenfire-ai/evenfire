@@ -140,6 +140,7 @@ describe('admin Codex subscription routes', () => {
   beforeEach(() => {
     app = makeAuthedApp()
     config.codexSubscriptionEnabled = true
+    config.grokSubscriptionEnabled = false
     config.codexOAuthClientId = originalClientId
     config.controlUiBaseUrl = originalControlUiBaseUrl
     for (const fn of Object.values(oauth)) fn.mockReset()
@@ -172,10 +173,29 @@ describe('admin Codex subscription routes', () => {
     expect(res.body).toEqual({ error: 'not_found' })
   })
 
-  it('returns 404 not_found for grok-subscription until that adapter is mounted', async () => {
+  it('returns 404 disabled for grok-subscription when that flag is off', async () => {
+    config.grokSubscriptionEnabled = false
     const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
     expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+  })
+
+  it('does not expose Codex un-keyed aliases for grok-subscription', async () => {
+    config.grokSubscriptionEnabled = true
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connection')
+    expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'not_found' })
+    const browser = await request(app).post('/admin/llm/providers/grok-subscription/browser/start')
+    expect(browser.status).toBe(404)
+    expect(browser.body).toEqual({ error: 'not_found' })
+  })
+
+  it('lists Grok connections when the Grok flag is on', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 0 })
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(200)
+    expect(res.body.connections).toEqual([])
   })
 
   it('returns 404 disabled for the connections list when the Codex flag is off', async () => {

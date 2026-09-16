@@ -171,6 +171,27 @@ export async function listOfferedGrokModelsForAssignment(
   return (result.rows as Array<{ model: string }>).map(row => String(row.model))
 }
 
+export async function listEnabledGrokModelsGroupedByConnection(
+  db: DbClient
+): Promise<Record<string, string[]>> {
+  const result = await db.query(
+    `SELECT c.connection_key AS connection_key, m.model
+       FROM grok_catalog_models m
+       JOIN grok_subscription_connections c ON c.id = m.connection_id
+      WHERE c.revoked_at IS NULL
+        AND m.enabled
+        AND m.stale = false
+      ORDER BY c.connection_key ASC, m.model ASC`
+  )
+  const grouped: Record<string, string[]> = {}
+  for (const row of result.rows as Array<{ connection_key: string; model: string }>) {
+    const key = String(row.connection_key)
+    grouped[key] ??= []
+    grouped[key].push(String(row.model))
+  }
+  return grouped
+}
+
 export async function listGrokCatalogModels(
   db: DbClient,
   connectionId: string

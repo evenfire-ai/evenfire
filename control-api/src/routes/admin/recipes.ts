@@ -22,6 +22,11 @@ import {
   isCodexUnassignedConnectionKey,
 } from '../../services/codexSubscriptionConnection.js'
 import {
+  GROK_UNASSIGNED_CONNECTION_KEY,
+  assertGrokConnectionKey,
+  isGrokUnassignedConnectionKey,
+} from '../../services/grokSubscriptionConnection.js'
+import {
   ensureRegistryPullSecrets,
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
@@ -1255,6 +1260,12 @@ function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
   return (agent as { provider?: unknown }).provider === 'codex-subscription'
 }
 
+function recipeUsesGrokBroker(spec?: Record<string, unknown>): boolean {
+  const agent = spec?.agent
+  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return false
+  return (agent as { provider?: unknown }).provider === 'grok-subscription'
+}
+
 function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
   const sdk = spec?.pluginWorkloadSdk
   return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
@@ -1331,11 +1342,75 @@ function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
   )
 }
 
+function readRequestedGrokRecipeGrant(body: RecipeBody): string {
+  const result = readSubscriptionConnectionRef({
+    provider: 'grok-subscription',
+    annotations: body.metadata?.annotations,
+  })
+  if (!result.ok) {
+    throw new RecipeGrantAnnotationDisagreeError(result.message)
+  }
+  return result.connectionKey
+}
+
+function validateGrokRecipeGrant(
+  body: RecipeBody,
+  opts?: { allowOmittedGrant?: boolean }
+): ValidationError[] {
+  if (!recipeUsesGrokBroker(body.spec)) return []
+  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
+  let key: string
+  try {
+    key = readRequestedGrokRecipeGrant(body)
+  } catch (err) {
+    if (err instanceof RecipeGrantAnnotationDisagreeError) {
+      return [
+        {
+          field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
+          rule: 'subscriptionAnnotationsDisagree',
+          message: err.message,
+        },
+      ]
+    }
+    throw err
+  }
+  if (isGrokUnassignedConnectionKey(key) || key === GROK_UNASSIGNED_CONNECTION_KEY) {
+    return [
+      {
+        field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
+        rule: 'grokRecipeGrantRequired',
+        message: 'Grok subscription recipes must choose an existing Grok grant',
+      },
+    ]
+  }
+  try {
+    assertGrokConnectionKey(key)
+  } catch {
+    return [
+      {
+        field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
+        rule: 'grokRecipeGrantInvalid',
+        message: 'clerum.io/subscription-connection-ref is not a valid connection key',
+      },
+    ]
+  }
+  return []
+}
+
 function sanitizeRecipeCodexAnnotation(
   body: RecipeBody,
   currentAnnotations?: Record<string, string>,
   currentSpec?: Record<string, unknown>
 ): Record<string, string> {
+  const grokMirrored = (key: string) => ({
+    [CODEX_CONNECTION_REF_ANNOTATION]: '',
+    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
+  })
+  if (recipeUsesGrokBroker(body.spec)) {
+    if (!bodyHasCodexGrantAnnotation(body)) return {}
+    const incoming = readRequestedGrokRecipeGrant(body)
+    return grokMirrored(isGrokUnassignedConnectionKey(incoming) ? '' : incoming)
+  }
   const incoming = readRequestedCodexRecipeGrant(body)
   const mirrored = (key: string) => ({
     [CODEX_CONNECTION_REF_ANNOTATION]: key,
@@ -1346,7 +1421,8 @@ function sanitizeRecipeCodexAnnotation(
     return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
   const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
-  if (leavingCodex) {
+  const leavingGrok = recipeUsesGrokBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
+  if (leavingCodex || leavingGrok) {
     return mirrored('')
   }
   if (bodyHasCodexGrantAnnotation(body)) {
@@ -1671,7 +1747,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ valid: false, errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body)
+      const grantErrors = [...validateCodexRecipeGrant(body), ...validateGrokRecipeGrant(body)]
       if (grantErrors.length > 0) {
         res.status(422).json({ valid: false, errors: grantErrors })
         return
@@ -1857,7 +1933,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body)
+      const grantErrors = [...validateCodexRecipeGrant(body), ...validateGrokRecipeGrant(body)]
       if (grantErrors.length > 0) {
         res.status(422).json({ errors: grantErrors })
         return
@@ -1967,7 +2043,10 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = validateCodexRecipeGrant(body, { allowOmittedGrant: true })
+      const grantErrors = [
+        ...validateCodexRecipeGrant(body, { allowOmittedGrant: true }),
+        ...validateGrokRecipeGrant(body, { allowOmittedGrant: true }),
+      ]
       if (grantErrors.length > 0) {
         res.status(422).json({ errors: grantErrors })
         return

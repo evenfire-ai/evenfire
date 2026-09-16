@@ -45,6 +45,35 @@ import {
   isPublicCodexCliClient,
   resolveCodexControlUiBaseUrl,
 } from '../../services/codexSubscriptionRedirectUri.js'
+import {
+  type GrokCatalogTransport,
+  createGrokCatalogTransportFromEnv,
+  listGrokCatalogModels,
+  listOfferedGrokModelsForAssignment,
+  pickGrokGrantModel,
+  setGrokCatalogModelEnabled,
+} from '../../services/grokSubscriptionCatalog.js'
+import {
+  GROK_UNASSIGNED_CONNECTION_KEY,
+  GrokSubscriptionInvalidConnectionKeyError,
+  assertGrokConnectionKey,
+  createNamedGrokSubscriptionConnection,
+  generateGrokConnectionKey,
+  getSafeGrokSubscriptionConnection,
+  listSafeGrokSubscriptionConnections,
+  updateGrokSubscriptionConnectionMetadata,
+} from '../../services/grokSubscriptionConnection.js'
+import {
+  type GrokOAuthDeps,
+  GrokSubscriptionOAuthError,
+  getGrokSubscriptionConnection,
+  isGrokOAuthErrorCode,
+  pollGrokDevice,
+  refreshGrokSubscriptionConnection,
+  revokeGrokSubscription,
+  runGrokCatalogSync,
+  startGrokDeviceConnect,
+} from '../../services/grokSubscriptionOAuth.js'
 import { publishAllowedModelsConfigMapAfterGrantChange } from '../../services/llmAllowedModelsConfigMap.js'
 import { K8sConflictError } from '../../services/resourceService.js'
 import {
@@ -129,6 +158,27 @@ function sendOAuthError(
     res.status(400).json({ error: 'invalid_connection_key' })
     return
   }
+  if (err instanceof GrokSubscriptionInvalidConnectionKeyError) {
+    res.status(400).json({ error: 'invalid_connection_key' })
+    return
+  }
+  if (err instanceof GrokSubscriptionOAuthError) {
+    const status =
+      err.code === 'disabled'
+        ? 404
+        : err.code === 'replacement_required' ||
+            err.code === 'fingerprint_in_use' ||
+            err.code === 'connection_mismatch'
+          ? 409
+          : err.code === 'refresh_in_flight' || err.code === 'stale_revision'
+            ? 409
+            : err.code === 'not_connected' || err.code === 'no_grant'
+              ? 404
+              : 400
+    log.warn({ event: 'grok_oauth_admin_denied', code: err.code }, 'Grok subscription OAuth denied')
+    res.status(status).json({ error: err.code })
+    return
+  }
   if (err instanceof CodexSubscriptionOAuthError) {
     const status =
       err.code === 'disabled'
@@ -180,10 +230,11 @@ function hostModelName(spec: unknown): string {
   return typeof name === 'string' ? name.trim() : ''
 }
 
-function hostConnectionRef(spec: unknown): string | null {
+function hostConnectionRef(spec: unknown, provider = 'codex-subscription'): string | null {
   const model = hostModel(spec)
-  if (!model || model.provider !== 'codex-subscription') return null
+  if (!model || model.provider !== provider) return null
   const raw = typeof model.connectionRef === 'string' ? model.connectionRef.trim() : ''
+  if (provider === 'grok-subscription') return raw || GROK_UNASSIGNED_CONNECTION_KEY
   return raw || CODEX_UNASSIGNED_CONNECTION_KEY
 }
 
@@ -194,8 +245,11 @@ function assignableHostFromRecord(host: HostRecord): CodexAssignableHostRow | nu
   const provider = typeof model?.provider === 'string' ? model.provider.trim() : ''
   const modelName = hostModelName(host.spec)
   const connectionRef =
-    provider === 'codex-subscription'
-      ? hostConnectionRef(host.spec) || CODEX_UNASSIGNED_CONNECTION_KEY
+    provider === 'codex-subscription' || provider === 'grok-subscription'
+      ? hostConnectionRef(host.spec, provider) ||
+        (provider === 'grok-subscription'
+          ? GROK_UNASSIGNED_CONNECTION_KEY
+          : CODEX_UNASSIGNED_CONNECTION_KEY)
       : CODEX_UNASSIGNED_CONNECTION_KEY
   return {
     name,
@@ -212,16 +266,60 @@ function storedCodexConnectionRef(spec: unknown): string | null {
   return typeof model.connectionRef === 'string' ? model.connectionRef.trim() : ''
 }
 
+function storedGrokConnectionRef(spec: unknown): string | null {
+  const model = hostModel(spec)
+  if (!model || model.provider !== 'grok-subscription') return null
+  return typeof model.connectionRef === 'string' ? model.connectionRef.trim() : ''
+}
+
 export function createAdminCodexSubscriptionRouter(
   catalogTransport: CodexCatalogTransport = createCodexCatalogTransportFromEnv(),
   gateway?: K8sGateway
 ): Router {
   const router = Router()
   mountSubscriptionAdminRoutes(router, {
-    providerIds: ['codex-subscription'],
+    providerIds: ['codex-subscription', 'grok-subscription'],
     enabled: providerId =>
-      providerId === 'codex-subscription' ? config.codexSubscriptionEnabled : false,
+      providerId === 'codex-subscription'
+        ? config.codexSubscriptionEnabled
+        : providerId === 'grok-subscription'
+          ? config.grokSubscriptionEnabled
+          : false,
   })
+
+  const grokCatalogTransport: GrokCatalogTransport = createGrokCatalogTransportFromEnv()
+
+  function reqProviderId(req: { params?: { providerId?: string } }): string {
+    return typeof req.params?.providerId === 'string' ? req.params.providerId : ''
+  }
+
+  function isGrokReq(req: { params?: { providerId?: string } }): boolean {
+    return reqProviderId(req) === 'grok-subscription'
+  }
+
+  function rejectGrokUnkeyed(req: Request, res: Response, next: NextFunction): void {
+    if (isGrokReq(req)) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
+  function grokOauthDeps(connectionKey: string): GrokOAuthDeps {
+    return {
+      db: dbClient(),
+      encryptionKey: deriveOAuthEncryptionKey(config.oauthEncryptionKey),
+      fetchFn: fetch,
+      clientId: config.grokOAuthClientId,
+      enabled: config.grokSubscriptionEnabled,
+      connectionKey,
+    }
+  }
+
+  function grokKeyFromReq(req: { params?: { key?: string } }): string {
+    const raw = typeof req.params?.key === 'string' ? req.params.key.trim() : ''
+    return assertGrokConnectionKey(raw)
+  }
 
   async function listHostsOrUnavailable(): Promise<HostRecord[] | null> {
     if (!gateway) return null
@@ -233,9 +331,13 @@ export function createAdminCodexSubscriptionRouter(
     }
   }
 
-  function hostsForConnection(hosts: HostRecord[], connectionKey: string): Array<{ name: string }> {
+  function hostsForConnection(
+    hosts: HostRecord[],
+    connectionKey: string,
+    provider = 'codex-subscription'
+  ): Array<{ name: string }> {
     return hosts
-      .filter(host => hostConnectionRef(host.spec) === connectionKey)
+      .filter(host => hostConnectionRef(host.spec, provider) === connectionKey)
       .map(host => ({ name: String(host.metadata?.name ?? '') }))
       .filter(host => host.name)
   }
@@ -274,7 +376,8 @@ export function createAdminCodexSubscriptionRouter(
   async function writeHostConnectionRef(
     hostRef: string,
     host: HostRecord,
-    nextConnectionRef: string
+    nextConnectionRef: string,
+    provider: 'codex-subscription' | 'grok-subscription' = 'codex-subscription'
   ): Promise<
     | { ok: true; warnings: StaleModelWarning[]; model: string }
     | { ok: false; status: number; error: string; message?: string; reason?: string }
@@ -288,11 +391,15 @@ export function createAdminCodexSubscriptionRouter(
       spec.model && typeof spec.model === 'object'
         ? { ...(spec.model as Record<string, unknown>) }
         : {}
-    model.provider = 'codex-subscription'
+    const grok = provider === 'grok-subscription'
+    model.provider = grok ? 'grok-subscription' : 'codex-subscription'
     model.connectionRef = nextConnectionRef
     let resolvedModel = typeof model.name === 'string' ? model.name.trim() : ''
-    if (nextConnectionRef !== CODEX_UNASSIGNED_CONNECTION_KEY) {
-      const offered = await listOfferedCodexModelsForAssignment(dbClient(), nextConnectionRef)
+    const unassigned = grok ? GROK_UNASSIGNED_CONNECTION_KEY : CODEX_UNASSIGNED_CONNECTION_KEY
+    if (nextConnectionRef !== unassigned) {
+      const offered = grok
+        ? await listOfferedGrokModelsForAssignment(dbClient(), nextConnectionRef)
+        : await listOfferedCodexModelsForAssignment(dbClient(), nextConnectionRef)
       if (offered.length === 0) {
         return {
           ok: false,
@@ -302,8 +409,13 @@ export function createAdminCodexSubscriptionRouter(
             'This subscription has no offered models yet. Sign in and sync the catalog before assigning agents.',
         }
       }
-      const grant = await getSafeCodexSubscriptionConnection(dbClient(), nextConnectionRef)
-      resolvedModel = pickCodexGrantModel(resolvedModel, offered, grant?.defaultModel)
+      if (grok) {
+        const grant = await getSafeGrokSubscriptionConnection(dbClient(), nextConnectionRef)
+        resolvedModel = pickGrokGrantModel(resolvedModel, offered, grant?.defaultModel)
+      } else {
+        const grant = await getSafeCodexSubscriptionConnection(dbClient(), nextConnectionRef)
+        resolvedModel = pickCodexGrantModel(resolvedModel, offered, grant?.defaultModel)
+      }
       model.name = resolvedModel
     }
     spec.model = model
@@ -380,7 +492,8 @@ export function createAdminCodexSubscriptionRouter(
 
   async function withAssignedHosts<T extends { connectionKey: string }>(
     connection: T,
-    hosts?: HostRecord[] | null
+    hosts?: HostRecord[] | null,
+    provider = 'codex-subscription'
   ) {
     const resolved = hosts === undefined ? await listHostsOrUnavailable() : hosts
     if (resolved === null) {
@@ -388,12 +501,17 @@ export function createAdminCodexSubscriptionRouter(
     }
     return {
       ...connection,
-      assignedHosts: hostsForConnection(resolved, connection.connectionKey),
+      assignedHosts: hostsForConnection(resolved, connection.connectionKey, provider),
     }
   }
 
   const getConnectionHandler = asyncHandler(async (req, res) => {
     try {
+      if (isGrokReq(req)) {
+        const connection = await getGrokSubscriptionConnection(grokOauthDeps(grokKeyFromReq(req)))
+        res.status(200).json(await withAssignedHosts(connection, undefined, 'grok-subscription'))
+        return
+      }
       const connection = await getCodexSubscriptionConnection(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
@@ -424,6 +542,14 @@ export function createAdminCodexSubscriptionRouter(
 
   const deviceStartHandler = asyncHandler(async (req, res) => {
     try {
+      if (isGrokReq(req)) {
+        const started = await startGrokDeviceConnect(
+          grokOauthDeps(grokKeyFromReq(req)),
+          parseIntent(req.body?.intent)
+        )
+        res.status(200).json(started)
+        return
+      }
       const started = await startCodexDeviceConnect(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req)),
         parseIntent(req.body?.intent)
@@ -437,6 +563,30 @@ export function createAdminCodexSubscriptionRouter(
   const devicePollHandler = asyncHandler(async (req, res) => {
     try {
       const state = typeof req.query.state === 'string' ? req.query.state : ''
+      if (isGrokReq(req)) {
+        const connectionKey = grokKeyFromReq(req)
+        const deps = grokOauthDeps(connectionKey)
+        let result = await pollGrokDevice(deps, state)
+        if (result.status === 'connected') {
+          const sync = await runGrokCatalogSync(
+            deps,
+            result.connection.connectionKey,
+            grokCatalogTransport
+          )
+          if (sync.ok) {
+            const latest = await getGrokSubscriptionConnection(deps)
+            if ('id' in latest) result = { ...result, connection: latest }
+          } else if ('connection' in result) {
+            result = {
+              ...result,
+              connection: { ...result.connection, catalogStatus: sync.catalogStatus },
+            }
+          }
+          if (await publishRuntimeAllowlistOrFail(res)) return
+        }
+        res.status(200).json(result)
+        return
+      }
       const connectionKey = keyFromReq(req)
       const deps = oauthDeps(req, resolveBrowserRedirectUri(req), connectionKey)
       let result = await pollCodexDevice(deps, state)
@@ -464,6 +614,14 @@ export function createAdminCodexSubscriptionRouter(
 
   const refreshHandler = asyncHandler(async (req, res) => {
     try {
+      if (isGrokReq(req)) {
+        const connection = await refreshGrokSubscriptionConnection(
+          grokOauthDeps(grokKeyFromReq(req))
+        )
+        if (await publishRuntimeAllowlistOrFail(res)) return
+        res.status(200).json(connection)
+        return
+      }
       const connection = await refreshCodexSubscriptionConnection(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
@@ -476,6 +634,43 @@ export function createAdminCodexSubscriptionRouter(
 
   const catalogSyncHandler = asyncHandler(async (req, res) => {
     try {
+      if (isGrokReq(req)) {
+        if (!config.grokSubscriptionEnabled) {
+          res.status(404).json({ error: 'disabled' })
+          return
+        }
+        const connectionKey = grokKeyFromReq(req)
+        const synced = await runGrokCatalogSync(
+          grokOauthDeps(connectionKey),
+          connectionKey,
+          grokCatalogTransport
+        )
+        if (synced.ok) {
+          if (await publishRuntimeAllowlistOrFail(res)) return
+          res.status(200).json({
+            outcome: synced.catalogStatus,
+            connection: synced.connection,
+          })
+          return
+        }
+        if (synced.reason === 'no_grant' || synced.reason === 'disabled') {
+          res.status(404).json({ error: synced.reason })
+          return
+        }
+        if (synced.reason === 'stale_revision') {
+          res.status(409).json({ error: 'stale_revision' })
+          return
+        }
+        if (isGrokOAuthErrorCode(synced.reason ?? '')) {
+          sendOAuthError(
+            res,
+            new GrokSubscriptionOAuthError(synced.reason as never, synced.reason ?? '')
+          )
+          return
+        }
+        res.status(503).json({ error: 'catalog_sync_failed', outcome: synced.catalogStatus })
+        return
+      }
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
@@ -525,6 +720,12 @@ export function createAdminCodexSubscriptionRouter(
 
   const revokeHandler = asyncHandler(async (req, res) => {
     try {
+      if (isGrokReq(req)) {
+        const connection = await revokeGrokSubscription(grokOauthDeps(grokKeyFromReq(req)))
+        if (await publishRuntimeAllowlistOrFail(res)) return
+        res.status(200).json(await withAssignedHosts(connection, undefined, 'grok-subscription'))
+        return
+      }
       const connection = await revokeCodexSubscription(
         oauthDeps(req, resolveBrowserRedirectUri(req), keyFromReq(req))
       )
@@ -535,16 +736,42 @@ export function createAdminCodexSubscriptionRouter(
     }
   })
 
-  router.get(`${BASE}/connection`, ...adminCodexReadRateLimits(), getConnectionHandler)
-  router.post(`${BASE}/browser/start`, ...adminCodexWriteRateLimits(), browserStartHandler)
-  router.post(`${BASE}/device/start`, ...adminCodexWriteRateLimits(), deviceStartHandler)
-  router.get(`${BASE}/device/poll`, ...adminCodexReadRateLimits(), devicePollHandler)
-  router.post(`${BASE}/refresh`, ...adminCodexWriteRateLimits(), refreshHandler)
-  router.post(`${BASE}/catalog/sync`, ...adminCodexWriteRateLimits(), catalogSyncHandler)
-  router.post(`${BASE}/revoke`, ...adminCodexWriteRateLimits(), revokeHandler)
+  router.get(
+    `${BASE}/connection`,
+    rejectGrokUnkeyed,
+    ...adminCodexReadRateLimits(),
+    getConnectionHandler
+  )
+  router.post(
+    `${BASE}/browser/start`,
+    rejectGrokUnkeyed,
+    ...adminCodexWriteRateLimits(),
+    browserStartHandler
+  )
+  router.post(
+    `${BASE}/device/start`,
+    rejectGrokUnkeyed,
+    ...adminCodexWriteRateLimits(),
+    deviceStartHandler
+  )
+  router.get(
+    `${BASE}/device/poll`,
+    rejectGrokUnkeyed,
+    ...adminCodexReadRateLimits(),
+    devicePollHandler
+  )
+  router.post(`${BASE}/refresh`, rejectGrokUnkeyed, ...adminCodexWriteRateLimits(), refreshHandler)
+  router.post(
+    `${BASE}/catalog/sync`,
+    rejectGrokUnkeyed,
+    ...adminCodexWriteRateLimits(),
+    catalogSyncHandler
+  )
+  router.post(`${BASE}/revoke`, rejectGrokUnkeyed, ...adminCodexWriteRateLimits(), revokeHandler)
   router.get(`${BASE}/connections/:key`, ...adminCodexReadRateLimits(), getConnectionHandler)
   router.post(
     `${BASE}/connections/:key/browser/start`,
+    rejectGrokUnkeyed,
     ...adminCodexWriteRateLimits(),
     browserStartHandler
   )
@@ -569,7 +796,28 @@ export function createAdminCodexSubscriptionRouter(
   router.get(
     `${BASE}/connections`,
     ...adminCodexReadRateLimits(),
-    asyncHandler(async (_req, res) => {
+    asyncHandler(async (req, res) => {
+      if (isGrokReq(req)) {
+        if (!config.grokSubscriptionEnabled) {
+          res.status(404).json({ error: 'disabled' })
+          return
+        }
+        const rows = await listSafeGrokSubscriptionConnections(dbClient())
+        const hosts = await listHostsOrUnavailable()
+        const connections = []
+        for (const row of rows) {
+          connections.push(await withAssignedHosts(row, hosts, 'grok-subscription'))
+        }
+        if (hosts === null) {
+          res.status(200).json({ connections, assignableHostsUnavailable: true })
+          return
+        }
+        res.status(200).json({
+          connections,
+          assignableHosts: collectAssignableHosts(hosts),
+        })
+        return
+      }
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
@@ -595,6 +843,43 @@ export function createAdminCodexSubscriptionRouter(
     `${BASE}/connections`,
     ...adminCodexWriteRateLimits(),
     asyncHandler(async (req, res) => {
+      if (isGrokReq(req)) {
+        if (!config.grokSubscriptionEnabled) {
+          res.status(404).json({ error: 'disabled' })
+          return
+        }
+        try {
+          const displayName =
+            typeof req.body?.displayName === 'string' && req.body.displayName.trim()
+              ? req.body.displayName.trim()
+              : 'Grok subscription'
+          if (displayName.length > 64) {
+            res.status(400).json({ error: 'display_name_too_long' })
+            return
+          }
+          const requestedKey =
+            typeof req.body?.connectionKey === 'string' && req.body.connectionKey.trim()
+              ? assertGrokConnectionKey(req.body.connectionKey.trim())
+              : generateGrokConnectionKey()
+          const created = await createNamedGrokSubscriptionConnection(dbClient(), {
+            connectionKey: requestedKey,
+            displayName,
+          })
+          res.status(201).json(await withAssignedHosts(created, undefined, 'grok-subscription'))
+        } catch (err) {
+          if (err instanceof GrokSubscriptionInvalidConnectionKeyError) {
+            res.status(400).json({ error: 'invalid_connection_key' })
+            return
+          }
+          const code = (err as { code?: string } | null)?.code
+          if (code === '23505') {
+            res.status(409).json({ error: 'connection_key_taken' })
+            return
+          }
+          throw err
+        }
+        return
+      }
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
@@ -636,6 +921,20 @@ export function createAdminCodexSubscriptionRouter(
     `${BASE}/connections/:key/models`,
     ...adminCodexReadRateLimits(),
     asyncHandler(async (req, res) => {
+      if (isGrokReq(req)) {
+        if (!config.grokSubscriptionEnabled) {
+          res.status(404).json({ error: 'disabled' })
+          return
+        }
+        const connection = await getGrokSubscriptionConnection(grokOauthDeps(grokKeyFromReq(req)))
+        if (!('id' in connection)) {
+          res.status(409).json({ error: 'not_connected' })
+          return
+        }
+        const models = await listGrokCatalogModels(dbClient(), connection.id)
+        res.status(200).json({ models })
+        return
+      }
       if (!config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
@@ -656,13 +955,14 @@ export function createAdminCodexSubscriptionRouter(
     `${BASE}/connections/:key`,
     ...adminCodexWriteRateLimits(),
     asyncHandler(async (req, res) => {
-      if (!config.codexSubscriptionEnabled) {
+      const grok = isGrokReq(req)
+      if (grok ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
       }
       let connectionKey: string
       try {
-        connectionKey = keyFromReq(req)
+        connectionKey = grok ? grokKeyFromReq(req) : keyFromReq(req)
       } catch (err) {
         sendOAuthError(res, err)
         return
@@ -683,16 +983,23 @@ export function createAdminCodexSubscriptionRouter(
           : ''
         : undefined
       if (defaultModel) {
-        const offered = await listOfferedCodexModelsForAssignment(dbClient(), connectionKey)
+        const offered = grok
+          ? await listOfferedGrokModelsForAssignment(dbClient(), connectionKey)
+          : await listOfferedCodexModelsForAssignment(dbClient(), connectionKey)
         if (!offered.includes(defaultModel)) {
           res.status(422).json({ error: 'default_model_not_offered' })
           return
         }
       }
-      const updated = await updateCodexSubscriptionConnectionMetadata(dbClient(), connectionKey, {
-        ...(hasDisplayName ? { displayName: req.body.displayName } : {}),
-        ...(hasDefaultModel ? { defaultModel: defaultModel || null } : {}),
-      })
+      const updated = grok
+        ? await updateGrokSubscriptionConnectionMetadata(dbClient(), connectionKey, {
+            ...(hasDisplayName ? { displayName: req.body.displayName } : {}),
+            ...(hasDefaultModel ? { defaultModel: defaultModel || null } : {}),
+          })
+        : await updateCodexSubscriptionConnectionMetadata(dbClient(), connectionKey, {
+            ...(hasDisplayName ? { displayName: req.body.displayName } : {}),
+            ...(hasDefaultModel ? { defaultModel: defaultModel || null } : {}),
+          })
       if (!updated) {
         res.status(404).json({ error: 'no_grant' })
         return
@@ -705,13 +1012,14 @@ export function createAdminCodexSubscriptionRouter(
     `${BASE}/connections/:key/models/:model`,
     ...adminCodexWriteRateLimits(),
     asyncHandler(async (req, res) => {
-      if (!config.codexSubscriptionEnabled) {
+      const grok = isGrokReq(req)
+      if (grok ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
       }
       let connectionKey: string
       try {
-        connectionKey = keyFromReq(req)
+        connectionKey = grok ? grokKeyFromReq(req) : keyFromReq(req)
       } catch (err) {
         sendOAuthError(res, err)
         return
@@ -720,7 +1028,9 @@ export function createAdminCodexSubscriptionRouter(
         res.status(400).json({ error: 'invalid_enabled' })
         return
       }
-      const connection = await getSafeCodexSubscriptionConnection(dbClient(), connectionKey)
+      const connection = grok
+        ? await getSafeGrokSubscriptionConnection(dbClient(), connectionKey)
+        : await getSafeCodexSubscriptionConnection(dbClient(), connectionKey)
       if (!connection) {
         res.status(404).json({ error: 'no_grant' })
         return
@@ -730,12 +1040,9 @@ export function createAdminCodexSubscriptionRouter(
         res.status(404).json({ error: 'model_not_found' })
         return
       }
-      const models = await setCodexCatalogModelEnabled(
-        dbClient(),
-        connection.id,
-        model,
-        req.body.enabled
-      )
+      const models = grok
+        ? await setGrokCatalogModelEnabled(dbClient(), connection.id, model, req.body.enabled)
+        : await setCodexCatalogModelEnabled(dbClient(), connection.id, model, req.body.enabled)
       if (!models) {
         res.status(404).json({ error: 'model_not_found' })
         return
@@ -748,8 +1055,8 @@ export function createAdminCodexSubscriptionRouter(
   router.get(
     `${BASE}/assignable-hosts`,
     ...adminCodexReadRateLimits(),
-    asyncHandler(async (_req, res) => {
-      if (!config.codexSubscriptionEnabled) {
+    asyncHandler(async (req, res) => {
+      if (isGrokReq(req) ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
       }
@@ -764,15 +1071,16 @@ export function createAdminCodexSubscriptionRouter(
 
   const bindUnbindHandler = (action: 'bind' | 'unbind') =>
     asyncHandler(async (req, res) => {
-      if (!config.codexSubscriptionEnabled) {
+      const grok = isGrokReq(req)
+      if (grok ? !config.grokSubscriptionEnabled : !config.codexSubscriptionEnabled) {
         res.status(404).json({ error: 'disabled' })
         return
       }
       let connectionKey: string
       try {
-        connectionKey = assertCodexConnectionKey(
-          typeof req.params.key === 'string' ? req.params.key : ''
-        )
+        connectionKey = grok
+          ? assertGrokConnectionKey(typeof req.params.key === 'string' ? req.params.key : '')
+          : assertCodexConnectionKey(typeof req.params.key === 'string' ? req.params.key : '')
       } catch (err) {
         sendOAuthError(res, err)
         return
@@ -788,22 +1096,26 @@ export function createAdminCodexSubscriptionRouter(
         res.status(loaded.status).json({ error: loaded.error })
         return
       }
-      const storedRef = storedCodexConnectionRef(loaded.host.spec)
+      const storedRef = grok
+        ? storedGrokConnectionRef(loaded.host.spec)
+        : storedCodexConnectionRef(loaded.host.spec)
       if (storedRef === null && action === 'unbind') {
-        res.status(409).json({ error: 'not_codex_host' })
+        res.status(409).json({ error: grok ? 'not_grok_host' : 'not_codex_host' })
         return
       }
+      const unassigned = grok ? GROK_UNASSIGNED_CONNECTION_KEY : CODEX_UNASSIGNED_CONNECTION_KEY
+      const provider = grok ? ('grok-subscription' as const) : ('codex-subscription' as const)
       // Empty/missing connectionRef is unassigned, never the reserved default grant.
-      // Non-Codex hosts bind as a conversion: the hub is the ops center that
+      // Non-broker hosts bind as a conversion: the hub is the ops center that
       // sets provider, grant, and a seeded default model in one write.
-      const currentRef = storedRef || CODEX_UNASSIGNED_CONNECTION_KEY
+      const currentRef = storedRef || unassigned
       const currentModel = hostModelName(loaded.host.spec)
 
       if (action === 'unbind') {
-        if (currentRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
+        if (currentRef === unassigned) {
           res.status(200).json({
             host: hostRef,
-            connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+            connectionRef: unassigned,
             ...(currentModel ? { model: currentModel } : {}),
           })
           return
@@ -812,11 +1124,7 @@ export function createAdminCodexSubscriptionRouter(
           res.status(409).json({ error: 'connection_mismatch' })
           return
         }
-        const written = await writeHostConnectionRef(
-          hostRef,
-          loaded.host,
-          CODEX_UNASSIGNED_CONNECTION_KEY
-        )
+        const written = await writeHostConnectionRef(hostRef, loaded.host, unassigned, provider)
         if (!written.ok) {
           res.status(written.status).json({
             error: written.error,
@@ -827,7 +1135,7 @@ export function createAdminCodexSubscriptionRouter(
         }
         res.status(200).json({
           host: hostRef,
-          connectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+          connectionRef: unassigned,
           ...(written.model ? { model: written.model } : {}),
           ...(written.warnings.length > 0 ? { warnings: written.warnings } : {}),
         })
@@ -842,7 +1150,7 @@ export function createAdminCodexSubscriptionRouter(
         })
         return
       }
-      const written = await writeHostConnectionRef(hostRef, loaded.host, connectionKey)
+      const written = await writeHostConnectionRef(hostRef, loaded.host, connectionKey, provider)
       if (!written.ok) {
         res.status(written.status).json({
           error: written.error,

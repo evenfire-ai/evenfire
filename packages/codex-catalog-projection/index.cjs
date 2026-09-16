@@ -13,6 +13,12 @@ const CODEX_UNASSIGNED_CONNECTION_KEY = 'unassigned'
 const CODEX_PROVIDER = 'codex-subscription'
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
 const CODEX_PROVIDER_PREFIX = `${CODEX_PROVIDER}:`
+const GROK_PROVIDER = 'grok-subscription'
+const GROK_EXECUTE_SCOPE = 'llm:grok:execute'
+const GROK_PROVIDER_PREFIX = `${GROK_PROVIDER}:`
+const GROK_ENABLED_ANNOTATION = 'clerum.io/grok-enabled'
+const GROK_CONNECTIONS_ANNOTATION = 'clerum.io/grok-connections'
+const GROK_CONNECTION_STATUS_ANNOTATION = 'clerum.io/grok-connection-status'
 
 function assignedCodexConnectionKey(value) {
   const trimmed = typeof value === 'string' ? value.trim() : ''
@@ -385,6 +391,160 @@ function toEligiblePolicyBinding(cm, connectionKey, model) {
   }
 }
 
+function toGrokPolicyBinding(cm, connectionKey) {
+  const key = assignedCodexConnectionKey(connectionKey)
+  if (!cm || key === CODEX_UNASSIGNED_CONNECTION_KEY) return null
+  const annotations = (cm.metadata && cm.metadata.annotations) || {}
+  const rawMap = annotations[GROK_CONNECTIONS_ANNOTATION]
+  if (!rawMap) return null
+  let parsed
+  try {
+    parsed = JSON.parse(rawMap)
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null
+  const assigned = parsed[key]
+  if (
+    !assigned ||
+    !Array.isArray(assigned.models) ||
+    !Number.isInteger(assigned.catalogRevision) ||
+    !Number.isInteger(assigned.connectionRevision)
+  ) {
+    return null
+  }
+  return {
+    catalogRevision: assigned.catalogRevision,
+    credentialRevision: assigned.connectionRevision,
+    connectionKey: key,
+    models: assigned.models.filter(model => typeof model === 'string' && model),
+  }
+}
+
+function parseGrokAllowedModelsSnapshot(cm, connectionKey) {
+  if (!cm) return snapshotFromConfigMapError('missing')
+  const annotations = (cm.metadata && cm.metadata.annotations) || {}
+  const flagEnabled = annotations[GROK_ENABLED_ANNOTATION] === 'true'
+  const assignedKey = assignedCodexConnectionKey(connectionKey)
+  const rawMap = annotations[GROK_CONNECTIONS_ANNOTATION]
+  if (!rawMap) {
+    return {
+      flagEnabled,
+      connectionStatus: 'disconnected',
+      enabledModels: [],
+      staleModels: [],
+      catalogContentHash: annotations[CONTENT_HASH_ANNOTATION] || null,
+    }
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(rawMap)
+  } catch {
+    return snapshotFromConfigMapError('malformed')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return snapshotFromConfigMapError('malformed')
+  }
+  const assigned = parsed[assignedKey]
+  if (!assigned || !Array.isArray(assigned.models)) {
+    return {
+      flagEnabled,
+      connectionStatus: 'disconnected',
+      enabledModels: [],
+      staleModels: [],
+      catalogContentHash: annotations[CONTENT_HASH_ANNOTATION] || null,
+    }
+  }
+  const enabledModels = assigned.models
+    .filter(model => typeof model === 'string' && model.trim())
+    .map(model => `${GROK_PROVIDER}:${model}`)
+  return {
+    flagEnabled,
+    connectionStatus: assigned.status || annotations[GROK_CONNECTION_STATUS_ANNOTATION] || null,
+    catalogRevision: Number.isInteger(assigned.catalogRevision) ? assigned.catalogRevision : null,
+    connectionRevision: Number.isInteger(assigned.connectionRevision)
+      ? assigned.connectionRevision
+      : null,
+    enabledModels,
+    staleModels: [],
+    catalogContentHash: annotations[CONTENT_HASH_ANNOTATION] || null,
+  }
+}
+
+function projectGrokExecution(spec, snapshot) {
+  const targets = collectCodexTargets(spec || {})
+  const brokerTargets = targets.filter(target => target.provider === GROK_PROVIDER)
+  const enabled = new Set(snapshot.enabledModels ?? [])
+  if (snapshot.snapshotError) {
+    return freezeProjection({
+      targets,
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresGrokProxyEgress: false,
+      catalogContentHash: snapshot.catalogContentHash ?? null,
+      catalogRevision: snapshot.catalogRevision ?? null,
+      connectionRevision: snapshot.connectionRevision ?? null,
+      eligibility: 'uncertain',
+      reason: `snapshot_${snapshot.snapshotError}`,
+    })
+  }
+  if (!snapshot.flagEnabled) {
+    return freezeProjection({
+      targets,
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresGrokProxyEgress: false,
+      catalogContentHash: snapshot.catalogContentHash ?? null,
+      catalogRevision: snapshot.catalogRevision ?? null,
+      connectionRevision: snapshot.connectionRevision ?? null,
+      eligibility: 'ineligible',
+      reason: 'flag_off',
+    })
+  }
+  if (brokerTargets.length === 0) {
+    return freezeProjection({
+      targets,
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresGrokProxyEgress: false,
+      catalogContentHash: snapshot.catalogContentHash ?? null,
+      catalogRevision: snapshot.catalogRevision ?? null,
+      connectionRevision: snapshot.connectionRevision ?? null,
+      eligibility: 'ineligible',
+      reason: 'static_only',
+    })
+  }
+  if (snapshot.connectionStatus !== 'connected') {
+    return freezeProjection({
+      targets,
+      eligibleTargets: [],
+      derivedScopes: [],
+      requiresGrokProxyEgress: false,
+      catalogContentHash: snapshot.catalogContentHash ?? null,
+      catalogRevision: snapshot.catalogRevision ?? null,
+      connectionRevision: snapshot.connectionRevision ?? null,
+      eligibility: 'ineligible',
+      reason: `connection_${snapshot.connectionStatus ?? 'unknown'}`,
+    })
+  }
+  const eligibleTargets = brokerTargets.filter(target => {
+    if (!target.model.trim()) return false
+    return enabled.has(`${target.provider}:${target.model}`)
+  })
+  const eligible = eligibleTargets.length > 0
+  return freezeProjection({
+    targets,
+    eligibleTargets,
+    derivedScopes: eligible ? [GROK_EXECUTE_SCOPE] : [],
+    requiresGrokProxyEgress: eligible,
+    catalogContentHash: snapshot.catalogContentHash ?? null,
+    catalogRevision: snapshot.catalogRevision ?? null,
+    connectionRevision: snapshot.connectionRevision ?? null,
+    eligibility: eligible ? 'eligible' : 'ineligible',
+    reason: eligible ? 'eligible' : 'no_eligible_broker_target',
+  })
+}
+
 module.exports = {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   CONTENT_HASH_ANNOTATION,
@@ -398,6 +558,11 @@ module.exports = {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   CODEX_PROVIDER,
   CODEX_EXECUTE_SCOPE,
+  GROK_PROVIDER,
+  GROK_EXECUTE_SCOPE,
+  GROK_ENABLED_ANNOTATION,
+  GROK_CONNECTIONS_ANNOTATION,
+  GROK_CONNECTION_STATUS_ANNOTATION,
   assignedCodexConnectionKey,
   isCodexUnassignedConnectionKey,
   readSubscriptionConnectionRef,
@@ -406,6 +571,9 @@ module.exports = {
   snapshotForAssignedCodexGrant,
   collectCodexTargets,
   projectCodexExecution,
+  parseGrokAllowedModelsSnapshot,
+  projectGrokExecution,
   toPolicyBinding,
+  toGrokPolicyBinding,
   toEligiblePolicyBinding,
 }
