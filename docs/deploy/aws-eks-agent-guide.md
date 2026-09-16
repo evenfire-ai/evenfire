@@ -527,11 +527,12 @@ Human (their own terminal, 8–256 character password stored straight into
 their password manager):
 
 ```bash
+LOCAL=127.0.0.1:18090          # the address the agent's port-forward listens on
 read -r -s -p 'New Evenfire admin password: ' EF_PW; echo
 jq -n --arg u '<admin-username>' --arg e '<admin-email>' --arg p "$EF_PW" \
   '{username:$u,email:$e,password:$p}' \
 | curl -sS -o /dev/null -w 'setup HTTP %{http_code}\n' \
-    -X POST http://127.0.0.1:18090/api/v1/admin/auth/setup \
+    -X POST "http://$LOCAL/api/v1/admin/auth/setup" \
     -H 'content-type: application/json' --data-binary @-
 unset EF_PW
 ```

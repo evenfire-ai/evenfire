@@ -72,14 +72,15 @@ On FAIL, re-run `provision-gfs-runtime.sh` (guide 5.12).
 ## 4. HTTP health
 
 Internal (ask before opening local ports). Each port-forward goes in its own
-terminal:
+terminal. Set `LOCAL` to the loopback address that forward listens on (for the
+first row, `LOCAL=127.0.0.1:18090`):
 
 | Service | Port-forward | Check |
 | --- | --- | --- |
-| control-api | `-n control-plane service/control-api 18090:8090` | `curl -fsS http://127.0.0.1:18090/health` |
-| external-rest-api | `-n profiles service/external-rest-api 18091:8091` | `curl -fsS http://127.0.0.1:18091/health` |
-| rpc-proxy | `-n rpc-proxy service/rpc-proxy 18094:8094` | `curl -fsS http://127.0.0.1:18094/health` |
-| control-ui | `-n control-plane service/control-ui 13000:3000` | `curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:13000/` is `200` or a redirect |
+| control-api | `-n control-plane service/control-api 18090:8090` | `curl -fsS "http://$LOCAL/health"` |
+| external-rest-api | `-n profiles service/external-rest-api 18091:8091` | `curl -fsS "http://$LOCAL/health"` |
+| rpc-proxy | `-n rpc-proxy service/rpc-proxy 18094:8094` | `curl -fsS "http://$LOCAL/health"` |
+| control-ui | `-n control-plane service/control-ui 13000:3000` | `curl -fsS -o /dev/null -w '%{http_code}' "http://$LOCAL/"` is `200` or a redirect |
 
 With ingress live, check the five public HTTPS hostnames instead and confirm TLS
 is valid.
