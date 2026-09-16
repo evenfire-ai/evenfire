@@ -3,6 +3,7 @@ import { config as appConfig } from '../../config'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
+import { parseCodexToolPresentation } from '../../core/orchestration/toolPresentationPolicy'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
 import { TOOL_DISCOVERY_TEXT } from '../../core/reasoning/promptBuilder'
 import { registerDesktopTools } from '../../core/tools/desktopTools'
@@ -15,6 +16,7 @@ import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { PromptCache } from '../../llm/promptCache'
+import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
 import { resolveProviderWorkflowCallerContext } from '../../workflow/providerWorkflowCallerContextClient'
 import { TaskExecutor, type TaskExecutorDeps, executionModeForSource } from '../taskExecutor'
@@ -1680,30 +1682,59 @@ describe('TaskExecutor Codex presentation wiring', () => {
     expect(registry.get('fixture__tool_249')).not.toBeNull()
   })
 
-  it('direct preserves a catalog over32 and does not activate the bridge despite the legacy flag', async () => {
-    const previousMode = appConfig.codexToolPresentation
-    const previousFlag = appConfig.dynamicToolsEnabled
-    appConfig.codexToolPresentation = 'direct'
-    appConfig.dynamicToolsEnabled = true
-    try {
-      const manager = {
-        getAllTools: () =>
-          Array.from({ length: 83 }, (_, i) => ({
-            name: `fixture__tool_${i}`,
-            inputSchema: { type: 'object' },
-          })),
+  it.each(['codex-subscription', 'zai'])(
+    'default direct for %s logs the catalog without a bridge',
+    async primary => {
+      const previousMode = appConfig.codexToolPresentation
+      const previousFlag = appConfig.dynamicToolsEnabled
+      const info = vi.spyOn(logger, 'info').mockImplementation(() => {})
+      appConfig.codexToolPresentation = parseCodexToolPresentation(undefined)
+      appConfig.dynamicToolsEnabled = true
+      try {
+        const manager = {
+          getAllTools: () =>
+            Array.from({ length: 83 }, (_, i) => ({
+              name: `fixture__tool_${i}`,
+              inputSchema: { type: 'object' },
+            })),
+        }
+        const { executor, deps } = makeExecutor(primary, manager)
+        if (primary !== 'codex-subscription') {
+          deps.failover = {
+            policy: { fallbacks: [{ provider: 'codex-subscription', model: 'test-model' }] },
+          } as any
+        }
+        const { registry, loopController, bridge } = await executor.createToolRegistry()
+        expect(bridge).toBeUndefined()
+        const full = registry.listDefinitions()
+        expect(full.length).toBeGreaterThan(83)
+        expect(
+          full.filter((tool: any) =>
+            ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call'].includes(
+              tool.name
+            )
+          )
+        ).toEqual([])
+        expect(await loopController.refreshTools(full)).toEqual(full)
+        expect(info).toHaveBeenCalledWith(
+          {
+            component: 'tool-presentation',
+            mode: 'direct',
+            strategy: 'direct',
+            nativeCount: full.length - 83,
+            mcpCount: 83,
+            presentedCount: full.length,
+            deferredCount: 0,
+          },
+          'Tool presentation selected'
+        )
+      } finally {
+        appConfig.codexToolPresentation = previousMode
+        appConfig.dynamicToolsEnabled = previousFlag
+        info.mockRestore()
       }
-      const { executor } = makeExecutor('codex-subscription', manager)
-      const { registry, loopController, bridge } = await executor.createToolRegistry()
-      expect(bridge).toBeUndefined()
-      const full = registry.listDefinitions()
-      expect(full.length).toBeGreaterThan(83)
-      expect(await loopController.refreshTools(full)).toEqual(full)
-    } finally {
-      appConfig.codexToolPresentation = previousMode
-      appConfig.dynamicToolsEnabled = previousFlag
     }
-  })
+  )
 
   it('rebuilds cached discovery guidance on same-model provider switches, preserving daily snapshot', async () => {
     const previous = appConfig.promptCacheEnabled
