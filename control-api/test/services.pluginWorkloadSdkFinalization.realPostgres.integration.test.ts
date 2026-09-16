@@ -63,6 +63,11 @@ describeRealPostgres('Plugin Workload SDK finalization on real PostgreSQL', () =
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE "${database.replace(/"/g, '""')}"`)
     dbPool = new Pool({ connectionString })
+    // The pool holds idle connections; when afterAll terminates backends
+    // before DROP DATABASE, a client that is still mid-shutdown surfaces a
+    // 57P01 FATAL on the pool. Absorb it so teardown is clean (the pool is
+    // being torn down anyway).
+    dbPool.on('error', () => {})
     await initDb({ connect: () => dbPool.connect() })
   })
 
