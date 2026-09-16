@@ -58,11 +58,6 @@ export function collectRecipeOauthBrokerProviders(spec: Record<string, unknown>)
       if (isPlainObject(step) && isPlainObject(step.agent)) push(step.agent.provider)
     }
   }
-  if (Array.isArray(spec.promptTargets)) {
-    for (const target of spec.promptTargets) {
-      if (isPlainObject(target)) push(target.provider)
-    }
-  }
   return providers
 }
 
@@ -109,11 +104,10 @@ export function readSubscriptionConnectionRef(input: {
   return { ok: true, connectionKey: readHostCodexConnectionRef(canonical) }
 }
 
-export function attestRequestedBrokerProvider(input: {
+export function attestLiveBrokerTarget(input: {
   requestedProvider: string
   liveBrokerProviders: string[]
-  liveConnectionRef: string
-}): SubscriptionGrantAttestResult {
+}): Exclude<SubscriptionGrantAttestResult, { ok: true }> | { ok: true; provider: string } {
   if (!isOauthBroker(input.requestedProvider)) {
     return {
       ok: false,
@@ -128,6 +122,16 @@ export function attestRequestedBrokerProvider(input: {
       message: 'requested oauth-broker provider is not a live target on this resource',
     }
   }
+  return { ok: true, provider: input.requestedProvider }
+}
+
+export function attestRequestedBrokerProvider(input: {
+  requestedProvider: string
+  liveBrokerProviders: string[]
+  liveConnectionRef: string
+}): SubscriptionGrantAttestResult {
+  const target = attestLiveBrokerTarget(input)
+  if (!target.ok) return target
   const connectionKey = readHostCodexConnectionRef(input.liveConnectionRef)
   if (
     isCodexUnassignedConnectionKey(connectionKey) ||

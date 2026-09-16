@@ -28,7 +28,11 @@ import {
   pluginWorkloadSdkSpendOutcomeExists,
   promoteReservedOauthBrokerProviderAttempt,
 } from './pluginWorkloadSdkDb.js'
-import { attestRequestedBrokerProvider } from './subscriptionGrantIdentity.js'
+import {
+  attestLiveBrokerTarget,
+  attestRequestedBrokerProvider,
+  readSubscriptionConnectionRef,
+} from './subscriptionGrantIdentity.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
@@ -92,14 +96,13 @@ export type LlmProviderAttemptAuthorizerDeps = {
   getModelState: typeof getCodexCatalogModelState
   resolveConnectionKey: (hostRef: string) => Promise<string>
   /**
-   * Live oauth-broker targets on the Host/recipe. When omitted, authorize
-   * treats the requested provider as the only live target so existing unit
-   * tests that mock only the connection key keep working. Production routes
-   * must pass the K8s-attested assignment.
+   * Live oauth-broker targets on the Host/recipe. Required: a missing
+   * assignment must not fall back to `request.provider` (that made D6 a no-op).
    */
-  resolveAssignment?: (hostRef: string) => Promise<{
+  resolveAssignment: (hostRef: string) => Promise<{
     liveBrokerProviders: string[]
     liveConnectionRef: string
+    annotations?: Record<string, string>
   }>
   evaluateBudget: typeof evaluateBudgetCheck
   getActiveReservation: typeof getActiveReservation
@@ -115,6 +118,10 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   getConnection: getSafeCodexSubscriptionConnection,
   getModelState: getCodexCatalogModelState,
   resolveConnectionKey: async () => CODEX_UNASSIGNED_CONNECTION_KEY,
+  resolveAssignment: async () => ({
+    liveBrokerProviders: [],
+    liveConnectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+  }),
   evaluateBudget: evaluateBudgetCheck,
   getActiveReservation,
   getMaxGeneration: getMaxLlmProviderAttemptGeneration,
@@ -264,16 +271,29 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const assignment = resolvedDeps.resolveAssignment
-    ? await resolvedDeps.resolveAssignment(caller.hostRef)
-    : {
-        liveBrokerProviders: [request.provider],
-        liveConnectionRef: await resolvedDeps.resolveConnectionKey(caller.hostRef),
-      }
+  const assignment = await resolvedDeps.resolveAssignment(caller.hostRef)
+  const liveTarget = attestLiveBrokerTarget({
+    requestedProvider: request.provider,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+  })
+  if (!liveTarget.ok) {
+    throw new LlmProviderAttemptAuthorizeError(liveTarget.code, liveTarget.message)
+  }
+  let resolvedConnectionRef = assignment.liveConnectionRef
+  if (assignment.annotations) {
+    const read = readSubscriptionConnectionRef({
+      provider: request.provider,
+      annotations: assignment.annotations,
+    })
+    if (!read.ok) {
+      throw new LlmProviderAttemptAuthorizeError(read.code, read.message)
+    }
+    resolvedConnectionRef = read.connectionKey
+  }
   const attested = attestRequestedBrokerProvider({
     requestedProvider: request.provider,
     liveBrokerProviders: assignment.liveBrokerProviders,
-    liveConnectionRef: assignment.liveConnectionRef,
+    liveConnectionRef: resolvedConnectionRef,
   })
   if (!attested.ok) {
     throw new LlmProviderAttemptAuthorizeError(attested.code, attested.message)

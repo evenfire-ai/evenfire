@@ -116,13 +116,20 @@ function deps(
   overrides: Partial<LlmProviderAttemptAuthorizerDeps> = {}
 ): LlmProviderAttemptAuthorizerDeps {
   const db = { query: vi.fn() }
+  const resolveConnectionKey =
+    overrides.resolveConnectionKey ?? vi.fn().mockResolvedValue('deployment-default')
+  const resolveAssignment =
+    overrides.resolveAssignment ??
+    (async (hostRef: string) => ({
+      liveBrokerProviders: ['codex-subscription'],
+      liveConnectionRef: await resolveConnectionKey(hostRef),
+    }))
   return {
     enabled: true,
     db,
     withTransaction: async work => work(db as never),
     getConnection: vi.fn().mockResolvedValue(connection()),
     getModelState: vi.fn().mockResolvedValue({ enabled: true, stale: false }),
-    resolveConnectionKey: vi.fn().mockResolvedValue('deployment-default'),
     evaluateBudget: vi.fn().mockResolvedValue({ allowed: true, reservationIds: ['res-1'] }),
     getActiveReservation: vi.fn().mockResolvedValue({ id: 'res-1' }),
     getMaxGeneration: vi.fn().mockResolvedValue(0),
@@ -136,6 +143,8 @@ function deps(
       claims: { jti: 'jti-ticket' },
     }),
     ...overrides,
+    resolveConnectionKey,
+    resolveAssignment,
   }
 }
 
@@ -500,14 +509,14 @@ describe('authorizeLlmProviderAttempt', () => {
   })
 
   it('rejects an unassigned Host connectionRef as unassigned_connection', async () => {
-    await expect(
-      authorizeLlmProviderAttempt(claims(), body(), {
-        ...current,
-        resolveConnectionKey: async () => 'unassigned',
-      })
-    ).rejects.toMatchObject({ code: 'unassigned_connection' })
-    expect(current.getConnection).not.toHaveBeenCalled()
-    expect(current.insertAttempt).not.toHaveBeenCalled()
+    const unassigned = deps({
+      resolveConnectionKey: async () => 'unassigned',
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), body(), unassigned)).rejects.toMatchObject({
+      code: 'unassigned_connection',
+    })
+    expect(unassigned.getConnection).not.toHaveBeenCalled()
+    expect(unassigned.insertAttempt).not.toHaveBeenCalled()
   })
 
   it('fails closed for every Host on a revoked grant and leaves another grant usable', async () => {

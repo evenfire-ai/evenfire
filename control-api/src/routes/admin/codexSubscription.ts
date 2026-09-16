@@ -64,7 +64,7 @@ const BASE = SUBSCRIPTION_ADMIN_BASE
 
 export function mountSubscriptionAdminRoutes(
   router: Router,
-  options: { providerId: string; enabled: () => boolean }
+  options: { providerIds: readonly string[]; enabled: (providerId: string) => boolean }
 ): void {
   router.use(SUBSCRIPTION_ADMIN_BASE, (req: Request, res: Response, next: NextFunction) => {
     const providerId = typeof req.params.providerId === 'string' ? req.params.providerId : ''
@@ -72,11 +72,11 @@ export function mountSubscriptionAdminRoutes(
       res.status(404).json({ error: 'not_found' })
       return
     }
-    if (providerId !== options.providerId) {
+    if (!options.providerIds.includes(providerId)) {
       res.status(404).json({ error: 'not_found' })
       return
     }
-    if (!options.enabled()) {
+    if (!options.enabled(providerId)) {
       res.status(404).json({ error: 'disabled' })
       return
     }
@@ -218,8 +218,9 @@ export function createAdminCodexSubscriptionRouter(
 ): Router {
   const router = Router()
   mountSubscriptionAdminRoutes(router, {
-    providerId: 'codex-subscription',
-    enabled: () => config.codexSubscriptionEnabled,
+    providerIds: ['codex-subscription'],
+    enabled: providerId =>
+      providerId === 'codex-subscription' ? config.codexSubscriptionEnabled : false,
   })
 
   async function listHostsOrUnavailable(): Promise<HostRecord[] | null> {

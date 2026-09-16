@@ -8,7 +8,10 @@ import {
   isCodexUnassignedConnectionKey,
 } from './codexSubscriptionConnection.js'
 import { K8sConflictError } from './resourceService.js'
-import { readSubscriptionConnectionRef } from './subscriptionGrantIdentity.js'
+import {
+  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  readSubscriptionConnectionRef,
+} from './subscriptionGrantIdentity.js'
 
 export class RecipeCodexGrantIdentityError extends Error {
   constructor(
@@ -98,6 +101,7 @@ export async function publishRecipeGrantIdentity(input: {
   const nextAnnotations = {
     ...annotations,
     [CODEX_CONNECTION_REF_ANNOTATION]: next === CODEX_UNASSIGNED_CONNECTION_KEY ? '' : next,
+    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: next === CODEX_UNASSIGNED_CONNECTION_KEY ? '' : next,
   }
   const spec = asRecord(current.spec) ?? {}
   const labels = stringMap(current.metadata?.labels)

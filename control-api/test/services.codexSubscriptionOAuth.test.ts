@@ -377,6 +377,35 @@ describe('codex subscription OAuth broker', () => {
     expect(repos.expireState).toHaveBeenCalled()
   })
 
+  it('does not follow OAuth token redirects and treats 3xx as provider_unavailable', async () => {
+    const handle = JSON.stringify({ deviceAuthId: 'deviceauth_secret', userCode: 'ABCD-EFGH' })
+    repos.peekState.mockResolvedValue({
+      safe: {
+        state: 'dev-redir',
+        flow: 'device',
+        intent: 'connect',
+        status: 'pending',
+        expiresAt: new Date(Date.now() + 60_000),
+        consumedAt: null,
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      deviceCode: handle,
+    })
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 307,
+      json: async () => ({}),
+    })
+    await expect(pollCodexDevice(deps(fetchFn), 'dev-redir')).rejects.toMatchObject({
+      code: 'provider_unavailable',
+    })
+    expect(fetchFn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ redirect: 'manual' })
+    )
+  })
+
   it('exchanges a completed device poll through the Codex device callback', async () => {
     const handle = JSON.stringify({ deviceAuthId: 'deviceauth_secret', userCode: 'ABCD-EFGH' })
     repos.peekState.mockResolvedValue({

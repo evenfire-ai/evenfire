@@ -4,7 +4,10 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import type { K8sGateway } from '../../k8s.js'
 import { requireMcpHostJwt } from '../../middleware/mcpHostJwtAuth.js'
 import { rootLogger } from '../../observability/logger.js'
-import { readHostCodexConnectionRef } from '../../services/codexSubscriptionConnection.js'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  readHostCodexConnectionRef,
+} from '../../services/codexSubscriptionConnection.js'
 import {
   LlmProviderAttemptAuthorizeError,
   authorizeLlmProviderAttempt,
@@ -47,6 +50,7 @@ function sendAuthorizeError(res: Response, err: unknown): void {
 export type LiveBrokerAssignment = {
   liveBrokerProviders: string[]
   liveConnectionRef: string
+  annotations?: Record<string, string>
 }
 
 function throwAttestError(result: { ok: false; code: string; message: string }): never {
@@ -76,17 +80,11 @@ export async function resolveHostAssignedAssignment(
       )) as { metadata?: { annotations?: Record<string, string> }; spec?: Record<string, unknown> }
       const spec = recipe?.spec && typeof recipe.spec === 'object' ? recipe.spec : {}
       const liveBrokerProviders = collectRecipeOauthBrokerProviders(spec)
-      const annotationProvider =
-        liveBrokerProviders[0] ??
-        (typeof (spec.agent as { provider?: string } | undefined)?.provider === 'string'
-          ? String((spec.agent as { provider: string }).provider)
-          : 'codex-subscription')
-      const read = readSubscriptionConnectionRef({
-        provider: annotationProvider,
+      return {
+        liveBrokerProviders,
+        liveConnectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
         annotations: recipe?.metadata?.annotations,
-      })
-      if (!read.ok) throwAttestError(read)
-      return { liveBrokerProviders, liveConnectionRef: read.connectionKey }
+      }
     } catch (err) {
       if (err instanceof LlmProviderAttemptAuthorizeError) throw err
       throw new LlmProviderAttemptAuthorizeError(
@@ -123,7 +121,13 @@ export async function resolveHostAssignedConnectionKey(
   hostRef: string
 ): Promise<string> {
   const assignment = await resolveHostAssignedAssignment(gateway, hostRef)
-  return assignment.liveConnectionRef
+  if (!assignment.annotations) return assignment.liveConnectionRef
+  const read = readSubscriptionConnectionRef({
+    provider: assignment.liveBrokerProviders[0] ?? 'codex-subscription',
+    annotations: assignment.annotations,
+  })
+  if (!read.ok) throwAttestError(read)
+  return read.connectionKey
 }
 
 export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {

@@ -99,12 +99,21 @@ describe('readSubscriptionConnectionRef', () => {
 })
 
 describe('collectRecipeOauthBrokerProviders', () => {
-  it('includes Codex promptTargets when the recipe agent is static', () => {
+  it('includes Codex step agents when the recipe agent is static', () => {
+    expect(
+      collectRecipeOauthBrokerProviders({
+        agent: { provider: 'openai' },
+        steps: [{ agent: { provider: 'codex-subscription' } }],
+      })
+    ).toEqual(['codex-subscription'])
+  })
+
+  it('does not treat promptTargets as a recipe spec field', () => {
     expect(
       collectRecipeOauthBrokerProviders({
         agent: { provider: 'openai' },
         promptTargets: [{ provider: 'codex-subscription' }],
       })
-    ).toEqual(['codex-subscription'])
+    ).toEqual([])
   })
 })

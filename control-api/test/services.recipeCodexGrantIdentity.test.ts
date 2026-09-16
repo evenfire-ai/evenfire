@@ -115,7 +115,10 @@ describe('recipe Codex grant identity', () => {
       {
         metadata: {
           labels: { app: 'recipe' },
-          annotations: { 'clerum.io/codex-connection-ref': '' },
+          annotations: {
+            'clerum.io/codex-connection-ref': '',
+            'clerum.io/subscription-connection-ref': '',
+          },
           resourceVersion: '9',
         },
         spec: { pluginWorkloadSdk: { family: 'promptBridge' } },

@@ -851,6 +851,7 @@ async function post(
       method: 'POST',
       headers: { 'content-type': contentType, accept: 'application/json' },
       body,
+      redirect: 'manual',
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
     })
   } catch (err) {
@@ -858,6 +859,16 @@ async function post(
     throw new CodexSubscriptionOAuthError(
       'provider_unavailable',
       'Codex OAuth upstream unreachable'
+    )
+  }
+  if (response.status >= 300 && response.status < 400) {
+    log.warn(
+      { event: 'codex_oauth_redirect_denied', status: response.status },
+      'Codex OAuth upstream returned a redirect'
+    )
+    throw new CodexSubscriptionOAuthError(
+      'provider_unavailable',
+      'Codex OAuth upstream returned a redirect'
     )
   }
   const json = (await response.json().catch(() => ({}))) as Record<string, unknown>

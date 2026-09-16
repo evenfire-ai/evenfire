@@ -1265,8 +1265,17 @@ function readRequestedCodexRecipeGrant(body: RecipeBody): string {
     provider: 'codex-subscription',
     annotations: body.metadata?.annotations,
   })
-  if (!result.ok) return CODEX_UNASSIGNED_CONNECTION_KEY
+  if (!result.ok) {
+    throw new RecipeGrantAnnotationDisagreeError(result.message)
+  }
   return result.connectionKey
+}
+
+class RecipeGrantAnnotationDisagreeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'RecipeGrantAnnotationDisagreeError'
+  }
 }
 
 function validateCodexRecipeGrant(
@@ -1275,7 +1284,21 @@ function validateCodexRecipeGrant(
 ): ValidationError[] {
   if (!recipeUsesCodexBroker(body.spec)) return []
   if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
-  const key = readRequestedCodexRecipeGrant(body)
+  let key: string
+  try {
+    key = readRequestedCodexRecipeGrant(body)
+  } catch (err) {
+    if (err instanceof RecipeGrantAnnotationDisagreeError) {
+      return [
+        {
+          field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
+          rule: 'subscriptionAnnotationsDisagree',
+          message: err.message,
+        },
+      ]
+    }
+    throw err
+  }
   if (isCodexUnassignedConnectionKey(key)) {
     return [
       {
@@ -1314,20 +1337,20 @@ function sanitizeRecipeCodexAnnotation(
   currentSpec?: Record<string, unknown>
 ): Record<string, string> {
   const incoming = readRequestedCodexRecipeGrant(body)
+  const mirrored = (key: string) => ({
+    [CODEX_CONNECTION_REF_ANNOTATION]: key,
+    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
+  })
   if (recipeUsesCodexBroker(body.spec)) {
     if (!bodyHasCodexGrantAnnotation(body)) return {}
-    return {
-      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
-    }
+    return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
   const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
   if (leavingCodex) {
-    return { [CODEX_CONNECTION_REF_ANNOTATION]: '' }
+    return mirrored('')
   }
   if (bodyHasCodexGrantAnnotation(body)) {
-    return {
-      [CODEX_CONNECTION_REF_ANNOTATION]: isCodexUnassignedConnectionKey(incoming) ? '' : incoming,
-    }
+    return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
   void currentAnnotations
   return {}
