@@ -69,6 +69,10 @@ export interface Config {
   codexSubscriptionEnabled: boolean
   // Server-owned Codex proxy URL. Callers cannot override this per request.
   codexProxyRuntimeBaseUrl: string
+  grokSubscriptionEnabled: boolean
+  grokProxyRuntimeBaseUrl: string
+  grokPolicyRevision: number
+  grokPolicyHash: string
   // Explicit authorize override for tests/dev. Host chat ignores an empty hash
   // and binds policyRevision/policyHash from the allowlist ConfigMap instead.
   codexPolicyRevision: number
@@ -670,6 +674,13 @@ export const config: Config = {
   // ConfigMap. Set both env vars together only as a test/dev override.
   codexPolicyRevision: parseInt(getEnv('CODEX_POLICY_REVISION', '1')!, 10),
   codexPolicyHash: getEnv('CODEX_POLICY_HASH', '')!,
+  grokSubscriptionEnabled: process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED === 'true',
+  grokProxyRuntimeBaseUrl: getEnv(
+    'GROK_LLM_PROXY_RUNTIME_URL',
+    'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
+  )!,
+  grokPolicyRevision: parseInt(getEnv('GROK_POLICY_REVISION', '1')!, 10),
+  grokPolicyHash: getEnv('GROK_POLICY_HASH', '')!,
 
   // Dev mode MCP servers
   devMcpServers: devMode ? parseDevMcpServers() : undefined,

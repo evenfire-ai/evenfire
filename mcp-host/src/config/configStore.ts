@@ -35,6 +35,7 @@ import {
   CODEX_CONNECTIONS_ANNOTATION,
   CONNECTION_REVISION_ANNOTATION,
   type CodexPolicyBinding,
+  toGrokPolicyBinding,
   toPolicyBinding,
 } from '@clerum/codex-catalog-projection'
 import { assignedConnectionRef } from '../llm/hostLlmBinding'
@@ -65,7 +66,7 @@ export const PROVIDER_ENV_NAME = Object.fromEntries(
     p,
     primarySlot(descriptorFor(p)).envName,
   ])
-) as Record<Exclude<LlmProvider, 'codex-subscription'>, string>
+) as Record<Exclude<LlmProvider, 'codex-subscription' | 'grok-subscription'>, string>
 
 /**
  * Every provider credential env var name across ALL providers and ALL their
@@ -249,6 +250,8 @@ export class ConfigStore {
   private allowlistMissingWarned = false
   /** Catalog/credential pair from allowlist CM annotations, or null. */
   private codexBinding: CodexPolicyBinding | null = null
+  /** Grok catalog/credential pair from grok-connections, or null. */
+  private grokBinding: CodexPolicyBinding | null = null
 
   constructor(opts: ConfigStoreOptions) {
     this.opts = opts
@@ -490,6 +493,15 @@ export class ConfigStore {
     return this.codexBinding
   }
 
+  /**
+   * Live Grok catalog/credential revisions from `clerum.io/grok-connections`.
+   * Null when the CM is absent, the Grok map is missing, or the assigned key
+   * is unassigned. Never reads Codex annotations.
+   */
+  grokPolicyBinding(): CodexPolicyBinding | null {
+    return this.grokBinding
+  }
+
   // ─── Bootstrap (initial list) ────────────────────────────────────────
 
   private async bootstrapLlmSecret(): Promise<void> {
@@ -559,10 +571,15 @@ export class ConfigStore {
     data?: Record<string, string>
     metadata?: { annotations?: Record<string, string> }
   }): boolean {
-    const nextBinding = toPolicyBinding(cm, assignedConnectionRef(this.opts.connectionRef))
-    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding)
-    const bindingChanged = !codexBindingsEqual(this.codexBinding, nextBinding)
+    const assigned = assignedConnectionRef(this.opts.connectionRef)
+    const nextBinding = toPolicyBinding(cm, assigned)
+    const nextGrokBinding = toGrokPolicyBinding(cm, assigned)
+    const modelsChanged = this.applyAllowlistData(cm.data ?? {}, nextBinding, nextGrokBinding)
+    const bindingChanged =
+      !codexBindingsEqual(this.codexBinding, nextBinding) ||
+      !codexBindingsEqual(this.grokBinding, nextGrokBinding)
     this.codexBinding = nextBinding
+    this.grokBinding = nextGrokBinding
     return modelsChanged || bindingChanged
   }
 
@@ -578,7 +595,8 @@ export class ConfigStore {
    */
   private applyAllowlistData(
     data: Record<string, string>,
-    binding: CodexPolicyBinding | null = null
+    binding: CodexPolicyBinding | null = null,
+    grokBinding: CodexPolicyBinding | null = null
   ): boolean {
     const next = new Map<string, AllowedModelEntry[]>()
     for (const [provider, raw] of Object.entries(data)) {
@@ -637,6 +655,14 @@ export class ConfigStore {
         // models[]. Keep the flat catalog. A map entry that omits models[]
         // is parsed as [] and fail-closes here.
       }
+      if (provider === 'grok-subscription') {
+        if (!grokBinding) {
+          entries = []
+        } else if (Array.isArray(grokBinding.models)) {
+          const allowed = new Set(grokBinding.models)
+          entries = entries.filter(entry => allowed.has(entry.model))
+        }
+      }
       next.set(provider, entries)
     }
     const changed = !allowlistMapsEqual(this.allowedModelsMap, next)
@@ -655,6 +681,7 @@ export class ConfigStore {
     this.allowlistDelivered = false
     this.allowedModelsMap = new Map()
     this.codexBinding = null
+    this.grokBinding = null
     if (!this.allowlistMissingWarned) {
       this.allowlistMissingWarned = true
       llmAllowlistMissingTotal.inc()

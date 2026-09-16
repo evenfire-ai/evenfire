@@ -106,7 +106,14 @@ function makeFakeCoreApi(initial: {
 
 function build(opts: {
   llmSecretRef?: string | null
-  provider?: 'openai' | 'claude' | 'zai' | 'bailian' | 'codex-subscription' | null
+  provider?:
+    | 'openai'
+    | 'claude'
+    | 'zai'
+    | 'bailian'
+    | 'codex-subscription'
+    | 'grok-subscription'
+    | null
   connectionRef?: string | null
   secrets?: Record<string, Record<string, string>>
   configMaps?: Record<string, Record<string, string>>
@@ -827,6 +834,51 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.allowedModels().get('codex-subscription')).toEqual([{ model: 'gpt-5.1' }])
     expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
     expect(store.codexPolicyBinding()?.models).toEqual(['gpt-5.1'])
+  })
+
+  it('exposes Grok catalog/credential revisions from grok-connections only', async () => {
+    const built = build({
+      provider: 'grok-subscription',
+      connectionRef: 'team-grok',
+      secrets: { 'chatllm-api-keys': { 'openai-api-key': 'sk' } },
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: {
+        [ALLOWLIST_CM]: {
+          'grok-subscription': JSON.stringify([{ model: 'grok-4.6' }, { model: 'grok-4.5' }]),
+          'codex-subscription': JSON.stringify([{ model: 'gpt-5.1' }]),
+        },
+      },
+      configMapAnnotations: {
+        [ALLOWLIST_CM]: {
+          'clerum.io/catalog-revision': '99',
+          'clerum.io/connection-revision': '88',
+          'clerum.io/codex-connections': JSON.stringify({
+            'team-grok': {
+              catalogRevision: 99,
+              connectionRevision: 88,
+              models: ['gpt-5.1'],
+            },
+          }),
+          'clerum.io/grok-connections': JSON.stringify({
+            'team-grok': {
+              catalogRevision: 5,
+              connectionRevision: 2,
+              models: ['grok-4.6'],
+            },
+          }),
+        },
+      },
+    })
+    store = built.store
+    await store.start()
+    expect(store.grokPolicyBinding()).toEqual({
+      catalogRevision: 5,
+      credentialRevision: 2,
+      connectionKey: 'team-grok',
+      models: ['grok-4.6'],
+    })
+    expect(store.allowedModels().get('grok-subscription')).toEqual([{ model: 'grok-4.6' }])
+    expect(store.codexPolicyBinding()?.catalogRevision).toBe(99)
   })
 
   it('does not inherit another grant when the assigned connection is missing from the map', async () => {
