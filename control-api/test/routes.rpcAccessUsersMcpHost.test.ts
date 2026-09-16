@@ -60,9 +60,9 @@ vi.mock('../src/middleware/rpcAccessAuth.js', () => ({
       next: () => void
     ) => {
       req.rpcAuth = {
-        ...req.rpcAuth,
         sub: req.params.userId,
         hostRefs: [req.params.hostRef],
+        ...req.rpcAuth,
       }
       next()
     },
@@ -74,20 +74,49 @@ vi.mock('../src/middleware/rpcAccessAuth.js', () => ({
       next: () => void
     ) => {
       req.rpcAuth = {
-        ...req.rpcAuth,
         sub: req.params.userId,
         hostRefs: [req.params.hostRef],
+        ...req.rpcAuth,
       }
       next()
     },
-  requireRpcTokenUserMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRpcTokenUserMatch:
+    (paramName = 'userId') =>
+    (
+      req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
+      res: { status: (status: number) => { json: (body: unknown) => void } },
+      next: () => void
+    ) => {
+      if (req.rpcAuth?.sub !== req.params[paramName]) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      next()
+    },
   requireRpcTokenTeamMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
-  requireRpcTokenHostMatch: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRpcTokenHostMatch:
+    (paramName = 'hostRef') =>
+    (
+      req: { params: Record<string, string>; rpcAuth?: Record<string, unknown> },
+      res: { status: (status: number) => { json: (body: unknown) => void } },
+      next: () => void
+    ) => {
+      const hostRefs = req.rpcAuth?.hostRefs
+      if (!Array.isArray(hostRefs) || !hostRefs.includes(req.params[paramName])) {
+        res.status(403).json({ error: 'Forbidden' })
+        return
+      }
+      next()
+    },
 }))
 
 type HostCRD = { metadata: { name: string }; spec?: { enabled?: boolean } }
 
-function buildApp(hosts: HostCRD[], rpcAuth?: { teamId?: string }, bindingBudgetMs?: number) {
+function buildApp(
+  hosts: HostCRD[],
+  rpcAuth?: { teamId?: string; sub?: string; hostRefs?: string[] },
+  bindingBudgetMs?: number
+) {
   const gatewayStub = {
     listResource: vi.fn(async () => hosts),
     getResource: vi.fn(async () => ({}) as never),
@@ -340,27 +369,225 @@ describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef — happy path', () =
 })
 
 describe('GET /rpc/access/users/:userId/mcp-hosts/:hostRef/artifact-read', () => {
-  it('uses the shared authenticated user and canonical Host bucket', async () => {
+  beforeEach(() => {
+    rateLimiterMock.checkAndIncrement.mockReset()
+    rateLimiterMock.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+    svc.getUserAgents.mockReset()
+  })
+
+  it('charges subject admission before authorization and the canonical Host bucket after it', async () => {
     const userId = 'user-a'
     const hostRef = 'chatllm'
     svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
+    const { app, gatewayStub } = buildApp([
+      { metadata: { name: hostRef }, spec: { enabled: true } },
+    ])
+
+    const order: string[] = []
+    rateLimiterMock.checkAndIncrement.mockImplementation(async (key: string) => {
+      order.push(`limit:${key}`)
+      return {
+        allowed: true,
+        remaining: 29,
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+        count: 1,
+      }
+    })
+    svc.getUserAgents.mockImplementation(async () => {
+      order.push('authorize:directory')
+      return { userId, agentNames: [hostRef] }
+    })
+    gatewayStub.listResource.mockImplementation(async () => {
+      order.push('authorize:kubernetes')
+      return [{ metadata: { name: hostRef }, spec: { enabled: true } }]
+    })
+
+    await request(app)
+      .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
+      .expect(200)
+
+    expect(order).toEqual([
+      `limit:host-artifact-pre-admission:${userId}`,
+      'authorize:directory',
+      'authorize:kubernetes',
+      `limit:host-artifact-read:${userId}:${hostRef}`,
+    ])
+  })
+
+  it('denies request 31 before any additional expensive Host authorization', async () => {
+    const userId = 'user-a'
+    const hostRef = 'chatllm'
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
+    const { app, gatewayStub } = buildApp([
+      { metadata: { name: hostRef }, spec: { enabled: true } },
+    ])
+    const counts = new Map<string, number>()
+    rateLimiterMock.checkAndIncrement.mockImplementation(async (key: string, max: number) => {
+      const count = (counts.get(key) ?? 0) + 1
+      counts.set(key, count)
+      return {
+        allowed: count <= max,
+        remaining: Math.max(0, max - count),
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+        count,
+      }
+    })
+
+    const statuses: number[] = []
+    for (let attempt = 1; attempt <= 31; attempt += 1) {
+      const response = await request(app).get(
+        `/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`
+      )
+      statuses.push(response.status)
+    }
+
+    expect({
+      statuses: [statuses[0], statuses[29], statuses[30]],
+      subjectAdmissionCalls: counts.get(`host-artifact-pre-admission:${userId}`),
+      canonicalHostCalls: counts.get(`host-artifact-read:${userId}:${hostRef}`),
+      directoryLookups: svc.getUserAgents.mock.calls.length,
+      kubernetesHostLists: gatewayStub.listResource.mock.calls.length,
+    }).toEqual({
+      statuses: [200, 200, 429],
+      subjectAdmissionCalls: 31,
+      canonicalHostCalls: 30,
+      directoryLookups: 30,
+      kubernetesHostLists: 30,
+    })
+  })
+
+  it('shares one subject budget across retained stale signed Host refs', async () => {
+    const userId = 'user-stale'
+    const staleRefs = ['deleted-host-a', 'deleted-host-b']
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: staleRefs })
+    const { app, gatewayStub } = buildApp([], { sub: userId, hostRefs: staleRefs })
+    const counts = new Map<string, number>()
+    rateLimiterMock.checkAndIncrement.mockImplementation(async (key: string, max: number) => {
+      const count = (counts.get(key) ?? 0) + 1
+      counts.set(key, count)
+      return {
+        allowed: count <= max,
+        remaining: Math.max(0, max - count),
+        resetMs: Date.now() + 60_000,
+        windowStartMs: Date.now(),
+        count,
+      }
+    })
+
+    const statuses: number[] = []
+    for (let attempt = 1; attempt <= 31; attempt += 1) {
+      const hostRef = staleRefs[(attempt - 1) % staleRefs.length]
+      const response = await request(app).get(
+        `/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`
+      )
+      statuses.push(response.status)
+    }
+
+    expect({
+      statuses: [statuses[0], statuses[29], statuses[30]],
+      subjectAdmissionCalls: counts.get(`host-artifact-pre-admission:${userId}`),
+      canonicalHostBuckets: [...counts.keys()].filter(key => key.startsWith('host-artifact-read:')),
+      directoryLookups: svc.getUserAgents.mock.calls.length,
+      kubernetesHostLists: gatewayStub.listResource.mock.calls.length,
+    }).toEqual({
+      statuses: [403, 403, 429],
+      subjectAdmissionCalls: 31,
+      canonicalHostBuckets: [],
+      directoryLookups: 30,
+      kubernetesHostLists: 30,
+    })
+  })
+
+  it('does not charge admission for user or signed-Host mismatch', async () => {
     rateLimiterMock.checkAndIncrement.mockResolvedValue({
-      allowed: false,
+      allowed: true,
+      remaining: 29,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+      count: 1,
+    })
+    const { app } = buildApp([], { sub: 'user-a', hostRefs: ['host-a', 'host-b'] })
+
+    await request(app).get('/rpc/access/users/user-b/mcp-hosts/host-a/artifact-read').expect(403)
+    await request(app)
+      .get('/rpc/access/users/user-a/mcp-hosts/not-signed/artifact-read')
+      .expect(403)
+
+    expect(rateLimiterMock.checkAndIncrement).not.toHaveBeenCalled()
+    expect(svc.getUserAgents).not.toHaveBeenCalled()
+  })
+
+  it('keeps subject budgets isolated while canonical Host buckets remain subject+Host scoped', async () => {
+    const hostA = 'host-a'
+    const hostB = 'host-b'
+    svc.getUserAgents.mockImplementation(async (userId: string) => ({
+      userId,
+      agentNames: [hostA, hostB],
+    }))
+    const hosts = [
+      { metadata: { name: hostA }, spec: { enabled: true } },
+      { metadata: { name: hostB }, spec: { enabled: true } },
+    ]
+    const appA = buildApp(hosts, { sub: 'subject-a', hostRefs: [hostA, hostB] })
+    const appB = buildApp(hosts, { sub: 'subject-b', hostRefs: [hostA] })
+
+    await request(appA.app)
+      .get(`/rpc/access/users/subject-a/mcp-hosts/${hostA}/artifact-read`)
+      .expect(200)
+    await request(appA.app)
+      .get(`/rpc/access/users/subject-a/mcp-hosts/${hostB}/artifact-read`)
+      .expect(200)
+    await request(appB.app)
+      .get(`/rpc/access/users/subject-b/mcp-hosts/${hostA}/artifact-read`)
+      .expect(200)
+
+    const keys = rateLimiterMock.checkAndIncrement.mock.calls.map(([key]) => key)
+    expect(keys).toEqual([
+      'host-artifact-pre-admission:subject-a',
+      'host-artifact-read:subject-a:host-a',
+      'host-artifact-pre-admission:subject-a',
+      'host-artifact-read:subject-a:host-b',
+      'host-artifact-pre-admission:subject-b',
+      'host-artifact-read:subject-b:host-a',
+    ])
+  })
+
+  it('preserves the canonical downstream 429 and Retry-After response', async () => {
+    const userId = 'user-a'
+    const hostRef = 'chatllm'
+    svc.getUserAgents.mockResolvedValue({ userId, agentNames: [hostRef] })
+    const { app } = buildApp([{ metadata: { name: hostRef }, spec: { enabled: true } }])
+    rateLimiterMock.checkAndIncrement.mockImplementation(async (key: string) => ({
+      allowed: !key.startsWith('host-artifact-read:'),
       remaining: 0,
       resetMs: Date.now() + 60_000,
       windowStartMs: Date.now(),
       count: 31,
-    })
-    const { app } = buildApp([{ metadata: { name: hostRef }, spec: { enabled: true } }])
+    }))
 
     await request(app)
       .get(`/rpc/access/users/${userId}/mcp-hosts/${hostRef}/artifact-read`)
       .expect(429)
-      .expect(({ body }) => {
+      .expect(({ body, headers }) => {
         expect(body.error).toBe('Too Many Requests')
+        expect(headers['retry-after']).toBeDefined()
       })
 
-    expect(rateLimiterMock.checkAndIncrement).toHaveBeenCalledWith(
+    expect(rateLimiterMock.checkAndIncrement).toHaveBeenNthCalledWith(
+      1,
+      `host-artifact-pre-admission:${userId}`,
+      30
+    )
+    expect(rateLimiterMock.checkAndIncrement).toHaveBeenNthCalledWith(
+      2,
       `host-artifact-read:${userId}:${hostRef}`,
       30
     )
