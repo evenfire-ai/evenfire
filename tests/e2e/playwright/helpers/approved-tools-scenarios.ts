@@ -28,6 +28,7 @@ export type UpstreamEvidence = {
   deniedResponses: number
   requests: Array<{
     definitionCount: number
+    explicitNonStrictCount: number
     definitionBytes: number
     inputBytes: number
     connectorDefinitionCount: number
