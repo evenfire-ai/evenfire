@@ -54,6 +54,9 @@ function baseController() {
     grantsError: null,
     loadingGrants: false,
     refreshGrants: vi.fn(),
+    inheritedAccess: [],
+    loadingInheritedAccess: false,
+    refreshInheritedAccess: vi.fn(),
     revokeGrant: vi.fn(),
     revoking: false,
     shares: [],
@@ -1659,6 +1662,201 @@ describe('FilesPage', () => {
     await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read'], true))
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
+  })
+
+  // TASK-243 — inherited access on a FILE: one normal toggleable row per
+  // member; any edit confirms against the parent folder and applies there.
+  function inheritedFileController(overrides: Record<string, unknown> = {}) {
+    return {
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.txt',
+        kind: 'file' as const,
+        version: 3,
+      },
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'share', 'write'],
+        canCreateShare: false,
+      },
+      grants: [
+        {
+          id: 'grant-1',
+          drive: 'main',
+          resourceId: 'file-1',
+          subject: { type: 'user', id: 'user-2' },
+          permissions: ['read', 'share'],
+          inherit: false,
+        },
+      ],
+      inheritedAccess: [
+        {
+          subject: { type: 'user', id: 'user-2' },
+          permissions: ['read', 'write'],
+          inheritedFrom: ['Team folder'],
+          source: {
+            resourceId: 'folder-1',
+            name: 'Team folder',
+            permissions: ['read', 'write'],
+            grantId: 'parent-grant-1',
+            shareIds: [],
+          },
+        },
+      ],
+      ...overrides,
+    }
+  }
+
+  function installInheritedDirectoryMocks() {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          grant: vi.fn(async () => undefined),
+        },
+        agents: { listMine: vi.fn(async () => []) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                members: [
+                  {
+                    id: 'user-2',
+                    email: 'test2@clerum.io',
+                    name: 'Test Two',
+                    role: 'member',
+                    status: 'active',
+                  },
+                ],
+                contextIds: [],
+                agentNames: [],
+              },
+            ],
+          })),
+        },
+      },
+    })
+  }
+
+  it('shows one normal toggleable row per member with inherited access on a file', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController())
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    // Direct grant row is consumed by the deduped merged row (one per member).
+    expect(within(manageDialog).queryByTestId('gfs-access-row-grant-grant-1')).toBeNull()
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(within(row).queryByText(/Inherited from/)).toBeNull()
+    // Effective role is the strongest across direct and inherited sources.
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
+  it('confirms an inherited role change against the parent folder and applies it there', async () => {
+    installInheritedDirectoryMocks()
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const refreshGrants = vi.fn(async () => undefined)
+    const refreshInheritedAccess = vi.fn(async () => undefined)
+    const fileGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({ refreshGrants, refreshInheritedAccess, grant: fileGrant })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Update role on parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
+    expect(within(confirmDialog).getByText('Team folder')).toBeTruthy()
+    expect(within(confirmDialog).getByText('report.txt')).toBeTruthy()
+
+    // Cancel reverts the dropdown and sends nothing.
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(parentGrant).not.toHaveBeenCalled()
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+
+    // Confirm applies the new role to the parent folder grant first…
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+    const confirmDialogAgain = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialogAgain).getByRole('button', { name: 'Update role' }))
+    })
+
+    await waitFor(() =>
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-1',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+    )
+    // …then aligns the file's own direct grant so it cannot mask the role.
+    await waitFor(() =>
+      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+    )
+    await waitFor(() => expect(refreshGrants).toHaveBeenCalled())
+    await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
+  })
+
+  it('removes an inherited member from the parent folder after confirmation', async () => {
+    installInheritedDirectoryMocks()
+    const revokeGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController({ revokeGrant }))
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Remove access on parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+    })
+
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('parent-grant-1'))
   })
 
   it('does not render resource options inside the share dialog', async () => {

@@ -27,6 +27,8 @@ export const desktopQueryKeys = {
     ['desktop-app', 'gfs', sessionScope, 'grants', drive, resourceId] as const,
   gfsShares: (sessionScope: string, resourceId: string, drive: string) =>
     ['desktop-app', 'gfs', sessionScope, 'shares', drive, resourceId] as const,
+  gfsInheritedAccess: (sessionScope: string, resourceId: string, drive: string) =>
+    ['desktop-app', 'gfs', sessionScope, 'inherited-access', drive, resourceId] as const,
   // Proactive connectors panel (spec 11 U2). Invalidated on connect/disconnect
   // completion (U3/U4) so the tri-state re-reads the authoritative grant store.
   connectors: ['desktop-app', 'connectors'] as const,

@@ -903,7 +903,7 @@ describe('useGfsBrowserController', () => {
     await waitFor(() => expect(screen.getByTestId('accessible-count').textContent).toBe('0'))
     expect(screen.getByTestId('accessible-error').textContent).toBe('none')
     expect(screen.getByTestId('accessible-notice').textContent).toContain(
-      'Automatic GFS discovery is not available'
+      'Automatic EvenDrive discovery is not available'
     )
 
     await act(async () => {
@@ -937,7 +937,7 @@ describe('useGfsBrowserController', () => {
 
     await waitFor(() =>
       expect(screen.getByTestId('accessible-notice').textContent).toContain(
-        'Automatic GFS discovery is not available'
+        'Automatic EvenDrive discovery is not available'
       )
     )
     expect(screen.getByTestId('accessible-error').textContent).toBe('none')

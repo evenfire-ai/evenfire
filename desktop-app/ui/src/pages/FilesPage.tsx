@@ -46,6 +46,9 @@ import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
+import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
+import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
+import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
@@ -64,6 +67,13 @@ import type {
 
 function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
+}
+
+/** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
+function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
+  return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
+    ? 'editor'
+    : 'read'
 }
 
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
@@ -224,6 +234,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
+  // Pending parent-folder confirmation (role change or removal) for a member
+  // whose file access is inherited from an ancestor folder.
+  const [parentUpdate, setParentUpdate] = useState<
+    | { row: GfsMergedAccessRow; label: string; mode: 'change-role'; nextRole: GfsAccessRole }
+    | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
+    | null
+  >(null)
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
@@ -473,6 +490,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // The parent-folder confirmation is the top-most dialog: Escape cancels
+      // it alone and leaves the Share dialog open.
+      if (parentUpdate) {
+        setParentUpdate(null)
+        return
+      }
       closeManage()
       setOpenLinkOpen(false)
       setMoveTarget(null)
@@ -480,7 +503,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeManage, manageOpen, openLinkOpen, moveTarget, renameTarget])
+  }, [closeManage, manageOpen, openLinkOpen, moveTarget, parentUpdate, renameTarget])
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
@@ -547,6 +570,71 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     } catch (roleError) {
       if (failClosedOnAuthorizationError(roleError)) return
       pushToast?.(describeGfsGrantError(roleError).message, 'error')
+    } finally {
+      setUpdatingAccessRole(false)
+    }
+  }
+
+  // A merged row whose access comes from a parent folder: any edit (upgrade,
+  // downgrade, or removal — no exceptions) is confirmed against the parent
+  // folder before anything is sent. Cancel reverts the dropdown untouched.
+  const handleInheritedRoleChange = (
+    row: GfsMergedAccessRow,
+    label: string,
+    role: GfsAccessRole
+  ) => {
+    setParentUpdate({ row, label, mode: 'change-role', nextRole: role })
+  }
+
+  const handleInheritedRemove = (row: GfsMergedAccessRow, label: string) => {
+    setParentUpdate({ row, label, mode: 'remove' })
+  }
+
+  const confirmParentUpdate = async () => {
+    const request = parentUpdate
+    const inherited = request?.row.inherited
+    if (!request || !inherited) {
+      setParentUpdate(null)
+      return
+    }
+    const source = inherited.source
+    const subject = inherited.subject
+    const subjectKey = subject.id ? `${subject.type}:${subject.id}` : subject.type
+    const label = request.label
+    setParentUpdate(null)
+    setUpdatingAccessRole(true)
+    try {
+      if (request.mode === 'change-role') {
+        const requested =
+          subject.type === 'host'
+            ? request.nextRole === 'editor'
+              ? ['read', 'write']
+              : ['read']
+            : request.nextRole === 'editor'
+              ? ['read', 'write', 'delete', 'manage_acl', 'share']
+              : ['read', 'share']
+        const bits = requested.filter(bit => affordances?.grantableBits.includes(bit))
+        // The parent folder's grant is updated first and keeps cascading to
+        // everything inside; its superseded share rows are consolidated.
+        await window.clerum.gfs.grant(source.resourceId, [subjectKey], bits, GFS_DRIVE_MAIN, true)
+        for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
+        // The file's own direct grant is aligned so it cannot mask the role.
+        if (request.row.grant) {
+          await ctrl.grant([subjectKey], bits, request.row.grant.inherit)
+        }
+        pushToast?.(
+          `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${source.name} and everything inside it`,
+          'success'
+        )
+      } else {
+        if (source.grantId) await ctrl.revokeGrant(source.grantId)
+        for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
+        pushToast?.(`Access removed on ${source.name} and everything inside it`, 'success')
+      }
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+    } catch (updateError) {
+      if (failClosedOnAuthorizationError(updateError)) return
+      pushToast?.(describeGfsGrantError(updateError).message, 'error')
     } finally {
       setUpdatingAccessRole(false)
     }
@@ -1716,7 +1804,10 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                     loading={
                       ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
                     }
+                    mergeInherited={currentIsFile}
+                    onChangeInheritedRole={handleInheritedRoleChange}
                     onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
+                    onRemoveInherited={handleInheritedRemove}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                     revoking={ctrl.revoking}
@@ -1732,6 +1823,35 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           </section>
         </div>
       ) : null}
+
+      <GfsInheritedAccessDialog
+        busy={updatingAccessRole}
+        request={
+          parentUpdate?.row.inherited
+            ? {
+                mode: parentUpdate.mode,
+                memberLabel: parentUpdate.label,
+                parentFolderName: parentUpdate.row.inherited.source.name,
+                fileName: current?.name ?? '',
+                parentCurrentRole: roleForAccessPermissions(
+                  parentUpdate.row.inherited.source.permissions
+                ),
+                fileCurrentRole: roleForAccessPermissions(parentUpdate.row.permissions),
+                nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+                fileRemainingRole:
+                  parentUpdate.mode === 'remove' &&
+                  (parentUpdate.row.grant || parentUpdate.row.shares.length > 0)
+                    ? roleForAccessPermissions([
+                        ...(parentUpdate.row.grant?.permissions ?? []),
+                        ...parentUpdate.row.shares.flatMap(share => share.permissions),
+                      ])
+                    : null,
+              }
+            : null
+        }
+        onCancel={() => setParentUpdate(null)}
+        onConfirm={() => void confirmParentUpdate()}
+      />
 
       {createFolderOpen && currentIsFolder && canWriteCurrent ? (
         <div

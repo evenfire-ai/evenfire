@@ -13899,17 +13899,74 @@ button.cu-gfs-tree__button:focus-visible,
   font-weight: 500;
 }
 
-.cu-gfs-existing-access__item--inherited .cu-gfs-existing-access__subject {
-  color: var(--cu-text-soft);
-  font-weight: 400;
+/* Parent-folder confirmation for inherited access rows (Share dialog). */
+.cu-gfs-parent-update {
+  width: min(34rem, calc(100vw - (var(--cu-space-4) * 2)));
 }
 
-.cu-gfs-existing-access__inherited-from {
+.cu-gfs-parent-update__learn-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--cu-link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.cu-gfs-parent-update__learn-more:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+.cu-gfs-parent-update__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--cu-space-2);
+}
+
+.cu-gfs-parent-update__column {
+  display: grid;
+  gap: var(--cu-space-05);
+  padding: var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-subtle);
+}
+
+.cu-gfs-parent-update__name {
   overflow: hidden;
-  color: var(--cu-text-muted);
-  font-size: var(--cu-font-size-xs);
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cu-gfs-parent-update__change {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-gfs-parent-update__role {
+  color: var(--cu-text-soft);
+  font-weight: 500;
+}
+
+.cu-gfs-parent-update__role--next {
+  color: var(--cu-text);
+}
+
+.cu-gfs-parent-update__help {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--cu-text-muted);
 }
 
 .cu-gfs-existing-access__chips {

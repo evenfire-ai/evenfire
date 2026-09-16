@@ -25,6 +25,8 @@ export type GfsGrantResource = {
   name: string
   gfsUri: string
   kind?: string
+  /** Canonical drive path; powers the inherited-access derivation. */
+  path?: string | null
 }
 
 export interface GfsGrantPanelProps {
@@ -44,4 +46,48 @@ export type GfsExistingAccessItem = {
   inherit: boolean
   grantId: string | null
   shareIds: string[]
+}
+
+/**
+ * A FILE's "People with access" row: direct rows and derived ancestor rows
+ * deduped to exactly one row per subject (the Google Drive model). The
+ * effective role is the strongest across sources; a member with an inherited
+ * floor is edited through the parent-folder confirmation dialog, never
+ * directly on the file.
+ */
+export type GfsFileAccessRow = {
+  subject: GfsSubjectInput
+  permissions: string[]
+  direct: GfsExistingAccessItem | null
+  inherited: GfsInheritedAccessItem | null
+}
+
+/**
+ * The ancestor folder a subject's inherited access is edited through: the
+ * contributing folder with the strongest role (nearest among equals). Its
+ * grant/share ids let the Share dialog route a confirmed change to the
+ * folder that actually configures the access.
+ */
+export type GfsInheritedAccessSource = {
+  resourceId: string
+  /** Folder label as shown in the confirmation dialog (root falls back to the drive name). */
+  name: string
+  permissions: string[]
+  grantId: string | null
+  shareIds: string[]
+}
+
+/**
+ * An access row derived from an ancestor folder's inheriting grant
+ * (inherit=true) or descendant-covering share (includeDescendants=true). The
+ * grants/shares GETs expose only direct rows, so inheritance is derived on
+ * the client by walking the resource's ancestor folders.
+ */
+export type GfsInheritedAccessItem = {
+  subject: GfsSubjectInput
+  permissions: string[]
+  /** Contributing ancestor folder labels, nearest first, deduplicated. */
+  inheritedFrom: string[]
+  /** The folder a confirmed role change or removal is applied to. */
+  source: GfsInheritedAccessSource
 }

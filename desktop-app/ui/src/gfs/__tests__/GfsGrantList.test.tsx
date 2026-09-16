@@ -2,7 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { GfsGrantList } from '../GfsGrantList'
-import type { GfsGrantListItem, GfsShareListItem } from '../delegation.types'
+import type {
+  GfsGrantListItem,
+  GfsInheritedAccessItem,
+  GfsShareListItem,
+} from '../delegation.types'
 
 /**
  * "Who has access" list (Manage modal). Rows resolve host subjects to agent
@@ -212,6 +216,182 @@ describe('GfsGrantList', () => {
     render(<GfsGrantList agents={agents} items={[]} onRevoke={vi.fn()} subjects={subjects} />)
 
     expect(screen.getByText('No one has access yet.')).toBeTruthy()
+  })
+
+  describe('inherited rows (file dialogs)', () => {
+    const inheritedItem = (overrides: Partial<GfsInheritedAccessItem>): GfsInheritedAccessItem => ({
+      subject: { type: 'user', id: 'user-2' },
+      permissions: ['read', 'write'],
+      inheritedFrom: ['team-docs'],
+      source: {
+        resourceId: 'folder-1',
+        name: 'team-docs',
+        permissions: ['read', 'write'],
+        grantId: 'parent-grant-1',
+        shareIds: [],
+      },
+      ...overrides,
+    })
+
+    it('renders inherited members as normal toggleable rows with their strongest role', () => {
+      const onChangeInheritedRole = vi.fn()
+      const onRemoveInherited = vi.fn()
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[
+            inheritedItem({}),
+            inheritedItem({ subject: { type: 'team', id: 'team-1' }, permissions: ['read'] }),
+          ]}
+          items={[]}
+          mergeInherited
+          onChangeInheritedRole={onChangeInheritedRole}
+          onRemoveInherited={onRemoveInherited}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      const userRow = screen.getByTestId('gfs-access-row-inherited-user')
+      expect(within(userRow).getByText('Test Two')).toBeTruthy()
+      expect(
+        within(userRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      ).toContain('Editor')
+      expect(within(userRow).getByRole('button', { name: 'Actions for Test Two' })).toBeTruthy()
+      // Normal-looking row: no inherited label, no muted duplicate.
+      expect(within(userRow).queryByText(/Inherited from/)).toBeNull()
+      expect(userRow.className).not.toContain('inherited')
+      expect(userRow.getAttribute('data-inherited')).toBe('true')
+      expect(userRow.querySelector('[data-subject-kind="user"] svg')).not.toBeNull()
+
+      const teamRow = screen.getByTestId('gfs-access-row-inherited-team')
+      expect(
+        within(teamRow).getByRole('button', { name: 'Access role for Core Team' }).textContent
+      ).toContain('Read')
+    })
+
+    it('dedupes a member with both a direct grant and inherited access into one row', () => {
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[inheritedItem({ permissions: ['read', 'write'] })]}
+          items={[grantItem({ subject: { type: 'user', id: 'user-2' }, permissions: ['read'] })]}
+          mergeInherited
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={vi.fn()}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      // One row per member: the direct grant row is consumed by the merge.
+      expect(screen.queryByTestId('gfs-access-row-grant-grant-1')).toBeNull()
+      const mergedRow = screen.getByTestId('gfs-access-row-inherited-user')
+      // Effective role is the strongest across direct and inherited sources.
+      expect(
+        within(mergedRow).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      ).toContain('Editor')
+    })
+
+    it('fires the inherited change and remove callbacks for merged rows', () => {
+      const onChangeInheritedRole = vi.fn()
+      const onRemoveInherited = vi.fn()
+      const item = inheritedItem({})
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[item]}
+          items={[]}
+          mergeInherited
+          onChangeInheritedRole={onChangeInheritedRole}
+          onRemoveInherited={onRemoveInherited}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      const row = screen.getByTestId('gfs-access-row-inherited-user')
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      expect(onChangeInheritedRole).toHaveBeenCalledTimes(1)
+      const [changedRow, label, role] = onChangeInheritedRole.mock.calls[0]
+      expect(changedRow.inherited).toBe(item)
+      expect(changedRow.permissions).toEqual(['read', 'write'])
+      expect(label).toBe('Test Two')
+      expect(role).toBe('read')
+
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      expect(onRemoveInherited).toHaveBeenCalledWith(
+        expect.objectContaining({ inherited: item }),
+        'Test Two'
+      )
+    })
+
+    it('consumes direct share rows of a merged member', () => {
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[
+            inheritedItem({
+              subject: { type: 'team', id: 'team-1' },
+              permissions: ['read'],
+            }),
+          ]}
+          items={[]}
+          mergeInherited
+          onChangeInheritedRole={vi.fn()}
+          onRemoveInherited={vi.fn()}
+          onRevoke={vi.fn()}
+          onRevokeShare={vi.fn()}
+          shares={[shareItem({})]}
+          subjects={subjects}
+        />
+      )
+
+      expect(screen.queryByTestId('gfs-access-row-share-share-1')).toBeNull()
+      expect(screen.getByTestId('gfs-access-row-inherited-team')).toBeTruthy()
+    })
+
+    it('ignores inherited items without mergeInherited (folder dialogs unchanged)', () => {
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[inheritedItem({})]}
+          items={[]}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      expect(screen.queryByTestId('gfs-access-row-inherited-user')).toBeNull()
+      expect(screen.getByText('No one has access yet.')).toBeTruthy()
+    })
+
+    it('keeps direct-only rows editable alongside merged rows and never the empty notice', () => {
+      const onRevoke = vi.fn()
+      const grant = grantItem({ id: 'grant-1' })
+      render(
+        <GfsGrantList
+          agents={agents}
+          inheritedItems={[
+            inheritedItem({ subject: { type: 'team', id: 'team-1' }, permissions: ['read'] }),
+          ]}
+          items={[grant]}
+          mergeInherited
+          onChangeRole={vi.fn()}
+          onRevoke={onRevoke}
+          subjects={subjects}
+        />
+      )
+
+      expect(screen.queryByText('No one has access yet.')).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Access role for Chat LLM' }))
+      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      fireEvent.click(screen.getByRole('button', { name: 'Actions for Chat LLM' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      expect(onRevoke).toHaveBeenCalled()
+    })
   })
 
   // R4 spec §2 — grants and shares fail independently: a share-list error

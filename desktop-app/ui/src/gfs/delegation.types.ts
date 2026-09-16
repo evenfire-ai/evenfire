@@ -62,3 +62,34 @@ export interface GfsShareListItem {
   permissions: string[]
   includeDescendants: boolean
 }
+
+/**
+ * The ancestor folder a subject's inherited access is edited through: the
+ * contributing folder with the strongest role (nearest among equals). Its
+ * grant/share ids let the Share dialog route a confirmed change to the
+ * folder that actually configures the access.
+ */
+export interface GfsInheritedAccessSource {
+  resourceId: string
+  /** Folder label as shown in the confirmation dialog (root falls back to the drive name). */
+  name: string
+  permissions: string[]
+  grantId: string | null
+  shareIds: string[]
+}
+
+/**
+ * An inherited access row: an ancestor folder's inheriting grant
+ * (inherit=true) or descendant-covering share (includeDescendants=true),
+ * derived on the client because the grants/shares GETs list only direct rows.
+ * Rendered as a normal toggleable row; every edit routes through the
+ * parent-folder confirmation.
+ */
+export interface GfsInheritedAccessItem {
+  subject: { type: string; id?: string }
+  permissions: string[]
+  /** Contributing ancestor folder labels, nearest first, deduplicated. */
+  inheritedFrom: string[]
+  /** The folder a confirmed role change or removal is applied to. */
+  source: GfsInheritedAccessSource
+}
