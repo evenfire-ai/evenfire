@@ -3,6 +3,7 @@ import type { Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
   requireRpcTokenUserMatch,
   requireValidRpcAccessToken,
@@ -14,6 +15,7 @@ import {
   resolveInvocableMcpServersForContexts,
 } from '../../services/access/mcpInvocable.js'
 import {
+  type AuthorizedRpcHostAccess,
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
@@ -47,6 +49,9 @@ const HOST_ACCESS_SCOPES = [
 ] as const
 
 type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
+type ArtifactReadRequest = RpcAuthedRequest & {
+  artifactReadConnection?: AuthorizedRpcHostAccess
+}
 
 /**
  * Response header that tells rpc-proxy why control-api denied Host access. The
@@ -67,6 +72,27 @@ function denyHostAccess(
   )
   res.setHeader(HOST_ACCESS_DENIAL_REASON_HEADER, reason)
   res.status(403).json({ error: 'Forbidden' })
+}
+
+async function resolveAuthorizedHostConnection(
+  req: RpcAuthedRequest,
+  res: Response,
+  gateway: K8sGateway,
+  directory: RpcHostAccessDirectory | undefined
+): Promise<AuthorizedRpcHostAccess | null> {
+  const userId = String(req.params.userId || '').trim()
+  const hostRef = String(req.params.hostRef || '').trim()
+  const claims = req.rpcAuth
+  if (!claims) {
+    denyHostAccess(req, res, 'claims_missing')
+    return null
+  }
+  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
+  if (!authorization.authorized) {
+    denyHostAccess(req, res, authorization.reason)
+    return null
+  }
+  return authorization.connection
 }
 
 async function bindDirectRunWithinBudget(
@@ -194,28 +220,43 @@ export function createRpcAccessUsersRouter(
     requireValidRpcAccessTokenAny([...HOST_ACCESS_SCOPES]),
     async (req: RpcAuthedRequest, res, next) => {
       try {
-        const userId = String(req.params.userId || '').trim()
-        const hostRef = String(req.params.hostRef || '').trim()
-        const claims = req.rpcAuth
-        if (!claims) {
-          denyHostAccess(req, res, 'claims_missing')
-          return
-        }
-        const authorization = await authorizeRpcHostAccess(
-          gateway,
-          claims,
-          userId,
-          hostRef,
-          directory
-        )
-        if (!authorization.authorized) {
-          denyHostAccess(req, res, authorization.reason)
-          return
-        }
-        res.status(200).json(authorization.connection)
+        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
+        if (connection) res.status(200).json(connection)
       } catch (error) {
         next(error)
       }
+    }
+  )
+
+  // Artifact reads can wake a Host and pull bounded but potentially expensive
+  // responses. Their durable PG bucket is independent of Host wake capacity
+  // and is keyed only after the live authorization above establishes the
+  // verified subject and canonical enabled Host.
+  router.get(
+    `${hostAccessPath}/artifact-read`,
+    requireValidRpcAccessTokenAny(['host:task:read']),
+    async (req: ArtifactReadRequest, res, next) => {
+      try {
+        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
+        if (!connection) return
+        req.artifactReadConnection = connection
+        next()
+      } catch (error) {
+        next(error)
+      }
+    },
+    rateLimitMiddleware({
+      bucketType: 'host_artifact_read',
+      maxPerMinute: config.hostArtifactReadRlPerMin,
+      getBucketKey: req => {
+        const artifactRead = req as ArtifactReadRequest
+        const subject = artifactRead.rpcAuth?.sub
+        const hostRef = artifactRead.artifactReadConnection?.hostRef
+        return subject && hostRef ? `host-artifact-read:${subject}:${hostRef}` : null
+      },
+    }),
+    (req: ArtifactReadRequest, res) => {
+      res.status(200).json(req.artifactReadConnection)
     }
   )
 
