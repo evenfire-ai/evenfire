@@ -19,29 +19,38 @@
  *     unmodified origin policy; the socket is then pointed at the loopback
  *     fixture instead of the public internet. No live ChatGPT OAuth is used.
  */
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
+import { generateKeyPairSync } from 'node:crypto'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { request as httpsRequest } from 'node:https'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { generateKeyPairSync } from 'node:crypto'
-import jwt from 'jsonwebtoken'
 import request from 'supertest'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   hashCodexCompletionRequestV1,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import type { CodexLlmProxyConfig } from '../src/config.js'
 import {
-  ControlApiClientError,
   type ControlApiClient,
+  ControlApiClientError,
   type FinalizeAttemptSuccess,
   type RedeemAttemptSuccess,
 } from '../src/controlApiClient.js'
 import { CODEX_CATALOG_ORIGIN, CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
-import { createProxyApps, type ProxyServers } from '../src/server.js'
+import { type ProxyServers, createProxyApps } from '../src/server.js'
+import { eventaskUpdateTool, optionalMcpTools } from './fixtures/optionalMcpTools.js'
+
+// Model output is simulated only at the external TLS boundary. The production
+// proxy must carry these exact arguments without synthesizing label edits.
+const OPTIONAL_CALL_ARGUMENTS = {
+  key: 'BUG-1',
+  actor: 'test-agent',
+  description: 'Updated description',
+}
 
 const FIXTURE_UPSTREAM = fileURLToPath(
   new URL('../../tests/e2e/fixtures/codex-subscription/test-upstream/server.mjs', import.meta.url)
@@ -300,6 +309,10 @@ beforeAll(async () => {
       CODEX_TEST_UPSTREAM_PORT: String(UPSTREAM_PORT),
       CODEX_TEST_UPSTREAM_CERT_PATH: certPath,
       CODEX_TEST_UPSTREAM_KEY_PATH: keyPath,
+      CODEX_TEST_UPSTREAM_TOOL_CALL: JSON.stringify({
+        name: eventaskUpdateTool.name,
+        arguments: OPTIONAL_CALL_ARGUMENTS,
+      }),
     },
     stdio: ['ignore', 'pipe', 'inherit'],
   })
@@ -327,14 +340,23 @@ afterAll(async () => {
 describe('hermetic authorize → proxy → fixture upstream → finalize', () => {
   it('streams a completion through the fixture upstream and finalizes a success receipt', async () => {
     const { client, redeems, finalizes } = makeControlApiMock()
+    const upstreamBodies: Array<Record<string, unknown>> = []
     servers = createProxyApps(config(), {
       controlApiClient: client,
-      fetchFn: rewriteFetch,
+      fetchFn: (url, init) => {
+        // Observe only: adding strict here would hide a broken serializer.
+        upstreamBodies.push(JSON.parse(String(init?.body)))
+        return rewriteFetch(url, init)
+      },
       lookup: async () => [{ address: '104.18.32.47', family: 4 }],
     })
     const before = await upstreamCounters()
 
-    const raw = completionRequest('gpt-5.3-codex')
+    const raw = {
+      ...completionRequest('gpt-5.3-codex'),
+      tools: structuredClone(optionalMcpTools),
+    }
+    const original = structuredClone(raw)
     const parsed = parseCodexCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
     const requestHash = hashCodexCompletionRequestV1(parsed.value)
@@ -358,6 +380,24 @@ describe('hermetic authorize → proxy → fixture upstream → finalize', () =>
     expect(res.headers['content-type']).toContain('text/event-stream')
     const frames = sseFrames(res.text)
     expect(frames).toContainEqual({ type: 'text', text: 'hello' })
+    expect(frames.filter(frame => frame.type === 'tool_call')).toEqual([
+      {
+        type: 'tool_call',
+        id: 'call-hermetic-optional',
+        name: eventaskUpdateTool.name,
+        arguments: OPTIONAL_CALL_ARGUMENTS,
+      },
+    ])
+    expect(upstreamBodies).toHaveLength(1)
+    expect(upstreamBodies[0]?.tools).toEqual(
+      optionalMcpTools.map(tool => ({
+        type: 'function',
+        ...tool,
+        strict: false,
+      }))
+    )
+    expect(raw).toEqual(original)
+    expect(hashCodexCompletionRequestV1(parsed.value)).toBe(requestHash)
     const done = frames.find(frame => frame.type === 'done')
     expect(done).toBeDefined()
     expect(done?.outcome).toBe('success')
