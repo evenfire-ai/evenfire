@@ -6,9 +6,8 @@ import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
 import { RowActionsMenu } from '@components/RowActionsMenu'
 import { useToast } from '@components/Toast'
-import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
 import { CONTROL_ROUTES } from '@constants/routes'
-import { GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
+import { GUARDRAIL_MARKETPLACE_ROUTE, GUARDRAIL_PHASES, GUARDRAIL_PHASE_LABELS } from './constants'
 import type { GuardrailHookRow, HostGuardrails, HostGuardrailsSectionProps } from './types'
 
 // Every field this section does not edit rides along untouched — dropping
@@ -19,8 +18,6 @@ function withHooks(
 ): HostGuardrails {
   return { ...source, hooks }
 }
-
-const ADD_HOOK_ROUTE = CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE })
 
 export function HostGuardrailsSection({
   initialGuardrails,
@@ -94,7 +91,7 @@ export function HostGuardrailsSection({
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => router.push(ADD_HOOK_ROUTE)}
+              onClick={() => router.push(GUARDRAIL_MARKETPLACE_ROUTE)}
               disabled={disabled}
             >
               Add hook

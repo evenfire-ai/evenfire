@@ -8862,17 +8862,10 @@ td.cu-registry-description {
   text-transform: uppercase;
 }
 
-.cu-identity-dirty[data-hidden='true'],
-.cu-identity-dirty-actions[data-hidden='true'] {
+.cu-identity-dirty[data-hidden='true'] {
   opacity: 0;
   pointer-events: none;
   visibility: hidden;
-}
-
-.cu-identity-dirty-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--cu-space-2);
 }
 
 .cu-identity-panel__local-actions {

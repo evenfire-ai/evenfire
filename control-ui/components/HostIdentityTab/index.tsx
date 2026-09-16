@@ -36,7 +36,7 @@ function fieldsFromPayload(payload: IdentityFields): IdentityFields {
 
 export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabProps) {
   const { showToast } = useToast()
-  const { confirm, confirmDialog } = useConfirmDialog()
+  const { choose, confirmDialog } = useConfirmDialog()
   const loadRequestId = useRef(0)
   const [state, setState] = useState<HostIdentityTabState>({
     activeField: 'identity',
@@ -48,6 +48,8 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
     resourceVersion: '',
     saving: false,
   })
+  const stateRef = useRef(state)
+  stateRef.current = state
 
   const activeConfig =
     IDENTITY_FIELDS.find(field => field.key === state.activeField) ?? IDENTITY_FIELDS[0]
@@ -105,16 +107,26 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
   }, [])
 
   const saveActiveField = useCallback(async (): Promise<boolean> => {
-    if (!activeDirty || activeTooLarge || state.reloadHint) return false
+    const current = stateRef.current
+    const currentConfig =
+      IDENTITY_FIELDS.find(field => field.key === current.activeField) ?? IDENTITY_FIELDS[0]
+    const currentValue = current.fields[currentConfig.key]
+    if (
+      currentValue === current.initial[currentConfig.key] ||
+      fieldBytes(currentValue) > FIELD_MAX_BYTES ||
+      current.reloadHint
+    ) {
+      return false
+    }
 
     setState(prev => ({ ...prev, error: '', saving: true }))
     try {
       const result = await updateHostPersonalization(hostName, {
-        agents: state.fields.agents,
-        identity: state.fields.identity,
-        resourceVersion: state.resourceVersion,
-        soul: state.fields.soul,
-        user: state.fields.user,
+        agents: current.fields.agents,
+        identity: current.fields.identity,
+        resourceVersion: current.resourceVersion,
+        soul: current.fields.soul,
+        user: current.fields.user,
       })
       setState(prev => ({
         ...prev,
@@ -139,7 +151,7 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
       showToast(message, { tone: 'error' })
       return false
     }
-  }, [activeDirty, activeTooLarge, hostName, showToast, state])
+  }, [hostName, showToast])
 
   const setActiveField = useCallback(
     async (key: IdentityFieldKey) => {
@@ -149,16 +161,19 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
         return
       }
 
-      const shouldSave = await confirm({
-        cancelLabel: 'Discard all',
+      const outcome = await choose({
+        cancelLabel: 'Cancel',
         confirmLabel: 'Save',
+        discardLabel: 'Discard all',
         message: 'Save or discard your identity edits before changing files.',
         title: 'Unsaved identity edits',
       })
-      if (shouldSave) {
+      if (outcome === 'confirm') {
         if (!(await saveActiveField())) return
-      } else {
+      } else if (outcome === 'discard') {
         discardEdits()
+      } else {
+        return
       }
       setState(prev => ({ ...prev, activeField: key }))
     },
@@ -218,6 +233,9 @@ export function HostIdentityTab({ hostName, onActionsChange }: HostIdentityTabPr
 
   return (
     <section className="cu-identity-panel" aria-label="Admin-managed identity files">
+      <p className="cu-identity-panel__intro">
+        Admin-managed identity files are readable by the agent but blocked from agent writes.
+      </p>
       {!onActionsChange && anyDirty ? (
         <div className="cu-identity-panel__local-actions">
           <Button

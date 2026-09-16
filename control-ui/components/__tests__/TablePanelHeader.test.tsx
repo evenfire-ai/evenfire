@@ -6,6 +6,10 @@ import { TablePanelHeader } from '../TablePanelHeader'
 
 const css = readFileSync(resolve(__dirname, '../../app/globals.css'), 'utf8')
 
+function AgentsIcon() {
+  return <svg aria-label="Agents icon" />
+}
+
 describe('TablePanelHeader', () => {
   it('applies the common action-toolbar layout to every header', () => {
     render(
@@ -30,7 +34,7 @@ describe('TablePanelHeader', () => {
       <TablePanelHeader
         title={
           <>
-            <svg aria-label="Agents icon" />
+            <AgentsIcon />
             Agents (8)
           </>
         }
@@ -41,6 +45,13 @@ describe('TablePanelHeader', () => {
       'cu-table-panel__title-icon'
     )
     expect(screen.getByText('Agents (8)')).toHaveClass('cu-table-panel__title-text')
+  })
+
+  it('does not treat an ordinary leading title element as an icon', () => {
+    render(<TablePanelHeader title={<span>Agents</span>} />)
+
+    expect(screen.getByText('Agents').closest('.cu-table-panel__title-text')).not.toBeNull()
+    expect(document.querySelector('.cu-table-panel__title-icon')).toBeNull()
   })
 
   it('renders secondary actions, search, refresh, and the primary action in focus order', () => {
@@ -102,7 +113,7 @@ describe('TablePanelHeader', () => {
 
       const description = document.querySelector('.cu-table-panel__description')
       expect(description).toHaveAttribute('tabindex', '0')
-      expect(screen.getByRole('tooltip')).toHaveTextContent(
+      expect(screen.getByRole('tooltip', { hidden: true })).toHaveTextContent(
         'A longer description that cannot fit within two lines.'
       )
     } finally {

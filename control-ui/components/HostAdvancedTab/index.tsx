@@ -6,9 +6,8 @@ import { DataTable, TableViewport } from '@clerum/frontend-components'
 import { HostApprovalSection } from '@components/HostApprovalSection'
 import { HostEnvTable } from '@components/HostEnvTable'
 import { HostGuardrailsSection } from '@components/HostGuardrailsSection'
+import { GUARDRAIL_MARKETPLACE_ROUTE } from '@components/HostGuardrailsSection/constants'
 import { TabBar } from '@components/TabBar'
-import { GUARDRAIL_ENTRY_TYPE } from '@constants/marketplaceEntryTypes'
-import { CONTROL_ROUTES } from '@constants/routes'
 import type { AdvancedSubTab, HostAdvancedTabProps } from './types'
 
 const ADVANCED_SUB_TABS: { key: AdvancedSubTab; label: string }[] = [
@@ -35,23 +34,19 @@ export function HostAdvancedTab({
   const [subTab, setSubTab] = useState<AdvancedSubTab>(DEFAULT_SUB_TAB)
 
   useEffect(() => {
-    if (!onActionsChange || subTab !== 'hooks') return
+    if (!onActionsChange || initialLoading || subTab !== 'hooks') return
     onActionsChange(
       <button
         type="button"
         className="cu-btn cu-btn--primary cu-btn--sm"
-        onClick={() =>
-          routerRef.current.push(
-            CONTROL_ROUTES.marketplace.orgEntriesFiltered({ type: GUARDRAIL_ENTRY_TYPE })
-          )
-        }
+        onClick={() => routerRef.current.push(GUARDRAIL_MARKETPLACE_ROUTE)}
         disabled={busy}
       >
         Add hook
       </button>
     )
     return () => onActionsChange(null)
-  }, [busy, onActionsChange, subTab])
+  }, [busy, initialLoading, onActionsChange, subTab])
 
   return (
     <section className="cu-advanced-tab" aria-label="Advanced">

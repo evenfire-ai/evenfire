@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 export type ConfirmDialogTone = 'default' | 'danger'
+export type ConfirmDialogOutcome = 'confirm' | 'cancel' | 'discard' | 'dismiss'
 
 export interface ConfirmDialogOptions {
   title?: string
@@ -13,16 +14,17 @@ export interface ConfirmDialogOptions {
   details?: ReactNode
   confirmLabel?: string
   cancelLabel?: string
+  discardLabel?: string
   tone?: ConfirmDialogTone
 }
 
 export interface ConfirmDialogRequest {
   id: number
   options: ConfirmDialogOptions
-  resolve: (confirmed: boolean) => void
+  resolve: (outcome: ConfirmDialogOutcome) => void
 }
 
 export interface ConfirmDialogProps {
   request: ConfirmDialogRequest | null
-  onResolve: (confirmed: boolean) => void
+  onResolve: (outcome: ConfirmDialogOutcome) => void
 }

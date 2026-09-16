@@ -1,7 +1,12 @@
 'use client'
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
-import type { ConfirmDialogOptions, ConfirmDialogProps, ConfirmDialogRequest } from './types'
+import type {
+  ConfirmDialogOptions,
+  ConfirmDialogOutcome,
+  ConfirmDialogProps,
+  ConfirmDialogRequest,
+} from './types'
 
 function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
   const titleId = useId()
@@ -16,7 +21,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
     cancelButtonRef.current?.focus()
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') onResolve(false)
+      if (event.key === 'Escape') onResolve('dismiss')
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -31,6 +36,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
   const {
     cancelLabel = 'Cancel',
     confirmLabel = 'OK',
+    discardLabel,
     details,
     message,
     title = 'Confirm action',
@@ -43,7 +49,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
       className="cu-modal-backdrop"
       role="presentation"
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onResolve(false)
+        if (event.target === event.currentTarget) onResolve('dismiss')
       }}
     >
       <section
@@ -72,11 +78,20 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
             ref={cancelButtonRef}
             type="button"
             className="cu-btn cu-btn--ghost"
-            onClick={() => onResolve(false)}
+            onClick={() => onResolve('cancel')}
           >
             {cancelLabel}
           </button>
-          <button type="button" className={confirmButtonClass} onClick={() => onResolve(true)}>
+          {discardLabel ? (
+            <button
+              type="button"
+              className="cu-btn cu-btn--danger"
+              onClick={() => onResolve('discard')}
+            >
+              {discardLabel}
+            </button>
+          ) : null}
+          <button type="button" className={confirmButtonClass} onClick={() => onResolve('confirm')}>
             {confirmLabel}
           </button>
         </div>
@@ -90,9 +105,9 @@ export function useConfirmDialog() {
   const nextIdRef = useRef(0)
 
   const resolveRequest = useCallback(
-    (confirmed: boolean) => {
+    (outcome: ConfirmDialogOutcome) => {
       setRequest(current => {
-        if (current) current.resolve(confirmed)
+        if (current) current.resolve(outcome)
         return null
       })
     },
@@ -102,12 +117,24 @@ export function useConfirmDialog() {
   const confirm = useCallback((options: ConfirmDialogOptions) => {
     return new Promise<boolean>(resolve => {
       nextIdRef.current += 1
+      setRequest({
+        id: nextIdRef.current,
+        options,
+        resolve: outcome => resolve(outcome === 'confirm'),
+      })
+    })
+  }, [])
+
+  const choose = useCallback((options: ConfirmDialogOptions) => {
+    return new Promise<ConfirmDialogOutcome>(resolve => {
+      nextIdRef.current += 1
       setRequest({ id: nextIdRef.current, options, resolve })
     })
   }, [])
 
   return {
     confirm,
+    choose,
     confirmDialog: <ConfirmDialog request={request} onResolve={resolveRequest} />,
   }
 }

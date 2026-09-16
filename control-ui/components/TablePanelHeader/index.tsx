@@ -28,7 +28,10 @@ export function TablePanelHeader({
 }: TablePanelHeaderProps) {
   const titleNodes = flattenTitleNodes(title)
   const [firstTitleNode, ...remainingTitleNodes] = titleNodes
-  const titleIcon = isValidElement(firstTitleNode) ? firstTitleNode : undefined
+  const titleIcon =
+    isValidElement(firstTitleNode) && typeof firstTitleNode.type !== 'string'
+      ? firstTitleNode
+      : undefined
   const titleText = titleIcon ? remainingTitleNodes : titleNodes
 
   return (
