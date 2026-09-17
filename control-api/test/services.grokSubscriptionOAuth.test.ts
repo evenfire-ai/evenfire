@@ -523,6 +523,7 @@ describe('grok subscription OAuth device broker', () => {
     expect(refreshed.status).toBe('reauth_required')
     expect(repos.persistRefresh).toHaveBeenCalled()
     expect(repos.markMismatch).toHaveBeenCalled()
+    expect(repos.updateInPlace).not.toHaveBeenCalled()
     expect(repos.rotate).not.toHaveBeenCalled()
   })
 

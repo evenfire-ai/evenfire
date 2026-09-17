@@ -350,4 +350,22 @@ describe('broker-backed authoring helpers', () => {
       })
     ).toMatch(/unit tokens/)
   })
+
+  it('requires a Grok grant when only a step agent uses grok-subscription', () => {
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+      })
+    ).toMatch(/Grok grant/)
+    expect(
+      brokerBackedRecipeAuthoringError(
+        {
+          agent: { provider: 'openai', model: 'gpt-5.1' },
+          steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+        },
+        'team-grok'
+      )
+    ).toBeNull()
+  })
 })

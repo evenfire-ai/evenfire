@@ -449,7 +449,19 @@ async function rotateLockedRefresh(
       throw err
     }
     const accountFingerprint = fingerprintAccount(subject)
-    const updated = await updateGrokAccessTokenInPlace(
+    if (
+      current?.accountFingerprint &&
+      accountFingerprint &&
+      current.accountFingerprint !== accountFingerprint
+    ) {
+      const marked = await markGrokRefreshSubjectMismatch(
+        deps.db,
+        key,
+        persisted.credentialRevision
+      )
+      return marked ?? { ...persisted, status: 'reauth_required' }
+    }
+    return updateGrokAccessTokenInPlace(
       deps.db,
       deps.encryptionKey,
       persisted.credentialRevision,
@@ -460,15 +472,6 @@ async function rotateLockedRefresh(
       key,
       lockToken
     )
-    if (
-      current?.accountFingerprint &&
-      accountFingerprint &&
-      current.accountFingerprint !== accountFingerprint
-    ) {
-      const marked = await markGrokRefreshSubjectMismatch(deps.db, key, updated.credentialRevision)
-      return marked ?? { ...updated, status: 'reauth_required' }
-    }
-    return updated
   } catch (err) {
     if (err instanceof GrokSubscriptionStaleRevisionError) {
       throw new GrokSubscriptionOAuthError('stale_revision', 'refresh lost the credential race')

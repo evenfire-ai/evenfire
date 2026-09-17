@@ -58,22 +58,52 @@ describe('Grok execution ticket', () => {
     expect(claims.aud).toBe(GROK_EXECUTION_TICKET_AUDIENCE)
     expect(claims.aud).not.toBe(CODEX_EXECUTION_TICKET_AUDIENCE)
 
-    const codexShaped = jwt.sign(
-      {
-        ...binding,
-        jti: randomUUID(),
-        typ: 'codex-execution-ticket',
-        provider: 'codex-subscription',
-      },
-      config.adminJwtPrivateKey,
-      {
+    const sign = (claims: Record<string, unknown>, audience: string) =>
+      jwt.sign(claims, config.adminJwtPrivateKey, {
         algorithm: 'RS256',
         issuer: config.adminJwtIssuer,
-        audience: CODEX_EXECUTION_TICKET_AUDIENCE,
+        audience,
         expiresIn: GROK_EXECUTION_TICKET_TTL_SECONDS,
-      }
-    )
-    expect(verifyGrokExecutionTicket(codexShaped)).toBeNull()
+      })
+    expect(
+      verifyGrokExecutionTicket(
+        sign(
+          {
+            ...binding,
+            jti: randomUUID(),
+            typ: 'codex-execution-ticket',
+            provider: 'grok-subscription',
+          },
+          GROK_EXECUTION_TICKET_AUDIENCE
+        )
+      )
+    ).toBeNull()
+    expect(
+      verifyGrokExecutionTicket(
+        sign(
+          {
+            ...binding,
+            jti: randomUUID(),
+            typ: 'grok-execution-ticket',
+            provider: 'codex-subscription',
+          },
+          GROK_EXECUTION_TICKET_AUDIENCE
+        )
+      )
+    ).toBeNull()
+    expect(
+      verifyGrokExecutionTicket(
+        sign(
+          {
+            ...binding,
+            jti: randomUUID(),
+            typ: 'grok-execution-ticket',
+            provider: 'grok-subscription',
+          },
+          CODEX_EXECUTION_TICKET_AUDIENCE
+        )
+      )
+    ).toBeNull()
   })
 
   it('expires after 60 seconds', async () => {

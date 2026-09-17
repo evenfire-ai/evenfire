@@ -2126,10 +2126,23 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
       runtimeTokenScopeHash(
         host: HostCRD,
         hasChannelIngress?: boolean,
-        frontsOAuthServer?: boolean
+        frontsOAuthServer?: boolean,
+        projection?: { derivedScopes?: string[]; driftHashInput?: string },
+        grokProjection?: { derivedScopes?: string[]; driftHashInput?: string }
       ): string
     }
   ).runtimeTokenScopeHash
+
+  it('keeps the pre-Grok scope hash when Grok has no derived scopes', () => {
+    const host = makeHost()
+    const codex = { derivedScopes: ['llm:codex:execute'], driftHashInput: '{"k":1}' }
+    expect(scopeHashOf(host, false, false, codex, { derivedScopes: [] })).toBe(
+      scopeHashOf(host, false, false, codex)
+    )
+    expect(
+      scopeHashOf(host, false, false, codex, { derivedScopes: ['llm:grok:execute'] })
+    ).not.toBe(scopeHashOf(host, false, false, codex))
+  })
 
   it('requests oauth:user-token through the real issuance payload when the Host fronts an enabled oauth mcp-server', async () => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()

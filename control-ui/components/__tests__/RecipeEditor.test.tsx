@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testi
 import * as api from '../../lib/api'
 import type { WorkflowRecipeResource } from '../../lib/api'
 import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
+import { listGrokSubscriptionConnections } from '../../lib/grokSubscription'
 import { validateRecipe } from '../../lib/recipeValidator'
 import { RecipeEditor } from '../RecipeEditor'
 import { ToastProvider } from '../Toast'
@@ -1776,6 +1777,62 @@ describe('RecipeEditor — grants in editor', () => {
       'clerum.io/subscription-connection-ref': 'team-plus',
     })
     expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('deploys a step-only Grok recipe with the canonical grant annotation', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValueOnce([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        catalogStatus: 'ready',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogSyncedAt: '2026-08-01T00:00:00.000Z',
+        lastRefreshAt: null,
+        lastAuthAt: '2026-08-01T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ])
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: {
+        value: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'step-grok' },
+            spec: {
+              agent: { provider: 'openai', model: 'gpt-5.1' },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [
+                {
+                  id: 'draft',
+                  instruction: 'Write',
+                  timeoutSeconds: 600,
+                  agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Grok grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/ }))
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => expect(api.createRecipe).toHaveBeenCalled())
+    const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(createPayload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': 'team-grok',
+    })
   })
 
   it('blocks a Codex recipe that has not chosen a ChatGPT grant', async () => {

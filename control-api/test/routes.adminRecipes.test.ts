@@ -330,6 +330,37 @@ describe.sequential('routes/admin/recipes', () => {
     })
   })
 
+  it('PUT /admin/recipes/:name — clears leftover Grok when switching to Codex without annotations', async () => {
+    await api
+      .post('/admin/recipes')
+      .send({
+        metadata: {
+          name: 'grok-then-codex-omit',
+          annotations: { 'clerum.io/subscription-connection-ref': 'team-grok' },
+        },
+        spec: {
+          agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/grok-then-codex-omit')
+      .send({
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': '',
+    })
+  })
+
   it('POST /admin/recipes — rejects mixed oauth-broker providers on agent and steps', async () => {
     const res = await api.post('/admin/recipes').send({
       metadata: { name: 'mixed-broker' },

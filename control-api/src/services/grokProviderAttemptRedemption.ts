@@ -154,7 +154,7 @@ export async function redeemGrokProviderAttempt(
     } catch (err) {
       if (err instanceof GrokSubscriptionOAuthError) {
         throw new GrokProviderAttemptRedeemError(
-          err.code === 'no_grant' || err.code === 'not_connected'
+          err.code === 'no_grant' || err.code === 'not_connected' || err.code === 'reauth_required'
             ? 'no_grant'
             : err.code === 'provider_unavailable'
               ? 'provider_unavailable'

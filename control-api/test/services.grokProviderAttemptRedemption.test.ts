@@ -6,6 +6,7 @@ import {
 } from '../src/services/grokProviderAttemptRedemption.js'
 import * as ticket from '../src/services/grokProviderAttemptTicket.js'
 import * as connection from '../src/services/grokSubscriptionConnection.js'
+import { GrokSubscriptionOAuthError } from '../src/services/grokSubscriptionOAuth.js'
 import * as store from '../src/services/llmProviderAttemptStore.js'
 
 vi.mock('../src/db.js', () => ({
@@ -85,5 +86,37 @@ describe('redeemGrokProviderAttempt', () => {
       )
     ).rejects.toMatchObject({ code: 'ticket_invalid' })
     expect(loadSecrets).not.toHaveBeenCalled()
+  })
+
+  it('maps reauth_required refresh to a non-retryable no_grant', async () => {
+    vi.spyOn(store, 'peekLlmProviderAttemptTicket').mockResolvedValue({
+      jti: CLAIMS.jti,
+      providerAttemptId: CLAIMS.providerAttemptId,
+      status: 'issued',
+      expiresAt: new Date(Date.now() + 30_000),
+      receiptHash: null,
+    })
+    vi.spyOn(store, 'loadLlmProviderAttempt').mockResolvedValue({
+      id: CLAIMS.providerAttemptId,
+      provider: 'grok-subscription',
+      connectionId: CONNECTION_ID,
+      status: 'authorized',
+    } as never)
+    await expect(
+      redeemGrokProviderAttempt(
+        { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+        {
+          enabled: true,
+          db: { query: vi.fn() },
+          withTransaction: async work => work({ query: vi.fn() }),
+          loadSecrets: vi.fn(),
+          getConnectionById: vi.fn().mockResolvedValue({ connectionKey: 'team-grok' }),
+          encryptionKey: Buffer.alloc(32),
+          ensureFreshAccessToken: async () => {
+            throw new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected')
+          },
+        }
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
   })
 })

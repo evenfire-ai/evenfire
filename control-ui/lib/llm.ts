@@ -290,13 +290,31 @@ export function budgetUnitAllowedForProviders(
 // Recipe authoring guard: a broker-backed agent must name an explicit model
 // and must not carry an LLM secretRef or a cost-unit budget. The grant lives
 // on metadata.annotations[clerum.io/codex-connection-ref], not in spec.
+function recipeOauthBrokerAgent(spec: Record<string, unknown>): Record<string, unknown> | null {
+  const consider = (value: unknown): Record<string, unknown> | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    const provider = typeof record.provider === 'string' ? record.provider : ''
+    if (isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') return record
+    return null
+  }
+  const top = consider(spec.agent)
+  if (top) return top
+  if (!Array.isArray(spec.steps)) return null
+  for (const step of spec.steps) {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) continue
+    const found = consider((step as Record<string, unknown>).agent)
+    if (found) return found
+  }
+  return null
+}
+
 export function brokerBackedRecipeAuthoringError(
   spec: Record<string, unknown>,
   connectionRef?: string
 ): string | null {
-  const agent = spec.agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return null
-  const record = agent as Record<string, unknown>
+  const record = recipeOauthBrokerAgent(spec)
+  if (!record) return null
   const provider = typeof record.provider === 'string' ? record.provider : ''
   if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
     return null

@@ -73,8 +73,10 @@ function makeBridge(
         }
       }),
   }
-  const createProvider = ((_keys: ApiKeys, model: ModelConfig) => {
+  const capturedCalls: unknown[] = []
+  const createProvider = ((_keys: ApiKeys, model: ModelConfig, captured?: unknown) => {
     providerCalls.push(`${model.provider}/${model.name}`)
+    capturedCalls.push(captured)
     return (providers[model.name] ?? null) as unknown as SingleTurnProvider | null
   }) as typeof createLLMProvider
   return {
@@ -84,6 +86,7 @@ function makeBridge(
       ...(maxResponseBytes !== undefined ? { maxResponseBytes } : {}),
     }),
     providerCalls,
+    capturedCalls,
     credentialCalls,
     resolver,
   }
@@ -916,10 +919,61 @@ const codexReceipt = {
   fallbackUsed: false,
 }
 
+const grokTarget: PromptBridgeTarget = {
+  targetRef: 'grok-primary',
+  provider: 'grok-subscription',
+  model: 'grok-4.6',
+  credentialSlot: '',
+  connectionRef: 'team-grok',
+}
+
+function installGrokBinding(): void {
+  replaceSdkOnlyGrokBinding({
+    connectionKey: 'team-grok',
+    catalogRevision: 1,
+    credentialRevision: 1,
+    model: grokTarget.model,
+    bindingHash: computeGrokPolicyHash({
+      model: grokTarget.model,
+      catalogRevision: 1,
+      credentialRevision: 1,
+      connectionKey: 'team-grok',
+    }),
+  })
+}
+
 describe('LlmBridge oauth-broker terminal accounting', () => {
   afterEach(() => {
     replaceSdkOnlyCodexBinding(null)
     replaceSdkOnlyGrokBinding(null)
+  })
+
+  it('forwards capturedGrokAttemptContext into createLLMProvider', async () => {
+    installGrokBinding()
+    const grok = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, capturedCalls } = makeBridge({ [grokTarget.model]: grok })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+    await bridge.complete({
+      ...request,
+      recipeNamespace: 'sandbox-recipes',
+      recipeName: 'prompt-notify',
+      targets: [{ target: grokTarget }],
+      credentialTicketIssuer: {
+        issue: vi.fn(async () => ({
+          credentialTicket: '',
+          providerAttemptId: 'sdk-grok-primary',
+          providerAttemptIndex: 1,
+        })),
+      },
+      providerAttemptReporter,
+    })
+    expect(capturedCalls[0]).toEqual({
+      capturedGrokAttemptContext: expect.objectContaining({
+        invocationId: 'inv-1',
+        pluginWorkloadSdkProviderAttemptId: 'sdk-grok-primary',
+        targetRef: 'grok-primary',
+      }),
+    })
   })
 
   it('keeps a pre-dispatch Codex budget denial revivable and carries its receipt', async () => {

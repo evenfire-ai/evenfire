@@ -1265,12 +1265,21 @@ export class HostReconciler {
         frontsOAuthServer,
       }),
     ].sort()
-    const derived = [...(projection?.derivedScopes ?? []), ...(grokProjection?.derivedScopes ?? [])]
-    if (derived.length === 0) {
+    const codexDerived = projection?.derivedScopes ?? []
+    const grokDerived = grokProjection?.derivedScopes ?? []
+    if (codexDerived.length === 0 && grokDerived.length === 0) {
       return HostReconciler.shortHash(runtimeScopes)
     }
+    // Codex-only Hosts must keep the pre-Grok hash input so an HCC upgrade
+    // does not remint every existing Codex runtime token.
+    if (grokDerived.length === 0) {
+      return HostReconciler.shortHash({
+        scopes: [...runtimeScopes, ...codexDerived].sort(),
+        drift: projection?.driftHashInput,
+      })
+    }
     return HostReconciler.shortHash({
-      scopes: [...runtimeScopes, ...derived].sort(),
+      scopes: [...runtimeScopes, ...codexDerived, ...grokDerived].sort(),
       drift: {
         codex: projection?.driftHashInput,
         grok: grokProjection?.driftHashInput,

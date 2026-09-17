@@ -100,13 +100,28 @@ function checkPolicyL1(parsed: { spec?: unknown } | null): ServerValidationError
   return null
 }
 
-function readRecipeAgentProvider(spec: unknown): string {
+function readRecipeOauthBrokerProvider(spec: unknown): string {
   if (!spec || typeof spec !== 'object' || Array.isArray(spec)) return ''
-  const agent = (spec as { agent?: unknown }).agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return ''
-  return typeof (agent as { provider?: unknown }).provider === 'string'
-    ? (agent as { provider: string }).provider.trim()
-    : ''
+  const ids: string[] = []
+  const push = (value: unknown) => {
+    if (typeof value !== 'string') return
+    const provider = value.trim()
+    if (
+      (provider === OPENAI_SUBSCRIPTION_PROVIDER || provider === GROK_SUBSCRIPTION_PROVIDER) &&
+      !ids.includes(provider)
+    ) {
+      ids.push(provider)
+    }
+  }
+  const rec = spec as {
+    agent?: { provider?: unknown }
+    steps?: Array<{ agent?: { provider?: unknown } }>
+  }
+  push(rec.agent?.provider)
+  for (const step of rec.steps ?? []) {
+    push(step?.agent?.provider)
+  }
+  return ids.length === 1 ? ids[0] : ''
 }
 
 function readRecipeCodexGrantAnnotation(
@@ -1728,7 +1743,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   const isCodexRecipe = useMemo(() => {
     try {
       const parsed = JSON.parse(jsonInput) as { spec?: unknown }
-      return readRecipeAgentProvider(parsed.spec) === OPENAI_SUBSCRIPTION_PROVIDER
+      return readRecipeOauthBrokerProvider(parsed.spec) === OPENAI_SUBSCRIPTION_PROVIDER
     } catch {
       return false
     }
@@ -1737,7 +1752,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
   const isGrokRecipe = useMemo(() => {
     try {
       const parsed = JSON.parse(jsonInput) as { spec?: unknown }
-      return readRecipeAgentProvider(parsed.spec) === GROK_SUBSCRIPTION_PROVIDER
+      return readRecipeOauthBrokerProvider(parsed.spec) === GROK_SUBSCRIPTION_PROVIDER
     } catch {
       return false
     }
@@ -1872,7 +1887,7 @@ export function RecipeEditor({ initial, onSaved, onCancel, pageHeader }: Props) 
       namespace?: string
     }
     const grantAnnotations = recipeGrantAnnotations(
-      readRecipeAgentProvider(specToUse),
+      readRecipeOauthBrokerProvider(specToUse),
       codexConnectionRef
     )
 
