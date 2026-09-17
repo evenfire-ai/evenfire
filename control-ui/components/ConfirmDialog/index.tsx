@@ -21,7 +21,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
     cancelButtonRef.current?.focus()
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') onResolve('dismiss')
+      if (event.key === 'Escape') onResolve('cancel')
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -49,7 +49,7 @@ function ConfirmDialog({ request, onResolve }: ConfirmDialogProps) {
       className="cu-modal-backdrop"
       role="presentation"
       onMouseDown={event => {
-        if (event.target === event.currentTarget) onResolve('dismiss')
+        if (event.target === event.currentTarget) onResolve('cancel')
       }}
     >
       <section

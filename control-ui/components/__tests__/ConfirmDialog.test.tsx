@@ -33,6 +33,20 @@ function DismissHarness() {
   )
 }
 
+function ChooseOutcomeHarness() {
+  const { choose, confirmDialog } = useConfirmDialog()
+  const [outcome, setOutcome] = useState('pending')
+  useEffect(() => {
+    void choose({ message: 'Save or discard?', title: 'Unsaved changes' }).then(setOutcome)
+  }, [choose])
+  return (
+    <>
+      <output>{outcome}</output>
+      {confirmDialog}
+    </>
+  )
+}
+
 describe('ConfirmDialog accessibility', () => {
   it('names the details block in the alertdialog accessible description', () => {
     render(
@@ -69,5 +83,21 @@ describe('ConfirmDialog accessibility', () => {
     fireEvent.mouseDown(document.querySelector('.cu-modal-backdrop') as HTMLElement)
 
     await waitFor(() => expect(screen.getByText('dismissed')).toBeInTheDocument())
+  })
+
+  it('normalizes Escape to the same cancel outcome as the Cancel button', async () => {
+    render(<ChooseOutcomeHarness />)
+
+    fireEvent.keyDown(window, { key: 'Escape' })
+
+    await waitFor(() => expect(screen.getByText('cancel')).toBeInTheDocument())
+  })
+
+  it('normalizes backdrop dismissal to the same cancel outcome as the Cancel button', async () => {
+    render(<ChooseOutcomeHarness />)
+
+    fireEvent.mouseDown(document.querySelector('.cu-modal-backdrop') as HTMLElement)
+
+    await waitFor(() => expect(screen.getByText('cancel')).toBeInTheDocument())
   })
 })

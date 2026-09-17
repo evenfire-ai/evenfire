@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 
 export type ConfirmDialogTone = 'default' | 'danger'
-export type ConfirmDialogOutcome = 'confirm' | 'cancel' | 'discard' | 'dismiss'
+export type ConfirmDialogOutcome = 'confirm' | 'cancel' | 'discard'
 
 export interface ConfirmDialogOptions {
   title?: string
