@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { GfsInheritedAccessDialog } from '../GfsInheritedAccessDialog'
 
 afterEach(() => {
@@ -103,5 +103,42 @@ describe('GfsInheritedAccessDialog', () => {
       <GfsInheritedAccessDialog request={null} onCancel={vi.fn()} onConfirm={vi.fn()} />
     )
     expect(container.firstElementChild).toBeNull()
+  })
+
+  // R1-L2 — the dialog describes itself and restores focus on close, matching
+  // the control-ui counterpart.
+  it('is described by its body and restores focus to the opener on close', async () => {
+    function Harness({ request }: { request: typeof changeRequest | null }) {
+      return (
+        <div>
+          <button type="button">Open share dialog</button>
+          <GfsInheritedAccessDialog
+            busy={false}
+            request={request}
+            onCancel={vi.fn()}
+            onConfirm={vi.fn()}
+          />
+        </div>
+      )
+    }
+
+    const { rerender } = render(<Harness request={null} />)
+    const opener = screen.getByRole('button', { name: 'Open share dialog' })
+    opener.focus()
+    expect(document.activeElement).toBe(opener)
+
+    rerender(<Harness request={changeRequest} />)
+    const dialog = screen.getByRole('alertdialog')
+    // The body copy is programmatically associated with the dialog…
+    const describedBy = dialog.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    const describedBody = document.getElementById(describedBy ?? '')
+    expect(describedBody?.textContent).toContain('will also change permissions on a parent folder')
+    // …focus lands on the safe cancel action while open…
+    await waitFor(() => expect(document.activeElement?.textContent).toBe('Cancel'))
+
+    // …and returns to the invoking element once the request clears.
+    rerender(<Harness request={null} />)
+    await waitFor(() => expect(document.activeElement).toBe(opener))
   })
 })

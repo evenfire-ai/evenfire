@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Button } from '@components/Common'
 import type { GfsInheritedAccessDialogProps, GfsInheritedAccessRole } from './types'
 
@@ -28,11 +28,29 @@ export function GfsInheritedAccessDialog({
   onCancel,
 }: GfsInheritedAccessDialogProps) {
   const titleId = useId()
+  const bodyId = useId()
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
+  const previousActiveElementRef = useRef<HTMLElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
+  // Keyed on open/close transitions, not the request object identity: the
+  // parent rebuilds the request object on every render, and refiring per
+  // render would reset the help view and steal focus mid-dialog.
+  const open = request !== null
 
   useEffect(() => {
     setShowHelp(false)
-  }, [request])
+  }, [open])
+
+  useEffect(() => {
+    if (!open) return
+    const previousActiveElement =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null
+    previousActiveElementRef.current = previousActiveElement
+    cancelButtonRef.current?.focus()
+    return () => {
+      previousActiveElementRef.current?.focus()
+    }
+  }, [open])
 
   if (!request) return null
 
@@ -59,6 +77,7 @@ export function GfsInheritedAccessDialog({
       }}
     >
       <section
+        aria-describedby={bodyId}
         aria-labelledby={titleId}
         aria-modal="true"
         className="da-gfs-parent-update-dialog"
@@ -67,7 +86,7 @@ export function GfsInheritedAccessDialog({
         <header className="da-gfs-parent-update-dialog__header">
           <h3 id={titleId}>{showHelp ? 'How sharing works in EvenDrive' : title}</h3>
         </header>
-        <div className="da-gfs-parent-update-dialog__body">
+        <div className="da-gfs-parent-update-dialog__body" id={bodyId}>
           {showHelp ? (
             <ul className="da-gfs-parent-update-dialog__help">
               {HELP_POINTS.map(point => (
@@ -124,7 +143,13 @@ export function GfsInheritedAccessDialog({
             </Button>
           ) : (
             <>
-              <Button autoFocus disabled={busy} onClick={onCancel} type="button" variant="ghost">
+              <Button
+                ref={cancelButtonRef}
+                disabled={busy}
+                onClick={onCancel}
+                type="button"
+                variant="ghost"
+              >
                 Cancel
               </Button>
               <Button
