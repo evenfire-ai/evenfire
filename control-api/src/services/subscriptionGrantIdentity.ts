@@ -20,45 +20,49 @@ function isOauthBroker(provider: string): boolean {
   return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
 }
 
-export function collectHostOauthBrokerProviders(spec: Record<string, unknown>): string[] {
+function knownOauthBrokerIds(): string[] {
+  return (Object.keys(PROVIDER_AUTH_MODE) as Array<keyof typeof PROVIDER_AUTH_MODE>).filter(
+    id => PROVIDER_AUTH_MODE[id] === 'oauth-broker'
+  )
+}
+
+function collectMatchingOauthBrokers(values: unknown[]): string[] {
   const providers: string[] = []
-  const push = (value: unknown) => {
-    if (typeof value !== 'string') return
-    const provider = value.trim()
-    if (provider && isOauthBroker(provider) && !providers.includes(provider)) {
-      providers.push(provider)
-    }
-  }
-  if (isPlainObject(spec.model)) push(spec.model.provider)
-  if (Array.isArray(spec.allowedModels)) {
-    for (const entry of spec.allowedModels) {
-      if (isPlainObject(entry)) push(entry.provider)
-    }
-  }
-  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
-    for (const entry of spec.llmPolicy.fallbacks) {
-      if (isPlainObject(entry)) push(entry.provider)
+  for (const id of knownOauthBrokerIds()) {
+    for (const value of values) {
+      if (typeof value === 'string' && value.trim() === id && !providers.includes(id)) {
+        providers.push(id)
+      }
     }
   }
   return providers
 }
 
-export function collectRecipeOauthBrokerProviders(spec: Record<string, unknown>): string[] {
-  const providers: string[] = []
-  const push = (value: unknown) => {
-    if (typeof value !== 'string') return
-    const provider = value.trim()
-    if (provider && isOauthBroker(provider) && !providers.includes(provider)) {
-      providers.push(provider)
+export function collectHostOauthBrokerProviders(spec: Record<string, unknown>): string[] {
+  const values: unknown[] = []
+  if (isPlainObject(spec.model)) values.push(spec.model.provider)
+  if (Array.isArray(spec.allowedModels)) {
+    for (const entry of spec.allowedModels) {
+      if (isPlainObject(entry)) values.push(entry.provider)
     }
   }
-  if (isPlainObject(spec.agent)) push(spec.agent.provider)
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    for (const entry of spec.llmPolicy.fallbacks) {
+      if (isPlainObject(entry)) values.push(entry.provider)
+    }
+  }
+  return collectMatchingOauthBrokers(values)
+}
+
+export function collectRecipeOauthBrokerProviders(spec: Record<string, unknown>): string[] {
+  const values: unknown[] = []
+  if (isPlainObject(spec.agent)) values.push(spec.agent.provider)
   if (Array.isArray(spec.steps)) {
     for (const step of spec.steps) {
-      if (isPlainObject(step) && isPlainObject(step.agent)) push(step.agent.provider)
+      if (isPlainObject(step) && isPlainObject(step.agent)) values.push(step.agent.provider)
     }
   }
-  return providers
+  return collectMatchingOauthBrokers(values)
 }
 
 /**

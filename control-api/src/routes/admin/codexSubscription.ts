@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import type { NextFunction, Request, Response } from 'express'
-import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
+import { PROVIDER_AUTH_MODE } from '@clerum/llm-providers'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { asyncHandler } from '../../http/asyncHandler.js'
@@ -91,21 +91,42 @@ const log = rootLogger.child({ module: 'admin-codex-subscription' })
 export const SUBSCRIPTION_ADMIN_BASE = '/admin/llm/providers/:providerId'
 const BASE = SUBSCRIPTION_ADMIN_BASE
 
+type SubscriptionBrokerId = 'codex-subscription' | 'grok-subscription'
+
+const subscriptionBrokerByReq = new WeakMap<object, SubscriptionBrokerId>()
+
+function bindKnownSubscriptionBroker(req: object, providerId: string): SubscriptionBrokerId | null {
+  if (providerId === 'codex-subscription') {
+    subscriptionBrokerByReq.set(req, 'codex-subscription')
+    return 'codex-subscription'
+  }
+  if (providerId === 'grok-subscription') {
+    subscriptionBrokerByReq.set(req, 'grok-subscription')
+    return 'grok-subscription'
+  }
+  return null
+}
+
+function isGrokReq(req: object): boolean {
+  return subscriptionBrokerByReq.get(req) === 'grok-subscription'
+}
+
 export function mountSubscriptionAdminRoutes(
   router: Router,
   options: { providerIds: readonly string[]; enabled: (providerId: string) => boolean }
 ): void {
   router.use(SUBSCRIPTION_ADMIN_BASE, (req: Request, res: Response, next: NextFunction) => {
-    const providerId = typeof req.params.providerId === 'string' ? req.params.providerId : ''
-    if (!isLlmProviderId(providerId) || PROVIDER_AUTH_MODE[providerId] !== 'oauth-broker') {
+    const raw = typeof req.params.providerId === 'string' ? req.params.providerId : ''
+    const broker = bindKnownSubscriptionBroker(req, raw)
+    if (!broker || PROVIDER_AUTH_MODE[broker] !== 'oauth-broker') {
       res.status(404).json({ error: 'not_found' })
       return
     }
-    if (!options.providerIds.includes(providerId)) {
+    if (!options.providerIds.includes(broker)) {
       res.status(404).json({ error: 'not_found' })
       return
     }
-    if (!options.enabled(providerId)) {
+    if (!options.enabled(broker)) {
       res.status(404).json({ error: 'disabled' })
       return
     }
@@ -288,14 +309,6 @@ export function createAdminCodexSubscriptionRouter(
   })
 
   const grokCatalogTransport: GrokCatalogTransport = createGrokCatalogTransportFromEnv()
-
-  function reqProviderId(req: { params?: { providerId?: string } }): string {
-    return typeof req.params?.providerId === 'string' ? req.params.providerId : ''
-  }
-
-  function isGrokReq(req: { params?: { providerId?: string } }): boolean {
-    return reqProviderId(req) === 'grok-subscription'
-  }
 
   function rejectGrokUnkeyed(req: Request, res: Response, next: NextFunction): void {
     if (isGrokReq(req)) {

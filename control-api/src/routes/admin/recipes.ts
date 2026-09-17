@@ -1282,10 +1282,11 @@ function recipeAnnotationStrings(
   annotations: Record<string, unknown> | undefined
 ): Record<string, string> | undefined {
   if (!annotations) return undefined
-  const out: Record<string, string> = {}
-  for (const [key, value] of Object.entries(annotations)) {
-    if (typeof value === 'string') out[key] = value
-  }
+  const out: Record<string, string> = Object.create(null)
+  const alias = annotations[CODEX_CONNECTION_REF_ANNOTATION]
+  const canonical = annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION]
+  if (typeof alias === 'string') out[CODEX_CONNECTION_REF_ANNOTATION] = alias
+  if (typeof canonical === 'string') out[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] = canonical
   return out
 }
 

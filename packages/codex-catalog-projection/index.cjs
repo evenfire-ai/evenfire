@@ -48,7 +48,11 @@ function readSubscriptionConnectionRef(input) {
 
   if (provider === CODEX_PROVIDER) {
     if (canonical && alias && canonical !== alias) {
-      return { ok: false, code: 'host_binding_mismatch', message: 'subscription connection annotations disagree' }
+      return {
+        ok: false,
+        code: 'host_binding_mismatch',
+        message: 'subscription connection annotations disagree',
+      }
     }
     return { ok: true, connectionKey: assignedCodexConnectionKey(canonical || alias) }
   }
@@ -492,7 +496,7 @@ function parseGrokAllowedModelsSnapshot(cm, connectionKey) {
   }
   const enabledModels = assigned.models
     .filter(model => typeof model === 'string' && model.trim())
-    .map(model => `${GROK_PROVIDER}:${model}`)
+    .map(model => `${GROK_PROVIDER_PREFIX}${model}`)
   return {
     flagEnabled,
     connectionStatus: assigned.status || annotations[GROK_CONNECTION_STATUS_ANNOTATION] || null,
