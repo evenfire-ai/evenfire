@@ -214,10 +214,11 @@ async function main() {
   }
   const authValue = command('bash', [
     '-c',
-    'source "$1"; e2e_resolve_admin_password "$2"',
+    'set -euo pipefail; source "$3"; dotenv_load_canonical_root "$2" >/dev/null; source "$1"; e2e_resolve_admin_password "$2"',
     'image-fixture',
     path.join(root, 'scripts/e2e/admin-credentials.sh'),
     root,
+    path.join(root, 'scripts/e2e/load-dotenv.sh'),
   ]).trim()
   if (!authValue) throw new Error('Owned lane admin login is not configured')
   const ADMIN_PASSWORD = authValue
