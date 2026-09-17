@@ -313,8 +313,9 @@ export function preserveServiceAssignedFields<
 /**
  * True when the desired PodDisruptionBudget is equivalent to the live object.
  * policy/v1 does not default-fill spec fields on this object, so comparison is
- * the whole PDB after stripping server-owned metadata. Doubt or a malformed
- * object returns false (fail-open-to-write).
+ * the whole PDB after stripping server-owned metadata. Labels, finalizers, and
+ * ownerReferences are compared in full (mergeExisting keeps annotations only).
+ * Doubt or a malformed object returns false (fail-open-to-write).
  */
 export function podDisruptionBudgetMatchesDesired(
   desired: k8s.V1PodDisruptionBudget | undefined,

@@ -57,6 +57,9 @@ function sanitizedStreamErrorMessage(): string {
 
 /** Clears in-process stream counters. Tests must call this; production never does. */
 export function resetHostStatusStreamRuntimeForTests(): void {
+  if (process.env.VITEST !== 'true' && process.env.NODE_ENV !== 'test') {
+    throw new Error('resetHostStatusStreamRuntimeForTests is test-only')
+  }
   activeStreamCountsByUser.clear()
   activeStreamCountsByUserHost.clear()
   activeStreams.clear()
@@ -66,7 +69,8 @@ export function resetHostStatusStreamRuntimeForTests(): void {
 export function createRpcHostStatusStreamRouter(): Router {
   const router = Router()
 
-  // ([^/]+) so a decoded "*" is a hostRef (400), not an Express splat (404).
+  // Explicit one-segment hostRef (same match set as Express 4 :hostRef).
+  // Wildcard 400 is isWildcardOrInvalidHostRef; tests reset module counters.
   router.get(
     '/rpc/hosts/:hostRef([^/]+)/status/stream',
     requireRpcAuth,

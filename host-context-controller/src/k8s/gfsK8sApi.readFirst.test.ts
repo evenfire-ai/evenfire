@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import livePdbFixture from '../__tests__/fixtures/629/gfsc-writer-pdb.json'
 import { createsTotal, existenceReadsTotal, writeSkipsTotal } from '../metrics'
+import { podDisruptionBudgetMatchesDesired } from '../utils'
 import { K8sGfsApi } from './gfsK8sApi'
 
 const namespace = 'mcp-host'
@@ -322,5 +323,13 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
     const replaced = drifted.replace.mock.calls[0][0].body as k8s.V1PodDisruptionBudget
     expect(replaced.spec?.minAvailable).toBe(1)
     expect(await skipCount()).toBe(0)
+  })
+
+  it('T4: a live unhealthyPodEvictionPolicy is drift', () => {
+    const live = {
+      ...desired,
+      spec: { ...desired.spec, unhealthyPodEvictionPolicy: 'AlwaysAllow' as const },
+    }
+    expect(podDisruptionBudgetMatchesDesired(desired, live)).toBe(false)
   })
 })

@@ -273,7 +273,7 @@ describe('networkPolicyMatchesDesired', () => {
     expect(networkPolicyMatchesDesired(emptyEgressDerived, live)).toBe(true)
   })
 
-  it('T2: clerum-dev llmhook fixture without ingress matches empty ingress', () => {
+  it('T2: 629 fixture without ingress matches empty ingress', () => {
     const live = liveLlmhookNp as k8s.V1NetworkPolicy
     expect(live.spec).not.toHaveProperty('ingress')
     const emptyIngress: k8s.V1NetworkPolicy = {

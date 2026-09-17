@@ -436,7 +436,20 @@ describe('deploymentMatchesDesired', () => {
     expect(deploymentMatchesDesired(desiredSet, live)).toBe(false)
   })
 
-  it('T1: clerum-dev env fixture without value matches empty value', () => {
+  it('T1: empty env value is not equivalent to a valueFrom secret ref', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+    ]
+    const desiredEmpty = structuredClone(live)
+    desiredEmpty.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: '' },
+    ]
+    expect(deploymentMatchesDesired(desiredEmpty, live)).toBe(false)
+    expect(deploymentMatchesDesired(live, desiredEmpty)).toBe(false)
+  })
+
+  it('T1: 629 fixture env without value matches empty value', () => {
     const live = liveCodexCert as k8s.V1Deployment
     const liveEnv = live.spec?.template.spec?.containers[0].env?.[0]
     expect(liveEnv?.name).toBe('CLERUM_LLM_SECRET_REF')
