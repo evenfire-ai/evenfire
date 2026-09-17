@@ -380,6 +380,13 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
     await test.step('upload and decode the image in Files', () =>
       uploadAndPreview(page, granted, filePath, fileName, visual.width, visual.height))
     await test.step('read the named file through a fresh agent conversation', async () => {
+      // Read-only business evidence after the real UI upload. This id is never
+      // provided to the model in the positive journey.
+      const uploaded = getGfsChildResourceSummary({
+        parentResourceId: granted.resourceId,
+        name: fileName,
+      })
+      expect(uploaded).toMatchObject({ kind: 'file', bytes: visual.bytes.length, deleted: false })
       await freshChat(page, agentLabel)
       await sendRead(
         page,
@@ -388,11 +395,15 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
           'Use color names red, green, blue, yellow, orange or purple, and shape names circle, square or triangle. ' +
           'Do not infer contents from the filename. Do not use other tools.'
       )
-      const visualOutputs = page
-        .getByTestId('step-output-panel')
-        .filter({ hasText: fileName })
-        .filter({ hasText: /"delivery"\s*:\s*"image_input"/ })
-      await expect(visualOutputs).not.toHaveCount(0)
+      // Progress previews truncate each line at 200 chars. The resource id is
+      // visible; the trailing delivery field is not. Exact visual facts below
+      // are the E2E oracle; typed delivery and serialized bytes are integration
+      // contracts, not claims inferred from a truncated preview.
+      await expect(
+        page
+          .getByTestId('step-output-panel')
+          .filter({ hasText: uploaded!.resourceId.replace(/-/g, '') })
+      ).not.toHaveCount(0)
       await expect(
         page
           .getByRole('navigation', { name: 'Chat breadcrumb' })
@@ -437,9 +448,8 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       await expect(
         page.getByTestId('step-output-panel').filter({ hasText: /gfsc 403: forbidden/ })
       ).not.toHaveCount(0)
-      await expect(
-        page.getByTestId('step-output-panel').filter({ hasText: /"delivery"\s*:\s*"image_input"/ })
-      ).toHaveCount(0)
+      // The 403 contract's zero-image assertion lives in the integration suite;
+      // absence of a field from a truncated UI preview cannot prove that fact.
       expect(await visualAnswer(page)).toEqual({
         status: 'denied',
       })
