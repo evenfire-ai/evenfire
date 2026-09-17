@@ -335,8 +335,10 @@ private predicate isFailClosedAuthorizationHandler(
 ) {
   exists(
     VariableDeclarator connectionDeclaration, VarDecl connectionBinding,
-    IfStmt connectionGuard, VarAccess guardedConnection, AssignExpr storedConnection,
-    PropAccess artifactConnection, VarAccess assignedConnection, CallExpr nextCall
+    IfStmt connectionGuard, LogNotExpr missingConnection, VarAccess guardedConnection,
+    ReturnStmt missingReturn, AssignExpr storedConnection, PropAccess artifactConnection,
+    VarAccess assignedConnection, CallExpr nextCall, TryStmt authorizationTry,
+    CatchClause errorHandler, CallExpr errorForwarding, VarAccess caughtError
   |
     liveAuthorization.getCallee().(VarAccess).getVariable() = resolver.getVariable() and
     liveAuthorization.getArgument(0).(VarAccess).getVariable() =
@@ -346,21 +348,44 @@ private predicate isFailClosedAuthorizationHandler(
     connectionDeclaration.getBindingPattern() = connectionBinding and
     connectionBinding.getVariable() = guardedConnection.getVariable() and
     connectionGuard.getCondition().getEnclosingFunction() = handler and
-    connectionGuard.getCondition() = guardedConnection and
+    connectionGuard.getCondition() = missingConnection and
+    missingConnection.getOperand() = guardedConnection and
+    connectionGuard.getThen() = missingReturn and
+    not exists(missingReturn.getExpr()) and
+    not exists(connectionGuard.getElse()) and
+    connectionGuard.nestedIn(authorizationTry.getBody()) and
+    not exists(TryStmt interveningTry |
+      connectionGuard.nestedIn(interveningTry.getBody()) and
+      interveningTry.nestedIn(authorizationTry.getBody())
+    ) and
     artifactConnection.getPropertyName() = "artifactReadConnection" and
     artifactConnection.getBase().(VarAccess).getVariable() = handler.getParameter(0).getVariable() and
     storedConnection.getEnclosingFunction() = handler and
     storedConnection.getLhs() = artifactConnection and
     storedConnection.getRhs() = assignedConnection and
     assignedConnection.getVariable() = connectionBinding.getVariable() and
-    storedConnection.getEnclosingStmt().nestedIn(connectionGuard.getThen()) and
+    storedConnection.getEnclosingStmt().nestedIn(authorizationTry.getBody()) and
+    connectionGuard.getLastToken().getIndex() <
+      storedConnection.getEnclosingStmt().getFirstToken().getIndex() and
     nextCall.getCalleeName() = "next" and
     nextCall.getEnclosingFunction() = handler and
-    nextCall.getEnclosingStmt().nestedIn(connectionGuard.getThen()) and
-    not exists(CallExpr unguardedNext |
-      unguardedNext.getCalleeName() = "next" and
-      unguardedNext.getEnclosingFunction() = handler and
-      not unguardedNext.getEnclosingStmt().nestedIn(connectionGuard.getThen())
+    nextCall.getNumArgument() = 0 and
+    nextCall.getEnclosingStmt().nestedIn(authorizationTry.getBody()) and
+    storedConnection.getEnclosingStmt().getLastToken().getIndex() <
+      nextCall.getEnclosingStmt().getFirstToken().getIndex() and
+    errorHandler = authorizationTry.getACatchClause() and
+    errorHandler.getNumParameter() = 1 and
+    errorForwarding.getCalleeName() = "next" and
+    errorForwarding.getNumArgument() = 1 and
+    errorForwarding.getArgument(0) = caughtError and
+    caughtError.(VarAccess).getVariable() = errorHandler.getAParameter().getVariable() and
+    errorForwarding.getEnclosingFunction() = handler and
+    errorForwarding.getEnclosingStmt().nestedIn(errorHandler.getBody()) and
+    not exists(CallExpr otherNext |
+      otherNext.getCalleeName() = "next" and
+      otherNext.getEnclosingFunction() = handler and
+      otherNext != nextCall and
+      otherNext != errorForwarding
     )
   )
 }
