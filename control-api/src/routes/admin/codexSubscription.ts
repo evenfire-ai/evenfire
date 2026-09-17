@@ -55,7 +55,10 @@ import {
 } from '../../services/grokSubscriptionCatalog.js'
 import {
   GROK_UNASSIGNED_CONNECTION_KEY,
+  GrokSubscriptionConnectionKeyConflictError,
+  GrokSubscriptionFingerprintConflictError,
   GrokSubscriptionInvalidConnectionKeyError,
+  GrokSubscriptionStaleRevisionError,
   assertGrokConnectionKey,
   createNamedGrokSubscriptionConnection,
   generateGrokConnectionKey,
@@ -181,6 +184,22 @@ function sendOAuthError(
   }
   if (err instanceof GrokSubscriptionInvalidConnectionKeyError) {
     res.status(400).json({ error: 'invalid_connection_key' })
+    return
+  }
+  // Grok connection-layer write races must never surface as unmapped 500s.
+  if (err instanceof GrokSubscriptionConnectionKeyConflictError) {
+    log.warn({ event: 'grok_oauth_admin_denied', code: err.code }, 'Grok connection key conflict')
+    res.status(409).json({ error: 'connection_key_taken' })
+    return
+  }
+  if (err instanceof GrokSubscriptionFingerprintConflictError) {
+    log.warn({ event: 'grok_oauth_admin_denied', code: err.code }, 'Grok fingerprint conflict')
+    res.status(409).json({ error: 'fingerprint_in_use' })
+    return
+  }
+  if (err instanceof GrokSubscriptionStaleRevisionError) {
+    log.warn({ event: 'grok_oauth_admin_denied', code: err.code }, 'Grok stale revision')
+    res.status(409).json({ error: 'stale_revision' })
     return
   }
   if (err instanceof GrokSubscriptionOAuthError) {
@@ -326,6 +345,21 @@ export function createAdminCodexSubscriptionRouter(
       clientId: config.grokOAuthClientId,
       enabled: config.grokSubscriptionEnabled,
       connectionKey,
+    }
+  }
+
+  /**
+   * Migration 0113 archives superseded tombstones as `<key>~revoked~<id>`.
+   * Those keys sit outside the key grammar, so no keyed route can address
+   * them; listing them would only surface unactionable duplicates. The key's
+   * own terminal tombstone (status `revoked`, `revokedAt` set) stays listed.
+   */
+  function isAddressableGrokConnection(row: { connectionKey: string }): boolean {
+    try {
+      assertGrokConnectionKey(row.connectionKey)
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -815,7 +849,9 @@ export function createAdminCodexSubscriptionRouter(
           res.status(404).json({ error: 'disabled' })
           return
         }
-        const rows = await listSafeGrokSubscriptionConnections(dbClient())
+        const rows = (await listSafeGrokSubscriptionConnections(dbClient())).filter(
+          isAddressableGrokConnection
+        )
         const hosts = await listHostsOrUnavailable()
         const connections = []
         for (const row of rows) {
@@ -885,6 +921,7 @@ export function createAdminCodexSubscriptionRouter(
             return
           }
           const code = (err as { code?: string } | null)?.code
+          // A revoked key is a terminal tombstone (0113): recreating it conflicts.
           if (code === '23505') {
             res.status(409).json({ error: 'connection_key_taken' })
             return

@@ -461,8 +461,12 @@ describe('GET /mcp-host/plugin-workload-sdk/capabilities', () => {
       defaultConnectionRef: 'team-grok',
       defaultCatalogRevision: 5,
       defaultCredentialRevision: 2,
-      bindingRevisions: true,
+      reservationOnlyOauthBroker: true,
+      codexBindingRevisions: true,
     })
+    // B-L15: no consumer reads a Grok-only `bindingRevisions` flag; the static
+    // `codexBindingRevisions` capability is the single revision gate.
+    expect(res.body).not.toHaveProperty('bindingRevisions')
     expect(vi.mocked(grokConnection.getSafeGrokSubscriptionConnection)).toHaveBeenCalledWith(
       expect.anything(),
       'team-grok'

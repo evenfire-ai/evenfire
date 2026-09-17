@@ -782,8 +782,9 @@ export function createMcpHostPluginWorkloadSdkRoutes(): Router {
         ...(reservationOnlyOauthBroker
           ? {
               reservationOnlyOauthBroker: true,
+              // Static for both brokers: mcp-host gates the Grok revision
+              // comparison on this same flag, so no Grok-only twin is emitted.
               codexBindingRevisions: true,
-              ...(grokDefault ? { bindingRevisions: true } : {}),
             }
           : {}),
         ...(brokerConnection

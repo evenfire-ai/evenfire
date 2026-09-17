@@ -351,7 +351,13 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
         body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
         current
       )
-    ).rejects.toMatchObject({ code: 'no_grant' })
+    ).rejects.toMatchObject({
+      code: 'no_grant',
+      // A host caller has no recipe namespace, so a later SDK-link check would
+      // also reject with no_grant. Only the host guard produces this message.
+      message: 'host Grok chat cannot bind a Plugin Workload SDK provider attempt',
+    })
+    expect(lockPluginWorkloadSdkRecipe).not.toHaveBeenCalled()
     expect(getPluginWorkloadSdkProviderAttemptForUpdate).not.toHaveBeenCalled()
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
