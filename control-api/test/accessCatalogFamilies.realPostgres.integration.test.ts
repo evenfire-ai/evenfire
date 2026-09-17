@@ -557,6 +557,113 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     ).toBe(2)
   })
 
+  it('discovers a Host through a direct user grant without a team grant', async () => {
+    const directOnlyUserId = randomUUID()
+    const directOnlySession: ExternalSessionAuthorityContext = {
+      contract: 'v1',
+      userId: directOnlyUserId,
+      tokenHash: randomBytes(32).toString('hex'),
+      issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
+    }
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Direct-only Catalog User')`,
+      [directOnlyUserId, `${directOnlyUserId}@example.test`]
+    )
+    await databasePool.query(
+      `INSERT INTO user_agents(user_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [directOnlyUserId]
+    )
+
+    const catalog = await buildAccessCatalog(
+      { session: directOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(catalog.items.map(item => item.resource.logicalId)).toEqual([
+      `${config.hostsNamespace}/catalog-host`,
+    ])
+    expect(catalog.items[0]?.accessPaths).toHaveLength(1)
+    expect(catalog.items[0]?.accessPaths[0]).toEqual(expect.objectContaining({ kind: 'direct' }))
+    expect(catalog.items[0]?.accessPaths[0]).not.toHaveProperty('teamId')
+  })
+
+  it('discovers a team-only Host and revokes it live without replacing the user session', async () => {
+    const teamOnlyUserId = randomUUID()
+    const teamOnlySession: ExternalSessionAuthorityContext = {
+      contract: 'v1',
+      userId: teamOnlyUserId,
+      tokenHash: randomBytes(32).toString('hex'),
+      issuedAt: Math.floor(Date.now() / 1_000),
+      authGeneration: 1,
+    }
+    await databasePool.query(
+      `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Team-only Catalog User')`,
+      [teamOnlyUserId, `${teamOnlyUserId}@example.test`]
+    )
+    await databasePool.query(
+      `INSERT INTO team_members(team_id, user_id, role, status)
+       VALUES ($1, $2, 'member', 'active')`,
+      [teamId, teamOnlyUserId]
+    )
+    await databasePool.query(
+      `INSERT INTO team_agents(team_id, agent_name) VALUES ($1, 'catalog-host')`,
+      [teamId]
+    )
+
+    const firstCatalog = await buildAccessCatalog(
+      { session: teamOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(firstCatalog.items.map(item => item.resource.logicalId)).toEqual([
+      `${config.hostsNamespace}/catalog-host`,
+    ])
+    expect(firstCatalog.items[0]?.accessPaths).toEqual([
+      expect.objectContaining({ kind: 'team', teamId }),
+    ])
+
+    const teamPath = firstCatalog.items[0]!.accessPaths[0]!
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session: teamOnlySession,
+          requiredCapability: 'host.read',
+          resource: canonicalResourceIdentity(firstCatalog.items[0]!.resource),
+          requestedAccessPathId: teamPath.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({
+        status: 'allowed',
+        selectedPath: expect.objectContaining({ kind: 'team', teamId }),
+      })
+    )
+
+    await databasePool.query(
+      `UPDATE team_members SET status = 'inactive' WHERE team_id = $1 AND user_id = $2`,
+      [teamId, teamOnlyUserId]
+    )
+
+    const afterRevocation = await buildAccessCatalog(
+      { session: teamOnlySession, families: ['host'], limit: 10 },
+      { transaction: transaction(databasePool) }
+    )
+    expect(afterRevocation.items).toEqual([])
+    await expect(
+      resolveLiveAuthorization(
+        {
+          session: teamOnlySession,
+          requiredCapability: 'host.read',
+          resource: canonicalResourceIdentity(firstCatalog.items[0]!.resource),
+          requestedAccessPathId: teamPath.accessPathId,
+        },
+        { transaction: transaction(databasePool), gateway }
+      )
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
+  })
+
   it('uses real Kubernetes list and exact-read wire boundaries', async () => {
     const listRequests = kubernetesApi.requests.filter(request => !request.watch && !request.name)
     expect(listRequests).toHaveLength(operationalSourceSpecs.length)
