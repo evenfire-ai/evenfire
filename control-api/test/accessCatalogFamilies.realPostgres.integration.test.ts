@@ -589,6 +589,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
 
   it('discovers a team-only Host and revokes it live without replacing the user session', async () => {
     const teamOnlyUserId = randomUUID()
+    const teamOnlyTeamId = randomUUID()
     const teamOnlySession: ExternalSessionAuthorityContext = {
       contract: 'v1',
       userId: teamOnlyUserId,
@@ -600,14 +601,17 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       `INSERT INTO users(id, email, name) VALUES ($1, $2, 'Team-only Catalog User')`,
       [teamOnlyUserId, `${teamOnlyUserId}@example.test`]
     )
+    await databasePool.query(`INSERT INTO teams(id, name) VALUES ($1, 'Team-only Catalog Team')`, [
+      teamOnlyTeamId,
+    ])
     await databasePool.query(
       `INSERT INTO team_members(team_id, user_id, role, status)
        VALUES ($1, $2, 'member', 'active')`,
-      [teamId, teamOnlyUserId]
+      [teamOnlyTeamId, teamOnlyUserId]
     )
     await databasePool.query(
       `INSERT INTO team_agents(team_id, agent_name) VALUES ($1, 'catalog-host')`,
-      [teamId]
+      [teamOnlyTeamId]
     )
 
     const firstCatalog = await buildAccessCatalog(
@@ -618,7 +622,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       `${config.hostsNamespace}/catalog-host`,
     ])
     expect(firstCatalog.items[0]?.accessPaths).toEqual([
-      expect.objectContaining({ kind: 'team', teamId }),
+      expect.objectContaining({ kind: 'team', teamId: teamOnlyTeamId }),
     ])
 
     const teamPath = firstCatalog.items[0]!.accessPaths[0]!
@@ -635,13 +639,13 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     ).resolves.toEqual(
       expect.objectContaining({
         status: 'allowed',
-        selectedPath: expect.objectContaining({ kind: 'team', teamId }),
+        selectedPath: expect.objectContaining({ kind: 'team', teamId: teamOnlyTeamId }),
       })
     )
 
     await databasePool.query(
       `UPDATE team_members SET status = 'inactive' WHERE team_id = $1 AND user_id = $2`,
-      [teamId, teamOnlyUserId]
+      [teamOnlyTeamId, teamOnlyUserId]
     )
 
     const afterRevocation = await buildAccessCatalog(
