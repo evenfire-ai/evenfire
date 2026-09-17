@@ -5,6 +5,8 @@ import { checkpointActionAuthority } from '../../src/services/access/actionAutho
 type FixtureInput = Readonly<{
   request: Parameters<typeof checkpointActionAuthority>[0]['request']
   destination: Readonly<{ kind: 'host' | 'mcp_server'; ref: string; url: string }> | null
+  pathKind?: 'direct' | 'team'
+  effectiveTeamId?: string | null
   checkedAt?: string
   validUntil?: string | null
 }>
@@ -48,8 +50,8 @@ async function main(): Promise<void> {
             accessPathId: input.request.accessPathId,
             authorizationRevision: input.request.authorizationRevision,
             behaviorBindingHash: input.request.behaviorBindingHash,
-            pathKind: 'direct',
-            effectiveTeamId: null,
+            pathKind: input.pathKind ?? 'direct',
+            effectiveTeamId: input.effectiveTeamId ?? null,
             selectedPathCapabilities: ['fixture.authorized'],
             behavior,
             validUntil: input.validUntil ?? null,
