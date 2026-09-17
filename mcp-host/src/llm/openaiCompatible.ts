@@ -38,6 +38,8 @@ import type {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import { createOpenRouterImageCapabilityResolver } from '../visualInput/capabilities'
+import type { ImageInputCapability } from '../visualInput/policy'
 import { OpenAIProvider } from './openai'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError } from './types'
@@ -79,6 +81,7 @@ const MODEL_NOT_AVAILABLE_CODES = new Set(['1211', '1220', 'ModelNotFound', 'Mod
 const BILLING_CODES = new Set(['1113', 'Arrearage'])
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
+  private readonly imageCapabilityResolver?: (signal?: AbortSignal) => Promise<ImageInputCapability>
   /** Provider temperature upper bound — 1 for Moonshot, else the [0,2] default. */
   private readonly temperatureCeiling: number
   /**
@@ -103,10 +106,28 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     super(new OpenAI({ apiKey, baseURL: cfg.baseURL }), model ?? cfg.defaultModel)
     this.temperatureCeiling = cfg.id === 'moonshot' ? 1 : 2
     this.downgradesRequiredToolChoice = cfg.id === 'moonshot'
+    if (cfg.id === 'openrouter') {
+      // This protocol publishes model modalities. Other compatible transports
+      // do not thereby prove model vision support and remain unknown.
+      const metadataBase = cfg.baseURL.replace(/\/+$/, '')
+      this.imageCapabilityResolver = createOpenRouterImageCapabilityResolver(
+        model ?? cfg.defaultModel,
+        (path, signal) =>
+          fetch(`${metadataBase}${path}`, {
+            headers: { authorization: `Bearer ${apiKey}` },
+            redirect: 'error',
+            signal,
+          })
+      )
+    }
   }
 
   override getProviderType(): LlmProvider {
     return this.cfg.id as LlmProvider
+  }
+
+  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    return this.imageCapabilityResolver?.(signal) ?? Promise.resolve({ status: 'unknown' })
   }
 
   /**
@@ -170,6 +191,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     return super.completeSingleTurnWithTools(

@@ -25,6 +25,7 @@ import type {
 } from '../../../db/worker/protocol'
 import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
+import { projectGfsApproval } from '../../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
   type ChatMessage,
@@ -1012,6 +1013,7 @@ export class SqliteConversationStore implements ConversationStore {
   }
 
   async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
+    approval = projectGfsApproval(approval)
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     if (!conv.activeTaskId) {

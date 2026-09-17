@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { decodeRuntimeJwtScopes } from '../workflow/mcpHostRuntimeJwt'
 import type { GfscWriteClient } from './gfs'
+import { readGfsContent } from './gfsContentRead'
 
 const DIRECT_KEY = 'MCP_HOST_GFS_TOKEN'
 const FILE_KEY = 'MCP_HOST_GFS_TOKEN_FILE'
@@ -83,14 +84,22 @@ export function createGfscClient(env: GfsRuntimeEnv): GfscWriteClient {
     return value
   }
 
-  async function request(baseUrl: string, path: string, init: RequestInit = {}): Promise<unknown> {
-    const res = await fetchFn(`${baseUrl}${path}`, {
+  async function authenticatedFetch(
+    baseUrl: string,
+    path: string,
+    init: RequestInit = {}
+  ): Promise<Response> {
+    return fetchFn(`${baseUrl}${path}`, {
       ...init,
       headers: {
         [AUTH_HEADER]: `${AUTH_SCHEME} ${await accessValue()}`,
         ...(init.headers ?? {}),
       },
     })
+  }
+
+  async function request(baseUrl: string, path: string, init: RequestInit = {}): Promise<unknown> {
+    const res = await authenticatedFetch(baseUrl, path, init)
     if (!res.ok) {
       const body = await res.text().catch(() => '')
       throw new Error(`gfsc ${res.status}: ${body || res.statusText}`)
@@ -111,11 +120,8 @@ export function createGfscClient(env: GfsRuntimeEnv): GfscWriteClient {
       if (cursor) q.set('cursor', cursor)
       return request(readerBase, `/v1/resources/${encodeURIComponent(resourceId)}/children?${q}`)
     },
-    read: ({ drive, resourceId }) =>
-      request(
-        readerBase,
-        `/v1/resources/${encodeURIComponent(resourceId)}/content?drive=${encodeURIComponent(drive)}`
-      ),
+    read: (args, options = {}) =>
+      readGfsContent((path, init) => authenticatedFetch(readerBase, path, init), args, options),
     stat: ({ drive, resourceId }) =>
       request(
         readerBase,

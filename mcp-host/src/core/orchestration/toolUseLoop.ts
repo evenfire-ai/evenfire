@@ -1,5 +1,6 @@
 import { evaluateTaskBrake } from '../../budget/taskBrake'
 import { logger } from '../../logger'
+import { projectGfsApproval } from '../../visualInput/suspension'
 import type {
   Attachment,
   ChatMessage,
@@ -332,6 +333,12 @@ export async function runToolUseLoop(
             tool_calls: result.calls,
           })
 
+          for (const message of messages) {
+            for (const part of message.contentParts ?? []) {
+              if (part.type === 'image' && !part.source)
+                config.visualInput?.budget.observeExternalImage(part.data)
+            }
+          }
           const { toolResults, pendingApproval, cancelled } = await executeToolCalls(
             result.calls,
             config,
@@ -351,7 +358,7 @@ export async function runToolUseLoop(
                 ...collectedAttachments,
               ]
             }
-            return { type: 'need_approval', approval: pendingApproval }
+            return { type: 'need_approval', approval: projectGfsApproval(pendingApproval) }
           }
 
           const workflowFallbackResults = toolResults.filter(
@@ -395,7 +402,7 @@ export async function runToolUseLoop(
 
         case 'need_approval':
           logger.info({ component: 'Loop', iterations: iteration + 1 }, 'Loop requires approval')
-          return { type: 'need_approval', approval: result.approval }
+          return { type: 'need_approval', approval: projectGfsApproval(result.approval) }
         case 'error': {
           const recovery = handleLoopErrorRecovery({
             error: result.error,

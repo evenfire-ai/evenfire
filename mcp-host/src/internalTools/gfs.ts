@@ -1,4 +1,7 @@
+import { inspectImage, validateImage } from '../visualInput/imageValidation'
+import { VisualInputError } from '../visualInput/policy'
 import type { InternalToolDefinition, InternalToolResult } from '../workflow/types'
+import type { GfsFileContent, GfsReadOptions } from './gfsReadTypes'
 
 /**
  * Agent gfs READ tools (spec community.md §Operator surfaces, plan P3-S04).
@@ -12,7 +15,10 @@ import type { InternalToolDefinition, InternalToolResult } from '../workflow/typ
 export interface GfscReadClient {
   accessible(args: { drive: string; cursor?: string }): Promise<unknown>
   list(args: { drive: string; resourceId: string; cursor?: string }): Promise<unknown>
-  read(args: { drive: string; resourceId: string }): Promise<unknown>
+  read(
+    args: { drive: string; resourceId: string },
+    options?: GfsReadOptions
+  ): Promise<GfsFileContent>
   stat(args: { drive: string; resourceId: string }): Promise<unknown>
   resolve(args: { uri: string }): Promise<unknown>
 }
@@ -24,7 +30,48 @@ function ok(content: unknown): InternalToolResult {
 // only gfsc's HTTP status and a coarse public category may reach the model —
 // never the response body, which could carry paths or server internals.
 function fail(error: unknown): InternalToolResult {
+  if (error instanceof VisualInputError) return { success: false, error: error.message }
   return redactedFail('GFS read failed', error)
+}
+
+function fileReference(file: GfsFileContent, reason: string): InternalToolResult {
+  return ok({
+    resource: file.source,
+    sizeBytes: file.bytes.byteLength,
+    delivery: 'reference_only',
+    reason,
+  })
+}
+
+function isNonTextFormat(bytes: Buffer): boolean {
+  const signature = bytes.byteLength >= 4 ? bytes.readUInt32LE(0) : 0
+  const gif = bytes.subarray(0, 6).toString('ascii')
+  return (
+    bytes.subarray(0, 5).equals(Buffer.from('%PDF-')) ||
+    [0x04034b50, 0x06054b50, 0x08074b50].includes(signature) ||
+    gif === 'GIF87a' ||
+    gif === 'GIF89a' ||
+    (bytes.subarray(0, 4).equals(Buffer.from('RIFF')) &&
+      ['WEBP', 'WAVE', 'AVI '].includes(bytes.subarray(8, 12).toString('ascii'))) ||
+    (bytes[0] === 0x1f && bytes[1] === 0x8b)
+  )
+}
+
+function isSvgText(text: string): boolean {
+  let remaining = text.trimStart()
+  // Scan each prefix once; do not use a repeated, backtracking XML regex on
+  // untrusted file content. This is format recognition, never XML execution.
+  for (;;) {
+    const end = remaining.startsWith('<?')
+      ? remaining.indexOf('?>', 2)
+      : remaining.startsWith('<!--')
+        ? remaining.indexOf('-->', 4)
+        : -1
+    if (end < 0) break
+    const suffixLength = remaining.startsWith('<?') ? 2 : 3
+    remaining = remaining.slice(end + suffixLength).trimStart()
+  }
+  return /^<svg[\s>]/i.test(remaining) || /^<!DOCTYPE\s+svg[\s>]/i.test(remaining)
 }
 // Locally-authored argument-validation messages carry no server data and must
 // reach the model verbatim so the agent can correct its call.
@@ -87,13 +134,65 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
     },
     {
       name: 'clerum__gfs_read',
-      description: 'Read a gfs file by drive + resourceId (read-only).',
+      description:
+        'Read a GFS file by drive + resourceId. Returns UTF-8 text, or a bounded JPEG/PNG image when the active model supports image input. Other formats return a reference and an explicit limitation.',
       parameters: driveResourceParams,
-      execute: async (args: Record<string, unknown>): Promise<InternalToolResult> => {
+      execute: async (args, _outputDir, options): Promise<InternalToolResult> => {
+        let file: GfsFileContent | undefined
         try {
-          return ok(await client.read(args as { drive: string; resourceId: string }))
+          file = await client.read(args as { drive: string; resourceId: string }, {
+            signal: options?.signal,
+            timeoutMs: options?.timeoutMs,
+            budget: options?.readBudget ?? options?.visualInput?.budget,
+          })
+          if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+          const image = inspectImage(file.bytes)
+          if (image) {
+            const visualInput = options?.visualInput
+            if (!visualInput)
+              return fileReference(file, 'image_input_unavailable_in_this_execution')
+            const capability = await visualInput.resolveCapability(options?.signal)
+            if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+            if (capability.status !== 'supported')
+              return fileReference(file, `model_image_input_${capability.status}`)
+            await validateImage(file.bytes, image, {
+              signal: options?.signal,
+              budget: visualInput.budget,
+            })
+            if (options?.signal?.aborted) throw new VisualInputError('cancelled')
+            const dataBase64 = visualInput.budget.encodeImage(file.bytes)
+            return {
+              success: true,
+              content: JSON.stringify({
+                resource: file.source,
+                mimeType: image.mimeType,
+                width: image.width,
+                height: image.height,
+                sizeBytes: file.bytes.byteLength,
+                delivery: 'image_input',
+              }),
+              images: [
+                { ...image, source: file.source, sizeBytes: file.bytes.byteLength, dataBase64 },
+              ],
+            }
+          }
+          if (/\.(?:png|jpe?g)$/i.test(file.source.name))
+            throw new VisualInputError('invalid_image')
+          if (isNonTextFormat(file.bytes)) return fileReference(file, 'unsupported_binary_format')
+          let text: string
+          try {
+            text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes)
+          } catch {
+            return fileReference(file, 'unsupported_binary_format')
+          }
+          if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(text))
+            return fileReference(file, 'unsupported_binary_format')
+          if (isSvgText(text)) return fileReference(file, 'svg_visual_input_not_supported')
+          return ok(text)
         } catch (err) {
           return fail(err)
+        } finally {
+          file?.reservation.release()
         }
       },
     },

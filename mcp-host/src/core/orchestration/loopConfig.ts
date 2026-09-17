@@ -1,5 +1,6 @@
 import type { TaskBrakeConfig } from '../../budget/taskBrake'
 import type { ProgressReporter } from '../../progress/types.js'
+import type { VisualInputContext } from '../../visualInput/policy'
 import type { ToolLaneGuardrail } from '../guardrails'
 import {
   AgentEventEmitter,
@@ -69,6 +70,7 @@ export interface LoopConfig {
 
   /** Optional abort signal. When aborted, the loop exits at the next checkpoint. */
   abortSignal?: AbortSignal
+  visualInput?: VisualInputContext
 
   /**
    * P2 token budgets — per-task emergency brake (§5.2). When the P1 pre-task

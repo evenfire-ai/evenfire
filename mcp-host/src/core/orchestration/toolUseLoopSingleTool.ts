@@ -26,6 +26,7 @@ export async function executeSingleTool(
     | 'toolProgressInterval'
     | 'spilloverStorage'
     | 'taskId'
+    | 'visualInput'
     | 'abortSignal'
   >,
   iteration?: number
@@ -68,7 +69,10 @@ export async function executeSingleTool(
   })
 
   let ringBuffer: RingBuffer | null = null
-  const executionContext: ExecutionContext = { onOutput: chunk => ringBuffer?.append(chunk) }
+  const executionContext: ExecutionContext = {
+    onOutput: chunk => ringBuffer?.append(chunk),
+    visualInput: config.visualInput,
+  }
   let watcherId: NodeJS.Timeout | null = null
   const watcherStartedAt = Date.now()
 
@@ -120,6 +124,10 @@ export async function executeSingleTool(
       'Tool execution finished'
     )
 
+    for (const attachment of output.attachments ?? []) {
+      if (attachment.kind === 'image' && !attachment.visualSource)
+        config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
+    }
     let wrappedContent: string
     if (tool.requiresSanitization()) {
       wrappedContent = toolOutputProcessor.afterExecution(call.name, output)

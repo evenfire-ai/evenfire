@@ -4,9 +4,16 @@ import {
   clerumPromptCacheReadTokens,
   clerumPromptCacheWriteTokens,
 } from '../../llm/promptCacheMetrics'
+import { logger } from '../../logger'
 import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
+import {
+  type ImageInputCapability,
+  type VisualInputBudget,
+  VisualInputError,
+} from '../../visualInput/policy'
+import { assertVisualRequestFits, hasGfsImageInput } from '../../visualInput/requestPolicy'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
-import { LlmError } from '../errors'
+import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort } from '../interfaces'
 import type { SystemPromptParts } from '../reasoning/systemPrompt'
 import { redactDiagnosticField } from '../redactDiagnostics.js'
@@ -104,7 +111,9 @@ export class LlmPortAdapter implements LlmPort {
      * Tests and legacy callers omit it (no-op). Independent of `usageReporter`:
      * session persistence does not require control-api to be wired.
      */
-    private readonly onUsageRecorded?: (usage: SessionTokenUsage) => void
+    private readonly onUsageRecorded?: (usage: SessionTokenUsage) => void,
+    /** Task-owned state survives message shaping; a removable source tag is not authority. */
+    private readonly visualBudget?: VisualInputBudget
   ) {}
 
   /**
@@ -121,14 +130,57 @@ export class LlmPortAdapter implements LlmPort {
     return this.tokenCounter
   }
 
+  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    return this.provider.getImageInputCapability?.(signal) ?? Promise.resolve({ status: 'unknown' })
+  }
+
+  private async assertImageInput(request: CompletionRequest, withTools: boolean): Promise<boolean> {
+    const hasImages = request.messages.some(message =>
+      message.contentParts?.some(part => part.type === 'image')
+    )
+    if (!hasGfsImageInput(request.messages) && !(this.visualBudget?.hasEncodedImages && hasImages))
+      return false
+    if (
+      request.messages.some(
+        message =>
+          message.role !== 'user' && message.contentParts?.some(part => part.type === 'image')
+      )
+    ) {
+      throw new LlmError(
+        'Image input must remain in its user visual message after request shaping.',
+        this.providerName,
+        LlmErrorCode.ApiCallFailed,
+        false
+      )
+    }
+    const capability = await this.getImageInputCapability(request.signal)
+    if (
+      !withTools ||
+      capability.status !== 'supported' ||
+      capability.provider !== this.providerName ||
+      capability.model !== this.model
+    ) {
+      throw new LlmError(
+        'Image input is not verified for the selected model and request method. Read the resource again with a supported model.',
+        this.providerName,
+        LlmErrorCode.ApiCallFailed,
+        false
+      )
+    }
+    assertVisualRequestFits(request.messages, request, true)
+    return true
+  }
+
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    console.log(
-      `[NewCore:LlmPort] complete → model=${this.model}, messages=${request.messages.length}, cache=${request.systemPromptParts ? 'on' : 'off'}`
+    logger.info(
+      { model: this.model, messages: request.messages.length, cache: !!request.systemPromptParts },
+      'LLM completion requested'
     )
     const requestId = newRequestId()
     try {
+      await this.assertImageInput(request, false)
       const response = await this.dispatchComplete(request)
-      console.log(`[NewCore:LlmPort] ← finish_reason=${response.finish_reason}`)
+      logger.info({ finishReason: response.finish_reason }, 'LLM completion finished')
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
     } catch (err) {
@@ -137,15 +189,23 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   async completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse> {
-    console.log(
-      `[NewCore:LlmPort] completeWithTools → model=${this.model}, tools=${request.tools.length}, messages=${request.messages.length}, cache=${request.systemPromptParts ? 'on' : 'off'}`
+    logger.info(
+      {
+        model: this.model,
+        tools: request.tools.length,
+        messages: request.messages.length,
+        cache: !!request.systemPromptParts,
+      },
+      'LLM tool completion requested'
     )
     const requestId = newRequestId()
     try {
-      const response = await this.dispatchCompleteWithTools(request)
+      const verificationRequired = await this.assertImageInput(request, true)
+      const response = await this.dispatchCompleteWithTools(request, verificationRequired)
       const toolCallCount = response.tool_calls?.length ?? 0
-      console.log(
-        `[NewCore:LlmPort] ← finish_reason=${response.finish_reason}, tool_calls=${toolCallCount}, usage=${JSON.stringify(response.usage ?? {})}`
+      logger.info(
+        { finishReason: response.finish_reason, toolCalls: toolCallCount, usage: response.usage },
+        'LLM tool completion finished'
       )
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
@@ -180,7 +240,8 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   private async dispatchCompleteWithTools(
-    request: ToolCompletionRequest
+    request: ToolCompletionRequest,
+    verificationRequired: boolean
   ): Promise<ToolCompletionResponse> {
     const parts = request.systemPromptParts
     if (parts && this.provider.completeSingleTurnWithToolsAndCache) {
@@ -193,6 +254,7 @@ export class LlmPortAdapter implements LlmPort {
           temperature: request.temperature,
           tool_choice: request.tool_choice,
           signal: request.signal,
+          ...(verificationRequired ? { verifyImageInput: true } : {}),
         }
       )
     }
@@ -202,6 +264,7 @@ export class LlmPortAdapter implements LlmPort {
       temperature: request.temperature,
       tool_choice: request.tool_choice,
       signal: request.signal,
+      ...(verificationRequired ? { verifyImageInput: true } : {}),
     })
   }
 
@@ -251,7 +314,7 @@ export class LlmPortAdapter implements LlmPort {
           cache_write_tokens: usage.cache_write_tokens,
         })
       } catch (err) {
-        console.error('[NewCore:LlmPort] onUsageRecorded sink threw (ignored):', err)
+        logger.error({ err }, 'LLM usage sink failed')
       }
     }
     if (!this.usageReporter || !this.staticContext || !usageContext || !usage) return
@@ -291,11 +354,25 @@ export class LlmPortAdapter implements LlmPort {
    * block without the compiler complaining about missing return paths.
    */
   private handleProviderError(err: unknown): never {
+    if (err instanceof LlmError) throw err
+    if (err instanceof VisualInputError) {
+      throw new LlmError(
+        err.message,
+        this.providerName,
+        err.code === 'limit_exceeded'
+          ? LlmErrorCode.ContextLengthExceeded
+          : LlmErrorCode.ApiCallFailed,
+        false
+      )
+    }
     const classified = this.provider.classifyError(err)
-    console.log(
-      `[NewCore:LlmPort] ← ERROR: code=${classified.code} ` +
-        `retryable=${classified.retryable} message="${classified.message}"` +
-        providerErrorDiagnostics(err)
+    logger.info(
+      {
+        code: classified.code,
+        retryable: classified.retryable,
+        diagnostics: providerErrorDiagnostics(err),
+      },
+      'LLM provider request failed'
     )
     throw new LlmError(
       classified.message,

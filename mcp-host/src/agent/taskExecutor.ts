@@ -1280,12 +1280,12 @@ export class TaskExecutor {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — a SAME-provider fallback (other key) respects the session's
         // model; a CROSS-provider fallback serves its fixed entry model
         // (ignoring the session selection). Drives usage_events + the tokenizer.
         const servedModel = entry.provider === primaryProvider ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -1302,7 +1302,8 @@ export class TaskExecutor {
             if (conversation.contextBreakdown && usage.input_tokens > 0) {
               conversation.contextBreakdown.totalInputTokens = usage.input_tokens
             }
-          }
+          },
+          this.executionBudget.visualInputs
         )
       },
     })
@@ -1345,7 +1346,8 @@ export class TaskExecutor {
         if (conversation.contextBreakdown && usage.input_tokens > 0) {
           conversation.contextBreakdown.totalInputTokens = usage.input_tokens
         }
-      }
+      },
+      this.executionBudget.visualInputs
     )
 
     // R5 — wrap the primary port with provider-failover when a policy is wired.
@@ -1448,6 +1450,12 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.visualInput = {
+      budget: this.executionBudget.visualInputs,
+      resolveCapability: signal =>
+        effectiveLlmPort.getImageInputCapability?.(signal) ??
+        Promise.resolve({ status: 'unknown' as const }),
+    }
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.

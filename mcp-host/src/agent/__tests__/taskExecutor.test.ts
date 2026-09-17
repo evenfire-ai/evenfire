@@ -15,6 +15,8 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { LlmPolicy } from '../../llm/failover/types'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
@@ -204,6 +206,40 @@ describe('TaskExecutor', () => {
     vi.mocked(requestEffectiveWorkflowList).mockReset()
     vi.mocked(resolveEffectiveWorkflowTarget).mockReset()
     vi.mocked(registerDesktopTools).mockResolvedValue(undefined)
+  })
+
+  it('constructs a same-provider fallback with the effective session model', async () => {
+    const policy: LlmPolicy = {
+      cooldownSeconds: 300,
+      triggerOn: ['rate_limited'],
+      fallbacks: [{ provider: 'openai', model: 'entry-model' }],
+    }
+    const engine = new FailoverEngine(policy, { metricInc: () => {} })
+    await engine.run(
+      { provider: 'openai', model: 'session-model' },
+      target => async () => {
+        if (target.kind === 'primary') throw new Error('rate limit fixture')
+        return 'fallback warmed'
+      },
+      () => ({ code: LlmErrorCode.RateLimited, retryable: true })
+    )
+    const fallback = createDeps().llmProvider
+    const buildProvider = vi.fn(() => fallback)
+    const deps = createDeps({
+      modelName: 'session-model',
+      failover: { engine, policy, buildProvider },
+    })
+    vi.mocked(runToolUseLoop).mockImplementationOnce(async config => {
+      await config.visualInput!.resolveCapability()
+      return {
+        type: 'response',
+        content: 'done',
+        usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
+      }
+    })
+    await new TaskExecutor(createTask(), deps).run()
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'openai', model: 'session-model' })
+    expect(deps.onComplete).toHaveBeenCalledOnce()
   })
 
   it('should execute a task and call onComplete', async () => {

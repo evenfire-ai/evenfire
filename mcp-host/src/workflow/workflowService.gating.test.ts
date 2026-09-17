@@ -492,7 +492,19 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
   it('dispatches workflow GFS calls through the existing gfsc client boundary', async () => {
     gfsGate.enabled = true
     process.env.MCP_HOST_GFS_SCOPES = 'gfs.read'
-    gfsClient.read.mockResolvedValue({ content: 'granted file content' })
+    const release = vi.fn()
+    gfsClient.read.mockResolvedValue({
+      source: {
+        kind: 'gfs',
+        drive: 'main',
+        resourceId: '0123456789abcdef0123456789abcdef',
+        gfsUri: 'gfs://main/0123456789abcdef0123456789abcdef',
+        version: 1,
+        name: 'note.txt',
+      },
+      bytes: Buffer.from('granted file content'),
+      reservation: { release },
+    })
     const provider = makeProvider()
     vi.mocked(provider.completeSingleTurnWithTools)
       .mockResolvedValueOnce({
@@ -535,10 +547,14 @@ describe('WorkflowService internal-tools capability gate (#592)', () => {
         result: expect.objectContaining({ success: true }),
       }),
     ])
-    expect(gfsClient.read).toHaveBeenCalledWith({
-      drive: 'main',
-      resourceId: '0123456789abcdef0123456789abcdef',
-    })
+    expect(gfsClient.read).toHaveBeenCalledWith(
+      {
+        drive: 'main',
+        resourceId: '0123456789abcdef0123456789abcdef',
+      },
+      expect.objectContaining({ signal: expect.any(AbortSignal), budget: expect.any(Object) })
+    )
+    expect(release).toHaveBeenCalledOnce()
   })
 
   it('fails closed when toolChoice is required but no allowed tool is available', async () => {

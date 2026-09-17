@@ -9,6 +9,8 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import { logger } from '../logger'
+import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
@@ -24,7 +26,7 @@ export class OpenAIProvider implements SingleTurnProvider {
       this.client = apiKeyOrClient
     }
     this.defaultModel = defaultModel
-    console.log(`[OpenAI] Initialized with model: ${defaultModel}`)
+    logger.info({ model: defaultModel }, 'OpenAI transport initialized')
   }
 
   /**
@@ -107,6 +109,7 @@ export class OpenAIProvider implements SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     const openaiMessages = this.convertToOpenAIMessages(messages)
@@ -124,19 +127,18 @@ export class OpenAIProvider implements SingleTurnProvider {
           }))
         : undefined
 
-    const response = await this.client.chat.completions.create(
-      {
-        model: this.defaultModel,
-        messages: openaiMessages,
-        tools: openaiTools,
-        tool_choice: openaiTools
-          ? ((options?.tool_choice ?? 'auto') as OpenAI.ChatCompletionToolChoiceOption)
-          : undefined,
-        ...this.tokenLimitOptions(options?.max_tokens),
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
-    )
+    const request = {
+      model: this.defaultModel,
+      messages: openaiMessages,
+      tools: openaiTools,
+      tool_choice: openaiTools
+        ? ((options?.tool_choice ?? 'auto') as OpenAI.ChatCompletionToolChoiceOption)
+        : undefined,
+      ...this.tokenLimitOptions(options?.max_tokens),
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    const response = await this.client.chat.completions.create(request, { signal: options?.signal })
 
     const choice = response.choices[0]
     const message = choice.message
