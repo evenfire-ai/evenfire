@@ -33,10 +33,13 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
       },
     }),
     async (req: ArtifactRequest, res, next) => {
-      const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
-      if (connection) {
+      try {
+        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
+        if (!connection) return
         req.artifactReadConnection = connection
         next()
+      } catch (error) {
+        next(error)
       }
     },
     rateLimitMiddleware({
