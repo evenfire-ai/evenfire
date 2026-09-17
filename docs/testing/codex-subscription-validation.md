@@ -24,6 +24,11 @@ present, `MINIKUBE_BUILD_IMAGE_ARGS=--skip-public` forwards the existing builder
 option through the public Make entry point. This avoids pulling unrelated demo
 images during a full source rebuild. Keep the normal image verification and
 runtime readiness gates; this option is not a substitute for bootstrap.
+When reconciling an existing profile configured through Control UI, use
+`MINIKUBE_REAPPLY_INSTANCES=false` to preserve its Host and other bootstrap
+instance configuration. This does not skip core manifests, CRDs, image checks,
+or readiness. Leave the default enabled for initial bootstrap. Verify the
+Host's provider/model/connection binding before and after the update.
 
 Provider tests must cover both completion methods, direct/tool origins, prompt
 context, redacted text parts, repeated bytes from distinct tool calls and the
