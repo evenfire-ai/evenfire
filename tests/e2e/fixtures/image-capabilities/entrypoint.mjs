@@ -29,4 +29,5 @@ const probe = new APIClient({ baseURL: 'http://127.0.0.1', maxRetries: 0, timeou
 if (probe.fetch !== fixture.fetch)
   throw new Error('SDK did not install the isolated provider boundary')
 persist(fixture.getEvidence())
-await import('/app/mcp-host/dist/main.js')
+// Docker starts the real Host as Node's main program after this preload. Its
+// require.main guard and crash handlers must execute exactly as in production.
