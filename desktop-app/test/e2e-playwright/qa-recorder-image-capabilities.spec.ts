@@ -337,8 +337,11 @@ async function expectSingleExchange(page: Page) {
   await expect(page.locator('[data-chat-message-id]')).toHaveCount(2, { timeout: 120_000 })
   const response = page.getByTestId('agent-response')
   await expect(response).toHaveCount(1, { timeout: 120_000 })
-  await expect(response).not.toHaveText('', { timeout: 120_000 })
-  return response
+  // The article also contains the timestamp; assert the answer body itself.
+  const body = response.locator('.message-block.markdown-content')
+  await expect(body).toHaveCount(1, { timeout: 120_000 })
+  await expect(body).not.toHaveText('', { timeout: 120_000 })
+  return body
 }
 
 /** Case-insensitive matcher for "any of these tile colors". */
