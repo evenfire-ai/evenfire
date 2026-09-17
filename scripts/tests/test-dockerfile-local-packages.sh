@@ -265,46 +265,130 @@ assert_declared_local_package_sources() {
 }
 
 assert_manifest_declared_local_packages() {
-  local row image service dockerfile
+  local rows_file expected_rows actual_rows row image service dockerfile
+  rows_file="$(mktemp "${TMPDIR:-/tmp}/evenfire-published-images.XXXXXX")"
+  if ! node -e '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const root = process.argv[2];
+    const published = manifest.images.filter(candidate => candidate.published === true);
+
+    if (published.length === 0) {
+      console.error("published image population must not be empty");
+      process.exit(1);
+    }
+
+    let invalid = false;
+    let consumerCount = 0;
+    for (const image of published) {
+      const packageJson = `${root}/${image.path}/package.json`;
+      if (!fs.existsSync(packageJson)) {
+        const hasLocalPackageSource = image.source_paths?.some(path => path.startsWith("packages/"));
+        if (hasLocalPackageSource) {
+          console.error(`local-package image ${image.name} is missing ${image.path}/package.json`);
+          invalid = true;
+        }
+        continue;
+      }
+      consumerCount += 1;
+      const dockerfile = `${image.path}/${image.dockerfile ?? "Dockerfile"}`;
+      console.log([image.name, image.path, dockerfile].join("\t"));
+    }
+
+    if (consumerCount === 0) {
+      console.error("published local-package consumer population must not be empty");
+      invalid = true;
+    }
+    if (invalid) process.exit(1);
+  ' "$IMAGES_MANIFEST" "$REPO_ROOT" >"$rows_file"; then
+    rm -f -- "$rows_file"
+    fail 'published image population must be complete and point to existing package.json files'
+    return
+  fi
+
+  expected_rows="$(node -e '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const root = process.argv[2];
+    const count = manifest.images.filter(candidate => {
+      if (candidate.published !== true) return false;
+      if (fs.existsSync(`${root}/${candidate.path}/package.json`)) return true;
+      return candidate.source_paths?.some(path => path.startsWith("packages/")) ?? false;
+    }).length;
+    process.stdout.write(String(count));
+  ' "$IMAGES_MANIFEST" "$REPO_ROOT")"
+  actual_rows="$(wc -l <"$rows_file" | tr -d '[:space:]')"
+  if [[ "$actual_rows" != "$expected_rows" ]]; then
+    rm -f -- "$rows_file"
+    fail "published image derivation omitted entries ($actual_rows of $expected_rows)"
+    return
+  fi
+
   while IFS=$'\t' read -r image service dockerfile; do
     [[ -z "$image" ]] && continue
     assert_declared_local_packages "$service" "$dockerfile"
     assert_declared_local_package_sources "$image" "$service"
-  done < <(node -e '
-    const fs = require("node:fs");
-    const manifest = require(process.argv[1]);
-    const root = process.argv[2];
-    for (const image of manifest.images.filter(candidate => candidate.published)) {
-      const packageJson = `${root}/${image.path}/package.json`;
-      if (!fs.existsSync(packageJson)) continue;
-      const dockerfile = `${image.path}/${image.dockerfile ?? "Dockerfile"}`;
-      console.log([image.name, image.path, dockerfile].join("\t"));
-    }
-  ' "$IMAGES_MANIFEST" "$REPO_ROOT")
+  done <"$rows_file"
+  rm -f -- "$rows_file"
 }
 
 assert_manifest_source_mutations_rejected() {
-  local fixture_dir fixture_manifest before real_manifest
+  local fixture_dir fixture_manifest before real_manifest mutation_name mutation
   fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/evenfire-publish-sources.XXXXXX")"
-  fixture_manifest="$fixture_dir/images.json"
   real_manifest="$IMAGES_MANIFEST"
-  node -e '
+
+  expect_manifest_rejection() {
+    mutation_name="$1"
+    mutation="$2"
+    fixture_manifest="$fixture_dir/${mutation_name}.json"
+    node -e "$mutation" "$real_manifest" "$fixture_manifest"
+    IMAGES_MANIFEST="$fixture_manifest"
+    before="$failures"
+    assert_manifest_declared_local_packages 2>/dev/null
+    IMAGES_MANIFEST="$real_manifest"
+    if [[ "$failures" -eq "$before" ]]; then
+      fail "manifest mutation must be rejected: $mutation_name"
+    else
+      failures="$before"
+    fi
+  }
+
+  expect_manifest_rejection all-unpublished '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    for (const image of manifest.images) image.published = false;
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
+  expect_manifest_rejection missing-package-json '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    for (const image of manifest.images) {
+      if (image.published) image.path = "tests/fixtures/missing-published-package";
+    }
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
+  expect_manifest_rejection control-api-missing-package-json '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const image = manifest.images.find(candidate => candidate.name === "control-api");
+    image.path = "tests/fixtures/missing-control-api-package";
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
+  expect_manifest_rejection rpc-proxy-missing-local-source '
     const fs = require("node:fs");
     const manifest = require(process.argv[1]);
     const image = manifest.images.find(candidate => candidate.name === "rpc-proxy");
     image.source_paths = image.source_paths.filter(path => path !== "packages/action-context-contracts/**");
     fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
-  ' "$real_manifest" "$fixture_manifest"
+  '
+  expect_manifest_rejection control-api-gutted-sources '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const image = manifest.images.find(candidate => candidate.name === "control-api");
+    image.source_paths = ["control-api/**"];
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
 
-  IMAGES_MANIFEST="$fixture_manifest"
-  before="$failures"
-  assert_declared_local_package_sources rpc-proxy rpc-proxy 2>/dev/null
-  IMAGES_MANIFEST="$real_manifest"
-  if [[ "$failures" -eq "$before" ]]; then
-    fail 'publish coverage must reject an omitted declared local-package consumer'
-  else
-    failures="$before"
-  fi
   rm -rf -- "$fixture_dir"
 }
 
