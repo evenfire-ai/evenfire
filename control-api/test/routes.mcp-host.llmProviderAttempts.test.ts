@@ -42,7 +42,8 @@ const HOST = 'research-host'
 
 function buildApp() {
   const app = express()
-  app.use(express.json({ limit: '1mb' }))
+  // Match the authorize gateway: V2 visual envelopes are 24 MiB, not nginx's 1m default.
+  app.use(express.json({ limit: '24mb' }))
   const api = express.Router()
   api.use(
     createMcpHostLlmProviderAttemptRoutes({
@@ -151,6 +152,27 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       expiresAt: '2026-08-20T12:00:00.000Z',
     })
     expect(JSON.stringify(res.body)).not.toMatch(/refresh|access_token|Authorization/i)
+  })
+
+  it('admits a V2 authorize body larger than 1 MiB', async () => {
+    const app = buildApp()
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockResolvedValueOnce({
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      requestHash: 'a'.repeat(64),
+      executionTicket: 'ticket.jwt',
+      expiresAt: '2026-08-20T12:00:00.000Z',
+    })
+    const res = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({
+        request: {
+          schemaVersion: 'codex-completion-request.v2',
+          pad: 'x'.repeat(2 * 1024 * 1024),
+        },
+      })
+    expect(res.status).toBe(200)
+    expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalledOnce()
   })
 })
 

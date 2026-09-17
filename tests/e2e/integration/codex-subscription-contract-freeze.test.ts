@@ -120,6 +120,16 @@ describe('codex-subscription contract freeze', () => {
     const architecture = readFileSync(architectureDocPath, 'utf8')
     expect(architecture).toContain('codex-completion-request.v2')
     expect(architecture).toContain('CODEX_IMAGE_INPUT_MODELS')
+    const proxyDeploy = readFileSync(
+      join(repoRoot, 'deploy/base/control-plane/codex-llm-proxy.yaml'),
+      'utf8'
+    )
+    expect(proxyDeploy).toContain(
+      `CODEX_LLM_PROXY_MAX_BODY_BYTES: "${localContract.LIMITS.maxRequestBodyBytes}"`
+    )
+    expect(proxyDeploy).toContain(
+      `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "${localContract.LIMITS.maxVisualRequestBodyBytes}"`
+    )
   })
 
   it('requires the sanitized fixture and both freeze documents', () => {
