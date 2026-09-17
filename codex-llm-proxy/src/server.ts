@@ -25,6 +25,7 @@ import { RequestLimitError, streamGate } from './requestLimits.js'
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
+const COMPLETION_PATH = '/internal/runtime/v1/codex/completions'
 
 const completionBodySchema = z
   .object({
@@ -116,22 +117,20 @@ export function createProxyApps(
   const runtimeApp = express()
   const ordinaryJson = express.json({ limit: config.maxBodyBytes })
   const visualJson = express.json({ limit: config.maxVisualBodyBytes })
-  runtimeApp.use((req, res, next) => {
-    // Only the image-capable completion endpoint with an already valid platform
-    // identity may use the larger transport budget. V1 is still bounded by its
-    // contract parser; admin and unauthenticated requests keep their old cap.
-    if (
-      req.method === 'POST' &&
-      req.path === '/internal/runtime/v1/codex/completions' &&
-      config.imageInputModels.length > 0 &&
-      verifyPlatformJwt(bearer(req), config)
-    ) {
+  // Selecting the transport budget needs the platform identity, so this runs as a
+  // route handler after the rate limiter: an unauthenticated caller cannot force
+  // token verification or body parsing ahead of the limit. Only the image-capable
+  // completion endpoint with an already valid platform identity may use the larger
+  // budget. V1 is still bounded by its contract parser, and admin or
+  // unauthenticated requests keep the ordinary cap.
+  const selectTransportBudget = (req: Request, res: Response, next: () => void): void => {
+    if (config.imageInputModels.length > 0 && verifyPlatformJwt(bearer(req), config)) {
       visualJson(req, res, next)
       return
     }
     ordinaryJson(req, res, next)
-  })
-  runtimeApp.post('/internal/runtime/v1/codex/completions', runtimeRateLimit, (req, res) => {
+  }
+  runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, selectTransportBudget, (req, res) => {
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
       return

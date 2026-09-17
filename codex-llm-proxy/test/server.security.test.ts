@@ -194,6 +194,30 @@ describe('codex-llm-proxy security surface', () => {
     expect(admin.status).toBe(413)
   })
 
+  it('rate limits the completion endpoint before body parsing and authorization', async () => {
+    const { runtimeApp } = createProxyApps(
+      config({ maxBodyBytes: 1024, imageInputModels: ['gpt-5.1'] })
+    )
+    const completion = () => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
+    const oversized = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(4096) },
+    }
+    // With budget left, an unauthenticated oversize request is stopped by the
+    // ordinary transport cap instead of the limiter.
+    const withinBudget = await completion().send(oversized)
+    expect(withinBudget.status).toBe(413)
+    for (let i = 0; i < 59; i += 1) {
+      const accepted = await completion().send({})
+      expect(accepted.status).toBe(401)
+    }
+    // The limiter runs first, so the exhausted window rejects before the identity
+    // check and body parsing turn the same request into a 413.
+    const limited = await completion().send(oversized)
+    expect(limited.status).toBe(429)
+  })
+
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
     const { runtimeApp } = createProxyApps(config())
     const foreign = sign(
