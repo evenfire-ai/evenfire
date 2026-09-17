@@ -18,7 +18,7 @@ export type SandboxUiShortcutOpenResult =
 export type SandboxUiPageProps = {
   actionRequest?: {
     id: number
-    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+    action: 'refresh' | 'back-to-apps'
   } | null
   boundsRefreshKey?: string | number
   conversationOrigin?: SandboxUiConversationOrigin | null
@@ -33,7 +33,6 @@ export type SandboxUiPageProps = {
   chatDrawerOpen?: boolean
   titlebarLeadingContainer?: HTMLElement | null
   onToggleChatDrawer?: () => void
-  onBackToConversation?: () => void | Promise<void>
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void

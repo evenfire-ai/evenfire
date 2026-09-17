@@ -373,38 +373,6 @@ describe('SandboxUiPage', () => {
     expect(sandboxUi.reload).not.toHaveBeenCalled()
   })
 
-  it('routes controlled conversation return through the existing transition owner', async () => {
-    sandboxUi.listApps.mockResolvedValue({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: 'Sales CRM',
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValue(undefined)
-    sandboxUi.close.mockResolvedValue(undefined)
-    const onBackToConversation = vi.fn().mockResolvedValue(undefined)
-    const props = {
-      conversationOrigin: { agentName: 'agent', chatId: 'chat', title: 'Conversation' },
-      onBackToConversation,
-    }
-    const { rerender } = render(<SandboxUiPage {...props} actionRequest={null} />)
-    fireEvent.click(await screen.findByRole('button', { name: 'Open Sales CRM' }))
-    await screen.findByRole('button', { name: 'Refresh app content' })
-
-    rerender(<SandboxUiPage {...props} actionRequest={{ id: 1, action: 'back-to-conversation' }} />)
-
-    await waitFor(() => {
-      expect(onBackToConversation).toHaveBeenCalledOnce()
-      expect(sandboxUi.close).toHaveBeenCalledOnce()
-    })
-  })
-
   it('runs contextual find only against the mounted active WebContents contract', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
@@ -624,81 +592,7 @@ describe('SandboxUiPage', () => {
     })
   })
 
-  it('returns to the originating conversation from an app', async () => {
-    sandboxUi.listApps.mockResolvedValueOnce({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: "Andy's Sales CRM",
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValueOnce(undefined)
-    sandboxUi.close.mockResolvedValueOnce(undefined)
-    const onBackToConversation = vi.fn()
-
-    render(
-      <SandboxUiPage
-        conversationOrigin={{
-          agentName: 'sales-agent',
-          chatId: 'chat-123',
-          title: 'Quarterly planning',
-        }}
-        onBackToConversation={onBackToConversation}
-      />
-    )
-
-    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Back to Quarterly planning' }))
-
-    await waitFor(() => {
-      expect(sandboxUi.close).toHaveBeenCalledTimes(1)
-      expect(onBackToConversation).toHaveBeenCalledTimes(1)
-    })
-  })
-
-  it('keeps a long conversation return label available to assistive technology and the native title tooltip', async () => {
-    const title =
-      'A deliberately long conversation title that must remain available to assistive technology'
-    sandboxUi.listApps.mockResolvedValueOnce({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: "Andy's Sales CRM",
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValueOnce(undefined)
-
-    render(
-      <SandboxUiPage
-        conversationOrigin={{ agentName: 'sales-agent', chatId: 'chat-123', title }}
-        onBackToConversation={vi.fn()}
-      />
-    )
-
-    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    // Icon-only control with no drawer toggle wired: it falls back to the
-    // back-to-conversation path (chevron icon, "Back to {title}" label). The full
-    // label is both the accessible name and the native `title` — the native title
-    // is the only tooltip that can render over the native app WebContentsView,
-    // which always paints above the renderer DOM. There is no DOM flyout.
-    const button = await screen.findByRole('button', { name: `Back to ${title}` })
-
-    expect(button.getAttribute('title')).toBe(`Back to ${title}`)
-    expect(button.closest('.titlebar-leading-action')?.querySelector('[role="tooltip"]')).toBeNull()
-    expect(button.querySelector('svg path')?.getAttribute('d')).toBe('m15 18-6-6 6-6')
-  })
-
-  it('shows a chat-drawer toggle (not a back button) when a conversation origin has a drawer toggle wired', async () => {
+  it('shows a chat-drawer toggle when a conversation origin has a drawer toggle wired', async () => {
     sandboxUi.listApps.mockResolvedValueOnce({
       apps: [
         {
@@ -713,7 +607,6 @@ describe('SandboxUiPage', () => {
     })
     sandboxUi.open.mockResolvedValueOnce(undefined)
     const onToggleChatDrawer = vi.fn()
-    const onBackToConversation = vi.fn()
 
     render(
       <SandboxUiPage
@@ -724,16 +617,14 @@ describe('SandboxUiPage', () => {
         }}
         chatDrawerOpen={false}
         onToggleChatDrawer={onToggleChatDrawer}
-        onBackToConversation={onBackToConversation}
       />
     )
 
     fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
 
-    // With a drawer toggle wired the originating conversation lives in the drawer,
-    // so this control opens/closes the drawer — it must NOT be labeled "Back to
-    // {title}" (the bug) nor fall back to destroying the embed. Chat icon, native
-    // title = the open/close label, and it drives the toggle only.
+    // With a conversation origin the leading control opens/closes the chat drawer
+    // where that conversation lives. Chat icon, native title = the open/close
+    // label, and it drives the toggle only — never a destroy-and-reconstitute.
     const toggle = await screen.findByRole('button', { name: 'Open chat drawer' })
     expect(screen.queryByRole('button', { name: 'Back to Quarterly planning' })).toBeNull()
     expect(toggle.getAttribute('title')).toBe('Open chat drawer')
@@ -744,45 +635,7 @@ describe('SandboxUiPage', () => {
 
     fireEvent.click(toggle)
     expect(onToggleChatDrawer).toHaveBeenCalledTimes(1)
-    expect(onBackToConversation).not.toHaveBeenCalled()
     expect(sandboxUi.close).not.toHaveBeenCalled()
-  })
-
-  it('keeps the app mounted when returning to the conversation fails', async () => {
-    sandboxUi.listApps.mockResolvedValueOnce({
-      apps: [
-        {
-          appRef: 'sandbox-recipes/sales-crm',
-          title: "Andy's Sales CRM",
-          defaultPath: '/',
-          ready: true,
-          phase: 'active',
-          updatedAt: null,
-        },
-      ],
-    })
-    sandboxUi.open.mockResolvedValueOnce(undefined)
-    const onBackToConversation = vi.fn().mockRejectedValue(new Error('team switch failed'))
-
-    render(
-      <SandboxUiPage
-        conversationOrigin={{
-          agentName: 'sales-agent',
-          chatId: 'chat-123',
-          title: 'Quarterly planning',
-          teamId: 'team-b',
-        }}
-        onBackToConversation={onBackToConversation}
-      />
-    )
-
-    fireEvent.click(await screen.findByRole('button', { name: "Open Andy's Sales CRM" }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Back to Quarterly planning' }))
-
-    await waitFor(() => expect(onBackToConversation).toHaveBeenCalledOnce())
-    expect(sandboxUi.close).not.toHaveBeenCalled()
-    // Still mounted (not returned to the picker) — the embed chrome is present.
-    expect(screen.getByTestId('sandbox-ui-mounted')).toBeTruthy()
   })
 
   it('keeps the conversation origin during Strict Mode effect replay', async () => {
@@ -799,7 +652,7 @@ describe('SandboxUiPage', () => {
       ],
     })
     sandboxUi.open.mockResolvedValueOnce(undefined)
-    const onBackToConversation = vi.fn()
+    const onToggleChatDrawer = vi.fn()
     const onEmbeddedAppBack = vi.fn()
 
     render(
@@ -810,7 +663,7 @@ describe('SandboxUiPage', () => {
             chatId: 'chat-123',
             title: 'Plan the launch',
           }}
-          onBackToConversation={onBackToConversation}
+          onToggleChatDrawer={onToggleChatDrawer}
           onEmbeddedAppBack={onEmbeddedAppBack}
         />
       </React.StrictMode>
@@ -818,7 +671,9 @@ describe('SandboxUiPage', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: 'Open Agentic Task Board' }))
 
-    expect(await screen.findByRole('button', { name: 'Back to Plan the launch' })).toBeTruthy()
+    // The conversation-origin leading control survives the double-invoke without
+    // tearing the embed down.
+    expect(await screen.findByRole('button', { name: 'Open chat drawer' })).toBeTruthy()
     expect(onEmbeddedAppBack).not.toHaveBeenCalled()
   })
 

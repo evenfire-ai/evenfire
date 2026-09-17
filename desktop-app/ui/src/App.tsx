@@ -323,7 +323,7 @@ export function App() {
   const [sandboxLocalSearchRequestId, setSandboxLocalSearchRequestId] = React.useState(0)
   const [sandboxActionRequest, setSandboxActionRequest] = React.useState<{
     id: number
-    action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+    action: 'refresh' | 'back-to-apps'
   } | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = React.useState(false)
   const [commandPaletteReturnToSandbox, setCommandPaletteReturnToSandbox] = React.useState(false)
@@ -810,47 +810,6 @@ export function App() {
     setHeaderShellOverlayOpen(false)
     setSidebarSettingsMenuOpen(false)
   }, [])
-
-  const handleSandboxUiBackToConversation = React.useCallback(async () => {
-    if (!sandboxUiConversationOrigin) return
-    const origin = sandboxUiConversationOrigin
-    let refreshWarning: string | null = null
-    try {
-      if (origin.teamId && origin.teamId !== vm.getCurrentTeamId()) {
-        await vm.handleEnsureTeamContext({ teamId: origin.teamId })
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (!origin.teamId || vm.getCurrentTeamId() !== origin.teamId) {
-        vm.pushToast(`Could not return to the conversation: ${message}`, 'error')
-        throw err
-      }
-      // The authoritative switch completed but its follow-up refresh failed.
-      // Keep the page aligned with the live team and surface the refresh problem.
-      refreshWarning = message
-    }
-    setActiveSandboxUiApp(null)
-    setSandboxUiConversationOrigin(null)
-    setHeaderShellOverlayOpen(false)
-    setSidebarSettingsMenuOpen(false)
-    vm.handleSelectChatAgent(origin.agentName, {
-      selectLatest: false,
-      chatId: origin.chatId,
-      title: origin.title,
-    })
-    if (refreshWarning) {
-      vm.pushToast(
-        `Returned to the conversation, but team data did not refresh: ${refreshWarning}`,
-        'warn'
-      )
-    }
-  }, [
-    sandboxUiConversationOrigin,
-    vm.getCurrentTeamId,
-    vm.handleEnsureTeamContext,
-    vm.handleSelectChatAgent,
-    vm.pushToast,
-  ])
 
   React.useEffect(() => {
     setNotificationDrawerReady(false)
@@ -1362,18 +1321,12 @@ export function App() {
         vm.hostRuntimeStatus?.degraded?.reason !== 'llm_key_missing',
       appMounted:
         vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp) && sandboxUiMounted,
-      conversationOriginAvailable:
-        vm.navItem === DESKTOP_ROUTES.apps &&
-        Boolean(activeSandboxUiApp) &&
-        sandboxUiMounted &&
-        Boolean(sandboxUiConversationOrigin),
       applicationBusy: vm.busy,
     }),
     [
       activeSandboxUiApp,
       chatDrawerVisible,
       chatViewTabs,
-      sandboxUiConversationOrigin,
       sandboxUiMounted,
       vm.activeChatId,
       vm.busy,
@@ -1479,17 +1432,8 @@ export function App() {
         setSidebarToggleRequestId(value => value + 1)
         return
       }
-      if (
-        commandId === 'app.refresh' ||
-        commandId === 'app.backToApps' ||
-        commandId === 'app.backToConversation'
-      ) {
-        const action =
-          commandId === 'app.refresh'
-            ? 'refresh'
-            : commandId === 'app.backToApps'
-              ? 'back-to-apps'
-              : 'back-to-conversation'
+      if (commandId === 'app.refresh' || commandId === 'app.backToApps') {
+        const action = commandId === 'app.refresh' ? 'refresh' : 'back-to-apps'
         setSandboxActionRequest(previous => ({ id: (previous?.id ?? 0) + 1, action }))
         return
       }
@@ -2154,7 +2098,6 @@ export function App() {
                                       chatDrawerOpen={chatDrawerVisible}
                                       titlebarLeadingContainer={titlebarLeadingRoot}
                                       onToggleChatDrawer={toggleChatDrawer}
-                                      onBackToConversation={handleSandboxUiBackToConversation}
                                       onEmbeddedAppOpening={handleSandboxUiOpening}
                                       onEmbeddedAppMounted={handleSandboxUiMounted}
                                       onEmbeddedAppBack={handleSandboxUiClosed}

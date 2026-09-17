@@ -57,7 +57,7 @@ const sandboxUiPageHarness = vi.hoisted(() => ({
     localSearchRequestId?: number
     actionRequest?: {
       id: number
-      action: 'refresh' | 'back-to-apps' | 'back-to-conversation'
+      action: 'refresh' | 'back-to-apps'
     } | null
     onEmbeddedAppOpening?: (app: {
       appRef: string
@@ -599,7 +599,6 @@ describe('App deep-link orchestration', () => {
     expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 1, action: 'refresh' })
     act(() => commandPaletteHarness.props?.onExecute('app.backToApps'))
     expect(sandboxUiPageHarness.props?.actionRequest).toEqual({ id: 2, action: 'back-to-apps' })
-    expect(commandPaletteHarness.props?.isEligible('app.backToConversation')).toBe(false)
   })
 
   it('resets controlled command requests with the authenticated shell lifetime', async () => {
@@ -1022,6 +1021,38 @@ describe('App deep-link orchestration', () => {
       expect.stringContaining("You don't have access"),
       'error'
     )
+  })
+
+  // Guard for conversationOrigin use (3): retiring back-to-conversation must not
+  // touch the deep-link team restore, which re-selects the originating chat after
+  // rolling a failed cross-team link back to the original team. Passes before and
+  // after the retirement.
+  it('re-selects the originating chat when a failed cross-team link rolls the team back', async () => {
+    currentController = makeController({
+      initialExperienceLoading: false,
+      navItem: DESKTOP_ROUTES.chat,
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+    } as Partial<AppController>)
+    render(<App />)
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+
+    await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
+    // Team rolled back to the original, then the origin chat re-selected.
+    expect(currentController.handleEnsureTeamContext).toHaveBeenNthCalledWith(2, {
+      teamId: 'team-a',
+      announce: true,
+    })
+    expect(currentController.handleSelectChatAgent).toHaveBeenCalledWith('alpha', {
+      selectLatest: false,
+      chatId: 'chat-1',
+      title: 'Conversation',
+    })
   })
 
   it('closes the active embed before switching teams for a failed cross-team handoff', async () => {
