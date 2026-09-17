@@ -114,7 +114,23 @@ export function createProxyApps(
   })
 
   const runtimeApp = express()
-  runtimeApp.use(express.json({ limit: config.maxBodyBytes }))
+  const ordinaryJson = express.json({ limit: config.maxBodyBytes })
+  const visualJson = express.json({ limit: config.maxVisualBodyBytes })
+  runtimeApp.use((req, res, next) => {
+    // Only the image-capable completion endpoint with an already valid platform
+    // identity may use the larger transport budget. V1 is still bounded by its
+    // contract parser; admin and unauthenticated requests keep their old cap.
+    if (
+      req.method === 'POST' &&
+      req.path === '/internal/runtime/v1/codex/completions' &&
+      config.imageInputModels.length > 0 &&
+      verifyPlatformJwt(bearer(req), config)
+    ) {
+      visualJson(req, res, next)
+      return
+    }
+    ordinaryJson(req, res, next)
+  })
   runtimeApp.post('/internal/runtime/v1/codex/completions', runtimeRateLimit, (req, res) => {
     if (!req.is('application/json')) {
       reject(res, 415, 'unsupported_media_type')
@@ -127,6 +143,14 @@ export function createProxyApps(
     const platform = verifyPlatformJwt(bearer(req), config)
     if (!platform) {
       reject(res, 401, 'Unauthorized')
+      return
+    }
+    const bodyLimit =
+      req.body?.request?.schemaVersion === 'codex-completion-request.v2'
+        ? config.maxVisualBodyBytes
+        : config.maxBodyBytes
+    if (Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8') > bodyLimit) {
+      reject(res, 413, 'payload_too_large')
       return
     }
     const extra = Object.keys(req.body ?? {}).find(key => !COMPLETION_KEYS.has(key))

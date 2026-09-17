@@ -12,6 +12,12 @@
  * `codex-completion-request.v2` (the same closed root plus optional ordered
  * `contentParts` on user messages). V2 shares the V1 root field set on
  * purpose: it is not a looser schema.
+ *
+ * Two size ceilings, one policy: V1 keeps the 1 MiB body ceiling, and V2 raises
+ * it to 24 MiB for image payloads only. Everything a caller writes that is not
+ * image data — content, tool definitions, ids — stays on the 1 MiB budget in
+ * both versions, and `requestBodyLimitBytes` is the number a pre-parse HTTP
+ * body cap should use.
  */
 
 export declare const SCHEMA_VERSION: 'codex-completion-request.v1'
@@ -21,7 +27,10 @@ export declare const PROVIDER_ID: 'codex-subscription'
 export declare const TICKET_TYP: 'codex-execution-ticket'
 
 export declare const LIMITS: {
+  /** V1 ceiling, and the V2 ceiling for everything that is not image data. */
   readonly maxRequestBodyBytes: 1048576
+  /** V2 request/envelope ceiling; covers image payloads plus the V1 share. */
+  readonly maxVisualRequestBodyBytes: 25165824
   readonly maxMessages: 128
   readonly maxToolCalls: 32
   readonly maxOutputTokens: 16384
@@ -32,14 +41,15 @@ export declare const LIMITS: {
 /**
  * Conservative local safety/product budgets for V2 image parts. These are
  * deliberately not upstream facts: the frozen ChatGPT endpoint is not
- * certified by these numbers.
+ * certified by these numbers. The aggregate budget remains below three
+ * maximum-sized images, so callers must satisfy both independent byte caps.
  */
 export declare const VISUAL_LIMITS: {
   readonly maxImages: 3
-  readonly maxImageBytes: 524288
-  readonly maxTotalImageBytes: 655360
+  readonly maxImageBytes: 10485760
+  readonly maxTotalImageBytes: 15728640
   readonly maxImageDimension: 8192
-  readonly maxImagePixels: 16777216
+  readonly maxImagePixels: 64000000
 }
 
 export type ContractResult<T> =
@@ -218,6 +228,14 @@ export type CodexAttemptReceiptV1 = {
 }
 
 export declare function stableStringify(value: unknown): string
+/**
+ * Byte ceiling for a request body, or for the envelope that carries it, applied
+ * BEFORE parsing: 24 MiB for a document that declares
+ * `codex-completion-request.v2`, 1 MiB for anything else. Declaring V2 does not
+ * raise the budget for text or tool definitions — the parser measures the body
+ * with every image payload blanked and keeps that share on the 1 MiB ceiling.
+ */
+export declare function requestBodyLimitBytes(request: unknown): number
 export declare function parseCodexCompletionRequestV1(
   input: unknown
 ): ContractResult<CodexCompletionRequestV1>

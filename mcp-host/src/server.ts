@@ -128,6 +128,116 @@ export type {
   SetTitleResult,
 } from './server/types'
 
+/**
+ * Body budgets for chat payloads carrying base64 image attachments.
+ *
+ * Intentional mirror of `rpc-proxy/src/app.ts`: rpc-proxy has no dependency on
+ * any @clerum package, so the two services cannot share one source without a
+ * new package. Both copies must change together.
+ *
+ *   - MAX_CHAT_BODY_BYTES bounds the raw JSON body of `POST /v1/runtime/messages`.
+ *     10MiB encodes to ~13.3MiB of base64, so a 10MiB image plus a 5MiB image
+ *     (the largest combination the 15MiB total allows) needs ~21MiB plus the
+ *     envelope. Every other route keeps the 6MiB default.
+ *   - MAX_NON_IMAGE_BODY_BYTES bounds that same body MINUS the base64 of images
+ *     counting against the documented attachment budget (10MiB per image, at
+ *     most 3 images / 15MiB total). Without the subtraction the attachment
+ *     budget would silently become a general 24MiB text budget.
+ */
+const MAX_CHAT_BODY_BYTES = 24 * 1024 * 1024
+const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
+const MAX_CHAT_IMAGES = 3
+const MAX_IMAGE_DECODED_BYTES = 10 * 1024 * 1024
+const MAX_IMAGE_DECODED_BYTES_TOTAL = 15 * 1024 * 1024
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
+
+/** Base64 alphabet value of one character, or null when it is not a base64 char. */
+function base64SextetValue(char: string): number | null {
+  const code = char.charCodeAt(0)
+  if (code >= 0x41 && code <= 0x5a) return code - 0x41
+  if (code >= 0x61 && code <= 0x7a) return code - 0x61 + 26
+  if (code >= 0x30 && code <= 0x39) return code - 0x30 + 52
+  if (code === 0x2b) return 62
+  if (code === 0x2f) return 63
+  return null
+}
+
+/**
+ * Decoded byte length of a base64 payload, or null when it is not canonical.
+ *
+ * '=' padding makes the final group carry fewer bits than it encodes, so the
+ * unused low bits of that group's last sextet must be zero (RFC 4648 §3.5). A
+ * payload padding a non-zero tail still decodes in a permissive decoder, but it
+ * is not the canonical encoding of its bytes: accepting it would let a caller
+ * park arbitrary unused bytes inside the base64 length that the body budget is
+ * asked to credit.
+ */
+function decodedBase64Bytes(dataBase64: string): number | null {
+  if (dataBase64.length === 0 || dataBase64.length % 4 !== 0) return null
+  if (!BASE64_RE.test(dataBase64)) return null
+  const padding = dataBase64.endsWith('==') ? 2 : dataBase64.endsWith('=') ? 1 : 0
+  if (padding > 0) {
+    const lastSextet = base64SextetValue(dataBase64[dataBase64.length - 1 - padding] ?? '')
+    if (lastSextet === null) return null
+    if (padding === 1 && (lastSextet & 0b11) !== 0) return null
+    if (padding === 2 && (lastSextet & 0b1111) !== 0) return null
+  }
+  // A 4-char group decodes to 3 bytes, the pad chars each drop one byte.
+  return (dataBase64.length / 4) * 3 - padding
+}
+
+/**
+ * Byte length of the base64 that counts against the documented image budget.
+ * Only attachments with the exact wire shape the composer produces qualify:
+ * `kind: 'image'`, `encoding: 'base64'`, a PNG/JPEG MIME type, canonical
+ * base64 whose leading bytes are that image's signature, and at most 10MiB
+ * decoded each within a 3-image / 15MiB total budget. Anything else is charged
+ * to the non-image budget, so a claim cannot be smuggled through by mislabelling
+ * a payload.
+ */
+function budgetedImageBase64Length(body: unknown): number {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 0
+  const attachments = (body as { attachments?: unknown }).attachments
+  if (!Array.isArray(attachments)) return 0
+
+  let credited = 0
+  let decodedTotal = 0
+  let counted = 0
+  for (const attachment of attachments) {
+    if (counted >= MAX_CHAT_IMAGES) break
+    if (!attachment || typeof attachment !== 'object') continue
+    const candidate = attachment as {
+      kind?: unknown
+      encoding?: unknown
+      mimeType?: unknown
+      dataBase64?: unknown
+    }
+    if (candidate.kind !== 'image' || candidate.encoding !== 'base64') continue
+    const mimeType = typeof candidate.mimeType === 'string' ? candidate.mimeType : ''
+    if (mimeType !== 'image/png' && mimeType !== 'image/jpeg') continue
+    const dataBase64 = typeof candidate.dataBase64 === 'string' ? candidate.dataBase64 : ''
+    const decoded = decodedBase64Bytes(dataBase64)
+    if (decoded === null || decoded <= 0 || decoded > MAX_IMAGE_DECODED_BYTES) continue
+    if (decodedTotal + decoded > MAX_IMAGE_DECODED_BYTES_TOTAL) continue
+    const signature = Buffer.from(dataBase64.slice(0, 16), 'base64')
+    const matchesSignature =
+      mimeType === 'image/png'
+        ? signature.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+        : signature.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE)
+    if (!matchesSignature) continue
+    credited += dataBase64.length
+    decodedTotal += decoded
+    counted += 1
+  }
+  return credited
+}
+
+function chatBodyExceedsNonImageBudget(rawBodyBytes: number, body: unknown): boolean {
+  return rawBodyBytes - budgetedImageBase64Length(body) > MAX_NON_IMAGE_BODY_BYTES
+}
+
 export class RPCServer {
   private server: http.Server | null = null
   private app = express()
@@ -190,8 +300,31 @@ export class RPCServer {
     })
 
     // Image attachments are sent as base64 in /v1/runtime/messages.
-    // 6mb comfortably covers the default 3mb binary limit plus JSON overhead.
-    this.app.use(express.json({ limit: '6mb' }))
+    // That route alone gets the larger ceiling described above; every other
+    // route keeps the 6mb default.
+    const jsonParser = express.json({ limit: '6mb' })
+    const chatJsonParser = express.json({
+      limit: MAX_CHAT_BODY_BYTES,
+      verify: (req, _res, buffer) => {
+        ;(req as Request & { rawBodyBytes?: number }).rawBodyBytes = buffer.length
+      },
+    })
+    this.app.use((req, res, next) => {
+      const isChatMessagePost = req.method === 'POST' && req.path === '/v1/runtime/messages'
+      const parser = isChatMessagePost ? chatJsonParser : jsonParser
+      parser(req, res, error => {
+        if (error || !isChatMessagePost) {
+          next(error)
+          return
+        }
+        const rawBodyBytes = (req as Request & { rawBodyBytes?: number }).rawBodyBytes
+        if (rawBodyBytes !== undefined && chatBodyExceedsNonImageBudget(rawBodyBytes, req.body)) {
+          json(res, 413, { error: 'Payload Too Large' })
+          return
+        }
+        next()
+      })
+    })
     this.registerRoutes()
   }
 

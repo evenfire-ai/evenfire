@@ -5,6 +5,7 @@ export type CodexLlmProxyConfig = {
   adminPort: number
   probePort: number
   maxBodyBytes: number
+  maxVisualBodyBytes: number
   maxStreamDurationMs: number
   maxDeadlineMs: number
   jwtIssuer: string
@@ -45,7 +46,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
     LIMITS.maxRequestBodyBytes
   )
-  if (imageInputModels.length > 0 && maxBodyBytes < LIMITS.maxRequestBodyBytes) {
+  const maxVisualBodyBytes = requiredPositiveInt(
+    'CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES',
+    env.CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES,
+    LIMITS.maxVisualRequestBodyBytes
+  )
+  if (imageInputModels.length > 0 && maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
     throw new Error('Visual Codex requests require the full shared envelope byte budget')
   }
   return {
@@ -65,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
       9090
     ),
     maxBodyBytes,
+    maxVisualBodyBytes,
     maxStreamDurationMs: requiredPositiveInt(
       'CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS',
       env.CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS,

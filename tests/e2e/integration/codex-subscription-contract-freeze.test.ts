@@ -38,6 +38,7 @@ const REQUIRED_OPERATIONS = [
 
 const REQUIRED_LIMIT_KEYS = [
   'maxRequestBodyBytes',
+  'maxVisualRequestBodyBytes',
   'maxMessages',
   'maxToolCalls',
   'maxOutputTokens',
@@ -176,6 +177,7 @@ describe('codex-subscription contract freeze', () => {
     expect(limits).not.toHaveProperty('maxTools')
     expect(limits?.maxToolCalls).toBe(32)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
+    expect(limits?.maxVisualRequestBodyBytes).toBe(25165824)
 
     const errors = contract.errorTaxonomy
     expect(Array.isArray(errors) && (errors as unknown[]).length > 0).toBe(true)

@@ -41,6 +41,7 @@
   "oauthScopes": ["openid", "profile", "email", "offline_access"],
   "limits": {
     "maxRequestBodyBytes": 1048576,
+    "maxVisualRequestBodyBytes": 25165824,
     "maxMessages": 128,
     "maxToolCalls": 32,
     "maxOutputTokens": 16384,
@@ -84,10 +85,10 @@
     "validation": "container-framing-and-dimensions",
     "limits": {
       "maxImages": 3,
-      "maxImageBytes": 524288,
-      "maxTotalImageBytes": 655360,
+      "maxImageBytes": 10485760,
+      "maxTotalImageBytes": 15728640,
       "maxImageDimension": 8192,
-      "maxImagePixels": 16777216
+      "maxImagePixels": 64000000
     }
   }
 }

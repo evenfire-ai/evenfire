@@ -1,4 +1,7 @@
-import { LIMITS, parseAuthorizeAttemptResponse } from '@clerum/llm-provider-attempt-contract'
+import {
+  parseAuthorizeAttemptResponse,
+  requestBodyLimitBytes,
+} from '@clerum/llm-provider-attempt-contract'
 
 export const AUTHORIZE_PATH = '/api/v1/mcp-host/llm/provider-attempts/authorize'
 
@@ -77,10 +80,11 @@ export class ProviderAttemptAuthorizer {
     expiresAt: string
   }> {
     const serialized = JSON.stringify(body)
-    if (Buffer.byteLength(serialized, 'utf8') > LIMITS.maxRequestBodyBytes) {
+    const bodyLimit = requestBodyLimitBytes(body.request)
+    if (Buffer.byteLength(serialized, 'utf8') > bodyLimit) {
       throw new CodexAuthorizeError(
         'payload_too_large',
-        'Codex request exceeds 1 MiB; use fewer or smaller images, or reduce context'
+        `Codex request exceeds ${bodyLimit / (1024 * 1024)} MiB; use fewer or smaller images, or reduce context`
       )
     }
     const jwt = this.options.readPlatformJwt()

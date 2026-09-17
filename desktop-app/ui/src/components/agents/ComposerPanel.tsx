@@ -22,6 +22,7 @@ import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
+  COMPOSER_MAX_TOTAL_IMAGE_BYTES,
   ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
@@ -53,6 +54,26 @@ function getComposerReferenceTypeLabel(type: ComposerReferenceAttachment['type']
 
 function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
   return `Uploaded File - ${Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB`
+}
+
+function formatComposerMebibytes(bytes: number): number {
+  return Math.round(bytes / (1024 * 1024))
+}
+
+type ComposerImageBudgetRejection = 'image-too-large' | 'total-too-large' | null
+
+/**
+ * Budget decision for one image of `sizeBytes` placed next to `otherImagesBytes`
+ * already attached. Shared by the picker/paste/drop path and the annotation-save
+ * path so neither route can exceed the per-image limit or the per-message total.
+ */
+function composerImageBudgetRejection(
+  sizeBytes: number,
+  otherImagesBytes: number
+): ComposerImageBudgetRejection {
+  if (sizeBytes > COMPOSER_MAX_IMAGE_BYTES) return 'image-too-large'
+  if (otherImagesBytes + sizeBytes > COMPOSER_MAX_TOTAL_IMAGE_BYTES) return 'total-too-large'
+  return null
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
@@ -436,6 +457,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const accepted: ComposerImageAttachment[] = []
       const validationErrors: string[] = []
       const selected = candidates.slice(0, availableSlots)
+      if (candidates.length > selected.length) {
+        validationErrors.push(
+          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message.`
+        )
+      }
+      // The budget runs across the images already attached plus the ones accepted
+      // below, so a selection cannot exceed the per-message total even when every
+      // file is individually allowed.
+      let plannedBytes = composerImageAttachments.reduce(
+        (total, attachment) => total + attachment.sizeBytes,
+        0
+      )
 
       for (const [index, file] of selected.entries()) {
         const mimeType = inferComposerImageMimeType(file)
@@ -443,11 +476,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
           continue
         }
-        if (file.size > COMPOSER_MAX_IMAGE_BYTES) {
+        const rejection = composerImageBudgetRejection(file.size, plannedBytes)
+        if (rejection) {
           validationErrors.push(
-            `${file.name || 'Image'} is too large. Max size is ${Math.round(
-              COMPOSER_MAX_IMAGE_BYTES / (1024 * 1024)
-            )} MB.`
+            rejection === 'image-too-large'
+              ? `${file.name || 'Image'} is too large. Max size is ${formatComposerMebibytes(
+                  COMPOSER_MAX_IMAGE_BYTES
+                )} MiB.`
+              : `${file.name || 'Image'} was not added. Attachments can total at most ${formatComposerMebibytes(
+                  COMPOSER_MAX_TOTAL_IMAGE_BYTES
+                )} MiB per message.`
           )
           continue
         }
@@ -475,6 +513,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             sizeBytes: file.size,
             previewDataUrl: previewUrl || dataUrl,
           })
+          plannedBytes += file.size
         } catch (error) {
           revokePreviewUrl(previewUrl)
           validationErrors.push(
@@ -491,13 +530,51 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     [
       activeProviderDoesNotSupportImages,
       buildAttachmentName,
-      composerImageAttachments.length,
+      composerImageAttachments,
       inferComposerImageMimeType,
       onAddComposerImageAttachments,
       readFileAsDataUrl,
       createPreviewUrl,
       revokePreviewUrl,
     ]
+  )
+
+  /**
+   * An annotation save re-encodes the image, so the result can be larger than the
+   * file the picker accepted. Apply the same budget before the attachment is
+   * replaced; a refusal never calls through, so the original attachment, its
+   * preview URL and its bytes stay exactly as they were.
+   *
+   * The refusal is thrown rather than returned: AnnotationCanvas runs `onSave`
+   * inside its own try/catch and renders the thrown message in
+   * `.composer-image-preview-error` within its dialog. That is the only error
+   * surface above the full-screen annotation overlay — the composer's own banner
+   * sits behind that overlay's 86%-opaque backdrop — and throwing also skips the
+   * canvas's `setPreviewIsAnnotating(false)`, so the user keeps their strokes.
+   */
+  const handleAnnotatedImageSave = useCallback(
+    (updated: ComposerImageAttachment) => {
+      const otherImagesBytes = composerImageAttachments.reduce(
+        (total, attachment) =>
+          attachment.id === updated.id ? total : total + attachment.sizeBytes,
+        0
+      )
+      const rejection = composerImageBudgetRejection(updated.sizeBytes, otherImagesBytes)
+      if (!rejection) {
+        onUpdateComposerImageAttachment(updated)
+        return
+      }
+      throw new Error(
+        rejection === 'image-too-large'
+          ? `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
+              COMPOSER_MAX_IMAGE_BYTES
+            )} MiB per image.`
+          : `${updated.name || 'Image'} was kept unchanged. Attachments can total at most ${formatComposerMebibytes(
+              COMPOSER_MAX_TOTAL_IMAGE_BYTES
+            )} MiB per message.`
+      )
+    },
+    [composerImageAttachments, onUpdateComposerImageAttachment]
   )
 
   const handleComposerPaste = useCallback(
@@ -949,7 +1026,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       {previewAttachment && (
         <AnnotationCanvas
           attachment={previewAttachment}
-          onSave={onUpdateComposerImageAttachment}
+          onSave={handleAnnotatedImageSave}
           onClose={() => setPreviewAttachmentId(null)}
         />
       )}

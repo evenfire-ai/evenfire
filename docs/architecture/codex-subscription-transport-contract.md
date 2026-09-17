@@ -33,21 +33,34 @@ retain one remaining image per MIME/bytes pair and its explanatory text. They do
 not restore pixels removed by pruning. The user-facing attachment collection
 keeps its existing deduplication behavior.
 
-Local visual budgets are three images, 512 KiB decoded per image, 640 KiB decoded
-across a request, 8192 pixels per dimension and 16,777,216 pixels per image.
+Local visual budgets are three images, 10 MiB decoded per image, 15 MiB decoded
+across a request, 8192 pixels per dimension and 64,000,000 pixels per image.
+The aggregate is independent: one 10 MiB image plus one 5 MiB image fits, as do
+three 5 MiB images; three 10 MiB images do not. Original bytes are preserved.
 These are conservative Evenfire limits, not claims about upstream capabilities.
 The shared pure validator checks canonical base64, MIME/container framing and
 header dimensions; it does not decode pixels or prove image decodability.
 The fixtures contain independently decoded 2x2 PNG/JPEG images.
 
-The existing 1 MiB bound still applies to each complete serialized request and
-HTTP envelope, including text, tools, history and the signed execution ticket.
+V1 keeps its existing 1 MiB request/envelope ceiling. V2 has a 24 MiB ceiling
+for the complete serialized request and HTTP envelope, including base64,
+history and the signed execution ticket. V2 text, tools and other non-image
+fields remain bounded to 1 MiB, measured with only image data blanked in a
+temporary size projection; the actual request and its hash are not modified.
 The authorizer builds the exact V2 proxy envelope inside its transaction after
 signing but before commit. Exceeding the bound rolls back the new attempt,
 ticket and new reservation; it does not call the receipt finalizer before redeem.
 The Host uses the same envelope builder. V2 has no outer deadline: its deadline
 is `request.deadlineMs`, part of the authorized hash. A proxy configured below
-the shared envelope budget refuses visual activation at startup.
+the shared visual envelope budget refuses visual activation at startup.
+
+Desktop enforces the 10 MiB individual and 15 MiB combined attachment budgets.
+RPC and Host permit a 24 MiB JSON body only on their message POST routes; their
+6 MiB budget for other content and routes remains unchanged. The proxy's larger
+parser requires a valid platform identity on the visual completion route.
+Admin and unauthenticated requests retain the ordinary configured body limit.
+`CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` controls the visual transport ceiling;
+`CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests.
 
 The proxy projects parts to Responses `input_text` and `input_image` items with
 an inline data URL. The shape is grounded in the official Codex client

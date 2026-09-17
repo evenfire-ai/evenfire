@@ -10,6 +10,15 @@ ordered text/image content and local image/envelope budgets. Its
 `fixtures/canonical-request-hashes.v2.json` freezes the new projection separately.
 The image parser validates container structure and dimensions, not decoded pixels.
 
+Capacity checks cover 10 MiB per image, 15 MiB across up to three images, and a
+24 MiB V2 envelope. Exercise 10 MiB, 10+5 MiB and 3x5 MiB acceptance, plus
+individual/aggregate overflow. V1 and V2 non-image fields keep a 1 MiB ceiling;
+unrelated RPC/Host routes keep 6 MiB. The larger proxy parser must not admit an
+anonymous, wrong-scope or admin request, or enlarge V1's effective body limit.
+Changing these budgets does not change OAuth, grants, ticket binding, origins,
+fallback, or connection selection. Local capacity evidence is separate from
+successful image interpretation by a real model.
+
 Provider tests must cover both completion methods, direct/tool origins, prompt
 context, redacted text parts, repeated bytes from distinct tool calls and the
 default-disabled model gate. Proxy conformance inspects the final upstream body,

@@ -304,7 +304,15 @@ describeRealPostgres('Codex provider-attempt authorization on real PostgreSQL', 
                 )
                 expect(registered.rows).toHaveLength(1)
                 signed = true
-                return issued
+                // The request's text budget stays at 1 MiB. Inject an oversized
+                // return value only after a real ticket/reservation exists in
+                // this transaction, to prove the final envelope guard rolls
+                // back database writes. This value never leaves the test.
+                return {
+                  ...issued,
+                  executionTicket:
+                    issued.executionTicket + 'x'.repeat(LIMITS.maxVisualRequestBodyBytes),
+                }
               },
             })
           )

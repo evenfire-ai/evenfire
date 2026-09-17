@@ -1,9 +1,9 @@
 import {
-  LIMITS,
   buildCodexProxyEnvelope,
   computeCodexPolicyHash,
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
+  requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
@@ -195,7 +195,7 @@ export async function authorizeLlmProviderAttempt(
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'body must be an object')
   }
   const serialized = JSON.stringify(body)
-  if (Buffer.byteLength(serialized, 'utf8') > LIMITS.maxRequestBodyBytes) {
+  if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
   }
   const unknown = firstUnknownKey(body)

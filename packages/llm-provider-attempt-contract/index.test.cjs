@@ -549,6 +549,70 @@ function declaredHeaderPngOfSize(targetBytes) {
   ])
 }
 
+const MIB = 1024 * 1024
+// The per-image ceiling this suite replaced. Kept as a literal so the tests
+// prove the raise rather than restating the current constant.
+const FORMER_IMAGE_CEILING = 524288
+
+/**
+ * Real PNG (correct CRCs, inflatable scanlines) padded to an exact byte length
+ * with an ancillary tEXt chunk inserted before IEND. Ancillary chunks are
+ * legal anywhere before IEND, so the image stays decodable while the file size
+ * is exact.
+ */
+function realPngOfSize(targetBytes, width, height, seed) {
+  const base = realPng(width, height, seed)
+  const padding = targetBytes - base.length
+  assert.ok(padding >= 0, `target ${targetBytes} is smaller than the real PNG ${base.length}`)
+  if (padding === 0) return base
+  assert.ok(padding >= 12, 'target must leave room for the padding chunk')
+  const iend = base.subarray(base.length - 12)
+  const body = base.subarray(0, base.length - 12)
+  const payloadLength = padding - 12
+  const text = Buffer.concat([
+    Buffer.from('pad\0', 'latin1'),
+    Buffer.alloc(Math.max(payloadLength - 4, 0), 0x20),
+  ])
+  assert.equal(text.length, payloadLength)
+  return Buffer.concat([body, pngChunk('tEXt', text), iend])
+}
+
+/**
+ * Structurally framed JPEG of an exact byte length: SOI, a frame header that
+ * declares the dimensions, a start-of-scan segment, entropy payload and EOI.
+ * This is the container the v2 JPEG checks were written against — marker
+ * framing and declared dimensions — not an entropy-decodable image; the module
+ * documents that it never decodes scan data.
+ */
+function jpegOfSize(targetBytes, width = 2, height = 2) {
+  const sofPayload = Buffer.alloc(9)
+  sofPayload[0] = 8
+  sofPayload.writeUInt16BE(height, 1)
+  sofPayload.writeUInt16BE(width, 3)
+  sofPayload[5] = 1
+  sofPayload[6] = 1
+  sofPayload[7] = 0x11
+  sofPayload[8] = 0
+  const segmentLength = Buffer.alloc(2)
+  segmentLength.writeUInt16BE(sofPayload.length + 2, 0)
+  const sof = Buffer.concat([Buffer.from([0xff, 0xc0]), segmentLength, sofPayload])
+
+  const sosPayload = Buffer.alloc(6)
+  const sosLength = Buffer.alloc(2)
+  sosLength.writeUInt16BE(sosPayload.length + 2, 0)
+  const sos = Buffer.concat([Buffer.from([0xff, 0xda]), sosLength, sosPayload])
+
+  const entropyLength = targetBytes - (2 + sof.length + sos.length + 2)
+  assert.ok(entropyLength >= 1, 'target must leave room for entropy-coded data')
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    sof,
+    sos,
+    Buffer.alloc(entropyLength, 0x2a),
+    Buffer.from([0xff, 0xd9]),
+  ])
+}
+
 function imagePart(data, mimeType = 'image/png') {
   return {
     type: 'image',
@@ -806,20 +870,59 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
   )
   assert.equal(decoded.code, 'limit')
 
-  const bigA = realPng(335, 335, 1)
-  const bigB = realPng(335, 335, 2)
-  assert.ok(bigA.length < contract.VISUAL_LIMITS.maxImageBytes)
-  assert.ok(bigA.length + bigB.length > contract.VISUAL_LIMITS.maxTotalImageBytes)
-  const single = contract.parseCodexCompletionRequest(
-    v2WithParts([imagePart(bigA.toString('base64'))])
+  // Above the ceiling this suite replaced, in both accepted containers.
+  const pngOverFormerCeiling = declaredHeaderPngOfSize(FORMER_IMAGE_CEILING + 1)
+  assert.equal(pngOverFormerCeiling.length, FORMER_IMAGE_CEILING + 1)
+  const acceptedPng = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(pngOverFormerCeiling.toString('base64'))])
   )
-  assert.equal(single.ok, true, single.message)
-  const total = contract.parseCodexCompletionRequest(
-    v2WithParts([imagePart(bigA.toString('base64')), imagePart(bigB.toString('base64'))])
+  assert.equal(acceptedPng.ok, true, acceptedPng.message)
+  const acceptedJpeg = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(jpegOfSize(FORMER_IMAGE_CEILING + 1).toString('base64'), 'image/jpeg')])
   )
-  assert.equal(total.ok, false)
-  assert.equal(total.code, 'limit')
-  assert.match(total.message, /total image bytes/)
+  assert.equal(acceptedJpeg.ok, true, acceptedJpeg.message)
+
+  // 3 MiB, and exactly the per-image ceiling, are inside the budget.
+  const acceptedThreeMiB = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(declaredHeaderPngOfSize(3 * MIB).toString('base64'))])
+  )
+  assert.equal(acceptedThreeMiB.ok, true, acceptedThreeMiB.message)
+  const acceptedCeiling = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(declaredHeaderPngOfSize(contract.VISUAL_LIMITS.maxImageBytes).toString('base64')),
+    ])
+  )
+  assert.equal(acceptedCeiling.ok, true, acceptedCeiling.message)
+
+  // One byte over the per-image ceiling, as a container that is otherwise valid.
+  const overCeiling = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(
+        declaredHeaderPngOfSize(contract.VISUAL_LIMITS.maxImageBytes + 1).toString('base64')
+      ),
+    ])
+  )
+  assert.equal(overCeiling.ok, false)
+  assert.equal(overCeiling.code, 'limit')
+  assert.match(overCeiling.message, /image exceeds/)
+  assert.match(overCeiling.message, new RegExp(String(contract.VISUAL_LIMITS.maxImageBytes)))
+
+  // A larger individual image does not increase the aggregate resource budget.
+  const tenMiB = declaredHeaderPngOfSize(10 * MIB).toString('base64')
+  const fiveMiB = declaredHeaderPngOfSize(5 * MIB).toString('base64')
+  const combined = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(tenMiB), imagePart(fiveMiB)])
+  )
+  assert.equal(combined.ok, true, combined.message)
+  const overAggregate = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(tenMiB),
+      imagePart(declaredHeaderPngOfSize(5 * MIB + 1).toString('base64')),
+    ])
+  )
+  assert.equal(overAggregate.ok, false)
+  assert.equal(overAggregate.code, 'limit')
+  assert.match(overAggregate.message, /total image bytes/)
 
   const atDimension = contract.parseCodexCompletionRequest(
     v2WithParts([
@@ -835,29 +938,41 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
   assert.equal(overDimension.code, 'limit')
   assert.match(overDimension.message, /dimension/)
 
-  const pixelsAtLimit =
-    contract.VISUAL_LIMITS.maxImagePixels / contract.VISUAL_LIMITS.maxImageDimension
+  // A 48 MP phone capture (8064x6048) is the payload the raise exists for.
+  const phonePixels = 8064 * 6048
+  assert.ok(phonePixels < contract.VISUAL_LIMITS.maxImagePixels)
+  const atPhoneShape = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(declaredHeaderPng(8064, 6048).toString('base64'))])
+  )
+  assert.equal(atPhoneShape.ok, true, atPhoneShape.message)
+
+  // Exactly the pixel ceiling, then one row over it.
+  const pixelsAtLimit = 8000
+  assert.equal(pixelsAtLimit * pixelsAtLimit, contract.VISUAL_LIMITS.maxImagePixels)
   const atPixels = contract.parseCodexCompletionRequest(
-    v2WithParts([
-      imagePart(
-        declaredHeaderPng(contract.VISUAL_LIMITS.maxImageDimension, pixelsAtLimit).toString(
-          'base64'
-        )
-      ),
-    ])
+    v2WithParts([imagePart(declaredHeaderPng(pixelsAtLimit, pixelsAtLimit).toString('base64'))])
   )
   assert.equal(atPixels.ok, true, atPixels.message)
   const overPixels = contract.parseCodexCompletionRequest(
-    v2WithParts([
-      imagePart(
-        declaredHeaderPng(contract.VISUAL_LIMITS.maxImageDimension, pixelsAtLimit + 1).toString(
-          'base64'
-        )
-      ),
-    ])
+    v2WithParts([imagePart(declaredHeaderPng(pixelsAtLimit, pixelsAtLimit + 1).toString('base64'))])
   )
   assert.equal(overPixels.code, 'limit')
   assert.match(overPixels.message, /pixel count/)
+
+  // Both dimensions inside the dimension ceiling, product over the pixel
+  // ceiling: isolates the pixel rule from the dimension rule.
+  const squareOverPixels = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(
+        declaredHeaderPng(
+          contract.VISUAL_LIMITS.maxImageDimension,
+          contract.VISUAL_LIMITS.maxImageDimension
+        ).toString('base64')
+      ),
+    ])
+  )
+  assert.equal(squareOverPixels.code, 'limit')
+  assert.match(squareOverPixels.message, /pixel count/)
 
   const wrongMime = contract.parseCodexCompletionRequest(
     v2WithParts([imagePart(png, 'image/jpeg')])
@@ -869,7 +984,7 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
   assert.equal(jpegAsPng.ok, false)
 })
 
-test('v2 visual budgets are request-scoped across messages, not per message', () => {
+test('v2 visual budgets are request-scoped across messages: three 5 MiB images fit, four do not', () => {
   const png = IMAGE_DATA.png
   const userWithImages = count => ({
     role: 'user',
@@ -891,13 +1006,213 @@ test('v2 visual budgets are request-scoped across messages, not per message', ()
   )
   assert.equal(oneEach.ok, true, oneEach.message)
 
-  // The same aggregate rule holds for total bytes with one image per message.
-  const bigA = realPng(335, 335, 5)
-  const bigB = realPng(335, 335, 7)
-  const splitBytes = contract.parseCodexCompletionRequest(
-    v2WithMessages([userWithImages(0), userWithImages(0)])
+  // Three 5 MiB images across messages fill the unchanged aggregate budget.
+  const atCeiling = declaredHeaderPngOfSize(5 * MIB).toString('base64')
+  const messageWith = encoded => ({
+    role: 'user',
+    content: '',
+    contentParts: [imagePart(encoded)],
+  })
+  const oneEachAtCeiling = contract.parseCodexCompletionRequest(
+    v2WithMessages([messageWith(atCeiling), messageWith(atCeiling), messageWith(atCeiling)])
   )
-  return undefined === splitBytes
+  assert.equal(oneEachAtCeiling.ok, true, oneEachAtCeiling.message)
+  // Three ceiling images are the exact aggregate boundary, and the encoded body
+  // is larger than the V1 ceiling — this is the request that needs the V2 budget.
+  const ceilingBody = Buffer.byteLength(
+    JSON.stringify(
+      v2WithMessages([messageWith(atCeiling), messageWith(atCeiling), messageWith(atCeiling)])
+    ),
+    'utf8'
+  )
+  assert.ok(ceilingBody > contract.LIMITS.maxRequestBodyBytes)
+  assert.ok(ceilingBody <= contract.LIMITS.maxVisualRequestBodyBytes)
+
+  // A fourth ceiling image is refused before the count gate is reached: four
+  // 5 MiB payloads encode to more than the 24 MiB body ceiling. The count rule
+  // is exercised with small images above; this asserts which gate fires first
+  // for maximum-size payloads.
+  const fourMessages = contract.parseCodexCompletionRequest(
+    v2WithMessages([
+      messageWith(atCeiling),
+      messageWith(atCeiling),
+      messageWith(atCeiling),
+      messageWith(atCeiling),
+    ])
+  )
+  assert.equal(fourMessages.ok, false)
+  assert.equal(fourMessages.code, 'limit')
+  assert.equal(fourMessages.message, 'request exceeds maxVisualRequestBodyBytes')
+})
+
+/**
+ * The request with every image payload replaced by an empty string — the
+ * non-image share the V2 budget is defined on. Used to find an exact boundary;
+ * the assertions below always check the contract's verdict, not this helper.
+ */
+function nonImageBytes(request) {
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...request,
+      messages: request.messages.map(message =>
+        Array.isArray(message.contentParts)
+          ? {
+              ...message,
+              contentParts: message.contentParts.map(part =>
+                part.type === 'image' ? { ...part, data: '' } : part
+              ),
+            }
+          : message
+      ),
+    }),
+    'utf8'
+  )
+}
+
+test('requestBodyLimitBytes: V2 declares 24 MiB; every other body keeps the 1 MiB ceiling', () => {
+  assert.equal(contract.LIMITS.maxRequestBodyBytes, 1048576)
+  assert.equal(contract.LIMITS.maxVisualRequestBodyBytes, 25165824)
+  assert.equal(contract.VISUAL_LIMITS.maxImages, 3)
+  assert.equal(contract.VISUAL_LIMITS.maxImageBytes, 10485760)
+  assert.equal(contract.VISUAL_LIMITS.maxTotalImageBytes, 15728640)
+  assert.equal(contract.VISUAL_LIMITS.maxImageDimension, 8192)
+  assert.equal(contract.VISUAL_LIMITS.maxImagePixels, 64000000)
+
+  for (const v2 of [VISUAL_FIXTURE.png, VISUAL_FIXTURE.jpeg, VISUAL_FIXTURE.pngImageOnly]) {
+    assert.equal(v2.schemaVersion, contract.SCHEMA_VERSION_V2)
+    assert.equal(contract.requestBodyLimitBytes(v2), 25165824)
+  }
+  // A declaration is not a payload: unknown, missing and non-object bodies keep
+  // the smaller ceiling so a caller cannot ask for the larger budget it has not
+  // satisfied.
+  for (const other of [
+    BASE,
+    { ...BASE, schemaVersion: 'codex-completion-request.v3' },
+    { ...BASE, schemaVersion: undefined },
+    {},
+    null,
+    undefined,
+    'x',
+    7,
+    [],
+  ]) {
+    assert.equal(contract.requestBodyLimitBytes(other), 1048576, String(other))
+  }
+})
+
+test('v2 preserves the non-image budget: text and tools stay on the 1 MiB ceiling', () => {
+  const { maxRequestBodyBytes, maxVisualRequestBodyBytes } = contract.LIMITS
+  const image = imagePart(IMAGE_DATA.png)
+  const overflow = 'request exceeds maxRequestBodyBytes outside image data'
+  const longText = 'x'.repeat(2 * MIB)
+
+  // Images do not buy text: 2 MiB of content-class payload is refused far below
+  // the 24 MiB ceiling the same body is allowed to use for image data.
+  const textHeavy = contract.parseCodexCompletionRequest(
+    v2WithParts([image, { type: 'text', text: longText }], longText)
+  )
+  assert.equal(textHeavy.ok, false)
+  assert.equal(textHeavy.code, 'limit')
+  assert.equal(textHeavy.message, overflow)
+
+  // A text-only V2 body is not a 24 MiB allowance either.
+  assert.deepEqual(contract.parseCodexCompletionRequest(v2TextRequest(longText)), {
+    ok: false,
+    code: 'limit',
+    message: overflow,
+  })
+
+  // Tool definitions are on the same caller-controlled budget.
+  const toolHeavy = contract.parseCodexCompletionRequest({
+    ...v2WithParts([image]),
+    tools: [{ name: 'read', description: 'y'.repeat(2 * MIB), parameters: {} }],
+  })
+  assert.equal(toolHeavy.ok, false)
+  assert.equal(toolHeavy.code, 'limit')
+  assert.equal(toolHeavy.message, overflow)
+
+  // Exact boundary. The image is blanked out of the measurement, so the largest
+  // accepted text still leaves the body far under the V2 ceiling, and one byte
+  // more is refused by the non-image rule.
+  const withImageAndText = length =>
+    v2WithParts([image, { type: 'text', text: 'z'.repeat(length) }], 'z'.repeat(length))
+  const base = nonImageBytes(withImageAndText(0))
+  const growth = (nonImageBytes(withImageAndText(10)) - base) / 10
+  assert.equal(growth, 2, 'content and its text part both carry the payload')
+  const exactLength = Math.floor((maxRequestBodyBytes - base) / growth)
+  const boundary = nonImageBytes(withImageAndText(exactLength))
+  assert.ok(
+    boundary <= maxRequestBodyBytes && boundary > maxRequestBodyBytes - growth,
+    `non-image boundary landed at ${boundary}`
+  )
+  const bodyAtBoundary = Buffer.byteLength(JSON.stringify(withImageAndText(exactLength)), 'utf8')
+  assert.ok(
+    bodyAtBoundary < maxVisualRequestBodyBytes,
+    'the non-image boundary is decided well below the V2 ceiling'
+  )
+  const atLimit = contract.parseCodexCompletionRequest(withImageAndText(exactLength))
+  assert.equal(atLimit.ok, true, atLimit.message)
+  const overLimit = contract.parseCodexCompletionRequest(withImageAndText(exactLength + 1))
+  assert.equal(overLimit.ok, false)
+  assert.equal(overLimit.code, 'limit')
+  assert.equal(overLimit.message, overflow)
+  assert.ok(
+    nonImageBytes(withImageAndText(exactLength + 1)) > maxRequestBodyBytes,
+    'the rejection is the non-image budget, not another gate'
+  )
+})
+
+test('v2 total budget: the raw body is capped at 24 MiB and the three budgets stay consistent', () => {
+  const { maxVisualRequestBodyBytes, maxRequestBodyBytes } = contract.LIMITS
+  // The V2 ceiling must cover the largest legal image set (3 x 5 MiB decoded, so
+  // ~21 MiB of canonical base64) plus the whole non-image share. Asserted so a
+  // future change to any of the three image numbers is caught here.
+  const aggregateEncoded = 4 * Math.ceil(contract.VISUAL_LIMITS.maxTotalImageBytes / 3) + 8
+  assert.ok(aggregateEncoded + maxRequestBodyBytes < maxVisualRequestBodyBytes)
+
+  // Over the ceiling is refused by the size gate, before any payload work.
+  const oversized = v2WithParts([imagePart('A'.repeat(maxVisualRequestBodyBytes))])
+  assert.ok(Buffer.byteLength(JSON.stringify(oversized), 'utf8') > maxVisualRequestBodyBytes)
+  const refused = contract.parseCodexCompletionRequest(oversized)
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'limit')
+  assert.equal(refused.message, 'request exceeds maxVisualRequestBodyBytes')
+
+  // The same shape parsed as V1 keeps the V1 ceiling and its V1 message: the
+  // larger budget is a property of the version, not of the payload.
+  const asV1 = contract.parseCodexCompletionRequestV1({
+    ...oversized,
+    schemaVersion: contract.SCHEMA_VERSION,
+  })
+  assert.equal(asV1.ok, false)
+  assert.equal(asV1.code, 'limit')
+  assert.equal(asV1.message, 'request exceeds maxRequestBodyBytes')
+})
+
+test('large real PNG: CRCs and inflatable scanlines at 3 MiB and at the 10 MiB ceiling', () => {
+  const cases = [
+    ['3 MiB', 3 * MIB, 512, 512, 21],
+    ['10 MiB ceiling', contract.VISUAL_LIMITS.maxImageBytes, 1150, 1150, 31],
+  ]
+  for (const [label, target, width, height, seed] of cases) {
+    const png = realPngOfSize(target, width, height, seed)
+    assert.equal(png.length, target, label)
+    const chunks = pngChunks(png)
+    assert.deepEqual(
+      chunks.map(chunk => chunk.type),
+      ['IHDR', 'IDAT', 'tEXt', 'IEND'],
+      label
+    )
+    for (const chunk of chunks) {
+      assert.equal(chunk.crc, zlib.crc32(chunk.crcInput) >>> 0, `${label} ${chunk.type} crc`)
+    }
+    const raw = zlib.inflateSync(chunks[1].data)
+    assert.equal(raw.length, height * (1 + width * 3), label)
+    const parsed = contract.parseCodexCompletionRequest(
+      v2WithParts([imagePart(png.toString('base64'))])
+    )
+    assert.equal(parsed.ok, true, `${label}: ${parsed.message}`)
+  }
 })
 
 test('buildCodexProxyEnvelope: exact shape, no outer deadline, exact size boundary', () => {
@@ -925,7 +1240,7 @@ test('buildCodexProxyEnvelope: exact shape, no outer deadline, exact size bounda
   assert.equal(Object.isFrozen(envelope.value), true)
   assert.equal(
     Buffer.byteLength(JSON.stringify(envelope.value), 'utf8') <=
-      contract.LIMITS.maxRequestBodyBytes,
+      contract.requestBodyLimitBytes(envelope.value.request),
     true
   )
 
@@ -940,46 +1255,84 @@ test('buildCodexProxyEnvelope: exact shape, no outer deadline, exact size bounda
     'the deadline is bound by the request hash'
   )
 
-  const envelopeFor = contentLength => {
-    const request = contract.parseCodexCompletionRequest(v2TextRequest('x'.repeat(contentLength)))
+  // V2 exact boundary. The request's own share is bounded (images at ~21 MiB
+  // encoded, everything else at 1 MiB), so padding its text can no longer reach
+  // the envelope ceiling — the ticket is the field that moves it, and the ticket
+  // is what the authorizer really adds.
+  const envelopeForTicket = ticketBytes => {
+    const request = contract.parseCodexCompletionRequest(VISUAL_FIXTURE.png)
     assert.equal(request.ok, true, request.message)
     const hash = contract.hashCodexCompletionRequest(request.value)
+    const executionTicket = 't'.repeat(ticketBytes)
     return {
-      request,
+      executionTicket,
       hash,
+      request,
       size: Buffer.byteLength(
-        JSON.stringify({ executionTicket: ticket, requestHash: hash, request: request.value }),
+        JSON.stringify({ executionTicket, requestHash: hash, request: request.value }),
         'utf8'
       ),
     }
   }
-  const seed = 1000
-  const seedEnvelope = envelopeFor(seed)
-  const exactLength = seed + (contract.LIMITS.maxRequestBodyBytes - seedEnvelope.size)
-  const exact = envelopeFor(exactLength)
+  const limit = contract.requestBodyLimitBytes(parsed.value)
+  assert.equal(limit, contract.LIMITS.maxVisualRequestBodyBytes)
+  const probe = envelopeForTicket(8)
+  const exactTicket = 8 + (limit - probe.size)
+  const exact = envelopeForTicket(exactTicket)
+  assert.equal(exact.size, limit)
   const atLimit = contract.buildCodexProxyEnvelope({
-    executionTicket: ticket,
+    executionTicket: exact.executionTicket,
     requestHash: exact.hash,
     request: exact.request.value,
   })
   assert.equal(atLimit.ok, true, atLimit.message)
-  assert.equal(
-    Buffer.byteLength(JSON.stringify(atLimit.value), 'utf8'),
-    contract.LIMITS.maxRequestBodyBytes
-  )
+  assert.equal(Buffer.byteLength(JSON.stringify(atLimit.value), 'utf8'), limit)
 
-  const over = envelopeFor(exactLength + 1)
-  assert.ok(
-    Buffer.byteLength(JSON.stringify(over.request.value), 'utf8') <=
-      contract.LIMITS.maxRequestBodyBytes
-  )
+  const over = envelopeForTicket(exactTicket + 1)
+  assert.equal(over.size, limit + 1)
   const refused = contract.buildCodexProxyEnvelope({
-    executionTicket: ticket,
+    executionTicket: over.executionTicket,
     requestHash: over.hash,
     request: over.request.value,
   })
   assert.equal(refused.ok, false)
   assert.equal(refused.code, 'limit')
+  assert.equal(refused.message, 'proxy envelope exceeds maxVisualRequestBodyBytes')
+
+  // V1 keeps the 1 MiB envelope ceiling: same construction, exact boundary, and
+  // the V1 failure message.
+  const v1Request = contract.parseCodexCompletionRequest({ ...BASE, deadlineMs: 5000 })
+  assert.equal(v1Request.ok, true)
+  const v1Hash = contract.hashCodexCompletionRequest(v1Request.value)
+  const v1Size = ticketBytes =>
+    Buffer.byteLength(
+      JSON.stringify({
+        executionTicket: 't'.repeat(ticketBytes),
+        requestHash: v1Hash,
+        request: v1Request.value,
+      }),
+      'utf8'
+    )
+  const v1Ticket = 8 + (contract.LIMITS.maxRequestBodyBytes - v1Size(8))
+  const v1Exact = contract.buildCodexProxyEnvelope({
+    executionTicket: 't'.repeat(v1Ticket),
+    requestHash: v1Hash,
+    request: v1Request.value,
+  })
+  assert.equal(v1Exact.ok, true, v1Exact.message)
+  assert.equal(Buffer.byteLength(JSON.stringify(v1Exact.value), 'utf8'), v1Size(v1Ticket))
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(v1Exact.value), 'utf8'),
+    contract.LIMITS.maxRequestBodyBytes
+  )
+  const v1Over = contract.buildCodexProxyEnvelope({
+    executionTicket: 't'.repeat(v1Ticket + 1),
+    requestHash: v1Hash,
+    request: v1Request.value,
+  })
+  assert.equal(v1Over.ok, false)
+  assert.equal(v1Over.code, 'limit')
+  assert.equal(v1Over.message, 'proxy envelope exceeds maxRequestBodyBytes')
 })
 
 test('buildCodexProxyEnvelope: fails closed on hash mismatch, bad input and invalid requests', () => {

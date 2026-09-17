@@ -13,14 +13,23 @@
  * The budget below is a conservative local safety/product decision. It is not
  * an upstream capability fact; the frozen ChatGPT endpoint is not certified by
  * these numbers.
+ *
+ * The raised ceiling supports larger original captures, including 8064x6048
+ * frames, without requiring a lossy re-encode. `maxImageBytes` and
+ * `maxImagePixels` independently bound the payload; the
+ * container checks above are unchanged by the raise, and the pixel budget stays
+ * a declared-header bound rather than a decode.
+ *
+ * The 15 MiB aggregate is independent from the 10 MiB per-image ceiling:
+ * one large photo can fit without doubling the maximum request allocation.
  */
 
 const VISUAL_LIMITS = Object.freeze({
   maxImages: 3,
-  maxImageBytes: 524288,
-  maxTotalImageBytes: 655360,
+  maxImageBytes: 10485760,
+  maxTotalImageBytes: 15728640,
   maxImageDimension: 8192,
-  maxImagePixels: 16777216,
+  maxImagePixels: 64000000,
 })
 
 // Exact encoded length of a canonical base64 string that decodes to

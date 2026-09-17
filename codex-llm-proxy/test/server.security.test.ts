@@ -19,6 +19,7 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     adminPort: 8081,
     probePort: 9090,
     maxBodyBytes: 1024,
+    maxVisualBodyBytes: 24 * 1024 * 1024,
     maxStreamDurationMs: 300_000,
     maxDeadlineMs: 300_000,
     jwtIssuer: 'control-api',
@@ -149,6 +150,48 @@ describe('codex-llm-proxy security surface', () => {
         request: { pad: 'x'.repeat(200) },
       })
     expect(res.status).toBe(413)
+  })
+
+  it('reserves the larger transport budget for authenticated visual requests', async () => {
+    const { runtimeApp, adminApp } = createProxyApps(
+      config({ maxBodyBytes: 1_048_576, imageInputModels: ['gpt-5.1'] })
+    )
+    // Deliberately invalid ticket: this test checks parser admission and the
+    // unchanged ticket gate, without redeeming or contacting any model.
+    const payload = {
+      executionTicket: 'invalid-ticket',
+      requestHash: 'a'.repeat(64),
+      request: { schemaVersion: 'codex-completion-request.v2', pad: 'x'.repeat(10 * 1024 * 1024) },
+    }
+    const admitted = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(payload)
+    expect(admitted.status).toBe(403)
+    expect(admitted.body.error).toBe('ticket_invalid')
+
+    const anonymous = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .send(payload)
+    expect(anonymous.status).toBe(413)
+    const noScope = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken({ workflowControlScopes: [] })}`)
+      .send(payload)
+    expect(noScope.status).toBe(413)
+    const v1 = await request(runtimeApp)
+      .post('/internal/runtime/v1/codex/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send({
+        ...payload,
+        request: { ...payload.request, schemaVersion: 'codex-completion-request.v1' },
+      })
+    expect(v1.status).toBe(413)
+    const admin = await request(adminApp)
+      .post('/internal/admin/v1/codex/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send(payload)
+    expect(admin.status).toBe(413)
   })
 
   it('rejects a platform JWT whose hostRefs do not bind the ticket hostRef', async () => {
@@ -291,7 +334,7 @@ describe('codex-llm-proxy security surface', () => {
       loadConfig({
         CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
         CODEX_IMAGE_INPUT_MODELS: 'gpt-5.1',
-        CODEX_LLM_PROXY_MAX_BODY_BYTES: '1024',
+        CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024',
       })
     ).toThrow(/shared envelope byte budget/)
     expect(

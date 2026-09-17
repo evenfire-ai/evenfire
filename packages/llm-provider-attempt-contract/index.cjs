@@ -16,7 +16,20 @@ const PROVIDER_ID = 'codex-subscription'
 const TICKET_TYP = 'codex-execution-ticket'
 
 const LIMITS = Object.freeze({
+  // V1 ceiling, and the V2 ceiling for everything that is not image data. The
+  // measurement that enforces the second half lives in
+  // `measureNonImageRequestBytes` below.
   maxRequestBodyBytes: 1048576,
+  /**
+   * V2 request/envelope ceiling. It is deliberately larger than
+   * `maxRequestBodyBytes` because a V2 body carries base64 image payloads, and
+   * it is deliberately larger than the largest legal V2 image set
+   * (`maxImages` * `maxImageBytes` decoded ≈ 21 MiB encoded) so the same number
+   * covers the non-image share and the envelope's ticket and digest. It is not a
+   * text/tool allowance: `measureNonImageRequestBytes` keeps that share on the
+   * V1 ceiling.
+   */
+  maxVisualRequestBodyBytes: 25165824,
   maxMessages: 128,
   // Bound calls in each assistant message independently of advertised definitions.
   maxToolCalls: 32,
@@ -142,6 +155,55 @@ function isPlainObject(value) {
 
 function unknownKeys(obj, allowed) {
   return Object.keys(obj).filter(k => !allowed.has(k))
+}
+
+/**
+ * Request/envelope byte ceiling for a schema version. V2 raises the ceiling so
+ * a body can carry image payloads; every other value keeps the V1 ceiling, so a
+ * missing, unknown or lower version can never buy the larger budget.
+ */
+function schemaRequestBodyLimit(schemaVersion) {
+  return schemaVersion === SCHEMA_VERSION_V2
+    ? LIMITS.maxVisualRequestBodyBytes
+    : LIMITS.maxRequestBodyBytes
+}
+
+/**
+ * Ceiling for a request body, or for the envelope that carries it, BEFORE
+ * parsing. Callers that must size an HTTP body — the client, the authorizer and
+ * the proxy — only have the declared document at that point, so this keys off
+ * the declaration and falls back to the V1 ceiling for anything else.
+ */
+function requestBodyLimitBytes(request) {
+  return schemaRequestBodyLimit(isPlainObject(request) ? request.schemaVersion : undefined)
+}
+
+/**
+ * UTF-8 length of a request with every image payload replaced by an empty
+ * string: the caller-controlled text/tool share of the body.
+ *
+ * V2's larger ceiling exists for image data only, so this share stays on the V1
+ * budget and declaring V2 never buys 24 MiB of text or tool definitions. The
+ * measurement builds a detached shadow — the input's key order, shallow copies,
+ * only image `data` blanked — measures it and discards it. The original
+ * request, its hash and its projection are never touched, so this cannot change
+ * what is authorized or signed.
+ */
+function measureNonImageRequestBytes(input) {
+  const messages = input.messages
+  const shadowMessages = Array.isArray(messages)
+    ? messages.map(message => {
+        const parts = isPlainObject(message) ? message.contentParts : undefined
+        if (!Array.isArray(parts)) return message
+        return {
+          ...message,
+          contentParts: parts.map(part =>
+            isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
+          ),
+        }
+      })
+    : messages
+  return Buffer.byteLength(JSON.stringify({ ...input, messages: shadowMessages }), 'utf8')
 }
 
 function isBoundedId(value) {
@@ -355,12 +417,29 @@ function parseTransportHints(raw) {
  * the same ordered checks and the same projection. Only the schema version
  * literal and the message field set differ, so a new version cannot become a
  * looser root by accident.
+ *
+ * Two size gates run first, before any key, id or payload work:
+ *   1. the whole body against this version's ceiling (24 MiB for V2, 1 MiB
+ *      otherwise), then
+ *   2. for V2 only, the body with every image payload blanked against the V1
+ *      ceiling — the images, not the text, are what the larger budget buys.
+ * Both are pure measurements, so the projected value and its hash are
+ * unaffected by them.
  */
 function parseCodexCompletionRequestRoot(input, schemaVersion, messageKeys) {
   if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
+  const visualSchema = schemaVersion === SCHEMA_VERSION_V2
   const encoded = Buffer.byteLength(JSON.stringify(input), 'utf8')
-  if (encoded > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'request exceeds maxRequestBodyBytes')
+  if (encoded > schemaRequestBodyLimit(schemaVersion)) {
+    return fail(
+      'limit',
+      visualSchema
+        ? 'request exceeds maxVisualRequestBodyBytes'
+        : 'request exceeds maxRequestBodyBytes'
+    )
+  }
+  if (visualSchema && measureNonImageRequestBytes(input) > LIMITS.maxRequestBodyBytes) {
+    return fail('limit', 'request exceeds maxRequestBodyBytes outside image data')
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra
@@ -554,10 +633,15 @@ function hashCodexCompletionRequest(request) {
  * The returned envelope is re-parsed and re-hashed here, so it cannot carry a
  * request the contract rejects or a hash that disagrees with the request it
  * carries. Its exact UTF-8 byte length (JSON.stringify minus whitespace, the
- * same serialization the transport sends) must fit `LIMITS.maxRequestBodyBytes`
- * — the default the proxy enforces through CODEX_LLM_PROXY_MAX_BODY_BYTES. A
- * deployment that lowers that proxy limit below the contract limit is not
- * covered by this measurement.
+ * same serialization the transport sends) must fit the ceiling of the schema it
+ * carries — `requestBodyLimitBytes(request)`, i.e. 24 MiB for V2 and 1 MiB
+ * otherwise — which is the number the proxy enforces through
+ * CODEX_LLM_PROXY_MAX_BODY_BYTES. A deployment that lowers that proxy limit
+ * below the contract limit is not covered by this measurement.
+ *
+ * The request inside the envelope already passed the V2 non-image budget, so
+ * the V2 headroom here can only be spent by the ticket and the digest the
+ * authorizer produced; a caller cannot reach this ceiling with text.
  */
 function buildCodexProxyEnvelope(input) {
   if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')
@@ -577,9 +661,15 @@ function buildCodexProxyEnvelope(input) {
     return fail('request_hash_mismatch', 'requestHash does not match the request')
   }
   const envelope = { executionTicket: ticket, requestHash, request: parsed.value }
+  const visualSchema = parsed.value.schemaVersion === SCHEMA_VERSION_V2
   const encoded = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
-  if (encoded > LIMITS.maxRequestBodyBytes) {
-    return fail('limit', 'proxy envelope exceeds maxRequestBodyBytes')
+  if (encoded > requestBodyLimitBytes(parsed.value)) {
+    return fail(
+      'limit',
+      visualSchema
+        ? 'proxy envelope exceeds maxVisualRequestBodyBytes'
+        : 'proxy envelope exceeds maxRequestBodyBytes'
+    )
   }
   return ok(Object.freeze(envelope))
 }
@@ -752,6 +842,7 @@ module.exports = {
   TICKET_TYP,
   LIMITS,
   VISUAL_LIMITS,
+  requestBodyLimitBytes,
   stableStringify,
   parseCodexCompletionRequestV1,
   parseCodexCompletionRequestV2,

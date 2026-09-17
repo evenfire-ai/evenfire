@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { crc32 } from 'node:zlib'
 import { LIMITS, hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
 import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
 import {
@@ -160,9 +161,11 @@ describe('authorizeLlmProviderAttempt', () => {
     ['jpeg', 'attachment', true],
     ['png', 'tool', true],
     ['jpeg', 'tool', false],
+    ['png', 'attachment', false, 10 * 1024 * 1024],
+    ['png', 'tool', true, 5 * 1024 * 1024],
   ] as const)(
     'carries %s from %s (tools=%s) through Host authorization and proxy projection',
-    async (format, origin, withTools) => {
+    async (format, origin, withTools, imageBytes = 0) => {
       const fixtures = JSON.parse(
         readFileSync(
           new URL(
@@ -253,6 +256,22 @@ describe('authorizeLlmProviderAttempt', () => {
       const image = fixtures[format].messages[0].contentParts.find(
         (part: { type: string }) => part.type === 'image'
       )
+      if (imageBytes > 0) {
+        // Preserve the real PNG pixels and add a standards-compliant ancillary
+        // text chunk to exercise actual byte transport, not a forged header.
+        const png = Buffer.from(image.data, 'base64')
+        const payload = Buffer.alloc(imageBytes - png.length - 12, 65)
+        Buffer.from('Comment\0').copy(payload)
+        const chunk = Buffer.alloc(payload.length + 12)
+        chunk.writeUInt32BE(payload.length)
+        chunk.write('tEXt', 4)
+        payload.copy(chunk, 8)
+        chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)) >>> 0, chunk.length - 4)
+        image.data = Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]).toString(
+          'base64'
+        )
+        expect(Buffer.from(image.data, 'base64')).toHaveLength(imageBytes)
+      }
       let messages = fixtures[format].messages
       if (origin === 'tool') {
         image.source = { kind: 'tool', attachmentId: 'fixture-image', toolCallId: 'fixture-call' }
@@ -324,9 +343,10 @@ describe('authorizeLlmProviderAttempt', () => {
           throw error
         }
       },
-      // A bounded synthetic signed envelope contribution; no live account material.
+      // Fault injection at the signing seam: exercise the post-signing envelope
+      // guard without exceeding the unchanged 1 MiB non-image request budget.
       issueTicket: vi.fn().mockResolvedValue({
-        executionTicket: 't'.repeat(4096),
+        executionTicket: 't'.repeat(LIMITS.maxVisualRequestBodyBytes),
         expiresAt: new Date('2026-09-16T23:00:00Z'),
       }),
     })

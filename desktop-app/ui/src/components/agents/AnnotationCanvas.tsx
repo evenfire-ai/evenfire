@@ -155,13 +155,19 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
         typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
           ? URL.createObjectURL(blob)
           : dataUrl
-      onSave({
-        ...attachment,
-        mimeType: nextMimeType,
-        dataBase64: dataUrl.slice(base64Index + 'base64,'.length),
-        sizeBytes: blob.size,
-        previewDataUrl: nextPreviewUrl,
-      })
+      try {
+        onSave({
+          ...attachment,
+          mimeType: nextMimeType,
+          dataBase64: dataUrl.slice(base64Index + 'base64,'.length),
+          sizeBytes: blob.size,
+          previewDataUrl: nextPreviewUrl,
+        })
+      } catch (error) {
+        // The rejected replacement never becomes the attachment's preview.
+        if (nextPreviewUrl !== dataUrl) URL.revokeObjectURL(nextPreviewUrl)
+        throw error
+      }
       setPreviewIsAnnotating(false)
     } catch (error) {
       setAnnotationError(error instanceof Error ? error.message : String(error))

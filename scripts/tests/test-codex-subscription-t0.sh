@@ -248,6 +248,7 @@ run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/server.security.test.ts"
 
 run_group "mcp-host" "mcp-host" \
+  "src/__tests__/bodylimits.test.ts" \
   "src/capabilities/toolCatalogTools.test.ts" \
   "src/core/orchestration/__tests__/approvedToolsLifecycle.integration.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.spillover.test.ts" \
@@ -276,6 +277,9 @@ run_group "mcp-host" "mcp-host" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
   "src/core/adapters/__tests__/llmPortAdapter.test.ts"
+
+run_group "rpc-proxy-image-budgets" "rpc-proxy" \
+  "src/__tests__/bodylimits.test.ts"
 
 run_group "host-context-controller" "host-context-controller" \
   "src/codexExecutionProjection.test.ts" \
@@ -319,14 +323,16 @@ else
   else
     pass "desktop-app verify:electron"
     run_group "desktop-app" "desktop-app" \
+      "src/__tests__/devIsolation.test.ts" \
+      "ui/src/components/agents/__tests__/ComposerPanel.test.tsx" \
       "ui/src/components/agents/__tests__/ModelSelector.test.tsx" \
       "ui/src/hooks/__tests__/useHostModels.test.tsx" \
       "ui/src/hooks/domain/__tests__/useAgentChatController.pendingModel.test.tsx"
   fi
 fi
 
-if [[ "${GROUPS_RUN}" -ne 11 ]]; then
-  fail "expected all 11 T0 groups, ran ${GROUPS_RUN}"
+if [[ "${GROUPS_RUN}" -ne 12 ]]; then
+  fail "expected all 12 T0 groups, ran ${GROUPS_RUN}"
 fi
 
 if [[ "${FAIL}" -ne 0 ]]; then
