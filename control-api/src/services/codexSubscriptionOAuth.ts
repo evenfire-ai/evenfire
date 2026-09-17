@@ -15,6 +15,7 @@ import {
   acquireCodexSubscriptionRefreshLock,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
+  isCodexConnectionKeyConflict,
   loadCodexSubscriptionSecrets,
   normalizeCodexConnectionKey,
   persistCodexChatgptAccountId,
@@ -22,6 +23,7 @@ import {
   revokeCodexSubscriptionConnection,
   rotateCodexSubscriptionCredentials,
   updateCodexAccessTokenInPlace,
+  wasCodexConnectionRevokedSinceOAuthState,
 } from './codexSubscriptionConnection.js'
 import {
   type CodexSubscriptionOAuthIntent,
@@ -292,7 +294,8 @@ export async function handleCodexBrowserCallback(
     deps,
     consumed.safe.intent,
     token,
-    completionConnectionKey(deps, consumed.safe.connectionKey)
+    completionConnectionKey(deps, consumed.safe.connectionKey),
+    input.state
   )
 }
 
@@ -347,7 +350,8 @@ export async function pollCodexDevice(
     deps,
     consumed.safe.intent,
     tokenResult.parsed,
-    completionConnectionKey(deps, consumed.safe.connectionKey)
+    completionConnectionKey(deps, consumed.safe.connectionKey),
+    state
   )
   return { status: 'connected', connection }
 }
@@ -431,13 +435,49 @@ export async function revokeCodexSubscription(
   return local ?? { connectionKey: key, status: 'disconnected' }
 }
 
+function revokedDuringAuthorizationError(): CodexSubscriptionOAuthError {
+  return new CodexSubscriptionOAuthError(
+    'state_cancelled',
+    'connection was revoked after this authorization started; start a new connection flow'
+  )
+}
+
+/**
+ * A completion lost a write race on its key. If a revoke landed after this
+ * flow's state was created, the authorization was invalidated
+ * (state_cancelled); otherwise another writer holds the live row
+ * (stale_revision, 409).
+ */
+async function lostKeyRaceError(
+  deps: CodexOAuthDeps,
+  key: string,
+  state: string,
+  message: string
+): Promise<CodexSubscriptionOAuthError> {
+  if (await wasCodexConnectionRevokedSinceOAuthState(deps.db, key, state)) {
+    return revokedDuringAuthorizationError()
+  }
+  return new CodexSubscriptionOAuthError('stale_revision', message)
+}
+
 async function persistGrantedTokens(
   deps: CodexOAuthDeps,
   intent: CodexSubscriptionOAuthIntent,
   parsed: ParsedCodexToken,
-  connectionKey: string
+  connectionKey: string,
+  state: string
 ): Promise<CodexSubscriptionSafeConnection> {
   const key = normalizeCodexConnectionKey(connectionKey)
+  // Revoke cancels pending states, but a completion may already have consumed
+  // its state when the revoke landed. That authorization predates the revoke
+  // and must not recreate the grant; a flow started after the revoke may.
+  if (await wasCodexConnectionRevokedSinceOAuthState(deps.db, key, state)) {
+    log.warn(
+      { event: 'codex_oauth_completion_revoked', connectionKey: key },
+      'OAuth completion predates a revoke of its connection'
+    )
+    throw revokedDuringAuthorizationError()
+  }
   const existing = await getSafeCodexSubscriptionConnection(deps.db, key)
   if (existing?.revokedAt || existing?.status === 'revoked') {
     throw new CodexSubscriptionOAuthError(
@@ -470,14 +510,27 @@ async function persistGrantedTokens(
     )
   }
   if (!existing) {
-    const created = await insertInitialCodexSubscriptionConnection(
-      deps.db,
-      deps.encryptionKey,
-      write,
-      key
-    )
-    log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
-    return created
+    try {
+      const created = await insertInitialCodexSubscriptionConnection(
+        deps.db,
+        deps.encryptionKey,
+        write,
+        key
+      )
+      log.info({ event: 'codex_oauth_persisted', connectionKey: key }, 'Codex grant persisted')
+      return created
+    } catch (err) {
+      if (isCodexConnectionKeyConflict(err)) {
+        throw await lostKeyRaceError(deps, key, state, 'a concurrent grant created this connection')
+      }
+      if (err instanceof CodexSubscriptionFingerprintConflictError) {
+        throw new CodexSubscriptionOAuthError(
+          'fingerprint_in_use',
+          'a live Codex subscription already uses this ChatGPT account'
+        )
+      }
+      throw err
+    }
   }
   try {
     const rotated = await rotateCodexSubscriptionCredentials(
@@ -491,10 +544,7 @@ async function persistGrantedTokens(
     return rotated
   } catch (err) {
     if (err instanceof CodexSubscriptionStaleRevisionError) {
-      throw new CodexSubscriptionOAuthError(
-        'stale_revision',
-        'connection was replaced concurrently'
-      )
+      throw await lostKeyRaceError(deps, key, state, 'connection was replaced concurrently')
     }
     if (err instanceof CodexSubscriptionFingerprintConflictError) {
       throw new CodexSubscriptionOAuthError(

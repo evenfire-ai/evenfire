@@ -28,6 +28,7 @@ import {
 } from './services/grokSubscriptionSchema.js'
 import {
   applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptConnectionIntegritySchema,
   applyLlmProviderAttemptSchema,
   applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   applyLlmProviderAttemptSdkLinkSchema,
@@ -6040,6 +6041,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0113_grok_subscription_terminal_connection_key',
     apply: applyGrokSubscriptionTerminalConnectionKeySchema,
+  },
+  {
+    version: '0114_llm_provider_attempts_connection_integrity',
+    apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
 ]
 

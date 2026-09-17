@@ -18,6 +18,7 @@ const repos = vi.hoisted(() => ({
   revokeConnection: vi.fn(),
   updateInPlace: vi.fn(),
   persistAccountId: vi.fn(),
+  revokedSince: vi.fn(),
 }))
 
 vi.mock('../src/services/codexSubscriptionOAuthState.js', async () => {
@@ -45,6 +46,7 @@ vi.mock('../src/services/codexSubscriptionConnection.js', async () => {
     revokeCodexSubscriptionConnection: repos.revokeConnection,
     updateCodexAccessTokenInPlace: repos.updateInPlace,
     persistCodexChatgptAccountId: repos.persistAccountId,
+    wasCodexConnectionRevokedSinceOAuthState: repos.revokedSince,
   }
 })
 
@@ -278,6 +280,92 @@ describe('codex subscription OAuth broker', () => {
     ).rejects.toMatchObject({ code: 'not_connected' })
     expect(repos.rotate).not.toHaveBeenCalled()
     expect(repos.insertInitial).not.toHaveBeenCalled()
+  })
+
+  it('rejects a completion whose state predates a revoke of its key without writing a grant', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: 'access-secret',
+        refresh_token: 'refresh-secret',
+        id_token: idTokenFor('acct_raw_123'),
+      }),
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'state-before-revoke',
+        flow: 'browser',
+        intent: 'reconnect',
+        status: 'consumed',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 1000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      pkceVerifier: 'verifier',
+    })
+    // The key has no live row any more (revoked after this flow started).
+    repos.getSafe.mockResolvedValue(null)
+    repos.revokedSince.mockResolvedValue(true)
+    await expect(
+      handleCodexBrowserCallback(deps(fetchFn), { code: 'code-1', state: 'state-before-revoke' })
+    ).rejects.toMatchObject({ code: 'state_cancelled' })
+    expect(repos.revokedSince.mock.calls[0]?.slice(1)).toEqual(['team-plus', 'state-before-revoke'])
+    expect(repos.insertInitial).not.toHaveBeenCalled()
+    expect(repos.rotate).not.toHaveBeenCalled()
+  })
+
+  it('maps a lost first-grant live-key race to stale_revision, or state_cancelled when a revoke won', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        access_token: 'access-secret',
+        refresh_token: 'refresh-secret',
+        id_token: idTokenFor('acct_raw_123'),
+      }),
+    })
+    repos.consumeState.mockResolvedValue({
+      safe: {
+        state: 'state-race',
+        flow: 'browser',
+        intent: 'connect',
+        status: 'consumed',
+        connectionKey: 'team-plus',
+        expiresAt: new Date(Date.now() + 1000),
+        consumedAt: new Date(),
+        cancelledAt: null,
+        createdAt: new Date(),
+      },
+      pkceVerifier: 'verifier',
+    })
+    repos.getSafe.mockResolvedValue(null)
+    repos.insertInitial.mockRejectedValue(
+      Object.assign(new Error('duplicate key value violates unique constraint'), {
+        code: '23505',
+        constraint: 'codex_subscription_connections_active_key',
+      })
+    )
+    repos.revokedSince.mockResolvedValue(false)
+    await expect(
+      handleCodexBrowserCallback(deps(fetchFn), { code: 'code-1', state: 'state-race' })
+    ).rejects.toMatchObject({ name: 'CodexSubscriptionOAuthError', code: 'stale_revision' })
+
+    repos.revokedSince.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    await expect(
+      handleCodexBrowserCallback(deps(fetchFn), { code: 'code-1', state: 'state-race' })
+    ).rejects.toMatchObject({ code: 'state_cancelled' })
+
+    repos.revokedSince.mockResolvedValue(false)
+    repos.insertInitial.mockRejectedValue(
+      Object.assign(new Error('duplicate key value violates unique constraint'), {
+        code: '23505',
+        constraint: 'some_other_unique',
+      })
+    )
+    await expect(
+      handleCodexBrowserCallback(deps(fetchFn), { code: 'code-1', state: 'state-race' })
+    ).rejects.toMatchObject({ code: '23505', constraint: 'some_other_unique' })
   })
 
   it('persists a different account only with explicit replace intent', async () => {

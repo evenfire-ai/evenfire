@@ -12,6 +12,7 @@ import {
   readHostGrokConnectionRef,
   recordGrokCatalogOutcome,
 } from './grokSubscriptionConnection.js'
+import { boundDiscoveredCatalogModels } from './subscriptionCatalogBounds.js'
 
 const log = rootLogger.child({ module: 'grok-subscription-catalog' })
 const PROVIDER = 'grok-subscription'
@@ -314,7 +315,7 @@ export async function syncGrokSubscriptionCatalog(
   }
   const expectedCredentialRevision = expected.credentialRevision ?? connection.credentialRevision
   const expectedCatalogRevision = expected.catalogRevision ?? connection.catalogRevision
-  const result = await transport.listModels({ accessToken })
+  const result = boundGrokCatalogResult(await transport.listModels({ accessToken }))
   const outcomePlan = planGrokCatalogReconcile([], result)
   const runInTransaction = options.withTransaction ?? defaultGrokTransactionRunner
   const committed = await runInTransaction(async tx => {
@@ -360,6 +361,24 @@ export async function syncGrokSubscriptionCatalog(
     refreshed,
     staled,
   }
+}
+
+function boundGrokCatalogResult(result: GrokCatalogTransportResult): GrokCatalogTransportResult {
+  if (result.outcome !== 'ready') return result
+  const bounded = boundDiscoveredCatalogModels(result.models)
+  if (bounded.droppedInvalidId > 0 || bounded.droppedOverCount > 0) {
+    log.warn(
+      {
+        event: 'grok_catalog_discovery_bounded',
+        discovered: result.models.length,
+        kept: bounded.models.length,
+        droppedInvalidId: bounded.droppedInvalidId,
+        droppedOverCount: bounded.droppedOverCount,
+      },
+      'Grok catalog discovery exceeded bounds; extra models were ignored'
+    )
+  }
+  return { outcome: 'ready', models: bounded.models }
 }
 
 export function createUnavailableGrokCatalogTransport(): GrokCatalogTransport {

@@ -1,4 +1,7 @@
 import type { DbClient } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
+
+const log = rootLogger.child({ module: 'llm-provider-attempt-store' })
 
 export const LLM_PROVIDER_ATTEMPT_PROVIDER = 'codex-subscription' as const
 export const GROK_PROVIDER_ATTEMPT_PROVIDER = 'grok-subscription' as const
@@ -204,6 +207,106 @@ export async function applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema(
       REFERENCES plugin_workload_sdk_provider_attempts(id)
       ON DELETE SET NULL;
   `)
+}
+
+/**
+ * 0114 — restore `llm_provider_attempts.connection_id` integrity.
+ *
+ * 0103 added `connection_id REFERENCES codex_subscription_connections(id)`;
+ * 0112 dropped that FK so Grok attempts could reference
+ * `grok_subscription_connections` and did not replace it. A plain FK cannot
+ * point at one of two tables by provider, so a CONSTRAINT TRIGGER enforces the
+ * same invariant on every INSERT and on UPDATEs that touch `provider` or
+ * `connection_id`: a non-null connection_id must exist in the provider's own
+ * connection table (codex-subscription -> codex_subscription_connections,
+ * grok-subscription -> grok_subscription_connections). A Codex attempt may
+ * still carry NULL (pre-0103 rows, old pods); Grok NULL is already rejected by
+ * the 0112 CHECK. Unknown providers with a connection id fail closed.
+ *
+ * Connection rows are never deleted (revocation tombstones them; DELETE is
+ * revoked from control_api_runtime), so an existence check at write time is
+ * equivalent to the dropped FK for runtime writers.
+ *
+ * NOT VALID semantics: triggers never re-check existing rows, so historic
+ * dangling rows cannot fail this migration and stay readable/finalizable
+ * (status/outcome updates do not fire the trigger). The count of such rows is
+ * logged (count only). Idempotent (CREATE OR REPLACE + DROP
+ * TRIGGER IF EXISTS) and old-pod compatible: pods only ever write connection
+ * ids they just read from the provider's table.
+ */
+export async function applyLlmProviderAttemptConnectionIntegritySchema(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION llm_provider_attempts_assert_connection_exists()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE
+      connection_exists BOOLEAN;
+    BEGIN
+      IF NEW.connection_id IS NULL THEN
+        RETURN NULL;
+      END IF;
+      IF NEW.provider = 'codex-subscription' THEN
+        SELECT EXISTS (
+          SELECT 1 FROM public.codex_subscription_connections WHERE id = NEW.connection_id
+        ) INTO connection_exists;
+      ELSIF NEW.provider = 'grok-subscription' THEN
+        SELECT EXISTS (
+          SELECT 1 FROM public.grok_subscription_connections WHERE id = NEW.connection_id
+        ) INTO connection_exists;
+      ELSE
+        connection_exists := false;
+      END IF;
+      IF NOT connection_exists THEN
+        RAISE EXCEPTION USING
+          ERRCODE = 'foreign_key_violation',
+          CONSTRAINT = 'llm_provider_attempts_connection_integrity',
+          MESSAGE = format(
+            'llm_provider_attempts.connection_id is not a %s connection',
+            NEW.provider
+          );
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+
+    REVOKE ALL ON FUNCTION llm_provider_attempts_assert_connection_exists() FROM PUBLIC;
+
+    DROP TRIGGER IF EXISTS llm_provider_attempts_connection_integrity ON llm_provider_attempts;
+
+    CREATE CONSTRAINT TRIGGER llm_provider_attempts_connection_integrity
+      AFTER INSERT OR UPDATE OF provider, connection_id ON llm_provider_attempts
+      FOR EACH ROW
+      EXECUTE FUNCTION llm_provider_attempts_assert_connection_exists();
+  `)
+  const danglingAttempts = await countDanglingLlmProviderAttemptConnections(db)
+  if (danglingAttempts > 0) {
+    log.warn(
+      { event: 'llm_provider_attempts_dangling_connection_ids', danglingAttempts },
+      'historic provider attempts reference a missing connection; new writes are enforced'
+    )
+  }
+}
+
+/** Attempts whose non-null connection_id is missing from the provider's connection table. */
+export async function countDanglingLlmProviderAttemptConnections(db: DbClient): Promise<number> {
+  const result = await db.query(`
+    SELECT COUNT(*)::int AS dangling
+      FROM llm_provider_attempts a
+     WHERE a.connection_id IS NOT NULL
+       AND NOT (
+         (a.provider = 'codex-subscription' AND EXISTS (
+           SELECT 1 FROM codex_subscription_connections c WHERE c.id = a.connection_id
+         ))
+         OR (a.provider = 'grok-subscription' AND EXISTS (
+           SELECT 1 FROM grok_subscription_connections g WHERE g.id = a.connection_id
+         ))
+       )
+  `)
+  return Number((result.rows[0] as { dangling?: number } | undefined)?.dangling ?? 0)
 }
 
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {

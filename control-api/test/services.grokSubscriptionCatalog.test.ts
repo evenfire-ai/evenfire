@@ -114,6 +114,28 @@ describe('grok subscription catalog', () => {
       expect(h.txLog.some(sql => sql.includes('INSERT INTO llm_allowed_models'))).toBe(true)
     })
 
+    it('inserts at most 256 discovered models and skips ids longer than 128 characters', async () => {
+      const h = harness()
+      const models = [
+        { model: 'g'.repeat(129) },
+        ...Array.from({ length: 300 }, (_, index) => ({ model: `grok-cap-${index}` })),
+      ]
+      const synced = await syncGrokSubscriptionCatalog(
+        h.outside,
+        { listModels: async () => ({ outcome: 'ready', models }) },
+        'access-token',
+        { connectionKey: 'team-grok' },
+        { withTransaction: h.withTransaction as never }
+      )
+      const inserted = h.tx.query.mock.calls
+        .filter(([sql]) => String(sql).includes('INSERT INTO grok_catalog_models'))
+        .map(call => String((call as unknown as [string, unknown[]])[1]?.[1]))
+      expect(synced.added).toBe(256)
+      expect(inserted).toHaveLength(256)
+      expect(inserted.at(-1)).toBe('grok-cap-255')
+      expect(inserted.some(model => model.length > 128)).toBe(false)
+    })
+
     it('propagates a mid-reconcile failure out of the transaction instead of reporting ready', async () => {
       const h = harness({ failOn: /INSERT INTO grok_catalog_models/ })
       await expect(
