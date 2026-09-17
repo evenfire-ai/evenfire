@@ -483,7 +483,9 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         },
         { transaction: transaction(databasePool), gateway }
       )
-    ).resolves.toEqual(expect.objectContaining({ status: 'not_found', code: 'not_found' }))
+    ).resolves.toEqual(
+      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
+    )
 
     await expect(
       resolveLiveAuthorization(
@@ -664,9 +666,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         },
         { transaction: transaction(databasePool), gateway }
       )
-    ).resolves.toEqual(
-      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
-    )
+    ).resolves.toEqual(expect.objectContaining({ status: 'not_found', code: 'not_found' }))
   })
 
   it('uses real Kubernetes list and exact-read wire boundaries', async () => {
