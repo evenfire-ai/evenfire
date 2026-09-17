@@ -138,7 +138,7 @@ run_group "grok-catalog-projection" \
   bash -lc "cd '${ROOT}/packages/codex-catalog-projection' && node --test index.test.cjs"
 
 run_group "grok-llm-proxy freeze+origin" \
-  bash -lc "cd '${ROOT}/grok-llm-proxy' && npx vitest run test/contractFreeze.test.ts test/originPolicy.test.ts --no-file-parallelism"
+  bash -lc "cd '${ROOT}/grok-llm-proxy' && npx vitest run test/contractFreeze.test.ts test/originPolicy.test.ts test/grokTransport.conformance.test.ts --no-file-parallelism"
 
 run_group "control-api grok grant/oauth/redeem/authorize" \
   bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts test/routes.adminPluginWorkloadSdk.test.ts test/services.recipeCodexGrantIdentity.test.ts test/hostSpecValidation.codexSubscription.test.ts test/crd.llmProviderEnums.test.ts test/routes.mcp-host.plugin-workload-sdk.test.ts --no-file-parallelism"

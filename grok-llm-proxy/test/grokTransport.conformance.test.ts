@@ -602,7 +602,9 @@ describe('streamGrokCompletion', () => {
     const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body)) as Record<string, unknown>
     expect(body.instructions).toBe('be brief')
     expect(body.store).toBe(false)
-    expect(body.tools).toEqual(request.tools.map(tool => ({ type: 'function', ...tool })))
+    expect(body.tools).toEqual(
+      request.tools.map(tool => ({ type: 'function', ...tool, strict: false }))
+    )
     expect(body.parallel_tool_calls).toBe(true)
     expect(body.tool_choice).toBe('auto')
     expect(body.prompt_cache_key).toBe('sess-1')

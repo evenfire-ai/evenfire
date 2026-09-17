@@ -290,6 +290,9 @@ function toUpstreamPayload(
       name: names.toWire(tool.name),
       description: tool.description,
       parameters: tool.parameters,
+      // Responses-shaped Grok proxy can normalize omitted `strict` to require
+      // optional MCP fields. Preserve source schema optionality explicitly.
+      strict: false,
     }))
     payload.parallel_tool_calls = true
   }
