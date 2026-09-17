@@ -142,6 +142,16 @@ export function hostDeclaresOpenAiCompatible(host: HostCRD | undefined): boolean
   )
 }
 
+/**
+ * A broker discovered by a label-scoped LIST, carrying the owning Host name when
+ * the object still has its `clerum.io/host` label (every object this HCC creates
+ * does — see brokerLabels). `hostName` is undefined only for objects created by
+ * something else / a legacy shape without the label. The orphan sweep uses the
+ * owner to serialize a broker's GC under the SAME `host:<owner>` key its reconcile
+ * uses, so a GC cannot race an in-flight reconcile of that Host.
+ */
+type BrokerRef = { brokerName: string; hostName?: string }
+
 export class OpenAiEgressBrokerReconciler {
   private readonly appsApi: k8s.AppsV1Api
   private readonly coreApi: k8s.CoreV1Api
@@ -823,22 +833,41 @@ server {
     const inEgress = await this.listBrokerDeploymentNames(hostSelector)
     const inSecrets = await this.listBrokerSecretNames(hostSelector)
     const inHost = await this.listHostSourcePolicyBrokerNames(hostName)
-    const all = new Set<string>([...inEgress, ...inSecrets, ...inHost])
+    const all = new Set<string>([
+      ...inEgress.map(r => r.brokerName),
+      ...inSecrets.map(r => r.brokerName),
+      ...inHost,
+    ])
     for (const brokerName of all) {
       if (keep.has(brokerName)) continue
       await this.gcBroker(brokerName)
     }
   }
 
-  private async listBrokerDeploymentNames(labelSelector: string): Promise<string[]> {
+  /**
+   * Map a LIST result to broker refs: the broker-name label plus the owning-Host
+   * label (`clerum.io/host`) when present. Reading the owner here is what lets the
+   * orphan sweep serialize a broker's GC under its `host:<owner>` key.
+   */
+  private toBrokerRefs(
+    items: Array<{ metadata?: { labels?: Record<string, string> } }> | undefined
+  ): BrokerRef[] {
+    const refs: BrokerRef[] = []
+    for (const item of items ?? []) {
+      const brokerName = item.metadata?.labels?.[OAI_EGRESS_BROKER_LABEL]
+      if (typeof brokerName !== 'string' || brokerName.length === 0) continue
+      refs.push({ brokerName, hostName: item.metadata?.labels?.[HOST_LABEL] })
+    }
+    return refs
+  }
+
+  private async listBrokerDeploymentNames(labelSelector: string): Promise<BrokerRef[]> {
     try {
       const resp = await this.appsApi.listNamespacedDeployment({
         namespace: config.llmEgressNamespace,
         labelSelector,
       })
-      return (resp.items ?? [])
-        .map(d => d.metadata?.labels?.[OAI_EGRESS_BROKER_LABEL])
-        .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      return this.toBrokerRefs(resp.items)
     } catch (error) {
       log.error('Failed to list broker Deployments', { err: error })
       return []
@@ -964,6 +993,12 @@ server {
    * is not desired by any live Host. Covers brokers orphaned by a missed Host
    * delete event or a crash mid-teardown. Also sweeps the host-namespace source
    * policies whose broker is gone.
+   *
+   * TOCTOU-safe against a Host created/changed WHILE the sweep runs: each broker's
+   * GC is serialized under its owner's `host:<owner>` key (read from the label)
+   * and re-checks the live cache inside that section, so a broker a concurrent
+   * reconcile is (or is about to be) creating is never deleted. Same shape as
+   * llmHookReconciler.sweepOrphanedWorkloads.
    */
   private async sweepOrphans(): Promise<void> {
     const desired = new Set<string>()
@@ -982,43 +1017,84 @@ server {
       `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${COMPONENT_LABEL}=${OAI_EGRESS_COMPONENT_VALUE}`
     )
     const hostOrphans = await this.listAllSourcePolicyBrokerNames()
-    const all = new Set<string>([...egressOrphans, ...secretOrphans, ...hostOrphans])
-    for (const brokerName of all) {
+
+    // Broker → owner Host name (first source with a defined owner label wins; a
+    // later defined label upgrades an earlier undefined). Every object this HCC
+    // creates carries it; undefined only for foreign/legacy shapes.
+    const owners = new Map<string, string | undefined>()
+    for (const ref of [...egressOrphans, ...secretOrphans, ...hostOrphans]) {
+      const current = owners.get(ref.brokerName)
+      if (current === undefined) {
+        owners.set(ref.brokerName, ref.hostName)
+      } else if (ref.hostName !== undefined && ref.hostName !== current) {
+        // The name derives deterministically from the host, so two sources should
+        // never disagree on the owner; keep the first and flag the anomaly.
+        log.warn('Orphan sweep: broker labeled with conflicting owner Hosts — keeping the first', {
+          broker: ref.brokerName,
+          owner: current,
+          other: ref.hostName,
+        })
+      }
+    }
+
+    for (const [brokerName, hostName] of owners) {
+      // Fast path: a broker still in the pre-LIST snapshot is a true positive to
+      // keep — no need to serialize.
       if (desired.has(brokerName)) continue
-      log.info('Orphan sweep: deleting broker not desired by any Host', { broker: brokerName })
-      // Serialized under a `gc:` key rather than the `host:` key a live reconcile
-      // uses (the sweep does not know the owning host name). This cannot race a
-      // concurrent reconcile of a still-desired broker: the Host cache is updated
-      // synchronously before reconcileForHost is dispatched, so any broker an
-      // in-flight reconcile is creating is already in `desired` here and skipped.
-      await this.runSerialized(`gc:${brokerName}`, () => this.gcBroker(brokerName))
+      // The snapshot above precedes three awaited LISTs that yield the event loop.
+      // A Host created/changed in that window is NOT in the snapshot, yet its
+      // broker IS in the LIST — deleting it here would wipe a live broker. So
+      // serialize the GC under the owner's `host:<owner>` key (it queues behind any
+      // in-flight reconcile of that Host) and re-check the live cache inside: if
+      // the Host now desires the broker, skip; any later reconcile chains after
+      // this GC and recreates. `gc:<broker>` stays the fallback for objects with no
+      // owner label (not created by this HCC). Mirrors
+      // llmHookReconciler.sweepOrphanedWorkloads.
+      const key = hostName ? `host:${hostName}` : `gc:${brokerName}`
+      await this.runSerialized(key, async () => {
+        if (hostName && this.isBrokerDesiredNow(hostName, brokerName)) {
+          log.info('Orphan sweep: broker became desired during the sweep — kept', {
+            broker: brokerName,
+            host: hostName,
+          })
+          return
+        }
+        log.info('Orphan sweep: deleting broker not desired by any Host', {
+          broker: brokerName,
+          host: hostName,
+        })
+        await this.gcBroker(brokerName)
+      })
     }
   }
 
-  private async listBrokerSecretNames(labelSelector: string): Promise<string[]> {
+  /** True when the Host is live in the cache AND still desires this broker. */
+  private isBrokerDesiredNow(hostName: string, brokerName: string): boolean {
+    const host = this.hosts.get(hostName)
+    if (host === undefined) return false
+    return this.buildDesiredBrokers(host).desired.some(b => b.brokerName === brokerName)
+  }
+
+  private async listBrokerSecretNames(labelSelector: string): Promise<BrokerRef[]> {
     try {
       const resp = await this.coreApi.listNamespacedSecret({
         namespace: config.llmEgressNamespace,
         labelSelector,
       })
-      return (resp.items ?? [])
-        .map(s => s.metadata?.labels?.[OAI_EGRESS_BROKER_LABEL])
-        .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      return this.toBrokerRefs(resp.items)
     } catch (error) {
       log.error('Failed to list broker Secrets for sweep', { err: error })
       return []
     }
   }
 
-  private async listAllSourcePolicyBrokerNames(): Promise<string[]> {
+  private async listAllSourcePolicyBrokerNames(): Promise<BrokerRef[]> {
     try {
       const resp = await this.networkingApi.listNamespacedNetworkPolicy({
         namespace: config.hostNamespace,
         labelSelector: `${MANAGED_BY_LABEL}=${MANAGED_BY_VALUE},${COMPONENT_LABEL}=${OAI_EGRESS_COMPONENT_VALUE}`,
       })
-      return (resp.items ?? [])
-        .map(np => np.metadata?.labels?.[OAI_EGRESS_BROKER_LABEL])
-        .filter((n): n is string => typeof n === 'string' && n.length > 0)
+      return this.toBrokerRefs(resp.items)
     } catch (error) {
       log.error('Failed to list source NetworkPolicies for sweep', { err: error })
       return []
