@@ -8,6 +8,7 @@ import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError, type PluginWorkloadProviderAttemptContext } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { readSdkOnlyCodexBinding, verifySdkOnlyCodexBindingHash } from '../sdkOnlyCodexBinding'
+import { readSdkOnlyGrokBinding, verifySdkOnlyGrokBindingHash } from '../sdkOnlyGrokBinding'
 import type { BrokeredCredential } from './credentialBrokerClient'
 
 class ClassifiedProviderError extends Error {
@@ -146,10 +147,14 @@ function captureSdkOnlyCodexAttemptContext(
   target: PromptBridgeTarget,
   ticket: { providerAttemptId?: string; providerAttemptIndex?: number }
 ): CodexAttemptContext | null {
-  const binding = readSdkOnlyCodexBinding()
+  const grok = target.provider === 'grok-subscription'
+  const binding = grok ? readSdkOnlyGrokBinding() : readSdkOnlyCodexBinding()
+  const hashOk = grok
+    ? Boolean(binding && verifySdkOnlyGrokBindingHash(binding))
+    : Boolean(binding && verifySdkOnlyCodexBindingHash(binding))
   if (
     !binding ||
-    !verifySdkOnlyCodexBindingHash(binding) ||
+    !hashOk ||
     binding.model !== target.model ||
     !ticket.providerAttemptId ||
     ticket.providerAttemptIndex === undefined
@@ -647,7 +652,9 @@ export class LlmBridge {
         { code: LlmErrorCode.ApiCallFailed, retryable: true },
         new PluginWorkloadError(
           'provider_unavailable',
-          'Codex execution binding is missing after reserving the SDK attempt',
+          authorized.target.provider === 'grok-subscription'
+            ? 'Grok execution binding is missing after reserving the SDK attempt'
+            : 'Codex execution binding is missing after reserving the SDK attempt',
           true,
           'provider_unavailable',
           false,

@@ -7,6 +7,7 @@ import {
 } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
+import { readSdkOnlyGrokBinding } from '../sdkOnlyGrokBinding'
 
 /**
  * Anti-corruption layer (plan §3.4): encapsulates the HTTP call to
@@ -639,7 +640,12 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    const binding = isOauthBrokerProvider(expectedProvider) ? readSdkOnlyCodexBinding() : null
+    const grok = expectedProvider === 'grok-subscription'
+    const binding = grok
+      ? readSdkOnlyGrokBinding()
+      : isOauthBrokerProvider(expectedProvider)
+        ? readSdkOnlyCodexBinding()
+        : null
     const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
     const contractReady =
       capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
@@ -660,7 +666,7 @@ export class PluginWorkloadSdkControlApiClient {
       (binding !== null &&
         capabilities.defaultCatalogRevision === binding.catalogRevision &&
         capabilities.defaultCredentialRevision === binding.credentialRevision)
-    const codexBindingReady =
+    const brokerBindingReady =
       !isOauthBrokerProvider(expectedProvider) ||
       (reservationOnlyReady &&
         contractReady &&
@@ -679,7 +685,7 @@ export class PluginWorkloadSdkControlApiClient {
       !!capabilities.defaultTargetRef &&
       capabilities.defaultProvider === expectedProvider &&
       capabilities.defaultModel === expectedModel &&
-      codexBindingReady
+      brokerBindingReady
     const policyReason = policyReady
       ? undefined
       : capabilities.policyState === 'missing'
@@ -690,8 +696,10 @@ export class PluginWorkloadSdkControlApiClient {
             ? 'policy_revoking'
             : capabilities.policyState === 'disabled'
               ? 'policy_disabled'
-              : isOauthBrokerProvider(expectedProvider) && !codexBindingReady
-                ? 'codex_execution_binding_missing'
+              : isOauthBrokerProvider(expectedProvider) && !brokerBindingReady
+                ? grok
+                  ? 'execution_binding_missing'
+                  : 'codex_execution_binding_missing'
                 : capabilities.v2Ready
                   ? 'bootstrap_target_mismatch'
                   : 'policy_not_ready'
@@ -702,7 +710,10 @@ export class PluginWorkloadSdkControlApiClient {
       model: expectedModel,
       policyReady,
       policyState: capabilities.policyState,
-      ...(isOauthBrokerProvider(expectedProvider) ? { codexBindingReady } : {}),
+      ...(grok ? { bindingReady: brokerBindingReady } : {}),
+      ...(isOauthBrokerProvider(expectedProvider) && !grok
+        ? { codexBindingReady: brokerBindingReady }
+        : {}),
       ...(policyReason ? { policyReason } : {}),
       ...(capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&

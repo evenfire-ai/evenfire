@@ -268,6 +268,7 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
   "src/pluginWorkloadSdk/bootstrapIdentity.test.ts" \
+  "src/pluginWorkloadSdk/promptBridge/controlApiClient.test.ts" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \

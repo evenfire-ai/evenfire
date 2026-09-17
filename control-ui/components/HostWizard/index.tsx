@@ -45,6 +45,7 @@ import {
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
+  isOauthBrokerProvider,
   isProviderUsable,
   llmChainRequiresSecret,
   offeredCodexModelNames,
@@ -781,7 +782,9 @@ export function HostWizard({
         model: {
           provider,
           name: modelName,
-          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
+          ...(isOauthBrokerProvider(provider)
+            ? { connectionRef: connectionRef.trim() || CODEX_UNASSIGNED_CONNECTION_KEY }
+            : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.

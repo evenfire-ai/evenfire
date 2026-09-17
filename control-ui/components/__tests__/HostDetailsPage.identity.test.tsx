@@ -8,6 +8,10 @@ import {
   listCodexConnectionModels,
   listCodexSubscriptionConnections,
 } from '../../lib/codexSubscription'
+import {
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '../../lib/grokSubscription'
 import { ToastProvider } from '../Toast'
 
 const replaceMock = vi.fn()
@@ -428,6 +432,69 @@ describe('HostDetailsPage identity integration', () => {
       })
     )
     expect(screen.queryByText('OpenAI Codex Subscription')).not.toBeInTheDocument()
+  })
+
+  it('persists a Grok Host connectionRef on save', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        credentialRevision: 2,
+        catalogRevision: 5,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+        defaultModel: 'grok-4.6',
+      },
+    ])
+    vi.mocked(listGrokConnectionModels).mockResolvedValue([
+      { model: 'grok-4.6', enabled: true, stale: false },
+    ])
+    const grokHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: undefined,
+        model: {
+          provider: 'grok-subscription',
+          name: 'grok-4.6',
+          connectionRef: 'team-grok',
+        },
+      },
+    }
+    ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      host: grokHost,
+      contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+      secrets: [],
+      users: [],
+      teams: [],
+      agentUsers: [],
+      agentTeams: [],
+    })
+    ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(grokHost)
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/admin/hosts/foo',
+        expect.objectContaining({
+          spec: expect.objectContaining({
+            model: {
+              provider: 'grok-subscription',
+              name: 'grok-4.6',
+              connectionRef: 'team-grok',
+            },
+          }),
+        })
+      )
+    })
   })
 
   it('does not surface a page error when ChatGPT subscriptions are disabled', async () => {

@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import * as api from '../../lib/api'
 import {
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '../../lib/grokSubscription'
+import {
   buildHostReferencesForContext,
   materializeContextResource,
   materializeHostResource,
@@ -986,6 +990,62 @@ describe('HostWizard — broker-backed Codex authoring', () => {
         .mocked(api.apiSend)
         .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
     ).toBe(false)
+  }, 15_000)
+
+  it('creates a Grok-only Host with connectionRef', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        defaultModel: 'grok-4.6',
+        credentialRevision: 2,
+        catalogRevision: 5,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ])
+    vi.mocked(listGrokConnectionModels).mockResolvedValue([
+      { model: 'grok-4.6', enabled: true, stale: false },
+    ])
+    await renderWizard()
+    await walkToModelStep({ agentName: 'grok-only' })
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      ).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }), {
+      target: { value: 'grok-subscription' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'grok-only' },
+          spec: expect.objectContaining({
+            model: {
+              provider: 'grok-subscription',
+              name: 'grok-4.6',
+              connectionRef: 'team-grok',
+            },
+          }),
+        })
+      )
+    })
   }, 15_000)
 
   it('blocks Next until a ChatGPT subscription is chosen', async () => {

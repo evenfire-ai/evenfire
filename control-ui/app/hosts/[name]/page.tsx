@@ -1014,7 +1014,7 @@ export default function HostDetailsPage() {
         model: {
           provider: providerDraft,
           name: modelNameDraft.trim(),
-          ...(providerDraft === 'codex-subscription'
+          ...(isOauthBrokerProvider(providerDraft)
             ? {
                 connectionRef: connectionRefDraft.trim() || CODEX_UNASSIGNED_CONNECTION_KEY,
               }

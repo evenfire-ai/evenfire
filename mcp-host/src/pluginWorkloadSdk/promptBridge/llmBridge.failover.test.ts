@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
+import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
@@ -10,6 +11,7 @@ import { PluginWorkloadError } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { recordCircuitBreakerState } from '../metrics'
 import { replaceSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
+import { replaceSdkOnlyGrokBinding } from '../sdkOnlyGrokBinding'
 import { LlmBridge, type PromptBridgeCredentialResolver } from './llmBridge'
 
 const OK = {
@@ -105,6 +107,7 @@ const request = {
 describe('LlmBridge authorized multi-provider fallback', () => {
   afterEach(() => {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
   })
   it('redeems credentials per attempt and serves the next authorized provider', async () => {
     const first = new FakeProvider(() => Promise.reject(new Error('provider response')))
@@ -637,6 +640,89 @@ describe('LlmBridge authorized multi-provider fallback', () => {
     expect(result.providerAttemptIndex).toBe(1)
   })
 
+  it('authorizes a Grok target from the Grok binding slot', async () => {
+    const grok: PromptBridgeTarget = {
+      targetRef: 'grok-primary',
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      credentialSlot: '',
+      connectionRef: 'team-grok',
+    }
+    replaceSdkOnlyGrokBinding({
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-4.6',
+      bindingHash: computeGrokPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 5,
+        credentialRevision: 2,
+        connectionKey: 'team-grok',
+      }),
+    })
+    const provider = new FakeProvider(async () => ({
+      ...OK,
+      content: 'ok',
+    }))
+    const { bridge, resolver, credentialCalls } = makeBridge({
+      [grok.model]: provider,
+    })
+    const issuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: '',
+        providerAttemptId: 'sdk-attempt-grok',
+        providerAttemptIndex: 1,
+      })),
+    }
+    const result = await bridge.complete({
+      ...request,
+      targets: [{ target: grok }],
+      credentialTicketIssuer: issuer,
+    })
+    expect(result.content).toBe('ok')
+    expect(issuer.issue).toHaveBeenCalledTimes(1)
+    expect(resolver.resolve).not.toHaveBeenCalled()
+    expect(credentialCalls).toEqual([])
+    expect(result.providerAttemptId).toBe('sdk-attempt-grok')
+  })
+
+  it('fails a reserved Grok target when only a Codex binding is installed', async () => {
+    const grok: PromptBridgeTarget = {
+      targetRef: 'grok-primary',
+      provider: 'grok-subscription',
+      model: 'grok-4.6',
+      credentialSlot: '',
+      connectionRef: 'team-grok',
+    }
+    replaceSdkOnlyCodexBinding({
+      connectionKey: 'team-plus',
+      catalogRevision: 1,
+      credentialRevision: 1,
+      model: 'grok-4.6',
+      bindingHash: computeCodexPolicyHash({
+        model: 'grok-4.6',
+        catalogRevision: 1,
+        credentialRevision: 1,
+        connectionKey: 'team-plus',
+      }),
+    })
+    const { bridge } = makeBridge({})
+    const issuer = {
+      issue: vi.fn(async () => ({
+        credentialTicket: '',
+        providerAttemptId: 'sdk-attempt-grok',
+        providerAttemptIndex: 1,
+      })),
+    }
+    await expect(
+      bridge.complete({
+        ...request,
+        targets: [{ target: grok }],
+        credentialTicketIssuer: issuer,
+      })
+    ).rejects.toMatchObject({ code: 'provider_unavailable' })
+  })
+
   it('fails over after reserving a Codex target whose execution binding is missing', async () => {
     const codex: PromptBridgeTarget = {
       targetRef: 'codex-primary',
@@ -833,6 +919,7 @@ const codexReceipt = {
 describe('LlmBridge oauth-broker terminal accounting', () => {
   afterEach(() => {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
   })
 
   it('keeps a pre-dispatch Codex budget denial revivable and carries its receipt', async () => {
