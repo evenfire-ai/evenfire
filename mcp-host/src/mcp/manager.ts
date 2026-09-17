@@ -7,6 +7,7 @@
  * (populates the catalog) plus N lazily-admitted per-user partitions. Desired
  * state / catalog / fencing still reason by serverName — see `byServer`.
  */
+import { logger } from '../logger'
 import { McpServerInfo, McpTool, ToolCallResult } from '../types'
 import {
   McpAuthError,
@@ -145,7 +146,7 @@ export class McpManager {
     this.statusTracker = statusTracker ?? new ServerStatusTracker()
     this.tokenProviderFactory = tokenProviderFactory
     if (proxyUrl) {
-      console.log(`[McpManager] Proxy mode enabled: ${proxyUrl}`)
+      logger.info({ component: 'McpManager' }, 'Proxy mode enabled')
     }
   }
 
@@ -319,7 +320,10 @@ export class McpManager {
 
     // Skip disabled servers — operator intent, not infra failure.
     if (!serverConfig.enabled) {
-      console.log(`[McpManager] Skipping disabled server: ${serverConfig.name}`)
+      logger.info(
+        { component: 'McpManager', serverName: serverConfig.name },
+        'Skipping disabled server'
+      )
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markDisabled(serverConfig.name)
       control.onCommit?.()
@@ -329,8 +333,9 @@ export class McpManager {
     // Explicitly non-authoritative readiness is a fail-closed admission
     // signal, not permission to open a new connection.
     if (serverConfig.status?.authoritative === false) {
-      console.log(
-        `[McpManager] Skipping server with non-authoritative readiness: ${serverConfig.name}`
+      logger.info(
+        { component: 'McpManager', serverName: serverConfig.name },
+        'Skipping server with non-authoritative readiness'
       )
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
@@ -340,8 +345,9 @@ export class McpManager {
 
     // Skip servers that aren't ready yet — transient infra, surfaced as not_ready.
     if (!serverConfig.status?.ready) {
-      console.log(
-        `[McpManager] Skipping server not ready: ${serverConfig.name} (${serverConfig.status?.message || 'unknown'})`
+      logger.info(
+        { component: 'McpManager', serverName: serverConfig.name },
+        'Skipping server not ready'
       )
       this.serverInfos.set(serverConfig.name, serverConfig)
       this.statusTracker.markNotReady(serverConfig.name, serverConfig.status?.message)
@@ -355,7 +361,10 @@ export class McpManager {
     if (this.clients.has(key)) {
       const installed = this.serverInfos.get(serverConfig.name)
       if (installed && JSON.stringify(installed) === JSON.stringify(serverConfig)) {
-        console.log(`[McpManager] Server already connected: ${serverConfig.name}`)
+        logger.info(
+          { component: 'McpManager', serverName: serverConfig.name },
+          'Server already connected'
+        )
         control.onCommit?.()
         return 'applied'
       }
@@ -400,10 +409,13 @@ export class McpManager {
       this.pendingAdmissions.delete(key)
       this.installConnectedClient(key, serverConfig, client, ownsServerStatus)
       control.onCommit?.()
-      console.log(
-        `[McpManager] Installed client for server "${serverConfig.name}" (${
-          ownsServerStatus ? 'shared' : 'per-user'
-        } partition)`
+      logger.info(
+        {
+          component: 'McpManager',
+          serverName: serverConfig.name,
+          partition: ownsServerStatus ? 'shared' : 'per-user',
+        },
+        'Installed client for server'
       )
       return 'applied'
     } catch (error) {
@@ -413,11 +425,14 @@ export class McpManager {
         return 'stale'
       }
       this.pendingAdmissions.delete(key)
-      console.error(
-        `[McpManager] Failed to install client for server "${serverConfig.name}" (${
-          ownsServerStatus ? 'shared' : 'per-user'
-        } partition):`,
-        error
+      logger.error(
+        {
+          component: 'McpManager',
+          serverName: serverConfig.name,
+          partition: ownsServerStatus ? 'shared' : 'per-user',
+          err: error,
+        },
+        'Failed to install client for server'
       )
       // Only the SHARED/eager path owns the per-serverName status transition. A
       // per-user admission failure must leave the representative's status intact.
@@ -484,7 +499,7 @@ export class McpManager {
     this.evictPartitionsExcept(serverConfig.name, key, control)
 
     await this.scheduleClientCleanup(previousClient, control)
-    console.log(`[McpManager] Replaced server: ${serverConfig.name}`)
+    logger.info({ component: 'McpManager', serverName: serverConfig.name }, 'Replaced server')
     return 'applied'
   }
 
@@ -717,7 +732,7 @@ export class McpManager {
 
     return async () => {
       await this.runDetachedCleanups(cleanups)
-      console.log(`[McpManager] Removed server: ${serverName}`)
+      logger.info({ component: 'McpManager', serverName }, 'Removed server')
     }
   }
 
@@ -863,9 +878,11 @@ export class McpManager {
     args: Record<string, unknown>,
     options: McpToolCallOptions = {}
   ): Promise<ToolCallResult> {
-    // Parse server name and tool name
-    const parts = fullToolName.split('__')
-    if (parts.length !== 2) {
+    // Server identities come from Kubernetes metadata.name (RFC1123, no
+    // underscores). Only the first delimiter is ours; the remote tool name
+    // may itself contain '__' and must reach the client unchanged.
+    const delimiter = fullToolName.indexOf('__')
+    if (delimiter <= 0 || delimiter + 2 === fullToolName.length) {
       return {
         toolName: fullToolName,
         result: { error: `Invalid tool name format: ${fullToolName}` },
@@ -873,7 +890,8 @@ export class McpManager {
       }
     }
 
-    const [serverName, toolName] = parts
+    const serverName = fullToolName.slice(0, delimiter)
+    const toolName = fullToolName.slice(delimiter + 2)
     const info = this.serverInfos.get(serverName)
     // Only the per-user oauth sabor gets per-user partitions. oauth-context and
     // static both resolve on the SHARED representative (the else branch below).

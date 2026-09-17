@@ -23,6 +23,7 @@ import type {
   ReapedSession,
   SessionRow,
 } from '../../../db/worker/protocol'
+import { logger } from '../../../logger'
 import { parseSessionKey } from '../../../session/types'
 import { ConversationError, ConversationErrorCode } from '../../errors'
 import {
@@ -207,7 +208,7 @@ export class SqliteConversationStore implements ConversationStore {
         try {
           cb(key, value)
         } catch (err) {
-          console.error('[SqliteConversationStore] onEvict callback threw:', err)
+          logger.error({ err }, 'Conversation eviction callback failed')
         }
       }
     })
@@ -251,7 +252,7 @@ export class SqliteConversationStore implements ConversationStore {
 
   pin(key: string): void {
     if (!this.cache.has(key)) {
-      console.warn(`[SqliteConversationStore] pin(${key}): unknown key`)
+      logger.warn({ ...this.cache.stats() }, 'Cannot pin unknown conversation')
       return
     }
     this.cache.pin(key)
@@ -309,10 +310,9 @@ export class SqliteConversationStore implements ConversationStore {
         // up, and pinnedCountGauge surfaces the saturation for alerting. The
         // root-cause leak is fixed in SqliteColdStartLoader.releaseDropped; this
         // is the last-resort backstop.
-        console.error(
-          `[SqliteConversationStore] cache overflow loading sessionKey=${sessionKey} ` +
-            `(pinned=${this.cache.pinnedCount()}/${this.cache.maxSize}); returning uncached`,
-          err
+        logger.error(
+          { err, pinnedCount: this.cache.pinnedCount(), maxSize: this.cache.maxSize },
+          'Conversation cache full; returning uncached'
         )
         pinnedCountGauge?.set(this.cache.pinnedCount())
         return conversation
@@ -415,6 +415,10 @@ export class SqliteConversationStore implements ConversationStore {
         cache_read_tokens: row.session.cache_read_tokens,
         cache_write_tokens: row.session.cache_write_tokens,
         cacheTokensReported: row.session.cache_tokens_reported === 1,
+        // Auto-title (spec 15) — cold projection. `?? undefined` (never null) so
+        // `normalizeParityValue` treats a missing title identically to the memory
+        // store (which yields undefined); a null would survive and break parity.
+        title: cached ? cached.title : (row.session.title ?? undefined),
       })
     }
     return out
@@ -516,14 +520,13 @@ export class SqliteConversationStore implements ConversationStore {
           'Pending approval session ownership could not be verified',
           ConversationErrorCode.OwnershipMismatch
         )
-        console.error(
-          JSON.stringify({
-            level: 'error',
-            event: 'pending_approval_ownership_rejected',
+        logger.error(
+          {
             code: error.code,
             requestId: row.approval.request_id,
             reason: derivedOwner ? 'owner_mismatch' : 'unverifiable_session_suffix',
-          })
+          },
+          'Pending approval ownership rejected'
         )
         continue
       }
@@ -652,9 +655,7 @@ export class SqliteConversationStore implements ConversationStore {
   persistSessionCreate(conv: Conversation, opts: GetOrCreateOptions): void {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) {
-      console.warn(
-        `[SqliteConversationStore] persistSessionCreate: no sessionKey for conv ${conv.id}`
-      )
+      logger.warn({ conversationId: conv.id }, 'Missing session key while persisting conversation')
       return
     }
     const parsed = parseSessionKey(sessionKey)
@@ -734,6 +735,10 @@ export class SqliteConversationStore implements ConversationStore {
         // D.1 — mirror the in-RAM activeTaskId (set by startTurn) to the column.
         activeTaskId: conv.activeTaskId ?? null,
         activeTraceContext: conv.traceContext ? JSON.stringify(conv.traceContext) : null,
+        // Auto-title (spec 15): materialize only on turn 1, gated on the durable
+        // `turnNumber` (not `turns.length`, which is RAM-fragile). The dispatcher
+        // runs a COALESCE write so a retried turn 1 is idempotent.
+        title: turnNumber === 1 ? (conv.title ?? undefined) : undefined,
       },
       sessionKey
     )
@@ -990,6 +995,22 @@ export class SqliteConversationStore implements ConversationStore {
     })
   }
 
+  /**
+   * Spec 15 Fase B — persist a user rename. Enqueued (async) and keyed by
+   * sessionKey so it chains AFTER the session's own writes on the FIFO chain.
+   * `ConversationManager.setTitle` sets `conv.title` (a validated non-empty
+   * string) before calling this; the op overwrites `sessions.title` verbatim.
+   */
+  persistTitle(conv: Conversation): void {
+    const sessionKey = this.sessionKeyById.get(conv.id)
+    if (!sessionKey) return
+    this.persistQueue.enqueueAsync(sessionKey, {
+      kind: 'update_session_title',
+      sessionId: conv.id,
+      title: conv.title ?? '',
+    })
+  }
+
   async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
@@ -999,6 +1020,7 @@ export class SqliteConversationStore implements ConversationStore {
     this.reconcilePinning(sessionKey, conv)
     const now = Date.now()
     const row: PendingApprovalRow = {
+      task_budget: approval.task_budget ? JSON.stringify(approval.task_budget) : null,
       request_id: approval.request_id,
       session_id: conv.id,
       task_id: conv.activeTaskId,
@@ -1023,11 +1045,12 @@ export class SqliteConversationStore implements ConversationStore {
       mcp_server_name: approval.mcpServerName ?? null,
     }
     await this.persistQueue.enqueueSync(
-      { kind: 'insert_pending_approval', payload: row },
-      sessionKey
-    )
-    await this.persistQueue.enqueueSync(
-      { kind: 'update_session_state', sessionId: conv.id, state: conv.state },
+      {
+        kind: 'insert_pending_approval',
+        payload: row,
+        replaceRequestId: approval.replaces_request_id,
+        markAwaitingApproval: true,
+      },
       sessionKey
     )
   }

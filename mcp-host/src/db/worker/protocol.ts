@@ -82,6 +82,8 @@ export interface MessageRow {
 }
 
 export interface PendingApprovalRow {
+  /** Nullable for approvals created before migration 014. */
+  task_budget?: string | null
   request_id: string
   session_id: string
   task_id: string
@@ -220,6 +222,14 @@ export type WorkerOp =
       sessionId: string
       modelSelections: string
     }
+  | {
+      /** Spec 15 Fase B — overwrite the user-set session title (rename). Unlike
+       *  the Fase A auto-title (COALESCE, turn 1 only), this UNCONDITIONALLY
+       *  overwrites: an explicit rename always wins. */
+      kind: 'update_session_title'
+      sessionId: string
+      title: string
+    }
   | { kind: 'insert_message'; payload: MessageRow }
   | {
       /**
@@ -241,9 +251,20 @@ export type WorkerOp =
       activeTaskId?: string | null
       /** Same keep/set/clear semantics as update_session_state. */
       activeTraceContext?: string | null
+      /**
+       * Server-authoritative auto-title (spec 15). Present only on turn 1; the
+       * dispatcher runs `setSessionTitleIfAbsent` (COALESCE) so a retried turn 1
+       * never overwrites, and a rename set earlier wins.
+       */
+      title?: string
     }
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
-  | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
+  | {
+      kind: 'insert_pending_approval'
+      payload: PendingApprovalRow
+      replaceRequestId?: string
+      markAwaitingApproval?: boolean
+    }
   | { kind: 'delete_pending_approval'; requestId: string }
   | { kind: 'load_active_session'; sessionKey: string }
   | {
@@ -325,6 +346,7 @@ export function isWriteOp(op: WorkerOp): boolean {
     case 'update_session_counters':
     case 'update_session_prompt_stable_hash':
     case 'update_session_model_selections':
+    case 'update_session_title':
     case 'insert_message':
     case 'persist_turn_boundary':
     case 'replace_messages':

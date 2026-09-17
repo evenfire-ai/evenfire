@@ -25,6 +25,8 @@ export interface PreparedStatements {
   recomputeSessionMessageSummary: Statement
   updateSessionPromptStableHash: Statement
   updateSessionModelSelections: Statement
+  setSessionTitleIfAbsent: Statement
+  updateSessionTitle: Statement
   selectSessionBySessionKey: Statement
   selectSessionsByPrefix: Statement
   selectSessionSummariesByPrefix: Statement
@@ -172,6 +174,23 @@ export function prepareStatements(db: Database): PreparedStatements {
     updateSessionModelSelections: db.prepare(`
       UPDATE sessions
          SET model_selections = @model_selections
+       WHERE id = @id
+    `),
+    // Auto-title (spec 15) — write the derived title only if the column is still
+    // empty. COALESCE keeps a rename set earlier and makes a retried turn 1
+    // idempotent. A dedicated statement (NOT `updateSessionState`, which is
+    // shared with `persistTurnFail` and would break on a missing @title param).
+    setSessionTitleIfAbsent: db.prepare(`
+      UPDATE sessions
+         SET title = COALESCE(title, @title)
+       WHERE id = @id
+    `),
+    // Spec 15 Fase B — unconditional overwrite of the user-set title (rename).
+    // Independent of `setSessionTitleIfAbsent` (COALESCE, auto-title) and of
+    // `updateSessionState` (shared with persistTurnFail; must not gain @title).
+    updateSessionTitle: db.prepare(`
+      UPDATE sessions
+         SET title = @title
        WHERE id = @id
     `),
     updateSessionCounters: db.prepare(`
@@ -390,15 +409,16 @@ export function prepareStatements(db: Database): PreparedStatements {
         request_id, session_id, task_id, tool_name, tool_call_id,
         parameters, description, context_snapshot, completed_results,
         intent_summary, source_message, registered_at, expires_at, trace_context,
-        reason, mcp_server_name
+        reason, mcp_server_name, task_budget
       ) VALUES (
         @request_id, @session_id, @task_id, @tool_name, @tool_call_id,
         @parameters, @description, @context_snapshot, @completed_results,
         @intent_summary, @source_message, @registered_at, @expires_at, @trace_context,
-        @reason, @mcp_server_name
+        @reason, @mcp_server_name, @task_budget
       )
       ON CONFLICT(request_id) DO UPDATE SET
         task_id = excluded.task_id,
+        task_budget = excluded.task_budget,
         context_snapshot = excluded.context_snapshot,
         completed_results = excluded.completed_results,
         trace_context = excluded.trace_context,

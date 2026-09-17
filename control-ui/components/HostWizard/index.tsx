@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
+import { validateDisplayField } from '@clerum/display-field'
 import { CreateFlowPanel } from '@/components/CreateFlowPanel'
 import { CreateStepFlow } from '@/components/CreateStepFlow'
 import { LlmProviderConfig } from '@/components/LlmProviderConfig'
@@ -69,6 +70,21 @@ const SHOW_STATELESS_AGENT_SELECTOR = false
 // are optional and only warn, so they never enter this gate.
 function primaryCredentialUsable(provider: LlmProvider, draft: Record<string, string>): boolean {
   return isProviderUsable(provider, key => (draft[key] ?? '').trim().length > 0)
+}
+
+// TASK-231: human label for a connector's transport, shown on the step-4 cards
+// so the grid reads as a catalog instead of a bare name list. Falls back to
+// "Connector" when the spec carries no recognizable transport (legacy CRs).
+function mcpConnectorMeta(spec: Record<string, unknown> | undefined): string {
+  const transport = spec?.transport
+  const type =
+    transport && typeof transport === 'object' && !Array.isArray(transport)
+      ? String((transport as { type?: unknown }).type || '')
+      : ''
+  if (type === 'stdio') return 'Connector · local (stdio)'
+  if (type === 'sse') return 'Connector · HTTP (SSE)'
+  if (type === 'streamableHttp') return 'Connector · HTTP'
+  return 'Connector'
 }
 
 // The DELETE path for one tracked sibling. The server fixes each resource's
@@ -151,9 +167,28 @@ async function createOrThrow(path: string, body: unknown, collisionMessage: stri
   }
 }
 
+// Step 0 collects a free-text display name (`spec.host`) and derives the
+// immutable identifier (`metadata.name`) from it. Two validations apply:
+//  - the DISPLAY name passes the shared display-field rule (control chars +
+//    trimmed length, D4: same validator as control-api's write gate — the field
+//    label is passed in so the issue text reads as wizard copy);
+//  - the DERIVED slug passes the RFC1123 agent-name rule (3–63 chars, lowercase
+//    alphanumerics + hyphens), because the slug is what reaches metadata.name.
+function agentStepError(displayName: string): string {
+  if (!displayName.trim()) return 'Agent name is required.'
+  const displayIssue = validateDisplayField(displayName, 'Agent name')
+  if (displayIssue) return displayIssue.message
+  const slug = toKebabCase(displayName)
+  // A non-empty name whose characters all strip out (e.g. "###" or a name with
+  // no Latin letters/digits) derives an empty slug — a distinct problem from a
+  // missing name, so it gets distinct copy instead of "is required".
+  if (!slug) return 'Add at least one letter or number so an identifier can be derived.'
+  return getAgentNameError(slug)
+}
+
 function isStepValid(stepIndex: number, state: HostWizardValidationState): boolean {
   if (stepIndex === 0)
-    return state.hostName.trim().length > 0 && getAgentNameError(state.hostName) === ''
+    return state.hostName.trim().length > 0 && agentStepError(state.hostName) === ''
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
     // A local openai-compatible primary needs a valid private-LAN baseURL before
@@ -228,7 +263,14 @@ export function HostWizard({
 
   const [hostName, setHostName] = useState('')
   const hostNamespace = HOST_NAMESPACE
-  const agentNameError = getAgentNameError(hostName)
+  // TASK-230: the operator types a free-text display name; the immutable
+  // metadata.name slug is derived from it (shown live under the field) instead
+  // of being force-lowercased into the input while typing.
+  const derivedHostName = toKebabCase(hostName)
+  const agentNameError = agentStepError(hostName)
+  // Stable id for the slug-hint note so the input can point at it with
+  // aria-describedby (the note carries the error copy when invalid).
+  const slugNoteId = useId()
 
   const [selectedMcp, setSelectedMcp] = useState<string[]>([])
 
@@ -272,9 +314,13 @@ export function HostWizard({
   const availableMcp = useMemo(
     () =>
       mcpServers
-        .map(m => m.metadata?.name)
-        .filter((v): v is string => Boolean(v))
-        .sort(),
+        .map(m => {
+          const name = m.metadata?.name
+          if (!name) return null
+          return { name, meta: mcpConnectorMeta(m.spec) }
+        })
+        .filter((v): v is { name: string; meta: string } => Boolean(v))
+        .sort((left, right) => left.name.localeCompare(right.name)),
     [mcpServers]
   )
 
@@ -541,7 +587,7 @@ export function HostWizard({
 
   const validationMessage = useMemo(() => {
     if (step === 0) {
-      const agentNameError = getAgentNameError(hostName)
+      const agentNameError = agentStepError(hostName)
       if (agentNameError) return agentNameError
     }
     if (step === 1 && !modelName.trim()) return 'Model name is required.'
@@ -706,7 +752,10 @@ export function HostWizard({
               : ''
 
       const hostSpec: Record<string, unknown> = {
-        host: normalizedHostName,
+        // Display name: the free text the operator typed (falls back to the
+        // slug only when the trimmed name is somehow empty). The slug lives in
+        // metadata.name below — the two are intentionally distinct now.
+        host: hostName.trim() || normalizedHostName,
         contextRef: generatedContextName,
         ...(resolvedSecretRef ? { secretRef: resolvedSecretRef } : {}),
         channels: [],
@@ -756,7 +805,9 @@ export function HostWizard({
 
       if (!mountedRef.current) return
       showToast('Agent created successfully.', { tone: 'success' })
-      await onCreated()
+      // TASK-229: hand the created agent's identifier back so the host page can
+      // route straight to the new agent's detail view (name + route URL header).
+      await onCreated({ name: normalizedHostName })
       if (!mountedRef.current) return
       onClose()
     } catch (e) {
@@ -814,16 +865,20 @@ export function HostWizard({
         {step === 0 && (
           <div className="cu-form-stack cu-agent-form-stack">
             <Field
-              description="Automatically formatted to lowercase with hyphens."
-              label="Agent metadata name"
+              description="The name members see. The identifier used in URLs is derived automatically."
+              htmlFor="wizard-agent-name"
+              label="Agent name"
               required
             >
               <span className="cu-agent-input-shell">
                 <TextInput
+                  id="wizard-agent-name"
                   value={hostName}
-                  onChange={e => setHostName(toKebabInput(e.target.value))}
-                  placeholder="agent-name"
+                  onChange={e => setHostName(e.target.value)}
+                  placeholder="e.g. Support Bot"
                   autoFocus
+                  aria-describedby={slugNoteId}
+                  aria-invalid={hostName.trim() ? Boolean(agentNameError) : undefined}
                 />
                 {hostName.trim() ? (
                   agentNameError ? (
@@ -841,6 +896,18 @@ export function HostWizard({
                 ) : null}
               </span>
             </Field>
+            <div
+              className="cu-agent-slug-hint"
+              data-state={hostName.trim() ? (agentNameError ? 'invalid' : 'ready') : 'empty'}
+            >
+              <span className="cu-agent-slug-hint__label">Identifier</span>
+              <span className="cu-agent-slug-hint__value">{derivedHostName || 'agent-name'}</span>
+              <span id={slugNoteId} className="cu-agent-slug-hint__note" aria-live="polite">
+                {hostName.trim() && agentNameError
+                  ? agentNameError
+                  : 'Used in URLs, CLI, and grants. Lowercase letters, numbers, and hyphens.'}
+              </span>
+            </div>
             <div className="cu-agent-namespace">Namespace: {HOST_NAMESPACE}</div>
             {SHOW_STATELESS_AGENT_SELECTOR ? (
               <div className="cu-agent-access-section">
@@ -1129,7 +1196,7 @@ export function HostWizard({
         )}
 
         {step === 3 && (
-          <div className="cu-form-stack cu-agent-form-stack">
+          <div className="cu-form-stack cu-agent-form-stack cu-agent-form-stack--wide">
             <div className="cu-agent-access-section">
               <strong>Connectors</strong>
               <span className="cu-muted cu-agent-access-hint">
@@ -1137,9 +1204,8 @@ export function HostWizard({
                 connectors later.
               </span>
             </div>
-            <div className="cu-agent-section-label">Available connectors (optional)</div>
             <div className="cu-agent-mcp-grid" role="group" aria-label="Available connectors">
-              {availableMcp.map(name => (
+              {availableMcp.map(({ name, meta }) => (
                 <CheckboxField
                   key={name}
                   checked={selectedMcp.includes(name)}
@@ -1147,7 +1213,7 @@ export function HostWizard({
                   label={
                     <span className="cu-agent-mcp-option__label">
                       <span className="cu-agent-mcp-option__name">{name}</span>
-                      <span className="cu-agent-mcp-option__meta">Connector</span>
+                      <span className="cu-agent-mcp-option__meta">{meta}</span>
                     </span>
                   }
                   disabled={busy}
@@ -1157,6 +1223,25 @@ export function HostWizard({
               {availableMcp.length === 0 ? (
                 <span className="cu-agent-empty-note">No connectors available.</span>
               ) : null}
+            </div>
+            <div className="cu-agent-connectors-summary" aria-live="polite">
+              <div className="cu-agent-connectors-summary__head">
+                <span>Selected connectors</span>
+                <span>{selectedMcp.length}</span>
+              </div>
+              {selectedMcp.length > 0 ? (
+                <ul className="cu-agent-connectors-summary__list">
+                  {[...selectedMcp]
+                    .sort((a, b) => a.localeCompare(b))
+                    .map(name => (
+                      <li key={name}>{name}</li>
+                    ))}
+                </ul>
+              ) : (
+                <p className="cu-muted">
+                  None selected. You can add connectors later from the agent detail page.
+                </p>
+              )}
             </div>
           </div>
         )}

@@ -1,7 +1,14 @@
 import { serverNameOf } from '../../capabilities/toolCatalogTools'
+import { logger } from '../../logger'
 import { McpManager } from '../../mcp/manager'
-import { Tool, ToolRegistry } from '../interfaces'
-import { Attachment, ToolDefinition, ToolOutput } from '../types'
+import { ExecutionContext, Tool, ToolRegistry } from '../interfaces'
+import { Attachment, ToolDefinition, ToolOutput, ValidationResult } from '../types'
+import {
+  BoundedJsonError,
+  type SchemaValidationFailure,
+  boundedJson,
+  validateBoundedSchema,
+} from './boundedSchemaValidation'
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -75,6 +82,10 @@ function extractMcpContent(
  * Tool names preserve the serverName__toolName convention (Risk 4.8).
  */
 class McpToolAdapter implements Tool {
+  // One bounded successful pair per adapter avoids re-running Ajv after approval.
+  // Every use still serializes the live schema and arguments and checks freshness.
+  private validated?: { schemaJson: string; paramsJson: string }
+
   constructor(
     private readonly fullName: string,
     private readonly desc: string,
@@ -86,7 +97,8 @@ class McpToolAdapter implements Tool {
      * tool-lane guardrail identity that `server=` rules match on — see below.
      */
     private readonly serverName: string,
-    private readonly userId?: string
+    private readonly userId: string | undefined,
+    private readonly strictValidation: boolean
   ) {}
 
   name() {
@@ -104,6 +116,93 @@ class McpToolAdapter implements Tool {
   requiresApproval() {
     return false
   }
+  private liveTool() {
+    return this.mcpManager
+      .getAllTools()
+      .find(tool => tool.name === this.fullName && serverNameOf(tool) === this.serverName)
+  }
+
+  private validationFailure(
+    code: SchemaValidationFailure | 'tool_changed' | 'input_invalid'
+  ): ValidationResult {
+    const messages = {
+      input_limit:
+        'MCP validation input exceeds the supported size limit; reduce the request size.',
+      input_invalid:
+        'MCP schema or arguments are not supported bounded JSON; check their structure and size.',
+      queue_full: 'MCP validation is busy; retry shortly.',
+      timeout: 'MCP validation exceeded its time limit; retry or simplify the request.',
+      unsupported_schema:
+        'This MCP schema dialect or asynchronous schema is unsupported by local validation; ask the server owner to update it.',
+      invalid_schema:
+        'The MCP schema could not be compiled locally; ask the server owner to correct it.',
+      invalid_arguments: 'Arguments do not match the current MCP schema; correct the arguments.',
+      worker_failure:
+        'MCP validation could not complete; retry and contact the administrator if it persists.',
+      tool_changed:
+        'The MCP tool or arguments changed during validation; retry with the current tool definition.',
+    }
+    logger.warn({ component: 'ToolRegistry', validationFailure: code }, 'MCP validation rejected')
+    return { is_valid: false, errors: [messages[code]] }
+  }
+
+  private async validateCurrent(params: Record<string, unknown>) {
+    const live = this.liveTool()
+    try {
+      if (!live || !asRecord(live.inputSchema)) {
+        this.validated = undefined
+        return { result: this.validationFailure('tool_changed') }
+      }
+      const schemaJson = boundedJson(live.inputSchema)
+      const paramsJson = boundedJson(params)
+      if (this.validated?.schemaJson !== schemaJson || this.validated?.paramsJson !== paramsJson) {
+        this.validated = undefined
+        let failure: SchemaValidationFailure = 'worker_failure'
+        if (
+          !(await validateBoundedSchema(schemaJson, paramsJson, code => {
+            failure = code
+          }))
+        )
+          return { result: this.validationFailure(failure) }
+        this.validated = { schemaJson, paramsJson }
+      }
+      return { result: { is_valid: true, errors: [] } as ValidationResult, schemaJson, paramsJson }
+    } catch (error) {
+      // Never include raw schemas, arguments or validator diagnostics in errors.
+      this.validated = undefined
+      return {
+        result: this.validationFailure(
+          error instanceof BoundedJsonError ? error.failure : 'input_invalid'
+        ),
+      }
+    }
+  }
+
+  private validationStillCurrent(
+    checked: Awaited<ReturnType<McpToolAdapter['validateCurrent']>>,
+    params: Record<string, unknown>
+  ): boolean {
+    try {
+      const live = this.liveTool()
+      return (
+        checked.result.is_valid &&
+        !!live &&
+        boundedJson(live.inputSchema) === checked.schemaJson &&
+        boundedJson(params) === checked.paramsJson
+      )
+    } catch {
+      return false
+    }
+  }
+
+  async validateParams(params: Record<string, unknown>): Promise<ValidationResult> {
+    if (!this.strictValidation) return { is_valid: true, errors: [] }
+    const checked = await this.validateCurrent(params)
+    if (!checked.result.is_valid) return checked.result
+    return this.validationStillCurrent(checked, params)
+      ? checked.result
+      : this.validationFailure('tool_changed')
+  }
   traceDescriptor() {
     // `sourceRef` is the tool-lane guardrail's `server` identity (provenance.ts),
     // so a `server=` deny rule matches on THIS value. It used to be sliced off the
@@ -118,9 +217,24 @@ class McpToolAdapter implements Tool {
     }
   }
 
-  async execute(params: Record<string, unknown>): Promise<ToolOutput> {
+  async execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput> {
     const startTime = Date.now()
     try {
+      // An approval may have been suspended with an older adapter/schema.
+      // Resolve the live schema again immediately before manager dispatch.
+      const checked = this.strictValidation ? await this.validateCurrent(params) : undefined
+      // No await between the freshness check and manager dispatch: catalog or
+      // argument changes during worker evaluation cannot authorize this call.
+      if (checked && !this.validationStillCurrent(checked, params)) {
+        return {
+          content: (checked.result.is_valid
+            ? this.validationFailure('tool_changed')
+            : checked.result
+          ).errors.join(' '),
+          duration_ms: Date.now() - startTime,
+          is_error: true,
+        }
+      }
       // Principal binding (PR #319 C2/H1): the broker grant subject is ALWAYS
       // `this.userId` — the authenticated task sender baked in at construction
       // (taskExecutor threads `task.sourceMessage.sender`, itself bound to the
@@ -130,6 +244,8 @@ class McpToolAdapter implements Tool {
       // another user's broker token.
       const result = await this.mcpManager.callTool(this.fullName, params, {
         userId: this.userId,
+        ...(context?.timeoutMs === undefined ? {} : { timeoutMs: context.timeoutMs }),
+        ...(context?.signal ? { signal: context.signal } : {}),
       })
       const { textParts, attachments } = extractMcpContent(result.result, this.fullName)
 
@@ -186,7 +302,10 @@ export class McpToolRegistryAdapter implements ToolRegistry {
    */
   constructor(
     private readonly mcpManager: McpManager,
-    private readonly userId?: string
+    private readonly userId?: string,
+    // Codex bridge dispatch promises local, bounded schema validation. Other
+    // providers retain their existing MCP server-side validation contract.
+    private readonly options: { strictValidation?: boolean } = {}
   ) {
     this.refresh()
   }
@@ -202,7 +321,7 @@ export class McpToolRegistryAdapter implements ToolRegistry {
       description: t.description(),
       parameters: t.parametersSchema(),
     }))
-    console.log(`[NewCore:ToolRegistry] MCP tools loaded: ${defs.length}`)
+    logger.info({ component: 'ToolRegistry', toolCount: defs.length }, 'MCP tools loaded')
     return defs
   }
 
@@ -231,7 +350,8 @@ export class McpToolRegistryAdapter implements ToolRegistry {
           mcpTool.inputSchema || {},
           this.mcpManager,
           serverNameOf(mcpTool),
-          this.userId
+          this.userId,
+          this.options.strictValidation === true
         )
       )
     }

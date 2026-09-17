@@ -19,6 +19,7 @@ import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
 import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
+import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
 import { config } from './config'
@@ -130,6 +131,7 @@ import {
   RPCServer,
   RuntimeCallerContext,
   SetModelResult,
+  SetTitleResult,
   StatusResponse,
   TelegramWorkflowApprovalVerification,
   WorkflowApprovalMediumEnrollment,
@@ -1741,6 +1743,7 @@ async function initializeAgent(): Promise<void> {
   const maxConcurrent = parseInt(process.env.CLERUM_MAX_CONCURRENT_SESSIONS || '3', 10)
   sessionProcessor = new SessionProcessor({
     maxConcurrent,
+    taskDelayMs: config.agentTaskDelay,
     executor: async (task: Task) => {
       return agent!.executeTask(task)
     },
@@ -1866,6 +1869,25 @@ function applySessionModelSelection(
     hostRef,
     chatId,
     model
+  )
+}
+
+// Spec 15 Fase B — thin wrapper that injects the conversation manager into the
+// shared `applySessionTitleCore` (sanitize/validate title, resolve by exact key
+// scoped to the user, overwrite `sessions.title`). `agentName` is the rpc
+// channelId slot (matches the session-read routes), not the Agent instance.
+function applySessionTitle(
+  userSub: string,
+  agentName: string,
+  chatId: string,
+  title: string
+): Promise<SetTitleResult> {
+  return applySessionTitleCore(
+    { convManager: agent!.getConversationManager() },
+    userSub,
+    agentName,
+    chatId,
+    title
   )
 }
 
@@ -2560,10 +2582,19 @@ async function startRPCServer(): Promise<void> {
   const toolErrorSafety = new BasicSafety(() => configStore?.listSecretEntries() ?? [])
   const redactToolError = (toolName: string, rawError: string): string =>
     sanitizeError(toolErrorSafety.sanitizeOutput(toolName, rawError).content)
+  // spec 15 — re-redact a session title before it hits the list wire (defense in
+  // depth §5). Uses the non-logging redaction primitive so a 100-item page does
+  // not emit 100 log lines, and skips `sanitizeError` (which would truncate a
+  // legit title). Same operator secret list as the tool-error path.
+  const redactTitle = (rawTitle: string): string =>
+    toolErrorSafety.sanitizeFreeformContent(rawTitle, {
+      secretWarning: 'Potential secret detected in session title',
+    }).content
 
   const { handleSessionsList, handleSessionMessages } = createSessionRouteHandlers({
     getConversationManager: () => agent!.getConversationManager(),
     redactToolError,
+    redactTitle,
   })
 
   const handleContextBreakdown = async (userSub: string, agentName: string, chatId: string) => {
@@ -2635,6 +2666,10 @@ async function startRPCServer(): Promise<void> {
   const handleSetModel = (userSub: string, hostRef: string, chatId: string, model: string) =>
     applySessionModelSelection(userSub, hostRef, chatId, model)
 
+  // Spec 15 Fase B — PATCH /v1/runtime/sessions/:agent/:chatId/name rename adapter.
+  const handleSetTitle = (userSub: string, agentName: string, chatId: string, title: string) =>
+    applySessionTitle(userSub, agentName, chatId, title)
+
   rpcServer.onMessage(handleIncomingMessage)
   rpcServer.setArtifactSecretEntriesProvider(() => configStore?.listSecretEntries() ?? [])
   rpcServer.onStatus(getStatus)
@@ -2659,6 +2694,7 @@ async function startRPCServer(): Promise<void> {
   rpcServer.onContextBreakdown(handleContextBreakdown)
   rpcServer.onModelsList(handleModelsList)
   rpcServer.onSetModel(handleSetModel)
+  rpcServer.onSetTitle(handleSetTitle)
   // T3.1 — session search REST endpoint. Only wired when the feature is
   // enabled and the SQLite backend is live; otherwise the route returns 501
   // through `handleSessionSearchRoute`.

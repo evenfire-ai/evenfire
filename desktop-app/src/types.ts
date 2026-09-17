@@ -10,6 +10,7 @@ export type RpcScope =
   | 'host:task:read'
   | 'host:approval:write'
   | 'host:session:read'
+  | 'host:session:write'
   | 'host:model:write'
   | 'desktop:view'
   | 'sandbox:ui:view'
@@ -983,6 +984,14 @@ export interface SessionsListResult {
     chatId: string
     turnCount: number
     messageCount?: number
+    /**
+     * Server-authoritative session title (spec 15 §2.1). Absent when the host
+     * predates the feature or the session has no materialized title yet — the
+     * client then falls back to the local cache or a placeholder (§2.2 cases
+     * B/D). Sanitized on read in `parseSessionsListResult` (the client never
+     * trusts a title minted by another device or an older host).
+     */
+    title?: string
     lastActivityAt: string
     state?: SessionLifecycleState
     activeTaskId?: string

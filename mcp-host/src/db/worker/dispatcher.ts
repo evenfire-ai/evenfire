@@ -425,6 +425,16 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
         return { ok: true }
       })
 
+    case 'update_session_title':
+      // Spec 15 Fase B — unconditional overwrite (rename wins over the auto-title).
+      return withBusyRetry(() => {
+        const tx = db.transaction(() => {
+          s.updateSessionTitle.run({ id: op.sessionId, title: op.title })
+        })
+        tx.immediate()
+        return { ok: true }
+      })
+
     case 'insert_message':
       return withBusyRetry(() => {
         const tx = db.transaction(() => {
@@ -518,6 +528,12 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
           if (op.activeTaskId === null) {
             s.clearSessionActiveTask.run({ id: op.sessionId })
           }
+          // Auto-title (spec 15) — turn 1 only carries a title. COALESCE inside
+          // the statement makes a retried turn 1 idempotent and preserves a
+          // rename. Run in the SAME transaction as the boundary message.
+          if (op.title !== undefined) {
+            s.setSessionTitleIfAbsent.run({ id: op.sessionId, title: op.title })
+          }
         })
         tx.immediate()
         return { ok: true }
@@ -558,7 +574,34 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'insert_pending_approval':
       return withBusyRetry(() => {
         const tx = db.transaction((row: PendingApprovalRow) => {
-          s.insertPendingApproval.run(row)
+          let sourceMessage = row.source_message
+          if (op.replaceRequestId) {
+            const previous = db
+              .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+              .get(op.replaceRequestId) as PendingApprovalRow | undefined
+            if (
+              !previous ||
+              previous.session_id !== row.session_id ||
+              previous.task_id !== row.task_id ||
+              previous.task_budget !== 'legacy'
+            ) {
+              throw new Error('Approval renewal binding mismatch')
+            }
+            sourceMessage = previous.source_message
+            db.prepare('DELETE FROM pending_approvals WHERE request_id = ?').run(
+              op.replaceRequestId
+            )
+          }
+          s.insertPendingApproval.run({
+            ...row,
+            source_message: sourceMessage,
+            task_budget: row.task_budget ?? null,
+          })
+          if (op.markAwaitingApproval)
+            db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(
+              'awaiting_approval',
+              row.session_id
+            )
         })
         tx.immediate(op.payload)
         return { ok: true }

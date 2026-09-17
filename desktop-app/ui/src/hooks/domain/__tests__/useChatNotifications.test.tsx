@@ -30,6 +30,9 @@ function makeParams(overrides?: Partial<Parameters<typeof useChatNotifications>[
     activeChatVisibilityRef,
     currentTeamId: 'team-1',
     currentTeamName: 'Team One',
+    // Display-name resolver: catalog display (spec.host) with identifier
+    // fallback — mirrors the real resolver from useAgentsDataController.
+    agentDisplayName: (agentName: string) => (agentName === 'agent-x' ? 'Agent X' : agentName),
     pushNotification,
     // Deliver to both channels (chat not visible): the dedupe, not the gating, is
     // what suppresses the second call.
@@ -86,5 +89,48 @@ describe('useChatNotifications — reply first-materialization dedupe (§4.7.2)'
     result.current.pushAssistantReplyNotification('agent-x', reply('msg-B'), 'chat-1')
 
     expect(params.pushNotification).toHaveBeenCalledTimes(2)
+  })
+
+  // Rename propagation: the desktop toast TITLE uses the agent's display name
+  // (spec.host), while the in-app notification payload stays keyed by the
+  // immutable identifier (matching + dedupe survive a rename).
+  it('titles desktop toasts with the display name but keys in-app notifications by the identifier', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useChatNotifications(params))
+
+    result.current.pushAssistantReplyNotification('agent-x', reply('msg-A', 'task-1'), 'chat-1')
+
+    expect(params.showDesktopNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Agent X replied' })
+    )
+    expect(params.pushNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'assistant_reply', agentName: 'agent-x' })
+    )
+  })
+
+  // Review P1: the approval toast's BODY fallback must also resolve the
+  // display name — an empty approval text used to degrade to the raw slug
+  // while the title right above it showed the friendly name.
+  it('uses the display name in the approval toast body fallback', () => {
+    const params = makeParams()
+    const { result } = renderHook(() => useChatNotifications(params))
+
+    result.current.pushApprovalNotification({
+      agentName: 'agent-x',
+      chatId: 'chat-1',
+      taskId: 'task-1',
+      requestId: 'request-1',
+      text: '',
+    })
+
+    expect(params.showDesktopNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Agent X needs authorization',
+        body: 'Approval required for Agent X.',
+      })
+    )
+    expect(params.pushNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'approval_required', agentName: 'agent-x' })
+    )
   })
 })

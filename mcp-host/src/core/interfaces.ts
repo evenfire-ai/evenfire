@@ -78,6 +78,9 @@ export interface ToolTraceDescriptor {
  * `tool_progress` SSE events.
  */
 export interface ExecutionContext {
+  /** Execution budget, excluding bounded termination cleanup. */
+  timeoutMs?: number
+  signal?: AbortSignal
   /**
    * Tool calls this as output becomes available (not required to be line-aligned
    * — the ring buffer handles line boundaries).
@@ -92,6 +95,9 @@ export interface Tool {
   execute(params: Record<string, unknown>, context?: ExecutionContext): Promise<ToolOutput>
   requiresSanitization(): boolean
   requiresApproval(): boolean
+  /** Optional live parameter validation, run before approval and rechecked by
+   * the implementation at dispatch when its schema can change while suspended. */
+  validateParams?(params: Record<string, unknown>): ValidationResult | Promise<ValidationResult>
   /**
    * Safe, producer-owned classification for governed replay. This must never
    * include tool arguments or output. Native tools may omit it and are then
@@ -104,6 +110,8 @@ export interface Tool {
    * Tools that don't opt in get zero runtime overhead from this feature.
    */
   supportsProgressOutput?(): boolean
+  /** Local implementation-owned bounded cleanup after execution is stopped. */
+  timeoutCleanupMs?(): number
 }
 
 // ─── Channel ────────────────────────────────────────────────

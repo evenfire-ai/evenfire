@@ -1,3 +1,4 @@
+import { parseTaskExecutionBudget } from '../../../agent/taskExecutionBudget'
 /**
  * Reconstruct a live `Conversation` from rows pulled out of the SQLite store.
  *
@@ -76,6 +77,10 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // restart this may point at a task whose reporter is gone (ghost); the D.2
     // processing reaper reconciles that at boot.
     activeTaskId: persisted.session.active_task_id ?? undefined,
+    // Server-authoritative title (spec 15). `?? undefined` (not null) so the
+    // RAM shape matches the memory store for dual-store parity (a persisted
+    // NULL becomes undefined, which `normalizeParityValue` drops on both sides).
+    title: persisted.session.title ?? undefined,
     traceContext:
       parseTraceContext(persisted.session.active_trace_context) ?? pending?.traceContext ?? null,
     // Lifetime token totals — rehydrate the RAM mirror from the durable columns.
@@ -135,6 +140,11 @@ export function normalizeConnectReason(
 export function reconstructPendingApproval(row: PendingApprovalRow): PendingApproval {
   const snapshot = JSON.parse(row.context_snapshot) as ChatMessage[]
   return {
+    task_budget:
+      row.task_budget === 'legacy'
+        ? undefined
+        : parseTaskExecutionBudget(JSON.parse(row.task_budget ?? 'null')),
+    legacy_budget: row.task_budget === 'legacy',
     request_id: row.request_id,
     tool_name: row.tool_name,
     parameters: JSON.parse(row.parameters) as Record<string, unknown>,

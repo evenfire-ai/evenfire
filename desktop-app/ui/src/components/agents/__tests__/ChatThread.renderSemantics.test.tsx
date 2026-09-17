@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { buildLoadedChatSemanticModels } from '../../../lib/chatMessageSemantics'
 import type { AgentChatMessage } from '../../../uiTypes'
 import { ChatThread } from '../ChatThread'
@@ -63,6 +63,8 @@ afterEach(() => {
   cleanup()
   messages = []
   vi.clearAllMocks()
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
 })
 
 describe('ChatThread semantic renderer compatibility', () => {
@@ -85,4 +87,55 @@ describe('ChatThread semantic renderer compatibility', () => {
     )
     expect(container.querySelector('.error-bubble-details-text')?.textContent).toBe(content)
   })
+})
+
+it('keeps generated files visible and downloadable on an interrupted error message', () => {
+  messages = [
+    {
+      id: 'interrupted',
+      role: 'assistant',
+      content: 'Task interrupted',
+      timestamp: 1,
+      isError: true,
+      errorCode: 'TASK_ITERATION_LIMIT',
+      attachments: [
+        {
+          id: 'report',
+          type: 'response_file',
+          label: 'report.md',
+          filename: 'report.md',
+          mimeType: 'text/markdown',
+          encoding: 'base64',
+          dataBase64: 'IyByZXBvcnQ=',
+        },
+      ],
+    },
+  ]
+  // Only the browser download boundary is replaced in this component test.
+  const createObjectURL = vi.fn(() => 'blob:unit-download')
+  const revokeObjectURL = vi.fn()
+  const NativeURL = URL
+  vi.stubGlobal(
+    'URL',
+    class extends NativeURL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = revokeObjectURL
+    }
+  )
+  const clicked: string[] = []
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+    this: HTMLAnchorElement
+  ) {
+    clicked.push(this.download)
+  })
+  render(<ChatThread />)
+  expect(screen.getByText('Task interrupted', { selector: '.error-bubble-message' })).toBeTruthy()
+  expect(screen.getByTestId('agent-response').classList.contains('chat-bubble--error')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+  expect(clicked).toEqual(['report.md'])
+  expect(createObjectURL).toHaveBeenCalledWith(
+    expect.objectContaining({ size: 8, type: 'text/markdown' })
+  )
+  expect(revokeObjectURL).toHaveBeenCalledWith('blob:unit-download')
+  expect(screen.getByTestId('agent-response').classList.contains('chat-bubble--error')).toBe(true)
 })

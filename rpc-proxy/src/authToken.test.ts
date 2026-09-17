@@ -67,3 +67,35 @@ describe('verifyRpcToken access scope binding', () => {
     expect(verifyRpcToken('token')).toBeNull()
   })
 })
+
+describe('verifyRpcToken scope allow-list', () => {
+  beforeEach(() => jwtMock.verify.mockReset())
+
+  it('preserves a write-only host:session:write token through the allow-list filter', () => {
+    jwtMock.verify.mockReturnValue({
+      ...BASE_PAYLOAD,
+      scopes: ['host:session:write'],
+      accessScope: 'user',
+      teamId: null,
+    })
+
+    // Guards the ALLOWED_SCOPES membership of 'host:session:write': dropping it
+    // there would filter a write-only token down to zero scopes -> null -> 401.
+    expect(verifyRpcToken('token')).toMatchObject({
+      scopes: ['host:session:write'],
+    })
+  })
+
+  it('drops scopes outside the allow-list while keeping the recognized one', () => {
+    jwtMock.verify.mockReturnValue({
+      ...BASE_PAYLOAD,
+      scopes: ['host:session:write', 'totally:unknown:scope'],
+      accessScope: 'user',
+      teamId: null,
+    })
+
+    expect(verifyRpcToken('token')).toMatchObject({
+      scopes: ['host:session:write'],
+    })
+  })
+})

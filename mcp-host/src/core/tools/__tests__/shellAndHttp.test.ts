@@ -1,9 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as dns from 'dns/promises'
 import { mkdtemp, rm } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { HttpRequestTool, isPrivateIp } from '../httpRequest'
 import { ShellTool } from '../shell'
+
+// DNS failure is the input under test, not a dependency on the CI resolver.
+vi.mock('dns/promises', () => ({ resolve4: vi.fn(), resolve6: vi.fn() }))
 
 let workspacePath: string
 
@@ -76,6 +80,8 @@ describe('HttpRequestTool', () => {
   })
 
   it('should block request when DNS fails and allowlist is configured (Risk 3.5.3d)', async () => {
+    vi.mocked(dns.resolve4).mockRejectedValueOnce(new Error('ENOTFOUND'))
+    vi.mocked(dns.resolve6).mockRejectedValueOnce(new Error('ENOTFOUND'))
     const tool = new HttpRequestTool(['example.com'])
     const result = await tool.execute({
       url: 'http://definitely-does-not-exist-12345.example.com/test',
@@ -107,6 +113,8 @@ describe('HttpRequestTool', () => {
   })
 
   it('should fail closed when DNS fails and NO allowlist is configured', async () => {
+    vi.mocked(dns.resolve4).mockRejectedValueOnce(new Error('ENOTFOUND'))
+    vi.mocked(dns.resolve6).mockRejectedValueOnce(new Error('ENOTFOUND'))
     const tool = new HttpRequestTool([])
     const result = await tool.execute({
       url: 'http://definitely-does-not-exist-12345.example.com/test',

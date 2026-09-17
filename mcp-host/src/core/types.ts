@@ -322,6 +322,14 @@ export interface Conversation {
   created_at: Date
   updated_at: Date
   /**
+   * Server-authoritative session title (spec 15). Materialized on turn 1 from
+   * the first user input (redacted + truncated) and projected to the desktop
+   * catalog. RAM mirror of the durable `sessions.title` column, rehydrated on
+   * cold-load (`reconstruct.ts`). Kept in RAM for dual-store projection parity.
+   * `undefined` until the first turn materializes it (or a future rename sets it).
+   */
+  title?: string
+  /**
    * D.1 — task currently in flight for this conversation. Set on `startTurn`,
    * cleared on any terminal transition (complete/fail/cancel). Lives in RAM
    * (like `state` / `pending_approval`) and is mirrored to the durable
@@ -484,7 +492,19 @@ export interface TurnToolCall {
   spillover_ref?: string
 }
 
+export interface TaskExecutionBudgetSnapshot {
+  elapsedActiveMs: number
+  iterationsUsed: number
+  durationMs: number
+  maxIterations: number
+}
+
 export interface PendingApproval {
+  task_budget?: TaskExecutionBudgetSnapshot
+  /** Set only by reconstruction of migration-marked legacy rows. */
+  legacy_budget?: boolean
+  /** Internal atomic replacement instruction; not persisted in the snapshot. */
+  replaces_request_id?: string
   request_id: string
   tool_name: string
   /** Producer-owned governed replay classification; never inferred by Control UI. */
@@ -525,7 +545,13 @@ export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
-  | { type: 'exhaustion'; message: string; iterations: number; attachments?: Attachment[] }
+  | {
+      type: 'exhaustion'
+      reason?: 'iteration_limit' | 'task_budget'
+      message: string
+      iterations: number
+      attachments?: Attachment[]
+    }
   | { type: 'cancelled'; reason?: string }
 
 export type AgentEventType =

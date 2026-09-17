@@ -36,6 +36,11 @@ function defaultScopesForRole(role: TeamRole): RpcScope[] {
       'host:task:read',
       'host:approval:write',
       'host:session:read',
+      // Per-session write (rename). Granted to every role: the blast radius is
+      // the caller's own chat session. A dedicated write scope is required
+      // because host:session:read is minted on every session listing, so
+      // reusing it would hand write to every navigation token.
+      'host:session:write',
       // Per-session model selection (spec §8.2): granted to every role. The
       // blast radius of a swap is the caller's own chat session; the operator's
       // cost control is the model allowlist, not this scope.
