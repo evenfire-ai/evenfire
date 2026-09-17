@@ -80,6 +80,7 @@ describe('current-turn GFS image lifecycle', () => {
       expect(images.every(p => p.source === undefined)).toBe(true)
       const reference = messages.find(m => m.tool_call_id === 'read-1')!
       expect(JSON.parse(reference.content).reason).toBe('image_input_limit_exceeded')
+      expect(gfs.attachments).toBeUndefined()
     }
   )
   it('reinserts a reread after the image leaves the context, without collecting it as a generated download', () => {
@@ -163,7 +164,8 @@ describe('current-turn GFS image lifecycle', () => {
       ],
       completed_results: [result()],
       attachments: [image, generated],
-    }
+      visualPayload: 'must-not-survive-projection',
+    } as PendingApproval & { visualPayload: string }
     const projected = projectGfsApproval(approval)
     expect(projected.parameters).toBe(approval.parameters)
     expect(projected.request_id).toBe(approval.request_id)
@@ -175,6 +177,7 @@ describe('current-turn GFS image lifecycle', () => {
     expect(projected.completed_results![0].tool_call_id).toBe('read-1')
     expect(projectGfsApproval(projected)).toEqual(projected)
     expect(approval.attachments).toHaveLength(2)
+    expect(projected).not.toHaveProperty('visualPayload')
     // A later authorized read may produce another version; it must be new input.
     appendToolResults(
       projected.context_snapshot,
@@ -191,5 +194,36 @@ describe('current-turn GFS image lifecycle', () => {
       .filter(p => p.type === 'image')
     expect(delivered).toHaveLength(1)
     expect(delivered[0].source?.version).toBe(4)
+  })
+
+  it('projects unsourced image parts and unknown extra approval fields', () => {
+    const approval = {
+      request_id: 'approval-unsourced',
+      tool_name: 'shell_exec',
+      tool_call_id: 'pending-2',
+      description: 'pending operation',
+      parameters: { command: 'echo ready' },
+      context_snapshot: [
+        {
+          role: 'user',
+          content: 'image',
+          contentParts: [{ type: 'image', mimeType: 'image/png', data: image.dataBase64 }],
+        },
+      ],
+      completed_results: [
+        {
+          ...result('shot-1'),
+          name: 'screenshots',
+          attachments: [{ ...image, visualSource: undefined }],
+        },
+      ],
+      visualPayload: 'secret-pixels',
+    } as PendingApproval & { visualPayload: string }
+    const projected = projectGfsApproval(approval)
+    expect(JSON.stringify(projected)).not.toContain(image.dataBase64)
+    expect(JSON.stringify(projected)).not.toContain('secret-pixels')
+    expect(projected).not.toHaveProperty('visualPayload')
+    expect(projected.completed_results![0].attachments).toBeUndefined()
+    expect(projected.context_snapshot[0].contentParts?.some(p => p.type === 'image')).toBe(false)
   })
 })

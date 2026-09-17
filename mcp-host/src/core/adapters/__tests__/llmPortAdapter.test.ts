@@ -678,3 +678,74 @@ describe('Cross-provider ToolCall normalization', () => {
     })
   })
 })
+
+describe('LlmPortAdapter image destination degrade', () => {
+  const imageMessage = {
+    role: 'user' as const,
+    content: 'image',
+    contentParts: [
+      {
+        type: 'image' as const,
+        mimeType: 'image/png' as const,
+        data: 'pixel-bytes',
+        source: {
+          kind: 'gfs' as const,
+          drive: 'main',
+          resourceId: 'a'.repeat(32),
+          gfsUri: `gfs://main/${'a'.repeat(32)}`,
+          version: 1,
+          name: 'pic.png',
+        },
+      },
+    ],
+  }
+
+  it('strips unverified image parts and continues the turn', async () => {
+    const completeSingleTurnWithTools = vi.fn().mockResolvedValue({
+      content: 'ok',
+      tool_calls: [],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: FinishReason.Stop,
+    })
+    const adapter = new LlmPortAdapter(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools,
+        getProviderType: () => 'openai' as const,
+        getImageInputCapability: async () => ({ status: 'unknown' as const }),
+        classifyError: vi.fn(),
+      },
+      'unknown-model',
+      'openai'
+    )
+    const messages = [structuredClone(imageMessage)]
+    const result = await adapter.completeWithTools({ messages, tools: [] })
+    expect(result.content).toBe('ok')
+    expect(completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const sent = completeSingleTurnWithTools.mock.calls[0][0]
+    expect(
+      sent.flatMap((m: { contentParts?: { type: string }[] }) => m.contentParts ?? [])
+    ).not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image' })]))
+    expect(JSON.stringify(sent)).toContain('image_input_not_verified_for_selected_model')
+    expect(JSON.stringify(sent)).not.toContain('pixel-bytes')
+  })
+
+  it('still rejects image parts that left the user visual message', async () => {
+    const adapter = new LlmPortAdapter(
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools: vi.fn(),
+        getProviderType: () => 'openai' as const,
+        classifyError: vi.fn(),
+      },
+      'gpt-4o',
+      'openai'
+    )
+    await expect(
+      adapter.completeWithTools({
+        messages: [{ ...imageMessage, role: 'system' }],
+        tools: [],
+      })
+    ).rejects.toThrow('Image input must remain in its user visual message')
+  })
+})

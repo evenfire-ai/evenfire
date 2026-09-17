@@ -71,7 +71,7 @@ function isSvgText(text: string): boolean {
     const suffixLength = remaining.startsWith('<?') ? 2 : 3
     remaining = remaining.slice(end + suffixLength).trimStart()
   }
-  return /^<svg[\s>]/i.test(remaining) || /^<!DOCTYPE\s+svg[\s>]/i.test(remaining)
+  return /^<svg[\s>/]/i.test(remaining) || /^<!DOCTYPE\s+svg[\s>]/i.test(remaining)
 }
 // Locally-authored argument-validation messages carry no server data and must
 // reach the model verbatim so the agent can correct its call.
@@ -181,7 +181,12 @@ export function buildGfsReadTools(client: GfscReadClient): InternalToolDefinitio
           if (isNonTextFormat(file.bytes)) return fileReference(file, 'unsupported_binary_format')
           let text: string
           try {
-            text = new TextDecoder('utf-8', { fatal: true }).decode(file.bytes)
+            // Same fileBytes cap as images (G0). TextDecoder already drops a
+            // UTF-8 BOM; strip again so classification and the model see the
+            // same contract.
+            text = new TextDecoder('utf-8', { fatal: true })
+              .decode(file.bytes)
+              .replace(/^\uFEFF/, '')
           } catch {
             return fileReference(file, 'unsupported_binary_format')
           }

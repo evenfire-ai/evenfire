@@ -1,4 +1,5 @@
 import { parseSessionKey } from '../../session/types'
+import { projectGfsApproval } from '../../visualInput/suspension'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
 import {
@@ -511,11 +512,12 @@ export class ConversationManager {
     const prevApproval = conversation.pending_approval
     const prevApprovalTraceContext = approval.traceContext
     approval.traceContext = conversation.traceContext ?? null
+    const projected = projectGfsApproval(approval)
     conversation.state = ConversationState.AwaitingApproval
-    conversation.pending_approval = approval
+    conversation.pending_approval = projected
     conversation.updated_at = new Date()
     try {
-      await this.store.persistSuspend(conversation, approval)
+      await this.store.persistSuspend(conversation, projected)
     } catch (err) {
       // Under the sqlite/dual store the durable write can reject (worker
       // timeout, SQLITE_BUSY, worker exit). Roll back the in-RAM mutation so

@@ -124,9 +124,12 @@ export async function executeSingleTool(
       'Tool execution finished'
     )
 
-    for (const attachment of output.attachments ?? []) {
-      if (attachment.kind === 'image' && !attachment.visualSource)
-        config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
+    const attachments = output.is_error ? undefined : output.attachments
+    if (!output.is_error) {
+      for (const attachment of attachments ?? []) {
+        if (attachment.kind === 'image' && !attachment.visualSource)
+          config.visualInput?.budget.observeExternalImage(attachment.dataBase64)
+      }
     }
     let wrappedContent: string
     if (tool.requiresSanitization()) {
@@ -214,7 +217,7 @@ export async function executeSingleTool(
       name: call.name,
       content: finalContent,
       is_error: output.is_error,
-      attachments: output.attachments,
+      attachments,
       metadata: output.metadata,
       rawContent: output.content,
       spillover_ref: spilloverRef,

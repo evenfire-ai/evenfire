@@ -1,5 +1,37 @@
-import type { ChatMessage } from '../core/types'
+import type { ChatMessage, MessageContentPart } from '../core/types'
 import { VISUAL_INPUT_LIMITS, VisualInputError } from './policy'
+
+function referenceResource(part: MessageContentPart) {
+  if (part.type !== 'image' || !part.source) return undefined
+  const { kind, drive, resourceId, gfsUri, version, name } = part.source
+  return { kind, drive, resourceId, gfsUri, version, name }
+}
+
+/** Replace image parts with references when the destination cannot take them. */
+export function degradeUnverifiedImageInput(messages: ChatMessage[]): boolean {
+  let changed = false
+  for (const message of messages) {
+    if (!message.contentParts?.some(part => part.type === 'image')) continue
+    changed = true
+    message.contentParts = message.contentParts.map(part => {
+      if (part.type !== 'image') return part
+      const resource = referenceResource(part)
+      return {
+        type: 'text' as const,
+        text: JSON.stringify({
+          delivery: 'reference_only',
+          reason: 'image_input_not_verified_for_selected_model',
+          ...(resource ? { resource } : {}),
+        }),
+      }
+    })
+    if (message.role === 'user') {
+      message.content =
+        'Image input was not verified for the selected model. Treat the listed resources as references only.'
+    }
+  }
+  return changed
+}
 
 export function hasGfsImageInput(messages: readonly ChatMessage[]): boolean {
   return messages.some(message =>

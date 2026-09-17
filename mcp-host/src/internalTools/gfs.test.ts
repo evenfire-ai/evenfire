@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createCanvas } from '@napi-rs/canvas'
+import { VisualInputBudget } from '../visualInput/policy'
 import {
   type GfscReadClient,
   type GfscWriteClient,
@@ -93,6 +95,91 @@ describe('buildGfsReadTools', () => {
     expect(r.error).toBe('GFS read failed (gfsc 403: forbidden)')
     expect(r.error).not.toContain('/internal/server/path')
     expect(r.error).not.toContain('blob/key')
+  })
+
+  it('returns typed image input when the destination supports vision', async () => {
+    const canvas = createCanvas(2, 2)
+    canvas.getContext('2d').fillRect(0, 0, 2, 2)
+    const bytes = canvas.toBuffer('image/png')
+    const source = {
+      kind: 'gfs' as const,
+      drive: 'main',
+      resourceId: 'a'.repeat(32),
+      gfsUri: `gfs://main/${'a'.repeat(32)}`,
+      version: 2,
+      name: 'pic.png',
+    }
+    const reservation = { release: vi.fn() }
+    const c = client({
+      read: vi.fn(async () => ({ source, bytes, reservation })),
+    })
+    const r = await toolMap(c)
+      .get('clerum__gfs_read')!
+      .execute({ drive: 'main', resourceId: source.resourceId }, '', {
+        visualInput: {
+          budget: new VisualInputBudget(),
+          resolveCapability: async () => ({
+            status: 'supported',
+            provider: 'openai',
+            model: 'gpt-4.1',
+            evidence: 'unit',
+          }),
+        },
+      })
+    expect(r.success).toBe(true)
+    expect(JSON.parse(r.content as string).delivery).toBe('image_input')
+    expect(r.images?.[0]).toMatchObject({ mimeType: 'image/png', source })
+    expect(reservation.release).toHaveBeenCalledOnce()
+  })
+
+  it.each(['<svg/>', '<svg />', '<SVG/>', '\uFEFF<svg/>'])(
+    'returns a reference for self-closing SVG %j',
+    async text => {
+      const c = client({
+        read: vi.fn(async () => ({
+          source: {
+            kind: 'gfs' as const,
+            drive: 'main',
+            resourceId: 'a'.repeat(32),
+            gfsUri: `gfs://main/${'a'.repeat(32)}`,
+            version: 2,
+            name: 'icon.svg',
+          },
+          bytes: Buffer.from(text),
+          reservation: { release: vi.fn() },
+        })),
+      })
+      const r = await toolMap(c)
+        .get('clerum__gfs_read')!
+        .execute({ drive: 'main', resourceId: 'abc' }, '')
+      expect(r.success).toBe(true)
+      expect(JSON.parse(r.content as string)).toMatchObject({
+        delivery: 'reference_only',
+        reason: 'svg_visual_input_not_supported',
+      })
+    }
+  )
+
+  it('strips a UTF-8 BOM from otherwise valid text', async () => {
+    const c = client({
+      read: vi.fn(async () => ({
+        source: {
+          kind: 'gfs' as const,
+          drive: 'main',
+          resourceId: 'a'.repeat(32),
+          gfsUri: `gfs://main/${'a'.repeat(32)}`,
+          version: 2,
+          name: 'note.txt',
+        },
+        bytes: Buffer.from('\uFEFFhello'),
+        reservation: { release: vi.fn() },
+      })),
+    })
+    const r = await toolMap(c)
+      .get('clerum__gfs_read')!
+      .execute({ drive: 'main', resourceId: 'abc' }, '')
+    expect(r.success).toBe(true)
+    expect(r.content).toBe('hello')
   })
 
   it('strips a non-gfsc-shaped read error down to the generic label', async () => {

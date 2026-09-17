@@ -1014,6 +1014,9 @@ export class SqliteConversationStore implements ConversationStore {
 
   async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
     approval = projectGfsApproval(approval)
+    if (conv.pending_approval?.request_id === approval.request_id) {
+      conv.pending_approval = approval
+    }
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     if (!conv.activeTaskId) {

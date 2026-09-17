@@ -94,6 +94,8 @@ describe('SqliteConversationStore — basic round-trip', () => {
       expect(restored.tool_call_id).toBe('pending-action')
       expect(restored.context_snapshot.slice(0, 2)).toEqual(approval.context_snapshot.slice(0, 2))
       expect(restored.completed_results![0].attachments).toBeUndefined()
+      expect(JSON.stringify(conv.pending_approval)).not.toContain(payload)
+      expect(conv.pending_approval?.completed_results?.[0].attachments).toBeUndefined()
     } finally {
       await handle.shutdown()
     }

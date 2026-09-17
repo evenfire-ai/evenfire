@@ -2241,6 +2241,50 @@ describe('executeSingleTool — progress watcher', () => {
   })
 })
 
+describe('executeSingleTool — failed visual leftovers', () => {
+  it('does not observe or keep attachments from a failed tool result', async () => {
+    const observeExternalImage = vi.fn()
+    const tool = {
+      name: () => 'screenshots',
+      execute: vi.fn(async () => ({
+        content: 'failed',
+        is_error: true,
+        duration_ms: 1,
+        attachments: [
+          {
+            id: 'shot',
+            kind: 'image',
+            mimeType: 'image/png',
+            encoding: 'base64',
+            dataBase64: 'failed-image',
+          },
+        ],
+      })),
+      requiresSanitization: () => false,
+    }
+    const result = await executeSingleTool({ id: 'call-1', name: 'screenshots', arguments: {} }, {
+      toolRegistry: { get: () => tool },
+      toolOutputProcessor: {
+        beforeExecution: () => ({ is_valid: true, errors: [] }),
+        afterExecution: (_n: string, out: { content: string }) => out.content,
+      },
+      safety: {
+        sanitizeOutput: (_n: string, output: string) => ({
+          content: output,
+          was_modified: false,
+          warnings: [],
+        }),
+      },
+      events: { emit: () => {} },
+      toolTimeout: 60_000,
+      visualInput: { budget: { observeExternalImage } },
+    } as never)
+    expect(result.is_error).toBe(true)
+    expect(result.attachments).toBeUndefined()
+    expect(observeExternalImage).not.toHaveBeenCalled()
+  })
+})
+
 describe('tool presentation failure boundary', () => {
   it('does not disclose the full local catalog or call reasoning when presentation fails', async () => {
     const reasoning = createMockReasoning([{ type: 'text', content: 'should not run' }])

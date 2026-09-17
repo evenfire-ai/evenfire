@@ -91,6 +91,7 @@ export function createGfscClient(env: GfsRuntimeEnv): GfscWriteClient {
   ): Promise<Response> {
     return fetchFn(`${baseUrl}${path}`, {
       ...init,
+      redirect: 'error',
       headers: {
         [AUTH_HEADER]: `${AUTH_SCHEME} ${await accessValue()}`,
         ...(init.headers ?? {}),

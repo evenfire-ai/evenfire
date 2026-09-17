@@ -34,8 +34,8 @@ async function collect(
       const next = await reader.read()
       if (signal.aborted) throw new VisualInputError('cancelled')
       if (next.done) break
-      onChunk?.(next.value.byteLength)
       if (next.value.byteLength > maximum - size) throw new VisualInputError('limit_exceeded')
+      onChunk?.(next.value.byteLength)
       size += next.value.byteLength
       chunks.push(next.value)
     }

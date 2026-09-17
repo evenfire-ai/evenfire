@@ -67,6 +67,7 @@ describe('gfs runtime gfsc client', () => {
     expect(fetchFn.mock.calls[0]?.[1]?.headers).toMatchObject({
       authorization: 'Bearer gfs-access',
     })
+    expect(fetchFn.mock.calls[0]?.[1]).toMatchObject({ redirect: 'error' })
   })
 
   it('routes writes to the gfsc writer service with conditional body', async () => {
@@ -462,7 +463,7 @@ describe('GFS binary content snapshots', () => {
     })
     expect(cancel).toHaveBeenCalled()
     expect(budget.residentBytes).toBe(0)
-    expect(budget.readBytes).toBe(8)
+    expect(budget.readBytes).toBe(3)
   })
 
   it('rejects short content and unsolicited partial responses', async () => {

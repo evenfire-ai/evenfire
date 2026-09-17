@@ -140,6 +140,8 @@ export function appendToolResults(
               resource: att.visualSource,
             })
             tr.rawContent = tr.content
+            tr.attachments = tr.attachments?.filter(existing => existing !== att)
+            if (!tr.attachments?.length) delete tr.attachments
             continue
           }
         }

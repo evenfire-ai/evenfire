@@ -11,7 +11,10 @@ import {
   type VisualInputBudget,
   VisualInputError,
 } from '../../visualInput/policy'
-import { assertVisualRequestFits, hasGfsImageInput } from '../../visualInput/requestPolicy'
+import {
+  assertVisualRequestFits,
+  degradeUnverifiedImageInput,
+} from '../../visualInput/requestPolicy'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
 import { LlmError, LlmErrorCode } from '../errors'
 import { LlmPort } from '../interfaces'
@@ -138,8 +141,7 @@ export class LlmPortAdapter implements LlmPort {
     const hasImages = request.messages.some(message =>
       message.contentParts?.some(part => part.type === 'image')
     )
-    if (!hasGfsImageInput(request.messages) && !(this.visualBudget?.hasEncodedImages && hasImages))
-      return false
+    if (!hasImages) return false
     if (
       request.messages.some(
         message =>
@@ -160,12 +162,8 @@ export class LlmPortAdapter implements LlmPort {
       capability.provider !== this.providerName ||
       capability.model !== this.model
     ) {
-      throw new LlmError(
-        'Image input is not verified for the selected model and request method. Read the resource again with a supported model.',
-        this.providerName,
-        LlmErrorCode.ApiCallFailed,
-        false
-      )
+      degradeUnverifiedImageInput(request.messages)
+      return false
     }
     assertVisualRequestFits(request.messages, request, true)
     return true

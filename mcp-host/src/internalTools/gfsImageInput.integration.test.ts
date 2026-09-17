@@ -401,8 +401,20 @@ describe('GFS bytes to actual provider request', () => {
           : part
       ),
     }))
+    const completeSingleTurnWithTools = vi.fn().mockResolvedValue({
+      content: 'degraded',
+      tool_calls: [],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
     const fallback = new LlmPortAdapter(
-      new OpenAIProvider('integration-only', 'unknown-model'),
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools,
+        getProviderType: () => 'openai' as const,
+        getImageInputCapability: async () => ({ status: 'unknown' as const }),
+        classifyError: vi.fn(),
+      },
       'unknown-model',
       'openai',
       undefined,
@@ -412,8 +424,12 @@ describe('GFS bytes to actual provider request', () => {
       undefined,
       subject.budget
     )
-    await expect(fallback.completeWithTools({ messages: shaped, tools: [] })).rejects.toThrow(
-      'Image input is not verified'
+    const fallbackMessages = structuredClone(shaped)
+    await fallback.completeWithTools({ messages: fallbackMessages, tools: [] })
+    expect(completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(false)
+    expect(JSON.stringify(fallbackMessages)).toContain(
+      'image_input_not_verified_for_selected_model'
     )
     expect(sdkCreate).not.toHaveBeenCalled()
     await subject.adapter.completeWithTools({ messages: shaped, tools: [] })
@@ -478,6 +494,7 @@ describe('GFS bytes to actual provider request', () => {
     Buffer.from('%PDF-1.7'),
     Buffer.from([0x50, 0x4b, 0x03, 0x04]),
     Buffer.from('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>'),
+    Buffer.from('<svg/>'),
   ])('returns a reference instead of interpreting unsupported bytes as text', async bytes => {
     const subject = await setup(bytes, { name: 'misleading.txt' })
     expect(JSON.parse(subject.output.content).delivery).toBe('reference_only')
@@ -499,14 +516,30 @@ describe('GFS bytes to actual provider request', () => {
 
   it('rechecks the actual destination instead of forwarding images to an unknown fallback', async () => {
     const subject = await setup(createCanvas(1, 1).toBuffer('image/png'))
+    const completeSingleTurnWithTools = vi.fn().mockResolvedValue({
+      content: 'degraded',
+      tool_calls: [],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      finish_reason: 'stop',
+    })
     const fallback = new LlmPortAdapter(
-      new OpenAIProvider('integration-only', 'unknown-model'),
+      {
+        completeSingleTurn: vi.fn(),
+        completeSingleTurnWithTools,
+        getProviderType: () => 'openai' as const,
+        getImageInputCapability: async () => ({ status: 'unknown' as const }),
+        classifyError: vi.fn(),
+      },
       'unknown-model',
       'openai'
     )
-    await expect(
-      fallback.completeWithTools({ messages: subject.messages, tools: [] })
-    ).rejects.toThrow('Image input is not verified')
+    const fallbackMessages = structuredClone(subject.messages)
+    await fallback.completeWithTools({ messages: fallbackMessages, tools: [] })
+    expect(completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    expect(fallbackMessages.some(m => m.contentParts?.some(p => p.type === 'image'))).toBe(false)
+    expect(JSON.stringify(fallbackMessages)).toContain(
+      'image_input_not_verified_for_selected_model'
+    )
     expect(sdkCreate).not.toHaveBeenCalled()
     subject.budget.close()
   })
