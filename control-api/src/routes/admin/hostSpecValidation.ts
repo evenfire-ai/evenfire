@@ -494,7 +494,7 @@ export async function validateHostSpec(
   // gate — that is strictly fail-closed. A spec with no `name` key at all is left
   // untouched (deployed Hosts are never disrupted).
   const model = spec.model
-  if (isPlainObject(model) && model.name !== undefined) {
+  if (isPlainObject(model) && Object.prototype.hasOwnProperty.call(model, 'name')) {
     const name = typeof model.name === 'string' ? model.name.trim() : ''
     if (!name) {
       return {
