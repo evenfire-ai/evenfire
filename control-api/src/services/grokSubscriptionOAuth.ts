@@ -169,11 +169,13 @@ export type GrokDevicePollResult =
   | { status: 'expired' | 'denied' }
   | { status: 'connected'; connection: GrokSubscriptionSafeConnection }
 
-export type GrokCatalogSyncResult = {
-  ok: boolean
-  catalogStatus: GrokCatalogOutcome | 'never_synced'
-  reason?: GrokOAuthErrorCode | 'catalog_sync_failed' | 'stale_revision' | 'no_grant'
-}
+export type GrokCatalogSyncResult =
+  | { ok: true; catalogStatus: 'ready'; connection: GrokSubscriptionSafeConnection }
+  | {
+      ok: false
+      catalogStatus: GrokCatalogOutcome | 'never_synced'
+      reason?: GrokOAuthErrorCode | 'catalog_sync_failed' | 'stale_revision' | 'no_grant'
+    }
 
 export async function getGrokSubscriptionConnection(
   deps: GrokOAuthDeps
@@ -399,7 +401,7 @@ export async function runGrokCatalogSync(
     if (synced.outcome !== 'ready') {
       return { ok: false, catalogStatus: synced.outcome }
     }
-    return { ok: true, catalogStatus: 'ready' }
+    return { ok: true, catalogStatus: 'ready', connection: synced.connection }
   } catch (err) {
     log.warn(
       { err, event: 'grok_catalog_auto_sync_failed', connectionKey: key },

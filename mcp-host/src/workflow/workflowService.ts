@@ -106,6 +106,8 @@ function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
       return { azure: { 'azure-openai-api-key': apiKey } }
     case 'codex-subscription':
       return {}
+    case 'grok-subscription':
+      return {}
     default: {
       const _exhaustive: never = provider
       void _exhaustive

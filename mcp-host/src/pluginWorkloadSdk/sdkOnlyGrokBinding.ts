@@ -1,5 +1,5 @@
-import type { CodexPolicyBinding } from '@clerum/codex-catalog-projection'
 import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
+import type { GrokPolicyBinding } from '../llm/grokPolicyBinding'
 import {
   type PluginWorkloadSdkCodexBindingProof,
   isPluginWorkloadSdkCodexBindingProof,
@@ -19,13 +19,12 @@ export function readSdkOnlyGrokBinding(): PluginWorkloadSdkCodexBindingProof | n
   return current
 }
 
-export function sdkOnlyGrokBindingAsPolicy(): CodexPolicyBinding | null {
+export function sdkOnlyGrokBindingAsPolicy(): GrokPolicyBinding | null {
   if (!current) return null
   return {
     catalogRevision: current.catalogRevision,
     credentialRevision: current.credentialRevision,
     connectionKey: current.connectionKey,
-    models: [current.model],
   }
 }
 

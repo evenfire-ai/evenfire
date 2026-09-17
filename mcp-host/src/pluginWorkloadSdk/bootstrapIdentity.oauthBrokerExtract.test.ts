@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { LlmProvider } from '../llm/registryCore'
+import { configurePluginWorkloadSdkBootstrapIdentity } from './bootstrapIdentity'
 
 vi.mock('@clerum/llm-providers', async () => {
   const actual =
@@ -14,23 +16,22 @@ vi.mock('@clerum/llm-providers', async () => {
   }
 })
 
-vi.mock('../llm/registryCore.js', async () => {
-  const actual =
-    await vi.importActual<typeof import('../llm/registryCore.js')>('../llm/registryCore.js')
+vi.mock('../llm/registryCore', async () => {
+  const actual = await vi.importActual<typeof import('../llm/registryCore')>('../llm/registryCore')
   return {
     ...actual,
     isLlmProvider: (id: string) => actual.isLlmProvider(id) || id === 'fixture-broker',
   }
 })
 
-const { configurePluginWorkloadSdkBootstrapIdentity } = await import('./bootstrapIdentity.js')
+const FIXTURE_BROKER = 'fixture-broker' as LlmProvider
 
 describe('oauth-broker extract bootstrap', () => {
   it('uses contractVersion 3 for an injected fixture broker', async () => {
     const result = await configurePluginWorkloadSdkBootstrapIdentity(
       {
         capabilityFamily: 'promptBridge',
-        provider: 'fixture-broker',
+        provider: FIXTURE_BROKER,
         model: 'fixture-1',
       },
       { capabilityFamily: 'promptBridge' }

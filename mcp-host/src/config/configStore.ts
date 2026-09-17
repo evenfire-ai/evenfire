@@ -38,6 +38,7 @@ import {
   toGrokPolicyBinding,
   toPolicyBinding,
 } from '@clerum/codex-catalog-projection'
+import type { GrokPolicyBinding } from '../llm/grokPolicyBinding'
 import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
@@ -498,8 +499,16 @@ export class ConfigStore {
    * Null when the CM is absent, the Grok map is missing, or the assigned key
    * is unassigned. Never reads Codex annotations.
    */
-  grokPolicyBinding(): CodexPolicyBinding | null {
-    return this.grokBinding
+  grokPolicyBinding(): GrokPolicyBinding | null {
+    const binding = this.grokBinding
+    if (typeof binding?.connectionKey !== 'string' || binding.connectionKey.length === 0) {
+      return null
+    }
+    return {
+      catalogRevision: binding.catalogRevision,
+      credentialRevision: binding.credentialRevision,
+      connectionKey: binding.connectionKey,
+    }
   }
 
   // ─── Bootstrap (initial list) ────────────────────────────────────────

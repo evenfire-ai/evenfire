@@ -875,7 +875,6 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       catalogRevision: 5,
       credentialRevision: 2,
       connectionKey: 'team-grok',
-      models: ['grok-4.6'],
     })
     expect(store.allowedModels().get('grok-subscription')).toEqual([{ model: 'grok-4.6' }])
     expect(store.codexPolicyBinding()?.catalogRevision).toBe(99)

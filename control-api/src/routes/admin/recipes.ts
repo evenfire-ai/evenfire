@@ -1280,10 +1280,21 @@ function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
   return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
 }
 
+function recipeAnnotationStrings(
+  annotations: Record<string, unknown> | undefined
+): Record<string, string> | undefined {
+  if (!annotations) return undefined
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(annotations)) {
+    if (typeof value === 'string') out[key] = value
+  }
+  return out
+}
+
 function readRequestedCodexRecipeGrant(body: RecipeBody): string {
   const result = readSubscriptionConnectionRef({
     provider: 'codex-subscription',
-    annotations: body.metadata?.annotations,
+    annotations: recipeAnnotationStrings(body.metadata?.annotations),
   })
   if (!result.ok) {
     throw new RecipeGrantAnnotationDisagreeError(result.message)
@@ -1354,7 +1365,7 @@ function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
 function readRequestedGrokRecipeGrant(body: RecipeBody): string {
   const result = readSubscriptionConnectionRef({
     provider: 'grok-subscription',
-    annotations: body.metadata?.annotations,
+    annotations: recipeAnnotationStrings(body.metadata?.annotations),
   })
   if (!result.ok) {
     throw new RecipeGrantAnnotationDisagreeError(result.message)

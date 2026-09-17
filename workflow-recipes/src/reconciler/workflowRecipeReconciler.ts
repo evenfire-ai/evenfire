@@ -1019,6 +1019,7 @@ export class WorkflowRecipeReconciler {
         enableCustomCoordinatorImage: this.config.enableCustomCoordinatorImage,
         enableSnippetRuntime: this.config.enableSnippetRuntime,
         pluginWorkloadSdkEnabled: this.config.pluginWorkloadSdkEnabled,
+        grokSubscriptionEnabled: this.config.grokSubscriptionEnabled,
         maxWorkflowSteps: this.config.maxWorkflowSteps,
         allowedCoordinatorImagePrefixes: this.config.allowedCoordinatorImagePrefixes,
         requireCoordinatorImageDigest: this.config.requireCoordinatorImageDigest,
