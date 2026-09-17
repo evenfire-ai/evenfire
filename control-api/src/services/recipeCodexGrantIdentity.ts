@@ -110,9 +110,11 @@ export async function publishRecipeGrantIdentity(input: {
   const provider = grok ? 'grok-subscription' : 'codex-subscription'
   // The recipe's agent / step agents own the grant annotations when they name
   // an oauth-broker. Publishing another broker's identity would rewrite the
-  // agent grant (e.g. a Grok SDK key read back as the Codex agent's key).
+  // agent grant (e.g. a Grok SDK key read back as the Codex agent's key), and a
+  // named key on a recipe with no matching broker agent can never authorize
+  // (live-target attestation reads agent/steps only). Clearing is still allowed.
   const agentBrokers = collectRecipeOauthBrokerProviders(asRecord(current.spec) ?? {})
-  if (agentBrokers.length > 0 && !agentBrokers.includes(provider)) {
+  if ((agentBrokers.length > 0 || next !== unassignedKey) && !agentBrokers.includes(provider)) {
     throw new RecipeCodexGrantIdentityError(
       409,
       'oauth_broker_provider_conflict',

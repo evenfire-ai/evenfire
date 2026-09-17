@@ -434,7 +434,17 @@ async function publishPromptBridgeGrantIdentity(input: {
     )
     return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
   }
-  if (input.provider && recipeBrokers.length > 0 && !recipeBrokers.includes(input.provider)) {
+  // A broker SDK target is spendable only when the recipe's agent / step agents
+  // name that same broker: authorize attests live targets from agent/steps, and
+  // the promptBridge default target must match the bootstrap agent. A static-
+  // agent recipe (RP-009) therefore fails closed here instead of publishing an
+  // identity no SDK call can ever redeem. An unassigned target on such a recipe
+  // only clears the identity, so legacy grant re-saves keep working.
+  if (
+    input.provider &&
+    !recipeBrokers.includes(input.provider) &&
+    (recipeBrokers.length > 0 || input.nextRef !== '')
+  ) {
     if (input.onProviderConflict === 'skip') return {}
     return { error: { status: 400, error: 'oauth_broker_provider_conflict' } }
   }

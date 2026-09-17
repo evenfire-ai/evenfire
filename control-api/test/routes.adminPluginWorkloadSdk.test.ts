@@ -605,6 +605,17 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
 
   // ── Claim 1b: Codex (oauth-broker) promptBridge targets ─────────────────────
   describe('codex-subscription promptTargets', () => {
+    // A broker SDK target is publishable only on a recipe whose agent names the
+    // same broker (RP-009); default these suites to that realistic recipe shape.
+    beforeEach(() => {
+      getResource.mockResolvedValue({
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
+          pluginWorkloadSdk: { promptBridge: {} },
+        },
+      })
+    })
+
     const codexGrantBody = {
       ...validGrantBody,
       provider: 'codex-subscription',
@@ -741,6 +752,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     })
 
     it('accepts a stored Codex target without connectionRef as unassigned', async () => {
+      // Legacy re-save on a recipe with no broker agent: clearing stays allowed.
+      getResource.mockResolvedValue({ spec: { pluginWorkloadSdk: { promptBridge: {} } } })
       vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-legacy' } as never)
       const { connectionRef: _omitted, ...targetWithoutConnection } =
         codexGrantBody.promptTargets[0]!
@@ -760,6 +773,8 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     })
 
     it('accepts the unassigned sentinel as a stored Codex target', async () => {
+      // Legacy re-save on a recipe with no broker agent: clearing stays allowed.
+      getResource.mockResolvedValue({ spec: { pluginWorkloadSdk: { promptBridge: {} } } })
       vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-legacy' } as never)
       const res = await request(buildApp())
         .post('/admin/plugin-workload-sdk/grants')
@@ -847,6 +862,17 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
   })
 
   describe('grok-subscription promptTargets', () => {
+    // A broker SDK target is publishable only on a recipe whose agent names the
+    // same broker (RP-009); default these suites to that realistic recipe shape.
+    beforeEach(() => {
+      getResource.mockResolvedValue({
+        spec: {
+          agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+          pluginWorkloadSdk: { promptBridge: {} },
+        },
+      })
+    })
+
     const grokGrantBody = {
       ...validGrantBody,
       provider: 'grok-subscription',
@@ -886,37 +912,47 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
     })
 
     it.each([
-      ['spec.agent', { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } }],
       [
-        'a step agent',
+        'spec.agent is Codex',
+        { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } },
+      ],
+      [
+        'a step agent is Codex',
         {
           agent: { provider: 'openai', model: 'gpt-5.1' },
           steps: [{ id: 's', agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } }],
         },
       ],
-    ])(
-      'rejects a Grok target when %s is Codex (oauth_broker_provider_conflict)',
-      async (_label, spec) => {
-        vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
-        getResource.mockResolvedValue({
-          metadata: {
-            annotations: {
-              'clerum.io/codex-connection-ref': 'team-plus',
-              'clerum.io/subscription-connection-ref': 'team-plus',
-            },
+      // RP-009: a static-agent recipe has no live oauth-broker target, so a Grok
+      // SDK grant could publish but never authorize. Fail closed at publish.
+      [
+        'the only agent is static (openai)',
+        {
+          agent: { provider: 'openai', model: 'gpt-5.1' },
+          pluginWorkloadSdk: { promptBridge: {} },
+        },
+      ],
+      ['the recipe declares no agent at all', { pluginWorkloadSdk: { promptBridge: {} } }],
+    ])('rejects a Grok target when %s (oauth_broker_provider_conflict)', async (_label, spec) => {
+      vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
+      getResource.mockResolvedValue({
+        metadata: {
+          annotations: {
+            'clerum.io/codex-connection-ref': 'team-plus',
+            'clerum.io/subscription-connection-ref': 'team-plus',
           },
-          spec,
-        })
-        const res = await request(buildApp())
-          .post('/admin/plugin-workload-sdk/grants')
-          .send(grokGrantBody)
-        expect(res.status).toBe(400)
-        expect(res.body).toEqual({ error: 'oauth_broker_provider_conflict' })
-        expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
-        expect(updateResource).not.toHaveBeenCalled()
-        expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
-      }
-    )
+        },
+        spec,
+      })
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(grokGrantBody)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'oauth_broker_provider_conflict' })
+      expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
+      expect(updateResource).not.toHaveBeenCalled()
+      expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+    })
 
     it('accepts a Grok target on a Grok-agent recipe', async () => {
       vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-grok' } as never)

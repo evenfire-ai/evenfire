@@ -149,7 +149,7 @@ describe('recipe Codex grant identity', () => {
         resourceVersion: '3',
         annotations: {},
       },
-      spec: {},
+      spec: { agent: { provider: 'codex-subscription' } },
     })
     updateResource.mockRejectedValueOnce(new K8sConflictError('resource changed'))
     await expect(
@@ -253,7 +253,9 @@ describe('recipe Codex grant identity', () => {
     expect(updateResource).not.toHaveBeenCalled()
   })
 
-  it('publishes a Grok identity on an SDK-only recipe with a static agent', async () => {
+  it('refuses (409) to publish a named Grok identity on a recipe whose only agent is static', async () => {
+    // RP-009: authorize attests live oauth-broker targets from agent/steps only,
+    // so a static-agent recipe can never spend a published Grok key.
     getResource.mockResolvedValue({
       metadata: { resourceVersion: '7', annotations: {} },
       spec: { agent: { provider: 'openai' }, pluginWorkloadSdk: { family: 'promptBridge' } },
@@ -266,7 +268,30 @@ describe('recipe Codex grant identity', () => {
         next: 'team-grok',
         provider: 'grok-subscription',
       })
-    ).resolves.toMatchObject({ published: 'team-grok', noop: false })
+    ).rejects.toMatchObject({ status: 409, error: 'oauth_broker_provider_conflict' })
+    expect(updateResource).not.toHaveBeenCalled()
+  })
+
+  it('still clears (unassigns) a stale broker identity on a static-agent recipe', async () => {
+    getResource.mockResolvedValue({
+      metadata: {
+        resourceVersion: '7',
+        annotations: {
+          'clerum.io/codex-connection-ref': '',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        },
+      },
+      spec: { agent: { provider: 'openai' }, pluginWorkloadSdk: { family: 'promptBridge' } },
+    })
+    await expect(
+      publishRecipeGrantIdentity({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'unassigned',
+        provider: 'grok-subscription',
+      })
+    ).resolves.toMatchObject({ noop: false })
     expect(updateResource).toHaveBeenCalledTimes(1)
   })
 
