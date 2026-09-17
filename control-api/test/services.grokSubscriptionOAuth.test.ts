@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
-import { GrokSubscriptionStaleRevisionError } from '../src/services/grokSubscriptionConnection.js'
+import { rebuildLiveGrokUnionAllowlist } from '../src/services/grokSubscriptionCatalog.js'
+import {
+  GrokSubscriptionConnectionKeyConflictError,
+  GrokSubscriptionStaleRevisionError,
+} from '../src/services/grokSubscriptionConnection.js'
 
 const repos = vi.hoisted(() => ({
   insertState: vi.fn(),
@@ -10,6 +14,7 @@ const repos = vi.hoisted(() => ({
   expireState: vi.fn(),
   cancelState: vi.fn(),
   getSafe: vi.fn(),
+  getAny: vi.fn(),
   insertInitial: vi.fn(),
   rotate: vi.fn(),
   acquireLock: vi.fn(),
@@ -38,6 +43,7 @@ vi.mock('../src/services/grokSubscriptionConnection.js', async () => {
   return {
     ...actual,
     getSafeGrokSubscriptionConnection: repos.getSafe,
+    getGrokSubscriptionConnectionIncludingRevoked: repos.getAny,
     insertInitialGrokSubscriptionConnection: repos.insertInitial,
     rotateGrokSubscriptionCredentials: repos.rotate,
     acquireGrokSubscriptionRefreshLock: repos.acquireLock,
@@ -67,6 +73,7 @@ const {
   ensureFreshGrokAccessToken,
   pollGrokDevice,
   refreshGrokSubscriptionConnection,
+  revokeGrokSubscription,
   startGrokDeviceConnect,
 } = await import('../src/services/grokSubscriptionOAuth.js')
 
@@ -565,5 +572,162 @@ describe('grok subscription OAuth device broker', () => {
     expect(repos.persistRefresh).toHaveBeenCalled()
     expect(repos.updateInPlace).toHaveBeenCalled()
     expect(repos.releaseLock).toHaveBeenCalled()
+  })
+})
+
+function pendingState(state: string, status: 'pending' | 'consumed' = 'pending') {
+  return {
+    safe: {
+      state,
+      flow: 'device',
+      intent: 'connect',
+      status,
+      connectionKey: CONNECTION_KEY,
+      expiresAt: new Date(Date.now() + 60_000),
+      consumedAt: status === 'consumed' ? new Date() : null,
+      cancelledAt: null,
+      createdAt: new Date(),
+    },
+    deviceCode: 'device-secret',
+  }
+}
+
+function tokenFetch(subject = 'acct_raw_123') {
+  return vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      access_token: 'access-secret',
+      refresh_token: 'refresh-secret',
+      expires_in: 60,
+      id_token: idTokenFor(subject),
+    }),
+  })
+}
+
+const REVOKED_ROW = {
+  id: '11111111-1111-4111-8111-111111111111',
+  connectionKey: CONNECTION_KEY,
+  status: 'revoked',
+  credentialRevision: 2,
+  accountFingerprint: null,
+  revokedAt: new Date(),
+}
+
+const LIVE_ROW = {
+  id: '11111111-1111-4111-8111-111111111111',
+  connectionKey: CONNECTION_KEY,
+  status: 'connected',
+  credentialRevision: 1,
+  accountFingerprint: fingerprint('acct_raw_123'),
+  revokedAt: null,
+}
+
+describe('grok subscription grant lifecycle (revocation is terminal per key)', () => {
+  beforeEach(() => {
+    for (const fn of Object.values(repos)) fn.mockReset()
+    vi.mocked(rebuildLiveGrokUnionAllowlist).mockReset()
+  })
+
+  it('refuses to start device authorization for a revoked key', async () => {
+    repos.getAny.mockResolvedValue(REVOKED_ROW)
+    const fetchFn = vi.fn()
+    await expect(startGrokDeviceConnect(deps(fetchFn), 'connect')).rejects.toMatchObject({
+      code: 'not_connected',
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(repos.insertState).not.toHaveBeenCalled()
+  })
+
+  it('refuses to poll a device flow for a revoked key before consuming state or calling upstream', async () => {
+    repos.getAny.mockResolvedValue(REVOKED_ROW)
+    repos.peekState.mockResolvedValue(pendingState('dev-revoked'))
+    const fetchFn = tokenFetch()
+    await expect(pollGrokDevice(deps(fetchFn), 'dev-revoked')).rejects.toMatchObject({
+      code: 'not_connected',
+    })
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(repos.consumeState).not.toHaveBeenCalled()
+    expect(repos.insertInitial).not.toHaveBeenCalled()
+  })
+
+  it('does not recreate a live row when the key is revoked after the state was consumed', async () => {
+    repos.getAny.mockResolvedValueOnce(null).mockResolvedValue(REVOKED_ROW)
+    repos.peekState.mockResolvedValue(pendingState('dev-late'))
+    repos.consumeState.mockResolvedValue(pendingState('dev-late', 'consumed'))
+    await expect(pollGrokDevice(deps(tokenFetch()), 'dev-late')).rejects.toMatchObject({
+      code: 'not_connected',
+    })
+    expect(repos.insertInitial).not.toHaveBeenCalled()
+    expect(repos.rotate).not.toHaveBeenCalled()
+  })
+
+  it('maps a first-grant key race against a live row to stale_revision', async () => {
+    repos.getAny.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValue(LIVE_ROW)
+    repos.peekState.mockResolvedValue(pendingState('dev-race'))
+    repos.consumeState.mockResolvedValue(pendingState('dev-race', 'consumed'))
+    repos.insertInitial.mockRejectedValue(new GrokSubscriptionConnectionKeyConflictError())
+    await expect(pollGrokDevice(deps(tokenFetch()), 'dev-race')).rejects.toMatchObject({
+      code: 'stale_revision',
+    })
+  })
+
+  it('maps a first-grant key conflict against a revoked tombstone to not_connected', async () => {
+    repos.getAny
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(REVOKED_ROW)
+    repos.peekState.mockResolvedValue(pendingState('dev-tomb'))
+    repos.consumeState.mockResolvedValue(pendingState('dev-tomb', 'consumed'))
+    repos.insertInitial.mockRejectedValue(new GrokSubscriptionConnectionKeyConflictError())
+    await expect(pollGrokDevice(deps(tokenFetch()), 'dev-tomb')).rejects.toMatchObject({
+      code: 'not_connected',
+    })
+  })
+
+  it('maps a rotate that lost to a concurrent revoke to not_connected', async () => {
+    repos.getAny
+      .mockResolvedValueOnce(LIVE_ROW)
+      .mockResolvedValueOnce(LIVE_ROW)
+      .mockResolvedValue(REVOKED_ROW)
+    repos.peekState.mockResolvedValue(pendingState('dev-rotate'))
+    repos.consumeState.mockResolvedValue(pendingState('dev-rotate', 'consumed'))
+    repos.rotate.mockRejectedValue(new GrokSubscriptionStaleRevisionError())
+    await expect(pollGrokDevice(deps(tokenFetch()), 'dev-rotate')).rejects.toMatchObject({
+      code: 'not_connected',
+    })
+  })
+
+  it('revokes the grant and rebuilds the union inside one transaction, upstream revoke after commit', async () => {
+    const events: string[] = []
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'refresh-secret',
+      accessToken: null,
+      accessTokenExpiresAt: null,
+      credentialRevision: 1,
+    })
+    repos.revokeConnection.mockImplementation(async (db: unknown) => {
+      events.push(db === 'tx' ? 'revoke:tx' : 'revoke:outside')
+      return REVOKED_ROW
+    })
+    vi.mocked(rebuildLiveGrokUnionAllowlist).mockImplementation(async (db: unknown) => {
+      events.push(db === 'tx' ? 'rebuild:tx' : 'rebuild:outside')
+    })
+    const fetchFn = vi.fn().mockImplementation(async () => {
+      events.push('upstream')
+      return { ok: true, status: 200, json: async () => ({}) }
+    })
+    const withTransaction = vi.fn(async (work: (tx: never) => Promise<unknown>) => {
+      events.push('begin')
+      const result = await work('tx' as never)
+      events.push('commit')
+      return result
+    })
+    const revoked = await revokeGrokSubscription({
+      ...deps(fetchFn),
+      withTransaction: withTransaction as never,
+    })
+    expect(revoked).toMatchObject({ status: 'revoked' })
+    expect(events).toEqual(['begin', 'revoke:tx', 'rebuild:tx', 'commit', 'upstream'])
   })
 })

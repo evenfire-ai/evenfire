@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken'
 import { CATALOG_ORIGIN } from '@clerum/grok-provider-attempt-contract'
 import { config } from '../config.js'
-import type { DbClient } from '../db.js'
+import { type DbClient, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import {
   type GrokSubscriptionCatalogStatus,
@@ -19,6 +19,16 @@ const PROVIDER = 'grok-subscription'
 export const GROK_CATALOG_ORIGIN = CATALOG_ORIGIN
 
 export type GrokCatalogOutcome = 'ready' | 'auth-rejected' | 'unavailable'
+
+/**
+ * Runs `work` inside one database transaction and commits only when it
+ * resolves. Production uses the Control API pool (`withTransaction` in db.ts),
+ * which is the same pool behind the admin routes' DbClient; tests inject a
+ * runner bound to their own pool.
+ */
+export type GrokTransactionRunner = <T>(work: (tx: DbClient) => Promise<T>) => Promise<T>
+
+export const defaultGrokTransactionRunner: GrokTransactionRunner = work => withTransaction(work)
 
 export type GrokDiscoveredModel = {
   model: string
@@ -276,11 +286,21 @@ export async function rebuildLiveGrokUnionAllowlist(db: DbClient): Promise<void>
   )
 }
 
+/**
+ * Reconcile one connection's catalog. The provider call runs outside any
+ * transaction; the fenced readiness/revision write, the model row
+ * insert/refresh/stale and the live union rebuild commit together, so a
+ * failure in any phase leaves readiness, revision and rows untouched. The
+ * fenced UPDATE row-locks the connection first, so concurrent syncs on one
+ * revision serialize and exactly one commits an outcome. Callers publish the
+ * runtime allowlist only after this resolves (i.e. after commit).
+ */
 export async function syncGrokSubscriptionCatalog(
   db: DbClient,
   transport: GrokCatalogTransport,
   accessToken: string,
-  expected: { credentialRevision?: number; catalogRevision?: number; connectionKey: string }
+  expected: { credentialRevision?: number; catalogRevision?: number; connectionKey: string },
+  options: { withTransaction?: GrokTransactionRunner } = {}
 ): Promise<{
   outcome: GrokCatalogOutcome
   connection: GrokSubscriptionSafeConnection | null
@@ -295,24 +315,27 @@ export async function syncGrokSubscriptionCatalog(
   const expectedCredentialRevision = expected.credentialRevision ?? connection.credentialRevision
   const expectedCatalogRevision = expected.catalogRevision ?? connection.catalogRevision
   const result = await transport.listModels({ accessToken })
-  const existing = await loadGrokRows(db, connection.id)
-  const plan = planGrokCatalogReconcile(existing, result)
-  const recorded = await recordGrokCatalogOutcome(db, {
-    catalogStatus: plan.catalogStatus as GrokSubscriptionCatalogStatus,
-    connectionStatus: plan.connectionStatus,
-    expectedCredentialRevision,
-    expectedCatalogRevision,
-    connectionKey: expected.connectionKey,
+  const outcomePlan = planGrokCatalogReconcile([], result)
+  const runInTransaction = options.withTransaction ?? defaultGrokTransactionRunner
+  const committed = await runInTransaction(async tx => {
+    const recorded = await recordGrokCatalogOutcome(tx, {
+      catalogStatus: outcomePlan.catalogStatus as GrokSubscriptionCatalogStatus,
+      connectionStatus: outcomePlan.connectionStatus,
+      expectedCredentialRevision,
+      expectedCatalogRevision,
+      connectionKey: expected.connectionKey,
+    })
+    if (!recorded || !outcomePlan.mutateRows) {
+      return { recorded, added: 0, refreshed: 0, staled: 0 }
+    }
+    const plan = planGrokCatalogReconcile(await loadGrokRows(tx, connection.id), result)
+    const added = await insertDiscovered(tx, connection.id, plan.inserts)
+    const refreshed = await refreshDiscovered(tx, connection.id, plan.refresh)
+    const staled = await staleMissing(tx, connection.id, plan.stale)
+    await rebuildLiveGrokUnionAllowlist(tx)
+    return { recorded, added, refreshed, staled }
   })
-  let added = 0
-  let refreshed = 0
-  let staled = 0
-  if (recorded && plan.mutateRows) {
-    added = await insertDiscovered(db, connection.id, plan.inserts)
-    refreshed = await refreshDiscovered(db, connection.id, plan.refresh)
-    staled = await staleMissing(db, connection.id, plan.stale)
-    await rebuildLiveGrokUnionAllowlist(db)
-  }
+  const { recorded, added, refreshed, staled } = committed
   if (!recorded) {
     log.warn(
       { event: 'grok_catalog_stale_writer' },
@@ -322,7 +345,7 @@ export async function syncGrokSubscriptionCatalog(
     log.info(
       {
         event: 'grok_catalog_reconciled',
-        outcome: plan.catalogStatus,
+        outcome: outcomePlan.catalogStatus,
         added,
         refreshed,
         staled,
@@ -331,7 +354,7 @@ export async function syncGrokSubscriptionCatalog(
     )
   }
   return {
-    outcome: plan.catalogStatus,
+    outcome: outcomePlan.catalogStatus,
     connection: recorded,
     added,
     refreshed,

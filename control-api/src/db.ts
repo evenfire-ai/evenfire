@@ -23,6 +23,7 @@ import {
   applyGrokCatalogModelsSchema,
   applyGrokSubscriptionConnectionSchema,
   applyGrokSubscriptionOAuthStateSchema,
+  applyGrokSubscriptionTerminalConnectionKeySchema,
   applyLlmProviderAttemptsGrokBrokerSchema,
 } from './services/grokSubscriptionSchema.js'
 import {
@@ -6035,6 +6036,10 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0112_llm_provider_attempts_grok_broker',
     apply: applyLlmProviderAttemptsGrokBrokerSchema,
+  },
+  {
+    version: '0113_grok_subscription_terminal_connection_key',
+    apply: applyGrokSubscriptionTerminalConnectionKeySchema,
   },
 ]
 

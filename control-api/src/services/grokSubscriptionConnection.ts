@@ -53,6 +53,27 @@ export class GrokSubscriptionFingerprintConflictError extends Error {
   }
 }
 
+/**
+ * A write lost the connection_key uniqueness race: another writer created the
+ * key first, or the key is a revoked tombstone (revocation is terminal per key
+ * since migration 0113). Callers re-read with
+ * `getGrokSubscriptionConnectionIncludingRevoked` to tell the two apart.
+ */
+export class GrokSubscriptionConnectionKeyConflictError extends Error {
+  readonly code = 'connection_key_conflict'
+
+  constructor() {
+    super('Grok subscription connection key is already taken')
+    this.name = 'GrokSubscriptionConnectionKeyConflictError'
+  }
+}
+
+const CONNECTION_KEY_UNIQUE_CONSTRAINTS: ReadonlySet<string> = new Set([
+  'grok_subscription_connections_key_unique',
+  // Pre-0113 live-only index name.
+  'grok_subscription_connections_active_key',
+])
+
 export class GrokSubscriptionStaleRevisionError extends Error {
   readonly code = 'grok_subscription_stale_revision'
 
@@ -168,6 +189,28 @@ export async function getSafeGrokSubscriptionConnection(
   return row ? toSafeConnection(row) : null
 }
 
+/**
+ * Lifecycle lookup that also returns revoked tombstones. Use it wherever a
+ * decision must respect revocation (OAuth start/completion); the live-only
+ * getter above reports a revoked key as simply absent.
+ */
+export async function getGrokSubscriptionConnectionIncludingRevoked(
+  db: DbClient,
+  connectionKey: string
+): Promise<GrokSubscriptionSafeConnection | null> {
+  const key = assertGrokConnectionKey(connectionKey)
+  const result = await db.query(
+    `SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM grok_subscription_connections
+      WHERE connection_key = $1
+      ORDER BY revoked_at DESC NULLS FIRST, created_at DESC
+      LIMIT 1`,
+    [key]
+  )
+  const row = result.rows[0] as SafeConnectionRow | undefined
+  return row ? toSafeConnection(row) : null
+}
+
 export async function getSafeGrokSubscriptionConnectionById(
   db: DbClient,
   connectionId: string
@@ -267,7 +310,7 @@ export async function insertInitialGrokSubscriptionConnection(
     )
     return toSafeConnection(result.rows[0] as SafeConnectionRow)
   } catch (err) {
-    throw remapFingerprintConflict(err)
+    throw remapUniqueConflict(err)
   }
 }
 
@@ -314,7 +357,7 @@ export async function rotateGrokSubscriptionCredentials(
     if (!row) throw new GrokSubscriptionStaleRevisionError()
     return toSafeConnection(row)
   } catch (err) {
-    throw remapFingerprintConflict(err)
+    throw remapUniqueConflict(err)
   }
 }
 
@@ -378,37 +421,57 @@ export async function markGrokRefreshSubjectMismatch(
   return row ? toSafeConnection(row) : null
 }
 
+/**
+ * Revoke the live grant for a key and invalidate every pending OAuth device
+ * state for that key in ONE statement (data-modifying CTEs share a snapshot and
+ * commit atomically), so no earlier authorization work can complete against a
+ * revoked key. Pending states are cancelled even when the key has no live row.
+ * The terminal tombstone plus the full connection_key unique index (0113) is
+ * the backstop for a completion that consumed its state before the revoke.
+ */
 export async function revokeGrokSubscriptionConnection(
   db: DbClient,
   connectionKey: string
 ): Promise<GrokSubscriptionSafeConnection | null> {
   const key = assertGrokConnectionKey(connectionKey)
   const result = await db.query(
-    `UPDATE grok_subscription_connections
-        SET status = 'revoked',
-            refresh_token_encrypted = NULL,
-            access_token_encrypted = NULL,
-            access_token_expires_at = NULL,
-            catalog_status = 'never_synced',
-            credential_revision = credential_revision + 1,
-            refresh_lock_token = NULL,
-            refresh_lock_expires_at = NULL,
-            revoked_at = now(),
-            updated_at = now()
-      WHERE connection_key = $1
-        AND revoked_at IS NULL
-      RETURNING ${SAFE_CONNECTION_COLUMNS}`,
+    `WITH cancelled_states AS (
+       UPDATE grok_subscription_oauth_states
+          SET status = 'cancelled',
+              cancelled_at = now()
+        WHERE connection_key = $1
+          AND status = 'pending'
+        RETURNING 1
+     ),
+     revoked AS (
+       UPDATE grok_subscription_connections
+          SET status = 'revoked',
+              refresh_token_encrypted = NULL,
+              access_token_encrypted = NULL,
+              access_token_expires_at = NULL,
+              catalog_status = 'never_synced',
+              credential_revision = credential_revision + 1,
+              refresh_lock_token = NULL,
+              refresh_lock_expires_at = NULL,
+              revoked_at = now(),
+              updated_at = now()
+        WHERE connection_key = $1
+          AND revoked_at IS NULL
+        RETURNING ${SAFE_CONNECTION_COLUMNS}
+     ),
+     disabled_models AS (
+       UPDATE grok_catalog_models
+          SET enabled = false,
+              stale = true
+        WHERE connection_id IN (SELECT id FROM revoked)
+        RETURNING 1
+     )
+     SELECT ${SAFE_CONNECTION_COLUMNS}
+       FROM revoked`,
     [key]
   )
   const row = result.rows[0] as SafeConnectionRow | undefined
   if (!row) return getSafeGrokSubscriptionConnection(db, key)
-  await db.query(
-    `UPDATE grok_catalog_models
-        SET enabled = false,
-            stale = true
-      WHERE connection_id = $1`,
-    [row.id]
-  )
   return toSafeConnection(row)
 }
 
@@ -599,15 +662,17 @@ export async function updateGrokSubscriptionConnectionMetadata(
   return row ? toSafeConnection(row) : null
 }
 
-function remapFingerprintConflict(err: unknown): never | Error {
+function remapUniqueConflict(err: unknown): unknown {
   const conflict = err as { code?: string; constraint?: string } | null
-  if (
-    conflict?.code === '23505' &&
-    conflict.constraint === 'grok_subscription_connections_active_fingerprint'
-  ) {
-    return new GrokSubscriptionFingerprintConflictError()
+  if (conflict?.code === '23505') {
+    if (conflict.constraint === 'grok_subscription_connections_active_fingerprint') {
+      return new GrokSubscriptionFingerprintConflictError()
+    }
+    if (conflict.constraint && CONNECTION_KEY_UNIQUE_CONSTRAINTS.has(conflict.constraint)) {
+      return new GrokSubscriptionConnectionKeyConflictError()
+    }
   }
-  throw err
+  return err
 }
 
 function toSafeConnection(row: SafeConnectionRow): GrokSubscriptionSafeConnection {

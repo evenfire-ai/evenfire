@@ -119,4 +119,43 @@ describe('redeemGrokProviderAttempt', () => {
       )
     ).rejects.toMatchObject({ code: 'no_grant' })
   })
+
+  it('maps a missing connection row to connection_unavailable instead of an unmapped error', async () => {
+    vi.spyOn(store, 'peekLlmProviderAttemptTicket').mockResolvedValue({
+      jti: CLAIMS.jti,
+      providerAttemptId: CLAIMS.providerAttemptId,
+      status: 'issued',
+      expiresAt: new Date(Date.now() + 30_000),
+      receiptHash: null,
+    })
+    vi.spyOn(store, 'loadLlmProviderAttempt').mockResolvedValue({
+      id: CLAIMS.providerAttemptId,
+      provider: 'grok-subscription',
+      connectionId: CONNECTION_ID,
+      status: 'authorized',
+    } as never)
+    const ensureFresh = vi.fn(async (connectionKey?: string) => {
+      connection.assertGrokConnectionKey(connectionKey ?? '')
+    })
+    const withTransaction = vi.fn()
+    await expect(
+      redeemGrokProviderAttempt(
+        { executionTicket: 'ticket', requestHash: CLAIMS.requestHash },
+        {
+          enabled: true,
+          db: { query: vi.fn() },
+          withTransaction: withTransaction as never,
+          loadSecrets: vi.fn(),
+          getConnectionById: vi.fn().mockResolvedValue(null),
+          encryptionKey: Buffer.alloc(32),
+          ensureFreshAccessToken: ensureFresh,
+        }
+      )
+    ).rejects.toMatchObject({
+      name: 'GrokProviderAttemptRedeemError',
+      code: 'connection_unavailable',
+    })
+    expect(ensureFresh).not.toHaveBeenCalled()
+    expect(withTransaction).not.toHaveBeenCalled()
+  })
 })

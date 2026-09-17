@@ -1,15 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { deriveOAuthEncryptionKey, encryptOAuthSecret } from '../src/oauth/encryption.js'
 import {
+  GrokSubscriptionConnectionKeyConflictError,
   GrokSubscriptionFingerprintConflictError,
   GrokSubscriptionInvalidConnectionKeyError,
   GrokSubscriptionStaleRevisionError,
   assertGrokConnectionKey,
   generateGrokConnectionKey,
+  getGrokSubscriptionConnectionIncludingRevoked,
   getSafeGrokSubscriptionConnection,
   insertInitialGrokSubscriptionConnection,
   persistGrokRefreshCiphertextFirst,
   readHostGrokConnectionRef,
+  revokeGrokSubscriptionConnection,
 } from '../src/services/grokSubscriptionConnection.js'
 
 const KEY = deriveOAuthEncryptionKey('ab'.repeat(32))
@@ -152,6 +155,46 @@ describe('grok subscription connection repository', () => {
         'team-grok'
       )
     ).rejects.toBeInstanceOf(GrokSubscriptionFingerprintConflictError)
+  })
+
+  it.each(['grok_subscription_connections_active_key', 'grok_subscription_connections_key_unique'])(
+    'maps a %s unique violation to a connection key conflict',
+    async constraint => {
+      query.mockRejectedValueOnce(
+        Object.assign(new Error('duplicate'), { code: '23505', constraint })
+      )
+      await expect(
+        insertInitialGrokSubscriptionConnection(
+          { query },
+          KEY,
+          { refreshToken: 'plain-refresh', accountFingerprint: 'fp_race' },
+          'team-grok'
+        )
+      ).rejects.toBeInstanceOf(GrokSubscriptionConnectionKeyConflictError)
+    }
+  )
+
+  it('reads revoked tombstones through the lifecycle lookup', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await expect(
+      getGrokSubscriptionConnectionIncludingRevoked({ query }, 'team-grok')
+    ).resolves.toBe(null)
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toContain('connection_key = $1')
+    expect(sql).not.toContain('revoked_at IS NULL')
+  })
+
+  it('revokes the grant and cancels pending OAuth states for the key atomically', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 })
+    await revokeGrokSubscriptionConnection({ query }, 'team-grok')
+    const sql = String(query.mock.calls[0]?.[0])
+    expect(sql).toContain('UPDATE grok_subscription_oauth_states')
+    expect(sql).toContain("status = 'cancelled'")
+    expect(sql).toContain("status = 'pending'")
+    expect(sql).toContain('UPDATE grok_subscription_connections')
+    expect(sql).toContain('UPDATE grok_catalog_models')
+    expect(query.mock.calls[0]?.[1]).toEqual(['team-grok'])
   })
 
   it('fences persist-first refresh on lock token, revision, and live lease', async () => {

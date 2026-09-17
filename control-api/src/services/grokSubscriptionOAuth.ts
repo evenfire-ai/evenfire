@@ -4,15 +4,19 @@ import { rootLogger } from '../observability/logger.js'
 import {
   type GrokCatalogOutcome,
   type GrokCatalogTransport,
+  type GrokTransactionRunner,
+  defaultGrokTransactionRunner,
   rebuildLiveGrokUnionAllowlist,
   syncGrokSubscriptionCatalog,
 } from './grokSubscriptionCatalog.js'
 import {
+  GrokSubscriptionConnectionKeyConflictError,
   GrokSubscriptionFingerprintConflictError,
   type GrokSubscriptionSafeConnection,
   GrokSubscriptionStaleRevisionError,
   acquireGrokSubscriptionRefreshLock,
   assertGrokConnectionKey,
+  getGrokSubscriptionConnectionIncludingRevoked,
   getSafeGrokSubscriptionConnection,
   insertInitialGrokSubscriptionConnection,
   loadGrokSubscriptionSecrets,
@@ -122,6 +126,8 @@ export type GrokOAuthDeps = {
   clientId: string
   enabled: boolean
   connectionKey: string
+  /** Transaction runner bound to `db`'s pool; defaults to the Control API pool. */
+  withTransaction?: GrokTransactionRunner
 }
 
 function connectionKeyOf(deps: GrokOAuthDeps): string {
@@ -147,6 +153,24 @@ function completionConnectionKey(deps: GrokOAuthDeps, stateKey: string): string 
 function requireEnabled(deps: GrokOAuthDeps): void {
   if (!deps.enabled) {
     throw new GrokSubscriptionOAuthError('disabled', 'Grok subscription is disabled')
+  }
+}
+
+function revokedKeyError(): GrokSubscriptionOAuthError {
+  return new GrokSubscriptionOAuthError(
+    'not_connected',
+    'revoked grant cannot be reused; create a new connection'
+  )
+}
+
+function isRevoked(connection: GrokSubscriptionSafeConnection | null | undefined): boolean {
+  return Boolean(connection?.revokedAt || connection?.status === 'revoked')
+}
+
+/** Revocation is terminal per key: no OAuth work may start or finish on a tombstone. */
+async function assertKeyNotRevoked(deps: GrokOAuthDeps, key: string): Promise<void> {
+  if (isRevoked(await getGrokSubscriptionConnectionIncludingRevoked(deps.db, key))) {
+    throw revokedKeyError()
   }
 }
 
@@ -191,6 +215,7 @@ export async function startGrokDeviceConnect(
 ): Promise<GrokDeviceStartResult> {
   requireEnabled(deps)
   const connectionKey = connectionKeyOf(deps)
+  await assertKeyNotRevoked(deps, connectionKey)
   const started = await postForm(deps, GROK_OAUTH_DEVICE_URL, {
     client_id: deps.clientId,
     scope: GROK_OAUTH_SCOPES.join(' '),
@@ -235,6 +260,7 @@ export async function pollGrokDevice(
   state: string
 ): Promise<GrokDevicePollResult> {
   requireEnabled(deps)
+  await assertKeyNotRevoked(deps, connectionKeyOf(deps))
   const pending = await peekPendingGrokSubscriptionOAuthState(deps.db, deps.encryptionKey, state)
   if (!pending) {
     throw new GrokSubscriptionOAuthError('state_replayed', 'device state is not pending')
@@ -314,8 +340,12 @@ export async function revokeGrokSubscription(
   requireEnabled(deps)
   const key = connectionKeyOf(deps)
   const secrets = await loadGrokSubscriptionSecrets(deps.db, deps.encryptionKey, key)
-  const local = await revokeGrokSubscriptionConnection(deps.db, key)
-  await rebuildLiveGrokUnionAllowlist(deps.db)
+  const runInTransaction = deps.withTransaction ?? defaultGrokTransactionRunner
+  const local = await runInTransaction(async tx => {
+    const revoked = await revokeGrokSubscriptionConnection(tx, key)
+    await rebuildLiveGrokUnionAllowlist(tx)
+    return revoked
+  })
   if (secrets?.refreshToken) {
     try {
       await postForm(deps, GROK_OAUTH_REVOKE_URL, {
@@ -392,9 +422,13 @@ export async function runGrokCatalogSync(
     if (!secrets?.accessToken) {
       return { ok: false, catalogStatus: 'never_synced', reason: 'no_grant' }
     }
-    const synced = await syncGrokSubscriptionCatalog(deps.db, transport, secrets.accessToken, {
-      connectionKey: key,
-    })
+    const synced = await syncGrokSubscriptionCatalog(
+      deps.db,
+      transport,
+      secrets.accessToken,
+      { connectionKey: key },
+      { withTransaction: deps.withTransaction }
+    )
     if (!synced.connection) {
       return { ok: false, catalogStatus: 'never_synced', reason: 'stale_revision' }
     }
@@ -487,13 +521,9 @@ async function persistGrantedTokens(
   connectionKey: string
 ): Promise<GrokSubscriptionSafeConnection> {
   const key = assertGrokConnectionKey(connectionKey)
-  const existing = await getSafeGrokSubscriptionConnection(deps.db, key)
-  if (existing?.revokedAt || existing?.status === 'revoked') {
-    throw new GrokSubscriptionOAuthError(
-      'not_connected',
-      'revoked grant cannot be reused; create a new connection'
-    )
-  }
+  // Tombstone-aware: a key revoked after this flow started must not be revived.
+  const existing = await getGrokSubscriptionConnectionIncludingRevoked(deps.db, key)
+  if (isRevoked(existing)) throw revokedKeyError()
   if (
     existing?.accountFingerprint &&
     existing.accountFingerprint !== parsed.accountFingerprint &&
@@ -512,14 +542,27 @@ async function persistGrantedTokens(
     status: 'connected' as const,
   }
   if (!existing) {
-    const created = await insertInitialGrokSubscriptionConnection(
-      deps.db,
-      deps.encryptionKey,
-      write,
-      key
-    )
-    log.info({ event: 'grok_oauth_persisted', connectionKey: key }, 'Grok grant persisted')
-    return created
+    try {
+      const created = await insertInitialGrokSubscriptionConnection(
+        deps.db,
+        deps.encryptionKey,
+        write,
+        key
+      )
+      log.info({ event: 'grok_oauth_persisted', connectionKey: key }, 'Grok grant persisted')
+      return created
+    } catch (err) {
+      if (err instanceof GrokSubscriptionConnectionKeyConflictError) {
+        throw await lostKeyRaceError(deps, key, 'a concurrent grant created this connection')
+      }
+      if (err instanceof GrokSubscriptionFingerprintConflictError) {
+        throw new GrokSubscriptionOAuthError(
+          'fingerprint_in_use',
+          'a live Grok subscription already uses this account'
+        )
+      }
+      throw err
+    }
   }
   try {
     const rotated = await rotateGrokSubscriptionCredentials(
@@ -533,7 +576,7 @@ async function persistGrantedTokens(
     return rotated
   } catch (err) {
     if (err instanceof GrokSubscriptionStaleRevisionError) {
-      throw new GrokSubscriptionOAuthError('stale_revision', 'connection was replaced concurrently')
+      throw await lostKeyRaceError(deps, key, 'connection was replaced concurrently')
     }
     if (err instanceof GrokSubscriptionFingerprintConflictError) {
       throw new GrokSubscriptionOAuthError(
@@ -543,6 +586,21 @@ async function persistGrantedTokens(
     }
     throw err
   }
+}
+
+/**
+ * A completion lost a write race on its key. If the winner was a revoke, the
+ * key is a terminal tombstone (not_connected); otherwise another writer holds
+ * the live row (stale_revision, 409).
+ */
+async function lostKeyRaceError(
+  deps: GrokOAuthDeps,
+  key: string,
+  message: string
+): Promise<GrokSubscriptionOAuthError> {
+  const latest = await getGrokSubscriptionConnectionIncludingRevoked(deps.db, key)
+  if (isRevoked(latest)) return revokedKeyError()
+  return new GrokSubscriptionOAuthError('stale_revision', message)
 }
 
 type GrokTokenPair = {

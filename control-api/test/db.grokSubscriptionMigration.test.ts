@@ -66,4 +66,19 @@ describe('0109-0112 Grok subscription persistence', () => {
     expect(profiles.get('grok_subscription_oauth_states')).toBe('upsert')
     expect(profiles.get('grok_catalog_models')).toBe('upsert')
   })
+
+  it('registers 0113 terminal Grok connection keys after 0112 as an additive migration', () => {
+    const v0112 = dbSource.indexOf("version: '0112_llm_provider_attempts_grok_broker'")
+    const v0113 = dbSource.indexOf("version: '0113_grok_subscription_terminal_connection_key'")
+    expect(v0113).toBeGreaterThan(v0112)
+    expect(dbSource).toContain('apply: applyGrokSubscriptionTerminalConnectionKeySchema')
+    const body = schemaSource.slice(
+      schemaSource.indexOf('export async function applyGrokSubscriptionTerminalConnectionKeySchema')
+    )
+    expect(body).toContain(
+      'CREATE UNIQUE INDEX IF NOT EXISTS grok_subscription_connections_key_unique'
+    )
+    expect(body).toMatch(/ON grok_subscription_connections \(connection_key\);/)
+    expect(body).toContain("status = 'cancelled'")
+  })
 })

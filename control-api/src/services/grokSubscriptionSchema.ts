@@ -183,3 +183,66 @@ export async function applyLlmProviderAttemptsGrokBrokerSchema(db: DbClient): Pr
     END $$;
   `)
 }
+
+/**
+ * 0113 — revocation is terminal per Grok connection key.
+ *
+ * 0109 only enforced key uniqueness among live rows (`revoked_at IS NULL`), so
+ * a revoked key could be revived by an older pending device flow (or a raw
+ * insert) and existing key-based Host/recipe assignments would silently become
+ * usable again. From 0113 a connection_key names exactly one row for its whole
+ * lifetime; reconnecting after revoke requires a fresh key (the UI generates
+ * `grok-<hex>` keys).
+ *
+ * Additive and idempotent, safe to run against DBs where 0109–0112 already ran:
+ *   1. Archive superseded tombstones: when a key already has several rows (a
+ *      live row plus tombstones, or several tombstones), every row except the
+ *      live one — or, when no live row exists, the newest tombstone — gets its
+ *      key rewritten to `<key>~revoked~<id>`. `~` is outside the key grammar, so
+ *      archived keys can never collide with or be addressed as a real key.
+ *      Rows are never deleted: catalog models and provider attempts keep
+ *      pointing at their connection id.
+ *   2. Cancel pending OAuth device states whose key is now a tombstone.
+ *   3. Replace the live-only key index with a full unique index. The
+ *      fingerprint index stays live-only (an account may reconnect under a new
+ *      key).
+ * Pods still running pre-0113 code keep working: a revive attempt now fails
+ * closed with 23505 instead of creating a second row.
+ */
+export async function applyGrokSubscriptionTerminalConnectionKeySchema(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    WITH ranked AS (
+      SELECT id,
+             row_number() OVER (
+               PARTITION BY connection_key
+               ORDER BY revoked_at DESC NULLS FIRST, created_at DESC, id DESC
+             ) AS key_rank
+        FROM grok_subscription_connections
+    )
+    UPDATE grok_subscription_connections c
+       SET connection_key = c.connection_key || '~revoked~' || c.id::text,
+           updated_at = now()
+      FROM ranked r
+     WHERE r.id = c.id
+       AND r.key_rank > 1
+       AND c.revoked_at IS NOT NULL;
+
+    UPDATE grok_subscription_oauth_states s
+       SET status = 'cancelled',
+           cancelled_at = now()
+     WHERE s.status = 'pending'
+       AND EXISTS (
+         SELECT 1
+           FROM grok_subscription_connections c
+          WHERE c.connection_key = s.connection_key
+            AND c.revoked_at IS NOT NULL
+       );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS grok_subscription_connections_key_unique
+      ON grok_subscription_connections (connection_key);
+
+    DROP INDEX IF EXISTS grok_subscription_connections_active_key;
+  `)
+}

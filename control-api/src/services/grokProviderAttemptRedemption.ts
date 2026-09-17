@@ -148,9 +148,17 @@ export async function redeemGrokProviderAttempt(
   }
 
   if (deps.ensureFreshAccessToken) {
+    const assigned = await deps.getConnectionById(deps.db, claims.connectionId)
+    if (!assigned) {
+      // The attempt's connection row is gone; never hand an empty key to the
+      // refresh path (it would surface as an unmapped 500).
+      throw new GrokProviderAttemptRedeemError(
+        'connection_unavailable',
+        'Grok subscription connection is not usable'
+      )
+    }
     try {
-      const assigned = await deps.getConnectionById(deps.db, claims.connectionId)
-      await deps.ensureFreshAccessToken(assigned?.connectionKey)
+      await deps.ensureFreshAccessToken(assigned.connectionKey)
     } catch (err) {
       if (err instanceof GrokSubscriptionOAuthError) {
         throw new GrokProviderAttemptRedeemError(
