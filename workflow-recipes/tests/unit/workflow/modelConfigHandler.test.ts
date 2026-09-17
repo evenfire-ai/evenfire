@@ -918,7 +918,7 @@ describe('POST /configure-model — Grok grantRedeemable uses the Grok projectio
 
   it('skips a Grok fallback whose assigned grant is not eligible', async () => {
     const mapping = { openai: 'openai-secret/apiKey', 'grok-subscription': 'grok-secret/key' }
-    const secret = { apiKey: 'sk-test-123', key: 'unused' }
+    const secret = { apiKey: 'sk-test-token', key: 'unused-dummy' }
     const allowlist = { ...GROK_ALLOWLIST, openai: JSON.stringify([{ model: 'gpt-4' }]) }
     const run = async (annotations: Record<string, string>, grokSubscriptionEnabled = true) => {
       const mcpHost = mockMcpHost()

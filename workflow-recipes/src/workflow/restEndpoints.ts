@@ -903,7 +903,7 @@ export function createWorkflowEndpointHandlers(
 
         const stepEntry = {
           phase: body.phase,
-          ...(outputPreview && outputPreview),
+          ...outputPreview,
           ...(resolvedError && { error: resolvedError }),
           ...(body.executor && { executor: body.executor }),
           ...(body.startedAt && { startedAt: body.startedAt }),
