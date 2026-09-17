@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
-import { createsTotal, existenceReadsTotal } from '../metrics'
+import livePdbFixture from '../__tests__/fixtures/629/gfsc-writer-pdb.json'
+import { createsTotal, existenceReadsTotal, writeSkipsTotal } from '../metrics'
 import { K8sGfsApi } from './gfsK8sApi'
 
 const namespace = 'mcp-host'
@@ -48,7 +49,7 @@ const cases = [
   },
   {
     kind: 'PodDisruptionBudget',
-    updates: true,
+    updates: false,
     body: {
       kind: 'PodDisruptionBudget',
       metadata,
@@ -100,6 +101,7 @@ async function count(metric: typeof createsTotal, kind: string, outcome: string)
 beforeEach(() => {
   createsTotal.reset()
   existenceReadsTotal.reset()
+  writeSkipsTotal.reset()
 })
 
 describe.each(cases)('K8sGfsApi $kind read-first', resource => {
@@ -255,3 +257,69 @@ describe.each(cases.filter(resource => resource.updates))(
     })
   }
 )
+
+describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
+  const namespace = 'gfs'
+  const desired = livePdbFixture as k8s.V1PodDisruptionBudget
+
+  async function skipCount() {
+    return (
+      (await writeSkipsTotal.get()).values.find(row => row.labels.kind === 'PodDisruptionBudget')
+        ?.value ?? 0
+    )
+  }
+
+  it('T4: skips replace when the live PDB matches', async () => {
+    const equal = harness('PodDisruptionBudget')
+    equal.read.mockImplementation(async () => {
+      equal.events.push('GET')
+      return {
+        ...desired,
+        metadata: { ...desired.metadata, resourceVersion: '1' },
+      }
+    })
+    await equal.api.applyPodDisruptionBudget(desired, namespace)
+    expect(equal.read).toHaveBeenCalledTimes(1)
+    expect(equal.replace).toHaveBeenCalledTimes(0)
+    expect(await skipCount()).toBe(1)
+  })
+
+  it('T4: retries a drifted PDB PUT after 409 using a fresh resourceVersion', async () => {
+    const h = harness('PodDisruptionBudget')
+    let version = 0
+    h.read.mockImplementation(async () => {
+      h.events.push('GET')
+      return {
+        ...desired,
+        metadata: { ...desired.metadata, resourceVersion: String(++version) },
+        spec: { ...desired.spec, minAvailable: 2 },
+      }
+    })
+    h.replace.mockImplementationOnce(async ({ body }) => {
+      h.events.push(`PUT:${body.metadata?.resourceVersion}`)
+      throw { code: 409 }
+    })
+    await h.api.applyPodDisruptionBudget(desired, namespace)
+    expect(h.events).toEqual(['GET', 'PUT:1', 'GET', 'PUT:2'])
+    expect(h.replace).toHaveBeenCalledTimes(2)
+    expect(h.create).not.toHaveBeenCalled()
+  })
+
+  it('T4: writes when minAvailable differs', async () => {
+    const drifted = harness('PodDisruptionBudget')
+    const live = {
+      ...desired,
+      metadata: { ...desired.metadata, resourceVersion: '7' },
+      spec: { ...desired.spec, minAvailable: 2 },
+    }
+    drifted.read.mockImplementation(async () => {
+      drifted.events.push('GET')
+      return live
+    })
+    await drifted.api.applyPodDisruptionBudget(desired, namespace)
+    expect(drifted.read).toHaveBeenCalledTimes(1)
+    expect(drifted.replace).toHaveBeenCalledTimes(1)
+    expect(drifted.replace.mock.calls[0][0].body.spec.minAvailable).toBe(1)
+    expect(await skipCount()).toBe(0)
+  })
+})

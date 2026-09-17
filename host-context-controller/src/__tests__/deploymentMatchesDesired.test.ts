@@ -413,4 +413,25 @@ describe('deploymentMatchesDesired', () => {
     ) as k8s.V1Deployment
     expectSweepDetectsLiveOnlySpecLeaves(desired, asApiserverDeployment(desired))
   })
+
+  it('T1: empty env value is equivalent to an omitted value', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [{ name: 'CLERUM_LLM_SECRET_REF' }]
+    const desiredEmpty = structuredClone(live)
+    desiredEmpty.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: '' },
+    ]
+    expect(live.spec?.template.spec?.containers[0].env?.[0]).not.toHaveProperty('value')
+    expect(deploymentMatchesDesired(desiredEmpty, live)).toBe(true)
+  })
+
+  it('T1: a real env value is not equivalent to an omitted value', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [{ name: 'CLERUM_LLM_SECRET_REF' }]
+    const desiredSet = structuredClone(live)
+    desiredSet.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: 'x' },
+    ]
+    expect(deploymentMatchesDesired(desiredSet, live)).toBe(false)
+  })
 })
