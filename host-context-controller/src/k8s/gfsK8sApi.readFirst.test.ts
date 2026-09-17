@@ -319,7 +319,8 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
     await drifted.api.applyPodDisruptionBudget(desired, namespace)
     expect(drifted.read).toHaveBeenCalledTimes(1)
     expect(drifted.replace).toHaveBeenCalledTimes(1)
-    expect(drifted.replace.mock.calls[0][0].body.spec.minAvailable).toBe(1)
+    const replaced = drifted.replace.mock.calls[0][0].body as k8s.V1PodDisruptionBudget
+    expect(replaced.spec?.minAvailable).toBe(1)
     expect(await skipCount()).toBe(0)
   })
 })

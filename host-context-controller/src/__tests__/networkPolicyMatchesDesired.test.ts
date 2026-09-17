@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { networkPolicyMatchesDesired } from '../utils'
 import { RECORDED_NETWORKPOLICY, asApiserverNetworkPolicy } from './asApiserverNetworkPolicy'
+import liveLlmhookNp from './fixtures/629/np-llmhook-8204baab199521b5.json'
 
 function desiredPolicy(overrides: Partial<k8s.V1NetworkPolicy> = {}): k8s.V1NetworkPolicy {
   return {
@@ -250,6 +251,7 @@ describe('networkPolicyMatchesDesired', () => {
       spec: {
         podSelector: selector,
         policyTypes: ['Ingress'],
+        // client-node property; ObjectSerializer maps `_from` to wire `from`.
         ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
       },
     }
@@ -269,5 +271,15 @@ describe('networkPolicyMatchesDesired', () => {
       spec: { podSelector: selector, egress: [] },
     }
     expect(networkPolicyMatchesDesired(emptyEgressDerived, live)).toBe(true)
+  })
+
+  it('T2: clerum-dev llmhook fixture without ingress matches empty ingress', () => {
+    const live = liveLlmhookNp as k8s.V1NetworkPolicy
+    expect(live.spec).not.toHaveProperty('ingress')
+    const emptyIngress: k8s.V1NetworkPolicy = {
+      ...live,
+      spec: { ...live.spec, policyTypes: live.spec?.policyTypes ?? ['Ingress'], ingress: [] },
+    }
+    expect(networkPolicyMatchesDesired(emptyIngress, live)).toBe(true)
   })
 })
