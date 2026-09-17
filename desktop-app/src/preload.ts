@@ -42,7 +42,6 @@ const DESKTOP_COMMAND_IDS = new Set<DesktopCommandId>([
   'sidebar.toggle',
   'app.refresh',
   'app.backToApps',
-  'app.backToConversation',
 ])
 
 function isDesktopCommandId(value: unknown): value is DesktopCommandId {
