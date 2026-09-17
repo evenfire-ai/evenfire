@@ -76,6 +76,12 @@ function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
     : 'read'
 }
 
+/** The permission set a role stands for: hosts cap at read/write. */
+function rolePermissionRequest(subjectType: string, role: GfsAccessRole): string[] {
+  if (subjectType === 'host') return role === 'editor' ? ['read', 'write'] : ['read']
+  return role === 'editor' ? ['read', 'write', 'delete', 'manage_acl', 'share'] : ['read', 'share']
+}
+
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
@@ -235,9 +241,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
   // Pending parent-folder confirmation (role change or removal) for a member
-  // whose file access is inherited from an ancestor folder.
+  // whose file access is inherited from an ancestor folder. change-role
+  // carries the bits the pre-flight validated on the parent folder itself.
   const [parentUpdate, setParentUpdate] = useState<
-    | { row: GfsMergedAccessRow; label: string; mode: 'change-role'; nextRole: GfsAccessRole }
+    | {
+        row: GfsMergedAccessRow
+        label: string
+        mode: 'change-role'
+        nextRole: GfsAccessRole
+        parentBits: string[]
+      }
     | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
     | null
   >(null)
@@ -550,15 +563,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     label: string,
     role: GfsAccessRole
   ) => {
-    const requested =
-      item.subject.type === 'host'
-        ? role === 'editor'
-          ? ['read', 'write']
-          : ['read']
-        : role === 'editor'
-          ? ['read', 'write', 'delete', 'manage_acl', 'share']
-          : ['read', 'share']
-    const bits = requested.filter(bit => affordances?.grantableBits.includes(bit))
+    const bits = rolePermissionRequest(item.subject.type, role).filter(bit =>
+      affordances?.grantableBits.includes(bit)
+    )
     const subjectKey = item.subject.id
       ? `${item.subject.type}:${item.subject.id}`
       : item.subject.type
@@ -578,12 +585,42 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   // A merged row whose access comes from a parent folder: any edit (upgrade,
   // downgrade, or removal — no exceptions) is confirmed against the parent
   // folder before anything is sent. Cancel reverts the dropdown untouched.
-  const handleInheritedRoleChange = (
+  const handleInheritedRoleChange = async (
     row: GfsMergedAccessRow,
     label: string,
     role: GfsAccessRole
   ) => {
-    setParentUpdate({ row, label, mode: 'change-role', nextRole: role })
+    const inherited = row.inherited
+    if (!inherited) return
+    const source = inherited.source
+    const subject = inherited.subject
+    // Pre-flight: the parent grant is judged by the PARENT folder's own
+    // grantable bits, never by the open file's affordances (which may be
+    // missing or narrower). A role the folder cannot grant fails loudly here
+    // — the confirmation never opens with a promise it cannot keep.
+    let folderAffordances: { canDelegate: boolean; grantableBits: string[] }
+    try {
+      folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
+    } catch (affordancesError) {
+      if (failClosedOnAuthorizationError(affordancesError)) return
+      pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
+      return
+    }
+    const parentBits = rolePermissionRequest(subject.type, role).filter(bit =>
+      folderAffordances.grantableBits.includes(bit)
+    )
+    const expressesRole =
+      role === 'editor'
+        ? parentBits.includes('read') && parentBits.includes('write')
+        : parentBits.includes('read')
+    if (!folderAffordances.canDelegate || !expressesRole) {
+      pushToast?.(
+        `Your access on ${source.name} does not allow making ${label} ${role === 'editor' ? 'an Editor' : 'Read-only'}.`,
+        'error'
+      )
+      return
+    }
+    setParentUpdate({ row, label, mode: 'change-role', nextRole: role, parentBits })
   }
 
   const handleInheritedRemove = (row: GfsMergedAccessRow, label: string) => {
@@ -605,25 +642,26 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     setUpdatingAccessRole(true)
     try {
       if (request.mode === 'change-role') {
-        const requested =
-          subject.type === 'host'
-            ? request.nextRole === 'editor'
-              ? ['read', 'write']
-              : ['read']
-            : request.nextRole === 'editor'
-              ? ['read', 'write', 'delete', 'manage_acl', 'share']
-              : ['read', 'share']
-        const bits = requested.filter(bit => affordances?.grantableBits.includes(bit))
-        // The parent folder's grant is updated first and keeps cascading to
+        // The parent folder's grant is updated first with the bits the
+        // pre-flight validated on the folder itself, and keeps cascading to
         // everything inside; its superseded share rows are consolidated.
-        await window.clerum.gfs.grant(source.resourceId, [subjectKey], bits, GFS_DRIVE_MAIN, true)
+        await window.clerum.gfs.grant(
+          source.resourceId,
+          [subjectKey],
+          request.parentBits,
+          GFS_DRIVE_MAIN,
+          true
+        )
         for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
         // The file's own direct rows are aligned so they cannot mask the
         // confirmed role: the grant upsert expresses the new role and every
         // direct file share for the member is revoked after it — a stale
         // editor share would otherwise keep the member an Editor.
         if (request.row.grant || request.row.shares.length > 0) {
-          await ctrl.grant([subjectKey], bits, request.row.grant?.inherit ?? false)
+          const fileBits = rolePermissionRequest(subject.type, request.nextRole).filter(bit =>
+            affordances?.grantableBits.includes(bit)
+          )
+          await ctrl.grant([subjectKey], fileBits, request.row.grant?.inherit ?? false)
           for (const share of request.row.shares) await ctrl.revokeShare(share.id)
         }
         pushToast?.(

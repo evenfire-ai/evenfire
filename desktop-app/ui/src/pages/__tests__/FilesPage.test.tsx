@@ -1717,6 +1717,12 @@ describe('FilesPage', () => {
         gfs: {
           getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
           grant: vi.fn(async () => undefined),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read', 'share', 'write', 'delete', 'manage_acl'],
+            canCreateShare: true,
+          })),
         },
         agents: { listMine: vi.fn(async () => []) },
         team: {
@@ -1884,6 +1890,103 @@ describe('FilesPage', () => {
       'Test Two is now Read-only on Team folder and everything inside it',
       'success'
     )
+  })
+
+  // R1-M1 — the parent grant's bits are judged by the PARENT folder's
+  // grantable bits, never by the open file's affordances (which may be null
+  // or narrower than what the folder allows).
+  it('derives the parent grant bits from the parent folder affordances, not the file', async () => {
+    installInheritedDirectoryMocks()
+    const folderAffordances = (window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> })
+      .affordances
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const pushToast = vi.fn()
+    // The file's grantable bits came back empty (failed/narrow probe) — the
+    // legacy path built the parent bits from these and confirmed a [] grant.
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        affordances: {
+          held: ['read', 'write', 'share', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    // Pre-flight judged the parent folder itself before opening the modal.
+    await waitFor(() => expect(folderAffordances).toHaveBeenCalledWith('folder-1', 'main'))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+    })
+
+    await waitFor(() =>
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-1',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Test Two is now Read-only on Team folder and everything inside it',
+      'success'
+    )
+  })
+
+  it('refuses a role the parent folder cannot grant, before opening the confirmation', async () => {
+    installInheritedDirectoryMocks()
+    ;(window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> }).affordances.mockResolvedValue(
+      {
+        held: ['read', 'share'],
+        canDelegate: true,
+        grantableBits: ['read', 'share'],
+        canCreateShare: false,
+      }
+    )
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController())
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    // Editor needs write on the parent; this folder cannot grant it.
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    })
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Your access on Team folder does not allow making Test Two an Editor.',
+        'error'
+      )
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(parentGrant).not.toHaveBeenCalled()
+    // The dropdown reverts to the server-backed role.
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
   })
 
   it('removes an inherited member from the parent folder after confirmation', async () => {
