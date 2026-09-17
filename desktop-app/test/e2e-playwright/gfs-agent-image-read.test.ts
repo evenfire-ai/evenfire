@@ -226,8 +226,8 @@ async function uploadAndPreview(
 
 async function freshChat(page: Page, agentName: string): Promise<void> {
   await page.getByTestId('nav-chat').click()
-  const newThread = page.getByRole('button', { name: /new thread/i })
-  if (await newThread.isVisible()) await newThread.click()
+  await page.getByTestId('nav-new-chat').click()
+  await expect(page.getByRole('heading', { name: 'New chat with', exact: true })).toBeVisible()
   await expect(page.getByTestId('agent-response')).toHaveCount(0)
   await expect(page.getByTestId('progress-expand-btn')).toHaveCount(0)
   const selector = page.getByRole('button', { name: 'Switch chat agent', exact: true })
@@ -276,6 +276,17 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
   requireOwnedRuntime()
   assertGfsInfraHealthy()
   const agent = discoverManagedGfsAgent()
+  // UI labels use spec.host; authorization and fixture grants use the stable id.
+  const agentLabel =
+    kubectlOut([
+      '-n',
+      agent.namespace,
+      'get',
+      'host',
+      agent.name,
+      '-o',
+      'jsonpath={.spec.host}',
+    ]).trim() || agent.name
   // Only identity/grants/password are prepared out of band; both image files
   // below are created in GFS through the visible product upload control.
   seedPasswordForEmail(E2E_EMAIL)
@@ -331,7 +342,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
     await test.step('upload and decode the image in Files', () =>
       uploadAndPreview(page, granted, filePath, fileName, visual.width, visual.height))
     await test.step('read the named file through a fresh agent conversation', async () => {
-      await freshChat(page, agent.name)
+      await freshChat(page, agentLabel)
       await sendRead(
         page,
         `Use your GFS tools to read the image at path "/${granted.name}/${fileName}" in drive main. ` +
@@ -347,7 +358,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       await expect(
         page
           .getByRole('navigation', { name: 'Chat breadcrumb' })
-          .getByText(agent.name, { exact: true })
+          .getByText(agentLabel, { exact: true })
       ).toBeVisible()
       const response = page.getByTestId('agent-response')
       await expect(response).toBeVisible()
@@ -377,7 +388,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
         bytes: deniedVisual.bytes.length,
         deleted: false,
       })
-      await freshChat(page, agent.name)
+      await freshChat(page, agentLabel)
       await sendRead(
         page,
         `Call clerum__gfs_read with drive main and resourceId ${record!.resourceId}. ` +
