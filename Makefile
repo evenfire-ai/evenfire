@@ -238,7 +238,7 @@ minikube-build-images-body:
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK=true T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/require-t2-mutation-lock.sh
-	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh $(MINIKUBE_BUILD_IMAGE_ARGS)
 
 .PHONY: minikube-build-custom-coordinator-fixture minikube-build-custom-coordinator-fixture-body
 minikube-build-custom-coordinator-fixture: ## Build only the custom coordinator E2E fixture image in minikube

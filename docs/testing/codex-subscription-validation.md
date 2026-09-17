@@ -19,6 +19,12 @@ Changing these budgets does not change OAuth, grants, ticket binding, origins,
 fallback, or connection selection. Local capacity evidence is separate from
 successful image interpretation by a real model.
 
+For an already bootstrapped local profile whose required public images are
+present, `MINIKUBE_BUILD_IMAGE_ARGS=--skip-public` forwards the existing builder
+option through the public Make entry point. This avoids pulling unrelated demo
+images during a full source rebuild. Keep the normal image verification and
+runtime readiness gates; this option is not a substitute for bootstrap.
+
 Provider tests must cover both completion methods, direct/tool origins, prompt
 context, redacted text parts, repeated bytes from distinct tool calls and the
 default-disabled model gate. Proxy conformance inspects the final upstream body,
