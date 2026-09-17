@@ -58,7 +58,7 @@ describe('rpc-proxy HCC base URL default', () => {
   })
 })
 
-describe('rpc-proxy production namespace configuration', () => {
+describe('rpc-proxy base namespace configuration', () => {
   const repoRoot = path.join(__dirname, '../..')
   const configSource = readFileSync(path.join(__dirname, 'config.ts'), 'utf8')
   const deployment = readFileSync(
@@ -66,7 +66,7 @@ describe('rpc-proxy production namespace configuration', () => {
     'utf8'
   )
 
-  it('launches every production overlay with the required MCP server namespace', () => {
+  it('keeps the base deployment on the required MCP server namespace', () => {
     expect(configSource).toMatch(
       /requiredOrDevDefault\('RPC_PROXY_MCP_SERVER_NAMESPACE',\s*'mcp-server'\)/
     )
