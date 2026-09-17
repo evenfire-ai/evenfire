@@ -100,7 +100,7 @@ describeRealPostgres('LLM provider-attempt ledger on real PostgreSQL', () => {
   it('keeps attempt bindings immutable and rejects a duplicate invocation winner', async () => {
     const input = attemptInput({ invocationId: 'shared-invocation' })
     const first = await insertLlmProviderAttempt(pool, input)
-    await expect(insertLlmProviderAttempt(pool, input)).rejects.toThrow(/duplicate|unique/i)
+    await expect(insertLlmProviderAttempt(pool, input)).rejects.toMatchObject({ code: '23505' })
 
     const [winner, loser] = await Promise.allSettled([
       insertLlmProviderAttempt(pool, { ...input, providerAttemptIndex: 2 }),

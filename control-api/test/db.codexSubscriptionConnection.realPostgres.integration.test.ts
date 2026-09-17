@@ -82,7 +82,7 @@ describeRealPostgres('Codex subscription connection on real PostgreSQL', () => {
         refreshToken: 'second-refresh',
         accountFingerprint: 'fp-two',
       })
-    ).rejects.toThrow(/duplicate|unique/i)
+    ).rejects.toMatchObject({ code: '23505' })
 
     const count = await pool.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM codex_subscription_connections WHERE revoked_at IS NULL`

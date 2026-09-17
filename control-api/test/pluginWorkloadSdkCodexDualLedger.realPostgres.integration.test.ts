@@ -264,7 +264,7 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
           pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
         })
       )
-    ).rejects.toThrow(/duplicate|unique/i)
+    ).rejects.toMatchObject({ code: '23505' })
 
     const host = await insertLlmProviderAttempt(
       pool,
