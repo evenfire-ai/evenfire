@@ -38,14 +38,6 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
     requireValidRpcAccessTokenAny(['host:task:read']),
     requireRpcTokenUserMatch(),
     requireRpcTokenHostMatch(),
-    rateLimitMiddleware({
-      bucketType: 'host_artifact_pre_admission',
-      maxPerMinute: config.hostArtifactReadRlPerMin,
-      getBucketKey: req => {
-        const subject = (req as ArtifactRequest).rpcAuth?.sub
-        return subject ? `host-artifact-pre-admission:${subject}` : null
-      },
-    }),
     async (req: ArtifactRequest, res, next) => {
       try {
         const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
@@ -56,6 +48,14 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
         next(error)
       }
     },
+    rateLimitMiddleware({
+      bucketType: 'host_artifact_pre_admission',
+      maxPerMinute: config.hostArtifactReadRlPerMin,
+      getBucketKey: req => {
+        const subject = (req as ArtifactRequest).rpcAuth?.sub
+        return subject ? `host-artifact-pre-admission:${subject}` : null
+      },
+    }),
     rateLimitMiddleware({
       bucketType: 'host_artifact_read',
       maxPerMinute: config.hostArtifactReadRlPerMin,

@@ -757,14 +757,198 @@ private predicate isCanonicalHostArtifactAdmission(CallExpr limiter) {
   )
 }
 
+private predicate isRpcRequestFieldLocal(Function resolver, VarDecl binding, string field) {
+  exists(
+    VariableDeclarator declaration, MethodCallExpr trimCall, CallExpr stringCall,
+    BinaryExpr fallback, PropAccess access, PropAccess params, StringLiteral empty
+  |
+    declaration.getEnclosingFunction() = resolver and
+    declaration.getBindingPattern() = binding and
+    declaration.getDeclStmt() instanceof ConstDeclStmt and
+    declaration.getInit() = trimCall and
+    trimCall.getMethodName() = "trim" and
+    trimCall.getReceiver() = stringCall and
+    stringCall.getCalleeName() = "String" and
+    stringCall.getNumArgument() = 1 and
+    stringCall.getArgument(0) = fallback and
+    fallback.getOperator() = "||" and
+    fallback.getRightOperand() = empty and
+    empty.getStringValue() = "" and
+    fallback.getLeftOperand() = access and
+    access.getPropertyName() = field and
+    params = access.getBase().(PropAccess) and
+    params.getPropertyName() = "params" and
+    params.getBase().(VarAccess).getVariable() = resolver.getParameter(0).getVariable()
+  )
+}
+
+private predicate isRpcAuthClaimsLocal(Function resolver, VarDecl binding) {
+  exists(VariableDeclarator declaration, PropAccess claims |
+    declaration.getEnclosingFunction() = resolver and
+    declaration.getBindingPattern() = binding and
+    declaration.getDeclStmt() instanceof ConstDeclStmt and
+    declaration.getInit() = claims and
+    claims.getPropertyName() = "rpcAuth" and
+    claims.getBase().(VarAccess).getVariable() = resolver.getParameter(0).getVariable()
+  )
+}
+
+private predicate isCanonicalAuthorizationDecision(
+  Function resolver, CallExpr authorityCall
+) {
+  exists(
+    VariableDeclarator authorizationDeclaration, VarDecl authorizationBinding,
+    IfStmt denied, LogNotExpr deniedCondition, PropAccess authorizedFlag,
+    ReturnStmt deniedReturn,
+    ReturnStmt connectionReturn, PropAccess authorizedConnection
+  |
+    authorizationDeclaration.getEnclosingFunction() = resolver and
+    authorizationDeclaration.getDeclStmt() instanceof ConstDeclStmt and
+    authorizationDeclaration.getInit().getAChild*() = authorityCall and
+    authorizationDeclaration.getBindingPattern() = authorizationBinding and
+    denied.getCondition().getEnclosingFunction() = resolver and
+    denied.getCondition() = deniedCondition and
+    deniedCondition.getOperand() = authorizedFlag and
+    denied.getThen().getAChild*() = deniedReturn and
+    deniedReturn.getExpr() instanceof NullLiteral and
+    authorizedFlag.getPropertyName() = "authorized" and
+    authorizedFlag.getBase().(VarAccess).getVariable() = authorizationBinding.getVariable() and
+    connectionReturn.getExpr().getEnclosingFunction() = resolver and
+    authorizedConnection = connectionReturn.getExpr().(PropAccess) and
+    authorizedConnection.getPropertyName() = "connection" and
+    authorizedConnection.getBase().(VarAccess).getVariable() = authorizationBinding.getVariable() and
+    not exists(ReturnStmt alternateReturn |
+      alternateReturn.getTarget() = resolver and
+      not alternateReturn.getExpr() instanceof NullLiteral and
+      alternateReturn.getExpr() != connectionReturn.getExpr()
+    ) and
+    not exists(AssignExpr connectionMutation, PropAccess mutatedField |
+      connectionMutation.getEnclosingFunction() = resolver and
+      connectionMutation.getLhs() = mutatedField and
+      mutatedField.getBase() = authorizedConnection
+    )
+  )
+}
+
+private predicate isCanonicalHostAuthorizationImplementation(Function resolver) {
+  exists(
+    ImportSpecifier authorityImport, CallExpr authorityCall,
+    VarDecl claimsBinding, VarDecl userBinding, VarDecl hostBinding
+  |
+    resolver.getFile().getRelativePath() = "control-api/src/routes/rpc-access/users.ts" and
+    resolver.getName() = "resolveAuthorizedHostConnection" and
+    authorityImport.getImportedName() = "authorizeRpcHostAccess" and
+    authorityImport.getImportDeclaration().getImportedFile().getRelativePath() =
+      "control-api/src/services/access/rpcHostAccessAuthorizer.ts" and
+    authorityCall.getEnclosingFunction() = resolver and
+    authorityCall.getCallee().(VarAccess).getVariable() =
+      authorityImport.getLocal().getVariable() and
+    authorityCall.getArgument(0).(VarAccess).getVariable() =
+      resolver.getParameter(2).getVariable() and
+    authorityCall.getArgument(4).(VarAccess).getVariable() =
+      resolver.getParameter(3).getVariable() and
+    authorityCall.getArgument(1).(VarAccess).getVariable() = claimsBinding.getVariable() and
+    isRpcAuthClaimsLocal(resolver, claimsBinding) and
+    authorityCall.getArgument(2).(VarAccess).getVariable() = userBinding.getVariable() and
+    isRpcRequestFieldLocal(resolver, userBinding, "userId") and
+    authorityCall.getArgument(3).(VarAccess).getVariable() = hostBinding.getVariable() and
+    isRpcRequestFieldLocal(resolver, hostBinding, "hostRef") and
+    isCanonicalAuthorizationDecision(resolver, authorityCall)
+  )
+}
+
+private predicate isCanonicalArtifactProducerRouter(MethodCallExpr registration) {
+  exists(Function usersRouter, Function rpcRouter, CallExpr usersRouterCall,
+    MethodCallExpr routerUse, VariableDeclarator routerDeclaration, VarDecl routerBinding,
+    ReturnStmt routerReturn |
+    usersRouter = registration.getEnclosingFunction() and
+    usersRouter.getName() = "createRpcAccessUsersRouter" and
+    usersRouter.getFile().getRelativePath() = "control-api/src/routes/rpc-access/users.ts" and
+    rpcRouter.getName() = "createRpcAccessRouter" and
+    rpcRouter.getFile().getRelativePath() = "control-api/src/routes/rpc-access/index.ts" and
+    usersRouterCall.getEnclosingFunction() = rpcRouter and
+    isExactImportedCall(usersRouterCall,
+      "control-api/src/routes/rpc-access/users.ts", "createRpcAccessUsersRouter") and
+    routerUse.getEnclosingFunction() = rpcRouter and
+    routerUse.getMethodName() = "use" and
+    routerUse.getArgument(0) = usersRouterCall and
+    routerDeclaration.getEnclosingFunction() = rpcRouter and
+    routerDeclaration.getBindingPattern() = routerBinding and
+    routerUse.getReceiver().(VarAccess).getVariable() = routerBinding.getVariable() and
+    routerReturn.getTarget() = rpcRouter and
+    routerReturn.getExpr().(VarAccess).getVariable() = routerBinding.getVariable()
+  )
+}
+
+private predicate isFailClosedAuthorizationHandler(
+  CallExpr liveAuthorization, Function handler, Function resolver
+) {
+  exists(
+    VariableDeclarator connectionDeclaration, VarDecl connectionBinding,
+    IfStmt connectionGuard, LogNotExpr missingConnection, VarAccess guardedConnection,
+    ReturnStmt missingReturn, AssignExpr storedConnection, PropAccess artifactConnection,
+    VarAccess assignedConnection, CallExpr nextCall, TryStmt authorizationTry,
+    CatchClause errorHandler, CallExpr errorForwarding, VarAccess caughtError
+  |
+    liveAuthorization.getCallee().(VarAccess).getVariable() = resolver.getVariable() and
+    liveAuthorization.getArgument(0).(VarAccess).getVariable() =
+      handler.getParameter(0).getVariable() and
+    connectionDeclaration.getEnclosingFunction() = handler and
+    connectionDeclaration.getInit().getAChild*() = liveAuthorization and
+    connectionDeclaration.getBindingPattern() = connectionBinding and
+    connectionBinding.getVariable() = guardedConnection.getVariable() and
+    connectionGuard.getCondition().getEnclosingFunction() = handler and
+    connectionGuard.getCondition() = missingConnection and
+    missingConnection.getOperand() = guardedConnection and
+    connectionGuard.getThen() = missingReturn and
+    not exists(missingReturn.getExpr()) and
+    not exists(connectionGuard.getElse()) and
+    connectionGuard.nestedIn(authorizationTry.getBody()) and
+    not exists(TryStmt interveningTry |
+      connectionGuard.nestedIn(interveningTry.getBody()) and
+      interveningTry.nestedIn(authorizationTry.getBody())
+    ) and
+    artifactConnection.getPropertyName() = "artifactReadConnection" and
+    artifactConnection.getBase().(VarAccess).getVariable() = handler.getParameter(0).getVariable() and
+    storedConnection.getEnclosingFunction() = handler and
+    storedConnection.getLhs() = artifactConnection and
+    storedConnection.getRhs() = assignedConnection and
+    assignedConnection.getVariable() = connectionBinding.getVariable() and
+    storedConnection.getEnclosingStmt().nestedIn(authorizationTry.getBody()) and
+    connectionGuard.getLastToken().getIndex() <
+      storedConnection.getEnclosingStmt().getFirstToken().getIndex() and
+    nextCall.getCalleeName() = "next" and
+    nextCall.getEnclosingFunction() = handler and
+    nextCall.getNumArgument() = 0 and
+    nextCall.getEnclosingStmt().nestedIn(authorizationTry.getBody()) and
+    storedConnection.getEnclosingStmt().getLastToken().getIndex() <
+      nextCall.getEnclosingStmt().getFirstToken().getIndex() and
+    errorHandler = authorizationTry.getACatchClause() and
+    errorHandler.getNumParameter() = 1 and
+    errorForwarding.getCalleeName() = "next" and
+    errorForwarding.getNumArgument() = 1 and
+    errorForwarding.getArgument(0) = caughtError and
+    caughtError.(VarAccess).getVariable() = errorHandler.getAParameter().getVariable() and
+    errorForwarding.getEnclosingFunction() = handler and
+    errorForwarding.getEnclosingStmt().nestedIn(errorHandler.getBody()) and
+    not exists(CallExpr otherNext |
+      otherNext.getCalleeName() = "next" and
+      otherNext.getEnclosingFunction() = handler and
+      otherNext != nextCall and
+      otherNext != errorForwarding
+    )
+  )
+}
+
 private predicate isCanonicalArtifactProducer(MethodCallExpr registration) {
   exists(
     CallExpr tokenCheck, ArrayExpr scopes, StringLiteral scope,
     CallExpr userMatch, CallExpr hostMatch, CallExpr preAdmission, Function authorizationHandler,
-    CallExpr liveAuthorization, CallExpr hostAdmission
+    CallExpr liveAuthorization, Function resolver, CallExpr hostAdmission
   |
     registration.getMethodName() = "get" and
     registration.getFile().getRelativePath() = "control-api/src/routes/rpc-access/users.ts" and
+    isCanonicalArtifactProducerRouter(registration) and
     isCanonicalArtifactReadPath(registration.getArgument(0)) and
     tokenCheck = registration.getArgument(1) and
     isExactImportedCall(tokenCheck, "control-api/src/middleware/rpcAccessAuth.ts",
@@ -783,7 +967,11 @@ private predicate isCanonicalArtifactProducer(MethodCallExpr registration) {
     isSubjectOnlyArtifactPreAdmission(preAdmission) and
     authorizationHandler = registration.getArgument(5) and
     liveAuthorization.getEnclosingFunction() = authorizationHandler and
-    liveAuthorization.getCalleeName() = "resolveAuthorizedHostConnection" and
+    resolver.getFile().getRelativePath() = "control-api/src/routes/rpc-access/users.ts" and
+    resolver.getName() = "resolveAuthorizedHostConnection" and
+    liveAuthorization.getCallee().(VarAccess).getVariable() = resolver.getVariable() and
+    isCanonicalHostAuthorizationImplementation(resolver) and
+    isFailClosedAuthorizationHandler(liveAuthorization, authorizationHandler, resolver) and
     hostAdmission = registration.getArgument(6) and
     isCanonicalHostArtifactAdmission(hostAdmission)
   )
