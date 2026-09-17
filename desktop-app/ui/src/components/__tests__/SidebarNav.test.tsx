@@ -120,16 +120,17 @@ describe('SidebarNav logo', () => {
     expect(settingsMenu?.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
-  it('mounts the GFS solid-folder SVG inside the Files nav item so the icon is visible', () => {
+  it('mounts the hard-drive SVG inside the EvenDrive nav item so the icon is visible', () => {
     const { container } = render(<SidebarNav {...baseProps()} />)
     const filesLink = container.querySelector('[data-testid="nav-files"]')
     const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
     expect(icon).toBeTruthy()
-    expect(icon?.getAttribute('viewBox')).toBe('0 0 512 512')
-    // Solid Font Awesome fa-folder path data.
+    expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
+    // Lucide hard-drive outline plus the separator line and two activity dots.
     expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
-      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+      'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
     )
+    expect(icon?.querySelectorAll('line')).toHaveLength(3)
   })
 
   it('routes a controlled palette request through desktop collapse behavior', () => {

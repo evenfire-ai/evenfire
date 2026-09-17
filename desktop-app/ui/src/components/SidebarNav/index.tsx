@@ -17,7 +17,7 @@ import {
   IconChat,
   IconChevronRight,
   IconConnectors,
-  IconContexts,
+  IconHardDrive,
   IconMoreHorizontal,
   IconNewChat,
   IconSandboxUi,
@@ -556,7 +556,7 @@ export function SidebarNav({
                 className="nav-link-main"
                 onClick={() => handleSelect(DESKTOP_ROUTES.files)}
                 aria-label="EvenDrive"
-                leadingIcon={<IconContexts />}
+                leadingIcon={<IconHardDrive />}
                 trailingIcon={
                   <span className="nav-tooltip" role="tooltip">
                     EvenDrive

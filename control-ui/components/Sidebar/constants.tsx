@@ -1,4 +1,4 @@
-import { IconPaperclip } from '@components/icons'
+import { IconHardDrive } from '@components/icons'
 import { CONTROL_ROUTES } from '@constants/routes'
 import {
   IconAdministrativeTrace,
@@ -66,7 +66,7 @@ export const SIDEBAR_TABS: Record<SidebarTab, SidebarItem> = {
       {
         label: 'EvenDrive',
         href: CONTROL_ROUTES.globalFileSystem,
-        icon: <IconPaperclip />,
+        icon: <IconHardDrive />,
       },
       {
         label: 'Agent Outputs',

@@ -27,6 +27,7 @@ import { useToast } from '@components/Toast'
 import {
   IconChevronRight,
   IconDownload,
+  IconHardDrive,
   IconPaperclip,
   IconPencil,
   IconShare,
@@ -1252,7 +1253,7 @@ export function GfsBrowser(): React.JSX.Element {
         <TablePanelHeader
           title={
             <>
-              <IconPaperclip /> EvenDrive
+              <IconHardDrive /> EvenDrive
             </>
           }
           subtitle="Browse and manage drive resources and access grants from the admin plane."
