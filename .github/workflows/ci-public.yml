@@ -147,6 +147,20 @@ jobs:
             scripts/e2e/approved-tools-resource-cleanup.test.mjs \
             tests/e2e/fixtures/codex-subscription/approved-tools-workflow/index.test.mjs
 
+      # Image-capabilities (issue #654) node:test fixtures. The pixel-fixture
+      # unit proves the fixture contract and the SDK test drives the compiled
+      # OpenAICompatibleProvider against the production serializer. Both
+      # depend on Host's built dist/, so the step runs after `Build` and after
+      # `Test Codex approved-tools fixtures and runner` (same registration
+      # pattern as the approved-tools lane).
+      - name: Test image-capabilities fixtures and runner
+        if: matrix.service == 'mcp-host'
+        run: |
+          node scripts/tests/run-node-test-files.mjs \
+            scripts/e2e/image-capabilities-fixture.test.mjs \
+            tests/e2e/fixtures/image-capabilities/provider.test.mjs \
+            tests/e2e/fixtures/image-capabilities/sdk.test.mjs
+
       # Typecheck against the base tsconfig (covers src + test dirs).
       # This catches errors in test files that tsconfig.build.json may exclude.
       #

@@ -73,3 +73,39 @@ test('discovery cannot claim known support without a validity contract', () => {
   assert.equal(resolveImageInputCapability(dated, options).state, 'supported')
   assert.deepEqual(parseImageInputCapability(supported), supported)
 })
+
+test('hostname policy compares the DNS root dot but preserves the exact reference', () => {
+  const original = 'https://docs.z.ai./guides/vlm/glm-5.3-flash'
+  const trailingDot = {
+    ...supported,
+    evidence: { ...evidence, reference: original },
+  }
+  // A public fully qualified hostname with the DNS root dot is still public.
+  assert.deepEqual(parseImageInputCapability(trailingDot), trailingDot)
+  assert.deepEqual(normalizeImageInputCapability(trailingDot), {
+    state: 'supported',
+    evidence: trailingDot.evidence,
+  })
+  assert.equal(
+    resolveImageInputCapability(trailingDot, options).evidence.reference,
+    original
+  )
+
+  // The trailing dot cannot make an intranet, private, or single-label form
+  // pass, and old evidence stored with such a reference stays unknown.
+  for (const reference of [
+    'https://localhost./docs',
+    'https://10.0.0.1./docs',
+    'https://catalog.internal./docs',
+    'https://docs.local./docs',
+    'https://web./docs',
+  ]) {
+    assert.deepEqual(
+      normalizeImageInputCapability({
+        ...supported,
+        evidence: { ...evidence, reference },
+      }),
+      { state: 'unknown' }
+    )
+  }
+})

@@ -30,6 +30,10 @@ function validReference(value) {
   if (/^evidence:[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/.test(value)) return true
   try {
     const url = new URL(value)
+    // A DNS root dot is not part of the hostname. Policy decisions compare the
+    // normalized form so a trailing dot cannot bypass intranet rejection, while
+    // the caller's exact reference string is preserved for storage and output.
+    const hostname = url.hostname.replace(/\.+$/, '')
     return (
       url.protocol === 'https:' &&
       !url.username &&
@@ -37,9 +41,10 @@ function validReference(value) {
       !url.search &&
       !url.hash &&
       !/[\s\u0000-\u001f\u007f]/.test(value) &&
-      !/^(?:localhost|[\d.]+|\[)/i.test(url.hostname) &&
-      !/\.(?:local|internal|localhost)$/i.test(url.hostname) &&
-      url.hostname.includes('.')
+      hostname !== '' &&
+      !/^(?:localhost|[\d.]+|\[)/i.test(hostname) &&
+      !/\.(?:local|internal|localhost)$/i.test(hostname) &&
+      hostname.includes('.')
     )
   } catch {
     return false

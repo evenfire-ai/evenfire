@@ -194,6 +194,34 @@ describe('llmAllowedModels service', () => {
         updateLlmAllowedModelSchema.safeParse({ image_input: { state: 'nope' } }).success
       ).toBe(false)
     })
+
+    it('compares the DNS root dot for hostname policy and preserves the exact reference', () => {
+      const original = 'https://docs.z.ai./guides/vlm/glm-5.3-flash'
+      const dotted = {
+        ...CURATED_SUPPORTED,
+        evidence: { ...CURATED_SUPPORTED.evidence, reference: original },
+      }
+      const parsed = withImage(dotted)
+      // A public fully qualified hostname with the DNS root dot is still right.
+      expect(parsed.success).toBe(true)
+      if (parsed.success) {
+        expect(JSON.stringify(parsed.data)).toContain(original)
+      }
+      // The trailing dot cannot make an intranet, private, or single-label
+      // hostname pass: the policy compares the normalized hostname, and old
+      // evidence stored with such a reference must not produce a known claim.
+      for (const reference of [
+        'https://localhost./docs',
+        'https://10.0.0.1./docs',
+        'https://catalog.internal./docs',
+        'https://docs.local./docs',
+        'https://web./docs',
+      ]) {
+        expect(
+          withImage({ ...CURATED_SUPPORTED, evidence: { ...dotted.evidence, reference } }).success
+        ).toBe(false)
+      }
+    })
   })
 
   describe('updateLlmAllowedModelSchema', () => {
@@ -532,14 +560,26 @@ describe('llmAllowedModels service', () => {
           { ...ROW, image_input: null },
           { ...ROW, id: '2', image_input: { state: 'bogus' } },
           { ...ROW, id: '3', image_input: CURATED_SUPPORTED },
+          {
+            ...ROW,
+            id: '4',
+            image_input: {
+              state: 'supported',
+              evidence: {
+                ...CURATED_SUPPORTED.evidence,
+                reference: 'https://catalog.internal./docs',
+              },
+            },
+          },
         ],
-        rowCount: 3,
+        rowCount: 4,
       })
       const rows = await listAllowedModels(fakeDb(query))
       expect(String(query.mock.calls[0][0])).toMatch(/image_input/)
       expect(rows[0].image_input).toEqual({ state: 'unknown' })
       expect(rows[1].image_input).toEqual({ state: 'unknown' })
       expect(rows[2].image_input).toEqual(CURATED_SUPPORTED)
+      expect(rows[3].image_input).toEqual({ state: 'unknown' })
     })
   })
 

@@ -576,6 +576,35 @@ test('delegates internal routes untouched, including their auth', async () => {
   assert.deepEqual(evidence.attempts, [])
 })
 
+test('classifies bracketed IPv6 literals before the single-label internal rule', async () => {
+  const h = harness()
+  const internals = [
+    'http://[::1]:8080/healthz',
+    'http://[fe80::1]:8080/healthz',
+    'http://localhost:8080/healthz',
+    'http://127.0.0.1:8080/healthz',
+    'http://chatllm:8080/healthz',
+  ]
+  const externals = ['https://[2606:4700::1111]/cdn-cgi/trace', 'https://example.com/anything']
+
+  for (const url of internals) {
+    const response = await h.fetch(url, { method: 'GET' })
+    assert.equal(response.status, 200, url)
+    assert.equal(await response.text(), 'delegated', url)
+  }
+
+  for (const url of externals) {
+    const response = await h.fetch(url, { method: 'GET' })
+    assert.equal(response.status, 403, url)
+    assert.equal((await response.json()).error.code, 'egress_blocked', url)
+  }
+
+  assert.equal(h.delegated.length, internals.length)
+  const evidence = h.getEvidence()
+  assert.equal(evidence.counters.blockedEgress, externals.length)
+  assert.equal(evidence.counters.totalAttempts, 0)
+})
+
 test('streams SSE when the client asks for a stream', async () => {
   const { names, png } = palettePng()
   const h = harness()

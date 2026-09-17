@@ -360,6 +360,15 @@ function isInternalHost(hostname) {
   if (!host) return false
   if (host === 'localhost' || host === '::1' || host === '[::1]') return true
   if (/^127(?:\.\d{1,3}){3}$/.test(host)) return true
+  // A bracketed IPv6 literal carries no dot, so it must be classified here,
+  // before the single-label rule below would accept any public address as
+  // cluster traffic. Only loopback and link-local (fe80::/10) literals are
+  // internal; every other literal is external egress.
+  if (host.startsWith('[') && host.endsWith(']')) {
+    const literal = host.slice(1, -1)
+    if (literal === '::1') return true
+    return /^fe[89ab][0-9a-f]:/.test(literal)
+  }
   if (INTERNAL_HOST_SUFFIXES.some(suffix => host.endsWith(suffix))) return true
   if (!host.includes('.')) return true
   const labels = host.split('.')

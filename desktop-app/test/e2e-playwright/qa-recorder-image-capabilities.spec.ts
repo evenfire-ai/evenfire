@@ -757,6 +757,11 @@ test('image-capabilities fixture: image capability gates the composer and the pr
       // The removed image never reached the wire at all.
       expect(appended.filter(row => row.imageSha256 !== null)).toHaveLength(0)
       expect(appended.filter(row => row.imageSha256 === textSha)).toHaveLength(0)
+      // A delivered-but-undecodable image is recorded with `imageSha256: null` and
+      // `responseKind: 'rejected'`, so the row checks above cannot see it. The
+      // fixture still counts that attempt, so the image-attempt counter must not
+      // move either.
+      expect(after.counters.imageAttempts - before.counters.imageAttempts).toBe(0)
 
       const textRows = appended.filter(
         row =>

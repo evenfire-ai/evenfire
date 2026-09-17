@@ -800,17 +800,36 @@ t2_control_api_runtime_check() {
 # An optional image-input fixture must never survive into a runtime verdict.
 # Runs without that opt-in image keep the existing probe set unchanged.
 t2_image_capability_fixture_check() {
+  # The planner and bootstrap lanes never certify the live Host baseline, so
+  # they never probe it: an absent manifest or an unready Host there is a plan,
+  # not residue. The strict final preflight is T2_PLAN_MODE=false on a
+  # bootstrapped profile.
+  [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
   local acquired configuration restored
-  acquired="$(python3 - "${T2_PROJECT_DIR}/deploy/minikube/.image-manifest.json" <<'PY_IMAGE_FIXTURE'
+  if [ ! -f "$T2_IMAGE_MANIFEST" ]; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is missing: $T2_IMAGE_MANIFEST"
+    return 1
+  fi
+  if ! acquired="$(python3 - "$T2_IMAGE_MANIFEST" 2>/dev/null <<'PY_IMAGE_FIXTURE'
 import json, sys
 with open(sys.argv[1]) as source:
     images = json.load(source)["images"]
+if not isinstance(images, dict):
+    raise SystemExit("images")
 print("yes" if any(ref.removeprefix("docker.io/") == "clerum/image-capabilities-mcp-host:test" for ref in images) else "no")
 PY_IMAGE_FIXTURE
-  )" || return 1
+  )"; then
+    T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is invalid or incomplete: $T2_IMAGE_MANIFEST"
+    return 1
+  fi
   [ "$acquired" = yes ] || return 0
-  configuration="$(t2_kc -n mcp-host get configmap mcp-host-config -o json)" || return 1
-  if ! python3 - "$1" "$configuration" <<'PY_IMAGE_FIXTURE'
+  if ! configuration="$(t2_kc -n mcp-host get configmap mcp-host-config -o json)"; then
+    t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the mcp-host image capability configuration'
+    return 1
+  fi
+  if ! python3 - "$1" "$configuration" 2>/dev/null <<'PY_IMAGE_FIXTURE'
 import json, sys
 deployments, config = (json.loads(value) for value in sys.argv[1:])
 flag = "evenfire.ai/image-capabilities-run"
@@ -832,8 +851,11 @@ PY_IMAGE_FIXTURE
     t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
     return 1
   fi
-  restored="$(t2_kc -n mcp-host exec deployment/chatllm -- node -e \
-    'process.stdout.write(String(process.env.NODE_ENV !== "test" && !Object.keys(process.env).some(key => key.startsWith("IMAGE_CAPABILITIES_") || key === "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE") && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))')" || return 1
+  if ! restored="$(t2_kc -n mcp-host exec deployment/chatllm -- node -e \
+    'process.stdout.write(String(process.env.NODE_ENV !== "test" && !Object.keys(process.env).some(key => key.startsWith("IMAGE_CAPABILITIES_") || key === "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE") && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))')"; then
+    t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the running Host image capability environment'
+    return 1
+  fi
   if [ "$restored" != true ]; then
     t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture remains in the running Host'
     return 1
