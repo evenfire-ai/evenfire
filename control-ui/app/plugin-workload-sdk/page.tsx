@@ -575,8 +575,13 @@ function GrantFormModal({
       .then(capability => {
         if (!cancelled) setGrokEnabled(capability.enabled)
       })
-      .catch(() => {
-        if (!cancelled) setGrokEnabled(false)
+      .catch(err => {
+        if (cancelled) return
+        // loadGrokSubscriptionCapability already maps "disabled" to
+        // { enabled: false }; anything reaching here is a real probe failure
+        // and must not be presented as the flag being off.
+        setGrokEnabled(false)
+        setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
       })
     return () => {
       cancelled = true

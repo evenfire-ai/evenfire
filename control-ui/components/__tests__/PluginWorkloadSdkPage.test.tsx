@@ -218,7 +218,34 @@ describe('Plugin Workload SDK operator page', () => {
     await waitFor(() => expect(newGrant).toBeEnabled())
     fireEvent.click(newGrant)
     const dialog = await screen.findByRole('dialog', { name: 'New SDK grant' })
-    expect(within(dialog).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
+    const provider = await waitFor(() =>
+      within(dialog).getByRole('combobox', { name: /target provider/i })
+    )
+    // Liveness: the probe ran and resolved disabled, and the picker rendered
+    // its other providers, so the absence below is not a pre-probe snapshot.
+    await waitFor(() => expect(grokCapability.load).toHaveBeenCalled())
+    await act(async () => {
+      await grokCapability.load.mock.results.at(-1)?.value
+    })
+    expect(
+      within(provider).getByRole('option', { name: /OpenAI Codex Subscription/i })
+    ).toBeInTheDocument()
+    expect(within(provider).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
+    expect(within(dialog).queryByText(/Could not load Grok subscriptions/)).toBeNull()
+  })
+
+  it('surfaces a non-disabled Grok capability probe error and keeps Grok hidden', async () => {
+    grokCapability.load.mockRejectedValue(
+      Object.assign(new Error('Grok capability probe failed'), { status: 500 })
+    )
+    render(<PluginWorkloadSdkPage />)
+    const newGrant = await screen.findByRole('button', { name: 'New grant' })
+    await waitFor(() => expect(newGrant).toBeEnabled())
+    fireEvent.click(newGrant)
+    const dialog = await screen.findByRole('dialog', { name: 'New SDK grant' })
+    expect(await within(dialog).findByText('Grok capability probe failed')).toBeInTheDocument()
+    const provider = within(dialog).getByRole('combobox', { name: /target provider/i })
+    expect(within(provider).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
   })
 
   it('offers Grok grants in the SDK picker when the Grok flag is on', async () => {

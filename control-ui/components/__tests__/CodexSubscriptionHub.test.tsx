@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import type { CodexSubscriptionConnectionView } from '@lib/codexSubscription'
 import {
   CODEX_DEVICE_VERIFICATION_URI,
@@ -12,10 +12,22 @@ import {
   revokeCodexSubscription,
   startCodexDeviceConnect,
 } from '@lib/codexSubscription'
+import {
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+  pollGrokDevice,
+  revokeGrokSubscription,
+  startGrokDeviceConnect,
+} from '@lib/grokSubscription'
 import { CodexSubscriptionHub } from '../CodexSubscriptionHub'
 import { ToastProvider } from '../Toast'
 
 const confirmMock = vi.fn()
+
+const capabilityProbes = vi.hoisted(() => ({
+  codex: vi.fn(),
+  grok: vi.fn(),
+}))
 
 vi.mock('@components/ConfirmDialog', () => ({
   useConfirmDialog: () => ({
@@ -27,13 +39,13 @@ vi.mock('@components/ConfirmDialog', () => ({
 vi.mock('@lib/codexSubscriptionFeature', () => ({
   isCodexSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
     capability?.enabled === true,
-  loadCodexSubscriptionCapability: async () => ({ enabled: true }),
+  loadCodexSubscriptionCapability: () => capabilityProbes.codex(),
 }))
 
 vi.mock('@lib/grokSubscriptionFeature', () => ({
   isGrokSubscriptionUiEnabled: (capability?: { enabled?: boolean } | null) =>
     capability?.enabled === true,
-  loadGrokSubscriptionCapability: async () => ({ enabled: false }),
+  loadGrokSubscriptionCapability: () => capabilityProbes.grok(),
 }))
 
 vi.mock('@lib/codexSubscription', async importOriginal => {
@@ -56,7 +68,14 @@ vi.mock('@lib/grokSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/grokSubscription')>()
   return {
     ...actual,
-    listGrokSubscriptionConnections: vi.fn().mockResolvedValue([]),
+    listGrokSubscriptionConnections: vi.fn(),
+    listGrokConnectionModels: vi.fn(),
+    createGrokSubscriptionConnection: vi.fn(),
+    patchGrokSubscriptionConnection: vi.fn(),
+    patchGrokCatalogModel: vi.fn(),
+    startGrokDeviceConnect: vi.fn(),
+    pollGrokDevice: vi.fn(),
+    revokeGrokSubscription: vi.fn(),
   }
 })
 
@@ -83,6 +102,9 @@ function connection(
 describe('CodexSubscriptionHub', () => {
   beforeEach(() => {
     confirmMock.mockReset()
+    capabilityProbes.codex.mockResolvedValue({ enabled: true })
+    capabilityProbes.grok.mockResolvedValue({ enabled: false })
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([])
     vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
       connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
     ])
@@ -382,5 +404,317 @@ describe('CodexSubscriptionHub', () => {
     await waitFor(() => {
       expect(revokeCodexSubscription).toHaveBeenCalledWith('codex-aaa')
     })
+  })
+})
+
+describe('CodexSubscriptionHub with Grok enabled', () => {
+  function renderHub() {
+    return render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+  }
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (reason: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
+  function attributeText(root: HTMLElement): string {
+    return Array.from(root.querySelectorAll('*'))
+      .flatMap(node => [node.getAttribute('aria-label'), node.getAttribute('title')])
+      .filter(Boolean)
+      .join(' ')
+  }
+
+  beforeEach(() => {
+    confirmMock.mockReset()
+    capabilityProbes.codex.mockResolvedValue({ enabled: true })
+    capabilityProbes.grok.mockResolvedValue({ enabled: true })
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'codex-aaa', displayName: 'Team A' }),
+    ])
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok', defaultModel: 'grok-4.6' }),
+    ])
+    vi.mocked(listCodexConnectionModels).mockResolvedValue([
+      { model: 'gpt-5.1', enabled: true, stale: false },
+    ])
+    vi.mocked(listGrokConnectionModels).mockResolvedValue([
+      { model: 'grok-4.6', enabled: true, stale: false },
+      { model: 'grok-code-old', enabled: false, stale: true },
+    ])
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.clearAllMocks()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('keeps Grok rows and reports the Codex error when the Codex list fails', async () => {
+    vi.mocked(listCodexSubscriptionConnections).mockRejectedValue(new Error('codex list boom'))
+    renderHub()
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
+    expect(await screen.findByText(/codex list boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team A')).not.toBeInTheDocument()
+  })
+
+  it('keeps Codex rows and reports the Grok error when the Grok list fails', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValue(new Error('grok list boom'))
+    renderHub()
+    expect(await screen.findByText('Team A')).toBeInTheDocument()
+    expect(await screen.findByText(/grok list boom/)).toBeInTheDocument()
+    expect(screen.queryByText('Team Grok')).not.toBeInTheDocument()
+  })
+
+  it('recovers the failed provider on reload without losing the healthy one', async () => {
+    vi.mocked(listGrokSubscriptionConnections)
+      .mockRejectedValueOnce(new Error('grok list boom'))
+      .mockResolvedValue([connection({ connectionKey: 'grok-aaa', displayName: 'Team Grok' })])
+    renderHub()
+    expect(await screen.findByText(/grok list boom/)).toBeInTheDocument()
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Reload/ }))
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByText(/grok list boom/)).not.toBeInTheDocument()
+    })
+    expect(screen.getByText('Team A')).toBeInTheDocument()
+  })
+
+  it('surfaces a non-disabled Codex capability probe error while Grok is enabled', async () => {
+    capabilityProbes.codex.mockRejectedValue(new Error('codex probe boom'))
+    renderHub()
+    expect(await screen.findByText('Team Grok')).toBeInTheDocument()
+    expect(await screen.findByText(/codex probe boom/)).toBeInTheDocument()
+  })
+
+  it('surfaces a non-disabled Grok capability probe error while Codex is enabled', async () => {
+    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+    renderHub()
+    expect(await screen.findByText('Team A')).toBeInTheDocument()
+    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+  })
+
+  it('surfaces a non-disabled Grok capability probe error when Codex is disabled', async () => {
+    capabilityProbes.codex.mockResolvedValue({ enabled: false })
+    capabilityProbes.grok.mockRejectedValue(new Error('grok probe boom'))
+    renderHub()
+    expect(await screen.findByText(/grok probe boom/)).toBeInTheDocument()
+  })
+
+  it('keeps same-key Codex and Grok rows independent for keys, busy state and edit-close', async () => {
+    const consoleError = vi.spyOn(console, 'error')
+    vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'shared', displayName: 'Shared Codex' }),
+    ])
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      connection({ connectionKey: 'shared', displayName: 'Shared Grok' }),
+    ])
+    const revoke = deferred<CodexSubscriptionConnectionView>()
+    vi.mocked(revokeCodexSubscription).mockReturnValue(revoke.promise)
+    confirmMock.mockResolvedValue(true)
+    renderHub()
+    expect(await screen.findByText('Shared Codex')).toBeInTheDocument()
+    expect(screen.getByText('Shared Grok')).toBeInTheDocument()
+    expect(consoleError.mock.calls.some(call => String(call[0]).includes('same key'))).toBe(false)
+
+    // Open the Grok row, then delete the same-key Codex row.
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for Grok subscription Shared Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    expect(
+      await screen.findByRole('dialog', { name: 'Update Grok subscription Shared Grok' })
+    ).toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for ChatGPT subscription Shared Codex' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    await waitFor(() => expect(revokeCodexSubscription).toHaveBeenCalledWith('shared'))
+
+    // Codex row is busy; the same-key Grok row is not.
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Actions for Grok subscription Shared Grok' })
+    )
+    const grokDelete = screen.getByRole('menuitem', { name: 'Delete' })
+    expect(grokDelete).not.toHaveAttribute('aria-disabled', 'true')
+    expect(grokDelete).not.toBeDisabled()
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    revoke.resolve(connection({ connectionKey: 'shared', status: 'revoked' }))
+    await waitFor(() => expect(listCodexSubscriptionConnections).toHaveBeenCalledTimes(2))
+    // Revoking the Codex row must not close the open Grok dialog.
+    expect(
+      screen.getByRole('dialog', { name: 'Update Grok subscription Shared Grok' })
+    ).toBeInTheDocument()
+    expect(revokeGrokSubscription).not.toHaveBeenCalled()
+  })
+
+  it('uses Grok copy (no ChatGPT wording) across the Grok dialog, device card and models', async () => {
+    const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => tab)
+    )
+    vi.mocked(startGrokDeviceConnect).mockResolvedValue({
+      userCode: 'GROK-1234',
+      verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
+      intervalSeconds: 60,
+      state: 'grok-state',
+      intent: 'reconnect',
+    })
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Update Grok subscription Team Grok',
+    })
+    expect(await within(dialog).findByLabelText('grok-4.6')).toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign in with Grok' }))
+    expect(await within(dialog).findByTestId('codex-device-code')).toHaveTextContent('GROK-1234')
+    expect(dialog.textContent ?? '').not.toMatch(/ChatGPT/)
+    expect(attributeText(dialog)).not.toMatch(/ChatGPT/)
+    expect(within(dialog).getByText(/No longer in the Grok catalog/)).toBeInTheDocument()
+    expect(dialog.querySelectorAll('[data-provider="codex-subscription"]').length).toBe(0)
+  })
+
+  it('titles the Grok create dialog for Grok when Grok is the selected provider', async () => {
+    renderHub()
+    await screen.findByText('Team Grok')
+    fireEvent.click(screen.getByRole('button', { name: 'Add subscription' }))
+    const dialog = await screen.findByRole('dialog', { name: 'New ChatGPT subscription' })
+    fireEvent.change(within(dialog).getByLabelText('Provider'), {
+      target: { value: 'grok-subscription' },
+    })
+    expect(await screen.findByRole('dialog', { name: 'New Grok subscription' })).toBeInTheDocument()
+    expect(dialog.textContent ?? '').not.toMatch(/ChatGPT sign-in|Sign in with ChatGPT/)
+  })
+
+  it('opens a tab before the awaited start and navigates it to the returned Grok verification URI', async () => {
+    const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
+    const openMock = vi.fn(() => tab)
+    vi.stubGlobal('open', openMock)
+    const started = deferred<{
+      userCode: string
+      verificationUri: string
+      intervalSeconds: number
+      state: string
+      intent: 'reconnect'
+    }>()
+    vi.mocked(startGrokDeviceConnect).mockReturnValue(started.promise)
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    // Opened synchronously inside the click (user activation), before the start resolves.
+    expect(openMock).toHaveBeenCalledTimes(1)
+    expect(openMock.mock.calls[0]?.[0]).not.toBe('https://auth.x.ai')
+    expect(tab.opener).toBeNull()
+    started.resolve({
+      userCode: 'GROK-1234',
+      verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
+      intervalSeconds: 60,
+      state: 'grok-state',
+      intent: 'reconnect',
+    })
+    await waitFor(() => {
+      expect(tab.location.replace).toHaveBeenCalledWith(
+        'https://auth.x.ai/device?user_code=GROK-1234'
+      )
+    })
+    expect(await screen.findByTestId('codex-device-verification-link')).toHaveAttribute(
+      'href',
+      'https://auth.x.ai/device?user_code=GROK-1234'
+    )
+    expect(tab.close).not.toHaveBeenCalled()
+  })
+
+  it('closes the pre-opened Grok tab when the device start fails', async () => {
+    const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => tab)
+    )
+    vi.mocked(startGrokDeviceConnect).mockRejectedValue(new Error('start boom'))
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    expect(await screen.findByText('start boom')).toBeInTheDocument()
+    expect(tab.close).toHaveBeenCalled()
+    expect(tab.location.replace).not.toHaveBeenCalled()
+    expect(pollGrokDevice).not.toHaveBeenCalled()
+  })
+
+  it('shows the returned Grok verification link when the tab is blocked', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => null)
+    )
+    vi.mocked(startGrokDeviceConnect).mockResolvedValue({
+      userCode: 'GROK-1234',
+      verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
+      intervalSeconds: 60,
+      state: 'grok-state',
+      intent: 'reconnect',
+    })
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    const card = await screen.findByTestId('codex-device-code')
+    expect(card).toHaveTextContent('Open the Grok verification page')
+    expect(screen.getByTestId('codex-device-verification-link')).toHaveAttribute(
+      'href',
+      'https://auth.x.ai/device?user_code=GROK-1234'
+    )
+  })
+
+  it('falls back to the Grok verification origin, never the ChatGPT URI, when no URI is returned', async () => {
+    const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => tab)
+    )
+    vi.mocked(startGrokDeviceConnect).mockResolvedValue({
+      userCode: 'GROK-1234',
+      verificationUri: null as unknown as string,
+      intervalSeconds: 60,
+      state: 'grok-state',
+      intent: 'reconnect',
+    })
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
+    const link = await screen.findByTestId('codex-device-verification-link')
+    expect(link).toHaveAttribute('href', 'https://auth.x.ai')
+    expect(link).not.toHaveAttribute('href', CODEX_DEVICE_VERIFICATION_URI)
+    // An unusable URI is never navigated to; the pre-opened tab is closed.
+    expect(tab.location.replace).not.toHaveBeenCalled()
+    expect(tab.close).toHaveBeenCalled()
+    expect(screen.getByTestId('codex-device-code')).toHaveTextContent(
+      'Open the Grok verification page'
+    )
   })
 })
