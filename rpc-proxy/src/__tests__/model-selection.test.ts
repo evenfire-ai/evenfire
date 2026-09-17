@@ -52,7 +52,8 @@ describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
   })
 
   it('forwards to mcp-host and returns the upstream body verbatim', async () => {
@@ -142,7 +143,8 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
   })
 
   it('forwards the body to mcp-host and returns the upstream response', async () => {

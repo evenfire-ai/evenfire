@@ -55,11 +55,20 @@ function sanitizedStreamErrorMessage(): string {
   return 'Status temporarily unavailable'
 }
 
+/** Clears in-process stream counters. Tests must call this; production never does. */
+export function resetHostStatusStreamRuntimeForTests(): void {
+  activeStreamCountsByUser.clear()
+  activeStreamCountsByUserHost.clear()
+  activeStreams.clear()
+  streamCounter = 0
+}
+
 export function createRpcHostStatusStreamRouter(): Router {
   const router = Router()
 
+  // ([^/]+) so a decoded "*" is a hostRef (400), not an Express splat (404).
   router.get(
-    '/rpc/hosts/:hostRef/status/stream',
+    '/rpc/hosts/:hostRef([^/]+)/status/stream',
     requireRpcAuth,
     requireScope('host:status:read'),
     async (req: AuthedRequest, res, next) => {

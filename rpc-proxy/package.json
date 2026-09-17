@@ -1,6 +1,6 @@
 {
   "name": "clerum-rpc-proxy",
-  "version": "0.1.77",
+  "version": "0.1.78",
   "description": "External-facing RPC proxy for tenant-scoped MCP access",
   "main": "dist/main.js",
   "engines": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --no-file-parallelism",
     "test:watch": "vitest",
     "test:e2e": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e",
     "test:e2e:watch": "npm --prefix ../tests/e2e run test:rpc-proxy-e2e:watch",
