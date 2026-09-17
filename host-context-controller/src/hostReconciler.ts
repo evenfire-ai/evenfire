@@ -7,6 +7,7 @@ import type { AdministrativeOutcomeReporter } from './administrativeOutcomeRepor
 import {
   type CodexCatalogSnapshot,
   type CodexExecutionProjection,
+  GROK_EXECUTE_SCOPE,
   assignedHostCodexConnectionRef,
   projectCodexExecution,
   projectGrokExecution,
@@ -511,6 +512,9 @@ type GfsTokenLifecycleEvidence = {
 type DeploymentMutationState = {
   lifecycle: EffectiveHostLifecycle
   runtimeTokenRevision: string
+  // Captured in the same synchronous step as the stable scope-hash check so
+  // the pod's Grok factory switch and the minted llm:grok:execute scope agree.
+  grokExecutionEnabled: boolean
 }
 
 export class HostReconciler {
@@ -1613,6 +1617,10 @@ export class HostReconciler {
     const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
     const snapshot = parseGrokAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
     return projectGrokExecution(host.spec, snapshot)
+  }
+
+  private hostDerivesGrokExecution(host: HostCRD): boolean {
+    return this.projectGrokForHost(host).derivedScopes.includes(GROK_EXECUTE_SCOPE)
   }
 
   private resolveEffectiveControlScopesForHost(
@@ -2853,7 +2861,8 @@ export class HostReconciler {
     host: HostCRD,
     mounts: ResolvedSfsMount[] = [],
     runtimeTokenRevision = '',
-    lifecycle?: EffectiveHostLifecycle
+    lifecycle?: EffectiveHostLifecycle,
+    grokExecutionEnabled = this.hostDerivesGrokExecution(host)
   ): k8s.V1Deployment {
     const labels: Record<string, string> = {
       app: host.name,
@@ -2957,6 +2966,14 @@ export class HostReconciler {
       },
       { name: 'MCP_HOST_GATEWAY_URL', value: config.mcpHostGatewayUrl },
     ]
+    // mcp-host refuses to construct the grok-subscription provider unless this
+    // switch is on. Emit it only when this Host's Grok projection mints
+    // llm:grok:execute (same gate as the scope and grok-proxy egress policy),
+    // so an eligibility flip changes the pod template and rolls the Host.
+    // Non-Grok Hosts keep a byte-identical template.
+    if (grokExecutionEnabled) {
+      env.push({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
+    }
     if (isStateless) {
       env.push(
         { name: 'CLERUM_STATELESS_LIFECYCLE', value: 'true' },
@@ -3503,7 +3520,8 @@ export class HostReconciler {
         host,
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
-        state?.lifecycle ?? lifecycle
+        state?.lifecycle ?? lifecycle,
+        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
       )
     }
     const mutationAllowed = () => {
@@ -4594,6 +4612,7 @@ export class HostReconciler {
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
       await this.reconcileMcpHostGrokProxyEgressNetworkPolicy(host)
       // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
       // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
@@ -4705,6 +4724,7 @@ export class HostReconciler {
           return {
             lifecycle: effective,
             runtimeTokenRevision: runtimeTokenProvision.revision,
+            grokExecutionEnabled: this.hostDerivesGrokExecution(host),
           }
         }
         log.warn('CommunicationChannel scope contract changed before Deployment mutation', {
