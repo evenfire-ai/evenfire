@@ -1,30 +1,10 @@
 'use client'
 
-import { Children, Fragment, isValidElement } from 'react'
-import type { ReactNode } from 'react'
 import { DataViewHeader } from '@clerum/frontend-components'
 import { cn } from '@lib/cn'
 import { ClampedDescription } from './ClampedDescription'
+import { hasInteractiveDescendant, splitTitleContent } from './contentSemantics'
 import type { TablePanelHeaderProps } from './types'
-
-function flattenTitleNodes(title: ReactNode): ReactNode[] {
-  return Children.toArray(title).flatMap(node =>
-    isValidElement<{ children?: ReactNode }>(node) && node.type === Fragment
-      ? flattenTitleNodes(node.props.children)
-      : node
-  )
-}
-
-function hasInteractiveDescendant(node: ReactNode): boolean {
-  if (!isValidElement<{ children?: ReactNode }>(node)) return false
-  if (
-    typeof node.type === 'string' &&
-    ['a', 'button', 'input', 'select', 'textarea'].includes(node.type)
-  ) {
-    return true
-  }
-  return Children.toArray(node.props.children).some(hasInteractiveDescendant)
-}
 
 /** Control UI compatibility adapter for the shared list header. */
 export function TablePanelHeader({
@@ -37,13 +17,7 @@ export function TablePanelHeader({
   title,
   titleActions,
 }: TablePanelHeaderProps) {
-  const titleNodes = flattenTitleNodes(title)
-  const [firstTitleNode, ...remainingTitleNodes] = titleNodes
-  const titleIcon =
-    isValidElement(firstTitleNode) && typeof firstTitleNode.type !== 'string'
-      ? firstTitleNode
-      : undefined
-  const titleText = titleIcon ? remainingTitleNodes : titleNodes
+  const { icon: titleIcon, text: titleText } = splitTitleContent(title)
 
   return (
     <DataViewHeader
