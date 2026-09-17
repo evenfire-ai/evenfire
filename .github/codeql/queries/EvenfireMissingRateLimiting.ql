@@ -491,6 +491,185 @@ private predicate hasCanonicalRpcProxyScopeAuthorization() {
   )
 }
 
+private predicate hasBoundedArtifactScopeImplementation() {
+  exists(
+    Function scopeGuard, Function scopeHandler, CallExpr boundRequest,
+    PropAccess delegation, IfStmt v2Branch, ReturnStmt v2Return,
+    VariableDeclarator authDeclaration, VarDecl authBinding, PropAccess reqAuth,
+    MethodCallExpr scopeCheck, PropAccess scopes, LogNotExpr deniedScopeCheck,
+    IfStmt denied, MethodCallExpr forbiddenStatus, ReturnStmt deniedReturn,
+    CallExpr nextCall
+  |
+    scopeGuard.getFile().getRelativePath() = "rpc-proxy/src/middleware/auth.ts" and
+    scopeGuard.getName() = "requireScope" and
+    functionOccursWithin(scopeHandler, scopeGuard) and
+    exists(ReturnStmt returnedHandler |
+      returnedHandler.nestedIn(scopeGuard.getBody()) and
+      returnedHandler.getExpr() = scopeHandler
+    ) and
+    isExactImportedCall(boundRequest, "rpc-proxy/src/routeActionBindingV2.ts",
+      "authorizeBoundRequestV2") and
+    boundRequest.getEnclosingFunction() = scopeHandler and
+    delegation.getPropertyName() = "userDelegationV2" and
+    delegation.getBase().(VarAccess).getVariable() = scopeHandler.getParameter(0).getVariable() and
+    v2Branch.getCondition() = delegation and
+    boundRequest.getEnclosingStmt().nestedIn(v2Branch.getThen()) and
+    v2Return.nestedIn(v2Branch.getThen()) and
+    not exists(v2Return.getExpr()) and
+    authDeclaration.getEnclosingFunction() = scopeHandler and
+    authDeclaration.getDeclStmt() instanceof ConstDeclStmt and
+    authBinding.getVariable() = authDeclaration.getBindingPattern().(VarDecl).getVariable() and
+    reqAuth = authDeclaration.getInit().(PropAccess) and
+    reqAuth.getPropertyName() = "auth" and
+    reqAuth.getBase().(VarAccess).getVariable() = scopeHandler.getParameter(0).getVariable() and
+    scopeCheck.getEnclosingFunction() = scopeHandler and
+    scopeCheck.getMethodName() = "includes" and
+    scopes = scopeCheck.getReceiver().(PropAccess) and
+    scopes.getPropertyName() = "scopes" and
+    scopes.getBase().(VarAccess).getVariable() = authBinding.getVariable() and
+    scopeCheck.getArgument(0).(VarAccess).getVariable() = scopeGuard.getParameter(0).getVariable() and
+    deniedScopeCheck.getOperand() = scopeCheck and
+    scopeCheck.getParent() = deniedScopeCheck and
+    deniedScopeCheck.getParent() = denied.getCondition() and
+    forbiddenStatus.getEnclosingFunction() = scopeHandler and
+    forbiddenStatus.getMethodName() = "status" and
+    forbiddenStatus.getArgument(0).getIntValue() = 403 and
+    forbiddenStatus.getEnclosingStmt().nestedIn(denied.getThen()) and
+    deniedReturn.nestedIn(denied.getThen()) and
+    not exists(deniedReturn.getExpr()) and
+    nextCall.getEnclosingFunction() = scopeHandler and
+    nextCall.getCalleeName() = "next" and
+    nextCall.getNumArgument() = 0 and
+    (
+      denied.getLocation().getEndLine() < nextCall.getLocation().getStartLine() or
+      (
+        denied.getLocation().getEndLine() = nextCall.getLocation().getStartLine() and
+        denied.getLocation().getEndColumn() < nextCall.getLocation().getStartColumn()
+      )
+    ) and
+    not exists(CallExpr unprovedCall |
+      unprovedCall.getEnclosingFunction() = scopeHandler and
+      unprovedCall != boundRequest and
+      unprovedCall != scopeCheck and
+      not unprovedCall.getCalleeName() in ["status", "json", "next"]
+    ) and
+    hasBoundedArtifactV2RouteBinding()
+  )
+}
+
+private predicate hasBoundedArtifactV2RouteBinding() {
+  exists(
+    Function boundRequest, Function binder, Function candidate,
+    CallExpr bindCall, CallExpr candidateCall, CallExpr authorityCall,
+    TryStmt bindingTry, CatchClause bindingCatch, IfStmt recognizedBindingError,
+    InstanceofExpr errorTypeCheck, MethodCallExpr invalidStatus, ThrowStmt unsupportedRoute,
+    NewExpr unsupportedError, StringLiteral unsupportedCode
+  |
+    boundRequest.getFile().getRelativePath() = "rpc-proxy/src/routeActionBindingV2.ts" and
+    boundRequest.getName() = "authorizeBoundRequestV2" and
+    binder.getFile() = boundRequest.getFile() and
+    binder.getName() = "bindRouteActionV2" and
+    candidate.getFile() = boundRequest.getFile() and
+    candidate.getName() = "candidateForRequest" and
+    bindCall.getEnclosingFunction() = boundRequest and
+    bindCall.getCallee().(VarAccess).getVariable() = binder.getVariable() and
+    bindingTry.nestedIn(boundRequest.getBody()) and
+    bindCall.getEnclosingStmt().nestedIn(bindingTry.getBody()) and
+    bindingCatch = bindingTry.getACatchClause() and
+    recognizedBindingError.getCondition() = errorTypeCheck and
+    errorTypeCheck.getLeftOperand().(VarAccess).getVariable() =
+      bindingCatch.getAParameter().getVariable() and
+    errorTypeCheck.getRightOperand().(VarAccess).getVariable().getName() = "RouteActionBindingError" and
+    recognizedBindingError.nestedIn(bindingCatch.getBody()) and
+    invalidStatus.getEnclosingFunction() = boundRequest and
+    invalidStatus.getMethodName() = "status" and
+    invalidStatus.getArgument(0).getIntValue() = 400 and
+    invalidStatus.getEnclosingStmt().nestedIn(recognizedBindingError.getThen()) and
+    exists(ReturnStmt invalidBindingReturn |
+      invalidBindingReturn.nestedIn(recognizedBindingError.getThen()) and
+      not exists(invalidBindingReturn.getExpr())
+    ) and
+    authorityCall.getEnclosingFunction() = boundRequest and
+    isExactImportedCall(authorityCall, "rpc-proxy/src/actionAuthorityV2.ts", "authorizeActionV2") and
+    (
+      bindingTry.getLocation().getEndLine() < authorityCall.getLocation().getStartLine() or
+      (
+        bindingTry.getLocation().getEndLine() = authorityCall.getLocation().getStartLine() and
+        bindingTry.getLocation().getEndColumn() < authorityCall.getLocation().getStartColumn()
+      )
+    ) and
+    not exists(CallExpr prematureAuthorityCall |
+      isExactImportedCall(prematureAuthorityCall,
+        "rpc-proxy/src/actionAuthorityV2.ts", "authorizeActionV2") and
+      (
+        prematureAuthorityCall.getEnclosingFunction() = binder or
+        prematureAuthorityCall.getEnclosingFunction() = candidate or
+        (
+          prematureAuthorityCall.getEnclosingFunction() = boundRequest and
+          (
+            prematureAuthorityCall.getLocation().getEndLine() < bindCall.getLocation().getStartLine() or
+            (
+              prematureAuthorityCall.getLocation().getEndLine() = bindCall.getLocation().getStartLine() and
+              prematureAuthorityCall.getLocation().getEndColumn() < bindCall.getLocation().getStartColumn()
+            )
+          )
+        )
+      )
+    ) and
+    not exists(CallExpr remoteBeforeClassification |
+      remoteBeforeClassification.getEnclosingFunction() = candidate and
+      remoteBeforeClassification.getCalleeName() in ["fetch", "axios", "request", "got"]
+    ) and
+    candidateCall.getEnclosingFunction() = binder and
+    candidateCall.getCallee().(VarAccess).getVariable() = candidate.getVariable() and
+    unsupportedRoute.nestedIn(candidate.getBody()) and
+    unsupportedError = unsupportedRoute.getExpr().(NewExpr) and
+    unsupportedError.getCalleeName() = "RouteActionBindingError" and
+    unsupportedError.getCallee().(VarAccess).getVariable() =
+      errorTypeCheck.getRightOperand().(VarAccess).getVariable() and
+    unsupportedCode = unsupportedError.getArgument(0).(StringLiteral) and
+    unsupportedCode.getValue() = "unsupported_route" and
+    candidate.getBody().(BlockStmt).getStmt(
+      candidate.getBody().(BlockStmt).getNumStmt() - 1
+    ) = unsupportedRoute and
+    not exists(StringLiteral artifactRouteSupport |
+      artifactRouteSupport.getEnclosingFunction() = candidate and
+      artifactRouteSupport.getValue().regexpMatch("(?i).*artifact.*")
+    )
+  )
+}
+
+private predicate isCanonicalArtifactScopeContext(Routing::Node useSite) {
+  exists(MethodCallExpr registration, StringLiteral path, CallExpr scope, Expr resolver,
+    int resolverIndex |
+    registration.getMethodName() = "get" and
+    registration.getFile().getRelativePath() = "rpc-proxy/src/routes/rpc.ts" and
+    registration.getArgument(0) = path and
+    path.getStringValue() in [
+      "/rpc/hosts/:hostRef/artifacts",
+      "/rpc/hosts/:hostRef/artifacts/:filename/download"
+    ] and
+    isExactImportedValue(registration.getArgument(1), "rpc-proxy/src/middleware/auth.ts",
+      "requireRpcAuth") and
+    scope = registration.getArgument(2) and
+    isExactImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
+    scope.getArgument(0).getStringValue() = "host:task:read" and
+    (
+      resolverIndex = 3 and path.getStringValue() = "/rpc/hosts/:hostRef/artifacts" or
+      resolverIndex = 4 and path.getStringValue() =
+        "/rpc/hosts/:hostRef/artifacts/:filename/download"
+    ) and
+    resolver = registration.getArgument(resolverIndex) and
+    isCanonicalArtifactResolver(resolver) and
+    isCanonicalArtifactTransport() and
+    hasCanonicalArtifactServiceBoundary() and
+    exists(MethodCallExpr producer | isCanonicalArtifactProducer(producer)) and
+    hasCanonicalRpcProxyScopeAuthorization() and
+    hasBoundedArtifactScopeImplementation() and
+    isInstalledRouteArgument(registration, useSite, 2)
+  )
+}
+
 private predicate hasCanonicalRpcProxyDelegationVerifier() {
   hasCanonicalRpcProxyAuthentication() and hasCanonicalRpcProxyScopeAuthorization()
 }
@@ -1073,7 +1252,7 @@ private predicate isCanonicalArtifactResolver(Expr resolverValue) {
 private predicate isCanonicalArtifactProxyGuard(Routing::Node useSite) {
   exists(
     MethodCallExpr registration, StringLiteral path, CallExpr scope, Expr resolver,
-    int index
+    int resolverIndex, int index
   |
     registration.getMethodName() = "get" and
     registration.getFile().getRelativePath() = "rpc-proxy/src/routes/rpc.ts" and
@@ -1087,18 +1266,24 @@ private predicate isCanonicalArtifactProxyGuard(Routing::Node useSite) {
     scope = registration.getArgument(2) and
     isExactImportedCall(scope, "rpc-proxy/src/middleware/auth.ts", "requireScope") and
     scope.getArgument(0).getStringValue() = "host:task:read" and
-    resolver = registration.getArgument(3) and
+    (
+      resolverIndex = 3 and path.getStringValue() = "/rpc/hosts/:hostRef/artifacts" or
+      resolverIndex = 4 and path.getStringValue() =
+        "/rpc/hosts/:hostRef/artifacts/:filename/download"
+    ) and
+    resolver = registration.getArgument(resolverIndex) and
     isCanonicalArtifactResolver(resolver) and
     isCanonicalArtifactTransport() and
     hasCanonicalArtifactServiceBoundary() and
     exists(MethodCallExpr producer | isCanonicalArtifactProducer(producer)) and
-    (index = 1 or index = 3) and
+    (index = 1 or index = resolverIndex) and
     isInstalledRouteArgument(registration, useSite, index)
   )
 }
 
 private predicate hasLocalRateLimitingGuard(Routing::Node useSite) {
   isCanonicalArtifactProxyGuard(useSite) or
+  isCanonicalArtifactScopeContext(useSite) or
   isCanonicalArtifactProducerGuard(useSite) or
   exists(RateLimitingMiddleware middleware |
     useSite.isGuardedByNode(middleware.getRoutingNode()) and
