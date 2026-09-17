@@ -4,6 +4,9 @@
 # Fails when a required suite is missing, executes zero tests, reports
 # skipped/todo cases, or exits non-zero. Exit 0 alone is never enough: the
 # script parses machine-readable counts from Vitest or node:test.
+#
+# Lane separation: Grok-only suites run in test-grok-subscription-t0.sh, never
+# here. Provider-neutral suites shared by both brokers may appear in both.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -221,17 +224,17 @@ run_group "control-api" "control-api" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/services.recipeCodexGrantIdentity.test.ts" \
+  "test/services.recipeGrantTransition.test.ts" \
   "test/crd.llmProviderEnums.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
-  "test/hostSpecValidation.grokSubscription.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionConnection.test.ts" \
   "test/services.llmAllowedModelsConfigMap.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
-  "test/services.grokSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
+  "test/services.subscriptionCatalogBounds.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
-  "test/services.llmProviderAttemptAuthorizer.grok.test.ts" \
+  "test/services.llmProviderAttemptAuthorizer.depth.test.ts" \
   "test/services.llmProviderAttemptTicket.test.ts" \
   "test/services.llmProviderAttemptRedemption.test.ts" \
   "test/services.llmProviderAttemptFinalization.test.ts" \
@@ -244,11 +247,14 @@ run_group "control-api" "control-api" \
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/catalogBounds.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
-  "test/server.security.test.ts"
+  "test/requestLimits.test.ts" \
+  "test/server.security.test.ts" \
+  "test/sseBackpressure.test.ts"
 
 run_group "mcp-host" "mcp-host" \
   "src/capabilities/toolCatalogTools.test.ts" \
@@ -263,6 +269,7 @@ run_group "mcp-host" "mcp-host" \
   "src/agent/__tests__/taskExecutor.test.ts" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
+  "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \
@@ -291,9 +298,7 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \
   "src/workflow/sdkOnlyCodexBinding.test.ts" \
-  "src/workflow/sdkOnlyGrokBinding.test.ts" \
   "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
-  "src/workflow/pluginWorkloadSdkProvisioner.grokPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
   "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
