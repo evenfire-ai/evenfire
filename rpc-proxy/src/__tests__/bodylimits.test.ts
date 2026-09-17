@@ -3,7 +3,7 @@
  *
  * Proves on a real listening `createApp()` socket:
  *  - `POST /api/v1/rpc/hosts/:hostRef/messages` carries the documented image
- *    payloads (a 10MiB image, 10MiB + 5MiB, and three 5MiB images) to the auth
+ *    payloads (a 10MiB image, a 5MiB JPEG, 10MiB + 5MiB, and three 5MiB images) to the auth
  *    boundary instead of being rejected as too large.
  *  - The larger ceiling is NOT a general text allowance: non-image bytes stay
  *    capped at 6MiB, and every other route keeps its 6MiB parser.
@@ -20,6 +20,7 @@ import { createApp } from '../app.js'
 
 const MIB = 1024 * 1024
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
 let baseUrl: string
@@ -40,17 +41,27 @@ afterAll(async () => {
 })
 
 const pngBase64Cache = new Map<number, string>()
+const jpegBase64Cache = new Map<number, string>()
+
+function imageBase64(cache: Map<number, string>, signature: Buffer, sizeBytes: number): string {
+  const cached = cache.get(sizeBytes)
+  if (cached !== undefined) return cached
+  const bytes = Buffer.alloc(sizeBytes)
+  signature.copy(bytes, 0)
+  bytes.fill(0x41, signature.length)
+  const encoded = bytes.toString('base64')
+  cache.set(sizeBytes, encoded)
+  return encoded
+}
 
 /** Canonical base64 of a PNG whose decoded length is exactly `sizeBytes`. */
 function pngBase64(sizeBytes: number): string {
-  const cached = pngBase64Cache.get(sizeBytes)
-  if (cached !== undefined) return cached
-  const bytes = Buffer.alloc(sizeBytes)
-  PNG_SIGNATURE.copy(bytes, 0)
-  bytes.fill(0x41, PNG_SIGNATURE.length)
-  const encoded = bytes.toString('base64')
-  pngBase64Cache.set(sizeBytes, encoded)
-  return encoded
+  return imageBase64(pngBase64Cache, PNG_SIGNATURE, sizeBytes)
+}
+
+/** Canonical base64 of a JPEG whose decoded length is exactly `sizeBytes`. */
+function jpegBase64(sizeBytes: number): string {
+  return imageBase64(jpegBase64Cache, JPEG_SIGNATURE, sizeBytes)
 }
 
 /**
@@ -68,14 +79,19 @@ function withNonCanonicalTailBits(base64: string): string {
   return base64.slice(0, lastIndex) + mutated + base64.slice(lastIndex + 1)
 }
 
-function imageAttachment(id: string, sizeBytes: number) {
+function imageAttachment(
+  id: string,
+  sizeBytes: number,
+  mimeType: 'image/png' | 'image/jpeg' = 'image/png'
+) {
+  const isJpeg = mimeType === 'image/jpeg'
   return {
     id,
     kind: 'image',
-    mimeType: 'image/png',
+    mimeType,
     encoding: 'base64',
-    dataBase64: pngBase64(sizeBytes),
-    filename: `${id}.png`,
+    dataBase64: isJpeg ? jpegBase64(sizeBytes) : pngBase64(sizeBytes),
+    filename: `${id}.${isJpeg ? 'jpg' : 'png'}`,
   }
 }
 
@@ -101,6 +117,26 @@ describe('rpc-proxy chat message body budget', () => {
     })
     // 10MiB of bytes encodes to more than 13MiB, well past the old 6MiB parser.
     expect(Buffer.byteLength(body)).toBeGreaterThan(13 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(401)
+  })
+
+  it('carries a 5MiB JPEG to the auth boundary', async () => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', 5 * MIB, 'image/jpeg')],
+    })
+    expect(Buffer.byteLength(body)).toBeGreaterThan(6 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(401)
+  })
+
+  it('carries 10MiB PNG + 5MiB JPEG to the auth boundary', async () => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', 10 * MIB), imageAttachment('a2', 5 * MIB, 'image/jpeg')],
+    })
+    expect(Buffer.byteLength(body)).toBeGreaterThan(20 * MIB)
     const response = await post(MESSAGE_PATH, body)
     expect(response.status).toBe(401)
   })

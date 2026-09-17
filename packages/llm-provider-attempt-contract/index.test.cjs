@@ -881,6 +881,10 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
     v2WithParts([imagePart(jpegOfSize(FORMER_IMAGE_CEILING + 1).toString('base64'), 'image/jpeg')])
   )
   assert.equal(acceptedJpeg.ok, true, acceptedJpeg.message)
+  const acceptedFiveMiBJpeg = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(jpegOfSize(5 * MIB).toString('base64'), 'image/jpeg')])
+  )
+  assert.equal(acceptedFiveMiBJpeg.ok, true, acceptedFiveMiBJpeg.message)
 
   // 3 MiB, and exactly the per-image ceiling, are inside the budget.
   const acceptedThreeMiB = contract.parseCodexCompletionRequest(
@@ -914,6 +918,10 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
     v2WithParts([imagePart(tenMiB), imagePart(fiveMiB)])
   )
   assert.equal(combined.ok, true, combined.message)
+  const combinedWithJpeg = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(tenMiB), imagePart(jpegOfSize(5 * MIB).toString('base64'), 'image/jpeg')])
+  )
+  assert.equal(combinedWithJpeg.ok, true, combinedWithJpeg.message)
   const overAggregate = contract.parseCodexCompletionRequest(
     v2WithParts([
       imagePart(tenMiB),

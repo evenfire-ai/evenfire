@@ -249,8 +249,8 @@ const MIB = 1024 * 1024
  * size drives the real code path without allocating and base64-encoding 10MiB
  * blobs per case.
  */
-function imageFile(name: string, sizeBytes: number): File {
-  const file = new File([new Uint8Array([0x41])], name, { type: 'image/png' })
+function imageFile(name: string, sizeBytes: number, type = 'image/png'): File {
+  const file = new File([new Uint8Array([0x41])], name, { type })
   Object.defineProperty(file, 'size', { configurable: true, value: sizeBytes })
   return file
 }
@@ -304,6 +304,15 @@ describe('ComposerPanel image budget', () => {
       imageFile('c.png', 5 * MIB),
     ])
     await waitFor(() => expect(attachedImages()).toHaveLength(3))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('accepts a 5MiB JPEG at the same budget as PNG', async () => {
+    const { container } = render(<ComposerPanel inline={false} />)
+    pickFiles(container, [imageFile('photo.jpg', 5 * MIB, 'image/jpeg')])
+    await waitFor(() => expect(attachedImages()).toHaveLength(1))
+    expect(attachedImages()[0]?.mimeType).toBe('image/jpeg')
+    expect(attachedImages()[0]?.sizeBytes).toBe(5 * MIB)
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
