@@ -1497,6 +1497,7 @@ function ManageProbe() {
       <div data-testid="current">{ctrl.current?.resourceId ?? 'none'}</div>
       <div data-testid="grants-count">{ctrl.grants.length}</div>
       <div data-testid="shares-count">{ctrl.shares.length}</div>
+      <div data-testid="inherited-error">{ctrl.inheritedAccessError ?? 'none'}</div>
       <button type="button" onClick={() => swallow(ctrl.openUri('gfs://main/root'))}>
         open root
       </button>
@@ -1924,5 +1925,57 @@ describe('useGfsBrowserController — grants list / revoke / inherit (#826)', ()
 
     await waitFor(() => expect(createShare).toHaveBeenCalledWith('root', ['user:bob'], 'main'))
     await waitFor(() => expect(screen.getByTestId('shares-count').textContent).toBe('1'))
+  })
+
+  // R1-M3 — a total inherited-derivation failure (the file itself cannot be
+  // re-resolved for the walk) must surface as controller error state instead
+  // of silently collapsing to an empty list.
+  it('exposes inheritedAccessError when the derivation fails entirely', async () => {
+    let resolveCalls = 0
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [], nextCursor: null })),
+          // The navigation resolve succeeds; the derivation's own resolve of
+          // the same file then fails outright.
+          resolve: vi.fn(async () => {
+            resolveCalls += 1
+            if (resolveCalls > 1) throw new Error('Error: 500 resolve_failed')
+            return {
+              resourceId: 'file-1',
+              parentResourceId: 'folder-1',
+              gfsUri: 'gfs://main/file-1',
+              name: 'report.txt',
+              kind: 'file',
+              version: 1,
+            }
+          }),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read'],
+            canCreateShare: false,
+          })),
+          listGrants: vi.fn(async () => []),
+          listShares: vi.fn(async () => []),
+        },
+      },
+    })
+
+    render(<ManageProbe />, { wrapper: Harness })
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open root' }).click()
+    })
+    await waitFor(() => expect(screen.getByTestId('current').textContent).toBe('file-1'))
+    await act(async () => {
+      screen.getByRole('button', { name: 'open manage' }).click()
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId('inherited-error').textContent).toBe('Error: 500 resolve_failed')
+    )
   })
 })

@@ -88,6 +88,9 @@ function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
 
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
 
+const INHERITED_DERIVATION_NOTICE =
+  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+
 function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
 }
@@ -428,6 +431,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  // A total inherited-derivation failure becomes a quiet notice in the Share
+  // dialog: an empty derived list alone would silently read as "no one else
+  // has access" (R1-M3). Per-ancestor best-effort skipping stays silent.
+  const inheritedAccessNotice =
+    currentIsFile && ctrl.inheritedAccessError ? INHERITED_DERIVATION_NOTICE : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {
@@ -1840,6 +1848,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   </div>
                   <GfsGrantList
                     agents={agentSubjects}
+                    derivationNotice={inheritedAccessNotice}
                     error={grantsError}
                     inheritedItems={ctrl.inheritedAccess}
                     items={ctrl.grants}

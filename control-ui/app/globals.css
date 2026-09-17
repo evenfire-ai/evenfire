@@ -13853,6 +13853,13 @@ button.cu-gfs-tree__button:focus-visible,
   font-size: 0.75rem;
 }
 
+/* Quiet notice when the whole inherited-access derivation failed (R1-M3). */
+.cu-gfs-existing-access__notice {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+}
+
 .cu-gfs-existing-access__list {
   display: grid;
   gap: var(--cu-space-2);

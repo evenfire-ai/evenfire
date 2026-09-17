@@ -368,6 +368,24 @@ describe('GfsGrantList', () => {
       expect(screen.getByText('No one has access yet.')).toBeTruthy()
     })
 
+    // R1-M3 — a total derivation failure is a quiet notice, never a silent
+    // "no one has access".
+    it('renders the derivation notice and suppresses the empty claim', () => {
+      render(
+        <GfsGrantList
+          agents={agents}
+          derivationNotice="Inherited access could not be loaded. Members with access from a parent folder may be missing."
+          items={[]}
+          onRevoke={vi.fn()}
+          subjects={subjects}
+        />
+      )
+
+      const banner = screen.getByText(/Inherited access could not be loaded/)
+      expect(banner.closest('.status-banner')?.className).toContain('tone-info')
+      expect(screen.queryByText('No one has access yet.')).toBeNull()
+    })
+
     it('keeps direct-only rows editable alongside merged rows and never the empty notice', () => {
       const onRevoke = vi.fn()
       const grant = grantItem({ id: 'grant-1' })

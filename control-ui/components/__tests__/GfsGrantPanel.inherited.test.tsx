@@ -469,6 +469,26 @@ describe('GfsGrantPanel inherited access', () => {
     expect(mockGetGfsResourceByPath).not.toHaveBeenCalled()
   })
 
+  // R1-M3 — a total derivation failure is a quiet inline notice, never a
+  // silent "no one has access".
+  it('shows a quiet notice when the inherited derivation fails entirely', async () => {
+    mockGetGfsResourceByPath.mockImplementation(async () => {
+      throw Object.assign(new Error('503 unavailable'), { status: 503 })
+    })
+    renderPanel()
+
+    const existing = await screen.findByRole('region', { name: 'People with access' })
+    expect(
+      await within(existing).findByText(
+        'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+      )
+    ).toBeTruthy()
+    expect(within(existing).queryByText('No one has access yet.')).toBeNull()
+    expect(within(existing).getByRole('status').textContent).toContain(
+      'Inherited access could not be loaded'
+    )
+  })
+
   it('merges the same subject inherited through several folders into one row with the strongest source', async () => {
     mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
       if (path === '/team-docs') return byPathView(FOLDER_ID, 'team-docs')

@@ -1989,6 +1989,29 @@ describe('FilesPage', () => {
     ).toContain('Editor')
   })
 
+  // R1-M3 — a total derivation failure must not silently read as "no one".
+  it('shows a quiet notice instead of the empty claim when the derivation fails', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        grants: [],
+        inheritedAccess: [],
+        inheritedAccessError: 'Error invoking remote method: 500',
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(
+      await within(manageDialog).findByText(
+        'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+      )
+    ).toBeTruthy()
+    expect(within(manageDialog).queryByText('No one has access yet.')).toBeNull()
+  })
+
   it('removes an inherited member from the parent folder after confirmation', async () => {
     installInheritedDirectoryMocks()
     const revokeGrant = vi.fn(async () => undefined)

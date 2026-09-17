@@ -93,6 +93,7 @@ export function GfsGrantList({
   inheritedItems = [],
   mergeInherited = false,
   loading = false,
+  derivationNotice = null,
   error = null,
   shareError = null,
   agents,
@@ -147,6 +148,7 @@ export function GfsGrantList({
 
   return (
     <>
+      {derivationNotice ? <StatusBanner tone="info" text={derivationNotice} /> : null}
       {hasAnyError ? (
         <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
           {error ? (
@@ -292,7 +294,7 @@ export function GfsGrantList({
       ) : !hasAnyError ? (
         loading ? (
           <p className="muted">Loading access…</p>
-        ) : (
+        ) : derivationNotice ? null : (
           <p className="muted">No one has access yet.</p>
         )
       ) : null}

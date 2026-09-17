@@ -83,8 +83,10 @@ async function listInheritingRows(
 /**
  * Derives the inherited access for one resource path. Ancestors that cannot be
  * resolved or listed (moved, deleted, rate-limited) are skipped — the walk is
- * best-effort and never fails the whole derivation. The drive root carries an
- * empty name, so its label falls back to the drive name, matching the browser
+ * best-effort. A walk that resolves NO ancestor at all learned nothing about
+ * the file's ancestry and throws, so the caller can say the derivation failed
+ * instead of trusting an empty list (R1-M3). The drive root carries an empty
+ * name, so its label falls back to the drive name, matching the browser
  * breadcrumb.
  */
 export async function loadGfsInheritedAccess(
@@ -93,7 +95,9 @@ export async function loadGfsInheritedAccess(
   signal?: AbortSignal
 ): Promise<GfsInheritedAccessItem[]> {
   const bySubject = new Map<string, GfsInheritedAccessItem>()
-  for (const ancestorPath of gfsAncestorPaths(path)) {
+  const ancestorPaths = gfsAncestorPaths(path)
+  let resolvedAncestors = 0
+  for (const ancestorPath of ancestorPaths) {
     let folder: GfsResourceByPathView
     try {
       folder = await getGfsResourceByPath(drive, ancestorPath, signal)
@@ -101,6 +105,7 @@ export async function loadGfsInheritedAccess(
       if (signal?.aborted) throw error
       continue
     }
+    resolvedAncestors += 1
     let rows: InheritingRow[]
     try {
       rows = await listInheritingRows(folder, drive, signal)
@@ -157,6 +162,12 @@ export async function loadGfsInheritedAccess(
         }
       }
     }
+  }
+  // Every ancestor path failed to resolve: the derivation as a whole
+  // failed. An empty list here would silently read as "no inherited
+  // access", so the caller gets a failure it can surface (R1-M3).
+  if (ancestorPaths.length > 0 && resolvedAncestors === 0) {
+    throw new Error('inherited_access_derivation_failed')
   }
   return [...bySubject.values()]
 }

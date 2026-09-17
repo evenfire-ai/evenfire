@@ -125,6 +125,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   // the derivation — folder dialogs keep their direct-only behavior.
   const [inheritedAccess, setInheritedAccess] = useState<GfsInheritedAccessItem[]>([])
   const [inheritedAccessLoading, setInheritedAccessLoading] = useState(true)
+  // True only when the whole derivation failed (R1-M3): the access section
+  // then shows a quiet notice instead of trusting an empty derived list.
+  const [inheritedAccessFailed, setInheritedAccessFailed] = useState(false)
   const inheritedAccessRequest = useRef(0)
   const inheritedAccessController = useRef<AbortController | null>(null)
   // Pending parent-folder confirmation (role change or removal) for a member
@@ -202,6 +205,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const loadInheritedAccess = useCallback(async () => {
     inheritedAccessController.current?.abort()
     const requestId = ++inheritedAccessRequest.current
+    setInheritedAccessFailed(false)
     if (!resourceIsFile || !resource.path) {
       inheritedAccessController.current = null
       setInheritedAccess([])
@@ -218,6 +222,11 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     } catch {
       if (requestId !== inheritedAccessRequest.current) return
       setInheritedAccess([])
+      // A TOTAL derivation failure (the walk itself blew up) is surfaced as a
+      // quiet notice; per-ancestor best-effort skipping stays silent by
+      // design. An empty derived list alone would silently read as "no one
+      // else has access" (R1-M3).
+      setInheritedAccessFailed(true)
     } finally {
       if (requestId === inheritedAccessRequest.current) {
         inheritedAccessController.current = null
@@ -672,6 +681,12 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           <div className="cu-gfs-existing-access__header">
             <h4>People with access</h4>
           </div>
+          {inheritedAccessFailed ? (
+            <p role="status" className="cu-gfs-existing-access__notice">
+              Inherited access could not be loaded. Members with access from a parent folder may be
+              missing.
+            </p>
+          ) : null}
           {existingAccessLoading || inheritedAccessLoading ? (
             <p className="cu-gfs-existing-access__empty" role="status">
               Loading access…
@@ -685,7 +700,9 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                 Retry
               </Button>
             </div>
-          ) : existingAccess.length === 0 && inheritedAccess.length === 0 ? (
+          ) : existingAccess.length === 0 &&
+            inheritedAccess.length === 0 &&
+            !inheritedAccessFailed ? (
             <p className="cu-gfs-existing-access__empty">No one has access yet.</p>
           ) : (
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">

@@ -908,10 +908,15 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     refreshShares,
     // Client-derived ancestor access for FILE Manage dialogs: normal-looking
     // toggleable rows whose edits route through the parent-folder
-    // confirmation. Failures stay silent — the direct surfaces own error
-    // reporting.
+    // confirmation. Per-ancestor failures inside the derivation stay silent;
+    // a total failure is reported through inheritedAccessError.
     inheritedAccess,
     loadingInheritedAccess: inheritedAccessQuery.isFetching,
+    // A TOTAL derivation failure surfaces as this message; the Share dialog
+    // renders a quiet notice because "no inherited rows" would silently read
+    // as "no one else has access". Per-ancestor best-effort skipping stays
+    // silent by design.
+    inheritedAccessError: inheritedAccessQuery.error ? toMessage(inheritedAccessQuery.error) : null,
     refreshInheritedAccess,
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
     revokingShare: revokeShareMutation.isPending,

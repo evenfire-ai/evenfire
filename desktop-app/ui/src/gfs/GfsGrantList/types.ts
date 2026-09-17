@@ -37,6 +37,12 @@ export interface GfsGrantListProps {
   mergeInherited?: boolean
   loading?: boolean
   /**
+   * Quiet inline notice shown when the inherited-access derivation failed
+   * entirely (R1-M3): the row list may be incomplete, so the plain empty
+   * claim is suppressed while this is set.
+   */
+  derivationNotice?: string | null
+  /**
    * Mapped list-load failure. Severity 'quiet' (manage_acl_required) renders an
    * informational banner instead of the list; 'error' renders an error banner.
    */
