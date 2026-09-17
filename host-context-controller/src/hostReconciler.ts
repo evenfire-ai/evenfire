@@ -1004,23 +1004,21 @@ export class HostReconciler {
       resource = await read()
     } catch (error) {
       if (getErrorCode(error) === 404) return
-      console.error(`[HostReconciler] Failed to read ${kind} "${name}" ownership:`, error)
+      log.error('Failed to read Host resource ownership', { kind, name, err: error })
       throw error
     }
 
     if (!this.isHccOwnedHostResource(resource, hostName)) {
-      console.warn(
-        `[HostReconciler] Skipping ${kind} "${name}" delete - not HCC-owned for Host "${hostName}"`
-      )
+      log.warn('Skipping Host resource delete - not HCC-owned', { kind, name, host: hostName })
       return
     }
 
     try {
       await remove()
-      console.log(`[HostReconciler] Deleted ${kind} "${name}" in ${namespace}`)
+      log.info('Deleted Host resource', { kind, name, namespace })
     } catch (error) {
       if (getErrorCode(error) !== 404) {
-        console.error(`[HostReconciler] Failed to delete ${kind} "${name}":`, error)
+        log.error('Failed to delete Host resource', { kind, name, err: error })
         throw error
       }
     }
@@ -2018,10 +2016,7 @@ export class HostReconciler {
     try {
       return await this.ensureMcpHostRuntimeTokenSecret(host, options)
     } catch (err) {
-      console.error(
-        `[HostReconciler] mcpHost runtime token provisioning failed for host "${host.name}":`,
-        err
-      )
+      log.error('mcpHost runtime token provisioning failed', { host: host.name, err })
       this.setStatus(host.name, {
         deployed: false,
         ready: false,
@@ -2082,18 +2077,16 @@ export class HostReconciler {
       const secret = await this.coreApi.readNamespacedSecret({ name: secretName, namespace })
       const labels = secret.metadata?.labels ?? {}
       if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== name) {
-        console.warn(
-          `[HostReconciler] Skipping Secret "${secretName}" delete — not HCC-owned for Host "${name}"`
-        )
+        log.warn('Skipping runtime Secret delete - not HCC-owned', {
+          name: secretName,
+          host: name,
+        })
         return
       }
       await this.coreApi.deleteNamespacedSecret({ name: secretName, namespace })
     } catch (err) {
       if (getErrorCode(err) !== 404) {
-        console.error(
-          `[HostReconciler] Failed to delete runtime token Secret "${secretName}":`,
-          err
-        )
+        log.error('Failed to delete runtime Secret', { name: secretName, err })
         throw err
       }
     }
@@ -2114,9 +2107,9 @@ export class HostReconciler {
         labels['clerum.io/component'] === 'channel-reader' &&
         labels['clerum.io/secret-purpose'] === suffix
       if (!owned) {
-        console.warn(
-          `[HostReconciler] Skipping legacy runtime auth cleanup for "${nameToDelete}" because labels do not prove HCC ownership`
-        )
+        log.warn('Skipping legacy runtime auth cleanup; labels do not prove HCC ownership', {
+          name: nameToDelete,
+        })
         return
       }
       await this.coreApi.deleteNamespacedSecret({
@@ -2125,10 +2118,7 @@ export class HostReconciler {
       })
     } catch (err) {
       if (getErrorCode(err) !== 404) {
-        console.error(
-          `[HostReconciler] Failed legacy runtime auth cleanup for "${nameToDelete}":`,
-          err
-        )
+        log.error('Failed legacy runtime auth cleanup', { name: nameToDelete, err })
         throw err
       }
     }
@@ -2329,8 +2319,9 @@ export class HostReconciler {
     }
     if (this.pullPolicyRejectionLogged.get(host.name) !== image) {
       this.pullPolicyRejectionLogged.set(host.name, image)
-      console.warn(
-        `[HostReconciler] Stateless Host "${host.name}" runs imagePullPolicy=${resolution.policy} with mutable image "${image}" (no @sha256: digest, tag not sha-<gitsha>): a node with a stale cached image serves old code on wake. Pin an immutable reference to eliminate the risk.`
+      log.warn(
+        'Stateless Host runs a mutable image reference (no @sha256: digest, tag not sha-<gitsha>): a node with a stale cached image serves old code on wake. Pin an immutable reference to eliminate the risk.',
+        { host: host.name, imagePullPolicy: resolution.policy, image }
       )
     }
     return resolution.policy
@@ -2350,18 +2341,24 @@ export class HostReconciler {
       const code = getErrorCode(error)
       if (code === 404) {
         const message = `Secret "${host.spec.secretRef}" not found in namespace "${host.namespace}"`
-        console.error(`[HostReconciler] ${message}. Host "${host.name}" will not be deployed.`)
+        log.error('Host Secret not found; Host will not be deployed', {
+          host: host.name,
+          detail: message,
+        })
         return { ok: false, reason: 'SecretNotFound', message }
       }
       if (code === 401 || code === 403) {
         const message =
           `Access denied reading Secret "${host.spec.secretRef}" in namespace "${host.namespace}" ` +
           `(K8s API ${code})`
-        console.error(`[HostReconciler] ${message}. Host "${host.name}" will be failed closed.`)
+        log.error('Host Secret access denied; Host will be failed closed', {
+          host: host.name,
+          detail: message,
+        })
         return { ok: false, reason: 'SecretAccessDenied', message }
       }
       const message = `Failed to validate Secret "${host.spec.secretRef}" for host "${host.name}"`
-      console.error(`[HostReconciler] ${message}:`, error)
+      log.error('Failed to validate Host Secret', { host: host.name, detail: message, err: error })
       return { ok: false, reason: 'ReadError', message }
     }
   }
@@ -2765,13 +2762,17 @@ export class HostReconciler {
             ],
           }
         )
-        console.log(
-          `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
-        )
+        log.info('Patched channel-reader credentials-revision', {
+          deployment: depName,
+          revision: revision || '(empty)',
+        })
       })
     } catch (err) {
       if (getErrorCode(err) === 404) return
-      console.error(`[HostReconciler] Failed to reconcile ${depName} revision:`, err)
+      log.error('Failed to reconcile channel-reader credentials-revision', {
+        deployment: depName,
+        err,
+      })
     }
   }
 
@@ -3360,10 +3361,7 @@ export class HostReconciler {
         }
       }
       // Unknown error — surface it but don't throw.
-      console.warn(
-        `[HostReconciler] Failed to read channel-reader Deployment "${depName}" for status:`,
-        err
-      )
+      log.warn('Failed to read channel-reader Deployment for status', { deployment: depName, err })
       return {
         expected,
         ready: false,
@@ -3718,13 +3716,11 @@ export class HostReconciler {
       // Structured audit line — operators tail this to confirm the legacy
       // pod is gone post-deploy. Mirrors the format used by
       // sweepOrphanChannelReaderResources for consistency.
-      console.log(
-        `[HostReconciler] AUDIT: legacy-sweep deleted Deployment name=${depName} ns=${ns}`
-      )
+      log.info('AUDIT: legacy-sweep deleted Deployment', { name: depName, namespace: ns })
     } catch (err) {
       const code = getErrorCode(err)
       if (code === 404) return // already gone — steady state, no log
-      console.error(`[HostReconciler] legacy-sweep failed to delete "${depName}" in "${ns}":`, err)
+      log.error('legacy-sweep failed to delete Deployment', { name: depName, namespace: ns, err })
     }
   }
 
@@ -3773,10 +3769,7 @@ export class HostReconciler {
         '[HostReconciler]'
       )
     } catch (error) {
-      console.error(
-        `[HostReconciler] Failed to ensure desktop NetworkPolicy "${policyName}":`,
-        error
-      )
+      log.error('Failed to ensure desktop NetworkPolicy', { policy: policyName, err: error })
     }
   }
 
@@ -4441,7 +4434,7 @@ export class HostReconciler {
           // NOT a hard failure — do NOT emit controller_error/reconcile_exception
           // or an administrative 'failed' outcome. Callers already treat the
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
-          // only console.error), so the rethrow is preserved.
+          // only log the error), so the rethrow is preserved.
           this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
           throw error
         }
@@ -4521,9 +4514,9 @@ export class HostReconciler {
           deleteWorkspacePvc: false,
         })
       } else {
-        console.warn(
-          `[HostReconciler] Preserving existing runtime for "${host.name}" after transient Secret read failure`
-        )
+        log.warn('Preserving existing runtime after transient Secret read failure', {
+          host: host.name,
+        })
       }
       this.setStatus(host.name, {
         deployed: false,
@@ -4552,7 +4545,7 @@ export class HostReconciler {
       // reconciliation — the pod will still come up without the SFS mounts,
       // and a subsequent reconcile (Context update or SFS becoming Ready)
       // will inject them.
-      console.error(`[HostReconciler] Failed to resolve context mounts for "${host.name}":`, err)
+      log.error('Failed to resolve context mounts', { host: host.name, err })
     }
     revalidateHostMutationBoundary()
     // Stateless lifecycle (Stage 2): assess enable/reject and persist the
@@ -4620,7 +4613,7 @@ export class HostReconciler {
       revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure mcp-host NP for "${host.name}":`, err)
+      log.error('Failed to ensure mcp-host NP', { host: host.name, err })
       npFailures.push(`mcp-host NP: ${(err as Error).message}`)
     }
     try {
@@ -4629,7 +4622,7 @@ export class HostReconciler {
       revalidateHostMutationBoundary()
       await this.ensureRpcProxyHostEgressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure rpc-proxy host NP for "${host.name}":`, err)
+      log.error('Failed to ensure rpc-proxy host NP', { host: host.name, err })
       npFailures.push(`rpc-proxy NP: ${(err as Error).message}`)
     }
     revalidateHostMutationBoundary()
@@ -4640,7 +4633,7 @@ export class HostReconciler {
       revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure channels egress NP for "${host.name}":`, err)
+      log.error('Failed to ensure channels egress NP', { host: host.name, err })
       npFailures.push(`egress NP: ${(err as Error).message}`)
     }
 
@@ -4902,7 +4895,7 @@ export class HostReconciler {
           })
           return
         }
-        console.error(`[HostReconciler] Fleet reconcile failed for Host "${name}":`, error)
+        log.error('Fleet reconcile failed for Host', { host: name, err: error })
         throw error
       }
     })
@@ -4940,7 +4933,7 @@ export class HostReconciler {
       const reason =
         !capturedAuthority.known || !current.known ? 'authority_unknown' : 'generation_changed'
       hostCleanupDeferredTotal.inc({ reason })
-      console.warn(`[HostReconciler] Deferring orphan cleanup: ${reason}`)
+      log.warn('Deferring orphan cleanup', { reason })
       return failures
     }
 
@@ -4960,9 +4953,10 @@ export class HostReconciler {
       if (!candidate.owner) {
         // Never delete a resource whose owning Host cannot be derived.
         hostCleanupDeferredTotal.inc({ reason: 'no_owner_label' })
-        console.warn(
-          `[HostReconciler] Deferring orphan candidate ${candidate.kind}/${candidate.name}: no derivable owning Host`
-        )
+        log.warn('Deferring orphan candidate: no derivable owning Host', {
+          kind: candidate.kind,
+          name: candidate.name,
+        })
         continue
       }
       if (cacheHasHost(candidate.owner)) continue // still present → retain
@@ -4984,9 +4978,7 @@ export class HostReconciler {
       async hostName => {
         if (!authorityValid()) {
           hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
-          console.warn(
-            `[HostReconciler] Deferring orphan cleanup for "${hostName}": watch authority lost`
-          )
+          log.warn('Deferring orphan cleanup: watch authority lost', { host: hostName })
           return
         }
         const presence = await this.readHostPresence(hostName)
@@ -5040,10 +5032,7 @@ export class HostReconciler {
             await this.deleteHostRuntimeResources(hostName, config.hostNamespace)
           })
         } catch (error) {
-          console.error(
-            `[HostReconciler] Fleet cleanup failed for orphan Host "${hostName}":`,
-            error
-          )
+          log.error('Fleet cleanup failed for orphan Host', { host: hostName, err: error })
           throw error
         }
       }
@@ -5075,7 +5064,7 @@ export class HostReconciler {
         )
       }
     } catch (error) {
-      console.error('[HostReconciler] Failed to list managed host deployments:', error)
+      log.error('Failed to list managed host deployments', { err: error })
       listFailures.push(error)
     }
 
@@ -5090,7 +5079,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderDeployment', dep.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Deployment candidate list failed:', error)
+      log.warn('channel-reader Deployment candidate list failed', { err: error })
       listFailures.push(error)
     }
     try {
@@ -5101,7 +5090,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderService', svc.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Service candidate list failed:', error)
+      log.warn('channel-reader Service candidate list failed', { err: error })
       listFailures.push(error)
     }
     try {
@@ -5118,7 +5107,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderSecret', sec.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Secret candidate list failed:', error)
+      log.warn('channel-reader Secret candidate list failed', { err: error })
       listFailures.push(error)
     }
 
@@ -5143,7 +5132,7 @@ export class HostReconciler {
           pushOwner(kind, item.metadata?.name, item.metadata?.labels?.[HOST_LABEL])
         }
       } catch (error) {
-        console.warn(`[HostReconciler] ${kind} candidate list failed in ${hostNs}:`, error)
+        log.warn('Owned resource candidate list failed', { kind, namespace: hostNs, err: error })
         listFailures.push(error)
       }
     }
@@ -5182,7 +5171,7 @@ export class HostReconciler {
           pushOwner('NetworkPolicy', np.metadata?.name, np.metadata?.labels?.[HOST_LABEL])
         }
       } catch (error) {
-        console.warn(`[HostReconciler] NetworkPolicy candidate list failed in ${ns}:`, error)
+        log.warn('NetworkPolicy candidate list failed', { namespace: ns, err: error })
         listFailures.push(error)
       }
     }
@@ -5208,7 +5197,7 @@ export class HostReconciler {
       return 'present'
     } catch (error) {
       if (getErrorCode(error) === 404) return 'absent'
-      console.warn(`[HostReconciler] Fresh authoritative read for orphan "${name}" failed:`, error)
+      log.warn('Fresh authoritative read for orphan Host failed', { host: name, err: error })
       return 'error'
     }
   }
