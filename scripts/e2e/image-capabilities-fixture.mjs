@@ -79,8 +79,25 @@ function command(binary, args, { input, timeout = 60_000, env = process.env } = 
     timeout,
     maxBuffer: 8 * 1024 * 1024,
   })
-  if (result.error || result.status !== 0)
-    throw new Error(`${binary} failed (status ${result.status ?? 'unavailable'})`)
+  if (result.error || result.status !== 0) {
+    const operation =
+      args.find(value => ['get', 'create', 'patch', 'exec', 'delete', 'rollout'].includes(value)) ??
+      ''
+    const workload = args.find(value => /^deployment\/[a-z0-9-]+$/.test(value)) ?? ''
+    const reason = /timed out|deadline exceeded|timeout/i.test(result.stderr ?? '')
+      ? 'deadline'
+      : /not found|NotFound/.test(result.stderr ?? '')
+        ? 'missing-resource'
+        : /forbidden|Forbidden/.test(result.stderr ?? '')
+          ? 'permission'
+          : /conflict|test failed/i.test(result.stderr ?? '')
+            ? 'conflict'
+            : 'command-error'
+    // Emit only controlled labels, never child output that may contain data.
+    throw new Error(
+      `${binary} ${operation} ${workload} failed (status ${result.status ?? 'unavailable'}; ${reason})`
+    )
+  }
   return result.stdout
 }
 
@@ -118,10 +135,18 @@ async function main() {
   command('make', ['-f', branchMake, 'branch-profile-health'])
   const api = `${urlFor('control-api')}/api/v1`
   const kc = (args, input) =>
-    command('kubectl', [`--context=${profile}`, '--request-timeout=30s', ...args], {
-      input,
-      timeout: 180_000,
-    })
+    command(
+      'kubectl',
+      [
+        `--context=${profile}`,
+        args.includes('rollout') ? '--request-timeout=150s' : '--request-timeout=30s',
+        ...args,
+      ],
+      {
+        input,
+        timeout: 180_000,
+      }
+    )
   const get = (namespace, kind, name) =>
     JSON.parse(kc(['-n', namespace, 'get', kind, name, '-o', 'json']))
   const patch = (namespace, kind, name, operations) =>
@@ -661,11 +686,37 @@ async function main() {
     save()
   } catch (error) {
     failure = error
+    // Diagnostic failure must not prevent restoration. Inspect only this
+    // fixture's live deployment and persist fixed startup-error categories.
+    if (state.changes.hcc) {
+      try {
+        const current = get('mcp-host', 'deployment', 'chatllm')
+        if (
+          current.spec.template.spec.containers.some(container => container.image === fixtureImage)
+        ) {
+          const logs = kc(['-n', 'mcp-host', 'logs', 'deployment/chatllm', '--tail=60'])
+          state.startupDiagnostic = [
+            ['fixture-environment', /requires its isolated test environment/],
+            ['fixture-host', /Fixture requires the isolated chatllm Host/],
+            ['sdk-boundary', /SDK did not install the isolated provider boundary/],
+            ['module-missing', /Cannot find module|ERR_MODULE_NOT_FOUND/],
+            ['file-permission', /EACCES|permission denied/i],
+          ]
+            .filter(([, pattern]) => pattern.test(logs))
+            .map(([code]) => code)
+          save()
+        }
+      } catch {
+        /* The original failure is retained; restoration still runs. */
+      }
+    }
   }
   try {
     await restore()
   } catch (error) {
-    failure ??= error
+    failure = new Error(
+      `${failure ? `${failure.message}; ` : ''}restoration failed: ${error.message}`
+    )
   }
   if (failure) throw failure
   process.stdout.write(`IMAGE_CAPABILITIES_E2E_PASS evidence=${evidence}\n`)
