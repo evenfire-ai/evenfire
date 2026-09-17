@@ -12,6 +12,7 @@ import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
+  assertGfsFixtureCleaned,
   cleanupGfsFixture,
   getE2EUserId,
   getGfsChildResourceSummary,
@@ -29,6 +30,21 @@ test.describe.configure({ mode: 'serial' })
 // Login uses real local test credentials. Do not persist credential-bearing
 // automatic traces; failures still retain screenshots through the project config.
 test.use({ trace: 'off', video: 'off' })
+
+// A deadline is a failure bound, never a sleep used to advance UI state.
+async function withDeadline<T>(operation: Promise<T>, ms: number, phase: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`R12 ${phase} exceeded ${ms}ms`)), ms)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 function requireOwnedRuntime(): void {
   const context = process.env.E2E_K8S_CONTEXT
@@ -325,7 +341,9 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
     const fileName = `${randomUUID()}.png`
     const filePath = path.join(local, fileName)
     await writeFile(filePath, visual.bytes)
+    console.info('[R12] phase=launch-isolated-electron')
     app = await electron.launch({
+      timeout: 30_000,
       args: [
         '--no-os-protocol-registration',
         `--user-data-dir=${path.join(local, 'desktop')}`,
@@ -338,16 +356,25 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       },
     })
     // This is process identity verification, not a login or product-state shortcut.
-    const identity = await app.evaluate(({ app }) => ({
-      userData: app.getPath('userData'),
-      packaged: app.isPackaged,
-      argv: process.argv,
-    }))
+    console.info('[R12] phase=verify-process-identity')
+    const identity = await withDeadline(
+      app.evaluate(({ app }) => ({
+        userData: app.getPath('userData'),
+        packaged: app.isPackaged,
+        argv: process.argv,
+      })),
+      10_000,
+      'process identity'
+    )
     expect(identity.packaged).toBe(false)
     expect(await realpath(identity.userData)).toBe(await realpath(path.join(local, 'desktop')))
     expect(identity.argv).toContain('--no-os-protocol-registration')
     expect(identity.argv).toContain(path.resolve(__dirname, '../../dist/main.js'))
-    const page = await app.firstWindow()
+    console.info('[R12] phase=first-window')
+    const page = await app.firstWindow({ timeout: 30_000 })
+    page.setDefaultTimeout(15_000)
+    page.setDefaultNavigationTimeout(30_000)
+    console.info('[R12] phase=visible-journey')
     await test.step('login visibly into the isolated development environment', () =>
       visibleLogin(page))
     await test.step('upload and decode the image in Files', () =>
@@ -423,13 +450,24 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
   } finally {
     const cleanupErrors: unknown[] = []
     try {
-      await app?.close()
+      if (app) {
+        try {
+          await withDeadline(app.close(), 15_000, 'Electron cleanup')
+        } catch (error) {
+          // Only this test's ChildProcess is eligible for termination. A timed-out
+          // close must not strand the subsequent model/grant cleanup indefinitely.
+          const child = app.process()
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+          throw error
+        }
+      }
     } catch (error) {
       cleanupErrors.push(error)
     }
     for (const name of seeded) {
       try {
         cleanupGfsFixture(name)
+        assertGfsFixtureCleaned(name)
       } catch (error) {
         cleanupErrors.push(error)
       }
