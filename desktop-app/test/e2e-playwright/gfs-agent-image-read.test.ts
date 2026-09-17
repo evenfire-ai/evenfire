@@ -8,7 +8,7 @@
 import { type Page, _electron as electron, expect, test } from '@playwright/test'
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -344,7 +344,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       argv: process.argv,
     }))
     expect(identity.packaged).toBe(false)
-    expect(identity.userData).toBe(path.join(local, 'desktop'))
+    expect(await realpath(identity.userData)).toBe(await realpath(path.join(local, 'desktop')))
     expect(identity.argv).toContain('--no-os-protocol-registration')
     expect(identity.argv).toContain(path.resolve(__dirname, '../../dist/main.js'))
     const page = await app.firstWindow()
