@@ -5,6 +5,8 @@ import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../../core/errors'
 import { FinishReason } from '../../core/types'
 import type { SingleTurnProvider, createLLMProvider } from '../../llm'
+import { CodexSubscriptionProvider } from '../../llm/codexSubscription'
+import { GrokSubscriptionProvider } from '../../llm/grokSubscription'
 import type { ApiKeys, ModelConfig } from '../../types'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import { PluginWorkloadError } from '../domain/errors'
@@ -697,19 +699,24 @@ describe('LlmBridge authorized multi-provider fallback', () => {
       credentialSlot: '',
       connectionRef: 'team-grok',
     }
+    // A binding that would be fully valid for this Grok target (same model and
+    // key, Grok hash) sits in the Codex slot. Only slot separation rejects it.
     replaceSdkOnlyCodexBinding({
-      connectionKey: 'team-plus',
+      connectionKey: 'team-grok',
       catalogRevision: 1,
       credentialRevision: 1,
-      model: 'grok-4.6',
-      bindingHash: computeCodexPolicyHash({
-        model: 'grok-4.6',
+      model: grok.model,
+      bindingHash: computeGrokPolicyHash({
+        model: grok.model,
         catalogRevision: 1,
         credentialRevision: 1,
-        connectionKey: 'team-plus',
+        connectionKey: 'team-grok',
       }),
     })
-    const { bridge } = makeBridge({})
+    replaceSdkOnlyGrokBinding(null)
+    const provider = new FakeProvider(() => Promise.resolve(OK))
+    const { bridge, providerCalls } = makeBridge({ [grok.model]: provider })
+    const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
     const issuer = {
       issue: vi.fn(async () => ({
         credentialTicket: '',
@@ -717,13 +724,21 @@ describe('LlmBridge authorized multi-provider fallback', () => {
         providerAttemptIndex: 1,
       })),
     }
-    await expect(
-      bridge.complete({
-        ...request,
-        targets: [{ target: grok }],
-        credentialTicketIssuer: issuer,
-      })
-    ).rejects.toMatchObject({ code: 'provider_unavailable' })
+    const attempt = bridge.complete({
+      ...request,
+      targets: [{ target: grok }],
+      credentialTicketIssuer: issuer,
+      providerAttemptReporter,
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'provider_unavailable' })
+    await expect(attempt).rejects.toThrow(/Grok execution binding is missing/)
+    expect(providerCalls).toEqual([])
+    expect(provider.completeSingleTurn).not.toHaveBeenCalled()
+    expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+      providerAttemptId: 'sdk-attempt-grok',
+      providerAttemptIndex: 1,
+      status: 'failed',
+    })
   })
 
   it('fails over after reserving a Codex target whose execution binding is missing', async () => {
@@ -1242,4 +1257,91 @@ describe('LlmBridge oauth-broker terminal accounting', () => {
       status: 'failed',
     })
   })
+  it.each([
+    ['grok-subscription', 'unknown', 'partial output'],
+    ['grok-subscription', 'canceled', ''],
+    ['codex-subscription', 'unknown', 'partial output'],
+    ['codex-subscription', 'canceled', ''],
+  ] as const)(
+    'never acknowledges a %s %s terminal outcome as complete',
+    async (providerId, outcome, text) => {
+      const grok = providerId === 'grok-subscription'
+      const target = grok ? grokTarget : codexTarget
+      if (grok) installGrokBinding()
+      else installCodexBinding()
+      const authorize = vi.fn().mockResolvedValue({
+        providerAttemptId: 'proxy-attempt-1',
+        requestHash: 'c'.repeat(64),
+        executionTicket: 'ticket-123456',
+        expiresAt: '2026-08-20T10:00:00.000Z',
+      })
+      const stream = vi.fn().mockResolvedValue({
+        text,
+        toolCalls: [],
+        outcome,
+        usage: { inputTokens: 3, outputTokens: 4 },
+      })
+      const second = new FakeProvider(() => Promise.resolve(OK))
+      const providerDeps = {
+        authorizer: { authorize },
+        proxy: { stream },
+        attemptContext: () => ({ policyRevision: 1, policyHash: 'b'.repeat(64) }),
+      }
+      const real = grok
+        ? new GrokSubscriptionProvider(target.model, providerDeps as never)
+        : new CodexSubscriptionProvider(target.model, providerDeps as never)
+      const breaker = new CircuitBreaker()
+      const record = vi.spyOn(breaker, 'record')
+      const { bridge } = makeBridge(
+        {
+          [target.model]: real as unknown as FakeProvider,
+          [fallback.model]: second,
+        },
+        undefined,
+        candidate => (candidate.targetRef === target.targetRef ? breaker : new CircuitBreaker())
+      )
+      const providerAttemptReporter = { report: vi.fn().mockResolvedValue(undefined) }
+      const receipt = {
+        providerAttemptId: `sdk-${target.targetRef}`,
+        providerAttemptIndex: 1,
+        target,
+        attemptCount: 1,
+        fallbackUsed: false,
+      }
+
+      for (const acknowledgementMode of [undefined, 'atomic_terminal_finalization'] as const) {
+        providerAttemptReporter.report.mockClear()
+        await expect(
+          bridge.complete({
+            ...request,
+            ...(acknowledgementMode ? { acknowledgementMode } : {}),
+            targets: [{ target }, { target: fallback }],
+            credentialTicketIssuer: {
+              issue: vi.fn(async ({ target: issued }: { target: PromptBridgeTarget }) => ({
+                credentialTicket: issued.provider === providerId ? '' : 'fresh-fallback',
+                providerAttemptId: `sdk-${issued.targetRef}`,
+                providerAttemptIndex: issued.provider === providerId ? 1 : 2,
+              })),
+            },
+            providerAttemptReporter,
+          })
+        ).rejects.toMatchObject({
+          code: 'provider_unavailable',
+          providerMayHaveExecuted: true,
+          providerAttempt: receipt,
+        })
+        expect(providerAttemptReporter.report).toHaveBeenCalledTimes(1)
+        expect(providerAttemptReporter.report).toHaveBeenCalledWith({
+          providerAttemptId: receipt.providerAttemptId,
+          providerAttemptIndex: 1,
+          status: 'provider_unavailable',
+        })
+      }
+      expect(stream).toHaveBeenCalledTimes(2)
+      expect(record).not.toHaveBeenCalledWith(true)
+      expect(record).toHaveBeenCalledWith(false)
+      // Dispatched interrupted output must not fail over and double-execute.
+      expect(second.completeSingleTurn).not.toHaveBeenCalled()
+    }
+  )
 })

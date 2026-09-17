@@ -85,6 +85,22 @@ function assertTerminalGrokOutcome(result: {
       'proxy stream ended without a terminal outcome'
     )
   }
+  // Only `success` may become a completion. Partial text from an unknown
+  // terminal state or a cancellation is interrupted output: surfacing it as a
+  // finished answer would let callers ack it as complete and count it as a
+  // healthy call. The request was already dispatched, so keep it fenced.
+  if (result.outcome === 'unknown') {
+    throw new GrokProxyError(
+      'outcome_unknown',
+      'proxy stream ended without a successful terminal outcome'
+    )
+  }
+  if (result.outcome === 'canceled') {
+    throw new GrokProxyError(
+      'canceled',
+      'proxy stream was canceled before a successful terminal outcome'
+    )
+  }
 }
 
 export class GrokSubscriptionProvider implements SingleTurnProvider {
@@ -189,10 +205,7 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       content: result.text,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason:
-        result.outcome === 'canceled' || result.outcome === 'unknown'
-          ? FinishReason.Unknown
-          : FinishReason.Stop,
+      finish_reason: FinishReason.Stop,
       providerAttemptId: result.providerAttemptId,
       providerAttemptIndex: result.providerAttemptIndex,
     }
@@ -223,12 +236,7 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
           : null,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason:
-        result.toolCalls.length > 0
-          ? FinishReason.ToolUse
-          : result.outcome === 'canceled' || result.outcome === 'unknown'
-            ? FinishReason.Unknown
-            : FinishReason.Stop,
+      finish_reason: result.toolCalls.length > 0 ? FinishReason.ToolUse : FinishReason.Stop,
     }
   }
 
@@ -253,7 +261,7 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
       context.policyRevision < 1 ||
       !/^[a-f0-9]{64}$/.test(context.policyHash)
     ) {
-      throw new CodexAuthorizeError('no_grant', 'Codex catalog policy binding is missing')
+      throw new CodexAuthorizeError('no_grant', 'Grok catalog policy binding is missing')
     }
     const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
     const authorized = await this.deps.authorizer.authorize(
