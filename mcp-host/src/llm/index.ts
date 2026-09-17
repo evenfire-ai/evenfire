@@ -2,6 +2,7 @@
  * LLM Provider factory.
  */
 import { config } from '../config'
+import { logger } from '../logger'
 import { ApiKeys, ModelConfig } from '../types'
 import { ClaudeProvider } from './claude'
 import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProxyClient'
@@ -22,9 +23,10 @@ export type { ClassifiedError, SingleTurnProvider } from './types'
 const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
   'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
 
-function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
+function createCodexRuntimeDeps(model: string | undefined, captured?: CodexAttemptContext) {
   const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
   return {
+    imageInputEnabled: Boolean(model && config.codexImageInputModels.includes(model)),
     authorizer: new ProviderAttemptAuthorizer({
       authorizeUrl: resolveCodexAuthorizeUrl(gateway),
       readPlatformJwt: readCodexPlatformJwt,
@@ -70,7 +72,7 @@ export function createLLMProvider(
   const modelName = modelConfig?.name
 
   if (!isLlmProvider(provider)) {
-    console.error('[LLM] Unknown provider')
+    logger.error({}, 'Unknown LLM provider')
     return null
   }
 
@@ -81,7 +83,7 @@ export function createLLMProvider(
   const credentials = keys[provider] ?? {}
   for (const slot of descriptorFor(provider).credentialSlots) {
     if (slot.required && !credentials[slot.dataKey]) {
-      console.error('[LLM] required credential missing from secrets')
+      logger.error({}, 'Required LLM credential is missing')
       return null
     }
   }
@@ -98,11 +100,11 @@ export function createLLMProvider(
       credentials,
       modelName,
       provider === 'codex-subscription'
-        ? { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
+        ? { codex: createCodexRuntimeDeps(modelName, options?.capturedCodexAttemptContext) }
         : undefined
     )
   } catch (err) {
-    console.error('[LLM] failed to construct provider')
+    logger.error({}, 'Failed to construct LLM provider')
     return null
   }
 }

@@ -85,12 +85,13 @@ import type {
   ToolResult,
 } from '../core/types'
 import { ApprovalExpiredError } from '../core/types'
+import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { isLlmProvider } from '../llm/registryCore'
+import { descriptorFor, isLlmProvider } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -1008,12 +1009,17 @@ export class TaskExecutor {
     // History rehydration + pre-prune compaction are part of the session-load
     // cost the user pays before the first model byte.
     this.turnTiming?.addSessionLoadMs(Date.now() - historyStart)
-    const sourceMessageAttachments = this.buildSourceMessageContentParts()
+    const lastMessage = messages[messages.length - 1]
+    const sourceMessageAttachments = this.buildSourceMessageContentParts(
+      lastMessage?.role === 'user' ? lastMessage.content : ''
+    )
     if (sourceMessageAttachments.length > 0) {
-      const lastMessage = messages[messages.length - 1]
       if (lastMessage?.role === 'user') {
         messages[messages.length - 1] = {
           ...lastMessage,
+          // Parts are authoritative: `content` is restated from the text parts
+          // so a message with images cannot contradict its own projection.
+          content: textContentFromParts(sourceMessageAttachments),
           contentParts: sourceMessageAttachments,
         }
       }
@@ -1066,6 +1072,13 @@ export class TaskExecutor {
           : undefined,
       })
       const isCron = this.task.cronJobId !== undefined
+      if (m.contentParts && m.contentParts.length > 0) {
+        // Keep the parts/`content` invariant the Codex V2 parser enforces: the
+        // block moves with the text it is prepended to.
+        const contentParts = prependTextToParts(m.contentParts, block)
+        messages[i] = { ...m, contentParts, content: textContentFromParts(contentParts) }
+        return
+      }
       const baseContent =
         m.content && m.content.length > 0 ? m.content : isCron ? '<cron task>' : m.content
       messages[i] = { ...m, content: block + baseContent }
@@ -1448,6 +1461,15 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.imageSourceIdentity =
+      this.deps.llmProvider.requiresImageSourceIdentity === true ||
+      [
+        this.deps.llmProvider.getProviderType(),
+        ...(this.deps.failover?.policy.fallbacks.map(entry => entry.provider) ?? []),
+      ].some(
+        provider =>
+          isLlmProvider(provider) && descriptorFor(provider).requiresImageSourceIdentity === true
+      )
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
@@ -2103,7 +2125,7 @@ export class TaskExecutor {
     return attachments
   }
 
-  private buildSourceMessageContentParts(): MessageContentPart[] {
+  private buildSourceMessageContentParts(messageContent: string): MessageContentPart[] {
     const providerType = this.deps.llmProvider.getProviderType()
     // getProviderType() always returns a registered LlmProvider, so in practice
     // this never drops images for a known provider — that's the point: a new
@@ -2116,6 +2138,12 @@ export class TaskExecutor {
     if (!sourceAttachments || sourceAttachments.length === 0) {
       return []
     }
+    // Frozen provenance identity (#650). `messageId` is the delivery identity
+    // the channel supplied; internal/cron sources carry an empty id, so the
+    // queued task id stands in as the real identity of that task's message.
+    // Neither value is a placeholder, and neither is rewritten here: a value
+    // the shared contract does not accept fails its projection check instead.
+    const messageId = this.task.sourceMessage?.messageId?.trim() || this.task.id
     const imageParts = sourceAttachments
       .filter(
         att =>
@@ -2126,12 +2154,15 @@ export class TaskExecutor {
           type: 'image',
           mimeType: att.mimeType as 'image/jpeg' | 'image/png',
           data: att.dataBase64,
+          source: { kind: 'attachment', attachmentId: att.id, messageId },
         })
       )
     if (!imageParts.length) {
       return []
     }
-    const userText = this.task.sourceMessage?.content?.trim() || 'User attached image(s).'
+    // Preserve the actual history text (including any contextual enrichment).
+    // Reading sourceMessage again would overwrite text already assembled above.
+    const userText = messageContent.trim() ? messageContent : 'User attached image(s).'
     return [{ type: 'text', text: userText }, ...imageParts]
   }
 }

@@ -4,6 +4,7 @@ import {
   clerumPromptCacheReadTokens,
   clerumPromptCacheWriteTokens,
 } from '../../llm/promptCacheMetrics'
+import { logger } from '../../logger'
 import { LlmUsageEvent, UsageReporter, newRequestId } from '../../usage/usageReporter.js'
 import type { SessionTokenUsage } from '../conversation/conversationStore'
 import { LlmError } from '../errors'
@@ -48,7 +49,7 @@ function errorField(value: unknown, field: string): string | null {
   return trimmed ? redactDiagnosticField(trimmed).slice(0, 120) : null
 }
 
-function providerErrorDiagnostics(err: unknown): string {
+function providerErrorDiagnostics(err: unknown): Record<string, string> {
   const fields: Record<string, string> = {}
   const name = errorField(err, 'name')
   const type = errorField(err, 'type')
@@ -68,8 +69,7 @@ function providerErrorDiagnostics(err: unknown): string {
   if (causeName) fields.causeName = causeName
   if (causeCode) fields.causeCode = causeCode
 
-  const entries = Object.entries(fields)
-  return entries.length > 0 ? ` diagnostics=${JSON.stringify(Object.fromEntries(entries))}` : ''
+  return fields
 }
 
 /**
@@ -122,13 +122,18 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    console.log(
-      `[NewCore:LlmPort] complete → model=${this.model}, messages=${request.messages.length}, cache=${request.systemPromptParts ? 'on' : 'off'}`
+    logger.info(
+      {
+        model: this.model,
+        messageCount: request.messages.length,
+        cache: Boolean(request.systemPromptParts),
+      },
+      'LLM completion started'
     )
     const requestId = newRequestId()
     try {
       const response = await this.dispatchComplete(request)
-      console.log(`[NewCore:LlmPort] ← finish_reason=${response.finish_reason}`)
+      logger.info({ finishReason: response.finish_reason }, 'LLM completion finished')
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
     } catch (err) {
@@ -137,15 +142,22 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   async completeWithTools(request: ToolCompletionRequest): Promise<ToolCompletionResponse> {
-    console.log(
-      `[NewCore:LlmPort] completeWithTools → model=${this.model}, tools=${request.tools.length}, messages=${request.messages.length}, cache=${request.systemPromptParts ? 'on' : 'off'}`
+    logger.info(
+      {
+        model: this.model,
+        toolCount: request.tools.length,
+        messageCount: request.messages.length,
+        cache: Boolean(request.systemPromptParts),
+      },
+      'LLM tool completion started'
     )
     const requestId = newRequestId()
     try {
       const response = await this.dispatchCompleteWithTools(request)
       const toolCallCount = response.tool_calls?.length ?? 0
-      console.log(
-        `[NewCore:LlmPort] ← finish_reason=${response.finish_reason}, tool_calls=${toolCallCount}, usage=${JSON.stringify(response.usage ?? {})}`
+      logger.info(
+        { finishReason: response.finish_reason, toolCallCount, usage: response.usage },
+        'LLM tool completion finished'
       )
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
@@ -155,23 +167,65 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   /**
-   * T2.2 — route to the provider's cache-aware path when both
-   * `request.systemPromptParts` is set AND the provider implements the
-   * cache-aware method (Claude). Otherwise concat the parts back into a
-   * single `system` message and call the legacy method (OpenAI / ZAI /
-   * Bailian don't expose explicit cache markers; they cache implicitly by
-   * prefix when the routing is stable).
+   * Preserve the historical content-deduplicated API-key view without changing
+   * the loop's canonical messages. Each fallback adapter selects its own view;
+   * source-binding transports retain all identities before hashing them.
    */
+  private providerMessages(messages: ChatMessage[]): ChatMessage[] {
+    if (
+      this.provider.requiresImageSourceIdentity ||
+      !messages.some(message => message.contentParts?.some(part => part.sourceIdentityOnly))
+    ) {
+      return messages
+    }
+    const imageKey = (part: { mimeType: string; data: string }) =>
+      `${part.mimeType}\u0000${part.data}`
+    const represented = new Set<string>()
+    for (const message of messages) {
+      for (const part of message.contentParts ?? []) {
+        if (part.type === 'image' && !part.sourceIdentityOnly) represented.add(imageKey(part))
+      }
+    }
+    return messages.flatMap(message => {
+      if (!message.contentParts?.some(part => part.sourceIdentityOnly)) return [message]
+      let restoredImage = false
+      const selected = new Set(message.contentParts.filter(part => !part.sourceIdentityOnly))
+      for (const part of message.contentParts) {
+        if (part.type !== 'image' || !part.sourceIdentityOnly || represented.has(imageKey(part)))
+          continue
+        // In a mixed chain, pruning can remove the older legacy representative.
+        // Retain one current frame rather than silently losing all visual input.
+        selected.add(part)
+        represented.add(imageKey(part))
+        restoredImage = true
+      }
+      if (restoredImage) {
+        for (const part of message.contentParts) if (part.type === 'text') selected.add(part)
+      }
+      const contentParts = message.contentParts
+        .filter(part => selected.has(part))
+        .map(part => {
+          if (!part.sourceIdentityOnly) return part
+          const visible = { ...part }
+          delete visible.sourceIdentityOnly
+          return visible
+        })
+      return contentParts.length ? [{ ...message, contentParts }] : []
+    })
+  }
+
+  /** Native cache markers when supported, otherwise the existing system-text projection. */
   private async dispatchComplete(request: CompletionRequest): Promise<CompletionResponse> {
     const parts = request.systemPromptParts
+    const providerMessages = this.providerMessages(request.messages)
     if (parts && this.provider.completeSingleTurnAndCache) {
-      return this.provider.completeSingleTurnAndCache(parts, request.messages, {
+      return this.provider.completeSingleTurnAndCache(parts, providerMessages, {
         max_tokens: request.max_tokens,
         temperature: request.temperature,
         signal: request.signal,
       })
     }
-    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
+    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
     return this.provider.completeSingleTurn(messages, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -183,10 +237,11 @@ export class LlmPortAdapter implements LlmPort {
     request: ToolCompletionRequest
   ): Promise<ToolCompletionResponse> {
     const parts = request.systemPromptParts
+    const providerMessages = this.providerMessages(request.messages)
     if (parts && this.provider.completeSingleTurnWithToolsAndCache) {
       return this.provider.completeSingleTurnWithToolsAndCache(
         parts,
-        request.messages,
+        providerMessages,
         request.tools,
         {
           max_tokens: request.max_tokens,
@@ -196,7 +251,7 @@ export class LlmPortAdapter implements LlmPort {
         }
       )
     }
-    const messages = parts ? prependConcatSystem(parts, request.messages) : request.messages
+    const messages = parts ? prependConcatSystem(parts, providerMessages) : providerMessages
     return this.provider.completeSingleTurnWithTools(messages, request.tools, {
       max_tokens: request.max_tokens,
       temperature: request.temperature,
@@ -251,7 +306,10 @@ export class LlmPortAdapter implements LlmPort {
           cache_write_tokens: usage.cache_write_tokens,
         })
       } catch (err) {
-        console.error('[NewCore:LlmPort] onUsageRecorded sink threw (ignored):', err)
+        logger.error(
+          { err: providerErrorDiagnostics(err) },
+          'Usage sink failed; completion preserved'
+        )
       }
     }
     if (!this.usageReporter || !this.staticContext || !usageContext || !usage) return
@@ -292,10 +350,13 @@ export class LlmPortAdapter implements LlmPort {
    */
   private handleProviderError(err: unknown): never {
     const classified = this.provider.classifyError(err)
-    console.log(
-      `[NewCore:LlmPort] ← ERROR: code=${classified.code} ` +
-        `retryable=${classified.retryable} message="${classified.message}"` +
-        providerErrorDiagnostics(err)
+    logger.info(
+      {
+        code: classified.code,
+        retryable: classified.retryable,
+        diagnostics: providerErrorDiagnostics(err),
+      },
+      'LLM provider call failed'
     )
     throw new LlmError(
       classified.message,

@@ -15,6 +15,8 @@ import type { Attachment, ChatMessage, MessageContentPart, TraceContextV1 } from
 import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
 import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
+import { FailoverEngine } from '../../llm/failover/engine'
+import type { LlmPolicy } from '../../llm/failover/types'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
@@ -988,7 +990,7 @@ describe('TaskExecutor', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['openai', 'claude', 'zai', 'bailian'] as const)(
+  it.each(['openai', 'claude', 'zai', 'bailian', 'codex-subscription'] as const)(
     'injects text+image contentParts for %s provider',
     async providerType => {
       vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -1006,14 +1008,21 @@ describe('TaskExecutor', () => {
       await executor.run()
 
       const userMessage = getLastUserMessageFromLoopCall()
-      expect(userMessage.contentParts).toEqual([
-        { type: 'text', text: 'Analyze this image' },
-        {
-          type: 'image',
-          mimeType: 'image/jpeg',
-          data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-        },
-      ] satisfies MessageContentPart[])
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        providerType === 'codex-subscription'
+      )
+      const parts = userMessage.contentParts ?? []
+      expect(parts).toHaveLength(2)
+      // The prompt-cache turn-context block rides with the text part, so
+      // `content` and its text parts stay equal for the Codex V2 contract.
+      expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+      expect(userMessage.content.endsWith('Analyze this image')).toBe(true)
+      expect(parts[1]).toEqual({
+        type: 'image',
+        mimeType: 'image/jpeg',
+        data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+        source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+      } satisfies MessageContentPart)
     }
   )
 
@@ -1029,14 +1038,74 @@ describe('TaskExecutor', () => {
     await executor.run()
 
     const userMessage = getLastUserMessageFromLoopCall()
-    expect(userMessage.contentParts).toEqual([
-      { type: 'text', text: 'User attached image(s).' },
-      {
-        type: 'image',
-        mimeType: 'image/png',
-        data: 'cG5n',
-      },
-    ] satisfies MessageContentPart[])
+    const parts = userMessage.contentParts ?? []
+    expect(parts).toHaveLength(2)
+    expect(parts[0]).toEqual({ type: 'text', text: userMessage.content })
+    expect(userMessage.content.endsWith('User attached image(s).')).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/png',
+      data: 'cG5n',
+      source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+    } satisfies MessageContentPart)
+  })
+
+  it.each(['claude', 'codex-subscription'])(
+    'selects image identity from the configured fallback %s',
+    async fallback => {
+      vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+      const policy: LlmPolicy = {
+        fallbacks: [{ provider: fallback, model: 'fallback-model' }],
+        triggerOn: ['provider_unavailable'],
+        cooldownSeconds: 30,
+      }
+      const deps = createDeps({
+        failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+      })
+      await new TaskExecutor(createTask('hello'), deps).run()
+      expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(
+        fallback === 'codex-subscription'
+      )
+    }
+  )
+
+  it('preserves history enrichment when adding image parts', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const original = deps.conversationManager.buildMessageHistory.bind(deps.conversationManager)
+    vi.spyOn(deps.conversationManager, 'buildMessageHistory').mockImplementation(conversation => {
+      const messages = original(conversation)
+      const last = messages[messages.length - 1]
+      if (last?.role === 'user') last.content = `Conversation context: ${last.content}`
+      return messages
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const message = getLastUserMessageFromLoopCall()
+    expect(message.content).toContain('Conversation context: Analyze this image')
+    expect(message.contentParts?.[0]).toEqual({ type: 'text', text: message.content })
+  })
+
+  it('uses the queued task id when the source message carries no delivery id', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const deps = createDeps()
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.messageId = '   '
+    task.sourceMessage!.attachments = [createImageAttachment()]
+
+    const executor = new TaskExecutor(task, deps)
+    await executor.run()
+
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
+      // A real identity, not a placeholder: internal sources have no delivery
+      // id, so the task that queued the message identifies it.
+      source: { kind: 'attachment', attachmentId: 'att-1', messageId: task.id },
+    } satisfies MessageContentPart)
   })
 
   it('skips contentParts when provider is unsupported', async () => {

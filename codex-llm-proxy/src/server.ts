@@ -1,6 +1,6 @@
 import express, { type Express, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
-import { createServer, type Server } from 'node:http'
+import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
 import { z } from 'zod'
 import { verifyAdminPermit } from './auth/adminPermitVerifier.js'
@@ -17,9 +17,9 @@ import { ControlApiClient, ControlApiClientError } from './controlApiClient.js'
 import { logger } from './logger.js'
 import { createProxyMetrics } from './metrics.js'
 import {
-  defaultAddressLookup,
   OriginDeniedError,
   type OriginPolicyOptions,
+  defaultAddressLookup,
 } from './originPolicy.js'
 import { RequestLimitError, streamGate } from './requestLimits.js'
 
@@ -84,7 +84,10 @@ export type ProxyServers = {
   close: () => Promise<void>
 }
 
-export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeDeps = {}): ProxyServers {
+export function createProxyApps(
+  config: CodexLlmProxyConfig,
+  deps: ProxyRuntimeDeps = {}
+): ProxyServers {
   const metricsRegistry = new Registry()
   collectDefaultMetrics({ register: metricsRegistry })
   const metrics = createProxyMetrics(metricsRegistry)
@@ -168,6 +171,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
         const result = await streamCodexCompletion({
+          imageInputEnabled: config.imageInputModels.includes(ticket.model),
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,
@@ -223,7 +227,13 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       reject(res, 403, 'insufficient_scope')
       return
     }
-    if (!verifyAdminPermit(bearer(req), config, kind === 'models' ? 'catalog_list' : 'connection_test')) {
+    if (
+      !verifyAdminPermit(
+        bearer(req),
+        config,
+        kind === 'models' ? 'catalog_list' : 'connection_test'
+      )
+    ) {
       reject(res, 401, 'Unauthorized')
       return
     }

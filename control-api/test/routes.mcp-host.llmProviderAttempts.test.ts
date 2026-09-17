@@ -119,6 +119,16 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
       .send({ request: {} })
     expect(unassigned.status).toBe(403)
     expect(unassigned.body).toEqual({ error: 'unassigned_connection' })
+
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockRejectedValueOnce(
+      new LlmProviderAttemptAuthorizeError('payload_too_large', 'proxy envelope exceeds limit')
+    )
+    const oversized = await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ request: {} })
+    expect(oversized.status).toBe(413)
+    expect(oversized.body).toEqual({ error: 'payload_too_large' })
   })
 
   it('returns the authorize contract without leaking tokens', async () => {

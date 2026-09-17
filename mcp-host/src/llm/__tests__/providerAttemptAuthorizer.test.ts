@@ -13,6 +13,46 @@ const validAuthorize = {
 }
 
 describe('ProviderAttemptAuthorizer', () => {
+  it('rejects the complete oversized envelope before dispatch', async () => {
+    const fetchFn = vi.fn()
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn,
+    })
+    await expect(
+      authorizer.authorize({
+        request: { content: 'a'.repeat(1048576) },
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(fetchFn).not.toHaveBeenCalled()
+  })
+
+  it('recognizes a non-JSON 413 as a request limit', async () => {
+    const fetchFn = vi.fn(async () => new Response('<h1>Too large</h1>', { status: 413 }))
+    const authorizer = new ProviderAttemptAuthorizer({
+      authorizeUrl: 'http://gateway/authorize',
+      readPlatformJwt: () => 'test-jwt',
+      fetchFn,
+    })
+    await expect(
+      authorizer.authorize({
+        request: {},
+        invocationId: 'inv-1',
+        attemptGeneration: 1,
+        providerAttemptIndex: 1,
+        policyRevision: 1,
+        policyHash: 'b'.repeat(64),
+      })
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
   it('posts the platform JWT to the server-owned gateway URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,

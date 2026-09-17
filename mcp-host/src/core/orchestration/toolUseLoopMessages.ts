@@ -54,6 +54,50 @@ export function collectToolAttachments(
   return added
 }
 
+/** Text of the user message that carries tool-result frames. */
+const TOOL_RESULT_IMAGE_TEXT = 'Here are the screenshots from the tool results above.'
+
+/**
+ * Wire-eligible images of ONE tool result, with their provenance.
+ *
+ * Deduplication deliberately differs from the UI collection above: the
+ * user-facing attachment list collapses identical bytes across iterations,
+ * while the model must see every distinct tool call that produced a frame. Two
+ * calls returning the same bytes can yield two parts with different sources.
+ * The default loop keeps the historical collection view; source binding is
+ * explicitly enabled by the transport capabilities of the configured chain.
+ */
+function collectVisualImageParts(
+  result: ToolResult,
+  seen: Set<string>,
+  legacyRetained: Set<Attachment>,
+  preserveSourceIdentity: boolean
+): MessageContentPart[] {
+  const parts: MessageContentPart[] = []
+  for (const attachment of result.attachments ?? []) {
+    if (!shouldCollectAttachment(result, attachment)) continue
+    if (attachment.kind !== 'image') continue
+    const mimeType = attachment.mimeType
+    if (mimeType !== 'image/jpeg' && mimeType !== 'image/png') continue
+    // Consume membership once: an array can repeat the same attachment object.
+    const retained = legacyRetained.delete(attachment)
+    if (!retained && !preserveSourceIdentity) continue
+    const key = `${result.tool_call_id}\u0000${attachment.id}\u0000${mimeType}\u0000${attachment.dataBase64}`
+    // Keep every frame the original collection retained (including distinct
+    // filenames/lanes); source dedup must not narrow that legacy view.
+    if (seen.has(key) && !retained) continue
+    seen.add(key)
+    parts.push({
+      type: 'image',
+      mimeType,
+      data: attachment.dataBase64,
+      source: { kind: 'tool', attachmentId: attachment.id, toolCallId: result.tool_call_id },
+      ...(!retained ? { sourceIdentityOnly: true as const } : {}),
+    })
+  }
+  return parts
+}
+
 export function mergeCollectedAttachments(
   collected: Attachment[],
   attachments: Attachment[]
@@ -64,22 +108,29 @@ export function mergeCollectedAttachments(
 export function appendToolResults(
   messages: ChatMessage[],
   toolResults: ToolResult[],
-  collectedAttachments: Attachment[]
+  collectedAttachments: Attachment[],
+  preserveSourceIdentity = false
 ): void {
   const pendingImages: MessageContentPart[] = []
-  for (const tr of toolResults) {
-    const trustedAttachments = collectToolAttachments([tr], collectedAttachments)
-    if (trustedAttachments.length) {
-      for (const att of trustedAttachments) {
-        if (att.kind !== 'image') continue
-        if (att.mimeType !== 'image/jpeg' && att.mimeType !== 'image/png') continue
-        pendingImages.push({
-          type: 'image',
-          mimeType: att.mimeType,
-          data: att.dataBase64,
-        })
+  const seenVisuals = new Set<string>()
+  if (preserveSourceIdentity) {
+    for (const message of messages) {
+      for (const part of message.contentParts ?? []) {
+        if (part.type !== 'image' || part.source?.kind !== 'tool') continue
+        seenVisuals.add(
+          `${part.source.toolCallId}\u0000${part.source.attachmentId}\u0000${part.mimeType}\u0000${part.data}`
+        )
       }
     }
+  }
+  for (const tr of toolResults) {
+    // The UI collection keeps its cross-iteration dedup contract; the visual
+    // parts are collected independently so a repeated frame still carries the
+    // tool call that produced THIS instance.
+    const legacyRetained = new Set(collectToolAttachments([tr], collectedAttachments))
+    pendingImages.push(
+      ...collectVisualImageParts(tr, seenVisuals, legacyRetained, preserveSourceIdentity)
+    )
     messages.push({
       role: 'tool',
       content: tr.content,
@@ -94,9 +145,15 @@ export function appendToolResults(
   if (pendingImages.length > 0) {
     messages.push({
       role: 'user',
-      content: 'Here are the screenshots from the tool results above.',
+      content: TOOL_RESULT_IMAGE_TEXT,
       contentParts: [
-        { type: 'text', text: 'Here are the screenshots from the tool results above.' },
+        {
+          type: 'text',
+          text: TOOL_RESULT_IMAGE_TEXT,
+          ...(pendingImages.every(part => part.sourceIdentityOnly)
+            ? { sourceIdentityOnly: true as const }
+            : {}),
+        },
         ...pendingImages,
       ],
     })

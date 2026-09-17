@@ -2,6 +2,76 @@
 
 Frozen protocol version: `codex-subscription-transport.v1`.
 
+Request schemas: `codex-completion-request.v1` for ordinary text and
+`codex-completion-request.v2` for ordered visual content (including text parts
+left after media pruning). The transport, execution-ticket type and receipt
+version remain V1. Request V2 does not imply a transport protocol upgrade.
+
+## Visual requests (issue #650)
+
+V2 user messages may carry `contentParts`: ordered text parts or inline PNG/JPEG
+parts. Images contain `mimeType`, canonical base64 `data`, and a closed `source`
+identity: `{ kind: 'attachment', attachmentId, messageId }` or
+`{ kind: 'tool', attachmentId, toolCallId }`. Sources are established by the Host
+message/tool producers, included in the canonical request hash, and omitted from
+the upstream projection. They are attribution inside the authorized request,
+not permission to fetch another object. No arbitrary URL is accepted.
+
+The text parts joined with a newline must equal the message's `content`.
+Producers synchronize the fields when adding turn context. After media pruning,
+the remaining text parts are authoritative, so redaction text is preserved.
+Ordinary V1 textual requests retain their existing wire representation and hashes.
+
+Tool-image source retention is enabled only when a configured primary or fallback
+provider requires source identity. Pure API-key chains keep the existing loop
+deduplication and message shape. Mixed chains retain distinct source identities
+in canonical history; each provider adapter selects its own view without mutating
+that history. The internal `sourceIdentityOnly` marker identifies extra copies and
+never enters the Codex request schema. API-key adapters omit those copies when an
+unmarked representative remains. If pruning removed that representative, they
+retain one remaining image per MIME/bytes pair and its explanatory text. They do
+not restore pixels removed by pruning. The user-facing attachment collection
+keeps its existing deduplication behavior.
+
+Local visual budgets are three images, 512 KiB decoded per image, 640 KiB decoded
+across a request, 8192 pixels per dimension and 16,777,216 pixels per image.
+These are conservative Evenfire limits, not claims about upstream capabilities.
+The shared pure validator checks canonical base64, MIME/container framing and
+header dimensions; it does not decode pixels or prove image decodability.
+The fixtures contain independently decoded 2x2 PNG/JPEG images.
+
+The existing 1 MiB bound still applies to each complete serialized request and
+HTTP envelope, including text, tools, history and the signed execution ticket.
+The authorizer builds the exact V2 proxy envelope inside its transaction after
+signing but before commit. Exceeding the bound rolls back the new attempt,
+ticket and new reservation; it does not call the receipt finalizer before redeem.
+The Host uses the same envelope builder. V2 has no outer deadline: its deadline
+is `request.deadlineMs`, part of the authorized hash. A proxy configured below
+the shared envelope budget refuses visual activation at startup.
+
+The proxy projects parts to Responses `input_text` and `input_image` items with
+an inline data URL. The shape is grounded in the official Codex client
+[ContentItem and ImageReference definitions](https://github.com/openai/codex/blob/fc2ea82e7eff22c618a56db29c68a6b1967cba7d/codex-rs/protocol/src/models.rs#L878).
+This source evidence is not a successful call to Evenfire's frozen endpoint.
+
+`CODEX_IMAGE_INPUT_MODELS` is an explicit, comma-separated model rollout gate in
+both Host and proxy. It defaults to empty. Set it only for the models whose
+interoperability has been independently verified, after every authorizer/proxy
+replica accepts V2. This gate is not a replacement for catalog authorization.
+Until enabled, visual input returns `image_input_unsupported`; it is not silently
+removed and does not trigger automatic fallback. Ordinary eligible failures
+retain the existing configured fallback policy. Limit errors, including HTTP
+413 without a JSON body, remain non-retryable.
+
+Deploy accepting consumers before visual senders. An old consumer must reject
+V2 explicitly; do not translate V2 to text to work around that rejection. On
+rollback disable visual activation first, drain attempts, then restore consumers.
+Do not roll back to a sender that silently discards images without a front guard.
+Committed abandoned attempts retain their audit identity. Existing ticket and
+budget TTLs, rather than the receipt finalizer, bound their execution and pending
+budget; a new physical attempt must have a fresh attempt binding. Tests of these
+lifecycle guarantees and a real upstream image check are separate acceptance lanes.
+
 This document is the Phase 0 architecture freeze for provider `codex-subscription`.
 It is not a runtime client and does not authorize API-key billing.
 

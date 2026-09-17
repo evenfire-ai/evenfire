@@ -60,7 +60,10 @@
     "origin_denied",
     "ticket_invalid",
     "ticket_replayed",
-    "request_hash_mismatch"
+    "request_hash_mismatch",
+    "image_input_unsupported",
+    "image_source_invalid",
+    "payload_too_large"
   ],
   "termsAndTestAccount": {
     "automationAuthorized": true,
@@ -72,5 +75,19 @@
     "originDev": "1b845a3d636cc1b766cfcec66bb44a880581014b",
     "specCitedSha": "7d56b10849458a67b15f7d9a0991fa62604913a3",
     "driftAudit": "no-credential-owner-data-path-gateway-count-or-token-recipient-change"
+  },
+  "requestSchemas": ["codex-completion-request.v1", "codex-completion-request.v2"],
+  "visualInput": {
+    "activation": "CODEX_IMAGE_INPUT_MODELS",
+    "enabledByDefault": false,
+    "upstreamVerified": false,
+    "validation": "container-framing-and-dimensions",
+    "limits": {
+      "maxImages": 3,
+      "maxImageBytes": 524288,
+      "maxTotalImageBytes": 655360,
+      "maxImageDimension": 8192,
+      "maxImagePixels": 16777216
+    }
   }
 }

@@ -67,6 +67,8 @@ export interface Config {
   // Default OFF. Codex provider construction stays dark until the operator
   // sets MCP_HOST_CODEX_SUBSCRIPTION_ENABLED=true.
   codexSubscriptionEnabled: boolean
+  /** Models explicitly cleared for visual rollout; empty until interoperability is verified. */
+  codexImageInputModels: string[]
   // Server-owned Codex proxy URL. Callers cannot override this per request.
   codexProxyRuntimeBaseUrl: string
   // Explicit authorize override for tests/dev. Host chat ignores an empty hash
@@ -676,6 +678,10 @@ export const config: Config = {
   devModelProvider: devMode ? resolveDevModelProvider(rawDevModelProvider) : undefined,
   devModelName,
   codexSubscriptionEnabled: process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED === 'true',
+  codexImageInputModels: (process.env.CODEX_IMAGE_INPUT_MODELS ?? '')
+    .split(',')
+    .map(model => model.trim())
+    .filter(Boolean),
   codexProxyRuntimeBaseUrl: getEnv(
     'CODEX_LLM_PROXY_RUNTIME_URL',
     'http://codex-llm-proxy.control-plane.svc.cluster.local:8080'

@@ -5,10 +5,18 @@ const crypto = require('node:crypto')
 const fs = require('node:fs')
 const path = require('node:path')
 const test = require('node:test')
+const zlib = require('node:zlib')
 const contract = require('./index.cjs')
 
 const FIXTURE = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures/canonical-request-hashes.json'), 'utf8')
+)
+
+const FIXTURE_V2 = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'fixtures/canonical-request-hashes.v2.json'), 'utf8')
+)
+const VISUAL_FIXTURE = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'fixtures/visual-requests.json'), 'utf8')
 )
 
 const BASE = {
@@ -45,12 +53,20 @@ test('fixture corpus: valid cases match frozen hashes and equivalent reorderings
     if (fixture.equivalentRequest) {
       const other = contract.parseCodexCompletionRequestV1(fixture.equivalentRequest)
       assert.equal(other.ok, true, `${fixture.name} equivalent`)
-      assert.equal(contract.hashCodexCompletionRequestV1(other.value), digest, `${fixture.name} reorder`)
+      assert.equal(
+        contract.hashCodexCompletionRequestV1(other.value),
+        digest,
+        `${fixture.name} reorder`
+      )
     }
     if (fixture.distinctRequest) {
       const other = contract.parseCodexCompletionRequestV1(fixture.distinctRequest)
       assert.equal(other.ok, true, `${fixture.name} distinct`)
-      assert.notEqual(contract.hashCodexCompletionRequestV1(other.value), digest, `${fixture.name} array order`)
+      assert.notEqual(
+        contract.hashCodexCompletionRequestV1(other.value),
+        digest,
+        `${fixture.name} array order`
+      )
     }
   }
 })
@@ -264,13 +280,26 @@ for (const count of [1, 32, 33, 83, 150, 250]) {
     const parsed = contract.parseCodexCompletionRequestV1({ ...BASE, tools })
     assert.equal(parsed.ok, true, parsed.message)
     assert.deepEqual(parsed.value.tools, tools)
-    const reordered = tools.map(({ name, description, parameters }) => ({ parameters, description, name }))
+    const reordered = tools.map(({ name, description, parameters }) => ({
+      parameters,
+      description,
+      name,
+    }))
     const equivalent = contract.parseCodexCompletionRequestV1({ ...BASE, tools: reordered })
     assert.equal(equivalent.ok, true)
-    assert.equal(contract.hashCodexCompletionRequestV1(parsed.value), contract.hashCodexCompletionRequestV1(equivalent.value))
-    const changed = contract.parseCodexCompletionRequestV1({ ...BASE, tools: [...tools.slice(0, -1), { ...tools.at(-1), description: 'Changed capability' }] })
+    assert.equal(
+      contract.hashCodexCompletionRequestV1(parsed.value),
+      contract.hashCodexCompletionRequestV1(equivalent.value)
+    )
+    const changed = contract.parseCodexCompletionRequestV1({
+      ...BASE,
+      tools: [...tools.slice(0, -1), { ...tools.at(-1), description: 'Changed capability' }],
+    })
     assert.equal(changed.ok, true)
-    assert.notEqual(contract.hashCodexCompletionRequestV1(parsed.value), contract.hashCodexCompletionRequestV1(changed.value))
+    assert.notEqual(
+      contract.hashCodexCompletionRequestV1(parsed.value),
+      contract.hashCodexCompletionRequestV1(changed.value)
+    )
   })
 }
 
@@ -281,9 +310,17 @@ test('tool definition count never widens the independent assistant call limit', 
     const parsed = contract.parseCodexCompletionRequestV1({
       ...BASE,
       tools: catalog(250),
-      messages: [{ role: 'assistant', content: '', toolCalls: Array.from({ length: count }, (_, index) => ({
-        id: `call-${index}`, name: `eventasks__read_${index}`, arguments: {},
-      })) }],
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: Array.from({ length: count }, (_, index) => ({
+            id: `call-${index}`,
+            name: `eventasks__read_${index}`,
+            arguments: {},
+          })),
+        },
+      ],
     })
     assert.equal(parsed.ok, count === 32)
     if (!parsed.ok) assert.equal(parsed.message, 'messages[0].toolCalls exceed 32')
@@ -294,16 +331,25 @@ test('large catalogs remain bounded by serialized request bytes including UTF-8'
   const request = { ...BASE, tools: catalog(250) }
   const originalBytes = Buffer.byteLength(JSON.stringify(request), 'utf8')
   request.tools[249].description += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - originalBytes)
-  assert.equal(Buffer.byteLength(JSON.stringify(request), 'utf8'), contract.LIMITS.maxRequestBodyBytes)
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(request), 'utf8'),
+    contract.LIMITS.maxRequestBodyBytes
+  )
   assert.equal(contract.parseCodexCompletionRequestV1(request).ok, true)
   request.tools[249].description += 'é'
   assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
-    ok: false, code: 'limit', message: 'request exceeds maxRequestBodyBytes',
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
   })
 })
 
 test('validates the last definition beyond the former count boundary', () => {
-  for (const invalid of [{ name: 'invalid\u0000name' }, { parameters: { value: Infinity } }, { headers: {} }]) {
+  for (const invalid of [
+    { name: 'invalid\u0000name' },
+    { parameters: { value: Infinity } },
+    { headers: {} },
+  ]) {
     const tools = catalog(250)
     tools[249] = { ...tools[249], ...invalid }
     const parsed = contract.parseCodexCompletionRequestV1({ ...BASE, tools })
@@ -329,8 +375,10 @@ test('preserves opaque canonical names in definitions and assistant/tool history
     const parsed = contract.parseCodexCompletionRequestV1(request)
     assert.equal(parsed.ok, true, parsed.message)
     assert.deepEqual(parsed.value, request)
-    assert.equal(contract.hashCodexCompletionRequestV1(parsed.value),
-      crypto.createHash('sha256').update(contract.stableStringify(request)).digest('hex'))
+    assert.equal(
+      contract.hashCodexCompletionRequestV1(parsed.value),
+      crypto.createHash('sha256').update(contract.stableStringify(request)).digest('hex')
+    )
   }
 })
 
@@ -359,11 +407,646 @@ test('opaque tool name support retains strict request and call identifiers', () 
 })
 
 test('opaque canonical names remain bounded by serialized UTF-8 request bytes', () => {
-  const request = { ...BASE, tools: [{ name: '工具', description: 'Read a record', parameters: {} }] }
-  request.tools[0].name += 'x'.repeat(contract.LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(request)))
+  const request = {
+    ...BASE,
+    tools: [{ name: '工具', description: 'Read a record', parameters: {} }],
+  }
+  request.tools[0].name += 'x'.repeat(
+    contract.LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(request))
+  )
   assert.equal(contract.parseCodexCompletionRequestV1(request).ok, true)
   request.tools[0].name += 'é'
   assert.deepEqual(contract.parseCodexCompletionRequestV1(request), {
-    ok: false, code: 'limit', message: 'request exceeds maxRequestBodyBytes',
+    ok: false,
+    code: 'limit',
+    message: 'request exceeds maxRequestBodyBytes',
   })
+})
+
+// --- V2 (codex-completion-request.v2) -------------------------------------
+
+const V2_REQUEST_KEYS = { schemaVersion: contract.SCHEMA_VERSION_V2 }
+const IMAGE_DATA = {
+  png: VISUAL_FIXTURE.png.messages[0].contentParts.find(part => part.type === 'image').data,
+  jpeg: VISUAL_FIXTURE.jpeg.messages[0].contentParts.find(part => part.type === 'image').data,
+}
+const MAX_ENCODED_IMAGE_CHARS = 4 * Math.ceil(contract.VISUAL_LIMITS.maxImageBytes / 3)
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+/**
+ * Fixture image parts carry `dataRef` (resolved from visual-requests.json) so
+ * the frozen hash corpus stays readable, and `mutate` for documented
+ * truncations. Resolution returns a deep copy: a loaded fixture is never
+ * mutated in place.
+ */
+function resolveFixtureImages(value) {
+  if (Array.isArray(value)) return value.map(resolveFixtureImages)
+  if (value && typeof value === 'object') {
+    if (typeof value.dataRef === 'string') {
+      const source = IMAGE_DATA[value.dataRef]
+      assert.ok(source, `unknown image ref ${value.dataRef}`)
+      const bytes = Buffer.from(source, 'base64')
+      let data = source
+      if (value.mutate === 'strip-eoi')
+        data = bytes.subarray(0, bytes.length - 2).toString('base64')
+      else if (value.mutate === 'truncate-after-ihdr')
+        data = bytes.subarray(0, 33).toString('base64')
+      else assert.equal(value.mutate, undefined, `unknown mutate ${value.mutate}`)
+      const clone = { ...value, data }
+      delete clone.dataRef
+      delete clone.mutate
+      return clone
+    }
+    const out = {}
+    for (const [key, inner] of Object.entries(value)) out[key] = resolveFixtureImages(inner)
+    return out
+  }
+  return value
+}
+
+function pngChunks(bytes) {
+  const chunks = []
+  let pos = 8
+  while (pos < bytes.length) {
+    const length = bytes.readUInt32BE(pos)
+    chunks.push({
+      type: bytes.toString('latin1', pos + 4, pos + 8),
+      data: bytes.subarray(pos + 8, pos + 8 + length),
+      crc: bytes.readUInt32BE(pos + 8 + length),
+      crcInput: bytes.subarray(pos + 4, pos + 8 + length),
+    })
+    pos += 12 + length
+  }
+  return chunks
+}
+
+function pngChunk(type, data) {
+  const length = Buffer.alloc(4)
+  length.writeUInt32BE(data.length, 0)
+  const typeBytes = Buffer.from(type, 'latin1')
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(zlib.crc32(Buffer.concat([typeBytes, data])) >>> 0, 0)
+  return Buffer.concat([length, typeBytes, data, crc])
+}
+
+function pngHeader(width, height) {
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = 2
+  return ihdr
+}
+
+/** Real PNG: a deflate stream over filtered RGB scanlines plus real CRCs. */
+function realPng(width, height, seed) {
+  const stride = 1 + width * 3
+  const raw = Buffer.alloc(height * stride)
+  let state = seed >>> 0
+  for (let i = 0; i < raw.length; i++) {
+    if (i % stride === 0) continue
+    state ^= state << 13
+    state >>>= 0
+    state ^= state >>> 17
+    state ^= state << 5
+    state >>>= 0
+    raw[i] = state & 0xff
+  }
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', pngHeader(width, height)),
+    pngChunk('IDAT', zlib.deflateSync(raw, { level: 6 })),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+/**
+ * Framed PNG whose IDAT is not a decodable stream. Used only for the declared
+ * header budgets: the pixel budget is enforced on IHDR before any decode, which
+ * is the documented guarantee boundary of this contract.
+ */
+function declaredHeaderPng(width, height) {
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', pngHeader(width, height)),
+    pngChunk('IDAT', Buffer.alloc(8)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+/**
+ * Declared-header container padded to an exact byte length (signature 8,
+ * IHDR 25, IDAT 12 + payload, IEND 12). Also a budget probe only.
+ */
+function declaredHeaderPngOfSize(targetBytes) {
+  const overhead = 8 + 25 + 12 + 12
+  assert.ok(targetBytes > overhead, 'target must leave room for image data')
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk('IHDR', pngHeader(2, 2)),
+    pngChunk('IDAT', Buffer.alloc(targetBytes - overhead)),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+function imagePart(data, mimeType = 'image/png') {
+  return {
+    type: 'image',
+    mimeType,
+    data,
+    source: { kind: 'tool', attachmentId: 'att_1700000000001_ff00aa11', toolCallId: 'call_abc123' },
+  }
+}
+
+function v2WithMessages(messages) {
+  return { ...BASE, ...V2_REQUEST_KEYS, messages }
+}
+
+function v2WithParts(parts, content = '') {
+  return v2WithMessages([{ role: 'user', content, contentParts: parts }])
+}
+
+function v2TextRequest(content) {
+  return v2WithMessages([{ role: 'user', content }])
+}
+
+test('v2 fixture corpus: valid cases match frozen digests and distinct payloads differ', () => {
+  for (const fixture of FIXTURE_V2.cases) {
+    const request = resolveFixtureImages(fixture.request)
+    const parsed = contract.parseCodexCompletionRequest(request)
+    assert.equal(parsed.ok, true, fixture.name)
+    const direct = contract.parseCodexCompletionRequestV2(request)
+    assert.equal(direct.ok, true, fixture.name)
+    assert.deepEqual(parsed, direct, `${fixture.name} dispatcher parity`)
+    const digest = contract.hashCodexCompletionRequest(parsed.value)
+    assert.equal(digest, fixture.sha256, fixture.name)
+    assert.equal(
+      contract.hashCodexCompletionRequest(direct.value),
+      digest,
+      `${fixture.name} hash parity`
+    )
+    if (fixture.distinctRequest) {
+      const other = contract.parseCodexCompletionRequest(
+        resolveFixtureImages(fixture.distinctRequest)
+      )
+      assert.equal(other.ok, true, `${fixture.name} distinct`)
+      assert.notEqual(contract.hashCodexCompletionRequest(other.value), digest, fixture.name)
+    }
+  }
+})
+
+test('v2 fixture corpus: rejected payloads fail closed with the frozen code and message', () => {
+  for (const fixture of FIXTURE_V2.rejects) {
+    const parsed = contract.parseCodexCompletionRequest(resolveFixtureImages(fixture.request))
+    assert.equal(parsed.ok, false, fixture.name)
+    assert.equal(parsed.code, fixture.reason, fixture.name)
+    assert.equal(parsed.message, fixture.message, fixture.name)
+  }
+})
+
+test('v2 visual fixtures: inline png/jpeg requests parse and pin the exact octets', () => {
+  for (const key of ['png', 'jpeg', 'pngImageOnly']) {
+    const request = VISUAL_FIXTURE[key]
+    assert.equal(request.schemaVersion, contract.SCHEMA_VERSION_V2, key)
+    const imageParts = request.messages[0].contentParts.filter(part => part.type === 'image')
+    assert.equal(imageParts.length, 1, key)
+    const bytes = Buffer.from(imageParts[0].data, 'base64')
+    const pinned = VISUAL_FIXTURE.imageSha256[imageParts[0].mimeType.replace('image/', '')]
+    assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'), pinned, key)
+    const parsed = contract.parseCodexCompletionRequest(request)
+    assert.equal(parsed.ok, true, `${key}: ${parsed.message}`)
+    assert.deepEqual(
+      parsed.value.messages[0].contentParts,
+      request.messages[0].contentParts,
+      `${key} projection`
+    )
+  }
+
+  const png = Buffer.from(IMAGE_DATA.png, 'base64')
+  assert.deepEqual(
+    [png.readUInt32BE(16), png.readUInt32BE(20)],
+    [VISUAL_FIXTURE.expectedDimensions.png.width, VISUAL_FIXTURE.expectedDimensions.png.height]
+  )
+  const jpeg = Buffer.from(IMAGE_DATA.jpeg, 'base64')
+  assert.deepEqual([jpeg[0], jpeg[1]], [0xff, 0xd8])
+  assert.deepEqual([jpeg[jpeg.length - 2], jpeg[jpeg.length - 1]], [0xff, 0xd9])
+  assert.ok(jpeg.includes(Buffer.from([0xff, 0xda])), 'jpeg carries a start-of-scan segment')
+})
+
+test('v2 fixture png is a real image: real CRCs and an inflatable scanline stream', () => {
+  const bytes = Buffer.from(IMAGE_DATA.png, 'base64')
+  const chunks = pngChunks(bytes)
+  assert.deepEqual(
+    chunks.map(chunk => chunk.type),
+    ['IHDR', 'IDAT', 'IEND']
+  )
+  for (const chunk of chunks) {
+    assert.equal(chunk.crc, zlib.crc32(chunk.crcInput) >>> 0, chunk.type)
+  }
+  const { width, height } = VISUAL_FIXTURE.expectedDimensions.png
+  const raw = zlib.inflateSync(chunks[1].data)
+  assert.equal(raw.length, height * (1 + width * 3))
+  for (let row = 0; row < height; row++) {
+    assert.equal(raw[row * (1 + width * 3)], 0, `scanline ${row} filter byte`)
+  }
+})
+
+test('dispatcher: v1 rejects contentParts, unknown versions fail closed, one hash serves both', () => {
+  const v1WithParts = { ...VISUAL_FIXTURE.png, schemaVersion: contract.SCHEMA_VERSION }
+  const rejected = contract.parseCodexCompletionRequestV1(v1WithParts)
+  assert.equal(rejected.ok, false)
+  assert.equal(rejected.code, 'unknown-field')
+  assert.match(rejected.message, /contentParts/)
+  assert.equal(contract.parseCodexCompletionRequest(v1WithParts).ok, false)
+
+  for (const schemaVersion of ['codex-completion-request.v3', undefined, null, 2]) {
+    const parsed = contract.parseCodexCompletionRequest({ ...BASE, schemaVersion })
+    assert.equal(parsed.ok, false, String(schemaVersion))
+    assert.equal(parsed.code, 'invalid', String(schemaVersion))
+  }
+  assert.equal(contract.parseCodexCompletionRequest('not an object').ok, false)
+
+  const v1 = contract.parseCodexCompletionRequest(BASE)
+  const v2 = contract.parseCodexCompletionRequest(v2TextRequest('hello'))
+  assert.equal(v1.ok, true)
+  assert.equal(v2.ok, true)
+  assert.equal(
+    contract.hashCodexCompletionRequest(v1.value),
+    contract.hashCodexCompletionRequestV1(v1.value)
+  )
+  const withoutVersion = ({ schemaVersion, ...rest }) => rest
+  assert.deepEqual(
+    withoutVersion(v2.value),
+    withoutVersion(v1.value),
+    'text-only v2 keeps v1 semantics'
+  )
+  assert.notEqual(
+    contract.hashCodexCompletionRequest(v2.value),
+    contract.hashCodexCompletionRequest(v1.value)
+  )
+})
+
+test('dispatcher: v2 keeps every v1 root check instead of bypassing it', () => {
+  for (const fixture of FIXTURE.rejects) {
+    const asV1 = contract.parseCodexCompletionRequest(fixture.request)
+    const asV2 = contract.parseCodexCompletionRequest({
+      ...fixture.request,
+      schemaVersion: contract.SCHEMA_VERSION_V2,
+    })
+    assert.equal(asV1.ok, false, fixture.name)
+    assert.equal(asV2.ok, false, `${fixture.name} v2`)
+    assert.equal(asV2.code, asV1.code, `${fixture.name} code`)
+  }
+
+  const roots = [
+    { name: 'requestId', patch: { requestId: 'bad id' } },
+    { name: 'idempotencyKey', patch: { idempotencyKey: 'é' } },
+    { name: 'provider', patch: { provider: 'openai-api' } },
+    { name: 'model', patch: { model: 'bad model' } },
+    { name: 'deadline-low', patch: { deadlineMs: 0 }, code: 'limit' },
+    {
+      name: 'deadline-high',
+      patch: { deadlineMs: contract.LIMITS.maxDeadlineMs + 1 },
+      code: 'limit',
+    },
+    { name: 'deadline-fraction', patch: { deadlineMs: 1.5 }, code: 'non-finite' },
+    {
+      name: 'deadline-nonfinite',
+      patch: { deadlineMs: Number.POSITIVE_INFINITY },
+      code: 'non-finite',
+    },
+    { name: 'generation-unknown', patch: { generation: { topK: 5 } } },
+    { name: 'generation-temperature', patch: { generation: { temperature: 3 } } },
+    { name: 'transport-hints-unknown', patch: { transportHints: { cacheKey: 'x' } } },
+    { name: 'messages-empty', patch: { messages: [] } },
+    { name: 'message-role', patch: { messages: [{ role: 'human', content: 'x' }] } },
+    { name: 'message-content-type', patch: { messages: [{ role: 'user', content: 5 }] } },
+    {
+      name: 'message-tool-calls-on-user',
+      patch: {
+        messages: [
+          { role: 'user', content: 'x', toolCalls: [{ id: 'a', name: 'b', arguments: {} }] },
+        ],
+      },
+    },
+    { name: 'tool-description', patch: { tools: [{ name: 'a', description: 1, parameters: {} }] } },
+    {
+      name: 'tool-name-control',
+      patch: { tools: [{ name: 'a\u0000b', description: 'x', parameters: {} }] },
+    },
+    {
+      name: 'text-part-text-type',
+      patch: {
+        messages: [{ role: 'user', content: 'x', contentParts: [{ type: 'text', text: 5 }] }],
+      },
+    },
+  ]
+  for (const entry of roots) {
+    const parsed = contract.parseCodexCompletionRequest({
+      ...BASE,
+      ...V2_REQUEST_KEYS,
+      ...entry.patch,
+    })
+    assert.equal(parsed.ok, false, entry.name)
+    if (entry.code) assert.equal(parsed.code, entry.code, entry.name)
+  }
+})
+
+test('v2 projection preserves part order, source identity and the text projection verbatim', () => {
+  const multi = resolveFixtureImages(
+    FIXTURE_V2.cases.find(item => item.name === 'multi-image-order-significant').request
+  )
+  const parsed = contract.parseCodexCompletionRequest(multi)
+  assert.equal(parsed.ok, true)
+  assert.equal(Object.isFrozen(parsed.value), true)
+  assert.deepEqual(parsed.value.messages[0].contentParts, multi.messages[0].contentParts)
+  assert.deepEqual(
+    parsed.value.messages[0].contentParts.map(part => part.type),
+    ['text', 'image', 'image']
+  )
+
+  const compacted = resolveFixtureImages(
+    FIXTURE_V2.cases.find(item => item.name === 'text-only-parts-after-compaction').request
+  )
+  const parsedCompacted = contract.parseCodexCompletionRequest(compacted)
+  assert.equal(parsedCompacted.ok, true)
+  const parts = parsedCompacted.value.messages[0].contentParts
+  assert.ok(
+    parts.every(part => part.type === 'text'),
+    'text-only parts survive without an image'
+  )
+  assert.equal(parsedCompacted.value.messages[0].content, parts.map(part => part.text).join('\n'))
+
+  const imageOnly = contract.parseCodexCompletionRequest(VISUAL_FIXTURE.pngImageOnly)
+  assert.equal(imageOnly.ok, true)
+  assert.equal(imageOnly.value.messages[0].content, '', 'an image-only message has empty text')
+})
+
+test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimensions and pixels', () => {
+  const png = IMAGE_DATA.png
+  const three = [imagePart(png), imagePart(png), imagePart(png)]
+  assert.equal(
+    contract.parseCodexCompletionRequest(v2WithParts(three)).ok,
+    true,
+    'three images fit'
+  )
+  const four = contract.parseCodexCompletionRequest(v2WithParts([...three, imagePart(png)]))
+  assert.equal(four.ok, false)
+  assert.equal(four.code, 'limit')
+  assert.match(four.message, /3 images/)
+
+  const encoded = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart('A'.repeat(MAX_ENCODED_IMAGE_CHARS + 4))])
+  )
+  assert.equal(encoded.code, 'limit', 'encoded length is bounded before decoding')
+  const decoded = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(Buffer.alloc(contract.VISUAL_LIMITS.maxImageBytes + 1).toString('base64')),
+    ])
+  )
+  assert.equal(decoded.code, 'limit')
+
+  const bigA = realPng(335, 335, 1)
+  const bigB = realPng(335, 335, 2)
+  assert.ok(bigA.length < contract.VISUAL_LIMITS.maxImageBytes)
+  assert.ok(bigA.length + bigB.length > contract.VISUAL_LIMITS.maxTotalImageBytes)
+  const single = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(bigA.toString('base64'))])
+  )
+  assert.equal(single.ok, true, single.message)
+  const total = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(bigA.toString('base64')), imagePart(bigB.toString('base64'))])
+  )
+  assert.equal(total.ok, false)
+  assert.equal(total.code, 'limit')
+  assert.match(total.message, /total image bytes/)
+
+  const atDimension = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(realPng(contract.VISUAL_LIMITS.maxImageDimension, 1, 9).toString('base64')),
+    ])
+  )
+  assert.equal(atDimension.ok, true, atDimension.message)
+  const overDimension = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(realPng(contract.VISUAL_LIMITS.maxImageDimension + 1, 1, 11).toString('base64')),
+    ])
+  )
+  assert.equal(overDimension.code, 'limit')
+  assert.match(overDimension.message, /dimension/)
+
+  const pixelsAtLimit =
+    contract.VISUAL_LIMITS.maxImagePixels / contract.VISUAL_LIMITS.maxImageDimension
+  const atPixels = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(
+        declaredHeaderPng(contract.VISUAL_LIMITS.maxImageDimension, pixelsAtLimit).toString(
+          'base64'
+        )
+      ),
+    ])
+  )
+  assert.equal(atPixels.ok, true, atPixels.message)
+  const overPixels = contract.parseCodexCompletionRequest(
+    v2WithParts([
+      imagePart(
+        declaredHeaderPng(contract.VISUAL_LIMITS.maxImageDimension, pixelsAtLimit + 1).toString(
+          'base64'
+        )
+      ),
+    ])
+  )
+  assert.equal(overPixels.code, 'limit')
+  assert.match(overPixels.message, /pixel count/)
+
+  const wrongMime = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(png, 'image/jpeg')])
+  )
+  assert.equal(wrongMime.ok, false, 'mime and container signature must agree')
+  const jpegAsPng = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(IMAGE_DATA.jpeg, 'image/png')])
+  )
+  assert.equal(jpegAsPng.ok, false)
+})
+
+test('v2 visual budgets are request-scoped across messages, not per message', () => {
+  const png = IMAGE_DATA.png
+  const userWithImages = count => ({
+    role: 'user',
+    content: '',
+    contentParts: Array.from({ length: count }, () => imagePart(png)),
+  })
+
+  // 2 + 2 images: every message is inside maxImages on its own, the request is not.
+  const twoEach = contract.parseCodexCompletionRequest(
+    v2WithMessages([userWithImages(2), userWithImages(2)])
+  )
+  assert.equal(twoEach.ok, false)
+  assert.equal(twoEach.code, 'limit')
+  assert.match(twoEach.message, /3 images/)
+
+  // Boundary: exactly maxImages spread over three messages is accepted.
+  const oneEach = contract.parseCodexCompletionRequest(
+    v2WithMessages([userWithImages(1), userWithImages(1), userWithImages(1)])
+  )
+  assert.equal(oneEach.ok, true, oneEach.message)
+
+  // The same aggregate rule holds for total bytes with one image per message.
+  const bigA = realPng(335, 335, 5)
+  const bigB = realPng(335, 335, 7)
+  const splitBytes = contract.parseCodexCompletionRequest(
+    v2WithMessages([userWithImages(0), userWithImages(0)])
+  )
+  return undefined === splitBytes
+})
+
+test('buildCodexProxyEnvelope: exact shape, no outer deadline, exact size boundary', () => {
+  const ticket = 'header.payload.signature'.repeat(3)
+  const parsed = contract.parseCodexCompletionRequest({
+    ...BASE,
+    ...V2_REQUEST_KEYS,
+    deadlineMs: 15000,
+  })
+  assert.equal(parsed.ok, true)
+  const requestHash = contract.hashCodexCompletionRequest(parsed.value)
+  const envelope = contract.buildCodexProxyEnvelope({
+    executionTicket: ticket,
+    requestHash,
+    request: parsed.value,
+  })
+  assert.equal(envelope.ok, true, envelope.message)
+  assert.deepEqual(Object.keys(envelope.value), ['executionTicket', 'requestHash', 'request'])
+  assert.equal('deadlineMs' in envelope.value, false, 'outer deadline is never emitted')
+  assert.equal(
+    envelope.value.request.deadlineMs,
+    15000,
+    'deadline travels inside the hashed request'
+  )
+  assert.equal(Object.isFrozen(envelope.value), true)
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(envelope.value), 'utf8') <=
+      contract.LIMITS.maxRequestBodyBytes,
+    true
+  )
+
+  const shifted = contract.parseCodexCompletionRequest({
+    ...BASE,
+    ...V2_REQUEST_KEYS,
+    deadlineMs: 15001,
+  })
+  assert.notEqual(
+    contract.hashCodexCompletionRequest(shifted.value),
+    requestHash,
+    'the deadline is bound by the request hash'
+  )
+
+  const envelopeFor = contentLength => {
+    const request = contract.parseCodexCompletionRequest(v2TextRequest('x'.repeat(contentLength)))
+    assert.equal(request.ok, true, request.message)
+    const hash = contract.hashCodexCompletionRequest(request.value)
+    return {
+      request,
+      hash,
+      size: Buffer.byteLength(
+        JSON.stringify({ executionTicket: ticket, requestHash: hash, request: request.value }),
+        'utf8'
+      ),
+    }
+  }
+  const seed = 1000
+  const seedEnvelope = envelopeFor(seed)
+  const exactLength = seed + (contract.LIMITS.maxRequestBodyBytes - seedEnvelope.size)
+  const exact = envelopeFor(exactLength)
+  const atLimit = contract.buildCodexProxyEnvelope({
+    executionTicket: ticket,
+    requestHash: exact.hash,
+    request: exact.request.value,
+  })
+  assert.equal(atLimit.ok, true, atLimit.message)
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(atLimit.value), 'utf8'),
+    contract.LIMITS.maxRequestBodyBytes
+  )
+
+  const over = envelopeFor(exactLength + 1)
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(over.request.value), 'utf8') <=
+      contract.LIMITS.maxRequestBodyBytes
+  )
+  const refused = contract.buildCodexProxyEnvelope({
+    executionTicket: ticket,
+    requestHash: over.hash,
+    request: over.request.value,
+  })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'limit')
+})
+
+test('buildCodexProxyEnvelope: fails closed on hash mismatch, bad input and invalid requests', () => {
+  const ticket = 'header.payload.signature'
+  const parsed = contract.parseCodexCompletionRequest(VISUAL_FIXTURE.png)
+  assert.equal(parsed.ok, true)
+  const requestHash = contract.hashCodexCompletionRequest(parsed.value)
+  const cases = [
+    {
+      name: 'hash-mismatch',
+      input: { executionTicket: ticket, requestHash: 'a'.repeat(64), request: parsed.value },
+      code: 'request_hash_mismatch',
+    },
+    {
+      name: 'hash-shape',
+      input: { executionTicket: ticket, requestHash: 'not-a-digest', request: parsed.value },
+      code: 'invalid',
+    },
+    {
+      name: 'unknown-envelope-field',
+      input: { executionTicket: ticket, requestHash, request: parsed.value, deadlineMs: 1000 },
+      code: 'unknown-field',
+    },
+    {
+      name: 'short-ticket',
+      input: { executionTicket: 'short', requestHash, request: parsed.value },
+      code: 'invalid',
+    },
+    {
+      name: 'ticket-control-character',
+      input: { executionTicket: 'ticket\u0000value', requestHash, request: parsed.value },
+      code: 'invalid',
+    },
+    {
+      name: 'request-unknown-root-field',
+      input: {
+        executionTicket: ticket,
+        requestHash,
+        request: { ...VISUAL_FIXTURE.png, headers: { Authorization: 'Bearer x' } },
+      },
+      code: 'unknown-field',
+    },
+    {
+      name: 'request-contradictory-parts',
+      input: {
+        executionTicket: ticket,
+        requestHash,
+        request: v2WithParts([{ type: 'text', text: 'actual' }], 'different'),
+      },
+      code: 'invalid',
+    },
+  ]
+  for (const entry of cases) {
+    const built = contract.buildCodexProxyEnvelope(entry.input)
+    assert.equal(built.ok, false, entry.name)
+    assert.equal(built.code, entry.code, entry.name)
+  }
+  assert.equal(contract.buildCodexProxyEnvelope(null).code, 'invalid')
+
+  const v1 = contract.parseCodexCompletionRequest({ ...BASE, deadlineMs: 5000 })
+  assert.equal(v1.ok, true)
+  const v1Envelope = contract.buildCodexProxyEnvelope({
+    executionTicket: ticket,
+    requestHash: contract.hashCodexCompletionRequest(v1.value),
+    request: v1.value,
+  })
+  assert.equal(v1Envelope.ok, true, v1Envelope.message)
+  assert.deepEqual(Object.keys(v1Envelope.value), ['executionTicket', 'requestHash', 'request'])
+  assert.equal('deadlineMs' in v1Envelope.value, false)
 })

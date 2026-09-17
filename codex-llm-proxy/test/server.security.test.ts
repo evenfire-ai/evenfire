@@ -1,10 +1,10 @@
-import { generateKeyPairSync } from 'node:crypto'
-import jwt from 'jsonwebtoken'
-import request from 'supertest'
 import { describe, expect, it } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync } from 'node:crypto'
+import request from 'supertest'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
-import { loadConfig, type CodexLlmProxyConfig } from '../src/config.js'
+import { type CodexLlmProxyConfig, loadConfig } from '../src/config.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -24,6 +24,7 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
+    imageInputModels: [],
     controlApiBaseUrl: '',
     controlApiServiceName: 'codex-llm-proxy',
     controlApiServiceToken: '',
@@ -82,7 +83,9 @@ describe('codex-llm-proxy security surface', () => {
     const metrics = await request(probeApp).get('/metrics')
     expect(metrics.status).toBe(200)
     expect(metrics.text).not.toMatch(/account|refresh|accessToken/i)
-    expect((await request(runtimeApp).get('/internal/runtime/v1/codex/completions')).status).toBe(404)
+    expect((await request(runtimeApp).get('/internal/runtime/v1/codex/completions')).status).toBe(
+      404
+    )
     expect((await request(adminApp).get('/internal/admin/v1/codex/models')).status).toBe(404)
   })
 
@@ -280,5 +283,22 @@ describe('codex-llm-proxy security surface', () => {
         CODEX_LLM_PROXY_MAX_STREAM_DURATION_MS: String(Number.MAX_SAFE_INTEGER),
       })
     ).toThrow(/bounded positive integer/)
+  })
+
+  it('keeps visual rollout disabled by default and refuses an incompatible envelope budget', () => {
+    expect(loadConfig({ CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey }).imageInputModels).toEqual([])
+    expect(() =>
+      loadConfig({
+        CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        CODEX_IMAGE_INPUT_MODELS: 'gpt-5.1',
+        CODEX_LLM_PROXY_MAX_BODY_BYTES: '1024',
+      })
+    ).toThrow(/shared envelope byte budget/)
+    expect(
+      loadConfig({
+        CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+        CODEX_IMAGE_INPUT_MODELS: ' gpt-5.1, gpt-5.3-codex ',
+      }).imageInputModels
+    ).toEqual(['gpt-5.1', 'gpt-5.3-codex'])
   })
 })

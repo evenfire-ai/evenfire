@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { SingleTurnProvider } from '../../../llm'
+import { logger } from '../../../logger'
 import { LlmError, LlmErrorCode } from '../../errors'
 import { LlmPortAdapter } from '../llmPortAdapter'
 
@@ -7,7 +8,7 @@ describe('LlmPortAdapter diagnostics', () => {
   it('does not copy raw cause messages into provider diagnostics logs', async () => {
     const cause = new Error('upstream payload included Bearer sk-live-secret')
     const originalError = new Error('Connection error.', { cause })
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
     const mockProvider: SingleTurnProvider = {
       completeSingleTurn: vi.fn().mockRejectedValue(originalError),
       completeSingleTurnWithTools: vi.fn(),
@@ -22,7 +23,7 @@ describe('LlmPortAdapter diagnostics', () => {
 
     await expect(adapter.complete({ messages: [] })).rejects.toBeInstanceOf(LlmError)
 
-    const logText = logSpy.mock.calls.flat().join('\n')
+    const logText = JSON.stringify(logSpy.mock.calls)
     expect(logText).not.toContain('sk-live-secret')
     expect(logText).not.toContain('upstream payload included')
     logSpy.mockRestore()
@@ -40,7 +41,7 @@ describe('LlmPortAdapter diagnostics', () => {
       name: 'APIConnectionError',
       code: secretishCode,
     })
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const logSpy = vi.spyOn(logger, 'info').mockImplementation(() => undefined)
     const mockProvider: SingleTurnProvider = {
       completeSingleTurn: vi.fn().mockRejectedValue(originalError),
       completeSingleTurnWithTools: vi.fn(),
@@ -55,7 +56,7 @@ describe('LlmPortAdapter diagnostics', () => {
 
     await expect(adapter.complete({ messages: [] })).rejects.toBeInstanceOf(LlmError)
 
-    const logText = logSpy.mock.calls.flat().join('\n')
+    const logText = JSON.stringify(logSpy.mock.calls)
     expect(logText).not.toContain(secretishCode)
     expect(logText).not.toContain(secretishCauseCode)
     expect(logText).toContain(`${secretPrefix}-[redacted]`)

@@ -7,7 +7,10 @@
 
 const { createHash } = require('node:crypto')
 
+const { VISUAL_LIMITS, inspectVisualImage } = require('./visualPayload.cjs')
+
 const SCHEMA_VERSION = 'codex-completion-request.v1'
+const SCHEMA_VERSION_V2 = 'codex-completion-request.v2'
 const RECEIPT_SCHEMA_VERSION = 'codex-attempt-receipt.v1'
 const PROVIDER_ID = 'codex-subscription'
 const TICKET_TYP = 'codex-execution-ticket'
@@ -45,6 +48,26 @@ const TOOL_CALL_KEYS = new Set(['id', 'name', 'arguments'])
 const TOOL_KEYS = new Set(['name', 'description', 'parameters'])
 const GENERATION_KEYS = new Set(['temperature', 'maxOutputTokens', 'toolChoice'])
 const HINT_KEYS = new Set(['promptCacheKey'])
+
+/**
+ * V2 (codex-completion-request.v2) adds typed visual parts to user messages.
+ * The root field set is deliberately the same closed set as V1: V2 must not
+ * become a looser schema at the root.
+ */
+const MESSAGE_KEYS_V2 = new Set([
+  'role',
+  'content',
+  'contentParts',
+  'name',
+  'toolCallId',
+  'toolCalls',
+])
+const CONTENT_PART_TEXT_KEYS = new Set(['type', 'text'])
+const CONTENT_PART_IMAGE_KEYS = new Set(['type', 'mimeType', 'data', 'source'])
+const IMAGE_SOURCE_ATTACHMENT_KEYS = new Set(['kind', 'attachmentId', 'messageId'])
+const IMAGE_SOURCE_TOOL_KEYS = new Set(['kind', 'attachmentId', 'toolCallId'])
+const ENVELOPE_KEYS = new Set(['executionTicket', 'requestHash', 'request'])
+
 const CLAIMS_KEYS = new Set([
   'jti',
   'typ',
@@ -65,13 +88,14 @@ const CLAIMS_KEYS = new Set([
   'connectionRevision',
   'connectionId',
 ])
-const AUTHORIZE_KEYS = new Set([
+const AUTHORIZE_KEYS = new Set(['providerAttemptId', 'requestHash', 'executionTicket', 'expiresAt'])
+const RECEIPT_KEYS = new Set([
+  'schemaVersion',
   'providerAttemptId',
   'requestHash',
-  'executionTicket',
-  'expiresAt',
+  'outcome',
+  'usage',
 ])
-const RECEIPT_KEYS = new Set(['schemaVersion', 'providerAttemptId', 'requestHash', 'outcome', 'usage'])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
 function fail(code, message) {
@@ -165,7 +189,14 @@ function assertFiniteTree(value, label) {
   return null
 }
 
-function parseMessages(raw) {
+/**
+ * One message parser for every request version. `messageKeys` is the closed
+ * field set for that version (V2 adds `contentParts`); a version without that
+ * key rejects the field as unknown before this function can project it.
+ * `visualBudget` is a single request-scoped accumulator: image count and total
+ * image bytes bound the entire request, not one message.
+ */
+function parseMessages(raw, messageKeys, visualBudget) {
   if (!Array.isArray(raw) || raw.length === 0) {
     return fail('invalid', 'messages must be a non-empty array')
   }
@@ -175,55 +206,65 @@ function parseMessages(raw) {
   const messages = []
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i]
-    if (!isPlainObject(item)) return fail('invalid', `messages[${i}] must be an object`)
-    const extra = rejectUnknown(item, MESSAGE_KEYS, `messages[${i}]`)
+    const label = `messages[${i}]`
+    if (!isPlainObject(item)) return fail('invalid', `${label} must be an object`)
+    const extra = rejectUnknown(item, messageKeys, label)
     if (extra) return extra
-    if (!MESSAGE_ROLES.has(item.role)) return fail('invalid', `messages[${i}].role is not allowed`)
-    if (typeof item.content !== 'string') return fail('invalid', `messages[${i}].content must be a string`)
+    if (!MESSAGE_ROLES.has(item.role)) return fail('invalid', `${label}.role is not allowed`)
+    if (typeof item.content !== 'string')
+      return fail('invalid', `${label}.content must be a string`)
     const message = { role: item.role, content: item.content }
     if (item.name !== undefined) {
-      if (!isToolName(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
+      if (!isToolName(item.name)) return fail('invalid', `${label}.name is invalid`)
       message.name = item.name
     }
     if (item.toolCallId !== undefined) {
-      if (!isBoundedId(item.toolCallId)) return fail('invalid', `messages[${i}].toolCallId is invalid`)
+      if (!isBoundedId(item.toolCallId)) return fail('invalid', `${label}.toolCallId is invalid`)
       message.toolCallId = item.toolCallId
     }
     if (item.toolCalls !== undefined) {
       if (item.role !== 'assistant') {
-        return fail('invalid', `messages[${i}].toolCalls is only allowed on assistant`)
+        return fail('invalid', `${label}.toolCalls is only allowed on assistant`)
       }
       if (!Array.isArray(item.toolCalls) || item.toolCalls.length === 0) {
-        return fail('invalid', `messages[${i}].toolCalls must be a non-empty array`)
+        return fail('invalid', `${label}.toolCalls must be a non-empty array`)
       }
       if (item.toolCalls.length > LIMITS.maxToolCalls) {
-        return fail('limit', `messages[${i}].toolCalls exceed ${LIMITS.maxToolCalls}`)
+        return fail('limit', `${label}.toolCalls exceed ${LIMITS.maxToolCalls}`)
       }
       const toolCalls = []
       for (let j = 0; j < item.toolCalls.length; j++) {
         const call = item.toolCalls[j]
         if (!isPlainObject(call)) {
-          return fail('invalid', `messages[${i}].toolCalls[${j}] must be an object`)
+          return fail('invalid', `${label}.toolCalls[${j}] must be an object`)
         }
-        const callExtra = rejectUnknown(call, TOOL_CALL_KEYS, `messages[${i}].toolCalls[${j}]`)
+        const callExtra = rejectUnknown(call, TOOL_CALL_KEYS, `${label}.toolCalls[${j}]`)
         if (callExtra) return callExtra
         if (!isBoundedId(call.id)) {
-          return fail('invalid', `messages[${i}].toolCalls[${j}].id is invalid`)
+          return fail('invalid', `${label}.toolCalls[${j}].id is invalid`)
         }
         if (!isToolName(call.name)) {
-          return fail('invalid', `messages[${i}].toolCalls[${j}].name is invalid`)
+          return fail('invalid', `${label}.toolCalls[${j}].name is invalid`)
         }
         if (!isPlainObject(call.arguments)) {
-          return fail('invalid', `messages[${i}].toolCalls[${j}].arguments must be an object`)
+          return fail('invalid', `${label}.toolCalls[${j}].arguments must be an object`)
         }
-        const finiteArgs = assertFiniteTree(
-          call.arguments,
-          `messages[${i}].toolCalls[${j}].arguments`
-        )
+        const finiteArgs = assertFiniteTree(call.arguments, `${label}.toolCalls[${j}].arguments`)
         if (finiteArgs) return finiteArgs
         toolCalls.push({ id: call.id, name: call.name, arguments: call.arguments })
       }
       message.toolCalls = toolCalls
+    }
+    if (item.contentParts !== undefined) {
+      if (item.role !== 'user') {
+        return fail('invalid', `${label}.contentParts is only allowed on user`)
+      }
+      const parts = parseContentParts(item.contentParts, `${label}.contentParts`, visualBudget)
+      if (!parts.ok) return parts
+      if (parts.value.text !== item.content) {
+        return fail('invalid', `${label}.content must equal the text parts joined by '\\n'`)
+      }
+      message.contentParts = parts.value.parts
     }
     messages.push(message)
   }
@@ -309,7 +350,13 @@ function parseTransportHints(raw) {
   return ok({ promptCacheKey: raw.promptCacheKey })
 }
 
-function parseCodexCompletionRequestV1(input) {
+/**
+ * One root parser for every request version: the same closed root field set,
+ * the same ordered checks and the same projection. Only the schema version
+ * literal and the message field set differ, so a new version cannot become a
+ * looser root by accident.
+ */
+function parseCodexCompletionRequestRoot(input, schemaVersion, messageKeys) {
   if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
   const encoded = Buffer.byteLength(JSON.stringify(input), 'utf8')
   if (encoded > LIMITS.maxRequestBodyBytes) {
@@ -317,15 +364,15 @@ function parseCodexCompletionRequestV1(input) {
   }
   const extra = rejectUnknown(input, ROOT_KEYS, 'request')
   if (extra) return extra
-  if (input.schemaVersion !== SCHEMA_VERSION) {
-    return fail('invalid', 'schemaVersion is not codex-completion-request.v1')
+  if (input.schemaVersion !== schemaVersion) {
+    return fail('invalid', `schemaVersion is not ${schemaVersion}`)
   }
   if (!isBoundedId(input.requestId)) return fail('invalid', 'requestId is invalid')
   if (!isBoundedId(input.idempotencyKey)) return fail('invalid', 'idempotencyKey is invalid')
   if (input.provider !== PROVIDER_ID) return fail('invalid', 'provider must be codex-subscription')
   if (!isBoundedId(input.model)) return fail('invalid', 'model is invalid')
 
-  const messages = parseMessages(input.messages)
+  const messages = parseMessages(input.messages, messageKeys, { images: 0, totalBytes: 0 })
   if (!messages.ok) return messages
   const tools = parseTools(input.tools)
   if (!tools.ok) return tools
@@ -350,7 +397,7 @@ function parseCodexCompletionRequestV1(input) {
   }
 
   const projected = {
-    schemaVersion: SCHEMA_VERSION,
+    schemaVersion,
     requestId: input.requestId,
     idempotencyKey: input.idempotencyKey,
     provider: PROVIDER_ID,
@@ -364,8 +411,177 @@ function parseCodexCompletionRequestV1(input) {
   return ok(Object.freeze(projected))
 }
 
+function parseCodexCompletionRequestV1(input) {
+  return parseCodexCompletionRequestRoot(input, SCHEMA_VERSION, MESSAGE_KEYS)
+}
+
 function hashCodexCompletionRequestV1(request) {
   return createHash('sha256').update(stableStringify(request)).digest('hex')
+}
+
+/**
+ * Minimal image provenance for V2. Closed union: an attachment that arrived
+ * with a user message, or one produced by a tool call. It is hashed with the
+ * rest of the part and never becomes model text.
+ *
+ * Identifier shape reuses the existing bounded ID pattern. Evidence from the
+ * current producers: attachment ids are `att_<epoch>_<rand>`
+ * (mcp-host/src/core/tools/desktop/screenshotUtil.ts), channel message ids are
+ * values such as `telegram:tg-chat-1:42` or `1700000001.000001`
+ * (mcp-host/src/workflow/providerWorkflowCallerContextClient.test.ts), and
+ * tool-call ids come from the assistant tool call. All fit
+ * `[A-Za-z0-9._:/-]{1,128}`; no producer needs a different alphabet.
+ */
+function parseImageSource(raw, label) {
+  if (!isPlainObject(raw)) return fail('invalid', `${label} must be an object`)
+  if (raw.kind !== 'attachment' && raw.kind !== 'tool') {
+    return fail('invalid', `${label}.kind is not allowed`)
+  }
+  const fromAttachment = raw.kind === 'attachment'
+  const extra = rejectUnknown(
+    raw,
+    fromAttachment ? IMAGE_SOURCE_ATTACHMENT_KEYS : IMAGE_SOURCE_TOOL_KEYS,
+    label
+  )
+  if (extra) return extra
+  if (!isBoundedId(raw.attachmentId)) return fail('invalid', `${label}.attachmentId is invalid`)
+  const ownerKey = fromAttachment ? 'messageId' : 'toolCallId'
+  if (!isBoundedId(raw[ownerKey])) return fail('invalid', `${label}.${ownerKey} is invalid`)
+  if (fromAttachment) {
+    return ok({ kind: 'attachment', attachmentId: raw.attachmentId, messageId: raw.messageId })
+  }
+  return ok({ kind: 'tool', attachmentId: raw.attachmentId, toolCallId: raw.toolCallId })
+}
+
+/**
+ * Ordered content parts. Order is significant and preserved verbatim; nothing
+ * is merged, reordered or dropped. Text parts must agree with the message
+ * `content` string, so the textual projection and the part projection cannot
+ * contradict each other. Parts are optional and may be text-only (a compacted
+ * message that no longer carries an image is valid); images are bounded by
+ * count, per-image bytes, total bytes, dimension and pixel budgets.
+ */
+function parseContentParts(raw, label, visualBudget) {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return fail('invalid', `${label} must be a non-empty array`)
+  }
+  const parts = []
+  const textBits = []
+  for (let i = 0; i < raw.length; i++) {
+    const part = raw[i]
+    const partLabel = `${label}[${i}]`
+    if (!isPlainObject(part)) return fail('invalid', `${partLabel} must be an object`)
+    if (part.type === 'text') {
+      const extra = rejectUnknown(part, CONTENT_PART_TEXT_KEYS, partLabel)
+      if (extra) return extra
+      if (typeof part.text !== 'string') {
+        return fail('invalid', `${partLabel}.text must be a string`)
+      }
+      parts.push({ type: 'text', text: part.text })
+      textBits.push(part.text)
+      continue
+    }
+    if (part.type === 'image') {
+      const extra = rejectUnknown(part, CONTENT_PART_IMAGE_KEYS, partLabel)
+      if (extra) return extra
+      if (part.mimeType !== 'image/jpeg' && part.mimeType !== 'image/png') {
+        return fail('invalid', `${partLabel}.mimeType is not allowed`)
+      }
+      const source = parseImageSource(part.source, `${partLabel}.source`)
+      if (!source.ok) return source
+      const image = inspectVisualImage({ mimeType: part.mimeType, data: part.data })
+      if (!image.ok) return fail(image.code, `${partLabel}: ${image.message}`)
+      // Request-scoped budgets: history can carry more messages than one, so a
+      // per-message counter would let a request exceed the declared limits.
+      visualBudget.images += 1
+      if (visualBudget.images > VISUAL_LIMITS.maxImages) {
+        return fail('limit', `request exceeds ${VISUAL_LIMITS.maxImages} images`)
+      }
+      visualBudget.totalBytes += image.value.bytes
+      if (visualBudget.totalBytes > VISUAL_LIMITS.maxTotalImageBytes) {
+        return fail(
+          'limit',
+          `request exceeds ${VISUAL_LIMITS.maxTotalImageBytes} total image bytes`
+        )
+      }
+      parts.push({
+        type: 'image',
+        mimeType: part.mimeType,
+        data: part.data,
+        source: source.value,
+      })
+      continue
+    }
+    return fail('invalid', `${partLabel}.type is not allowed`)
+  }
+  return ok({ parts, text: textBits.join('\n') })
+}
+
+/**
+ * V2 root: the shared root parser with the V2 schema version and the message
+ * field set that additionally allows `contentParts`.
+ */
+function parseCodexCompletionRequestV2(input) {
+  return parseCodexCompletionRequestRoot(input, SCHEMA_VERSION_V2, MESSAGE_KEYS_V2)
+}
+
+/**
+ * Single dispatcher for every supported version. It only selects the version
+ * and defers all validation to that version's parser, so an unknown or missing
+ * schemaVersion fails closed instead of falling through to a loose path.
+ */
+function parseCodexCompletionRequest(input) {
+  if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
+  if (input.schemaVersion === SCHEMA_VERSION) return parseCodexCompletionRequestV1(input)
+  if (input.schemaVersion === SCHEMA_VERSION_V2) return parseCodexCompletionRequestV2(input)
+  return fail(
+    'invalid',
+    'schemaVersion must be codex-completion-request.v1 or codex-completion-request.v2'
+  )
+}
+
+function hashCodexCompletionRequest(request) {
+  return createHash('sha256').update(stableStringify(request)).digest('hex')
+}
+
+/**
+ * Exact proxy request envelope shared by the authorizer and the proxy.
+ *
+ * The outer `deadlineMs` is never emitted: a V2 request carries its deadline in
+ * `request.deadlineMs`, already bound by the request hash, and a caller must
+ * not be able to add an independent deadline after the envelope was measured.
+ *
+ * The returned envelope is re-parsed and re-hashed here, so it cannot carry a
+ * request the contract rejects or a hash that disagrees with the request it
+ * carries. Its exact UTF-8 byte length (JSON.stringify minus whitespace, the
+ * same serialization the transport sends) must fit `LIMITS.maxRequestBodyBytes`
+ * — the default the proxy enforces through CODEX_LLM_PROXY_MAX_BODY_BYTES. A
+ * deployment that lowers that proxy limit below the contract limit is not
+ * covered by this measurement.
+ */
+function buildCodexProxyEnvelope(input) {
+  if (!isPlainObject(input)) return fail('invalid', 'proxy envelope must be an object')
+  const extra = rejectUnknown(input, ENVELOPE_KEYS, 'proxy envelope')
+  if (extra) return extra
+  const ticket = input.executionTicket
+  if (typeof ticket !== 'string' || ticket.length < 8 || /[\p{Cc}\p{Cs}]/u.test(ticket)) {
+    return fail('invalid', 'executionTicket is invalid')
+  }
+  if (typeof input.requestHash !== 'string' || !SHA256_HEX.test(input.requestHash)) {
+    return fail('invalid', 'requestHash must be a SHA-256 hex digest')
+  }
+  const parsed = parseCodexCompletionRequest(input.request)
+  if (!parsed.ok) return parsed
+  const requestHash = hashCodexCompletionRequest(parsed.value)
+  if (requestHash !== input.requestHash) {
+    return fail('request_hash_mismatch', 'requestHash does not match the request')
+  }
+  const envelope = { executionTicket: ticket, requestHash, request: parsed.value }
+  const encoded = Buffer.byteLength(JSON.stringify(envelope), 'utf8')
+  if (encoded > LIMITS.maxRequestBodyBytes) {
+    return fail('limit', 'proxy envelope exceeds maxRequestBodyBytes')
+  }
+  return ok(Object.freeze(envelope))
 }
 
 /**
@@ -401,7 +617,12 @@ function requireHex64(obj, key) {
 
 function requireInt(obj, key, min) {
   const value = obj[key]
-  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < min) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < min
+  ) {
     return fail('non-finite', `${key} must be a finite integer`)
   }
   return null
@@ -411,7 +632,15 @@ function parseCodexExecutionTicketClaims(input) {
   if (!isPlainObject(input)) return fail('invalid', 'ticket claims must be an object')
   const extra = rejectUnknown(input, CLAIMS_KEYS, 'ticket claims')
   if (extra) return extra
-  for (const key of ['jti', 'sub', 'hostRef', 'invocationId', 'providerAttemptId', 'budgetReservationId', 'model']) {
+  for (const key of [
+    'jti',
+    'sub',
+    'hostRef',
+    'invocationId',
+    'providerAttemptId',
+    'budgetReservationId',
+    'model',
+  ]) {
     const bad = requireId(input, key)
     if (bad) return bad
   }
@@ -517,13 +746,19 @@ function parseCodexAttemptReceiptV1(input) {
 
 module.exports = {
   SCHEMA_VERSION,
+  SCHEMA_VERSION_V2,
   RECEIPT_SCHEMA_VERSION,
   PROVIDER_ID,
   TICKET_TYP,
   LIMITS,
+  VISUAL_LIMITS,
   stableStringify,
   parseCodexCompletionRequestV1,
+  parseCodexCompletionRequestV2,
+  parseCodexCompletionRequest,
   hashCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  buildCodexProxyEnvelope,
   computeCodexPolicyHash,
   parseCodexExecutionTicketClaims,
   parseAuthorizeAttemptResponse,

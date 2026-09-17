@@ -257,7 +257,13 @@ run_group "mcp-host" "mcp-host" \
   "src/core/orchestration/__tests__/deferrableToolController.test.ts" \
   "src/core/orchestration/__tests__/toolCallBridge.test.ts" \
   "src/core/orchestration/__tests__/toolUseLoop.test.ts" \
+  "src/core/orchestration/__tests__/toolUseLoopMessages.test.ts" \
+  "src/core/extensions/__tests__/prePrune.test.ts" \
+  "src/core/adapters/__tests__/llmImageCompatibility.test.ts" \
+  "src/core/adapters/__tests__/llmPortAdapterDiagnostics.test.ts" \
   "src/agent/__tests__/taskExecutor.test.ts" \
+  "src/llm/__tests__/openai.singleTurn.test.ts" \
+  "src/llm/__tests__/claude.singleTurn.test.ts" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \

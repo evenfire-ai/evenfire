@@ -2,6 +2,78 @@
 
 Evidence lanes for `codex-subscription`. One lane does not stand in for another.
 
+## Image input validation (#650)
+
+The shared package tests V1 golden-hash stability and V2 parsing, source identity,
+ordered text/image content and local image/envelope budgets. Its
+`fixtures/visual-requests.json` contains real 2x2 PNG/JPEG samples;
+`fixtures/canonical-request-hashes.v2.json` freezes the new projection separately.
+The image parser validates container structure and dimensions, not decoded pixels.
+
+Provider tests must cover both completion methods, direct/tool origins, prompt
+context, redacted text parts, repeated bytes from distinct tool calls and the
+default-disabled model gate. Proxy conformance inspects the final upstream body,
+asserts provenance does not become model input, and retains tools/cancel/SSE
+checks. Authorizer tests require a pre-commit exact-envelope check; its PostgreSQL
+case must prove rollback against a real transaction. A mocked transaction result
+does not satisfy that PostgreSQL gate.
+
+Set `CODEX_IMAGE_INPUT_MODELS` consistently on the owned Host/proxy only after
+consumer rollout and a separately authorized neutral-image interoperability check.
+The default empty list rejects visual input clearly. No test fixture or passing
+conformance suite certifies that the real endpoint or selected model sees images.
+
+Keep browser/Electron evidence separate: visible login and Host selection, upload
+through Add context / Upload Files, preview, send, correlated task completion and
+visible answer. Assert a business signal tied to the submitted image and current
+task; an answer saying it saw an image is insufficient. Do not use SDK text-only
+journeys or GFS file upload as substitutes for composer image input. Run the E2E
+static auditor on changed browser specs and record external prerequisites rather
+than silently skipping them.
+
+### Opt-in Desktop image lane
+
+`desktop-app/test/e2e-playwright/codex-image-input.spec.ts` covers direct PNG/JPEG
+uploads through the visible composer. It creates a fresh 64-bit hexadecimal
+challenge rendered only into image pixels. The filename and prompt do not carry
+the answer. An enabled run requires that answer (hexadecimal case is ignored), a non-error response, no
+tool steps substituting OCR/loading for direct image input, and no fallback badge.
+The selector's stable data attributes verify the actual selected Host, provider
+and model. The disabled mode instead requires the explicit capability error.
+
+This is a real upstream lane, not a mock. Before running it, obtain separate
+authorization for runtime, upstream access and the existing login fixture's
+stored-session reset. Provision the owned Host and consumers first. Set:
+
+- `E2E_CODEX_IMAGE_INPUT=1` and `CODEX_REAL_UPSTREAM_CONFIRM=1` only for that
+  authorized run; `E2E_CODEX_ALLOW_SESSION_RESET=1` acknowledges the fixture's
+  session reset.
+- `E2E_HOST_REF` to the actual owned Host and `E2E_CODEX_HOST_LABEL` to its
+  exact visible label in the Agents list; there is no shared-host default.
+- `E2E_CODEX_IMAGE_MODEL` and `E2E_CODEX_IMAGE_MODEL_LABEL` to its model ID and
+  visible picker label.
+- `E2E_CODEX_IMAGE_MODE=enabled` or `disabled`, matching the provisioned
+  capability gate. Run both modes against their appropriate configuration;
+  the test does not change deployments or grants.
+
+Install Host dependencies as well as Desktop dependencies: the neutral challenge
+uses the existing Host canvas dependency. Node 24 and `verify:electron` remain
+mandatory. After loading the approved branch-owned service URLs and prerequisites,
+the command from `desktop-app` is:
+
+```bash
+node node_modules/@playwright/test/cli.js test \
+  --config test/e2e-playwright/playwright.codex-image.config.ts --project codex-image-input
+```
+
+The normal Desktop project excludes this spec. Its dedicated config rejects
+missing authority, Host/model identity or mode before global setup; it cannot
+return a successful all-skipped run. The model ID must be the canonical ID
+returned by the runtime, not an alias. Static audit/typecheck and local challenge-image
+decoding do not count as browser or real-upstream execution. Typed tool-result
+images remain a separate integration/runtime journey; this direct-input test
+does not certify GFS producers or retained image history.
+
 ## Lanes
 
 - **T0** — unit, schema, hash, contracts, typecheck, lint, build. The

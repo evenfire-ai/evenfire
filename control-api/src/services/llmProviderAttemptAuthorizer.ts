@@ -1,8 +1,9 @@
 import {
   LIMITS,
+  buildCodexProxyEnvelope,
   computeCodexPolicyHash,
-  hashCodexCompletionRequestV1,
-  parseCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { config } from '../config.js'
 import { type DbClient, pool, withTransaction } from '../db.js'
@@ -63,6 +64,7 @@ export type LlmProviderAttemptAuthorizeErrorCode =
   | 'host_binding_mismatch'
   | 'unknown_field'
   | 'invalid_request'
+  | 'payload_too_large'
   | 'stale_generation'
   | 'idempotency_conflict'
   | 'provider_unavailable'
@@ -204,7 +206,7 @@ export async function authorizeLlmProviderAttempt(
   const caller = resolveCaller(claims)
   assertClaimBinding(body, claims)
 
-  const parsed = parseCodexCompletionRequestV1(body.request)
+  const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
   }
@@ -246,7 +248,7 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const requestHash = hashCodexCompletionRequestV1(request)
+  const requestHash = hashCodexCompletionRequest(request)
   if (typeof body.requestHash === 'string' && body.requestHash !== requestHash) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
@@ -512,6 +514,22 @@ export async function authorizeLlmProviderAttempt(
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
       })
+      if (request.schemaVersion === 'codex-completion-request.v2') {
+        // Measure the exact proxy envelope while the attempt, ticket and any
+        // new reservation are still transactional. Pre-redeem failures cannot
+        // use the ordinary receipt-based finalizer.
+        const envelope = buildCodexProxyEnvelope({
+          executionTicket: issued.executionTicket,
+          requestHash,
+          request,
+        })
+        if (!envelope.ok) {
+          throw new LlmProviderAttemptAuthorizeError(
+            envelope.code === 'limit' ? 'payload_too_large' : 'invalid_request',
+            envelope.message
+          )
+        }
+      }
       log.info(
         {
           event: 'codex_attempt_authorized',

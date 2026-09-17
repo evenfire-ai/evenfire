@@ -1,5 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { readFileSync } from 'node:fs'
+import { LIMITS, hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
+import {
+  CODEX_CATALOG_ORIGIN,
+  CODEX_COMPLETIONS_ORIGIN,
+} from '../../codex-llm-proxy/src/originPolicy'
+import { CodexLlmProxyClient } from '../../mcp-host/src/llm/codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../mcp-host/src/llm/codexSubscription'
+import { ProviderAttemptAuthorizer } from '../../mcp-host/src/llm/providerAttemptAuthorizer'
 import {
   LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
@@ -7,6 +16,9 @@ import {
   computeCodexPolicyHash,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+// Non-operational sentinel consumed only by the injected external model fixture.
+const FIXTURE_ACCESS_VALUE = 'fixture-only'
 
 const lockPluginWorkloadSdkRecipe = vi.hoisted(() => vi.fn())
 const getPluginWorkloadSdkProviderAttemptForUpdate = vi.hoisted(() => vi.fn())
@@ -140,6 +152,191 @@ function deps(
 }
 
 describe('authorizeLlmProviderAttempt', () => {
+  // In-process integration, not browser E2E or live OAuth evidence. The Host,
+  // both clients, authorizer, parsers/hash and proxy projection are real.
+  // DB/grant custody and the external model are injected seams.
+  it.each([
+    ['png', 'attachment', false],
+    ['jpeg', 'attachment', true],
+    ['png', 'tool', true],
+    ['jpeg', 'tool', false],
+  ] as const)(
+    'carries %s from %s (tools=%s) through Host authorization and proxy projection',
+    async (format, origin, withTools) => {
+      const fixtures = JSON.parse(
+        readFileSync(
+          new URL(
+            '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      )
+      let authorized: Awaited<ReturnType<typeof authorizeLlmProviderAttempt>> | undefined
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: 'http://test-control/authorize',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          authorized = await authorizeLlmProviderAttempt(
+            claims(),
+            JSON.parse(String(init?.body)),
+            deps()
+          )
+          return Response.json(authorized)
+        },
+      })
+      let projectedBody: Record<string, unknown> | undefined
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: authorized!.providerAttemptId,
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const proxy = new CodexLlmProxyClient({
+        runtimeUrl: 'http://test-proxy/completions',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          expect(authorized).toBeDefined()
+          const envelope = JSON.parse(String(init?.body))
+          const frames: unknown[] = []
+          const result = await streamCodexCompletion({
+            ...envelope,
+            imageInputEnabled: true,
+            ticket: {
+              jti: 'fixture-ticket',
+              hostRef: 'research-host',
+              model: REQUEST.model,
+              requestHash: authorized!.requestHash,
+              providerAttemptId: authorized!.providerAttemptId,
+            },
+            redeem: async () => ({
+              accessToken: FIXTURE_ACCESS_VALUE,
+              chatgptAccountId: 'fixture-account',
+              attemptReceipt: 'a'.repeat(64),
+              expiryClass: 'short_lived',
+              transport: {
+                protocolVersion: 'codex-subscription-transport.v1',
+                completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+                catalogOrigin: CODEX_CATALOG_ORIGIN,
+                operation: 'completion_stream',
+                servedModel: REQUEST.model,
+                maxStreamDurationMs: 1000,
+              },
+            }),
+            finalize,
+            lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+            fetchFn: async (_upstream, requestInit) => {
+              projectedBody = JSON.parse(String(requestInit?.body))
+              const parts = (
+                projectedBody!.input as Array<{ role?: string; content: Array<{ type: string }> }>
+              ).find(item => item.role === 'user')!.content
+              expect(parts.some(part => part.type === 'input_image')).toBe(true)
+              return new Response(
+                'data: {"type":"response.output_text.delta","delta":"image received"}\n\ndata: {"type":"response.completed"}\n\n'
+              )
+            },
+            onFrame: frame => frames.push(frame),
+          })
+          frames.push({ type: 'done', ...result })
+          return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''))
+        },
+      })
+      const provider = new CodexSubscriptionProvider(REQUEST.model, {
+        authorizer,
+        proxy,
+        imageInputEnabled: true,
+        attemptContext: () => ({
+          policyRevision: 4,
+          policyHash: body().policyHash,
+          hostRef: 'research-host',
+        }),
+      })
+      const image = fixtures[format].messages[0].contentParts.find(
+        (part: { type: string }) => part.type === 'image'
+      )
+      let messages = fixtures[format].messages
+      if (origin === 'tool') {
+        image.source = { kind: 'tool', attachmentId: 'fixture-image', toolCallId: 'fixture-call' }
+        messages = [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'fixture-call', name: 'screenshot', arguments: {} }],
+          },
+          {
+            role: 'tool',
+            content: 'Screenshot ready',
+            tool_call_id: 'fixture-call',
+            name: 'screenshot',
+          },
+          ...messages,
+        ]
+      }
+      const result = withTools
+        ? await provider.completeSingleTurnWithTools(messages, [
+            {
+              name: 'screenshot',
+              description: 'Take a screenshot',
+              parameters: { type: 'object', properties: {} },
+            },
+          ])
+        : await provider.completeSingleTurn(messages)
+      expect(
+        (projectedBody!.input as Array<{ role?: string; content: unknown[] }>).find(
+          item => item.role === 'user'
+        )!.content
+      ).toContainEqual({
+        type: 'input_image',
+        image_url: `data:${image.mimeType};base64,${image.data}`,
+      })
+      if (origin === 'tool') {
+        expect((projectedBody!.input as Array<{ type?: string }>).map(item => item.type)).toEqual([
+          'function_call',
+          'function_call_output',
+          undefined,
+        ])
+      }
+      expect(result.content).toBe('image received')
+      expect(finalize).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('checks the V2 proxy envelope inside the transaction, after signing and before commit', async () => {
+    const transactionEvents: string[] = []
+    const request = {
+      ...REQUEST,
+      schemaVersion: 'codex-completion-request.v2',
+      messages: [{ role: 'user', content: '' }],
+    }
+    const payload = body({ request })
+    request.messages[0].content = 'x'.repeat(
+      LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(payload)) - 16
+    )
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(LIMITS.maxRequestBodyBytes)
+    const current = deps({
+      withTransaction: async work => {
+        transactionEvents.push('begin')
+        try {
+          const result = await work({ query: vi.fn() } as never)
+          transactionEvents.push('commit')
+          return result
+        } catch (error) {
+          transactionEvents.push('rollback')
+          throw error
+        }
+      },
+      // A bounded synthetic signed envelope contribution; no live account material.
+      issueTicket: vi.fn().mockResolvedValue({
+        executionTicket: 't'.repeat(4096),
+        expiresAt: new Date('2026-09-16T23:00:00Z'),
+      }),
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
+      code: 'payload_too_large',
+    })
+    expect(current.issueTicket).toHaveBeenCalledOnce()
+    expect(transactionEvents).toEqual(['begin', 'rollback'])
+  })
+
   let current: LlmProviderAttemptAuthorizerDeps
 
   beforeEach(() => {

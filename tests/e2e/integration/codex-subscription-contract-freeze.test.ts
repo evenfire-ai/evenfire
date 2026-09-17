@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { existsSync, readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -85,6 +86,25 @@ function collectSensitiveLeaves(value: unknown, path: string, hits: string[]): v
 }
 
 describe('codex-subscription contract freeze', () => {
+  it('freezes V2 local budgets without asserting upstream image support', () => {
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'))
+    const localContract = createRequire(import.meta.url)(
+      join(repoRoot, 'packages/llm-provider-attempt-contract/index.cjs')
+    )
+    expect(fixture.protocolVersion).toBe('codex-subscription-transport.v1')
+    expect(fixture.requestSchemas).toEqual([
+      localContract.SCHEMA_VERSION,
+      localContract.SCHEMA_VERSION_V2,
+    ])
+    expect(fixture.visualInput.limits).toEqual(localContract.VISUAL_LIMITS)
+    expect(fixture.visualInput.enabledByDefault).toBe(false)
+    expect(fixture.visualInput.upstreamVerified).toBe(false)
+    expect(fixture.visualInput.activation).toBe('CODEX_IMAGE_INPUT_MODELS')
+    const architecture = readFileSync(architectureDocPath, 'utf8')
+    expect(architecture).toContain('codex-completion-request.v2')
+    expect(architecture).toContain('CODEX_IMAGE_INPUT_MODELS')
+  })
+
   it('requires the sanitized fixture and both freeze documents', () => {
     expect(existsSync(fixturePath), `missing fixture: ${fixturePath}`).toBe(true)
     expect(

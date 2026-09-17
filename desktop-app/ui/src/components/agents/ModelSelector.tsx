@@ -132,7 +132,13 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   // Render a static, non-interactive chip with an explanatory tooltip.
   if (data.degraded) {
     return (
-      <div className={rootClassName}>
+      <div
+        className={rootClassName}
+        data-testid={`model-selector-${placement}`}
+        data-host-ref={agentRef}
+        data-provider={data.provider}
+        data-model={effectiveModel}
+      >
         <Pill
           tone="neutral"
           size="sm"
@@ -148,7 +154,14 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   }
 
   return (
-    <div className={rootClassName} ref={containerRef}>
+    <div
+      className={rootClassName}
+      ref={containerRef}
+      data-testid={`model-selector-${placement}`}
+      data-host-ref={agentRef}
+      data-provider={data.provider}
+      data-model={effectiveModel}
+    >
       <Pill
         tone={data.sessionModelBlocked ? 'warning' : 'neutral'}
         size="sm"

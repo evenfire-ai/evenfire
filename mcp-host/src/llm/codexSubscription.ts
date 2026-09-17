@@ -1,22 +1,26 @@
 import { randomUUID } from 'node:crypto'
 import {
-  type CodexCompletionRequestV1,
+  type CodexCompletionRequest,
   LIMITS,
-  hashCodexCompletionRequestV1,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
 import {
   CompletionResponse,
   ChatMessage as CoreChatMessage,
   FinishReason,
+  MessageContentImageSource,
+  MessageContentPart,
   ToolCompletionResponse,
   ToolDefinition,
+  textContentFromParts,
 } from '../core/types'
 import { logger } from '../logger'
 import { CodexLlmProxyClient, CodexProxyError } from './codexLlmProxyClient'
 import { classifyUnknown } from './errorClassification'
 import { CodexAuthorizeError, ProviderAttemptAuthorizer } from './providerAttemptAuthorizer'
-import type { LlmProvider } from './registryCore'
+import { type LlmProvider, descriptorFor } from './registryCore'
 import type { ClassifiedError, SingleTurnProvider } from './types'
 
 export type CodexAttemptContext = {
@@ -60,6 +64,72 @@ export type CodexSubscriptionDeps = {
   authorizer: ProviderAttemptAuthorizer
   proxy: CodexLlmProxyClient
   attemptContext: (input: { model: string }) => CodexAttemptContext
+  /**
+   * Visual rollout gate (#650). Defaults to FALSE: a request that actually
+   * carries image parts is rejected with `image_input_unsupported` until the
+   * operator clears this model for image input in the registry/config wiring.
+   */
+  imageInputEnabled?: boolean
+}
+
+/**
+ * Pre-authorize rejections. Both are known, non-retryable codes: the request
+ * itself cannot succeed, so neither may trigger a retry or a provider fallback.
+ */
+const CODEX_REQUEST_INVALID = 'invalid_request'
+const CODEX_IMAGE_INPUT_UNSUPPORTED = 'image_input_unsupported'
+const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
+
+/** One image part as the Codex V2 contract serializes it. */
+type ProjectedImagePart = {
+  type: 'image'
+  mimeType: 'image/jpeg' | 'image/png'
+  data: string
+  source: MessageContentImageSource
+}
+
+/** One message as either contract version serializes it. */
+type ProjectedMessage = {
+  role: CoreChatMessage['role']
+  content: string
+  contentParts?: Array<{ type: 'text'; text: string } | ProjectedImagePart>
+  name?: string
+  toolCallId?: string
+  toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>
+}
+
+/**
+ * Provenance for one image part. The shared contract requires a source on every
+ * Codex V2 image and bounds its id charset; this checks only presence and shape,
+ * so the contract stays the single owner of format and size limits.
+ */
+function imageSourceError(detail: string): CodexAuthorizeError {
+  return new CodexAuthorizeError(
+    CODEX_IMAGE_SOURCE_INVALID,
+    `image part has no usable provenance source (${detail}); host producers must attach the attachment or tool call it came from`
+  )
+}
+
+function projectImageSource(
+  part: Extract<MessageContentPart, { type: 'image' }>
+): MessageContentImageSource {
+  const source = part.source
+  if (!source) throw imageSourceError('missing source')
+  if (source.kind === 'attachment') {
+    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
+    if (!source.messageId?.trim()) throw imageSourceError('empty messageId')
+    return {
+      kind: 'attachment',
+      attachmentId: source.attachmentId,
+      messageId: source.messageId,
+    }
+  }
+  if (source.kind === 'tool') {
+    if (!source.attachmentId?.trim()) throw imageSourceError('empty attachmentId')
+    if (!source.toolCallId?.trim()) throw imageSourceError('empty toolCallId')
+    return { kind: 'tool', attachmentId: source.attachmentId, toolCallId: source.toolCallId }
+  }
+  throw imageSourceError('unknown source kind')
 }
 
 function assertTerminalCodexOutcome(result: {
@@ -88,6 +158,8 @@ function assertTerminalCodexOutcome(result: {
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
+  readonly requiresImageSourceIdentity =
+    descriptorFor('codex-subscription').requiresImageSourceIdentity === true
   private nextProviderAttemptIndex = 1
 
   constructor(
@@ -246,7 +318,19 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
     const request = this.buildRequest(messages, tools, options)
-    const requestHash = hashCodexCompletionRequestV1(request)
+    // Validate the projection before anything is authorized or hashed: the
+    // ticket, the proxy and control-api must all bind the same canonical
+    // request, and an unusable visual payload must fail here as a known,
+    // non-retryable error instead of being dropped on the way out.
+    const parsed = parseCodexCompletionRequest(request)
+    if (!parsed.ok) {
+      throw new CodexAuthorizeError(
+        CODEX_REQUEST_INVALID,
+        `codex completion request rejected: ${parsed.message}`
+      )
+    }
+    const wireRequest = parsed.value
+    const requestHash = hashCodexCompletionRequest(wireRequest)
     const context = this.deps.attemptContext({ model: this.model })
     if (
       !Number.isInteger(context.policyRevision) ||
@@ -258,9 +342,9 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     const providerAttemptIndex = context.providerAttemptIndex ?? this.nextProviderAttemptIndex++
     const authorized = await this.deps.authorizer.authorize(
       {
-        request,
+        request: wireRequest,
         requestHash,
-        invocationId: context.invocationId ?? request.requestId,
+        invocationId: context.invocationId ?? wireRequest.requestId,
         attemptGeneration: context.attemptGeneration ?? 1,
         providerAttemptIndex,
         policyRevision: context.policyRevision,
@@ -285,7 +369,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     const streamed = await this.deps.proxy.stream({
       executionTicket: authorized.executionTicket,
       requestHash: authorized.requestHash,
-      request,
+      request: wireRequest,
       signal: options?.signal,
     })
     return {
@@ -295,63 +379,110 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     }
   }
 
+  /**
+   * Project the loop's messages onto the wire contract.
+   *
+   * A turn with no parts stays byte-identical to V1. As soon as one message
+   * carries parts the whole request moves to V2, where the text parts are
+   * authoritative for `content` — that is what keeps a redacted (text-only)
+   * message consistent with the contract's equality rule.
+   */
+  private projectMessage(message: CoreChatMessage): ProjectedMessage {
+    const projected: ProjectedMessage = {
+      role: message.role,
+      content: message.content ?? '',
+      ...(message.name ? { name: message.name } : {}),
+      ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
+      ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
+        ? {
+            toolCalls: message.tool_calls.map(call => ({
+              id: call.id,
+              name: call.name,
+              arguments: call.arguments,
+            })),
+          }
+        : {}),
+    }
+    const parts = message.contentParts
+    if (!parts || parts.length === 0) return projected
+    if (message.role !== 'user') {
+      throw new CodexAuthorizeError(
+        CODEX_REQUEST_INVALID,
+        `content parts are only supported on user messages (role=${message.role})`
+      )
+    }
+    if (parts.some(part => part.type === 'image') && this.deps.imageInputEnabled !== true) {
+      throw new CodexAuthorizeError(
+        CODEX_IMAGE_INPUT_UNSUPPORTED,
+        'Image input is not enabled for this Codex model; remove the attachments or enable image input for the codex-subscription provider'
+      )
+    }
+    const contentParts: NonNullable<ProjectedMessage['contentParts']> = parts.map(part =>
+      part.type === 'text'
+        ? { type: 'text', text: part.text }
+        : {
+            type: 'image',
+            mimeType: part.mimeType,
+            data: part.data,
+            source: projectImageSource(part),
+          }
+    )
+    return { ...projected, content: textContentFromParts(contentParts), contentParts }
+  }
+
   private buildRequest(
     messages: CoreChatMessage[],
     tools: ToolDefinition[] | undefined,
     options?: { max_tokens?: number; temperature?: number; tool_choice?: string }
-  ): CodexCompletionRequestV1 {
-    const request: CodexCompletionRequestV1 = {
-      schemaVersion: 'codex-completion-request.v1',
-      requestId: randomUUID(),
-      idempotencyKey: randomUUID(),
-      provider: 'codex-subscription',
-      model: this.model,
-      messages: messages.map(message => ({
-        role: message.role,
-        content: message.content ?? '',
-        ...(message.name ? { name: message.name } : {}),
-        ...(message.tool_call_id ? { toolCallId: message.tool_call_id } : {}),
-        ...(message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0
-          ? {
-              toolCalls: message.tool_calls.map(call => ({
-                id: call.id,
-                name: call.name,
-                arguments: call.arguments,
-              })),
-            }
-          : {}),
-      })),
-    }
-    if (tools && tools.length > 0) {
+  ): CodexCompletionRequest {
+    const projectedMessages = messages.map(message => this.projectMessage(message))
+    const presentedTools =
+      tools && tools.length > 0
+        ? tools.map(tool => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          }))
+        : undefined
+    if (presentedTools) {
       // Presentation is owned by the agent loop. Preserve its final definitions
       // in both the authorized hash and the proxy request; MCP names are not
       // permissions and must never be discarded by the provider adapter.
       logger.debug(
-        { provider: 'codex-subscription', presentedCount: tools.length },
+        { provider: 'codex-subscription', presentedCount: presentedTools.length },
         'Tool definitions prepared for authorization'
       )
-      request.tools = tools.map(tool => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-      }))
     }
-
-    if (
+    const hasGeneration =
       options?.temperature !== undefined ||
       options?.max_tokens !== undefined ||
-      options?.tool_choice
-    ) {
-      request.generation = {
-        ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-        ...(options.max_tokens !== undefined ? { maxOutputTokens: options.max_tokens } : {}),
-        ...(options.tool_choice === 'auto' ||
-        options.tool_choice === 'none' ||
-        options.tool_choice === 'required'
-          ? { toolChoice: options.tool_choice }
-          : {}),
-      }
+      Boolean(options?.tool_choice)
+    const base: Omit<CodexCompletionRequest, 'schemaVersion'> = {
+      requestId: randomUUID(),
+      idempotencyKey: randomUUID(),
+      provider: 'codex-subscription' as const,
+      model: this.model,
+      messages: projectedMessages,
+      ...(presentedTools ? { tools: presentedTools } : {}),
+      ...(hasGeneration
+        ? {
+            generation: {
+              ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+              ...(options?.max_tokens !== undefined ? { maxOutputTokens: options.max_tokens } : {}),
+              ...(options?.tool_choice === 'auto' ||
+              options?.tool_choice === 'none' ||
+              options?.tool_choice === 'required'
+                ? { toolChoice: options.tool_choice }
+                : {}),
+            },
+          }
+        : {}),
     }
-    return request
+    // V1 stays byte-identical for every text-only turn; one message with parts
+    // moves the whole request to V2, which is the only version that carries them.
+    if (!projectedMessages.some(message => message.contentParts !== undefined)) {
+      return { schemaVersion: 'codex-completion-request.v1', ...base }
+    }
+    return { schemaVersion: 'codex-completion-request.v2', ...base }
   }
 }
