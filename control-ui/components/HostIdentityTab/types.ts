@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react'
+
 export type IdentityFieldKey = 'identity' | 'soul' | 'agents' | 'user'
 
 export type IdentityFields = Record<IdentityFieldKey, string>
@@ -20,4 +22,9 @@ export type HostIdentityTabState = {
   reloadHint: boolean
   resourceVersion: string
   saving: boolean
+}
+
+export type HostIdentityTabProps = {
+  hostName: string
+  onActionsChange?: (actions: ReactNode | null) => void
 }
