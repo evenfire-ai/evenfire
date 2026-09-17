@@ -743,7 +743,7 @@ export function GfsBrowser(): React.JSX.Element {
       if (!(error instanceof GfsUploadCapabilityError) || !error.allowLegacyFallback) throw error
       if (input.resumeUploadId) {
         throw new GfsUploadCapabilityError(
-          'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+          'The persisted resumable session cannot be resumed while EvenDrive Upload v2 is unavailable.',
           { cause: error }
         )
       }
@@ -854,7 +854,7 @@ export function GfsBrowser(): React.JSX.Element {
               if (!(err instanceof GfsUploadCapabilityError) || !err.allowLegacyFallback) throw err
               if (resumeUploadIdForAttempt) {
                 throw new GfsUploadCapabilityError(
-                  'The persisted resumable session cannot be resumed while GFS Upload v2 is unavailable.',
+                  'The persisted resumable session cannot be resumed while EvenDrive Upload v2 is unavailable.',
                   { cause: err }
                 )
               }
