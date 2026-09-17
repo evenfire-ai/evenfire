@@ -271,6 +271,52 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
   })
 
+  // The header's "Open chat in full screen" CTA must EJECT the drawer's active
+  // conversation to the full-screen chat route — the non-drawer branch of
+  // revealChatViewTab (leaveSandboxForChat + a selection WITHOUT keepNavItem),
+  // not the in-drawer swap. Assert the observable result: navItem lands on the
+  // chat route and the drawer (its collapse CTA) is gone.
+  it('ejects the drawer conversation to the full-screen chat route on "Open chat in full screen"', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    render(<App />)
+
+    // Launch from chat-1: the drawer opens over the live embed on the apps route.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
+
+    // Ignore the selection the launch itself performed; assert only on the CTA.
+    vi.mocked(currentController.handleSelectChatAgent).mockClear()
+
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chat in full screen' })))
+
+    // Ejected: navItem flips to the full-screen chat route. The mock only flips
+    // navItem when the selection omits keepNavItem, so this pins the non-drawer
+    // (eject) branch — contrast the in-drawer composer.focus case above.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({ chatId: 'chat-1' })
+    )
+    expect(
+      vi.mocked(currentController.handleSelectChatAgent).mock.calls.at(-1)?.[1]?.keepNavItem
+    ).not.toBe(true)
+    // The drawer unmounts once the embed is torn down: its collapse CTA is gone.
+    expect(screen.queryByRole('button', { name: 'Collapse chat drawer' })).toBeNull()
+  })
+
   // The drawer's not-ready subtree is `inert`, and a `focus()` fired inside an
   // inert subtree is a silent no-op. So the `chat.switcher` shortcut (which opens
   // the drawer, then opens+focuses the switcher) must defer the open until the
