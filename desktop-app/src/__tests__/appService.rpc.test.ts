@@ -61,7 +61,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -116,7 +116,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -144,7 +144,7 @@ describe('AppService.invokeHostMessage', () => {
       ['chatllm']
     )
     expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
-    expect(service.rpcClient.invokeHostMessage.mock.calls[0][0]).toBe('rpc-token')
+    expect(service.rpcClient.invokeHostMessage.mock.calls[0][0]).toBe('rpc-test-token')
     expect(service.rpcClient.invokeHostMessage.mock.calls[0][1]).toBe('chatllm')
     const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2]
     expect(forwarded).toEqual({
@@ -173,7 +173,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -257,7 +257,7 @@ describe('AppService.invokeHostMessage', () => {
     service.authClient = {
       getMe: vi.fn().mockResolvedValueOnce(service.me).mockResolvedValueOnce(teamMe),
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-token',
+        token: 'team-test-token',
         team: { id: 'team-1', name: 'Team One', role: 'member' },
       }),
     }
@@ -265,7 +265,7 @@ describe('AppService.invokeHostMessage', () => {
       setSessionToken: vi.fn(),
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
     }
     service.rpcClient = {
@@ -278,7 +278,7 @@ describe('AppService.invokeHostMessage', () => {
 
     expect(service.authClient.switchTeam).toHaveBeenCalledWith('teamless-token', 'team-1')
     expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
-      'team-token',
+      'team-test-token',
       ['host:message:invoke', 'host:task:read', 'host:wake:write'],
       ['pro-agent']
     )
@@ -325,7 +325,7 @@ describe('AppService.invokeHostMessage', () => {
         .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
         .mockResolvedValueOnce({ ...service.me }),
       switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-token`,
+        token: `${teamId}-test-token`,
         team: { id: teamId, name: teamId === 'team-b' ? 'Team B' : 'Team A', role: 'member' },
       })),
     }
@@ -333,13 +333,13 @@ describe('AppService.invokeHostMessage', () => {
 
     await expect(
       service.runWithTeamContext('team-b', async (token: string) => token)
-    ).resolves.toBe('team-b-token')
+    ).resolves.toBe('team-b-test-token')
 
     expect(uploadJob.suspendForAuth).not.toHaveBeenCalled()
     expect(service.gfsUploadJobs).toHaveProperty('size', 1)
     expect(service.me.teamId).toBe('team-a')
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'teamless-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
   })
 
   it('blocks new GFS dispatches while a transient team token is installed', async () => {
@@ -367,7 +367,7 @@ describe('AppService.invokeHostMessage', () => {
         .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
         .mockResolvedValueOnce(service.me),
       switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-token`,
+        token: `${teamId}-test-token`,
         team: { id: teamId, name: teamId, role: 'member' },
       })),
     }
@@ -383,7 +383,7 @@ describe('AppService.invokeHostMessage', () => {
     ).resolves.toBe('team-b-operation')
 
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
     expect(service.gfsTransientTeamHopDepth).toBe(0)
   })
 
@@ -462,7 +462,7 @@ describe('AppService.invokeHostMessage', () => {
         .mockResolvedValueOnce({ ...service.me, teamId: 'team-b', teamName: 'Team B' })
         .mockResolvedValueOnce(service.me),
       switchTeam: vi.fn(async (_token: string, teamId: string) => ({
-        token: `${teamId}-token`,
+        token: `${teamId}-test-token`,
         team: { id: teamId, name: teamId, role: 'member' },
       })),
     }
@@ -488,7 +488,7 @@ describe('AppService.invokeHostMessage', () => {
     expect(job.cancel).toHaveBeenCalledTimes(1)
     expect(service.me.teamId).toBe('team-a')
     expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(1, 'team-a-token', 'team-b')
-    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-token', 'team-a')
+    expect(service.authClient.switchTeam).toHaveBeenNthCalledWith(2, 'team-b-test-token', 'team-a')
   })
 
   it('fences the old GFS scope if a replacement team token cannot be refreshed', async () => {
@@ -511,7 +511,7 @@ describe('AppService.invokeHostMessage', () => {
     }
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-token',
+        token: 'team-b-test-token',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
@@ -554,7 +554,7 @@ describe('AppService.invokeHostMessage', () => {
     }
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-token',
+        token: 'team-b-test-token',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockRejectedValue(new Error('replacement session rejected')),
@@ -600,7 +600,7 @@ describe('AppService.invokeHostMessage', () => {
     service.gfsDispatchBlocked = false
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-token',
+        token: 'team-b-test-token',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
@@ -653,7 +653,7 @@ describe('AppService.invokeHostMessage', () => {
     service.gfsDispatchBlocked = false
     service.authClient = {
       switchTeam: vi.fn().mockResolvedValue({
-        token: 'team-b-token',
+        token: 'team-b-test-token',
         team: { id: 'team-b', name: 'Team B', role: 'member' },
       }),
       getMe: vi.fn().mockResolvedValue({ ...service.me, teamId: 'team-b', teamName: 'Team B' }),
@@ -743,7 +743,7 @@ describe('AppService.invokeHostMessage', () => {
     }
     service.rpcTokenManager = {
       getOrIssue: vi.fn().mockResolvedValue({
-        token: 'user-rpc-token',
+        token: 'user-rpc-test-token',
         accessScope: 'user',
         teamId: null,
       }),
@@ -790,7 +790,7 @@ describe('AppService.invokeHostMessage', () => {
       getTeamAgents: vi.fn().mockResolvedValue({ agentNames: [], agents: [] }),
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-test-token' }),
       clear: vi.fn(),
     }
     service.rpcClient = {
