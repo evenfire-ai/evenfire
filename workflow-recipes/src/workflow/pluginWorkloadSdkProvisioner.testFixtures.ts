@@ -22,7 +22,7 @@ export function eagerSdkTestConfig(overrides: Partial<WorkflowConfig> = {}): Wor
     mcpHostImage: EAGER_SDK_TEST_IMAGE,
     wrcEndpoint: 'http://workflow-recipes.example',
     sandboxNamespace: EAGER_SDK_SANDBOX_NS,
-    mcpServerNamespace: 'mcp-server',
+    mcpServerNamespace: 'sandbox-mcp',
     imagePullPolicy: 'IfNotPresent',
     maxWorkflowSteps: 10,
     pluginWorkloadSdkEnabled: true,
