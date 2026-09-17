@@ -255,6 +255,12 @@ describe('Sandbox OAuth v2 authority', () => {
 
   it('mounts the active-view lease before a v2 Sandbox view reaches its upstream', async () => {
     const claims = viewDelegation()
+    const leaseState = { live: true }
+    lease.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
     auth.verifyUserDelegationV2.mockReturnValue(claims)
     authority.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
       claims,
@@ -282,6 +288,7 @@ describe('Sandbox OAuth v2 authority', () => {
 
     expect(authority.authorizeActionV2).toHaveBeenCalledOnce()
     expect(lease.startActiveViewLease).toHaveBeenCalledOnce()
+    expect(leaseState.live).toBe(false)
     expect(proxy.web).toHaveBeenCalledOnce()
     expect(lease.startActiveViewLease.mock.invocationCallOrder[0]).toBeLessThan(
       proxy.web.mock.invocationCallOrder[0]
