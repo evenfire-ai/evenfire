@@ -53,6 +53,7 @@ main() {
   t2_deployment_check
   t2_proxy_runtime_check "$T2_DEPLOYMENT_JSON"
   t2_control_api_runtime_check "$T2_DEPLOYMENT_JSON"
+  t2_image_capability_fixture_check "$T2_DEPLOYMENT_JSON"
   t2_process_check
   t2_classify_transition
   t2_write_plan "$T2_PLAN_FILE"

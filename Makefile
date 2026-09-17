@@ -267,6 +267,29 @@ minikube-build-627-worktracker: ## Build the reviewed Worktracker sources locall
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- bash scripts/e2e/build-627-worktracker.sh
 
+.PHONY: minikube-build-image-capabilities-fixture minikube-build-image-capabilities-fixture-body
+minikube-build-image-capabilities-fixture: ## Build the unpublished image-input provider fixture under the owned profile lease
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- \
+		$(MAKE) --no-print-directory minikube-build-image-capabilities-fixture-body
+
+minikube-build-image-capabilities-fixture-body:
+	@bash scripts/minikube/require-t2-mutation-lock.sh
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=mcp-host
+	@MINIKUBE_PROFILE="$(MINIKUBE_PROFILE)" scripts/minikube/build-images.sh --only=image-capabilities-mcp-host
+
+.PHONY: minikube-run-image-capabilities minikube-restore-image-capabilities
+minikube-run-image-capabilities: ## Run the visible image journey with an isolated external-provider fixture and restore the Host
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
+
+minikube-restore-image-capabilities: ## Resume restoration of this profile's recorded image fixture run
+	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
+		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs restore
+
 .PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body
 minikube-build-codex-approved-tools-fixtures: ## Acquire optional Codex tools fixture images before T2 reconcile
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \

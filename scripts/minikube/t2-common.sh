@@ -797,6 +797,49 @@ t2_control_api_runtime_check() {
     '/tmp/approved-tools-oauth-active.json'
 }
 
+# An optional image-input fixture must never survive into a runtime verdict.
+# Runs without that opt-in image keep the existing probe set unchanged.
+t2_image_capability_fixture_check() {
+  local acquired configuration restored
+  acquired="$(python3 - "${T2_PROJECT_DIR}/deploy/minikube/.image-manifest.json" <<'PY_IMAGE_FIXTURE'
+import json, sys
+with open(sys.argv[1]) as source:
+    images = json.load(source)["images"]
+print("yes" if any(ref.removeprefix("docker.io/") == "clerum/image-capabilities-mcp-host:test" for ref in images) else "no")
+PY_IMAGE_FIXTURE
+  )" || return 1
+  [ "$acquired" = yes ] || return 0
+  configuration="$(t2_kc -n mcp-host get configmap mcp-host-config -o json)" || return 1
+  if ! python3 - "$1" "$configuration" <<'PY_IMAGE_FIXTURE'
+import json, sys
+deployments, config = (json.loads(value) for value in sys.argv[1:])
+flag = "evenfire.ai/image-capabilities-run"
+def clean(data):
+    return not any(key.startswith("IMAGE_CAPABILITIES_") or key == "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE" for key in data)
+if flag in config.get("metadata", {}).get("annotations", {}) or not clean(config.get("data", {})) or config.get("data", {}).get("NODE_ENV") == "test":
+    raise SystemExit(1)
+for deployment in deployments["items"]:
+    if flag in deployment.get("metadata", {}).get("annotations", {}):
+        raise SystemExit(1)
+    for container in deployment["spec"]["template"]["spec"]["containers"]:
+        if "image-capabilities-mcp-host" in container.get("image", ""):
+            raise SystemExit(1)
+        for entry in container.get("env", []):
+            if not clean([entry["name"]]) or "image-capabilities-mcp-host" in entry.get("value", ""):
+                raise SystemExit(1)
+PY_IMAGE_FIXTURE
+  then
+    t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
+    return 1
+  fi
+  restored="$(t2_kc -n mcp-host exec deployment/chatllm -- node -e \
+    'process.stdout.write(String(process.env.NODE_ENV !== "test" && !Object.keys(process.env).some(key => key.startsWith("IMAGE_CAPABILITIES_") || key === "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE") && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))')" || return 1
+  if [ "$restored" != true ]; then
+    t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture remains in the running Host'
+    return 1
+  fi
+}
+
 t2_deployment_check() {
   local deployment_json unready
   deployment_json="$(t2_kc get deployments -A -o json 2>/dev/null || true)"
