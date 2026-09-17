@@ -87,7 +87,7 @@ Use this index for long-form docs.
 
 | Doc                                                             | Description                                     |
 | --------------------------------------------------------------- | ----------------------------------------------- |
-| [EKS agent how-to](deploy/aws-eks-agent-guide.md)               | Customer agent: deploy Evenfire onto existing EKS |
+| [EKS agent how-to](deploy/aws-eks-agent-guide.md)               | Deploy Evenfire onto an existing EKS cluster    |
 | [WorkflowRecipe guide](agents/CLERUM_WORKFLOW_RECIPE_GUIDE.md)  | Authoring recipes, for agents                   |
 | [Shared frontend rules](agents/frontend-style-rules.md)         | Cross-app rules for the three frontend surfaces |
 | [Control UI rules](agents/control-ui-rules.md)                  | Control UI application-specific guidance        |

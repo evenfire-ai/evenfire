@@ -21,7 +21,7 @@ Skill entry point: [`.agents/skills/evenfire-aws-eks/SKILL.md`](../../.agents/sk
 
 ---
 
-## 1. How to use this document
+## How to use this document
 
 **Two checkouts.** This guide and the skill live on the public repo's default
 branch. Released tags older than this guide do not contain them.
@@ -70,7 +70,7 @@ Rules:
 
 ---
 
-## 2. Mission and hard limits
+## Mission and hard limits
 
 **Done means:** Evenfire runs on the named cluster, every Deployment from the
 rendered overlay plus the HCC-spawned Host and GFS Deployments are rolled out,
@@ -92,7 +92,7 @@ existing database, Desktop code signing, Slack/Teams app review.
 
 ---
 
-## 3. Inputs the human must supply
+## Inputs the human must supply
 
 Stop and ask for anything blank that blocks a phase.
 
@@ -112,7 +112,7 @@ evaluation; that is a floor for a smoke test, not a production sizing.
 
 ---
 
-## 4. Phase 0 — Tools, identity, discovery (read-only)
+## Phase 0 — Tools, identity, discovery (read-only)
 
 Required local tools: `kubectl` ≥ 1.30, `helm` 3, `aws` v2, `git`, `bash`, `jq`,
 `ruby`, `python3`, `openssl`, `curl`. If one is missing, print the install
@@ -141,7 +141,7 @@ kubectl --context "$CONTEXT" get validatingwebhookconfigurations,mutatingwebhook
 - Kyverno / Gatekeeper / restricted Pod Security / a service mesh would block
   the install. Report the rule; do not disable it.
 
-### 4.1 NetworkPolicy enforcement (hard stop)
+### 0.1 NetworkPolicy enforcement (hard stop)
 
 Evenfire's isolation is default-deny NetworkPolicy. A cluster that accepts
 NetworkPolicy objects but does not enforce them silently removes that control.
@@ -186,7 +186,7 @@ CONTEXT="$CONTEXT" bash "$SKILL_SCRIPTS/np-deny-probe.sh"
 Exit 0 is the only pass. Exit 1 (not enforced) or 2 (inconclusive) is a hard
 stop. Do not install Evenfire on this cluster until it passes.
 
-### 4.2 Storage
+### 0.2 Storage
 
 ```bash
 . "$HOME/.evenfire-eks/env.sh"
@@ -201,7 +201,7 @@ before annotating one. EFS/RWX is not required. Details:
 
 ---
 
-## 5. Phase 0.5 — Cluster coordinates (read-only)
+## Phase 0.5 — Cluster coordinates (read-only)
 
 ```bash
 . "$HOME/.evenfire-eks/env.sh"
@@ -224,7 +224,7 @@ balancer uses (IP target mode) or the node subnets (instance mode). See
 
 ---
 
-## 6. Phase 1 — Add-ons only if missing (ask first)
+## Phase 1 — Add-ons only if missing (ask first)
 
 - **NetworkPolicy enforcement:** see 4.1. Re-run the probe after any change.
 - **AWS Load Balancer Controller:** only for the ALB/NLB variant and only if it
@@ -233,7 +233,7 @@ balancer uses (IP target mode) or the node subnets (instance mode). See
 
 ---
 
-## 7. Phase 2 — Data plane
+## Phase 2 — Data plane
 
 **Evaluation / pilot:** in-cluster `postgres:16-alpine` on the RWO class
 (`control-postgres-data`), as `deploy/base` ships. Step 5.5 replaces the
@@ -250,7 +250,7 @@ Host's LLM Secret ([llm-providers.md](llm-providers.md)); do not invent IRSA.
 
 ---
 
-## 8. Phase 3 — Release checkout
+## Phase 3 — Release checkout
 
 ### 3.1 Confirm the release
 
@@ -285,7 +285,7 @@ a comment line containing `newTag`.
 
 ---
 
-## 9. Phase 4 — Customer overlay
+## Phase 4 — Customer overlay
 
 Build `$REPO_DIR/deploy/overlays/aws-eks` exactly as
 [overlay-contract.md](../../.agents/skills/evenfire-aws-eks/references/overlay-contract.md)
@@ -323,7 +323,7 @@ stays unset unless the human configures Google sign-in. The
 
 ---
 
-## 10. Phase 5 — Install
+## Phase 5 — Install
 
 Run every step from `$REPO_DIR` after sourcing the env file.
 
@@ -491,7 +491,7 @@ namespaces from GKE context names. Every FAIL line is a stop.
 
 ### 5.14 Confirm WorkflowRecipe egress enforcement (ask first)
 
-Only after the Phase 4.1 probe passed and 5.13 has no FAIL, and the human
+Only after the Phase 0.1 probe passed and 5.13 has no FAIL, and the human
 agrees: add `patches/wrc-network-policy.yaml` (see overlay-contract.md),
 re-render, re-gate, re-apply (5.9–5.11). Until then WRC stays `required` and
 refuses recipes with external egress. That is the intended fail-closed state.
@@ -508,7 +508,7 @@ acceptable ones. After Phase 7, `verify-rollout.sh` must pass with no FAIL.
 
 ---
 
-## 11. Phase 6 — Claim the admin account (HUMAN, before any ingress)
+## Phase 6 — Claim the admin account (HUMAN, before any ingress)
 
 `POST /api/v1/admin/auth/setup` is unauthenticated by design. It sets the admin
 credentials while the bootstrap admin has never logged in. Whoever reaches it
@@ -547,7 +547,7 @@ Vertex / Azure the non-secret values under **Host → Environment**.
 
 ---
 
-## 12. Phase 7 — Ingress (ask first)
+## Phase 7 — Ingress (ask first)
 
 **ALB/NLB (Variant A):** the `alb-ingress-*` patches must already be in the
 applied render. Create Ingress / Service objects for the five hostnames:
@@ -584,7 +584,7 @@ After exposure, hit the five HTTPS hostnames and re-run `verify-rollout.sh`.
 
 ---
 
-## 13. Phase 8 — Prove it
+## Phase 8 — Prove it
 
 Follow [verify.md](../../.agents/skills/evenfire-aws-eks/references/verify.md)
 and print its handover block. Public HTTPS is mandatory when the human asked for
@@ -592,7 +592,7 @@ public DNS; a port-forward is acceptable only for an agreed internal pilot.
 
 ---
 
-## 14. Day-2 rules
+## Day-2 rules
 
 - **After any overlay change:** re-render, re-gate (Phase 4), apply, re-run 5.11
   (tokens), then re-run 5.12 (restores the RPC public key in `mcp-host-config`,
@@ -607,7 +607,7 @@ public DNS; a port-forward is acceptable only for an agreed internal pilot.
 
 ---
 
-## 15. Stop-and-ask-human gates
+## Stop-and-ask-human gates
 
 - Wrong AWS account, region, cluster, or kube-context
 - `np-deny-probe.sh` exit ≠ 0, or VPC CNI without strict mode
