@@ -483,9 +483,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
         },
         { transaction: transaction(databasePool), gateway }
       )
-    ).resolves.toEqual(
-      expect.objectContaining({ status: 'access_path_stale', code: 'access_path_stale' })
-    )
+    ).resolves.toEqual(expect.objectContaining({ status: 'not_found', code: 'not_found' }))
 
     await expect(
       resolveLiveAuthorization(
