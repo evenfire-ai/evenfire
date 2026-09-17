@@ -1017,7 +1017,15 @@ export function createAdminCodexSubscriptionRouter(
         res.status(404).json({ error: 'no_grant' })
         return
       }
-      res.status(200).json(await withAssignedHosts(updated))
+      res
+        .status(200)
+        .json(
+          await withAssignedHosts(
+            updated,
+            undefined,
+            grok ? 'grok-subscription' : 'codex-subscription'
+          )
+        )
     })
   )
 

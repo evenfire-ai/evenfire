@@ -151,12 +151,17 @@ function body(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function deps(
-  overrides: Partial<LlmProviderAttemptAuthorizerDeps> = {}
-): LlmProviderAttemptAuthorizerDeps {
+// `resolveConnectionKey` is a test-only convenience that feeds the default
+// `resolveAssignment`; the authorizer itself only consumes `resolveAssignment`.
+function deps({
+  resolveConnectionKey: resolveConnectionKeyOverride,
+  ...overrides
+}: Partial<LlmProviderAttemptAuthorizerDeps> & {
+  resolveConnectionKey?: (hostRef: string) => Promise<string>
+} = {}): LlmProviderAttemptAuthorizerDeps {
   const db = { query: vi.fn() }
   const resolveConnectionKey =
-    overrides.resolveConnectionKey ?? vi.fn().mockResolvedValue('team-grok')
+    resolveConnectionKeyOverride ?? vi.fn().mockResolvedValue('team-grok')
   const resolveAssignment =
     overrides.resolveAssignment ??
     (async (hostRef: string) => ({
@@ -178,7 +183,6 @@ function deps(
     }),
     issueTicket: vi.fn(),
     ...overrides,
-    resolveConnectionKey,
     resolveAssignment,
   }
 }

@@ -15,7 +15,6 @@ import {
 import {
   collectHostOauthBrokerProviders,
   collectRecipeOauthBrokerProviders,
-  readSubscriptionConnectionRef,
 } from '../../services/subscriptionGrantIdentity.js'
 import { llmProviderAttemptAuthorizeRateLimits } from '../workflows/shared/rateLimit.js'
 
@@ -51,13 +50,6 @@ export type LiveBrokerAssignment = {
   liveBrokerProviders: string[]
   liveConnectionRef: string
   annotations?: Record<string, string>
-}
-
-function throwAttestError(result: { ok: false; code: string; message: string }): never {
-  throw new LlmProviderAttemptAuthorizeError(
-    result.code as 'host_binding_mismatch' | 'unassigned_connection',
-    result.message
-  )
 }
 
 export async function resolveHostAssignedAssignment(
@@ -116,20 +108,6 @@ export async function resolveHostAssignedAssignment(
   }
 }
 
-export async function resolveHostAssignedConnectionKey(
-  gateway: Pick<K8sGateway, 'getResource'>,
-  hostRef: string
-): Promise<string> {
-  const assignment = await resolveHostAssignedAssignment(gateway, hostRef)
-  if (!assignment.annotations) return assignment.liveConnectionRef
-  const read = readSubscriptionConnectionRef({
-    provider: assignment.liveBrokerProviders[0] ?? 'codex-subscription',
-    annotations: assignment.annotations,
-  })
-  if (!read.ok) throwAttestError(read)
-  return read.connectionKey
-}
-
 export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Router {
   const router = Router()
   router.post(
@@ -144,7 +122,6 @@ export function createMcpHostLlmProviderAttemptRoutes(gateway: K8sGateway): Rout
       }
       try {
         const result = await authorizeLlmProviderAttempt(claims, req.body, {
-          resolveConnectionKey: hostRef => resolveHostAssignedConnectionKey(gateway, hostRef),
           resolveAssignment: hostRef => resolveHostAssignedAssignment(gateway, hostRef),
         })
         res.status(200).json(result)

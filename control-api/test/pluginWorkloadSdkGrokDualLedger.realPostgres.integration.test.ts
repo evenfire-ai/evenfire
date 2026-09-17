@@ -192,7 +192,6 @@ describeRealPostgres('Plugin Workload SDK Grok dual ledger on real PostgreSQL', 
         },
         getConnection: async () => current,
         getModelState: async () => ({ enabled: true, stale: false }),
-        resolveConnectionKey: async () => CONNECTION_KEY,
         resolveAssignment: async () => ({
           liveBrokerProviders: ['grok-subscription'],
           liveConnectionRef: CONNECTION_KEY,

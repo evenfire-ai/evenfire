@@ -885,6 +885,54 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       })
     })
 
+    it.each([
+      ['spec.agent', { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } }],
+      [
+        'a step agent',
+        {
+          agent: { provider: 'openai', model: 'gpt-5.1' },
+          steps: [{ id: 's', agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } }],
+        },
+      ],
+    ])(
+      'rejects a Grok target when %s is Codex (oauth_broker_provider_conflict)',
+      async (_label, spec) => {
+        vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
+        getResource.mockResolvedValue({
+          metadata: {
+            annotations: {
+              'clerum.io/codex-connection-ref': 'team-plus',
+              'clerum.io/subscription-connection-ref': 'team-plus',
+            },
+          },
+          spec,
+        })
+        const res = await request(buildApp())
+          .post('/admin/plugin-workload-sdk/grants')
+          .send(grokGrantBody)
+        expect(res.status).toBe(400)
+        expect(res.body).toEqual({ error: 'oauth_broker_provider_conflict' })
+        expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
+        expect(updateResource).not.toHaveBeenCalled()
+        expect(sdkDb.upsertGrant).not.toHaveBeenCalled()
+      }
+    )
+
+    it('accepts a Grok target on a Grok-agent recipe', async () => {
+      vi.mocked(sdkDb.upsertGrant).mockResolvedValue({ id: 'g-grok' } as never)
+      vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(true)
+      getResource.mockResolvedValue({
+        spec: { agent: { provider: 'grok-subscription', model: 'grok-4.6' } },
+      })
+      const res = await request(buildApp())
+        .post('/admin/plugin-workload-sdk/grants')
+        .send(grokGrantBody)
+      expect(res.status).toBe(200)
+      expect(publishRecipeGrantIdentity).toHaveBeenCalledWith(
+        expect.objectContaining({ next: 'team-grok', provider: 'grok-subscription' })
+      )
+    })
+
     it('fails closed when the Grok grant is unknown or does not offer the model', async () => {
       vi.mocked(isGrokAssignmentAllowed).mockResolvedValue(false)
       const res = await request(buildApp())
@@ -1216,6 +1264,21 @@ describe('routes/admin/pluginWorkloadSdk — grants', () => {
       name: 'sdk-recipe',
       next: 'unassigned',
     })
+  })
+
+  it('does not unassign a recipe whose step agent is Codex when the last SDK grant is deleted', async () => {
+    vi.mocked(sdkDb.deleteGrant).mockResolvedValue(true)
+    getResource.mockResolvedValue({
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        steps: [{ id: 's', agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } }],
+      },
+    })
+    const res = await request(buildApp())
+      .delete('/admin/plugin-workload-sdk/grants/g1')
+      .query({ recipeNamespace: 'sandbox-recipes', recipeName: 'sdk-recipe' })
+    expect(res.status).toBe(200)
+    expect(publishRecipeGrantIdentity).not.toHaveBeenCalled()
   })
 
   it('does not unassign a Codex-agent recipe when the last SDK Codex grant is deleted', async () => {

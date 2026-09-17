@@ -196,6 +196,80 @@ describe('recipe Codex grant identity', () => {
     )
   })
 
+  it.each([
+    ['agent', { agent: { provider: 'codex-subscription' } }],
+    [
+      'step agent',
+      {
+        agent: { provider: 'openai' },
+        steps: [{ id: 's', agent: { provider: 'codex-subscription' } }],
+      },
+    ],
+  ])(
+    'refuses (409) to publish a Grok identity on a recipe whose %s is Codex',
+    async (_label, spec) => {
+      getResource.mockResolvedValue({
+        metadata: {
+          resourceVersion: '5',
+          annotations: {
+            'clerum.io/codex-connection-ref': 'team-plus',
+            'clerum.io/subscription-connection-ref': 'team-plus',
+          },
+        },
+        spec,
+      })
+      await expect(
+        publishRecipeGrantIdentity({
+          gateway: { getResource, updateResource },
+          namespace: 'sandbox-recipes',
+          name: 'codex-recipe',
+          next: 'team-grok',
+          provider: 'grok-subscription',
+        })
+      ).rejects.toMatchObject({ status: 409, error: 'oauth_broker_provider_conflict' })
+      expect(updateResource).not.toHaveBeenCalled()
+    }
+  )
+
+  it('refuses (409) to publish a Codex identity on a Grok-agent recipe', async () => {
+    getResource.mockResolvedValue({
+      metadata: {
+        resourceVersion: '6',
+        annotations: {
+          'clerum.io/codex-connection-ref': '',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        },
+      },
+      spec: { agent: { provider: 'grok-subscription' } },
+    })
+    await expect(
+      publishRecipeGrantIdentity({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'grok-recipe',
+        next: 'team-plus',
+      })
+    ).rejects.toMatchObject({ status: 409, error: 'oauth_broker_provider_conflict' })
+    expect(updateResource).not.toHaveBeenCalled()
+  })
+
+  it('publishes a Grok identity on an SDK-only recipe with a static agent', async () => {
+    getResource.mockResolvedValue({
+      metadata: { resourceVersion: '7', annotations: {} },
+      spec: { agent: { provider: 'openai' }, pluginWorkloadSdk: { family: 'promptBridge' } },
+    })
+    await expect(
+      publishRecipeGrantIdentity({
+        gateway: { getResource, updateResource },
+        namespace: 'sandbox-recipes',
+        name: 'sdk-recipe',
+        next: 'team-grok',
+        provider: 'grok-subscription',
+      })
+    ).resolves.toMatchObject({ published: 'team-grok', noop: false })
+    expect(updateResource).toHaveBeenCalledTimes(1)
+  })
+
   it('rejects a named Grok publish when the Grok grant is not live', async () => {
     vi.mocked(getSafeGrokSubscriptionConnection).mockResolvedValueOnce(null)
     await expect(

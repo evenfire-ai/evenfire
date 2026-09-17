@@ -15,6 +15,7 @@ import {
 import { K8sConflictError } from './resourceService.js'
 import {
   SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
+  collectRecipeOauthBrokerProviders,
   readSubscriptionConnectionRef,
 } from './subscriptionGrantIdentity.js'
 
@@ -106,11 +107,21 @@ export async function publishRecipeGrantIdentity(input: {
     )
   }
 
+  const provider = grok ? 'grok-subscription' : 'codex-subscription'
+  // The recipe's agent / step agents own the grant annotations when they name
+  // an oauth-broker. Publishing another broker's identity would rewrite the
+  // agent grant (e.g. a Grok SDK key read back as the Codex agent's key).
+  const agentBrokers = collectRecipeOauthBrokerProviders(asRecord(current.spec) ?? {})
+  if (agentBrokers.length > 0 && !agentBrokers.includes(provider)) {
+    throw new RecipeCodexGrantIdentityError(
+      409,
+      'oauth_broker_provider_conflict',
+      `WorkflowRecipe agent uses ${agentBrokers.join(', ')}; cannot publish a ${provider} grant`
+    )
+  }
+
   const annotations = stringMap(current.metadata?.annotations)
-  const previous = readSubscriptionConnectionRef({
-    provider: grok ? 'grok-subscription' : 'codex-subscription',
-    annotations,
-  })
+  const previous = readSubscriptionConnectionRef({ provider, annotations })
   if (previous.ok && previous.connectionKey === next) {
     return { published: next, resourceVersion: current.metadata?.resourceVersion, noop: true }
   }

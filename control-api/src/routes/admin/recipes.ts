@@ -15,28 +15,14 @@ import {
   type SecretOwnership,
   parseSecretOwnership,
 } from '../../secretOwnership.js'
-import {
-  CODEX_CONNECTION_REF_ANNOTATION,
-  CODEX_UNASSIGNED_CONNECTION_KEY,
-  assertCodexConnectionKey,
-  isCodexUnassignedConnectionKey,
-} from '../../services/codexSubscriptionConnection.js'
-import {
-  GROK_UNASSIGNED_CONNECTION_KEY,
-  assertGrokConnectionKey,
-  isGrokUnassignedConnectionKey,
-} from '../../services/grokSubscriptionConnection.js'
+import { resolveRecipeGrantTransition } from '../../services/recipeGrantTransition.js'
 import {
   ensureRegistryPullSecrets,
   platformWorkloadNamespaces,
 } from '../../services/registryPullSecretService.js'
 import { K8sNotFoundError } from '../../services/resourceService.js'
 import { invalidSecretDataKeyReason } from '../../services/secretKeys.js'
-import {
-  SUBSCRIPTION_CONNECTION_REF_ANNOTATION,
-  collectRecipeOauthBrokerProviders,
-  readSubscriptionConnectionRef,
-} from '../../services/subscriptionGrantIdentity.js'
+import { collectRecipeOauthBrokerProviders } from '../../services/subscriptionGrantIdentity.js'
 import {
   validateWorkflowRecipeEgressPreflight,
   validateWorkflowRecipeLimits,
@@ -1263,218 +1249,11 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
   return errors
 }
 
-function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
-  if (!spec) return false
-  return collectRecipeOauthBrokerProviders(spec).includes('codex-subscription')
-}
-
-function recipeUsesGrokBroker(spec?: Record<string, unknown>): boolean {
-  if (!spec) return false
-  return collectRecipeOauthBrokerProviders(spec).includes('grok-subscription')
-}
-
-function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
-  const sdk = spec?.pluginWorkloadSdk
-  return Boolean(sdk && typeof sdk === 'object' && !Array.isArray(sdk))
-}
-
-function recipeAnnotationStrings(
-  annotations: Record<string, unknown> | undefined
-): Record<string, string> | undefined {
-  if (!annotations) return undefined
-  const out: Record<string, string> = Object.create(null)
-  const alias = annotations[CODEX_CONNECTION_REF_ANNOTATION]
-  const canonical = annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION]
-  if (typeof alias === 'string') out[CODEX_CONNECTION_REF_ANNOTATION] = alias
-  if (typeof canonical === 'string') out[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] = canonical
-  return out
-}
-
-function readRequestedCodexRecipeGrant(body: RecipeBody): string {
-  const result = readSubscriptionConnectionRef({
-    provider: 'codex-subscription',
-    annotations: recipeAnnotationStrings(body.metadata?.annotations),
-  })
-  if (!result.ok) {
-    throw new RecipeGrantAnnotationDisagreeError(result.message)
-  }
-  return result.connectionKey
-}
-
-class RecipeGrantAnnotationDisagreeError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'RecipeGrantAnnotationDisagreeError'
-  }
-}
-
-function validateCodexRecipeGrant(
-  body: RecipeBody,
-  opts?: { allowOmittedGrant?: boolean }
-): ValidationError[] {
-  if (!recipeUsesCodexBroker(body.spec)) return []
-  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
-  let key: string
-  try {
-    key = readRequestedCodexRecipeGrant(body)
-  } catch (err) {
-    if (err instanceof RecipeGrantAnnotationDisagreeError) {
-      return [
-        {
-          field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
-          rule: 'subscriptionAnnotationsDisagree',
-          message: err.message,
-        },
-      ]
-    }
-    throw err
-  }
-  if (isCodexUnassignedConnectionKey(key)) {
-    return [
-      {
-        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
-        rule: 'codexRecipeGrantRequired',
-        message: 'Codex subscription recipes must choose an existing ChatGPT grant',
-      },
-    ]
-  }
-  try {
-    assertCodexConnectionKey(key)
-  } catch {
-    return [
-      {
-        field: `metadata.annotations.${CODEX_CONNECTION_REF_ANNOTATION}`,
-        rule: 'codexRecipeGrantInvalid',
-        message: 'clerum.io/codex-connection-ref is not a valid connection key',
-      },
-    ]
-  }
-  return []
-}
-
-function bodyHasCodexGrantAnnotation(body: RecipeBody): boolean {
-  const annotations = body.metadata?.annotations
-  if (!annotations) return false
-  return (
-    Object.prototype.hasOwnProperty.call(annotations, CODEX_CONNECTION_REF_ANNOTATION) ||
-    Object.prototype.hasOwnProperty.call(annotations, SUBSCRIPTION_CONNECTION_REF_ANNOTATION)
-  )
-}
-
-function readRequestedGrokRecipeGrant(body: RecipeBody): string {
-  const result = readSubscriptionConnectionRef({
-    provider: 'grok-subscription',
-    annotations: recipeAnnotationStrings(body.metadata?.annotations),
-  })
-  if (!result.ok) {
-    throw new RecipeGrantAnnotationDisagreeError(result.message)
-  }
-  return result.connectionKey
-}
-
-function validateGrokRecipeGrant(
-  body: RecipeBody,
-  opts?: { allowOmittedGrant?: boolean }
-): ValidationError[] {
-  if (!recipeUsesGrokBroker(body.spec)) return []
-  if (opts?.allowOmittedGrant && !bodyHasCodexGrantAnnotation(body)) return []
-  let key: string
-  try {
-    key = readRequestedGrokRecipeGrant(body)
-  } catch (err) {
-    if (err instanceof RecipeGrantAnnotationDisagreeError) {
-      return [
-        {
-          field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
-          rule: 'subscriptionAnnotationsDisagree',
-          message: err.message,
-        },
-      ]
-    }
-    throw err
-  }
-  if (isGrokUnassignedConnectionKey(key) || key === GROK_UNASSIGNED_CONNECTION_KEY) {
-    return [
-      {
-        field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
-        rule: 'grokRecipeGrantRequired',
-        message: 'Grok subscription recipes must choose an existing Grok grant',
-      },
-    ]
-  }
-  try {
-    assertGrokConnectionKey(key)
-  } catch {
-    return [
-      {
-        field: `metadata.annotations.${SUBSCRIPTION_CONNECTION_REF_ANNOTATION}`,
-        rule: 'grokRecipeGrantInvalid',
-        message: 'clerum.io/subscription-connection-ref is not a valid connection key',
-      },
-    ]
-  }
-  return []
-}
-
-function sanitizeRecipeCodexAnnotation(
-  body: RecipeBody,
-  currentAnnotations?: Record<string, string>,
-  currentSpec?: Record<string, unknown>
-): Record<string, string> {
-  const grokMirrored = (key: string) => ({
-    [CODEX_CONNECTION_REF_ANNOTATION]: '',
-    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
-  })
-  if (recipeUsesGrokBroker(body.spec)) {
-    if (!bodyHasCodexGrantAnnotation(body)) return {}
-    const incoming = readRequestedGrokRecipeGrant(body)
-    return grokMirrored(isGrokUnassignedConnectionKey(incoming) ? '' : incoming)
-  }
-  const mirrored = (key: string) => ({
-    [CODEX_CONNECTION_REF_ANNOTATION]: key,
-    [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
-  })
-  if (recipeUsesCodexBroker(body.spec)) {
-    if (!bodyHasCodexGrantAnnotation(body)) {
-      if (recipeUsesGrokBroker(currentSpec)) return mirrored('')
-      return {}
-    }
-    const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
-    const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
-    const canonical = (annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] ?? '').trim()
-    if (canonical && alias && canonical !== alias) {
-      throw new RecipeGrantAnnotationDisagreeError('subscription connection annotations disagree')
-    }
-    // Grok writers emit canonical only. A missing Codex alias is leftover only
-    // when the previous spec was Grok — not when a Codex writer sent the
-    // canonical key alone.
-    if (recipeUsesGrokBroker(currentSpec) && !alias) return mirrored('')
-    const incoming = readRequestedCodexRecipeGrant(body)
-    return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
-  }
-  const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
-  const leavingGrok = recipeUsesGrokBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
-  if (leavingCodex || leavingGrok) {
-    return mirrored('')
-  }
-  if (bodyHasCodexGrantAnnotation(body)) {
-    const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
-    const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
-    // This path is not a Codex recipe. Missing alias must not promote a
-    // canonical leftover onto the Codex alias.
-    if (!alias) return mirrored('')
-    const incoming = readRequestedCodexRecipeGrant(body)
-    return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
-  }
-  void currentAnnotations
-  return {}
-}
-
 function sanitizeRecipeBody(
   body: RecipeBody,
+  grantAnnotations: Record<string, string>,
   currentLabels?: Record<string, string>,
-  currentAnnotations?: Record<string, string>,
-  currentSpec?: Record<string, unknown>
+  currentAnnotations?: Record<string, string>
 ): {
   metadata: { name: string; labels?: Record<string, string>; annotations: Record<string, string> }
   spec: Record<string, unknown>
@@ -1498,7 +1277,7 @@ function sanitizeRecipeBody(
       ...(sanitizedLabels ? { labels: sanitizedLabels } : {}),
       annotations: {
         ...(currentAnnotations ?? {}),
-        ...sanitizeRecipeCodexAnnotation(body, currentAnnotations, currentSpec),
+        ...grantAnnotations,
       },
     },
     spec: body.spec as Record<string, unknown>,
@@ -1785,9 +1564,9 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ valid: false, errors })
         return
       }
-      const grantErrors = [...validateCodexRecipeGrant(body), ...validateGrokRecipeGrant(body)]
-      if (grantErrors.length > 0) {
-        res.status(422).json({ valid: false, errors: grantErrors })
+      const grant = resolveRecipeGrantTransition({ body })
+      if (!grant.ok) {
+        res.status(422).json({ valid: false, errors: grant.errors })
         return
       }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
@@ -1971,9 +1750,9 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = [...validateCodexRecipeGrant(body), ...validateGrokRecipeGrant(body)]
-      if (grantErrors.length > 0) {
-        res.status(422).json({ errors: grantErrors })
+      const grant = resolveRecipeGrantTransition({ body })
+      if (!grant.ok) {
+        res.status(422).json({ errors: grant.errors })
         return
       }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
@@ -2033,7 +1812,7 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       // The reconciler still independently splits the rendered resources:
       //   - MCP workloads (transport) → mcp-server
       //   - non-MCP workloads + PVCs  → sandbox-recipes
-      const sanitized = sanitizeRecipeBody(body)
+      const sanitized = sanitizeRecipeBody(body, grant.annotations)
       const created = await gateway.createResource(PLURAL, sanitized, RECIPE_CRD_NAMESPACE)
       res
         .status(201)
@@ -2081,14 +1860,6 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
         res.status(422).json({ errors })
         return
       }
-      const grantErrors = [
-        ...validateCodexRecipeGrant(body, { allowOmittedGrant: true }),
-        ...validateGrokRecipeGrant(body, { allowOmittedGrant: true }),
-      ]
-      if (grantErrors.length > 0) {
-        res.status(422).json({ errors: grantErrors })
-        return
-      }
       const egressErrors = await validateWorkflowRecipeEgressPreflight(body.spec)
       if (egressErrors.length > 0) {
         res.status(422).json({ errors: egressErrors })
@@ -2115,6 +1886,25 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
       // Discover the canonical recipe resource and update it in sandbox-recipes.
       try {
         const { ns, resource } = await findRecipeNamespace(req.params.name)
+        const currentMeta =
+          isPlainObject(resource) && isPlainObject(resource.metadata)
+            ? resource.metadata
+            : undefined
+        const currentLabels = stringLabels(currentMeta?.labels)
+        const currentAnnotations = stringLabels(currentMeta?.annotations)
+        const currentSpec =
+          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
+        // Grant identity transitions depend on the stored recipe (provider
+        // change, broker→static). Resolve before any pull-secret mint so a 422
+        // leaves no side effect.
+        const grant = resolveRecipeGrantTransition({
+          body,
+          current: { spec: currentSpec, annotations: currentAnnotations },
+        })
+        if (!grant.ok) {
+          res.status(422).json({ errors: grant.errors })
+          return
+        }
         // Same guard as create: an update is how a recipe FIRST acquires a platform image
         // (edit the workload's image, keep the name), and the stored CRD is what WRC
         // reconciles. Provision AFTER the existence lookup, so a PUT naming a recipe that
@@ -2131,15 +1921,12 @@ export function createAdminRecipesRouter(gateway: K8sGateway): Router {
             return
           }
         }
-        const currentMeta =
-          isPlainObject(resource) && isPlainObject(resource.metadata)
-            ? resource.metadata
-            : undefined
-        const currentLabels = stringLabels(currentMeta?.labels)
-        const currentAnnotations = stringLabels(currentMeta?.annotations)
-        const currentSpec =
-          isPlainObject(resource) && isPlainObject(resource.spec) ? resource.spec : undefined
-        const sanitized = sanitizeRecipeBody(body, currentLabels, currentAnnotations, currentSpec)
+        const sanitized = sanitizeRecipeBody(
+          body,
+          grant.annotations,
+          currentLabels,
+          currentAnnotations
+        )
         const updated = await updateRecipeWithConflictRetry(gateway, req.params.name, sanitized, ns)
         res
           .status(200)

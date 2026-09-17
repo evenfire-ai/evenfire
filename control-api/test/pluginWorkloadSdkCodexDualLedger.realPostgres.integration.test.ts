@@ -145,7 +145,6 @@ describeRealPostgres('Plugin Workload SDK Codex dual ledger on real PostgreSQL',
       },
       getConnection: getSafeCodexSubscriptionConnection,
       getModelState: getCodexCatalogModelState,
-      resolveConnectionKey: async () => 'deployment-default',
       resolveAssignment: async () => ({
         liveBrokerProviders: ['codex-subscription'],
         liveConnectionRef: 'deployment-default',

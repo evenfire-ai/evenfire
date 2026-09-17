@@ -4,7 +4,6 @@ import request from 'supertest'
 import {
   createMcpHostLlmProviderAttemptRoutes,
   resolveHostAssignedAssignment,
-  resolveHostAssignedConnectionKey,
 } from '../src/routes/mcp-host/llmProviderAttempts.routes.js'
 import { LlmProviderAttemptAuthorizeError } from '../src/services/llmProviderAttemptAuthorizer.js'
 import * as authorizer from '../src/services/llmProviderAttemptAuthorizer.js'
@@ -175,7 +174,7 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
   })
 })
 
-describe('resolveHostAssignedConnectionKey', () => {
+describe('resolveHostAssignedAssignment', () => {
   it('reads connectionRef from a static primary with a Codex fallback', async () => {
     const gateway = {
       getResource: vi.fn().mockResolvedValue({
@@ -206,58 +205,42 @@ describe('resolveHostAssignedConnectionKey', () => {
     })
   })
 
-  it('fails closed when recipe subscription annotations disagree', async () => {
-    const gateway = {
-      getResource: vi.fn().mockResolvedValue({
-        metadata: {
-          annotations: {
-            'clerum.io/codex-connection-ref': 'team-plus',
-            'clerum.io/subscription-connection-ref': 'other-key',
-          },
-        },
-        spec: { agent: { provider: 'codex-subscription' } },
-      }),
-    }
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
-  })
-
   it('reads the Host connectionRef and treats a missing field as unassigned', async () => {
     const gateway = {
       getResource: vi.fn().mockResolvedValue({
         spec: { model: { provider: 'codex-subscription', connectionRef: 'team-plus' } },
       }),
     }
-    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-a')).resolves.toBe('team-plus')
+    await expect(resolveHostAssignedAssignment(gateway, 'agent-a')).resolves.toMatchObject({
+      liveConnectionRef: 'team-plus',
+    })
 
     gateway.getResource.mockResolvedValueOnce({
       spec: { model: { provider: 'codex-subscription' } },
     })
-    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-b')).resolves.toBe('unassigned')
-
-    gateway.getResource.mockResolvedValueOnce({
-      spec: { model: { provider: 'codex-subscription', connectionRef: 'unassigned' } },
+    await expect(resolveHostAssignedAssignment(gateway, 'agent-b')).resolves.toMatchObject({
+      liveConnectionRef: 'unassigned',
     })
-    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-c')).resolves.toBe('unassigned')
-
-    gateway.getResource.mockResolvedValueOnce({
-      spec: { model: { provider: 'codex-subscription', connectionRef: 'deployment-default' } },
-    })
-    await expect(resolveHostAssignedConnectionKey(gateway, 'agent-d')).resolves.toBe(
-      'deployment-default'
-    )
   })
 
-  it('attests a recipe caller from the codex-connection-ref annotation', async () => {
+  it('returns recipe broker targets and raw annotations for the authorizer to attest', async () => {
+    const annotations = {
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'other-key',
+    }
     const gateway = {
       getResource: vi.fn().mockResolvedValue({
-        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
+        metadata: { annotations },
+        spec: { agent: { provider: 'codex-subscription' } },
       }),
     }
     await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('team-plus')
+      resolveHostAssignedAssignment(gateway, 'sandbox-recipes/codex-recipe')
+    ).resolves.toEqual({
+      liveBrokerProviders: ['codex-subscription'],
+      liveConnectionRef: 'unassigned',
+      annotations,
+    })
     expect(gateway.getResource).toHaveBeenCalledWith(
       'workflowrecipes',
       'codex-recipe',
@@ -265,37 +248,16 @@ describe('resolveHostAssignedConnectionKey', () => {
     )
   })
 
-  it('treats a recipe without the grant annotation as unassigned', async () => {
-    const gateway = {
-      getResource: vi.fn().mockResolvedValue({ metadata: { annotations: {} } }),
-    }
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('unassigned')
-
-    gateway.getResource.mockResolvedValueOnce({
-      metadata: { annotations: { 'clerum.io/codex-connection-ref': '   ' } },
-    })
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/blank-annotation')
-    ).resolves.toBe('unassigned')
-
-    gateway.getResource.mockResolvedValueOnce({})
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/no-metadata')
-    ).resolves.toBe('unassigned')
-  })
-
   it('fails closed when the recipe cannot be attested', async () => {
     const gateway = {
       getResource: vi.fn().mockRejectedValue(Object.assign(new Error('nf'), { code: 404 })),
     }
     await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/ghost-recipe')
+      resolveHostAssignedAssignment(gateway, 'sandbox-recipes/ghost-recipe')
     ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
 
     // Malformed multi-segment refs never reach the gateway.
-    await expect(resolveHostAssignedConnectionKey(gateway, 'ns/name/extra')).rejects.toMatchObject({
+    await expect(resolveHostAssignedAssignment(gateway, 'ns/name/extra')).rejects.toMatchObject({
       code: 'host_binding_mismatch',
     })
   })
@@ -304,44 +266,8 @@ describe('resolveHostAssignedConnectionKey', () => {
     const gateway = {
       getResource: vi.fn().mockRejectedValue(Object.assign(new Error('nf'), { code: 404 })),
     }
-    await expect(resolveHostAssignedConnectionKey(gateway, 'ghost')).rejects.toMatchObject({
+    await expect(resolveHostAssignedAssignment(gateway, 'ghost')).rejects.toMatchObject({
       code: 'host_binding_mismatch',
     })
-  })
-
-  it('attests the recipe annotation even when an SDK grant would disagree', async () => {
-    const gateway = {
-      getResource: vi.fn().mockResolvedValue({
-        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
-        spec: { pluginWorkloadSdk: { family: 'promptBridge' } },
-      }),
-    }
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('team-plus')
-  })
-
-  it('keeps a recipes-only annotation as identity', async () => {
-    const gateway = {
-      getResource: vi.fn().mockResolvedValue({
-        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
-        spec: { agent: { provider: 'codex-subscription', model: 'gpt-5.3-codex' } },
-      }),
-    }
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('team-plus')
-  })
-
-  it('attests a leftover SDK annotation as identity (spend still uses getLive)', async () => {
-    const gateway = {
-      getResource: vi.fn().mockResolvedValue({
-        metadata: { annotations: { 'clerum.io/codex-connection-ref': 'team-plus' } },
-        spec: { pluginWorkloadSdk: { family: 'promptBridge' } },
-      }),
-    }
-    await expect(
-      resolveHostAssignedConnectionKey(gateway, 'sandbox-recipes/codex-recipe')
-    ).resolves.toBe('team-plus')
   })
 })

@@ -49,6 +49,7 @@ import {
   RecipeCodexGrantIdentityError,
   publishRecipeGrantIdentity,
 } from '../../services/recipeCodexGrantIdentity.js'
+import { collectRecipeOauthBrokerProviders } from '../../services/subscriptionGrantIdentity.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import {
   type EmitHostSpecIncoherenceTolerated,
@@ -409,28 +410,38 @@ async function publishPromptBridgeGrantIdentity(input: {
   recipeName: string
   nextRef: string
   provider?: string
+  /**
+   * Upsert rejects a broker target whose provider differs from the recipe's
+   * agent / step-agent broker. Delete skips the publish instead: the grant row
+   * is already gone and the agent owns the annotation.
+   */
+  onProviderConflict: 'reject' | 'skip'
 }): Promise<{ error?: { status: number; error: string } }> {
+  let recipeBrokers: string[]
+  try {
+    const recipe = (await input.gateway.getResource(
+      'workflowrecipes',
+      input.recipeName,
+      input.recipeNamespace
+    )) as { spec?: unknown } | null
+    recipeBrokers = collectRecipeOauthBrokerProviders(
+      isPlainObject(recipe?.spec) ? recipe.spec : {}
+    )
+  } catch (err) {
+    log.error(
+      { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
+      'failed to read WorkflowRecipe before publishing grant identity'
+    )
+    return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
+  }
+  if (input.provider && recipeBrokers.length > 0 && !recipeBrokers.includes(input.provider)) {
+    if (input.onProviderConflict === 'skip') return {}
+    return { error: { status: 400, error: 'oauth_broker_provider_conflict' } }
+  }
   let next = input.nextRef
   if (!next) {
-    let recipeAgent: string | undefined
-    try {
-      const recipe = (await input.gateway.getResource(
-        'workflowrecipes',
-        input.recipeName,
-        input.recipeNamespace
-      )) as { spec?: { agent?: { provider?: string } } }
-      recipeAgent =
-        typeof recipe.spec?.agent?.provider === 'string' ? recipe.spec.agent.provider : undefined
-    } catch (err) {
-      log.error(
-        { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
-        'failed to read WorkflowRecipe before publishing grant identity'
-      )
-      return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
-    }
-    if (recipeAgent === 'codex-subscription' || recipeAgent === 'grok-subscription') {
-      return {}
-    }
+    // Do not unassign a recipe whose agent (or any step agent) owns the grant.
+    if (recipeBrokers.length > 0) return {}
     next = 'unassigned'
   }
   try {
@@ -641,6 +652,7 @@ export function createAdminPluginWorkloadSdkRouter(
           recipeName,
           nextRef: brokerConnectionRef,
           provider: brokerTarget?.provider ?? brokerProviders[0],
+          onProviderConflict: 'reject',
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })
@@ -922,6 +934,7 @@ export function createAdminPluginWorkloadSdkRouter(
           recipeName,
           nextRef: remainingTarget?.connectionRef ?? '',
           provider: remainingTarget?.provider,
+          onProviderConflict: 'skip',
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })

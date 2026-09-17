@@ -110,7 +110,6 @@ export type LlmProviderAttemptAuthorizerDeps = {
   withTransaction: typeof withTransaction
   getConnection: typeof getSafeCodexSubscriptionConnection
   getModelState: typeof getCodexCatalogModelState
-  resolveConnectionKey: (hostRef: string) => Promise<string>
   /**
    * Live oauth-broker targets on the Host/recipe. Required: a missing
    * assignment must not fall back to `request.provider` (that made D6 a no-op).
@@ -133,7 +132,6 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   withTransaction,
   getConnection: getSafeCodexSubscriptionConnection,
   getModelState: getCodexCatalogModelState,
-  resolveConnectionKey: async () => CODEX_UNASSIGNED_CONNECTION_KEY,
   resolveAssignment: async () => ({
     liveBrokerProviders: [],
     liveConnectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,

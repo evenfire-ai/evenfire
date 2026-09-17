@@ -962,6 +962,35 @@ describe('admin Codex subscription routes', () => {
     expect(res.body).toEqual({ error: 'no_grant' })
   })
 
+  it('Grok metadata PATCH reports only Grok Hosts assigned to a same-named key', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValueOnce({
+      rows: [safeCreatedRow('team-shared', 'Shared')],
+      rowCount: 1,
+    })
+    const gateway = makeGateway()
+    gateway.listResource.mockResolvedValue([
+      {
+        metadata: { name: 'codex-host-a' },
+        spec: {
+          model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-shared' },
+        },
+      },
+      {
+        metadata: { name: 'grok-host-b' },
+        spec: {
+          model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-shared' },
+        },
+      },
+    ])
+    const res = await request(makeAuthedApp(gateway))
+      .patch('/admin/llm/providers/grok-subscription/connections/team-shared')
+      .send({ displayName: 'Shared' })
+    expect(res.status).toBe(200)
+    expect(res.body.assignedHosts).toEqual([{ name: 'grok-host-b' }])
+    assertNoLeak(res.body)
+  })
+
   it('lists grant models and toggles enabled', async () => {
     oauth.getConnection.mockResolvedValue({
       id: 'id-codex-aaa',

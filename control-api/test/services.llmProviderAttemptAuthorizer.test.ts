@@ -112,12 +112,17 @@ function body(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function deps(
-  overrides: Partial<LlmProviderAttemptAuthorizerDeps> = {}
-): LlmProviderAttemptAuthorizerDeps {
+// `resolveConnectionKey` is a test-only convenience that feeds the default
+// `resolveAssignment`; the authorizer itself only consumes `resolveAssignment`.
+function deps({
+  resolveConnectionKey: resolveConnectionKeyOverride,
+  ...overrides
+}: Partial<LlmProviderAttemptAuthorizerDeps> & {
+  resolveConnectionKey?: (hostRef: string) => Promise<string>
+} = {}): LlmProviderAttemptAuthorizerDeps {
   const db = { query: vi.fn() }
   const resolveConnectionKey =
-    overrides.resolveConnectionKey ?? vi.fn().mockResolvedValue('deployment-default')
+    resolveConnectionKeyOverride ?? vi.fn().mockResolvedValue('deployment-default')
   const resolveAssignment =
     overrides.resolveAssignment ??
     (async (hostRef: string) => ({
@@ -143,7 +148,6 @@ function deps(
       claims: { jti: 'jti-ticket' },
     }),
     ...overrides,
-    resolveConnectionKey,
     resolveAssignment,
   }
 }
@@ -567,6 +571,34 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-a')
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-b')
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-c')
+  })
+
+  it('attests recipe grant annotations and fails closed when alias and canonical disagree', async () => {
+    const disagree = deps({
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'unassigned',
+        annotations: {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'other-key',
+        },
+      }),
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), body(), disagree)).rejects.toMatchObject({
+      code: 'host_binding_mismatch',
+    })
+    expect(disagree.getConnection).not.toHaveBeenCalled()
+
+    const aliasOnly = deps({
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'unassigned',
+        annotations: { 'clerum.io/codex-connection-ref': 'deployment-default' },
+      }),
+    })
+    const result = await authorizeLlmProviderAttempt(claims(), body(), aliasOnly)
+    expect(result.executionTicket).toBe('ticket.jwt')
+    expect(aliasOnly.getConnection).toHaveBeenCalledWith(expect.anything(), 'deployment-default')
   })
 
   it('evaluates budget with a null user_id even when claims.sub is present', async () => {
