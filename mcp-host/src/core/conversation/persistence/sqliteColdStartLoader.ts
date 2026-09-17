@@ -112,6 +112,15 @@ function validRpcApprovalSource(value: unknown): boolean {
   }
 }
 
+function expectsV2ApprovalSource(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, 'authorityV2')
+  )
+}
+
 export class SqliteColdStartLoader implements ColdStartLoader {
   constructor(
     private readonly store: ConversationStore,
@@ -161,9 +170,13 @@ export class SqliteColdStartLoader implements ColdStartLoader {
         expiresAt: listing.expiresAt,
       }
 
-      if (listing.channelType === 'rpc' && !validRpcApprovalSource(listing.sourceMessage)) {
+      if (
+        listing.channelType === 'rpc' &&
+        expectsV2ApprovalSource(listing.sourceMessage) &&
+        !validRpcApprovalSource(listing.sourceMessage)
+      ) {
         await this.notifyExpired(entry)
-        this.releaseDropped(listing.sessionKey)
+        await this.releaseDropped(listing.sessionKey, entry.request_id)
         continue
       }
 
@@ -179,7 +192,7 @@ export class SqliteColdStartLoader implements ColdStartLoader {
         listing.expiresAt <= now
       ) {
         await this.notifyExpired(entry)
-        this.releaseDropped(listing.sessionKey)
+        await this.releaseDropped(listing.sessionKey, entry.request_id)
         continue
       }
 
@@ -190,7 +203,7 @@ export class SqliteColdStartLoader implements ColdStartLoader {
           const probe = await this.opts.spilloverResolver.probe(refs)
           if (probe.expired.length > 0) {
             await this.notifyExpired(entry)
-            this.releaseDropped(listing.sessionKey)
+            await this.releaseDropped(listing.sessionKey, entry.request_id)
             continue
           }
         }
@@ -208,15 +221,19 @@ export class SqliteColdStartLoader implements ColdStartLoader {
    * every boot). Left unbounded this fills the pinned set → `CacheOverflowError`
    * on the next insert → host-wide refusal of new sessions (sqlite-stores-4).
    *
-   * Transition the cached conversation to Idle (its approval is gone) and unpin
-   * so the slot becomes reclaimable. Both ops are sync RAM-only; in-memory
-   * stores treat `unpin` as a no-op.
+   * Transition the cached conversation to Idle, durably resolve the dropped
+   * approval, and unpin so the slot becomes reclaimable. In-memory stores treat
+   * the durable resolution as a no-op and `unpin` as a no-op.
    */
-  private releaseDropped(sessionKey: string): void {
+  private async releaseDropped(sessionKey: string, requestId: string): Promise<void> {
     const conv = this.store.get(sessionKey)
     if (conv) {
       conv.state = ConversationState.Idle
       conv.pending_approval = undefined
+      conv.activeTaskId = undefined
+      conv.traceContext = null
+      conv.updated_at = new Date()
+      await this.store.persistApprovalResolved(conv, requestId, 'cancel')
     }
     this.store.unpin(sessionKey)
   }

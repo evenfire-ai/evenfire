@@ -173,6 +173,87 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     }
   })
 
+  it('rehydrates a legacy v1 desktop approval after restart', async () => {
+    const userId = '55555555-5555-4555-8555-555555555555'
+    const sessionKey = `${userId}:rpc:agent:default`
+    const sourceMessage = {
+      content: 'legacy approval turn',
+      channelType: 'rpc',
+      channelId: 'agent',
+      sender: userId,
+      timestamp: new Date().toISOString(),
+      messageId: 'legacy-message-1',
+      hostRef: 'chatllm',
+    }
+    const podA = makeSqliteStore({ dbPath, cacheSize: 4 })
+    const managerA = new ConversationManager(podA.store)
+    const convA = await managerA.getOrCreate(sessionKey, {
+      userId,
+      channelType: 'rpc',
+      channelId: 'agent',
+      source: 'rpc',
+    })
+    await managerA.startTurn(convA, sourceMessage.content, 'legacy-task')
+    await managerA.suspendForApproval(
+      convA,
+      {
+        request_id: 'req-v1-restart',
+        tool_name: 'shell_exec',
+        tool_call_id: 'tc-v1-restart',
+        parameters: { command: 'printf legacy' },
+        description: 'legacy desktop approval',
+        context_snapshot: [],
+      },
+      sourceMessage
+    )
+    podA.worker.db
+      .prepare('UPDATE pending_approvals SET task_budget = ? WHERE request_id = ?')
+      .run('legacy', 'req-v1-restart')
+    await podA.shutdown()
+
+    const podB = makeSqliteStore({ dbPath, cacheSize: 4 })
+    try {
+      const loader = new SqliteColdStartLoader(podB.store)
+      const rehydrated = await loader.loadPendingApprovals(Date.now())
+
+      expect(rehydrated).toHaveLength(1)
+      expect(rehydrated[0]).toMatchObject({
+        request_id: 'req-v1-restart',
+        task_id: 'legacy-task',
+        source_message: sourceMessage,
+      })
+      expect(rehydrated[0].source_message).not.toHaveProperty('authorityV2')
+      expect(rehydrated[0].approval.legacy_budget).toBe(true)
+
+      const agent = new AgentStateMachine(new MessageQueue(), new TaskLifecycle(), {
+        autoStart: false,
+      })
+      agent.setLLMProvider({
+        completeSingleTurn: async () => ({ content: 'done' }),
+        completeSingleTurnWithTools: async () => ({ type: 'response', content: 'done' }),
+        getProviderType: () => 'openai',
+      } as never)
+      agent.setMcpManager({ getAllTools: () => [], callTool: async () => ({}) } as never)
+      agent.setConversationStore(podB.store)
+      agent.setColdStartLoader(loader)
+      await agent.bootstrap()
+      expect(agent.getPendingApprovals()).toEqual([
+        expect.objectContaining({ requestId: 'req-v1-restart', toolName: 'shell_exec' }),
+      ])
+      await expect(agent.handleDenial(userId, 'req-v1-restart', 'rpc', 'agent')).resolves.toEqual({
+        success: true,
+      })
+
+      const convB = await podB.store.getOrLoad(sessionKey)
+      expect(convB?.state).toBe(ConversationState.Idle)
+      await expect(
+        new ConversationManager(podB.store).startTurn(convB!, 'retry', 'retry-task')
+      ).resolves.toBeDefined()
+    } finally {
+      await podB.shutdown()
+    }
+  })
+
   it('fails closed instead of rehydrating an RPC approval with corrupt authority provenance', async () => {
     const pod = makeSqliteStore({ dbPath, cacheSize: 4 })
     const manager = new ConversationManager(pod.store)
@@ -219,6 +300,20 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
 
     const loader = new SqliteColdStartLoader(pod.store)
     await expect(loader.loadPendingApprovals(Date.now())).resolves.toEqual([])
+    expect(pod.worker.db.prepare('SELECT COUNT(*) AS count FROM pending_approvals').get()).toEqual({
+      count: 0,
+    })
+    expect(
+      pod.worker.db
+        .prepare('SELECT state, active_task_id FROM sessions WHERE session_key = ?')
+        .get(sessionKey)
+    ).toEqual({ state: 'idle', active_task_id: null })
+    const recovered = await pod.store.getOrLoad(sessionKey)
+    expect(recovered?.state).toBe(ConversationState.Idle)
+    expect(recovered?.activeTaskId).toBeUndefined()
+    await expect(
+      new ConversationManager(pod.store).startTurn(recovered!, 'retry', 'retry-task')
+    ).resolves.toBeDefined()
     await pod.shutdown()
   })
 
