@@ -82,6 +82,8 @@ export interface MessageRow {
 }
 
 export interface PendingApprovalRow {
+  /** Nullable for approvals created before migration 014. */
+  task_budget?: string | null
   request_id: string
   session_id: string
   task_id: string
@@ -257,7 +259,12 @@ export type WorkerOp =
       title?: string
     }
   | { kind: 'replace_messages'; sessionId: string; messages: MessageRow[] }
-  | { kind: 'insert_pending_approval'; payload: PendingApprovalRow }
+  | {
+      kind: 'insert_pending_approval'
+      payload: PendingApprovalRow
+      replaceRequestId?: string
+      markAwaitingApproval?: boolean
+    }
   | { kind: 'delete_pending_approval'; requestId: string }
   | { kind: 'load_active_session'; sessionKey: string }
   | {
