@@ -26,4 +26,20 @@ describe('ZaiProvider (OpenAICompatibleProvider)', () => {
   it("getProviderType returns 'zai'", () => {
     expect(makeZai().getProviderType()).toBe('zai')
   })
+
+  it('reports documented image input for glm-5.3-flash on the Coding Plan endpoint', async () => {
+    await expect(makeZai('glm-5.3-flash').getImageInputCapability()).resolves.toEqual({
+      status: 'supported',
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      evidence: 'zai-documented-model-contract',
+    })
+  })
+
+  it('keeps unlisted z.ai models unknown rather than inferring vision', async () => {
+    await expect(makeZai('glm-4.7').getImageInputCapability()).resolves.toEqual({
+      status: 'unknown',
+    })
+    await expect(makeZai().getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+  })
 })

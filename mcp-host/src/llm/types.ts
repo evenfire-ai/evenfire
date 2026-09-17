@@ -21,6 +21,7 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import type { ImageInputCapability } from '../visualInput/policy'
 import type { LlmProvider } from './registryCore'
 
 /**
@@ -63,6 +64,8 @@ export interface ClassifiedError {
  * Single-turn LLM transport. No loop, no tool execution.
  */
 export interface SingleTurnProvider {
+  /** Evidence for this provider instance's model, not a provider-name heuristic. */
+  getImageInputCapability?(signal?: AbortSignal): Promise<ImageInputCapability>
   completeSingleTurn(
     messages: CoreChatMessage[],
     options?: { max_tokens?: number; temperature?: number; signal?: AbortSignal }
@@ -76,6 +79,7 @@ export interface SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse>
 
@@ -105,6 +109,7 @@ export interface SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse>
 

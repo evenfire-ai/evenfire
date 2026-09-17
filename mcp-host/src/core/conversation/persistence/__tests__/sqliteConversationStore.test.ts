@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { PendingApprovalRow } from '../../../../db/worker/protocol'
 import { ConversationState, type PendingApproval, type TraceContextV1 } from '../../../types'
 import { ConversationManager } from '../../conversation'
 import { CacheOverflowError } from '../pinnedLruMap'
+import { reconstructPendingApproval } from '../reconstruct'
 import { type StoreHandle, makeSqliteStore } from './testHelpers'
 
 const SESSION_KEY = 'u-1:rpc:agent-x:chat-1'
@@ -11,6 +13,93 @@ afterEach(async () => {
 })
 
 describe('SqliteConversationStore — basic round-trip', () => {
+  it('persists GFS reread references and durable work without image bytes, then reconstructs the same pending action', async () => {
+    const handle = await freshStore()
+    try {
+      const manager = new ConversationManager(handle.store)
+      const conv = await manager.getOrCreate(SESSION_KEY)
+      await manager.startTurn(conv, 'inspect an image', 'visual-task')
+      const source = {
+        kind: 'gfs' as const,
+        drive: 'main',
+        resourceId: 'a'.repeat(32),
+        gfsUri: `gfs://main/${'a'.repeat(32)}`,
+        version: 3,
+        name: 'neutral.png',
+      }
+      // This boundary test serializes metadata; real decoding is covered separately.
+      const payload = 'GFS-PAYLOAD-MUST-NOT-SURVIVE-SUSPENSION'
+      const approval: PendingApproval = {
+        request_id: 'visual-approval',
+        tool_name: 'shell_exec',
+        tool_call_id: 'pending-action',
+        parameters: { command: 'echo done' },
+        description: 'pending action',
+        task_budget: {
+          elapsedActiveMs: 12,
+          iterationsUsed: 2,
+          durationMs: 10000,
+          maxIterations: 8,
+          visualReadBytes: 1234,
+        },
+        context_snapshot: [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'gfs-read', name: 'clerum__gfs_read', arguments: {} }],
+          },
+          {
+            role: 'tool',
+            name: 'clerum__gfs_read',
+            tool_call_id: 'gfs-read',
+            content: 'image prepared',
+          },
+          {
+            role: 'user',
+            content: 'image',
+            contentParts: [{ type: 'image', mimeType: 'image/png', data: payload, source }],
+          },
+        ],
+        completed_results: [
+          {
+            name: 'clerum__gfs_read',
+            tool_call_id: 'gfs-read',
+            content: 'image prepared',
+            rawContent: 'image prepared',
+            is_error: false,
+            attachments: [
+              {
+                id: 'gfs-image',
+                kind: 'image',
+                mimeType: 'image/png',
+                encoding: 'base64',
+                dataBase64: payload,
+                visualSource: source,
+              },
+            ],
+          },
+        ],
+      }
+      await manager.suspendForApproval(conv, approval)
+      const row = handle.worker.db
+        .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+        .get(approval.request_id) as PendingApprovalRow
+      expect(JSON.stringify(row)).not.toContain(payload)
+      expect(row.context_snapshot).toContain('new_gfs_read_required_after_suspension')
+      expect(row.completed_results).toContain('new_gfs_read_required_after_suspension')
+      const restored = reconstructPendingApproval(row)
+      expect(restored.task_budget?.visualReadBytes).toBe(1234)
+      expect(restored.parameters).toEqual(approval.parameters)
+      expect(restored.request_id).toBe(approval.request_id)
+      expect(restored.tool_call_id).toBe('pending-action')
+      expect(restored.context_snapshot.slice(0, 2)).toEqual(approval.context_snapshot.slice(0, 2))
+      expect(restored.completed_results![0].attachments).toBeUndefined()
+      expect(JSON.stringify(conv.pending_approval)).not.toContain(payload)
+      expect(conv.pending_approval?.completed_results?.[0].attachments).toBeUndefined()
+    } finally {
+      await handle.shutdown()
+    }
+  })
   it('create → suspend → load_active_session preserves state', async () => {
     const handle = await freshStore()
     try {

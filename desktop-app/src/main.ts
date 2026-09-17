@@ -10,7 +10,7 @@ import { createMainWindowCoordinator, createRetryableInitializer } from './mainW
 import { wireMainWindowRendererReadiness } from './mainWindowReadiness.js'
 import { McpOauthCompletionQueue } from './mcpOauthCompletionQueue.js'
 import { initPluginSdkRuntime } from './pluginSdkRuntime.js'
-import { collectInitialProtocolUrls } from './protocolLaunchArgs.js'
+import { collectInitialProtocolUrls, shouldRegisterOsProtocols } from './protocolLaunchArgs.js'
 import { SandboxUiDeepLinkQueue } from './sandboxUiDeepLinkQueue.js'
 import {
   CLERUM_OAUTH_PROTOCOL,
@@ -327,7 +327,7 @@ function handleClerumUrl(rawUrl: string): void {
   focusMainWindow()
 }
 
-registerCustomProtocols()
+if (shouldRegisterOsProtocols(process.argv, app.isPackaged)) registerCustomProtocols()
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {

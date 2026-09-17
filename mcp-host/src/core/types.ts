@@ -6,6 +6,7 @@
  *
  * Phase 1: Pure type definitions — no runtime behavior changes.
  */
+import type { GfsImageSource } from '../visualInput/policy'
 import type { SystemPromptParts } from './reasoning/systemPrompt'
 
 // ─── Message Types ──────────────────────────────────────────
@@ -14,7 +15,7 @@ export type MessageRole = 'system' | 'user' | 'assistant' | 'tool'
 
 export type MessageContentPart =
   | { type: 'text'; text: string }
-  | { type: 'image'; mimeType: 'image/jpeg' | 'image/png'; data: string }
+  | { type: 'image'; mimeType: 'image/jpeg' | 'image/png'; data: string; source?: GfsImageSource }
 
 export interface ChatMessage {
   role: MessageRole
@@ -61,6 +62,8 @@ export interface Attachment {
   sizeBytes?: number
   redactionState?: 'applied' | 'scanned' | 'skipped:binary'
   producer?: string
+  /** Producer-validated provenance; never supplied by model arguments. */
+  visualSource?: GfsImageSource
 }
 
 // ─── Completion Types ───────────────────────────────────────
@@ -497,6 +500,8 @@ export interface TaskExecutionBudgetSnapshot {
   iterationsUsed: number
   durationMs: number
   maxIterations: number
+  /** Cumulative source-read work; payloads are not durable task budget data. */
+  visualReadBytes?: number
 }
 
 export interface PendingApproval {

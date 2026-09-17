@@ -9,6 +9,9 @@
  * Source of truth: STAGE-2-STEP-EXECUTION-ENGINE.md §4.3–§4.4
  */
 import Ajv, { type ValidateFunction } from 'ajv'
+import { logger } from '../logger'
+import { VisualInputBudget } from '../visualInput/policy'
+import { projectInternalToolResult } from './internalToolProjection'
 import {
   AllowedToolsConfig,
   InternalToolDefinition,
@@ -81,6 +84,7 @@ export type McpClientFactory = (server: StepMcpServerRef) => McpClientConnection
 // ─── StepMcpRouter ──────────────────────────────────────────────────────
 
 export class StepMcpRouter {
+  private readBudget = new VisualInputBudget()
   private connections = new Map<string, McpClientConnection>()
   private toolMap = new Map<string, { serverName: string; rawToolName: string }>()
   private internalToolMap = new Map<string, InternalToolDefinition>()
@@ -116,8 +120,7 @@ export class StepMcpRouter {
       } catch (err) {
         // Schema failed to compile — dispatch falls through to runtime arg type-checking.
         // Surface the failure so schema regressions don't pass silently.
-        const message = err instanceof Error ? err.message : String(err)
-        console.warn(`[StepMcpRouter] AJV compile failed for '${tool.name}': ${message}`)
+        logger.warn({ err, toolName: tool.name }, 'Internal tool schema compilation failed')
       }
       // Also register in toolMap for consistent dispatch
       this.toolMap.set(tool.name, {
@@ -135,6 +138,7 @@ export class StepMcpRouter {
     servers: StepMcpServerRef[],
     options: { timeoutMs?: number; signal?: AbortSignal } = {}
   ): Promise<void> {
+    if (this.readBudget.isClosed) this.readBudget = new VisualInputBudget()
     if (servers.length === 0) return
 
     const failed: string[] = []
@@ -243,7 +247,12 @@ export class StepMcpRouter {
         }
       }
       const start = Date.now()
-      const internalResult = await internalTool.execute(args, this.outputDir)
+      const internalResult = projectInternalToolResult(
+        await internalTool.execute(args, this.outputDir, {
+          ...options,
+          readBudget: this.readBudget,
+        })
+      )
       const durationMs = Date.now() - start
       const record: ToolCallRecord = {
         serverName: 'clerum',
@@ -283,6 +292,7 @@ export class StepMcpRouter {
    * Disconnect all servers. Safe to call on unconnected router.
    */
   async disconnect(): Promise<void> {
+    this.readBudget.close()
     const disconnectPromises = [...this.connections.values()].map(client =>
       client.disconnect().catch(() => {
         /* swallow disconnect errors */

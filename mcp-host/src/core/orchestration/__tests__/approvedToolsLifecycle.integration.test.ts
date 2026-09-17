@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TaskExecutor, type TaskExecutorDeps } from '../../../agent/taskExecutor'
 import { config as appConfig } from '../../../config'
+import type { PendingApprovalRow } from '../../../db/worker/protocol'
 import { TaskLifecycle } from '../../../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../../../llm/types'
 import { McpManager } from '../../../mcp/manager'
@@ -9,6 +10,9 @@ import * as boundedValidation from '../../adapters/boundedSchemaValidation'
 import { CompositeToolRegistry, McpToolRegistryAdapter } from '../../adapters/toolRegistryAdapter'
 import { makeFakeConversation } from '../../conversation/__testing__/makeFakeConversation'
 import { ConversationManager } from '../../conversation/conversation'
+import { makeSqliteStore } from '../../conversation/persistence/__tests__/testHelpers'
+import { reconstructPendingApproval } from '../../conversation/persistence/reconstruct'
+import { SqliteConversationStore } from '../../conversation/persistence/sqliteConversationStore'
 import { ApprovalController } from '../../extensions/approvalController'
 import { InLoopContextManager, PressureContextManager } from '../../extensions/contextManager'
 import { UnifiedApprovalGateController } from '../../extensions/mcpApprovalGateController'
@@ -564,9 +568,19 @@ describe('approved catalog across presentation and lifecycle', () => {
     )
   })
 
-  it.each(['approve', 'direct', 'default', 'deny', 'cancel', 'revoke', 'schema-change'] as const)(
+  it.each([
+    'approve',
+    'durable',
+    'direct',
+    'default',
+    'deny',
+    'cancel',
+    'revoke',
+    'schema-change',
+  ] as const)(
     'TaskExecutor %s uses the actual loop and never duplicates the MCP call',
     async decision => {
+      const durable = decision === 'durable' ? makeSqliteStore() : undefined
       const direct = decision === 'direct' || decision === 'default'
       const saved = {
         enableApproval: appConfig.enableApproval,
@@ -662,7 +676,7 @@ describe('approved catalog across presentation and lifecycle', () => {
         const lifecycle = new TaskLifecycle()
         lifecycle.register(task)
         const deps: TaskExecutorDeps = {
-          conversationManager: new ConversationManager(),
+          conversationManager: new ConversationManager(durable?.store),
           llmProvider: provider,
           mcpManager: manager,
           workspaceService: undefined,
@@ -683,7 +697,7 @@ describe('approved catalog across presentation and lifecycle', () => {
           onFail: vi.fn(),
           dynamicEnvProvider: () => ({}),
         }
-        const executor = new TaskExecutor(task, deps)
+        let executor = new TaskExecutor(task, deps)
         await executor.run()
         expect(deps.onFail).not.toHaveBeenCalled()
         expect(executor.executorState).toBe('waiting_approval')
@@ -691,7 +705,24 @@ describe('approved catalog across presentation and lifecycle', () => {
         const approvalId = executor.pendingApproval!.request_id
         expect(approvalId).toBeTruthy()
         expect(remote.calls).not.toHaveBeenCalled()
-        if (decision === 'approve' || direct) {
+        if (durable) {
+          const row = durable.worker.db
+            .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+            .get(approvalId) as PendingApprovalRow
+          const restored = reconstructPendingApproval(row)
+          expect(restored.tool_call_id).toBe(call.id)
+          expect(restored.parameters).toEqual(executor.pendingApproval!.parameters)
+          expect(restored.task_budget).toEqual(executor.pendingApproval!.task_budget)
+          const sessionKey = executor.sessionKey!
+          // A fresh cache and executor force the production cold-load path through SQLite.
+          deps.conversationManager = new ConversationManager(
+            new SqliteConversationStore(durable.persistQueue, { cacheSize: 8 })
+          )
+          executor = new TaskExecutor(task, deps)
+          await executor.rehydrateWaitingApproval(sessionKey, restored)
+          expect(executor.pendingApproval?.request_id).toBe(approvalId)
+        }
+        if (decision === 'approve' || decision === 'durable' || direct) {
           await executor.resumeAfterApproval(false)
           expect(executor.executorState).toBe('completed')
           expect(remote.calls).toHaveBeenCalledTimes(1)
@@ -700,6 +731,10 @@ describe('approved catalog across presentation and lifecycle', () => {
             providerCalls[1].flatMap(message => message.tool_calls ?? []).map(tool => tool.id)
           ).toContain(call.id)
           expect(deps.onApprovalNeeded).toHaveBeenCalledTimes(1)
+          if (durable) {
+            await expect(executor.resumeAfterApproval(false)).rejects.toThrow('Cannot resume')
+            expect(remote.calls).toHaveBeenCalledTimes(1)
+          }
         } else if (decision === 'schema-change') {
           const selected = remote.catalogs
             .get('alpha')!
@@ -737,6 +772,7 @@ describe('approved catalog across presentation and lifecycle', () => {
         }
         expect(deps.onFail).not.toHaveBeenCalled()
       } finally {
+        await durable?.shutdown()
         Object.assign(appConfig, saved)
       }
     }
