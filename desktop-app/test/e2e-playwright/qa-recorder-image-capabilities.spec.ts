@@ -1,5 +1,7 @@
-import { type ElectronApplication, type Page, expect, test } from '@playwright/test'
+import { type ElectronApplication, type Page, type TestInfo, expect, test } from '@playwright/test'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
+import path from 'node:path'
 import {
   FIXTURE_RESPONSE_KIND,
   FIXTURE_TEXT_ONLY_CONTENT,
@@ -12,7 +14,9 @@ import {
 } from './helpers/imageCapabilityEvidence'
 import { buildImageFixture, orderedColorListRegex } from './helpers/qaRecorderImageFixture'
 import {
+  DESKTOP_APP_ROOT,
   EXTERNAL_REST_API_BASE_URL,
+  MAIN_ENTRY,
   RPC_PROXY_BASE_URL,
   assertAllowedTarget,
   configuredHostRef,
@@ -23,6 +27,65 @@ import {
   requireRecorderConfirm,
   screenshotAndLog,
 } from './qa-recorder-helpers'
+
+function instanceBindingCheck(app: ElectronApplication, page: Page, testInfo: TestInfo) {
+  const expectedRun = path.resolve(testInfo.outputPath('electron-isolation'))
+  const expectedData = path.join(expectedRun, 'user-data')
+  const expectedConfig = path.join(expectedRun, 'runtime-config.json')
+  const expectedExecutable = createRequire(path.join(DESKTOP_APP_ROOT, 'package.json'))(
+    'electron'
+  ) as string
+  let firstEnvKey: string | undefined
+  return async () => {
+    // Observe the running processes and IPC configuration, rather than trusting
+    // launch environment variables. This never changes selection or auth state.
+    const identity = await app.evaluate(({ app: electronApp }) => ({
+      pid: process.pid,
+      argv: process.argv,
+      executable: electronApp.getPath('exe'),
+      userData: electronApp.getPath('userData'),
+    }))
+    const runtime = await page.evaluate(async () => {
+      const state = await window.clerum.auth.getRuntimeConfigState()
+      const active = state.options.find(option => option.id === state.activeOptionId)
+      return {
+        storagePath: state.storagePath,
+        envKey: state.envKey,
+        rest: active?.externalRestApiBaseUrl,
+        rpc: active?.rpcProxyBaseUrl,
+      }
+    })
+    expect(identity.pid).toBe(app.process().pid)
+    expect(identity.argv.includes(MAIN_ENTRY)).toBe(true)
+    expect(fs.realpathSync(identity.executable)).toBe(fs.realpathSync(expectedExecutable))
+    expect(path.resolve(identity.userData)).toBe(expectedData)
+    expect(path.resolve(runtime.storagePath)).toBe(expectedConfig)
+    if (runtime.rest !== EXTERNAL_REST_API_BASE_URL || runtime.rpc !== RPC_PROXY_BASE_URL)
+      throw new Error('Desktop effective endpoints do not match the owned #654 lane')
+    expect(runtime.envKey.length).toBeGreaterThan(0)
+    if (firstEnvKey !== undefined) expect(runtime.envKey).toBe(firstEnvKey)
+    firstEnvKey = runtime.envKey
+    fs.writeFileSync(
+      testInfo.outputPath('instance-binding.json'),
+      JSON.stringify(
+        {
+          issue: 654,
+          pid: identity.pid,
+          mainEntry: MAIN_ENTRY,
+          executable: identity.executable,
+          userData: expectedData,
+          config: expectedConfig,
+          envKey: runtime.envKey,
+          rest: runtime.rest,
+          rpc: runtime.rpc,
+        },
+        null,
+        2
+      ),
+      { mode: 0o600 }
+    )
+  }
+}
 
 async function observeCompletedTask(
   page: Page,
@@ -229,6 +292,16 @@ async function selectModel(
 
   // State oracle: the chip now reports the model the catalog selected.
   await expect(modelChip(page)).toHaveAttribute('data-model-id', model)
+  // Selection identity can render before capability refresh settles. Assert
+  // the selected model's visible capability before attempting the next action.
+  if (imageState === 'supported') {
+    await expect(modelChip(page)).not.toHaveAttribute('title', /cannot receive|not verified/i)
+  } else {
+    await expect(modelChip(page)).toHaveAttribute(
+      'title',
+      imageState === 'unsupported' ? /cannot receive images/i : /not verified/i
+    )
+  }
 }
 
 /**
@@ -432,7 +505,10 @@ test('optional QA recorder: Desktop image capability — blocked on text-only mo
   let recordedPage: Page | undefined
 
   try {
-    const launched = await launchDesktopApp(testInfo)
+    const launched = await launchDesktopApp(
+      testInfo,
+      `issue654-minikube${new URL(EXTERNAL_REST_API_BASE_URL).port}`
+    )
     app = launched.app
     recordedPage = launched.page
     // A `const` alias keeps the non-optional type inside `test.step` closures,
@@ -542,14 +618,20 @@ test('image-capabilities fixture: image capability gates the composer and the pr
   let recordedPage: Page | undefined
 
   try {
-    const launched = await launchDesktopApp(testInfo)
+    const launched = await launchDesktopApp(
+      testInfo,
+      `issue654-minikube${new URL(EXTERNAL_REST_API_BASE_URL).port}`
+    )
     app = launched.app
     recordedPage = launched.page
     // A `const` alias keeps the non-optional type inside the `test.step`
     // closures below, where a captured `let` would widen back to `| undefined`.
     const page = launched.page
 
+    const assertBinding = instanceBindingCheck(app, page, testInfo)
+    await assertBinding()
     await signIn(page)
+    await assertBinding()
     await openConfiguredAgentChat(page, env.hostRef)
 
     await test.step('a model with no image evidence refuses the picker and sends nothing', async () => {
@@ -597,6 +679,7 @@ test('image-capabilities fixture: image capability gates the composer and the pr
     await test.step('the accepted send is answered from the delivered pixels and reaches the provider once', async () => {
       const before = readImageCapabilityEvidence(env)
 
+      await assertBinding()
       await sendButton(page).click()
       await expect(attachmentChips(page)).toHaveCount(0, { timeout: 30_000 })
 
@@ -652,6 +735,7 @@ test('image-capabilities fixture: image capability gates the composer and the pr
       await expect(sendButton(page)).toBeEnabled({ timeout: 20_000 })
 
       const before = readImageCapabilityEvidence(env)
+      await assertBinding()
       await sendButton(page).click()
 
       const response = await expectSingleExchange(page)
