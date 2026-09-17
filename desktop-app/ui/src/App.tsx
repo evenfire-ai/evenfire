@@ -21,6 +21,7 @@ import { ConfirmDialog } from '@components/ConfirmDialog'
 import { GfsImagePreview } from '@components/GfsImagePreview'
 import { PluginConsentModal } from '@components/PluginConsentModal'
 import type { PluginConsentRequest } from '@components/PluginConsentModal/types'
+import { RightRailShell } from '@components/RightRailShell'
 import { SidebarNav } from '@components/SidebarNav'
 import { TitlebarActionsPortal, WindowTitleBar } from '@components/WindowTitleBar'
 import { WorkspaceTabStrip } from '@components/WorkspaceTabStrip'
@@ -28,7 +29,11 @@ import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { THEME_STORAGE_KEY } from '@constants/theme'
 import { useAgentChatActionsValue } from '@hooks/useAgentChatActionsValue'
 import { useAppController } from '@hooks/useAppController'
-import { useChatDrawerResize } from '@hooks/useChatDrawerResize'
+import {
+  CHAT_DRAWER_DOM_FLOOR,
+  CHAT_DRAWER_EMBED_FLOOR,
+  useChatDrawerResize,
+} from '@hooks/useChatDrawerResize'
 import { useWindowFocusBridge } from '@hooks/useWindowFocusBridge'
 import type { ChatLocalMatch } from '@lib/chatLocalSearch'
 import { buildLoadedChatSemanticModels } from '@lib/chatMessageSemantics'
@@ -390,6 +395,13 @@ export function App() {
         }
         return
       }
+      // R4 (mini-spec 04a §D): revealing a chat tab full-screen collapses the
+      // drawer BEFORE the chat shows. Effective visibility already drops this
+      // commit because `drawerAvailable` goes false once a chat tab is active;
+      // clearing the open INTENT here keeps the drawer from silently re-opening
+      // when the user later returns to a non-chat tab (going to a chat is an
+      // explicit focus change; R5's "intact" only spans non-chat ↔ non-chat).
+      setChatDrawerOpen(false)
       leaveSandboxForChat()
       if (agentRef) {
         vm.handleSelectChatAgent(
@@ -616,32 +628,60 @@ export function App() {
   const isAgentChatView =
     (vm.navItem === DESKTOP_ROUTES.agents && Boolean(vm.selectedAgent)) ||
     (vm.navItem === DESKTOP_ROUTES.chat && Boolean(vm.selectedAgent))
-  // The chat drawer coexists with the live app only on the `apps` route. It is
-  // an orthogonal boolean axis over the universal store's chat sub-slice /
+  // Universal drawer availability (R2, mini-spec 04a §D): the chat drawer is
+  // available over ANY non-chat tab (app, files, settings), never on a chat tab
+  // (the chat is already the tab's content). An empty workspace (no active tab)
+  // maps to the chat home, so it is not available there either. It is an
+  // orthogonal boolean axis over the universal store's chat sub-slice /
   // <ChatPage> — never a second tab store, never a foreground/background module.
-  const chatDrawerAvailable = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
+  const drawerAvailable =
+    vm.activeWorkspaceTab !== undefined && vm.activeWorkspaceTab.kind !== 'chat'
+  // The drawer coexists with a NATIVE app embed only on the live `apps` route.
+  // This narrower predicate keeps the embed-specific machinery (anti-flash
+  // bounds gate, embed-measured top, wider content floor) scoped to app tabs; on
+  // DOM tabs (files/settings/apps-picker) there is no embed to ack or measure.
+  const drawerHasEmbed = vm.navItem === DESKTOP_ROUTES.apps && Boolean(activeSandboxUiApp)
   // Intention (what the user asked for) is kept separate from effective
-  // visibility. `chatDrawerDesired` is the user's open intent on an app-live
-  // route; below the minimum panel width the drawer can't coexist with the embed
+  // visibility. `chatDrawerDesired` is the user's open intent on a drawer-capable
+  // tab; below the minimum panel width the drawer can't coexist with the content
   // so it is SUPPRESSED — hidden without clearing the intent — and reappears on
   // re-widen. A manual close flips `chatDrawerOpen`, so it stays closed. The
   // resize hook measures the panel while the drawer is DESIRED (not only while
   // visible) so it can observe the re-widen; `panelTooNarrow` comes from that
   // measurement, and visibility derives from it — no dependency cycle with the
   // hook's `active` input, which is the desire alone.
-  const chatDrawerDesired = chatDrawerAvailable && chatDrawerOpen
-  // Session-only drawer sizing (always docked beside the native embed). Width is
+  const chatDrawerDesired = drawerAvailable && chatDrawerOpen
+  // Per-kind content floor (§A3): app tabs reserve the embed's legible floor; DOM
+  // tabs reserve a smaller floor, so a chat+DOM split survives narrower windows.
+  const drawerContentFloor = drawerHasEmbed ? CHAT_DRAWER_EMBED_FLOOR : CHAT_DRAWER_DOM_FLOOR
+  // Session-only drawer sizing (always docked beside the tab content). Width is
   // not persisted by design; it resets to the default each launch.
-  const chatDrawerResize = useChatDrawerResize(contentPanelRef, chatDrawerDesired)
+  const chatDrawerResize = useChatDrawerResize(
+    contentPanelRef,
+    chatDrawerDesired,
+    drawerContentFloor
+  )
   const chatDrawerVisible = chatDrawerDesired && !chatDrawerResize.panelTooNarrow
   // Can a gesture be diverted INTO the drawer right now? Only if it is a valid
-  // surface: app live AND wide enough to render. Kept SEPARATE from the hook's
-  // `active` input on purpose — folding `!panelTooNarrow` into `chatDrawerAvailable`
-  // or `chatDrawerDesired` would stop the ResizeObserver from observing the
-  // re-widen, turning "suppressed" into "never returns".
-  const chatDrawerDivertable = chatDrawerAvailable && !chatDrawerResize.panelTooNarrow
+  // surface: drawer available AND wide enough to render. Kept SEPARATE from the
+  // hook's `active` input on purpose — folding `!panelTooNarrow` into
+  // `drawerAvailable` or `chatDrawerDesired` would stop the ResizeObserver from
+  // observing the re-widen, turning "suppressed" into "never returns".
+  const chatDrawerDivertable = drawerAvailable && !chatDrawerResize.panelTooNarrow
   chatDrawerVisibleRef.current = chatDrawerVisible
   chatDrawerDivertableRef.current = chatDrawerDivertable
+  // Effective ready gate (§A2): app tabs wait for the embed's bounds ack
+  // (`chatDrawerReady`, flipped by handleSandboxUiBoundsApplied); DOM tabs are
+  // ready the moment they are visible — no native view paints over them and the
+  // drawer + content layout in the same frame. Derived (NOT an effect) so a DOM
+  // tab is ready in the SAME commit as visibility: no post-paint flip, no
+  // flicker, and never the "inert forever" trap where a DOM tab waits for a
+  // bounds ack that never arrives.
+  const drawerReady = drawerHasEmbed ? chatDrawerReady : chatDrawerVisible
+  // The rail follows the embed's measured header top only on app tabs; DOM tabs
+  // pass null so the shell uses its static CSS fallback (§A2 — never consume an
+  // embed measurement that will not arrive on a DOM tab).
+  const drawerRailTop = drawerHasEmbed ? chatDrawerEmbedTop : null
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form
@@ -891,11 +931,11 @@ export function App() {
   // until the embed acks its shrunk bounds, and a `focus()` fired while inert is a
   // silent no-op, so bumping on visibility alone would open the switcher unfocused.
   React.useEffect(() => {
-    if (chatDrawerVisible && chatDrawerReady && pendingChatSwitcherFocusRef.current) {
+    if (chatDrawerVisible && drawerReady && pendingChatSwitcherFocusRef.current) {
       pendingChatSwitcherFocusRef.current = false
       setChatSwitcherFocusRequestId(value => value + 1)
     }
-  }, [chatDrawerVisible, chatDrawerReady])
+  }, [chatDrawerVisible, drawerReady])
 
   const handleSandboxUiBoundsApplied = React.useCallback(() => {
     if (appNotificationDrawerOpen) setNotificationDrawerReady(true)
@@ -2155,16 +2195,11 @@ export function App() {
                                 }${chatDrawerVisible ? ' content-panel--chat-drawer-open' : ''}`}
                                 style={
                                   chatDrawerVisible
-                                    ? {
-                                        '--chat-drawer-width': `${chatDrawerResize.width}px`,
-                                        // Only publish the measured top once we have one;
-                                        // when unmeasured (null, pre-measure/tests) the CSS
-                                        // fallback applies. Uses null — not 0 — so a legitimate
-                                        // rect.top of 0/negative still follows the embed.
-                                        ...(chatDrawerEmbedTop !== null
-                                          ? { '--chat-drawer-top': `${chatDrawerEmbedTop}px` }
-                                          : {}),
-                                      }
+                                    ? // Only `--chat-drawer-width` lives here now: it feeds the
+                                      // universal tab-area gutter (`--app-header-utilities-width`).
+                                      // The rail's top/width are published by the RightRailShell
+                                      // itself (`--rail-*`), not inherited from the panel.
+                                      { '--chat-drawer-width': `${chatDrawerResize.width}px` }
                                     : undefined
                                 }
                               >
@@ -2186,6 +2221,9 @@ export function App() {
                                     }
                                     onNotificationTrayOpenChange={setHeaderNotificationTrayOpen}
                                     onShellOverlayOpenChange={setHeaderShellOverlayOpen}
+                                    drawerAvailable={drawerAvailable}
+                                    chatDrawerOpen={chatDrawerVisible}
+                                    onToggleChatDrawer={toggleChatDrawer}
                                   />
                                 </TitlebarActionsPortal>
                                 <ToastStack items={vm.toasts} />
@@ -2252,63 +2290,30 @@ export function App() {
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}
                                 {vm.navItem === DESKTOP_ROUTES.plugins && <WorkflowsPage />}
                                 {vm.navItem === DESKTOP_ROUTES.apps && (
-                                  <>
-                                    <SandboxUiPage
-                                      boundsRefreshKey={sandboxUiBoundsRefreshKey}
-                                      actionRequest={sandboxActionRequest}
-                                      conversationOrigin={sandboxUiConversationOrigin}
-                                      currentTeamId={vm.currentTeamId}
-                                      headerShellOverlayOpen={
-                                        headerShellOverlayOpen || commandPaletteOpen
-                                      }
-                                      sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
-                                      toastShellOverlayOpen={vm.toasts.length > 0}
-                                      deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
-                                      shortcutApp={activeSandboxUiApp}
-                                      shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
-                                      localSearchRequestId={sandboxLocalSearchRequestId}
-                                      chatDrawerOpen={chatDrawerVisible}
-                                      titlebarLeadingContainer={titlebarLeadingRoot}
-                                      onToggleChatDrawer={toggleChatDrawer}
-                                      onEmbeddedAppOpening={handleSandboxUiOpening}
-                                      onEmbeddedAppMounted={handleSandboxUiMounted}
-                                      onEmbeddedAppBack={handleSandboxUiClosed}
-                                      onEmbeddedAppRemoved={handleSandboxUiRemoved}
-                                      onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
-                                      onEmbedSlotTopChange={setChatDrawerEmbedTop}
-                                      onEmbedSlotRightChange={setNotificationTrayLeft}
-                                      onNotify={vm.pushToast}
-                                      onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
-                                    />
-                                    {chatDrawerVisible && (
-                                      <ChatDrawer
-                                        header={
-                                          <ChatSwitcher
-                                            tabs={chatWorkspaceTabs}
-                                            activeTabId={drawerActiveChatTabId}
-                                            onSelect={handleSelectDrawerChatTab}
-                                            onNewChat={handleNewWorkspaceChatTab}
-                                            focusRequestId={chatSwitcherFocusRequestId}
-                                          />
-                                        }
-                                        onNewChat={handleNewWorkspaceChatTab}
-                                        onExpandFullScreen={expandChatDrawerToFullScreen}
-                                        onToggle={toggleChatDrawer}
-                                        containerRef={chatDrawerRef}
-                                        ready={chatDrawerReady}
-                                        onResizeHandleMouseDown={
-                                          chatDrawerResize.onResizeHandleMouseDown
-                                        }
-                                        onResizeHandleKeyDown={
-                                          chatDrawerResize.onResizeHandleKeyDown
-                                        }
-                                        width={chatDrawerResize.width}
-                                        resizing={chatDrawerResize.isResizing}
-                                      >
-                                        <ChatPage scrollContainerRef={chatDrawerRef} />
-                                      </ChatDrawer>
-                                    )}
-                                  </>
+                                  <SandboxUiPage
+                                    boundsRefreshKey={sandboxUiBoundsRefreshKey}
+                                    actionRequest={sandboxActionRequest}
+                                    currentTeamId={vm.currentTeamId}
+                                    headerShellOverlayOpen={
+                                      headerShellOverlayOpen || commandPaletteOpen
+                                    }
+                                    sidebarShellOverlayOpen={sidebarSettingsMenuOpen}
+                                    toastShellOverlayOpen={vm.toasts.length > 0}
+                                    deepLinkShellOverlayOpen={sandboxUiDeepLinkDialog !== null}
+                                    shortcutApp={activeSandboxUiApp}
+                                    shortcutOpenRequestId={sandboxUiShortcutOpenRequestId}
+                                    localSearchRequestId={sandboxLocalSearchRequestId}
+                                    titlebarLeadingContainer={titlebarLeadingRoot}
+                                    onEmbeddedAppOpening={handleSandboxUiOpening}
+                                    onEmbeddedAppMounted={handleSandboxUiMounted}
+                                    onEmbeddedAppBack={handleSandboxUiClosed}
+                                    onEmbeddedAppRemoved={handleSandboxUiRemoved}
+                                    onEmbedBoundsApplied={handleSandboxUiBoundsApplied}
+                                    onEmbedSlotTopChange={setChatDrawerEmbedTop}
+                                    onEmbedSlotRightChange={setNotificationTrayLeft}
+                                    onNotify={vm.pushToast}
+                                    onShortcutOpenResult={handleSandboxUiShortcutOpenResult}
+                                  />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.settings && (
                                   <SettingsPage
@@ -2336,6 +2341,47 @@ export function App() {
                                   />
                                 )}
                               </section>
+                              {/* Universal chat drawer (mini-spec 04a §B/§D):
+                                  mounted at the workspace-layout level (a sibling
+                                  of the content panel), not inside the apps block,
+                                  so it persists across ANY non-chat tab (R5). It
+                                  fills the shared right-rail shell; the tab area
+                                  between the sidebar and this rail shrinks via the
+                                  universal gutter. Single global <ChatPage>/
+                                  ChatSwitcher — no duplicated tab state or
+                                  streams. */}
+                              {chatDrawerVisible && (
+                                <RightRailShell
+                                  occupant="chat-drawer"
+                                  width={chatDrawerResize.width}
+                                  top={drawerRailTop}
+                                >
+                                  <ChatDrawer
+                                    header={
+                                      <ChatSwitcher
+                                        tabs={chatWorkspaceTabs}
+                                        activeTabId={drawerActiveChatTabId}
+                                        onSelect={handleSelectDrawerChatTab}
+                                        onNewChat={handleNewWorkspaceChatTab}
+                                        focusRequestId={chatSwitcherFocusRequestId}
+                                      />
+                                    }
+                                    onNewChat={handleNewWorkspaceChatTab}
+                                    onExpandFullScreen={expandChatDrawerToFullScreen}
+                                    onToggle={toggleChatDrawer}
+                                    containerRef={chatDrawerRef}
+                                    ready={drawerReady}
+                                    onResizeHandleMouseDown={
+                                      chatDrawerResize.onResizeHandleMouseDown
+                                    }
+                                    onResizeHandleKeyDown={chatDrawerResize.onResizeHandleKeyDown}
+                                    width={chatDrawerResize.width}
+                                    resizing={chatDrawerResize.isResizing}
+                                  >
+                                    <ChatPage scrollContainerRef={chatDrawerRef} />
+                                  </ChatDrawer>
+                                </RightRailShell>
+                              )}
                             </section>
                           </main>
                           {commandPaletteOpen ? (

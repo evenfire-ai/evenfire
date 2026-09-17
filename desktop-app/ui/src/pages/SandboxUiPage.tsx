@@ -4,7 +4,7 @@ import { IconButton, StatusBanner } from '@components/Common'
 import { joinClasses } from '@lib/classNames'
 import SandboxCurrentContentSearch from '../components/SandboxCurrentContentSearch'
 import type { AppFindState } from '../components/SandboxCurrentContentSearch/types'
-import { IconChat, IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
+import { IconCopy, IconRefresh, IconSandboxUi } from '../components/SidebarNav/icons'
 import { clickableRowProps } from '../lib/clickableRowProps'
 import type { SandboxUiAppListing } from '../lib/sandboxUiAppSelection.types'
 import type {
@@ -204,7 +204,6 @@ function TitlebarLeadingAction({
 export function SandboxUiPage({
   actionRequest = null,
   boundsRefreshKey = 0,
-  conversationOrigin = null,
   currentTeamId = '',
   headerShellOverlayOpen = false,
   sidebarShellOverlayOpen = false,
@@ -213,9 +212,7 @@ export function SandboxUiPage({
   shortcutApp = null,
   shortcutOpenRequestId = 0,
   localSearchRequestId = 0,
-  chatDrawerOpen = false,
   titlebarLeadingContainer = null,
-  onToggleChatDrawer,
   onEmbeddedAppOpening,
   onEmbeddedAppMounted,
   onEmbeddedAppBack,
@@ -598,49 +595,24 @@ export function SandboxUiPage({
   if (launch.kind === 'mounted' || launch.kind === 'minting') {
     const showRefreshBanner =
       refreshError && launch.kind === 'mounted' && refreshError.appRef === launch.appRef
-    // Every leading control below is gated: the refresh/copy pair only exists
-    // while 'mounted', and the conversation/drawer control needs an origin. In
-    // the 'minting' state without an origin all of them are absent, so portaling
-    // the wrapper unconditionally would inject an empty <div> into the shared
-    // title bar. Only portal when at least one control will render.
-    const hasLeadingActions =
-      launch.kind === 'mounted' || Boolean(conversationOrigin && onToggleChatDrawer)
+    // The refresh/copy pair only exists while 'mounted'. The chat-drawer toggle
+    // moved to the app header (mini-spec 04a §C), so the leading slot carries no
+    // drawer control any more. In the 'minting' state both are absent, so
+    // portaling the wrapper unconditionally would inject an empty <div> into the
+    // shared title bar. Only portal when at least one control will render.
+    const hasLeadingActions = launch.kind === 'mounted'
     return (
       <section className="page" data-testid="sandbox-ui-mounted">
         {/* App actions live in the native title bar's leading slot (icon-only,
             label in a hover flyout). They render through a portal only once the
             title bar has published its container; there is no inline fallback,
             mirroring how the header search/bell portal works. "Back to apps" is
-            intentionally gone — the sidebar owns the return to the app picker. */}
+            intentionally gone — the sidebar owns the return to the app picker;
+            the chat-drawer toggle now lives in the app header. */}
         {titlebarLeadingContainer &&
           hasLeadingActions &&
           createPortal(
             <div className="window-titlebar__leading-actions">
-              {conversationOrigin && onToggleChatDrawer ? (
-                // The originating conversation lives in the drawer beside the
-                // live embed, so this control opens/closes that drawer (chat
-                // icon, open/close label). The conversation-origin variant keeps
-                // its own class so the toggle can later move to the app header.
-                <TitlebarLeadingAction
-                  className="sandbox-ui-conversation-btn"
-                  label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-                  pressed={chatDrawerOpen}
-                  onClick={onToggleChatDrawer}
-                >
-                  <IconChat />
-                </TitlebarLeadingAction>
-              ) : null}
-              {launch.kind === 'mounted' && onToggleChatDrawer && !conversationOrigin && (
-                // No originating conversation to return to — a plain drawer toggle.
-                <TitlebarLeadingAction
-                  className="sandbox-ui-chat-drawer-btn"
-                  label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
-                  pressed={chatDrawerOpen}
-                  onClick={onToggleChatDrawer}
-                >
-                  <IconChat />
-                </TitlebarLeadingAction>
-              )}
               {launch.kind === 'mounted' && (
                 <>
                   <TitlebarLeadingAction

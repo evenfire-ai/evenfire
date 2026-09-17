@@ -21,7 +21,6 @@ export type SandboxUiPageProps = {
     action: 'refresh' | 'back-to-apps'
   } | null
   boundsRefreshKey?: string | number
-  conversationOrigin?: SandboxUiConversationOrigin | null
   currentTeamId?: string
   headerShellOverlayOpen?: boolean
   sidebarShellOverlayOpen?: boolean
@@ -30,9 +29,7 @@ export type SandboxUiPageProps = {
   shortcutApp?: ActiveSandboxUiApp | null
   shortcutOpenRequestId?: number
   localSearchRequestId?: number
-  chatDrawerOpen?: boolean
   titlebarLeadingContainer?: HTMLElement | null
-  onToggleChatDrawer?: () => void
   onEmbeddedAppOpening?: (app: ActiveSandboxUiApp) => void
   onEmbeddedAppMounted?: () => void
   onEmbeddedAppBack?: () => void

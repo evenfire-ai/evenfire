@@ -13013,26 +13013,52 @@ pre {
   --app-header-utilities-width: var(--chat-drawer-width);
 }
 
-.content-panel.content-panel--chat-drawer-open > .page:has(.sandbox-ui-embed-slot) {
+/* Universal tab-area gutter (mini-spec 04a §A1). The chat drawer is available on
+   any non-chat tab, so the "tab area" — the page content between the sidebar and
+   the drawer — must shrink for ANY active tab kind, not only the app embed. The
+   gutter is `padding-right` on the active tab's `.page` child (app embed slot,
+   files, settings, connectors, agents, plugins, the apps picker — all render a
+   direct `.page`), never on the measured content-panel, so opening the drawer
+   (which is `position: fixed`) never changes the panel's `clientWidth` and there
+   is no ResizeObserver feedback loop (confirmed in useChatDrawerResize). */
+.content-panel.content-panel--chat-drawer-open > .page {
   padding-right: var(--app-header-utilities-width);
 }
 
-.chat-drawer {
+/* Right-rail shell (mini-spec 04a §B): the fixed right column that a single
+   occupant fills. It owns the rail geometry via one shared token set
+   (`--rail-width`, `--rail-top`); the occupant supplies the values. Flush to the
+   panel's right and bottom edges (VS Code secondary-side-bar style). */
+.right-rail-shell {
   position: fixed;
-  /* Follow the measured top of the embed slot (`--chat-drawer-top`, published by
-     App from useEmbedBounds) so the drawer stays aligned when the sandbox-ui
-     header wraps in a narrow window. The fallback keeps the pre-measure/test
-     behavior: a single-row header at space-4 + 36px + space-2 = 64px. */
-  top: var(--chat-drawer-top, calc(var(--space-4) + 36px + var(--space-2)));
-  /* Docked, VS Code secondary-side-bar style: flush to the panel's right and
-     bottom edges (no floating inset), square corners, no shadow. The only
-     visible edge is the 1px resize seam on the LEFT (see __resize-handle::after),
-     which owns the border between the embed and the drawer — the drawer itself
-     carries no border. */
+  /* Follow the measured top the occupant publishes (`--rail-top`); when
+     unmeasured (DOM tabs, tests) fall back to a single-row header at
+     space-4 + 36px + space-2 = 64px so the rail never waits on a measurement
+     that never arrives (§A2). */
+  top: var(--rail-top, calc(var(--space-4) + 36px + var(--space-2)));
   right: 0;
   bottom: 0;
-  width: var(--chat-drawer-width);
+  width: var(--rail-width);
   z-index: var(--layer-chat-overlay);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Per-occupant rail width is published inline by RightRailShell from the
+   occupant's runtime width (the chat drawer is resizable), so it lives on the
+   element, not here. A future notification-tray occupant sets its own inline
+   --rail-width the same way. */
+
+.chat-drawer {
+  /* Positioning context for the absolute resize handle; the drawer fills the
+     rail shell (which owns top/right/bottom/width). The only visible edge is the
+     1px resize seam on the LEFT (see __resize-handle::after), which owns the
+     border between the content and the drawer — the drawer itself carries no
+     border. */
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -13040,8 +13066,8 @@ pre {
      distinct from the editor/embed zone (which is --surface-0/--panel). */
   background: var(--surface-3);
   overflow: hidden;
-  /* Anti-flash: reveal only after the embed acknowledges its shrunk bounds,
-     mirroring the notification drawer's bounds-ack gate. */
+  /* Anti-flash: reveal only after the drawer is ready (app tabs: the embed acks
+     its shrunk bounds; DOM tabs: immediately, same frame — §A2). */
   opacity: 0;
   pointer-events: none;
 }
@@ -13359,6 +13385,37 @@ pre {
 .window-titlebar__actions .notification-bell--titlebar svg {
   color: var(--titlebar-action-ink) !important;
   stroke: var(--titlebar-action-ink) !important;
+}
+
+/* Chat-drawer toggle (mini-spec 04a §C): a ghost control between the search and
+   the bell, styled like the titlebar bell. `margin-left: auto` collapses the
+   free space to its left so the toggle and the utilities cluster (which also
+   carries margin-left:auto) sit together at the right, the toggle immediately
+   left of the bell with the top-bar gap. */
+.top-bar .chat-drawer-toggle {
+  margin-left: auto;
+}
+
+.window-titlebar__actions .chat-drawer-toggle {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.window-titlebar__actions .chat-drawer-toggle svg {
+  width: 16px;
+  height: 16px;
+  color: var(--titlebar-action-ink) !important;
+  stroke: var(--titlebar-action-ink) !important;
+}
+
+.window-titlebar__actions .chat-drawer-toggle:hover:enabled,
+.window-titlebar__actions .chat-drawer-toggle[aria-pressed='true'] {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: var(--surface-hover);
 }
 
 :root[data-theme='dark'] .window-titlebar__actions .search-input {

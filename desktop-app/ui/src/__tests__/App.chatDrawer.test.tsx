@@ -68,8 +68,6 @@ const sidebarHarness = vi.hoisted(() => ({
 }))
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
-    chatDrawerOpen?: boolean
-    onToggleChatDrawer?: () => void
     onEmbeddedAppMounted?: () => void
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
@@ -80,6 +78,13 @@ const appHeaderHarness = vi.hoisted(() => ({
   props: null as null | {
     notificationTrayMode?: 'drawer' | 'overlay'
     notificationTrayLeft?: number | null
+    // Drawer toggle moved to the app header (mini-spec 04a §C): the drawer's
+    // effective visibility and its toggle are now driven from here, on EVERY
+    // route (the header is portaled into the title bar unconditionally), not from
+    // the apps-only SandboxUiPage.
+    drawerAvailable?: boolean
+    chatDrawerOpen?: boolean
+    onToggleChatDrawer?: () => void
   },
   // Captured from context so tests can drive the "open conversation" gesture the
   // notification tray fires.
@@ -421,7 +426,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // Switch to chat-2 in the drawer switcher.
@@ -430,10 +435,10 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
 
     // Close the drawer, then reopen it.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
@@ -476,7 +481,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
 
@@ -569,13 +574,13 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppMounted?.())
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Fire the shortcut: the drawer reopens but has NOT acked its bounds, so its
     // subtree is inert. The switcher must stay CLOSED — no options rendered yet.
     act(() => commandCb?.('chat.switcher', 'shortcut-host'))
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('option')).toBeNull()
 
     // Embed acks its bounds → drawer becomes ready (inert lifted) → the deferred
@@ -631,7 +636,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Ignore any selection the launch itself performed; assert only on the command.
@@ -665,15 +670,15 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     // Both drawers share the same fixed right-rail rect, so the notification tray
     // must NOT use its drawer form while the chat drawer is up — it reverts to the
     // overlay/popover form (handled by the existing shell-overlay freeze).
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
 
     // Closing the chat drawer (app still mounted) restores the tray's drawer form.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
 
@@ -751,7 +756,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('First chat')
 
     // The ChatThread session list picks chat-2: switchToChat moves activeChatId
@@ -785,7 +790,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Open the conversation the approval is on (chat-2, a background chat) via the
@@ -803,7 +808,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     // Observable: the drawer now shows the approval's chat AND we did not eject
     // to the full-screen chat route.
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(currentController.activeChatId).toBe('chat-2')
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
@@ -836,7 +841,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // The approval is on a chat in a DIFFERENT team (team-b vs the harness team-a).
     await act(async () => {
@@ -852,7 +857,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // The drawer never opened, and the gesture ran through the plain path WITHOUT
     // keepNavItem — the eject the full-screen route needs so a team switch survives.
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ chatId: 'chat-2' }),
       undefined
@@ -882,7 +887,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // sdk_notification navigates to its own target — must NOT open the drawer.
     await act(async () => {
@@ -891,7 +896,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
         kind: 'sdk_notification',
       } as unknown as Parameters<NonNullable<typeof appHeaderHarness.openNotification>>[0])
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // workflow_completed navigates to plugins; returning to apps must NOT find a
     // drawer the user never asked for (the "stuck true" symptom).
@@ -905,7 +910,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       currentController.navItem = DESKTOP_ROUTES.apps
       rerender(<App />)
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
   })
 
   // An agent-conversation notification with an empty agentName has nothing to
@@ -931,7 +936,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
       })
     })
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Conversation notification whose agentName is blank → nothing to surface.
     await act(async () => {
@@ -946,7 +951,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // The drawer never opened, and the gesture ran through the plain path WITHOUT
     // keepNavItem (the controller itself will then no-op on the empty agent).
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.handleOpenNotification).toHaveBeenCalledWith(
       expect.objectContaining({ agentName: '   ' }),
       undefined
@@ -1048,28 +1053,28 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
 
     // Narrow the panel below CHAT_DRAWER_MIN_PANEL_WIDTH (846): the drawer is
     // suppressed and the app takes the full width (no gutter class).
     resizeTo(800)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
 
     // Re-widen above the threshold: the open intent was never cleared, so the
     // drawer reappears on its own.
     resizeTo(1200)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
     expect(screen.queryByRole('button', { name: 'Open chats' })).not.toBeNull()
 
     // Manual close while visible clears the intent.
-    act(() => sandboxUiPageHarness.props?.onToggleChatDrawer?.())
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
 
     // Widening (or any resize) must NOT bring a manually-closed drawer back.
     resizeTo(2000)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(screen.queryByRole('button', { name: 'Open chats' })).toBeNull()
   })
 
@@ -1116,7 +1121,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
       })
     })
     resizeTo(800)
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
 
     // Mod+T: the new chat must land on the full-screen chat route (reachable),
@@ -1126,7 +1131,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
     expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
   })
 
-  it('publishes --chat-drawer-top from the measured embed slot, falling back until measured', () => {
+  it('publishes the rail top from the measured embed slot on app tabs, falling back until measured', () => {
     render(<App />)
 
     act(() => {
@@ -1136,17 +1141,194 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
         defaultPath: '/',
       })
     })
-    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
 
     const panel = document.querySelector('.content-panel') as HTMLElement
     expect(panel.className).toContain('content-panel--chat-drawer-open')
-    // The width var is always present while docked; the top var stays absent until
-    // the embed reports a measured top, so the CSS 64px fallback applies.
+    // The gutter width var is always present on the panel while docked (§A1).
     expect(panel.style.getPropertyValue('--chat-drawer-width')).not.toBe('')
-    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('')
+
+    // The rail's top now lives on the RightRailShell (--rail-top), not the panel.
+    // On an app tab it stays absent until the embed reports a measured top, so the
+    // shell's static CSS fallback applies (§A2).
+    const rail = document.querySelector('.right-rail-shell') as HTMLElement
+    expect(rail).not.toBeNull()
+    expect(rail.getAttribute('data-occupant')).toBe('chat-drawer')
+    expect(rail.style.getPropertyValue('--rail-top')).toBe('')
 
     // The embed reports a wrapped-header top through the real callback path.
     act(() => sandboxUiPageHarness.props?.onEmbedSlotTopChange?.(140))
-    expect(panel.style.getPropertyValue('--chat-drawer-top')).toBe('140px')
+    expect(
+      (document.querySelector('.right-rail-shell') as HTMLElement).style.getPropertyValue(
+        '--rail-top'
+      )
+    ).toBe('140px')
+  })
+})
+
+// Mini-spec 04a — the drawer is universal (available over any non-chat tab), its
+// toggle lives in the app header, and it mounts once at the workspace level so it
+// survives non-chat tab switches. These drive the real App + real ChatDrawer/
+// ChatSwitcher through the mocked controller's store producers.
+describe('App chat drawer — universal availability (mini-spec 04a)', () => {
+  let currentController: AppController
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  // R2: available on app/files/settings, never on chat.
+  it('makes the drawer available on non-chat tabs and hides it on chat tabs (R2)', () => {
+    render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false) // chat tab
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.chat))
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false)
+  })
+
+  // §A2 T3: on a DOM tab (no embed) the drawer is ready — interactive, not inert —
+  // the moment it opens, in the same frame. Fails on the committed 2b, where the
+  // drawer is not even available over a DOM tab.
+  it('makes the drawer interactive immediately on a DOM tab, never inert (§A2)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { container } = render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const drawer = container.querySelector('.chat-drawer') as HTMLElement | null
+    expect(drawer).not.toBeNull()
+    // No native view to ack a shrunk-bounds gate → ready immediately, not inert.
+    expect(drawer!.getAttribute('data-ready')).toBe('true')
+    expect(drawer!.hasAttribute('inert')).toBe(false)
+  })
+
+  // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it
+  // open and never lets the chat reconcile steal focus onto a chat tab.
+  it('keeps the drawer intact across non-chat tab switches without stealing focus (R5/DEC-2)', () => {
+    render(<App />)
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Switch to a settings tab: drawer stays open AND the reconcile (which runs
+    // while the drawer is visible with a chat active) keeps the settings tab
+    // active — it does not re-home focus to a chat tab.
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.settings))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.settings)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Back to files: still open, still not stolen to chat.
+    act(() => currentController.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+  })
+
+  // R4: selecting a chat tab with the drawer open collapses the drawer before the
+  // chat shows, and clears the open intent so returning to a non-chat tab does not
+  // silently re-open it.
+  it('collapses the drawer before the chat and clears the intent when a chat tab is selected (R4)', () => {
+    render(<App />)
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    // Select the chat tab from the strip (full-screen chat).
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'First chat' })))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(document.querySelector('.chat-drawer')).toBeNull()
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(false)
+
+    // Return to the app tab: the drawer stays closed (intent cleared by R4). Were
+    // the intent left set, `drawerAvailable && chatDrawerOpen` would re-open it.
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'App' })))
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(document.querySelector('.chat-drawer')).toBeNull()
+  })
+
+  // Right-rail single-occupancy (E): while the chat drawer holds the rail the
+  // notification tray is forced to its overlay/popover form (never the app-drawer
+  // form), so opening the tray can't close the drawer. Collapsing the drawer frees
+  // the rail and the tray reclaims its drawer form — the tray behavior is intact.
+  it('keeps the notification tray out of the rail while the chat drawer occupies it', () => {
+    render(<App />)
+    act(() =>
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    )
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('overlay')
+    expect(document.querySelector('.chat-drawer')).not.toBeNull()
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(false)
+    expect(appHeaderHarness.props?.notificationTrayMode).toBe('drawer')
   })
 })
