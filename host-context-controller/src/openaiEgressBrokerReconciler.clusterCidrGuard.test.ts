@@ -262,6 +262,35 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
     })
   })
 
+  it('G9: dual-stack K8S_API_CIDRS (IPv6 + IPv4) still provisions a clean LAN broker and still denies the IPv4 apiserver entry (R5-L1)', async () => {
+    // k8sApiCidrs is dual-use: IPv6 is legal there (it drives the
+    // allow-k8s-api-egress NetworkPolicies) but the LAN classifier is IPv4-only.
+    // The IPv6 entry must be filtered OUT of the deny-set instead of poisoning it
+    // into cluster_cidr_invalid for EVERY baseURL, while its IPv4 sibling keeps
+    // denying.
+    config.clusterInternalEgressCidrs = ['10.96.0.0/12']
+    config.clusterNodeEgressCidrs = ['192.168.49.0/24']
+    config.k8sApiCidrs = ['fd00::1/128', '10.96.0.1/32']
+
+    // A clean private-LAN endpoint provisions — the IPv6 entry no longer poisons
+    // the whole deny-set.
+    const lan = makeHost('g9', 'http://192.168.1.50:8000/v1')
+    hosts.set(lan.name, lan)
+    await reconciler.reconcileForHost(lan)
+    expect(provisioned()).toBe(true)
+    expect(brokersCondition()).toMatchObject({ status: 'True' })
+
+    // Negative control: the IPv4 apiserver entry STILL denies. Fresh mock history
+    // so provisioned() reflects only this host (config/implementations survive
+    // clearAllMocks).
+    vi.clearAllMocks()
+    const internal = makeHost('g9b', 'http://10.96.0.1/v1')
+    hosts.set(internal.name, internal)
+    await reconciler.reconcileForHost(internal)
+    expect(provisioned()).toBe(false)
+    expect(brokersCondition()).toMatchObject({ status: 'False', reason: 'ClusterInternal' })
+  })
+
   describe('resolveClusterInternalCidrs (pure)', () => {
     it('unions every configured source and marks both guard categories configured', () => {
       config.k8sApiCidrs = ['10.96.0.0/12']
@@ -300,6 +329,15 @@ describe('OpenAiEgressBrokerReconciler — cluster-internal CIDR guard (R1-M1)',
       vi.stubEnv('KUBERNETES_SERVICE_HOST', 'fd00::1')
       const { cidrs } = resolveClusterInternalCidrs()
       expect(cidrs).toEqual([])
+    })
+
+    it('excludes non-IPv4 k8sApiCidrs entries from the deny-set — dual-use list, IPv4-only classifier (R5-L1)', () => {
+      // k8sApiCidrs may carry IPv6 for the allow-k8s-api-egress NetworkPolicies;
+      // only its IPv4 entries reach the IPv4-only LAN classifier. Order preserved.
+      config.k8sApiCidrs = ['fd00::1/128', '10.96.0.1/32']
+      vi.stubEnv('KUBERNETES_SERVICE_HOST', '10.96.0.2')
+      const { cidrs } = resolveClusterInternalCidrs()
+      expect(cidrs).toEqual(['10.96.0.1/32', '10.96.0.2/32'])
     })
   })
 })

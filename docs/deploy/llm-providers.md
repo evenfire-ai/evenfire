@@ -274,7 +274,9 @@ Three things to know as an operator:
   `CONTEXT_MAPPER_K8S_API_CIDRS` also drives the `allow-k8s-api-egress-*`
   NetworkPolicies and the watch-recovery E2E fixtures, so it is **not** set by the
   default patch. Turn it on deliberately when you want HCC to also reject a
-  `baseURL` inside the apiserver CIDRs beyond the ClusterIP floor.
+  `baseURL` inside the apiserver CIDRs beyond the ClusterIP floor. IPv6 entries
+  feed only the NetworkPolicies; the openai-compatible broker deny-set uses the
+  IPv4 entries (the LAN classifier is IPv4-only).
 
 A ready-to-adapt example (primary + fallback, both local) lives at
 [`charts/clerum-crds/examples/host-openai-compatible-lan.yaml`](../../charts/clerum-crds/examples/host-openai-compatible-lan.yaml).

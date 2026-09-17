@@ -51,10 +51,11 @@ export interface Config {
   openaiEgressBrokerPort: number
 
   // Cluster-internal CIDRs (pod + Service ranges) the egress broker must NOT be
-  // pointed at. Combined with k8sApiCidrs + nodeLocalDnsCidr, these are passed to
-  // classifyLanBaseURL so a baseURL that resolves to a cluster-internal RFC1918
-  // literal (apiserver ClusterIP, another pod's IP) is rejected fail-closed even
-  // when control-api admission was bypassed by a direct cluster write.
+  // pointed at. Combined with the IPv4 entries of k8sApiCidrs + nodeLocalDnsCidr,
+  // these are passed to classifyLanBaseURL so a baseURL that resolves to a
+  // cluster-internal RFC1918 literal (apiserver ClusterIP, another pod's IP) is
+  // rejected fail-closed even when control-api admission was bypassed by a
+  // direct cluster write.
   clusterInternalEgressCidrs: string[]
 
   // Node + control-plane CIDRs (node InternalIPs / node subnet, apiserver
@@ -115,6 +116,8 @@ export interface Config {
 
   // K8s API server CIDRs for allow-k8s-api-egress-* policies. Empty = fall
   // back to KUBERNETES_SERVICE_HOST. Validated fail-closed at module load.
+  // May contain IPv6 (NetworkPolicy ipBlock supports it); the broker deny-set
+  // takes only the IPv4 entries.
   k8sApiCidrs: string[]
 
   // DNS infrastructure CIDR for GKE NodeLocal DNSCache / kube-dns. When set,
