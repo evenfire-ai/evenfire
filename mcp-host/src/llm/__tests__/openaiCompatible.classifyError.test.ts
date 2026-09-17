@@ -16,6 +16,14 @@ const bailian = new OpenAICompatibleProvider(
 // lands at `err.error.code`, the level the override reads. Deriving guards
 // against the same nesting mismatch that broke the Claude arm.
 describe('OpenAICompatibleProvider.classifyError', () => {
+  it('does not inherit OpenAI model evidence for a different configured provider', async () => {
+    // Construction-only fixture; no authenticated request is made.
+    const compatible = new OpenAICompatibleProvider(
+      { id: 'zai', baseURL: 'https://api.openai.com/v1', defaultModel: 'gpt-4.1' },
+      'unit-only'
+    )
+    await expect(compatible.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+  })
   it('maps z.ai model-not-available codes (1211/1220) to ModelNotAvailable', () => {
     for (const code of ['1211', '1220']) {
       const c = zai.classifyError(openaiApiError(404, { code, message: 'model not available' }))

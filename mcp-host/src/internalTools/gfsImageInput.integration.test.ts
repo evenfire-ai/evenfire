@@ -165,6 +165,43 @@ afterEach(() => {
 })
 
 describe('GFS bytes to actual provider request', () => {
+  it.each(['image/png', 'image/jpeg'] as const)(
+    'delivers %s directly to a documented OpenAI model',
+    async mime => {
+      const model = 'gpt-4.1'
+      // Only the SDK HTTP boundary is doubled; no credential or catalog service.
+      const client = {
+        baseURL: 'https://api.openai.com/v1',
+        chat: { completions: { create: sdkCreate } },
+      }
+      const canvas = createCanvas(8, 8)
+      canvas.getContext('2d').fillRect(1, 1, 4, 4)
+      const bytes =
+        mime === 'image/png' ? canvas.toBuffer('image/png') : canvas.toBuffer('image/jpeg')
+      const subject = await setup(bytes, {
+        llm: {
+          provider: new OpenAIProvider(client as never, model),
+          model,
+          name: 'openai',
+        },
+      })
+      expect(JSON.parse(subject.output.content).delivery).toBe('image_input')
+      await subject.adapter.completeWithTools({ messages: subject.messages, tools: [] })
+      expect(subject.metadataFetch).not.toHaveBeenCalled()
+      const request = sdkCreate.mock.calls[0][0]
+      const images = request.messages
+        .flatMap((message: any) => (Array.isArray(message.content) ? message.content : []))
+        .filter((part: any) => part.type === 'image_url')
+      expect(images).toEqual([
+        {
+          type: 'image_url',
+          image_url: { url: `data:${mime};base64,${bytes.toString('base64')}` },
+        },
+      ])
+      expect(request.model).toBe(model)
+      subject.budget.close()
+    }
+  )
   it.each([
     ['image/png', false],
     ['image/jpeg', false],

@@ -126,7 +126,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     return this.cfg.id as LlmProvider
   }
 
-  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+  override getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
     return this.imageCapabilityResolver?.(signal) ?? Promise.resolve({ status: 'unknown' })
   }
 

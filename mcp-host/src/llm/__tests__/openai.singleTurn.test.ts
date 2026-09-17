@@ -2,6 +2,30 @@ import { describe, expect, it, vi } from 'vitest'
 import { type ChatMessage, FinishReason, type ToolDefinition } from '../../core/types'
 import { OpenAIProvider } from '../openai'
 
+describe('OpenAI image capability binding', () => {
+  it('binds the documented capability to the actual SDK endpoint', async () => {
+    const client = { ...createMockOpenAIClient(), baseURL: 'https://api.openai.com/v1' }
+    const provider = new OpenAIProvider(client as never, 'gpt-4.1')
+    await expect(provider.getImageInputCapability()).resolves.toMatchObject({
+      status: 'supported',
+      provider: 'openai',
+      model: 'gpt-4.1',
+    })
+    client.baseURL = 'https://gateway.example.invalid/v1'
+    await expect(provider.getImageInputCapability()).resolves.toEqual({ status: 'unknown' })
+    expect(client.chat.completions.create).not.toHaveBeenCalled()
+  })
+
+  it('honors cancellation before resolving a capability', async () => {
+    const client = { ...createMockOpenAIClient(), baseURL: 'https://api.openai.com/v1' }
+    const provider = new OpenAIProvider(client as never, 'gpt-4.1')
+    await expect(provider.getImageInputCapability(AbortSignal.abort())).rejects.toMatchObject({
+      code: 'cancelled',
+    })
+    expect(client.chat.completions.create).not.toHaveBeenCalled()
+  })
+})
+
 function createMockOpenAIClient() {
   return {
     chat: {

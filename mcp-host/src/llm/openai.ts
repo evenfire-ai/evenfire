@@ -10,6 +10,8 @@ import {
   ToolDefinition,
 } from '../core/types'
 import { logger } from '../logger'
+import { getDocumentedOpenAIImageCapability } from '../visualInput/documentedCapabilities'
+import { type ImageInputCapability, VisualInputError } from '../visualInput/policy'
 import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { LlmProvider } from './registryCore'
@@ -27,6 +29,13 @@ export class OpenAIProvider implements SingleTurnProvider {
     }
     this.defaultModel = defaultModel
     logger.info({ model: defaultModel }, 'OpenAI transport initialized')
+  }
+
+  async getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    if (signal?.aborted) throw new VisualInputError('cancelled')
+    // OpenAI's Models API does not report modalities. Use the documented
+    // contract for this exact model only when this SDK targets the official API.
+    return getDocumentedOpenAIImageCapability(this.defaultModel, this.client.baseURL)
   }
 
   /**
