@@ -622,7 +622,10 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
       `${config.hostsNamespace}/catalog-host`,
     ])
     expect(firstCatalog.items[0]?.accessPaths).toEqual([
-      expect.objectContaining({ kind: 'team', teamId: teamOnlyTeamId }),
+      expect.objectContaining({
+        kind: 'team',
+        safeTeamDescriptor: expect.objectContaining({ teamId: teamOnlyTeamId }),
+      }),
     ])
 
     const teamPath = firstCatalog.items[0]!.accessPaths[0]!
