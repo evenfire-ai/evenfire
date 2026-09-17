@@ -14,6 +14,7 @@ const accessPathId = `ap1_${'a'.repeat(43)}`
 const authorizationRevision = `ar1_${'b'.repeat(43)}`
 const behaviorBindingHash = `bh2_${'c'.repeat(43)}`
 const target = { recipeNamespace: 'sandbox-recipes', recipeName: 'demo' }
+const canonicalTarget = { recipeName: 'demo', recipeNamespace: 'sandbox-recipes' }
 const resource = canonicalResourceIdentity({
   environmentId: 'local',
   type: 'workflow_recipe',
@@ -100,13 +101,14 @@ describe('workflow action checkpoint client', () => {
     const jsonbOrderedRun = {
       authority_binding: {
         ...run.authority_binding,
-        target: { recipeName: 'demo', recipeNamespace: 'sandbox-recipes' },
+        target: { recipeNamespace: 'sandbox-recipes', recipeName: 'demo' },
       },
     } as never
     const fetchImpl = vi.fn(async (_url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body)) as { target: Record<string, string> }
       expect(Object.keys(body.target)).toEqual(['recipeName', 'recipeNamespace'])
       expect(body.target).toEqual(target)
+      expect(JSON.stringify(body.target)).toBe(JSON.stringify(canonicalTarget))
       return new Response(JSON.stringify(allowedCheckpoint()), { status: 200 })
     })
     const checkpoint = createWorkflowRunAuthorityCheckpointer({
