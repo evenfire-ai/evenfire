@@ -1,12 +1,39 @@
 // @vitest-environment jsdom
-import { useEffect } from 'react'
+import { useEffect, useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, render, waitFor } from '@testing-library/react'
 import { DESKTOP_ROUTES, SIDEBAR_COLLAPSED_KEY } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import {
+  activeWorkspaceTab,
+  createWorkspaceTabsState,
+  newChatTab,
+  openChatTab,
+  openFilesTab,
+  openSettingsTab,
+} from '@lib/workspaceTabs'
+import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { SandboxUiDeepLinkEnvelope } from '@/App.types'
 import type { DesktopCommandId } from '../../../src/desktopCommands'
+
+// The universal tab store lives inside the controller; the mock reproduces that
+// contract — `navItem` is DERIVED from the store, the store is reactive, and nav
+// drives it through the real producers (T1). See App.chatDrawer.test for the
+// rationale.
+let forceControllerRender: () => void = () => {}
+type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
+
+function useReactiveController(controller: AppController): AppController {
+  const [, force] = useReducer((count: number) => count + 1, 0)
+  forceControllerRender = force
+  const activeTab = activeWorkspaceTab(controller.workspaceTabs)
+  ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
+  ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive
+    ? DESKTOP_ROUTES.apps
+    : mapKindToRoute(activeTab)
+  return controller
+}
 
 const confirmDialogHarness = vi.hoisted(() => ({
   rendered: vi.fn(),
@@ -152,15 +179,80 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let liveTeamId = String(overrides.currentTeamId || 'team-a')
   let controller: AppController
+  let tabSequence = 2
+  const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
+  const setWorkspaceTabs = vi.fn((updater: unknown) => {
+    const next =
+      typeof updater === 'function'
+        ? (updater as (state: WorkspaceState) => WorkspaceState)(controller.workspaceTabs)
+        : (updater as WorkspaceState)
+    if (next === controller.workspaceTabs) return
+    controller.workspaceTabs = next
+    forceControllerRender()
+  })
+  const clearAppsPicker = vi.fn(() => {
+    if (!controller.appsPickerActive) return
+    controller.appsPickerActive = false
+    forceControllerRender()
+  })
+  const showAppsPicker = vi.fn(() => {
+    if (controller.appsPickerActive) return
+    if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
+    controller.appsPickerActive = true
+    forceControllerRender()
+  })
   const ensureTeamContext = vi.fn(async (target: { teamId?: string }): Promise<boolean> => {
     const targetTeamId = String(target.teamId || '').trim()
     if (!targetTeamId || targetTeamId === liveTeamId) return false
     liveTeamId = targetTeamId
     return true
   })
+  // Faithful nav: a store action; `navItem` is derived (useReactiveController).
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    controller.navItem = item
+    if (item === DESKTOP_ROUTES.chat) {
+      controller.selectedAgent = null
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => {
+        const active = activeWorkspaceTab(state)
+        if (active?.kind === 'chat') return state
+        const lastChat = [...state.tabs].reverse().find(tab => tab.kind === 'chat')
+        return lastChat
+          ? { ...state, activeTabId: lastChat.id }
+          : newChatTab(state, nextWorkspaceTabId(), null)
+      })
+    } else if (item === DESKTOP_ROUTES.apps) {
+      showAppsPicker()
+    } else if (item === DESKTOP_ROUTES.files) {
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => openFilesTab(state, { id: nextWorkspaceTabId() }))
+    } else {
+      const section = settingsSectionForRoute(item)
+      if (section) {
+        if (section === 'agents') controller.selectedAgent = null
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+        )
+      }
+    }
+    forceControllerRender()
   })
+  const handleSelectChatAgent = vi.fn(
+    (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
+      controller.selectedAgent = agentName
+      controller.activeChatId = options.chatId ?? null
+      if (!options.keepNavItem) {
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) => {
+          const chatId = options.chatId ?? null
+          return chatId
+            ? openChatTab(state, { id: nextWorkspaceTabId(), agentRef: agentName, chatId })
+            : newChatTab(state, nextWorkspaceTabId(), agentName)
+        })
+      }
+      forceControllerRender()
+    }
+  )
   controller = {
     booting: false,
     initialExperienceLoading: true,
@@ -184,6 +276,14 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     navItem: DESKTOP_ROUTES.chat,
     selectedAgent: null,
     selectedAgentRoute: null,
+    workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
+    setWorkspaceTabs,
+    activeWorkspaceTab: undefined,
+    nextWorkspaceTabId,
+    appsPickerActive: false,
+    showAppsPicker,
+    clearAppsPicker,
+    activateWorkspaceChatTab: noop,
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -210,7 +310,7 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     authTransitioning: false,
     handleEnsureTeamContext: ensureTeamContext,
     getCurrentTeamId: vi.fn(() => liveTeamId),
-    handleSelectChatAgent: vi.fn(),
+    handleSelectChatAgent,
     handleNavSelect,
     handleLogout: vi.fn(),
     pushToast: vi.fn(),
@@ -226,6 +326,24 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setDesktopEnvironmentSetupComplete: noop,
     ...overrides,
   } as unknown as AppController
+  // `navItem` is derived from the store; translate a starting-route override into
+  // the store state that derives to it.
+  if (overrides.navItem) {
+    const route = overrides.navItem
+    if (route === DESKTOP_ROUTES.apps) {
+      controller.appsPickerActive = true
+    } else if (route === DESKTOP_ROUTES.files) {
+      controller.workspaceTabs = openFilesTab(controller.workspaceTabs, { id: 'seed-files' })
+    } else if (route !== DESKTOP_ROUTES.chat) {
+      const section = settingsSectionForRoute(route)
+      if (section) {
+        controller.workspaceTabs = openSettingsTab(controller.workspaceTabs, {
+          id: `seed-${section}`,
+          section,
+        })
+      }
+    }
+  }
   return controller
 }
 
@@ -256,7 +374,7 @@ describe('App deep-link orchestration', () => {
     emitDeepLink = null
     emitCommand = null
     currentController = makeController()
-    vi.mocked(useAppController).mockImplementation(() => currentController)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
 
     Object.defineProperty(window, 'clerum', {
       configurable: true,
@@ -583,7 +701,12 @@ describe('App deep-link orchestration', () => {
     act(() => commandPaletteHarness.props?.onExecute('sidebar.toggle'))
     expect(sidebarHarness.props?.toggleRequestId).toBe(1)
 
-    currentController.navItem = DESKTOP_ROUTES.apps
+    // `navItem` is derived from the store; the instance-less Apps picker residual
+    // puts the shell on the Apps route so the contextual app commands apply.
+    act(() => {
+      currentController.appsPickerActive = true
+      forceControllerRender()
+    })
     act(() => emitCommand?.('commands.open'))
     act(() => {
       sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
@@ -732,7 +855,9 @@ describe('App deep-link orchestration', () => {
     await reportShortcutOpenResult()
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
-    expect(currentController.handleNavSelect).toHaveBeenCalledWith(DESKTOP_ROUTES.apps)
+    // The launch drives the store (an app tab), so `navItem` derives to the Apps
+    // route — the observable, not the retired `handleNavSelect(apps)` call.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
   })
 
   it('acknowledges an authenticated app link when confirmation is cancelled', async () => {
@@ -919,7 +1044,9 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
-    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+    // Launched exactly once — the store put the shell on the Apps route (the
+    // observable that replaced the retired single `handleNavSelect(apps)` call).
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
   })
 
   it('never presents a user A link after user B becomes authenticated', async () => {
@@ -1449,7 +1576,9 @@ describe('App deep-link orchestration', () => {
     expect(confirmDialogHarness.props?.title).toBe('App link could not be opened')
     expect(liveTeamId).toBe('team-c')
     expect(ensureTeamContext).toHaveBeenCalledTimes(1)
-    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+    // The launch put the shell on the Apps route via the store (observable that
+    // replaced the retired single `handleNavSelect(apps)` call).
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(sandboxUiPageHarness.props?.shortcutOpenRequestId).toBe(1)
     expect(acknowledgeDeepLink).not.toHaveBeenCalled()
 
@@ -1514,7 +1643,9 @@ describe('App deep-link orchestration', () => {
 
     await waitFor(() => expect(acknowledgeDeepLink).toHaveBeenCalledWith(1))
     expect(acknowledgeDeepLink).toHaveBeenCalledTimes(1)
-    expect(currentController.handleNavSelect).toHaveBeenCalledTimes(1)
+    // Launched exactly once onto the Apps route via the store (observable that
+    // replaced the retired single `handleNavSelect(apps)` call).
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
     expect(liveTeamId).toBe('team-b')
   })
 

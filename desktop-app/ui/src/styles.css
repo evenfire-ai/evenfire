@@ -16595,6 +16595,18 @@ pre {
   width: 100%;
 }
 
+/* Empty-workspace home state (mini-spec 03 §5): shown when the last tab closes. */
+.workspace-home-empty {
+  align-items: center;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--space-3);
+  justify-content: center;
+  padding: var(--space-5);
+  text-align: center;
+}
+
 .chat-view-surface {
   background: var(--surface-strong);
   border-color: var(--chat-view-selected-border);

@@ -1,11 +1,62 @@
 // @vitest-environment jsdom
+import { useReducer } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useNotificationsContext } from '@contexts/NotificationsContext'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAppController } from '@hooks/useAppController'
+import {
+  activeWorkspaceTab,
+  createWorkspaceTabsState,
+  newChatTab,
+  openChatTab,
+  openFilesTab,
+  openSettingsTab,
+} from '@lib/workspaceTabs'
+import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
 import type { AppNotification } from '@/uiTypes'
+
+// The universal tab store now lives inside the controller (single writer;
+// `navItem` derives from the active tab). These tests mock the controller, so
+// the mock reproduces that contract faithfully: `navItem` is DERIVED from the
+// store in `useReactiveController` (never a hand-set field), `setWorkspaceTabs`
+// bails out on an unchanged reference like React's setState, and the nav /
+// selection handlers drive the store through the real producers so the real
+// reconcile effect and real ChatSwitcher stay store-driven (T1).
+let forceControllerRender: () => void = () => {}
+
+function useReactiveController(controller: AppController): AppController {
+  const [, force] = useReducer((count: number) => count + 1, 0)
+  forceControllerRender = force
+  const activeTab = activeWorkspaceTab(controller.workspaceTabs)
+  ;(controller as { activeWorkspaceTab: unknown }).activeWorkspaceTab = activeTab
+  ;(controller as { navItem: unknown }).navItem = controller.appsPickerActive
+    ? DESKTOP_ROUTES.apps
+    : mapKindToRoute(activeTab)
+  return controller
+}
+
+type WorkspaceState = ReturnType<typeof useAppController>['workspaceTabs']
+
+// Store-driving helpers that mirror the real controller (focus a chat tab /
+// activate a specific chat), reused by the mock's nav + selection handlers.
+function focusChatState(state: WorkspaceState, nextId: string): WorkspaceState {
+  const active = activeWorkspaceTab(state)
+  if (active?.kind === 'chat') return state
+  const lastChat = [...state.tabs].reverse().find(tab => tab.kind === 'chat')
+  return lastChat ? { ...state, activeTabId: lastChat.id } : newChatTab(state, nextId, null)
+}
+function activateChatState(
+  state: WorkspaceState,
+  agentRef: string | null,
+  chatId: string | null,
+  nextId: string
+): WorkspaceState {
+  return chatId
+    ? openChatTab(state, { id: nextId, agentRef, chatId })
+    : newChatTab(state, nextId, agentRef)
+}
 
 // Keep @components/Common, ChatDrawer and ChatSwitcher REAL so the drawer's
 // open-chats switcher renders and can be driven. Everything else that App mounts
@@ -99,16 +150,72 @@ type AppController = ReturnType<typeof useAppController>
 function makeController(overrides: Partial<AppController> = {}): AppController {
   const noop = vi.fn()
   let controller: AppController
+  let tabSequence = 2
+  const nextWorkspaceTabId = vi.fn(() => `ws-tab-${tabSequence++}`)
+  // React-setState-faithful: bail out on an unchanged reference (so the
+  // idempotent reconcile effect can't spin), otherwise commit + re-render.
+  const setWorkspaceTabs = vi.fn((updater: unknown) => {
+    const next =
+      typeof updater === 'function'
+        ? (updater as (state: AppController['workspaceTabs']) => AppController['workspaceTabs'])(
+            controller.workspaceTabs
+          )
+        : (updater as AppController['workspaceTabs'])
+    if (next === controller.workspaceTabs) return
+    controller.workspaceTabs = next
+    forceControllerRender()
+  })
+  const clearAppsPicker = vi.fn(() => {
+    if (!controller.appsPickerActive) return
+    controller.appsPickerActive = false
+    forceControllerRender()
+  })
+  const showAppsPicker = vi.fn(() => {
+    // The picker residual is redundant when an app tab is already active.
+    if (controller.appsPickerActive) return
+    if (activeWorkspaceTab(controller.workspaceTabs)?.kind === 'app') return
+    controller.appsPickerActive = true
+    forceControllerRender()
+  })
+  // Faithful to the real controller: nav is a store action. `navItem` is derived
+  // (useReactiveController), so these drive the store — never set navItem.
   const handleNavSelect = vi.fn((item: AppController['navItem']) => {
-    controller.navItem = item
+    if (item === DESKTOP_ROUTES.chat) {
+      controller.selectedAgent = null
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => focusChatState(state, nextWorkspaceTabId()))
+    } else if (item === DESKTOP_ROUTES.apps) {
+      showAppsPicker()
+    } else if (item === DESKTOP_ROUTES.files) {
+      clearAppsPicker()
+      setWorkspaceTabs((state: WorkspaceState) => openFilesTab(state, { id: nextWorkspaceTabId() }))
+    } else {
+      const section = settingsSectionForRoute(item)
+      if (section) {
+        if (section === 'agents') controller.selectedAgent = null
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openSettingsTab(state, { id: nextWorkspaceTabId(), section })
+        )
+      }
+    }
+    forceControllerRender()
   })
   // Faithful to the real vm: selecting an agent/chat moves the primary
-  // `vm.activeChatId`/`selectedAgent` (the reconciler derives the tab from them).
+  // `vm.activeChatId`/`selectedAgent`, and (non-keepNavItem) activates the chat
+  // tab so `navItem` derives to `chat`. `keepNavItem` leaves the active tab (the
+  // app tab) untouched so the route stays on `apps`.
   const handleSelectChatAgent = vi.fn(
     (agentName: string, options: { chatId?: string; keepNavItem?: boolean } = {}) => {
       controller.selectedAgent = agentName
       controller.activeChatId = options.chatId ?? null
-      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+      if (!options.keepNavItem) {
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          activateChatState(state, agentName, options.chatId ?? null, nextWorkspaceTabId())
+        )
+      }
+      forceControllerRender()
     }
   )
   // Faithful to the real openAgentConversationTarget: `keepNavItem` (passed by
@@ -119,16 +226,31 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
       notification: { kind?: string; agentName?: string; chatId?: string },
       options: { keepNavItem?: boolean } = {}
     ) => {
-      // Faithful routing: workflow/sdk notifications navigate away (not to the
-      // chat/apps surface) — model them as leaving the agent chat state untouched.
+      // Faithful routing: workflow notifications navigate to the plugins section;
+      // sdk notifications navigate away without touching the agent chat state.
       if (notification.kind === 'workflow_completed') {
-        controller.navItem = DESKTOP_ROUTES.plugins
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          openSettingsTab(state, { id: nextWorkspaceTabId(), section: 'plugins' })
+        )
+        forceControllerRender()
         return Promise.resolve()
       }
       if (notification.kind === 'sdk_notification') return Promise.resolve()
       controller.selectedAgent = notification.agentName ?? controller.selectedAgent
       controller.activeChatId = notification.chatId ?? null
-      if (!options.keepNavItem) controller.navItem = DESKTOP_ROUTES.chat
+      if (!options.keepNavItem) {
+        clearAppsPicker()
+        setWorkspaceTabs((state: WorkspaceState) =>
+          activateChatState(
+            state,
+            controller.selectedAgent,
+            notification.chatId ?? null,
+            nextWorkspaceTabId()
+          )
+        )
+      }
+      forceControllerRender()
       return Promise.resolve()
     }
   )
@@ -147,6 +269,14 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     selectedAgentRoute: null,
     selectedContext: null,
     selectedTeam: null,
+    workspaceTabs: createWorkspaceTabsState('chat-tab-1'),
+    setWorkspaceTabs,
+    activeWorkspaceTab: undefined,
+    nextWorkspaceTabId,
+    appsPickerActive: false,
+    showAppsPicker,
+    clearAppsPicker,
+    activateWorkspaceChatTab: noop,
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -182,6 +312,25 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     setBooting: noop,
     ...overrides,
   } as unknown as AppController
+  // `navItem` is derived from the store (useReactiveController), so an override
+  // that names a starting route is translated into the store state that derives
+  // to it — never a hand-set `navItem` field.
+  if (overrides.navItem) {
+    const route = overrides.navItem
+    if (route === DESKTOP_ROUTES.apps) {
+      controller.appsPickerActive = true
+    } else if (route === DESKTOP_ROUTES.files) {
+      controller.workspaceTabs = openFilesTab(controller.workspaceTabs, { id: 'seed-files' })
+    } else if (route !== DESKTOP_ROUTES.chat) {
+      const section = settingsSectionForRoute(route)
+      if (section) {
+        controller.workspaceTabs = openSettingsTab(controller.workspaceTabs, {
+          id: `seed-${section}`,
+          section,
+        })
+      }
+    }
+  }
   return controller
 }
 
@@ -219,7 +368,7 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
     appHeaderHarness.props = null
     appHeaderHarness.openNotification = null
     currentController = makeController()
-    vi.mocked(useAppController).mockImplementation(() => currentController)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
@@ -843,7 +992,7 @@ describe('App chat drawer — narrow-width suppression (mini-spec 05)', () => {
       navItem: DESKTOP_ROUTES.chat,
       chatList: CHAT_LIST,
     } as Partial<AppController>)
-    vi.mocked(useAppController).mockImplementation(() => currentController)
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
       value: {
