@@ -35,27 +35,26 @@ function instanceBindingCheck(app: ElectronApplication, page: Page, testInfo: Te
   const expectedExecutable = createRequire(path.join(DESKTOP_APP_ROOT, 'package.json'))(
     'electron'
   ) as string
+  // Public environment identity contract: both effective origins contribute.
+  // An env-only launch does not necessarily have a saved selector option.
+  const restOrigin = new URL(EXTERNAL_REST_API_BASE_URL).origin
+  const rpcOrigin = new URL(RPC_PROXY_BASE_URL).origin
+  const slug = `${restOrigin}_${rpcOrigin}`
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 48)
+  const expectedEnvKey = `${slug}-${sha256Hex(Buffer.from(`${restOrigin}|rpc=${rpcOrigin}`)).slice(0, 12)}`
   let firstEnvKey: string | undefined
   return async () => {
     // Observe the running processes and IPC configuration, rather than trusting
     // launch environment variables. This never changes selection or auth state.
-    const identity = await app.evaluate(
-      ({ app: electronApp }, configModule) => {
-        // Read the already-loaded main-process config. Environment launches need
-        // not have a saved selector option, so options are not effective endpoints.
-        const { config, getActiveEnvKey } = require(configModule)
-        return {
-          pid: process.pid,
-          argv: process.argv,
-          executable: electronApp.getPath('exe'),
-          userData: electronApp.getPath('userData'),
-          rest: config.externalRestApiBaseUrl as string,
-          rpc: config.rpcProxyBaseUrl as string,
-          envKey: getActiveEnvKey() as string,
-        }
-      },
-      path.join(path.dirname(MAIN_ENTRY), 'config.js')
-    )
+    const identity = await app.evaluate(({ app: electronApp }) => ({
+      pid: process.pid,
+      argv: process.argv,
+      executable: electronApp.getPath('exe'),
+      userData: electronApp.getPath('userData'),
+    }))
     const runtime = await page.evaluate(async () => {
       const state = await window.clerum.auth.getRuntimeConfigState()
       return {
@@ -68,10 +67,7 @@ function instanceBindingCheck(app: ElectronApplication, page: Page, testInfo: Te
     expect(fs.realpathSync(identity.executable)).toBe(fs.realpathSync(expectedExecutable))
     expect(path.resolve(identity.userData)).toBe(expectedData)
     expect(path.resolve(runtime.storagePath)).toBe(expectedConfig)
-    if (identity.rest !== EXTERNAL_REST_API_BASE_URL || identity.rpc !== RPC_PROXY_BASE_URL)
-      throw new Error('Desktop effective endpoints do not match the owned #654 lane')
-    expect(runtime.envKey).toBe(identity.envKey)
-    expect(runtime.envKey.length).toBeGreaterThan(0)
+    expect(runtime.envKey).toBe(expectedEnvKey)
     if (firstEnvKey !== undefined) expect(runtime.envKey).toBe(firstEnvKey)
     firstEnvKey = runtime.envKey
     fs.writeFileSync(
@@ -85,8 +81,8 @@ function instanceBindingCheck(app: ElectronApplication, page: Page, testInfo: Te
           userData: expectedData,
           config: expectedConfig,
           envKey: runtime.envKey,
-          rest: identity.rest,
-          rpc: identity.rpc,
+          expectedRest: EXTERNAL_REST_API_BASE_URL,
+          expectedRpc: RPC_PROXY_BASE_URL,
         },
         null,
         2
