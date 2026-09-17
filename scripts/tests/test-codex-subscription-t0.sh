@@ -223,6 +223,7 @@ run_group "control-api" "control-api" \
   "test/services.recipeCodexGrantIdentity.test.ts" \
   "test/crd.llmProviderEnums.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
+  "test/hostSpecValidation.grokSubscription.test.ts" \
   "test/llmProviders.test.ts" \
   "test/services.codexSubscriptionConnection.test.ts" \
   "test/services.llmAllowedModelsConfigMap.test.ts" \
@@ -292,6 +293,7 @@ run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/sdkOnlyCodexBinding.test.ts" \
   "src/workflow/sdkOnlyGrokBinding.test.ts" \
   "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
+  "src/workflow/pluginWorkloadSdkProvisioner.grokPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
   "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
