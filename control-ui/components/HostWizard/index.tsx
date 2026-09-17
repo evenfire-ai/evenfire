@@ -198,7 +198,7 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
     if (
-      (state.provider === 'codex-subscription' || state.provider === GROK_SUBSCRIPTION_PROVIDER) &&
+      isOauthBrokerProvider(state.provider) &&
       (!state.connectionRef.trim() ||
         state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
         (state.provider === GROK_SUBSCRIPTION_PROVIDER
@@ -211,8 +211,7 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     // static primary/fallback still requires the exact credential slots.
     if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) {
       return (
-        (state.provider === 'codex-subscription' ||
-          state.provider === GROK_SUBSCRIPTION_PROVIDER) &&
+        isOauthBrokerProvider(state.provider) &&
         parseCredentialSelect(state.existingSecret).kind === 'subscription'
       )
     }
@@ -229,7 +228,7 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     )
     const hasValidSecret =
       state.secretMode === 'existing'
-        ? state.provider === 'codex-subscription'
+        ? isOauthBrokerProvider(state.provider)
           ? state.existingLlmSecret.trim().length > 0
           : parseCredentialSelect(state.existingSecret).kind === 'secret'
         : toKebabCase(state.newSecretName).length > 0 &&
@@ -525,7 +524,7 @@ export function HostWizard({
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
-    if (provider === 'codex-subscription' || provider === GROK_SUBSCRIPTION_PROVIDER) {
+    if (isOauthBrokerProvider(provider)) {
       const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
       if (offered.length === 0) return
       const grant = (
@@ -665,7 +664,7 @@ export function HostWizard({
     if (
       step === 1 &&
       secretMode === 'existing' &&
-      provider === 'codex-subscription' &&
+      isOauthBrokerProvider(provider) &&
       chainRequiresSecret &&
       !existingLlmSecret.trim()
     ) {
@@ -814,7 +813,7 @@ export function HostWizard({
         ? ''
         : secretMode === 'new'
           ? normalizedSecretName
-          : provider === 'codex-subscription'
+          : isOauthBrokerProvider(provider)
             ? existingLlmSecret.trim()
             : parseCredentialSelect(existingSecret).kind === 'secret'
               ? existingSecret
@@ -1052,9 +1051,10 @@ export function HostWizard({
                     checked={secretMode === 'new'}
                     onChange={() => {
                       setSecretMode('new')
-                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                      if (isOauthBrokerProvider(provider) && !llmPolicy?.fallbacks.length) {
                         setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
+                        setGrokModels([])
                         setExistingSecret('')
                         setExistingLlmSecret('')
                         setProvider('openai')
@@ -1082,7 +1082,7 @@ export function HostWizard({
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
-                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                  {isOauthBrokerProvider(provider) && chainRequiresSecret ? (
                     <>
                       <strong>LLM secret</strong>
                       <LlmSecretSelect
@@ -1131,10 +1131,11 @@ export function HostWizard({
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
-                if (
-                  next.provider !== 'codex-subscription' &&
-                  next.provider !== GROK_SUBSCRIPTION_PROVIDER
-                ) {
+                // A grant belongs to exactly one broker: any provider change
+                // (Codex → Grok, broker → static) drops the selected grant, its
+                // model catalog and the subscription pick so the next provider
+                // never reads another broker's connection key.
+                if (next.provider !== provider) {
                   setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                   setCodexModels([])
                   setGrokModels([])

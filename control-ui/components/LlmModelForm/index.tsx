@@ -3,7 +3,12 @@
 import React, { useState } from 'react'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import type { CreateLlmModelInput } from '@lib/api'
-import { LLM_PROVIDER_OPTIONS, isKnownProvider } from '@lib/llm'
+import {
+  GROK_SUBSCRIPTION_PROVIDER,
+  LLM_PROVIDER_OPTIONS,
+  isKnownProvider,
+  isOauthBrokerProvider,
+} from '@lib/llm'
 import type { LlmModelFormProps } from './types'
 
 // Returns a positive integer, or null when empty. Returns undefined when the
@@ -41,6 +46,9 @@ export function LlmModelForm({
   const [showErrors, setShowErrors] = useState(false)
 
   const providerIsKnown = isKnownProvider(provider)
+  // Subscription (oauth-broker) models are enabled by their grant catalog sync,
+  // never from this table — lock the toggle for every broker, not only Codex.
+  const brokerManaged = isOauthBrokerProvider(provider)
   const modelInvalid = model.trim().length === 0
   const contextWindowInvalid = parseContextWindow(contextWindow) === undefined
   const hasErrors = modelInvalid || contextWindowInvalid
@@ -159,13 +167,15 @@ export function LlmModelForm({
         <CheckboxField
           label="Enabled"
           description={
-            provider === 'codex-subscription'
-              ? 'ChatGPT subscription models are enabled by the assigned grant catalog after sync, not from this table.'
-              : 'Only enabled models can be selected for agents and served at runtime. Disable to retire a model without deleting it.'
+            provider === GROK_SUBSCRIPTION_PROVIDER
+              ? 'Grok subscription models are enabled by the assigned grant catalog after sync, not from this table.'
+              : brokerManaged
+                ? 'ChatGPT subscription models are enabled by the assigned grant catalog after sync, not from this table.'
+                : 'Only enabled models can be selected for agents and served at runtime. Disable to retire a model without deleting it.'
           }
           checked={enabled}
           onChange={event => setEnabled(event.target.checked)}
-          disabled={saving || provider === 'codex-subscription'}
+          disabled={saving || brokerManaged}
         />
       </FormSection>
 

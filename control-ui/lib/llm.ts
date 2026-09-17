@@ -58,7 +58,11 @@ export function isOpenAiFamily(provider: string | undefined | null): boolean {
 }
 
 export function isOauthBrokerProvider(provider: string | undefined | null): boolean {
-  return provider === OPENAI_SUBSCRIPTION_PROVIDER || provider === GROK_SUBSCRIPTION_PROVIDER
+  return (
+    typeof provider === 'string' &&
+    isLlmProviderId(provider) &&
+    PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+  )
 }
 
 /** Provider dropdown: one OpenAI entry. Runtime still persists `codex-subscription`. */
@@ -407,6 +411,25 @@ export function isProviderUsable(
   isPresent: (dataKey: string) => boolean
 ): boolean {
   return getLlmGroupCompleteness(getLlmCredentialGroup(provider), isPresent).usable
+}
+
+// Whether a linked LLM Secret (its data keys via `isPresent`) can serve the
+// chain it is linked for. A static primary must itself be usable (asymmetric
+// gate). An oauth-broker primary authenticates through its grant, so the Secret
+// exists only for the static-credential fallbacks: at least one of THOSE must
+// be usable. Broker fallbacks never count — a zero-slot broker is trivially
+// "usable" and would otherwise make any Secret look valid.
+export function isLinkedSecretUsableForChain(
+  primary: LlmProvider,
+  fallbacks: Array<{ provider: string }> | undefined,
+  isPresent: (dataKey: string) => boolean
+): boolean {
+  if (!isOauthBrokerProvider(primary)) return isProviderUsable(primary, isPresent)
+  return (fallbacks ?? []).some(
+    entry =>
+      providerRequiresLlmSecret(entry.provider) &&
+      isProviderUsable(entry.provider as LlmProvider, isPresent)
+  )
 }
 
 // The credential dataKeys currently in the provider domain — the primary's

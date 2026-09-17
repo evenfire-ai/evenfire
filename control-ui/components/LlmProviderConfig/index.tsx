@@ -127,16 +127,25 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
-  const pickerOptions = operatorProviderOptions({ grokEnabled })
-  const primaryProviderOptions = useMemo(
-    () =>
-      pickerOptions.map(option => ({
-        ...option,
-        icon: <LlmProviderIcon provider={option.value} label={option.label} />,
-      })),
-    [pickerOptions]
-  )
   const providerPickerValue = isOpenAiFamily(provider) ? 'openai' : provider
+  const primaryProviderOptions = useMemo(() => {
+    const options = operatorProviderOptions({ grokEnabled }).map(option => ({
+      ...option,
+      icon: <LlmProviderIcon provider={option.value} label={option.label} />,
+    }))
+    // A saved provider the picker no longer offers (e.g. a Grok primary while
+    // the Grok capability is off) stays visible and selected, marked disabled,
+    // instead of rendering as an empty selection.
+    if (!options.some(option => option.value === providerPickerValue)) {
+      const label = `${getProviderLabel(providerPickerValue)} (disabled)`
+      options.push({
+        value: providerPickerValue as LlmProvider,
+        label,
+        icon: <LlmProviderIcon provider={providerPickerValue} label={label} />,
+      })
+    }
+    return options
+  }, [grokEnabled, providerPickerValue])
   const primaryModelSelectOptions = useMemo(() => {
     const options: SelectionDropdownOption[] = primaryModelOptions.map(option => ({
       value: option,

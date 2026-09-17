@@ -58,8 +58,8 @@ import {
   getProviderLabel,
   getProvidersWithCompleteCredentials,
   hostModelNameError,
+  isLinkedSecretUsableForChain,
   isOauthBrokerProvider,
-  isProviderUsable,
   llmChainRequiresSecret,
   normalizeAllowedModels,
   normalizeLlmPolicy,
@@ -832,11 +832,9 @@ export default function HostDetailsPage() {
     chainRequiresSecret &&
     secretRefDraft.trim().length > 0 &&
     currentSecretKeys.length > 0 &&
-    (showFallbackSecretField
-      ? !(llmPolicyDraft?.fallbacks ?? []).some(entry =>
-          isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
-        )
-      : !isProviderUsable(providerDraft, key => currentSecretKeys.includes(key)))
+    !isLinkedSecretUsableForChain(providerDraft, llmPolicyDraft?.fallbacks, key =>
+      currentSecretKeys.includes(key)
+    )
   const secretMismatchLabel = showFallbackSecretField
     ? fallbackSecretLabels[0] || 'fallback'
     : getProviderLabel(providerDraft)
@@ -948,7 +946,7 @@ export default function HostDetailsPage() {
       setError(modelNameProblem)
       return false
     }
-    if (providerDraft === 'codex-subscription' || providerDraft === GROK_SUBSCRIPTION_PROVIDER) {
+    if (isOauthBrokerProvider(providerDraft)) {
       if (!connectionRefDraft.trim() || connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY) {
         setError(
           providerDraft === GROK_SUBSCRIPTION_PROVIDER
@@ -994,12 +992,11 @@ export default function HostDetailsPage() {
       setError('Select an LLM secret for the static-credentials provider in this chain.')
       return false
     }
-    const secretUsableFor =
-      providerDraft === 'codex-subscription'
-        ? (llmPolicyDraft?.fallbacks ?? []).find(entry =>
-            isProviderUsable(entry.provider as LlmProvider, key => currentSecretKeys.includes(key))
-          )
-        : isProviderUsable(providerDraft, key => currentSecretKeys.includes(key))
+    const secretUsableFor = isLinkedSecretUsableForChain(
+      providerDraft,
+      llmPolicyDraft?.fallbacks,
+      key => currentSecretKeys.includes(key)
+    )
     if (
       chainRequiresSecret &&
       secretRefDraft.trim() &&
@@ -1386,7 +1383,11 @@ export default function HostDetailsPage() {
                     onPrimaryChange={next => {
                       setProviderDraft(next.provider)
                       setModelNameDraft(next.model)
-                      if (!isOauthBrokerProvider(next.provider)) {
+                      // A grant belongs to exactly one broker: any provider
+                      // change (Codex → Grok, broker → static) drops the grant
+                      // and its catalog so the next provider never reads
+                      // another broker's connection key.
+                      if (next.provider !== providerDraft) {
                         setConnectionRefDraft(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
                         setGrokModels([])
@@ -1421,10 +1422,14 @@ export default function HostDetailsPage() {
                       disabled={
                         busy ||
                         Boolean(hostModelNameError(modelNameDraft)) ||
-                        (providerDraft === 'codex-subscription' &&
+                        (isOauthBrokerProvider(providerDraft) &&
                           (connectionRefDraft === CODEX_UNASSIGNED_CONNECTION_KEY ||
                             Boolean(grantCatalogError) ||
-                            !codexModels.includes(modelNameDraft.trim())))
+                            !(
+                              providerDraft === GROK_SUBSCRIPTION_PROVIDER
+                                ? grokModels
+                                : codexModels
+                            ).includes(modelNameDraft.trim())))
                       }
                     >
                       {busy ? 'Saving…' : 'Save'}

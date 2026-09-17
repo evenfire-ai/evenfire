@@ -4,7 +4,6 @@ import React, { useEffect, useMemo } from 'react'
 import { IconTrash } from '@/components/icons'
 import { Button, CheckboxField, Field, SelectInput, TextInput } from '@/components/ui'
 import {
-  GROK_SUBSCRIPTION_PROVIDER,
   LLM_DEFAULT_COOLDOWN_SECONDS,
   LLM_TRIGGER_CLASSES,
   LLM_TRIGGER_LABELS,
@@ -325,9 +324,11 @@ function FallbackRow({
             {entry.provider === OPENAI_SUBSCRIPTION_PROVIDER ? (
               <option value={OPENAI_SUBSCRIPTION_PROVIDER}>OpenAI (ChatGPT subscription)</option>
             ) : null}
-            {entry.provider === GROK_SUBSCRIPTION_PROVIDER &&
-            !pickerOptions.some(option => option.value === GROK_SUBSCRIPTION_PROVIDER) ? (
-              <option value={GROK_SUBSCRIPTION_PROVIDER}>xAI Grok Subscription</option>
+            {entry.provider !== OPENAI_SUBSCRIPTION_PROVIDER &&
+            !pickerOptions.some(option => option.value === entry.provider) ? (
+              <option value={entry.provider}>
+                {getProviderDisplayLabel(entry.provider)} (disabled)
+              </option>
             ) : null}
           </SelectInput>
         </Field>

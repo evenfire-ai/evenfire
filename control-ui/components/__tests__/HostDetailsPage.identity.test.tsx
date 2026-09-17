@@ -121,6 +121,94 @@ function render(children: ReactNode) {
   return rtlRender(<ToastProvider>{children}</ToastProvider>)
 }
 
+function mockGrokGrant() {
+  vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+    {
+      connectionKey: 'team-grok',
+      displayName: 'Team Grok',
+      status: 'connected',
+      credentialRevision: 2,
+      catalogRevision: 5,
+      accountFingerprint: 'fp',
+      catalogStatus: 'ready',
+      catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+      lastRefreshAt: '2026-08-20T00:00:00.000Z',
+      lastAuthAt: '2026-08-20T00:00:00.000Z',
+      refreshLockHeld: false,
+      defaultModel: 'grok-4.6',
+    },
+  ])
+  vi.mocked(listGrokConnectionModels).mockResolvedValue([
+    { model: 'grok-4.6', enabled: true, stale: false },
+  ])
+}
+
+function mockCodexGrant() {
+  vi.mocked(listCodexSubscriptionConnections).mockResolvedValue([
+    {
+      connectionKey: 'codex-aaa',
+      displayName: 'Team A',
+      status: 'connected',
+      credentialRevision: 1,
+      catalogRevision: 1,
+      accountFingerprint: 'fp',
+      catalogStatus: 'ready',
+      catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+      lastRefreshAt: '2026-08-20T00:00:00.000Z',
+      lastAuthAt: '2026-08-20T00:00:00.000Z',
+      refreshLockHeld: false,
+      defaultModel: 'gpt-5.1',
+    },
+  ])
+  vi.mocked(listCodexConnectionModels).mockResolvedValue([
+    { model: 'gpt-5.1', enabled: true, stale: false },
+  ])
+}
+
+// Grok primary with a same-broker Grok fallback AND a static OpenAI fallback:
+// only the static fallback needs the linked Secret.
+function grokFallbackHost(opts: { secretRef: string }) {
+  return {
+    ...host,
+    spec: {
+      ...host.spec,
+      secretRef: opts.secretRef,
+      model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' },
+      llmPolicy: {
+        fallbacks: [
+          { provider: 'grok-subscription', model: 'grok-4.6' },
+          { provider: 'openai', model: 'gpt-4o' },
+        ],
+      },
+    },
+  }
+}
+
+function mockHostBundle(hostResource: unknown, secrets: Array<{ name: string; keys?: string[] }>) {
+  ;(api.getHostDetailBundle as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+    host: hostResource,
+    contexts: [{ metadata: { name: 'ctx' }, spec: { contextId: 'ctx' } }],
+    secrets,
+    users: [],
+    teams: [],
+    agentUsers: [],
+    agentTeams: [],
+  })
+  ;(api.getHost as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(hostResource)
+  // Earlier tests override the allowlist; these cases exercise the Secret gate only.
+  ;(api.getLlmModels as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({ rows: [] })
+}
+
+async function findGrokProviderOption(): Promise<HTMLElement> {
+  let option: HTMLElement | null = null
+  await waitFor(() => {
+    const trigger = screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+    if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.click(trigger)
+    option = screen.getByRole('option', { name: 'xAI Grok Subscription' })
+  })
+  return option as unknown as HTMLElement
+}
+
 afterEach(() => {
   cleanup()
 })
@@ -545,6 +633,155 @@ describe('HostDetailsPage identity integration', () => {
         })
       )
     })
+  })
+
+  it('blocks saving a Grok Host whose static fallback Secret lacks the fallback credential', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    mockGrokGrant()
+    const grokHost = grokFallbackHost({ secretRef: 'claude-secret' })
+    mockHostBundle(grokHost, [{ name: 'claude-secret', keys: ['claude-api-key'] }])
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(
+      await screen.findAllByText(/does not contain a usable OpenAI credential/i)
+    ).not.toHaveLength(0)
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.anything()
+    )
+  })
+
+  it('saves a Grok Host with a same-broker fallback and a static fallback whose Secret is usable', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    mockGrokGrant()
+    const grokHost = grokFallbackHost({ secretRef: 'openai-secret' })
+    mockHostBundle(grokHost, [{ name: 'openai-secret', keys: ['openai-api-key'] }])
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'PUT',
+        '/api/v1/admin/hosts/foo',
+        expect.objectContaining({
+          spec: expect.objectContaining({
+            secretRef: 'openai-secret',
+            model: {
+              provider: 'grok-subscription',
+              name: 'grok-4.6',
+              connectionRef: 'team-grok',
+            },
+          }),
+        })
+      )
+    })
+  })
+
+  it('blocks saving a Codex Host whose static fallback Secret lacks the fallback credential', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    mockCodexGrant()
+    const codexHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: 'claude-secret',
+        model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'codex-aaa' },
+        llmPolicy: { fallbacks: [{ provider: 'openai', model: 'gpt-4o' }] },
+      },
+    }
+    mockHostBundle(codexHost, [{ name: 'claude-secret', keys: ['claude-api-key'] }])
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(
+      await screen.findAllByText(/does not contain a usable OpenAI credential/i)
+    ).not.toHaveLength(0)
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.anything()
+    )
+  })
+
+  it('drops the Codex grant when the primary switches to Grok and blocks Save until a Grok grant is chosen', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    mockCodexGrant()
+    mockGrokGrant()
+    const codexHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: undefined,
+        model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'codex-aaa' },
+      },
+    }
+    mockHostBundle(codexHost, [])
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(listCodexConnectionModels).toHaveBeenCalledWith('codex-aaa')
+    })
+    fireEvent.click(await findGrokProviderOption())
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      ).toHaveTextContent('xAI Grok Subscription')
+    })
+    expect(listGrokConnectionModels).not.toHaveBeenCalledWith('codex-aaa')
+    expect(screen.queryByText(/codex-aaa \(unavailable\)/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Could not load Grok grant models/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(api.apiSend).not.toHaveBeenCalledWith(
+      'PUT',
+      '/api/v1/admin/hosts/foo',
+      expect.anything()
+    )
+  })
+
+  it('keeps Save disabled while the assigned Grok grant catalog has not offered the model', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    mockGrokGrant()
+    vi.mocked(listGrokConnectionModels).mockReturnValue(new Promise(() => undefined))
+    const grokHost = {
+      ...host,
+      spec: {
+        ...host.spec,
+        secretRef: undefined,
+        model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' },
+      },
+    }
+    mockHostBundle(grokHost, [])
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(listGrokConnectionModels).toHaveBeenCalledWith('team-grok')
+    })
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('hides the Grok provider option when the Grok capability probe reports disabled', async () => {
+    mockParams = { name: 'foo', tab: 'model' }
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValue({ status: 404 })
+    render(<HostDetailsPage />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }))
+    await waitFor(() => {
+      expect(listGrokSubscriptionConnections).toHaveBeenCalled()
+    })
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /xAI Grok Subscription/ })).not.toBeInTheDocument()
   })
 
   it('does not surface a page error when ChatGPT subscriptions are disabled', async () => {
