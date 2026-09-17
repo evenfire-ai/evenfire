@@ -250,7 +250,7 @@ export function OwnedEntries({
           }
         />
       )}
-      <div className="cu-card__body">
+      <div className={hideHeader ? 'cu-card__body cu-marketplace-tab-body' : 'cu-card__body'}>
         {hideHeader && sharingUnavailable && hasPrivateEntries ? (
           <p className="cu-muted-note">
             Cross-org sharing isn’t available on this deployment, so private entries stay visible

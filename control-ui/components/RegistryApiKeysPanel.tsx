@@ -236,7 +236,7 @@ export default function RegistryApiKeysPanel({
         />
       )}
 
-      <div className="cu-card__body">
+      <div className={hideHeader ? 'cu-card__body cu-marketplace-tab-body' : 'cu-card__body'}>
         {view.kind === 'not-owner' ? (
           <p className="cu-banner cu-banner--warn">
             You must be an org owner to manage API keys
