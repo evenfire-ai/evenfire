@@ -618,9 +618,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
         // everything inside; its superseded share rows are consolidated.
         await window.clerum.gfs.grant(source.resourceId, [subjectKey], bits, GFS_DRIVE_MAIN, true)
         for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
-        // The file's own direct grant is aligned so it cannot mask the role.
-        if (request.row.grant) {
-          await ctrl.grant([subjectKey], bits, request.row.grant.inherit)
+        // The file's own direct rows are aligned so they cannot mask the
+        // confirmed role: the grant upsert expresses the new role and every
+        // direct file share for the member is revoked after it — a stale
+        // editor share would otherwise keep the member an Editor.
+        if (request.row.grant || request.row.shares.length > 0) {
+          await ctrl.grant([subjectKey], bits, request.row.grant?.inherit ?? false)
+          for (const share of request.row.shares) await ctrl.revokeShare(share.id)
         }
         pushToast?.(
           `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${source.name} and everything inside it`,

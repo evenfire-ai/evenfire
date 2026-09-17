@@ -1830,6 +1830,62 @@ describe('FilesPage', () => {
     await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
   })
 
+  // R1-H2 — a stale direct file share must not survive a confirmed parent
+  // role change: the editor share would keep masking the confirmed downgrade
+  // while the toast claims Read-only.
+  it('revokes the file’s direct shares when a confirmed parent role change downgrades the member', async () => {
+    installInheritedDirectoryMocks()
+    const fileGrant = vi.fn(async () => undefined)
+    const revokeShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        grants: [],
+        shares: [
+          {
+            id: 'file-share-1',
+            drive: 'main',
+            resourceId: 'file-1',
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            includeDescendants: false,
+          },
+        ],
+        grant: fileGrant,
+        revokeShare,
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    // The direct share row is consumed by the deduped merged row.
+    expect(within(manageDialog).queryByTestId('gfs-access-row-share-file-share-1')).toBeNull()
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+    const confirmDialog = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+    })
+
+    // The direct share is superseded by the aligned grant and revoked…
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
+    // …after the replacement grant expresses the confirmed role.
+    await waitFor(() =>
+      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Test Two is now Read-only on Team folder and everything inside it',
+      'success'
+    )
+  })
+
   it('removes an inherited member from the parent folder after confirmation', async () => {
     installInheritedDirectoryMocks()
     const revokeGrant = vi.fn(async () => undefined)
