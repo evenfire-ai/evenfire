@@ -491,8 +491,13 @@ describe('eager Grok policy gate', () => {
   })
 
   it('rejects a Grok bootstrap whose hash is a Codex digest', async () => {
+    // Minted and echoed hashes MUST be the same Codex digest. If parse used
+    // computeCodexPolicyHash, the echo would match and this would report ready.
     const forged = {
-      ...GROK_MINTED,
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: GROK_MODEL,
       bindingHash: computeCodexPolicyHash({
         model: GROK_MODEL,
         catalogRevision: 5,
@@ -501,8 +506,9 @@ describe('eager Grok policy gate', () => {
       }),
     }
     const harness = makeHarness(readyGrokBootstrapBody(forged), GROK_SPEC)
-    expect(await harness.reconcile({ grokBinding: GROK_MINTED })).toBe('deploying')
+    expect(await harness.reconcile({ grokBinding: forged })).toBe('deploying')
     expect(harness.provisioner.getBootstrapProof(GROK_RECIPE)).toBeUndefined()
+    expect(harness.configure).toHaveBeenCalled()
   })
 
   it('accepts execution_binding_missing as awaiting_policy when Grok has no grant', async () => {

@@ -428,9 +428,9 @@ export async function validateHostSpec(
     // already lived on the Host. A revoked/unknown grant must not ride the
     // identity/channels full-replace tolerance. An unchanged revoked ref stays
     // tolerable so operators can still save unrelated fields.
-    const storedConnectionRef = storedCodexConnectionRef(context.stored)
+    const storedConnectionRef = storedBrokerConnectionRef(context.stored)
     const connectionAssignmentChanged =
-      provider === 'codex-subscription' &&
+      (provider === 'codex-subscription' || provider === 'grok-subscription') &&
       storedConnectionRef !== undefined &&
       storedConnectionRef !== connectionRef
     if (
@@ -632,13 +632,22 @@ function resolvedCodexConnectionRef(model: unknown): string {
   )
 }
 
-function storedCodexConnectionRef(stored: Record<string, unknown> | undefined): string | undefined {
+function storedBrokerConnectionRef(
+  stored: Record<string, unknown> | undefined
+): string | undefined {
   if (!isPlainObject(stored) || !isPlainObject(stored.model)) return undefined
   const provider = typeof stored.model.provider === 'string' ? stored.model.provider.trim() : ''
-  if (provider !== 'codex-subscription') return undefined
-  return readHostCodexConnectionRef(
-    typeof stored.model.connectionRef === 'string' ? stored.model.connectionRef : null
-  )
+  if (provider === 'codex-subscription') {
+    return readHostCodexConnectionRef(
+      typeof stored.model.connectionRef === 'string' ? stored.model.connectionRef : null
+    )
+  }
+  if (provider === 'grok-subscription') {
+    return readHostGrokConnectionRef(
+      typeof stored.model.connectionRef === 'string' ? stored.model.connectionRef : null
+    )
+  }
+  return undefined
 }
 
 function toleratePair(
