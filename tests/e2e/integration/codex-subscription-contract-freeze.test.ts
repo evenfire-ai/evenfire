@@ -24,6 +24,22 @@ const architectureDocPath = join(
 )
 const validationDocPath = join(repoRoot, 'docs/testing/codex-subscription-validation.md')
 
+it('admits visual authorization envelopes only on the exact gateway route', () => {
+  const yaml = readFileSync(join(repoRoot, 'deploy/base/control-plane/configmaps.yaml'), 'utf8')
+  const gateway = yaml
+    .split('\n---')
+    .find(document => document.includes('name: nginx-workflow-approval-gateway'))!
+  expect(gateway).toBeTruthy()
+  const route = gateway.match(
+    /location = \/api\/v1\/mcp-host\/llm\/provider-attempts\/authorize \{([\s\S]*?)\n        \}/
+  )?.[1]
+  expect(route).toContain('client_max_body_size 25165824;')
+  expect(route).toMatch(/limit_except POST\s*\{\s*deny all;/)
+  expect(route).toContain('proxy_set_header Authorization $http_authorization;')
+  expect(route).toContain('proxy_pass http://control_api_upstream;')
+  expect(gateway.match(/client_max_body_size/g)).toHaveLength(1)
+})
+
 const REQUIRED_OPERATIONS = [
   'oauth_browser',
   'oauth_device',

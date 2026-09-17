@@ -61,6 +61,10 @@ parser requires a valid platform identity on the visual completion route.
 Admin and unauthenticated requests retain the ordinary configured body limit.
 `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES` controls the visual transport ceiling;
 `CODEX_LLM_PROXY_MAX_BODY_BYTES` continues to control ordinary requests.
+The internal authorization gateway also permits 24 MiB only at the exact
+`/api/v1/mcp-host/llm/provider-attempts/authorize` POST location. Other locations
+retain their prior limits, and the Authorization header and method restrictions
+are unchanged.
 
 The proxy projects parts to Responses `input_text` and `input_image` items with
 an inline data URL. The shape is grounded in the official Codex client
