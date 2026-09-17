@@ -182,10 +182,13 @@ async function openConfiguredAgentChat(page: Page, hostRef: string) {
   const switchAgent = page.getByRole('button', { name: 'Switch chat agent' })
   await expect(switchAgent).toBeVisible({ timeout: 30_000 })
   await switchAgent.click()
-  const agentMenuItem = page.getByRole('menuitem', { name: hostRef, exact: true })
+  const visibleName = new RegExp(`^${hostRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i')
+  const agentMenuItem = page.getByRole('menuitem', { name: visibleName })
   await expect(agentMenuItem).toHaveCount(1)
   await agentMenuItem.click()
-  await expect(switchAgent).toContainText(hostRef)
+  await expect(switchAgent).toContainText(
+    new RegExp(hostRef.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+  )
 }
 
 /** The model options menu, opened from the composer's own chip. */
@@ -675,6 +678,13 @@ test('image-capabilities fixture: image capability gates the composer and the pr
     })
 
     await screenshotAndLog(page, testInfo, 'desktop-image-capabilities-fixture')
+  } catch (error) {
+    if (recordedPage && !recordedPage.isClosed()) {
+      await recordedPage
+        .screenshot({ path: testInfo.outputPath('failure.png') })
+        .catch(() => undefined)
+    }
+    throw error
   } finally {
     await finalizeRecording(app, recordedPage)
   }

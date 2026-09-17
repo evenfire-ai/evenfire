@@ -71,6 +71,21 @@ export function requireOwnedResource(resource, uid, runId) {
     throw new Error('Fixture resource owner changed; refusing mutation')
 }
 
+export function sanitizeFixtureReport(output, privateValues) {
+  let text = String(output)
+  for (const value of privateValues) if (value) text = text.replaceAll(value, '[redacted]')
+  return text
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g, '[redacted]')
+    .split('\n')
+    .filter(
+      line =>
+        line.length < 2000 &&
+        !/password|authorization|cookie|credential|secret|access.?token|refresh.?token/i.test(line)
+    )
+    .join('\n')
+    .slice(-128 * 1024)
+}
+
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {
   const result = spawnSync(binary, args, {
     input,
@@ -94,9 +109,13 @@ function command(binary, args, { input, timeout = 60_000, env = process.env } = 
             ? 'conflict'
             : 'command-error'
     // Emit only controlled labels, never child output that may contain data.
-    throw new Error(
+    const error = new Error(
       `${binary} ${operation} ${workload} failed (status ${result.status ?? 'unavailable'}; ${reason})`
     )
+    Object.defineProperty(error, 'commandOutput', {
+      value: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
+    })
+    throw error
   }
   return result.stdout
 }
@@ -262,6 +281,15 @@ async function main() {
     .find(value => value.startsWith('control_ui_admin_session='))
     ?.split(';')[0]
   if (!cookie) throw new Error('Admin session missing')
+  const privateValues = [ADMIN_PASSWORD, cookie, cookie.slice(cookie.indexOf('=') + 1)]
+  const report = output => {
+    const file = openOwnedFile(evidence, 'playwright.log', { create: true })
+    try {
+      fs.writeFileSync(file.fd, sanitizeFixtureReport(output, privateValues))
+    } finally {
+      fs.closeSync(file.fd)
+    }
+  }
   const admin = async (method, route, body) => {
     const response = await fetch(`${api}/admin/${route}`, {
       method,
@@ -529,6 +557,7 @@ async function main() {
       save()
     }
     const fixtureKey = randomBytes(32).toString('hex')
+    privateValues.push(fixtureKey)
     const keyHash = createHash('sha256').update(fixtureKey).digest('hex')
     state.changes.key = true
     save()
@@ -676,16 +705,19 @@ async function main() {
       ],
       { env: environment, timeout: 930_000 }
     )
-    const file = openOwnedFile(evidence, 'playwright.log', { create: true })
-    try {
-      fs.writeFileSync(file.fd, output)
-    } finally {
-      fs.closeSync(file.fd)
-    }
+    report(output)
     state.playwright = 'PASS'
     save()
   } catch (error) {
     failure = error
+    // Evidence I/O must never prevent restoring the owned runtime.
+    if (error.commandOutput) {
+      try {
+        report(error.commandOutput)
+      } catch {
+        /* Keep the original failure and restore. */
+      }
+    }
     // Diagnostic failure must not prevent restoration. Inspect only this
     // fixture's live deployment and persist fixed startup-error categories.
     if (state.changes.hcc) {
