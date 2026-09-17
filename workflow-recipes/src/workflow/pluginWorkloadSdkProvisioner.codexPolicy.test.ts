@@ -15,6 +15,7 @@ import {
 } from './pluginWorkloadSdkProvisioner.testFixtures'
 import type { PluginWorkloadSdkCodexBindingProof } from './sdkOnlyCodexBinding'
 import { mintSdkOnlyCodexBindingProof } from './sdkOnlyCodexBinding'
+import { mintSdkOnlyGrokBindingProof } from './sdkOnlyGrokBinding'
 
 const RECIPE = 'codex-sdk'
 const MODEL = 'gpt-5.3-codex'
@@ -338,5 +339,56 @@ describe('eager Codex policy gate', () => {
 
     expect(await harness.reconcile({ codexBinding: MINTED })).toBe('deploying')
     expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
+  })
+
+  // B-L14: strict binding slots. mcp-host publishes a Codex binding only as
+  // `codexBinding`; WRC must read nothing else for Codex.
+  it('rejects a Codex bootstrap that echoes its binding only as subscriptionBinding', async () => {
+    // Mutation caught: parsing Codex as `codexBinding ?? subscriptionBinding`.
+    const body = readyBootstrapBody(null)
+    const harness = makeHarness({ ...body, body: { ...body.body, subscriptionBinding: MINTED } })
+
+    expect(await harness.reconcile({ codexBinding: MINTED })).toBe('deploying')
+    expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
+  })
+
+  it('never records a subscriptionBinding on a Codex proof', async () => {
+    // Mutation caught: parsing `subscriptionBinding` for a Codex body at all
+    // (the proof carried a second, unverified-for-this-provider slot).
+    const body = readyBootstrapBody(MINTED)
+    const harness = makeHarness({ ...body, body: { ...body.body, subscriptionBinding: MINTED } })
+
+    expect(await harness.reconcile({ codexBinding: MINTED })).toBe('ready')
+    const proof = harness.provisioner.getBootstrapProof(RECIPE)
+    expect(proof).toMatchObject({ codexBinding: MINTED })
+    expect(proof).not.toHaveProperty('subscriptionBinding')
+  })
+
+  it('does not let a cached Grok-slot binding answer ready for a Codex host', async () => {
+    // Mutation caught: the uncertain-provenance early return accepting
+    // `codexBinding || subscriptionBinding` instead of the agent's own slot.
+    const grokBinding = mintSdkOnlyGrokBindingProof({
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 2,
+      model: MODEL,
+    })
+    const harness = makeHarness({
+      status: 202,
+      body: {
+        ...readyBootstrapBody(null).body,
+        provider: 'grok-subscription',
+        defaultProvider: 'grok-subscription',
+        subscriptionBinding: grokBinding,
+      },
+    })
+    expect(await harness.reconcile({ codexBinding: null })).toBe('awaiting_policy')
+    expect(harness.provisioner.getBootstrapProof(RECIPE)).toMatchObject({
+      subscriptionBinding: grokBinding,
+    })
+
+    harness.configure.mockClear()
+    expect(await harness.reconcile({ codexBindingUndecidable: true })).toBe('awaiting_policy')
+    expect(harness.configure).not.toHaveBeenCalled()
   })
 })

@@ -1048,7 +1048,9 @@ export class WorkflowRecipeReconciler {
       // configure path (Option A). Same wiring as mcp/server.ts.
       modelConfigHandler: new ModelConfigHandler(
         new K8sSecretReaderImpl(this.coreApi),
-        new HttpMcpHostClient()
+        new HttpMcpHostClient(),
+        undefined,
+        { grokSubscriptionEnabled: this.config.grokSubscriptionEnabled }
       ),
       pluginWorkloadSdkRevocationClient: new HttpPluginWorkloadSdkRevocationClient(),
     }

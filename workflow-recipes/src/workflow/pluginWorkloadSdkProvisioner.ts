@@ -423,7 +423,11 @@ export class PluginWorkloadSdkProvisioner {
         !existing ||
         existing.policyReady === false ||
         existing.contractVersion !== 3 ||
-        !(existing.codexBinding || existing.subscriptionBinding) ||
+        // The agent's own slot only: a proof holding the other broker's
+        // binding says nothing about this host's grant.
+        !(mcpHostAgent?.provider === 'grok-subscription'
+          ? existing.subscriptionBinding
+          : existing.codexBinding) ||
         existing.policyReason === 'codex_execution_binding_missing' ||
         existing.policyReason === 'execution_binding_missing'
       ) {
@@ -783,11 +787,17 @@ function parseEagerSdkBootstrapProof(
   ) {
     return null
   }
-  const grok = body.provider === 'grok-subscription'
-  const codexBinding = parseCodexBindingProof(body.codexBinding, expectedModel)
-  const subscriptionBinding = grok
-    ? parseGrokBindingProof(body.subscriptionBinding ?? body.codexBinding, expectedModel)
-    : parseCodexBindingProof(body.subscriptionBinding, expectedModel)
+  // Strict slots, matching mcp-host's bootstrap identity: Codex proof lives
+  // only in `codexBinding`, Grok proof only in `subscriptionBinding`. Neither
+  // provider's proof ever carries the other slot.
+  const codexBinding =
+    body.provider === 'codex-subscription'
+      ? parseCodexBindingProof(body.codexBinding, expectedModel)
+      : undefined
+  const subscriptionBinding =
+    body.provider === 'grok-subscription'
+      ? parseGrokBindingProof(body.subscriptionBinding, expectedModel)
+      : undefined
   if (
     body.provider === 'codex-subscription' &&
     body.policyReason === 'codex_execution_binding_missing'

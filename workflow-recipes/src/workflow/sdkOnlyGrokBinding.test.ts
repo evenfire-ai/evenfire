@@ -69,4 +69,17 @@ describe('readVerifiedSdkOnlyGrokBinding', () => {
       )
     ).toBeNull()
   })
+
+  it('rejects a self-consistent proof minted for another model', () => {
+    // Mutation caught: dropping the model pin. The hash covers the five
+    // fields, so a proof for another model verifies on its own.
+    const other = mintSdkOnlyGrokBindingProof({
+      connectionKey: 'team-grok',
+      catalogRevision: 5,
+      credentialRevision: 2,
+      model: 'grok-build-0.1',
+    })
+    expect(readVerifiedSdkOnlyGrokBinding(other, MODEL)).toBeNull()
+    expect(readVerifiedSdkOnlyGrokBinding(other, 'grok-build-0.1')).toEqual(other)
+  })
 })

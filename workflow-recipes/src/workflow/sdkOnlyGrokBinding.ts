@@ -1,6 +1,9 @@
 import { computeGrokPolicyHash } from '@clerum/grok-provider-attempt-contract'
 import type { PluginWorkloadSdkCodexBindingProof } from './sdkOnlyCodexBinding'
-import { isPluginWorkloadSdkCodexBindingProof } from './sdkOnlyCodexBinding'
+import {
+  isPluginWorkloadSdkCodexBindingProof,
+  sanitizePluginWorkloadSdkCodexBindingProof,
+} from './sdkOnlyCodexBinding'
 
 export function mintSdkOnlyGrokBindingProof(binding: {
   connectionKey: string
@@ -41,11 +44,6 @@ export function readVerifiedSdkOnlyGrokBinding(
   if (!isPluginWorkloadSdkCodexBindingProof(value)) return null
   if (value.model !== model) return null
   if (!verifySdkOnlyGrokBindingHash(value)) return null
-  return {
-    connectionKey: value.connectionKey,
-    catalogRevision: value.catalogRevision,
-    credentialRevision: value.credentialRevision,
-    model: value.model,
-    bindingHash: value.bindingHash,
-  }
+  // The five-field proof shape is provider-neutral; only the digest differs.
+  return sanitizePluginWorkloadSdkCodexBindingProof(value)
 }

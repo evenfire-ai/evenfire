@@ -23,8 +23,9 @@ export {
 export const ALLOWLIST_CONFIGMAP_NAMESPACE = process.env.CLERUM_MODEL_CONFIG_NAMESPACE ?? 'mcp-host'
 
 /**
- * Recipe annotation reader. Empty/missing is `unassigned`, never the reserved
- * grant: only an explicit annotation may spend a ChatGPT subscription.
+ * Recipe annotation reader for the given oauth-broker provider's grant.
+ * Empty/missing is `unassigned`, never the reserved grant: only an explicit
+ * annotation may spend a subscription grant (Codex or Grok).
  */
 export function readRecipeCodexConnectionRef(
   annotations: Record<string, string> | undefined,
