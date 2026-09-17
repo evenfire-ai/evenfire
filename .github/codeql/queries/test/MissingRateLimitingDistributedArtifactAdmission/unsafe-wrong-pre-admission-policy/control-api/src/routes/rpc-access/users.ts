@@ -40,7 +40,7 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
     requireRpcTokenHostMatch(),
     rateLimitMiddleware({
       bucketType: 'host_artifact_pre_admission',
-      maxPerMinute: config.hostArtifactReadRlPerMin,
+      maxPerMinute: config.hostArtifactReadRlPerMin + 1,
       getBucketKey: req => {
         const subject = (req as ArtifactRequest).rpcAuth?.sub
         return subject ? `host-artifact-pre-admission:${subject}` : null
