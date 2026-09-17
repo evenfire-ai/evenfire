@@ -35,7 +35,12 @@
  * synced"). No per-model audit rows — that would flood `llm_allowed_models_audit`
  * (which records operator actions) with 1000+ rows per run.
  */
-import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
+import {
+  type ImageInputCapability,
+  type LlmProviderId,
+  PROVIDER_IDS,
+  parseImageInputCapability,
+} from '@clerum/llm-providers'
 import { config } from '../config.js'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
@@ -47,6 +52,38 @@ import {
   loadModelsDevCatalog,
   mapCatalogToProviders,
 } from './modelsDevClient.js'
+
+/**
+ * Public reference recorded on discovery provenance. FIXED — deliberately not
+ * `MODELS_DEV_API_URL`, whose non-prod env override may point at a private stub
+ * and must never be persisted as evidence.
+ */
+export const MODELS_DEV_EVIDENCE_REFERENCE = 'https://models.dev/api.json'
+
+/**
+ * The ONLY capability discovery may record from models.dev: `unknown` carrying
+ * provenance. models.dev declares no per-row validity or reliability, so a
+ * `supported`/`unsupported` claim from it would need an invented TTL — the
+ * shared contract rejects a discovery-sourced known state without `validUntil`.
+ * The observation is still worth storing: it tells the operator when this pair
+ * was last looked at, and it is what curation replaces.
+ *
+ * `capturedAt` is the SOURCE capture time (live fetch time, or the vendored
+ * snapshot's baked date) — never "now", so loading an old snapshot cannot make
+ * stale data look freshly verified. Returns null when the contract rejects the
+ * pair (e.g. a non-canonical capture stamp from a stub), so the caller stores
+ * NULL rather than an invalid payload.
+ */
+export function discoveryImageInput(capturedAt: string): ImageInputCapability | null {
+  return parseImageInputCapability({
+    state: 'unknown',
+    evidence: {
+      source: 'discovery',
+      reference: MODELS_DEV_EVIDENCE_REFERENCE,
+      checkedAt: capturedAt,
+    },
+  })
+}
 
 type SyncTxClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
@@ -126,6 +163,7 @@ async function reconcileProvider(
   discovered: DiscoveredModel[],
   markStale: boolean,
   providerMinLive: number,
+  imageInputJson: string | null,
   counters: { added: number; updated: number; staled: number }
 ): Promise<void> {
   const existingRes = await client.query(
@@ -157,10 +195,10 @@ async function reconcileProvider(
       const ins = await client.query(
         `INSERT INTO llm_allowed_models
            (provider, model, enabled, source, discovered_at, last_seen_at, stale,
-            context_window_tokens, display_name)
-         VALUES ($1, $2, false, 'discovery', NOW(), NOW(), false, $3, $4)
+            context_window_tokens, display_name, image_input)
+         VALUES ($1, $2, false, 'discovery', NOW(), NOW(), false, $3, $4, $5::jsonb)
          ON CONFLICT (provider, model) DO NOTHING`,
-        [provider, model.model_id, ctx, display]
+        [provider, model.model_id, ctx, display, imageInputJson]
       )
       counters.added += ins.rowCount ?? 0
       continue
@@ -180,6 +218,12 @@ async function reconcileProvider(
     // re-materialize (its guarantee). COALESCE keeps any operator-edited
     // non-null; `enabled` is never assigned. The freshest metadata for an
     // enabled row lands on the operator's next edit (which re-materializes).
+    //
+    // `image_input` follows the same freeze, plus one narrower rule: a
+    // discovery-sourced provenance may be refreshed (a sync run IS an
+    // observation of that source at `capturedAt`), while operator-curated
+    // evidence is never overwritten — not even on a disabled row. The refresh
+    // cannot promote a capability: discovery only ever writes `unknown`.
     const upd = await client.query(
       `UPDATE llm_allowed_models
           SET last_seen_at = NOW(),
@@ -191,9 +235,15 @@ async function reconcileProvider(
               display_name = CASE
                 WHEN enabled THEN display_name
                 ELSE COALESCE(display_name, $3)
+              END,
+              image_input = CASE
+                WHEN enabled THEN image_input
+                WHEN image_input IS NULL THEN $4::jsonb
+                WHEN image_input->'evidence'->>'source' = 'discovery' THEN $4::jsonb
+                ELSE image_input
               END
         WHERE id = $1 AND source = 'discovery'`,
-      [existing.id, ctx, display]
+      [existing.id, ctx, display, imageInputJson]
     )
     counters.updated += upd.rowCount ?? 0
   }
@@ -261,8 +311,13 @@ export async function syncDiscoveredModels(
   const load = opts.loadCatalog ?? loadModelsDevCatalog
   const minPlausibleLiveTotal = opts.minPlausibleLiveTotal ?? config.modelsDevMinPlausibleLiveTotal
   const providerMinLive = opts.providerMinLive ?? config.llmCatalogSyncProviderMinLive
-  const { source, fetchedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
+  const { source, fetchedAt, capturedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
   const byProvider = mapCatalogToProviders(catalog)
+  // Provenance stamped with the SOURCE capture time (see discoveryImageInput).
+  // Serialized once per run: the JSONB parameter is identical for every row.
+  const discoveryImageInputValue = discoveryImageInput(capturedAt)
+  const imageInputJson =
+    discoveryImageInputValue === null ? null : JSON.stringify(discoveryImageInputValue)
 
   // §4.5 sanity guard, LAYER 3 — absolute global plausibility floor. Compared
   // BEFORE touching any row, against a config constant, with NO baseline / no
@@ -309,6 +364,7 @@ export async function syncDiscoveredModels(
         byProvider[provider] ?? [],
         markStale,
         providerMinLive,
+        imageInputJson,
         counters
       )
     }

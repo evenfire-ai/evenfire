@@ -84,7 +84,7 @@ class, `OpenAICompatibleProvider`.
 | Moonshot      | `moonshot`   | `moonshot-api-key`   | `kimi-k2.6`                                         |
 | Nebius        | `nebius`     | `nebius-api-key`     | `Qwen/Qwen3-235B-A22B-Instruct-2507`                |
 | Novita AI     | `novita`     | `novita-api-key`     | `deepseek/deepseek-v3.2`                            |
-| MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                         |
+| MiniMax       | `minimax`    | `minimax-api-key`    | `MiniMax-M2`                                        |
 
 `openai` itself also speaks this protocol but uses the official SDK (Group B).
 
@@ -245,6 +245,28 @@ to the `clerum-llm-allowed-models` ConfigMap for the runtime.
 - **If the ConfigMap is missing** (rollout in progress, migration not yet run),
   the runtime degrades explicitly: only the model already configured on the
   Host/step is permitted. Neither open nor bricked.
+
+### Image input capability (`image_input`)
+
+Whether a model accepts images is a property of the **(provider, model) pair**,
+declared per row and backed by evidence — never inferred from the model name, its
+family, or an "OpenAI-compatible" request shape.
+
+- Each row carries `image_input` (`{ state, evidence? }`). Absent or malformed
+  metadata reads as `unknown`. `supported` / `unsupported` require evidence: a
+  public `https://` documentation reference with no query string, fragment or
+  userinfo (or a sanitized `evidence:<id>`) plus the date it was read. Add
+  `validUntil` only when the source itself defines an expiry.
+- **Unknown blocks images, never text.** Text-only chat keeps working on an
+  unverified model; attaching an image is what stops, with the model and the
+  reason surfaced. Curating the evidence is what enables images.
+- Discovery only records **provenance** (`unknown` plus the models.dev capture
+  date). models.dev declares no per-row validity, so the sync never claims
+  support: enabling a discovered row does not verify it — curation does.
+- Renaming a row's provider or model clears its evidence (it belonged to the old
+  pair), and editing capability never changes `enabled`.
+- A capability change re-materializes the ConfigMap `imageInput` field, so
+  running Hosts pick it up without a redeploy.
 
 Beyond the global allowlist there are two narrower scopes:
 

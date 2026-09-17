@@ -5,6 +5,38 @@
  */
 
 /** Canonical provider ids, in dev auto-detection priority order. */
+export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
+export interface ImageInputEvidence {
+  source: 'curated' | 'discovery'
+  reference: string
+  checkedAt: string
+  validUntil?: string
+}
+export interface ImageInputCapability {
+  state: ImageInputState
+  evidence?: ImageInputEvidence
+}
+export type ImageInputReason =
+  | 'supported'
+  | 'policy_denied'
+  | 'transport_unsupported'
+  | 'model_unsupported'
+  | 'model_unknown'
+  | 'evidence_expired'
+  | 'evidence_not_yet_valid'
+export interface ImageInputDecision {
+  state: ImageInputState
+  reason: ImageInputReason
+  validUntil?: string
+  evidence?: ImageInputEvidence
+}
+export declare function parseImageInputCapability(value: unknown): ImageInputCapability | null
+export declare function normalizeImageInputCapability(value: unknown): ImageInputCapability
+export declare function resolveImageInputCapability(
+  value: unknown,
+  options: { transportSupported: boolean; policyAllowed: boolean; now?: number }
+): ImageInputDecision
+
 export declare const PROVIDER_IDS: readonly [
   'openai',
   'claude',
@@ -88,7 +120,7 @@ export declare function isLlmProviderId(s: unknown): s is LlmProviderId
  */
 export declare function isCredentialSlotOwnedByProvider(
   provider: string,
-  credentialSlot: string,
+  credentialSlot: string
 ): boolean
 
 export type ProviderAuthMode = 'static-credentials' | 'oauth-broker'
@@ -108,5 +140,5 @@ export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
 export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
 export declare function requireStaticCredentialSlot(
-  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>,
+  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>
 ): CredentialSlot

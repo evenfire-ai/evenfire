@@ -1,3 +1,5 @@
+import type { ImageInputDecision } from './imageInputDecision'
+
 export type Role = 'admin' | 'inviter' | 'member'
 export type RpcScope =
   | 'mcp:servers:list'
@@ -534,6 +536,8 @@ export type HostMessageRequest = {
    * validates + persists this session selection before running the task.
    */
   model?: string
+  /** CAS base captured with a visual message's explicit model choice. */
+  modelSelectionRevision?: number
   [key: string]: unknown
 }
 
@@ -1089,6 +1093,13 @@ export interface HostModelOption {
   name: string
   displayName?: string
   contextWindowTokens?: number
+  /**
+   * Image-input capability projected by the host for this model (issue #654).
+   * Optional and additive: a host that predates the projection omits it, which
+   * normalizes to `unknown` — text stays allowed and image attachments are
+   * blocked with an explicit reason. Never inferred from provider/model name.
+   */
+  imageInput?: ImageInputDecision
   /** Last-known catalog row; hidden from new picks unless it is already selected. */
   stale?: boolean
   /** Operator-disabled catalog row; hidden from new picks unless it is already selected. */
@@ -1112,6 +1123,13 @@ export interface HostModelsResult {
   sessionModelBlocked?: string
   degraded: boolean
   models: HostModelOption[]
+  /**
+   * Revision of the session selection this projection was read at (issue #654
+   * CAS). Optional: when the host does not project it, the renderer never sends
+   * `expectedRevision`, so selection writes stay backwards compatible.
+   */
+  modelSelectionRevision?: number
+  catalogRevision?: string
 }
 
 /**
@@ -1125,6 +1143,8 @@ export interface SetHostModelResult {
   effective: 'next-task'
   provider: string
   model: string
+  /** Revision after this accepted write; feeds the next CAS attempt. */
+  modelSelectionRevision?: number
 }
 
 export interface ChatMessage {

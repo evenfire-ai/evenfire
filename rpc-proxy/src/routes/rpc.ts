@@ -371,6 +371,12 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
+        if (body.attachments != null && !Array.isArray(body.attachments)) {
+          res
+            .status(400)
+            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -381,6 +387,9 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.modelSelectionRevision === undefined
+            ? {}
+            : { modelSelectionRevision: body.modelSelectionRevision }),
           traceContext,
           // R2 "Option A": thread the optional piggybacked per-session model.
           // This body is an explicit field allow-list, so an unlisted field is

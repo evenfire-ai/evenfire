@@ -47,12 +47,35 @@ function catalogWith(
   return { anthropic: { name: 'Anthropic', models } }
 }
 
-function loadStub(catalog: RawModelsDevCatalog, source: 'live' | 'vendored' = 'vendored') {
-  return async () => ({ source, fetchedAt: '2026-07-13T00:00:00.000Z', catalog })
+function loadStub(
+  catalog: RawModelsDevCatalog,
+  source: 'live' | 'vendored' = 'vendored',
+  // `fetchedAt` is the run's acquisition time; `capturedAt` is when the DATA was
+  // captured (a vendored snapshot's baked date). Kept distinct on purpose.
+  capturedAt = '2026-07-10T00:00:00.000Z'
+) {
+  return async () => ({
+    source,
+    fetchedAt: '2026-07-13T00:00:00.000Z',
+    capturedAt,
+    catalog,
+  })
 }
 
 const CALL_FOR = (calls: Array<{ sql: string; params: unknown[] }>, re: RegExp) =>
   calls.filter(c => re.test(c.sql))
+
+/** The exact provenance payload discovery may persist for a capture stamp. */
+function discoveryProvenance(capturedAt: string): string {
+  return JSON.stringify({
+    state: 'unknown',
+    evidence: {
+      source: 'discovery',
+      reference: 'https://models.dev/api.json',
+      checkedAt: capturedAt,
+    },
+  })
+}
 
 describe('syncDiscoveredModels — source-guarded reconciliation', () => {
   it('INSERTs a new discovered model as disabled discovery (enabled=false, ON CONFLICT DO NOTHING)', async () => {
@@ -68,10 +91,51 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(inserts[0].sql).toMatch(/'discovery'/)
     expect(inserts[0].sql).toMatch(/false/)
     expect(inserts[0].sql).toMatch(/ON CONFLICT \(provider, model\) DO NOTHING/)
-    // params: provider, model, ctx, display
-    expect(inserts[0].params).toEqual(['claude', 'claude-opus-4-5', 200000, 'Opus'])
+    // params: provider, model, ctx, display, image_input
+    expect(inserts[0].params).toEqual([
+      'claude',
+      'claude-opus-4-5',
+      200000,
+      'Opus',
+      discoveryProvenance('2026-07-10T00:00:00.000Z'),
+    ])
     expect(res.added).toBe(1)
     expect(res.updated).toBe(0)
+  })
+
+  it('#654 stamps discovery provenance with the SOURCE capture time, never `fetchedAt`', async () => {
+    const { connector, calls } = makeConnector({})
+    const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
+    // The stub's fetchedAt (acquisition) deliberately differs from capturedAt.
+    await syncDiscoveredModels(
+      { loadCatalog: loadStub(catalog, 'vendored', '2026-08-19T16:16:10.000Z') },
+      connector
+    )
+
+    const insert = CALL_FOR(calls, /INSERT INTO llm_allowed_models/)[0]
+    const persisted = JSON.parse(String(insert.params[4]))
+    expect(persisted).toEqual({
+      state: 'unknown',
+      evidence: {
+        source: 'discovery',
+        reference: 'https://models.dev/api.json',
+        checkedAt: '2026-08-19T16:16:10.000Z',
+      },
+    })
+    // Reloading a stale snapshot must not manufacture freshness.
+    expect(String(insert.params[4])).not.toContain('2026-07-13T00:00:00.000Z')
+    // Discovery never claims a known state — models.dev declares no validity.
+    expect(persisted.state).toBe('unknown')
+  })
+
+  it('#654 stores NULL (not a fabricated stamp) when the capture time is unusable', async () => {
+    const { connector, calls } = makeConnector({})
+    const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
+    await syncDiscoveredModels(
+      { loadCatalog: loadStub(catalog, 'live', 'not-a-timestamp') },
+      connector
+    )
+    expect(CALL_FOR(calls, /INSERT INTO llm_allowed_models/)[0].params[4]).toBeNull()
   })
 
   it('NEVER touches a colliding source=manual row (invisible to discovery)', async () => {
@@ -111,9 +175,32 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(sql).toMatch(/CASE\s+WHEN enabled THEN display_name/)
     // `enabled` is never assigned in the SET clause.
     expect(/enabled\s*=/.test(sql)).toBe(false)
-    expect(updates[0].params).toEqual(['d1', 200000, 'Opus'])
+    expect(updates[0].params).toEqual([
+      'd1',
+      200000,
+      'Opus',
+      discoveryProvenance('2026-07-10T00:00:00.000Z'),
+    ])
     expect(res.updated).toBe(1)
     expect(res.added).toBe(0)
+  })
+
+  it('#654 freezes capability for enabled rows and never overwrites curated evidence', async () => {
+    const { connector, calls } = makeConnector({
+      claude: [{ id: 'd1', model: 'claude-opus-4-5', source: 'discovery' }],
+    })
+    const catalog = catalogWith({ 'claude-opus-4-5': { id: 'claude-opus-4-5' } })
+    await syncDiscoveredModels({ loadCatalog: loadStub(catalog) }, connector)
+
+    const sql = CALL_FOR(calls, /SET last_seen_at/)[0].sql
+    // Enabled rows are in the ConfigMap: their metadata must stay byte-stable.
+    expect(sql).toMatch(/WHEN enabled THEN image_input/)
+    // A disabled row with no metadata gets the provenance …
+    expect(sql).toMatch(/WHEN image_input IS NULL THEN \$4::jsonb/)
+    // … a discovery-sourced one may be refreshed (this run observed the source) …
+    expect(sql).toMatch(/image_input->'evidence'->>'source' = 'discovery' THEN \$4::jsonb/)
+    // … and operator-curated evidence is preserved untouched.
+    expect(sql).toMatch(/ELSE image_input/)
   })
 
   it('flags vanished discovery rows stale from a LIVE catalog (never delete, never disable)', async () => {

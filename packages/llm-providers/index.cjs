@@ -224,13 +224,18 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
 /** @type {Record<string, 'static-credentials' | 'oauth-broker'>} */
 const PROVIDER_AUTH_MODE = Object.freeze(
   Object.fromEntries(
-    PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'oauth-broker' : 'static-credentials'])
+    PROVIDER_IDS.map(id => [
+      id,
+      id === 'codex-subscription' ? 'oauth-broker' : 'static-credentials',
+    ])
   )
 )
 
 /** @type {Record<string, 'static' | 'dynamic'>} */
 const PROVIDER_MODEL_CATALOG_MODE = Object.freeze(
-  Object.fromEntries(PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'dynamic' : 'static']))
+  Object.fromEntries(
+    PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'dynamic' : 'static'])
+  )
 )
 
 function providerDescriptor(id) {
@@ -261,6 +266,7 @@ function requireStaticCredentialSlot(descriptor) {
 }
 
 module.exports = {
+  ...require('./imageInput.cjs'),
   PROVIDER_IDS,
   RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
   RUNNABLE_LLM_MODEL_ID_PATTERN,

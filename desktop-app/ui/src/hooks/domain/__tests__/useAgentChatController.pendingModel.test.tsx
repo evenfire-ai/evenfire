@@ -2,8 +2,8 @@
 /**
  * R2 "Option A" send-path piggyback: a per-session model chosen while the host
  * was suspended is held as pending (module-level, in `useChatStore`) and carried
- * on the next `invokeHostMessage` as `model`, then cleared once the POST is
- * accepted. Sends with no pending must omit `model` entirely (additive/optional).
+ * on the next `invokeHostMessage` as `model`, then cleared after an authoritative
+ * read confirms it. Sends with no pending omit `model` entirely.
  *
  * Harness mirrors `useAgentChatController.crossChat.test.tsx` — a rendered
  * component so the real send path runs — trimmed to a single agent + chat.
@@ -29,9 +29,11 @@ function installClerumHarness() {
   const chats: Array<ReturnType<typeof createChatMeta>> = []
   const messagesByChat = new Map<string, unknown[]>()
   const progressHandlers = new Map<string, ProgressHandler>()
+  let sessionModel: string | null = null
 
   const invokeHostMessage = vi.fn(async (_agentRef: string, _payload: { model?: string }) => {
     taskIndex += 1
+    sessionModel = _payload.model ?? sessionModel
     return { taskId: `task-${taskIndex}`, status: 'pending' }
   })
 
@@ -66,6 +68,14 @@ function installClerumHarness() {
         dismissOnboarding: vi.fn(async () => undefined),
       },
       rpc: {
+        getHostModels: vi.fn(async () => ({
+          provider: 'anthropic',
+          hostDefault: 'claude-opus-4-8',
+          sessionModel,
+          degraded: false,
+          models: [{ name: 'claude-opus-4-8' }],
+          modelSelectionRevision: taskIndex,
+        })),
         listSessions: vi.fn(async () => ({ items: [] })),
         loadSessionMessages: vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] })),
         subscribeHostActivity: vi.fn(async () => async () => undefined),
@@ -170,7 +180,7 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
     delete (window as { clerum?: unknown }).clerum
   })
 
-  it('(d) includes the pending model on the next send and clears it once accepted', async () => {
+  it('(d) includes the pending model and clears it after the host confirms selection', async () => {
     const { invokeHostMessage } = installClerumHarness()
     render(
       <AgentTaskTrackerProvider>
@@ -190,8 +200,8 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
       threadId: chatId,
       model: 'claude-opus-4-8',
     })
-    // …and the accepted POST drained it (a persisted selection needs no replay).
-    expect(readPending(chatId)).toBeUndefined()
+    // The fresh host projection confirms persistence, not just HTTP acceptance.
+    await waitFor(() => expect(readPending(chatId)).toBeUndefined())
   })
 
   it('does not invent a Codex catalog default when sending without a pending model', async () => {
@@ -208,6 +218,29 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
 
     const payload = invokeHostMessage.mock.calls[0]?.[1] as Record<string, unknown>
     expect('model' in payload).toBe(false)
+  })
+
+  it('keeps the pending choice when the accepted POST is not confirmed by the host', async () => {
+    const { invokeHostMessage } = installClerumHarness()
+    const getHostModels = vi.spyOn(window.clerum.rpc, 'getHostModels').mockResolvedValue({
+      provider: 'anthropic',
+      hostDefault: 'claude-opus-4-8',
+      sessionModel: null,
+      degraded: false,
+      models: [{ name: 'claude-opus-4-8' }],
+      modelSelectionRevision: 0,
+    })
+    render(
+      <AgentTaskTrackerProvider>
+        <AgentChatHarness />
+      </AgentTaskTrackerProvider>
+    )
+    const chatId = await createChat()
+    setPending(chatId, 'claude-opus-4-8')
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    await waitFor(() => expect(invokeHostMessage).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(getHostModels).toHaveBeenCalled())
+    expect(readPending(chatId)).toBe('claude-opus-4-8')
   })
 
   it('(e) omits model entirely when there is no pending selection', async () => {
@@ -252,7 +285,7 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
     })
     // …the pre-chat slot was consumed (no stale carry-over to the next new chat)…
     expect(readPreChat()).toBeUndefined()
-    // …and the migrated pending slot was drained once the POST was accepted.
-    expect(readPending(chatId)).toBeUndefined()
+    // The migrated pending slot drains after the authoritative read confirms it.
+    await waitFor(() => expect(readPending(chatId)).toBeUndefined())
   })
 })

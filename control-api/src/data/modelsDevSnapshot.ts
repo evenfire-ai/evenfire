@@ -12,6 +12,18 @@
  */
 import type { RawModelsDevCatalog } from '../services/modelsDevClient.js'
 
+/**
+ * When this snapshot's data was captured from the public catalog — the date of
+ * the commit that last regenerated the file, NOT the time it is loaded:
+ *
+ *   git log -1 --format=%cI -- control-api/src/data/modelsDevSnapshot.ts
+ *
+ * Catalog evidence must never be rejuvenated by re-reading an old file (a
+ * vendored fallback is a static offline copy, not a fresh observation). Bump
+ * this whenever the snapshot is regenerated.
+ */
+export const VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT = '2026-08-19T16:16:10.000Z'
+
 export const VENDORED_MODELS_DEV_SNAPSHOT: RawModelsDevCatalog = {
   openai: {
     name: 'OpenAI',

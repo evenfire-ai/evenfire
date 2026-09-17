@@ -219,6 +219,94 @@ describe('admin llm-models routes', () => {
     expect(mockPoolQuery).not.toHaveBeenCalled()
   })
 
+  it('POST /admin/llm-models accepts curated evidence and stores it (#654)', async () => {
+    const capability = {
+      state: 'supported',
+      evidence: {
+        source: 'curated',
+        reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+        checkedAt: '2026-09-16T00:00:00.000Z',
+      },
+    }
+    mockPoolQuery
+      .mockResolvedValueOnce({
+        rows: [{ ...MODEL_ROW, provider: 'zai', model: 'glm-5.3-flash', image_input: capability }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }) // audit
+    const res = await authed('post', '/api/v1/admin/llm-models')
+      .send({ provider: 'zai', model: 'glm-5.3-flash', image_input: capability })
+      .expect(201)
+    expect(res.body.image_input).toEqual(capability)
+    const insert = mockPoolQuery.mock.calls[0]
+    expect(String(insert[0])).toMatch(/image_input/)
+    expect((insert[1] as unknown[])[5]).toBe(JSON.stringify(capability))
+  })
+
+  it('POST /admin/llm-models rejects a known claim without evidence with 400 (#654)', async () => {
+    const res = await authed('post', '/api/v1/admin/llm-models')
+      .send({ provider: 'zai', model: 'glm-5.3', image_input: { state: 'supported' } })
+      .expect(400)
+    expect(res.body.error).toBe('invalid_request')
+    expect(res.body.details[0].field).toBe('image_input')
+    expect(mockPoolQuery).not.toHaveBeenCalled()
+  })
+
+  it('POST /admin/llm-models rejects a state-less payload without touching the database (#654)', async () => {
+    // `{}` and `{"state": null}` are exactly the payloads a total CHECK has to
+    // catch, so the writer must refuse them before the INSERT is attempted.
+    for (const image_input of [{}, { state: null }]) {
+      const res = await authed('post', '/api/v1/admin/llm-models')
+        .send({ provider: 'zai', model: 'glm-5.3', image_input })
+        .expect(400)
+      expect(res.body.error).toBe('invalid_request')
+      expect(res.body.details[0].field).toBe('image_input')
+    }
+    expect(mockPoolQuery).not.toHaveBeenCalled()
+  })
+
+  it('PUT /admin/llm-models/:id rejects discovery-sourced known support without validUntil', async () => {
+    const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ROW.id}`)
+      .send({
+        image_input: {
+          state: 'supported',
+          evidence: {
+            source: 'discovery',
+            reference: 'https://models.dev/api.json',
+            checkedAt: '2026-09-16T00:00:00.000Z',
+          },
+        },
+      })
+      .expect(400)
+    expect(res.body.details[0].field).toBe('image_input')
+    expect(mockPoolQuery).not.toHaveBeenCalled()
+  })
+
+  it('PUT /admin/llm-models/:id clears evidence on an explicit null (#654)', async () => {
+    // A metadata edit that keeps the pair enabled takes no gate/lock: route read,
+    // service read, UPDATE, audit.
+    mockPoolQuery
+      .mockResolvedValueOnce({
+        rows: [{ ...MODEL_ROW, image_input: { state: 'unknown' } }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{ ...MODEL_ROW, image_input: { state: 'unknown' } }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ ...MODEL_ROW, image_input: null }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    const res = await authed('put', `/api/v1/admin/llm-models/${MODEL_ROW.id}`)
+      .send({ image_input: null })
+      .expect(200)
+    expect(res.body.image_input).toEqual({ state: 'unknown' })
+    const update = mockPoolQuery.mock.calls.find(c =>
+      /^UPDATE llm_allowed_models/.test(String(c[0]))
+    )
+    expect(update).toBeDefined()
+    expect((update![1] as unknown[])[0]).toBeNull()
+  })
+
   it('POST /admin/llm-models maps a unique violation to 409', async () => {
     mockPoolQuery.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: '23505' }))
     const res = await authed('post', '/api/v1/admin/llm-models')

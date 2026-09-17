@@ -11,7 +11,14 @@ import {
   buildResponseFileAttachments,
 } from '@lib/chatMessageAttachments'
 import { truncateTitle } from '@lib/chatTitle'
+import {
+  getComposerDraft,
+  getComposerDraftRevision,
+  setComposerDraft,
+} from '@lib/composerDraftStore'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
+import { loadHostModels, readHostModelSelection } from '@lib/hostModelSelectionStore'
+import { createRetainedSendStore } from '@lib/retainedSendStore'
 import {
   mergeAuthoritativeServerMessages,
   messageServerTurnNumber,
@@ -468,6 +475,31 @@ export function useAgentChatController({
   const [agentSending, setAgentSending] = useState(false)
   const [agentError, setAgentError] = useState<string | null>(null)
   const [failedAgentSend, setFailedAgentSend] = useState<FailedAgentSend | null>(null)
+  const [retainedRevision, setRetainedRevision] = useState(0)
+  const [retainedSends] = useState(() =>
+    createRetainedSendStore(() => setRetainedRevision(value => value + 1))
+  )
+  const {
+    retainSendSnapshot,
+    attachTaskIdToRetainedSend,
+    releaseRetainedSend,
+    releaseRetainedSendsForTask,
+    markRetainedSendReason,
+    failRetainedSend,
+  } = retainedSends
+  const sendScopeGeneration = useRef(0)
+  const lastRetentionScope = useRef(`${isAuthenticated}:${authenticatedScope}`)
+  useEffect(() => {
+    const scope = `${isAuthenticated}:${authenticatedScope}`
+    if (lastRetentionScope.current === scope) return
+    lastRetentionScope.current = scope
+    sendScopeGeneration.current += 1
+    agentSendInFlightRef.current = false
+    setAgentSending(false)
+    retainedSends.resetRetainedSendStore()
+    setFailedAgentSend(null)
+    setAgentError(null)
+  }, [authenticatedScope, isAuthenticated, retainedSends])
 
   const activityUnsubByAgentRef = useRef<Record<string, () => Promise<void>>>({})
   const activityInFlightByAgentRef = useRef<Record<string, string[]>>({})
@@ -580,6 +612,7 @@ export function useAgentChatController({
 
   const {
     composerImageAttachments,
+    composerAttachmentRevisionRef,
     composerReferenceAttachments,
     resetComposerAttachments,
     clearComposerAfterSend,
@@ -777,6 +810,9 @@ export function useAgentChatController({
     // effects — append a message, push a toast — after the session is gone. The
     // main-process half (`stopAllStreams` on logout) is Fase 4.
     tracker.releaseAll()
+    sendScopeGeneration.current += 1
+    agentSendInFlightRef.current = false
+    retainedSends.resetRetainedSendStore()
     // Abort any in-flight reconcile so a run mid-backoff can't resurrect a
     // just-cleared tracker/FSM entry after this teardown (security review).
     reconcileChatRef.current?.reset()
@@ -1696,6 +1732,7 @@ export function useAgentChatController({
         const message = typeof durableError === 'string' ? durableError : durableError.message
         const errorCode = typeof durableError === 'string' ? undefined : durableError.code
         const errorProvider = typeof durableError === 'string' ? undefined : durableError.provider
+        markRetainedSendReason(taskIdHint ?? '', 'async_task_failed', message, 'upstream')
         const attachments = buildResponseFileAttachments(taskResult)
         await appendAssistantMessage(agentRef, chatId, {
           id: crypto.randomUUID(),
@@ -1991,6 +2028,7 @@ export function useAgentChatController({
           if (durableError) {
             const message = typeof durableError === 'string' ? durableError : durableError.message
             const errorCode = typeof durableError === 'string' ? undefined : durableError.code
+            markRetainedSendReason(state.taskId, 'async_task_failed', message, 'upstream')
             const errorProvider =
               typeof durableError === 'string' ? undefined : durableError.provider
             const attachments = buildResponseFileAttachments(taskResult)
@@ -2176,6 +2214,10 @@ export function useAgentChatController({
       }
 
       if (result?.kind === 'reply') {
+        // Terminal success: the durable reply exists, so the retained send
+        // payload for this task can be released (idempotent — duplicate SSE/poll
+        // terminals only release once).
+        releaseRetainedSendsForTask(state.taskId)
         if (result.content && result.content !== 'Message failed') {
           const toolSteps = toMessageToolSteps(state.steps)
           await appendAssistantMessage(agentRef, chatId, {
@@ -2190,6 +2232,13 @@ export function useAgentChatController({
         }
         liveDepsRef.current.pushToast(`Message sent to ${agentRef}.`, 'success')
       } else if (result?.kind === 'error') {
+        // Terminal failure: the payload stays retained for explicit recovery.
+        markRetainedSendReason(
+          state.taskId,
+          result.source === 'failed' ? 'async_task_failed' : 'stream_lost',
+          result.message,
+          'upstream'
+        )
         if (result.source === 'failed') {
           await appendAssistantMessage(agentRef, chatId, {
             id: crypto.randomUUID(),
@@ -2418,8 +2467,13 @@ export function useAgentChatController({
     async (
       content: string,
       attachments: ComposerImageAttachment[] = composerImageAttachments,
-      references: ComposerReferenceAttachment[] = composerReferenceAttachments
+      references: ComposerReferenceAttachment[] = composerReferenceAttachments,
+      preserveComposer = false
     ) => {
+      const sendScope = sendScopeGeneration.current
+      const originalDraftChat = activeChatVisibilityRef.current.activeChatId
+      const originalDraftRevision = getComposerDraftRevision(originalDraftChat)
+      const originalAttachmentRevision = composerAttachmentRevisionRef.current
       const trimmedContent = content.trim()
       const effectiveAttachments = [...attachments]
       const effectiveReferences = [...references]
@@ -2437,7 +2491,37 @@ export function useAgentChatController({
       if (agentSendInFlightRef.current) return
       agentSendInFlightRef.current = true
       const sendAgent = selectedAgent
+      // Issue #654 — send-time image guard. Runs BEFORE the chat is created (a
+      // blocked visual send must not leave a stray empty chat) and long before
+      // the optimistic message/attachment clear. `readHostModelSelection` is the
+      // same shared source the composer and the selector read, so what is
+      // enforced here is exactly what the chip shows. Text-only sends keep the
+      // previous behavior and are never blocked by a missing capability.
+      let visualModelForSend: string | undefined
+      let visualModelRevisionForSend: number | undefined
+      if (effectiveAttachments.length > 0) {
+        const selection = readHostModelSelection(
+          sendAgent,
+          activeChatVisibilityRef.current.activeChatId ?? null
+        )
+        if (selection.visualSendBlocked) {
+          const blocker =
+            selection.imageBlockMessage ??
+            'Image attachments are not available for the selected model yet.'
+          setAgentError(blocker)
+          pushToast(blocker, 'error')
+          agentSendInFlightRef.current = false
+          return
+        }
+        // Capture the model the guard just validated; the request below must
+        // carry exactly this identity (no re-reading an intent after the awaits).
+        visualModelForSend = selection.intentModel ?? selection.effectiveModel ?? undefined
+        visualModelRevisionForSend = selection.confirmedRevision ?? undefined
+      }
       let sendChatId = activeChatId
+      // Captured for the retention snapshot: the model this attempt actually
+      // asked for (issue #654), readable from the catch below.
+      let requestModelForRetention: string | undefined
       // B10: when a chat is auto-created by this send, the `chatList` captured in
       // this closure predates it, so the auto-title lookup below would miss it and
       // never title the chat on message 1 (then mis-title it on message 2). Keep
@@ -2447,6 +2531,7 @@ export function useAgentChatController({
         try {
           const chatId = crypto.randomUUID()
           const meta = await chatStore.createChat(sendAgent, chatId)
+          if (sendScope !== sendScopeGeneration.current) return
           chatStore.clearCachedRemoteData()
           autoCreatedMeta = meta
           appendNewEntry(sendAgent, meta)
@@ -2470,7 +2555,9 @@ export function useAgentChatController({
           setActiveChatId(chatId)
           setChatMessages([])
           await chatStore.setLastActive(sendAgent, chatId)
+          if (sendScope !== sendScopeGeneration.current) return
         } catch (error) {
+          if (sendScope !== sendScopeGeneration.current) return
           const message = error instanceof Error ? error.message : String(error)
           pushToast(`Could not create a chat session: ${message}`, 'error')
           agentSendInFlightRef.current = false
@@ -2552,7 +2639,33 @@ export function useAgentChatController({
         activityTaskToMessageByAgentRef.current[sendAgent] = {}
       }
 
-      clearComposerAfterSend(sendChatId)
+      const pendingModelForSend = sendChatId
+        ? chatStore.getPendingModel(sendAgent, sendChatId)
+        : undefined
+      requestModelForRetention = effectiveAttachments.length
+        ? visualModelForSend
+        : pendingModelForSend
+      retainSendSnapshot({
+        agentRef: sendAgent,
+        chatId: sendChatId ?? null,
+        userMessageId,
+        content: trimmedContent,
+        attachments: effectiveAttachments,
+        references: effectiveReferences,
+        model: requestModelForRetention,
+        reason: 'awaiting_terminal',
+        timestamp: Date.now(),
+        draftRevision: originalDraftRevision,
+      })
+      if (
+        !preserveComposer &&
+        activeChatVisibilityRef.current.selectedAgent === sendAgent &&
+        activeChatVisibilityRef.current.activeChatId === sendChatId &&
+        composerAttachmentRevisionRef.current === originalAttachmentRevision &&
+        getComposerDraftRevision(originalDraftChat) === originalDraftRevision
+      ) {
+        clearComposerAfterSend(sendChatId)
+      }
       setAgentError(null)
       setFailedAgentSend(null)
       setAgentSending(true)
@@ -2562,9 +2675,9 @@ export function useAgentChatController({
         // R2 "Option A": a per-session model chosen while the host was suspended
         // couldn't be persisted server-side, so it was held as pending. Piggyback
         // it here — this send wakes the host and applies the model to this task.
-        const pendingModel = sendChatId
-          ? chatStore.getPendingModel(sendAgent, sendChatId)
-          : undefined
+        if (sendScope !== sendScopeGeneration.current) return
+        const pendingModel = pendingModelForSend
+        const requestModel = requestModelForRetention
         const request = {
           content: effectiveContentForRequest,
           channelType: 'rpc',
@@ -2574,7 +2687,10 @@ export function useAgentChatController({
             effectiveAttachments.length > 0
               ? mapComposerAttachmentsToHostRequest(effectiveAttachments)
               : undefined,
-          ...(pendingModel ? { model: pendingModel } : {}),
+          ...(requestModel ? { model: requestModel } : {}),
+          ...(visualModelRevisionForSend === undefined
+            ? {}
+            : { modelSelectionRevision: visualModelRevisionForSend }),
         }
 
         const response = await window.clerum.rpc.invokeHostMessage(
@@ -2588,13 +2704,27 @@ export function useAgentChatController({
         // A successful send creates or updates the durable server session. Do not
         // let the short-lived sidebar cache hide that new catalog state.
         chatStore.clearCachedRemoteData()
-        // The runtime accepted the POST (sync reply or async task) — it received
-        // the piggybacked model, so drop the pending entry. A thrown POST skips
-        // this (the catch below leaves it set) so the next attempt retries it.
-        if (pendingModel && sendChatId) {
-          chatStore.clearPendingModel(sendAgent, sendChatId)
-        }
+        if (sendScope !== sendScopeGeneration.current) return
         const responseRecord = response as Record<string, unknown>
+        // Confirm a held intent against a fresh authoritative read. An HTTP
+        // acknowledgement alone can contain a structured failure or an ignored
+        // legacy model selection; it must not clear a newer intent.
+        if (
+          !responseRecord.error &&
+          responseRecord.success !== false &&
+          pendingModel &&
+          sendChatId
+        ) {
+          void loadHostModels(
+            {
+              getHostModels: (host, chat) => chatStore.getHostModels(host, chat, { force: true }),
+              setHostModel: chatStore.setHostModel,
+            },
+            sendAgent,
+            sendChatId,
+            { force: true }
+          )
+        }
         const taskId =
           (typeof responseRecord.taskId === 'string' ? responseRecord.taskId : undefined) ||
           (typeof responseRecord.id === 'string' ? responseRecord.id : undefined)
@@ -2604,6 +2734,11 @@ export function useAgentChatController({
           const errorRecord = responseRecord.error as
             | { message?: string; code?: string; provider?: string }
             | undefined
+          // Issue #654: a synchronous failure can arrive as `{error: …}` OR as
+          // `{success: false}` without an error object. Both are failures — HTTP
+          // 200 or a missing `success` boolean never imply success.
+          const explicitFailure = responseRecord.success === false
+          const isErrorResponse = Boolean(errorRecord) || explicitFailure
           const content =
             typeof errorRecord?.message === 'string'
               ? errorRecord.message
@@ -2615,24 +2750,38 @@ export function useAgentChatController({
             content,
             timestamp: Date.now(),
             ...(responseAttachments.length ? { attachments: responseAttachments } : {}),
-            ...(errorRecord && {
+            ...(isErrorResponse && {
               isError: true,
-              errorCode: errorRecord.code,
-              errorProvider: errorRecord.provider,
+              errorCode: errorRecord?.code,
+              errorProvider: errorRecord?.provider,
             }),
           }
           if (sendChatId) {
             await chatStore.appendMessages(sendAgent, sendChatId, [userMessage])
           }
           await appendAssistantMessage(sendAgent, sendChatId, assistantMessage)
-          if (errorRecord) {
+          if (isErrorResponse) {
+            // The input was cleared before the round-trip: retain it (memory
+            // only) so the failure is recoverable, and restore the text into the
+            // composer only when it is still the same chat with no newer draft.
+            const failureMessage =
+              typeof errorRecord?.message === 'string' ? errorRecord.message : content
+            failRetainedSend(
+              sendAgent,
+              sendChatId ?? null,
+              userMessageId,
+              'sync_error_envelope',
+              failureMessage,
+              'upstream'
+            )
             updateMessageActivity(sendAgent, userMessageId, previous => ({
               ...previous,
               status: 'error',
-              errorMessage: errorRecord.message,
+              errorMessage: failureMessage,
             }))
-            pushToast(`Message to ${sendAgent} failed: ${errorRecord.message ?? 'error'}`, 'error')
+            pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
           } else {
+            releaseRetainedSend(sendAgent, sendChatId ?? null, userMessageId)
             updateMessageActivity(sendAgent, userMessageId, previous => ({
               ...previous,
               status: previous.events.length ? 'completed' : 'no_activity',
@@ -2654,6 +2803,7 @@ export function useAgentChatController({
         if (sendChatId) {
           await chatStore.appendMessages(sendAgent, sendChatId, [persistedUserMessage])
         }
+        attachTaskIdToRetainedSend(sendAgent, sendChatId ?? null, userMessageId, taskId)
         activityTaskToMessageByAgentRef.current[sendAgent] = {
           ...(activityTaskToMessageByAgentRef.current[sendAgent] || {}),
           [taskId]: userMessageId,
@@ -2689,6 +2839,7 @@ export function useAgentChatController({
           fsm.dispatch(taskKey, { type: 'TASK_CREATED', taskId })
         }
       } catch (error) {
+        if (sendScope !== sendScopeGeneration.current) return
         const message = error instanceof Error ? error.message : String(error)
         const normalized = message.toLowerCase()
         const isRequestEntityTooLarge =
@@ -2708,6 +2859,11 @@ export function useAgentChatController({
                 ? 'Access issue while sending to this agent.'
                 : 'Unable to send message to this agent.'
         setAgentError(`${friendlyMessage} ${fallback}`)
+        // Issue #654 — keep the payload recoverable and record WHO it belongs
+        // to, so recovery can never overwrite a different chat's composer or a
+        // newer draft. Memory only; released on terminal success/discard.
+        if (sendScope !== sendScopeGeneration.current) return
+        failRetainedSend(sendAgent, sendChatId ?? null, userMessageId, 'post_failed', message, kind)
         setFailedAgentSend({
           content: trimmedContent,
           attachments: effectiveAttachments,
@@ -2715,6 +2871,10 @@ export function useAgentChatController({
           message,
           kind,
           timestamp: Date.now(),
+          agentRef: sendAgent,
+          chatId: sendChatId ?? null,
+          userMessageId,
+          model: requestModelForRetention,
         })
         updateMessageActivity(sendAgent, userMessageId, previous => ({
           ...previous,
@@ -2751,8 +2911,10 @@ export function useAgentChatController({
       } finally {
         // Fire & forget: release the synchronous setup guard immediately. The
         // task (if any) keeps running in the tracker.
-        agentSendInFlightRef.current = false
-        setAgentSending(false)
+        if (sendScope === sendScopeGeneration.current) {
+          agentSendInFlightRef.current = false
+          setAgentSending(false)
+        }
       }
     },
     [
@@ -2785,14 +2947,81 @@ export function useAgentChatController({
     [composerImageAttachments, composerReferenceAttachments, sendAgentMessage]
   )
 
+  const visibleRetainedFailure = useMemo(() => {
+    const snapshot = selectedAgent
+      ? retainedSends.getLatestRetainedSendSnapshotForChat(selectedAgent, activeChatId)
+      : undefined
+    if (!snapshot?.failure) return null
+    return {
+      ...snapshot,
+      message: snapshot.failure.message,
+      kind: snapshot.failure.kind,
+    } satisfies FailedAgentSend
+  }, [retainedSends, retainedRevision, selectedAgent, activeChatId])
+  const visibleFailure =
+    visibleRetainedFailure ??
+    (failedAgentSend &&
+    (!failedAgentSend.agentRef ||
+      (failedAgentSend.agentRef === selectedAgent && failedAgentSend.chatId === activeChatId))
+      ? failedAgentSend
+      : null)
+
   const handleRetryFailedAgentSend = useCallback(async () => {
-    if (!failedAgentSend) return
+    if (!visibleFailure) return
     await sendAgentMessage(
-      failedAgentSend.content,
-      failedAgentSend.attachments,
-      failedAgentSend.references
+      visibleFailure.content,
+      visibleFailure.attachments,
+      visibleFailure.references,
+      true
     )
-  }, [failedAgentSend, sendAgentMessage])
+  }, [visibleFailure, sendAgentMessage])
+
+  const handleDiscardFailedAgentSend = useCallback(() => {
+    if (visibleFailure?.agentRef && visibleFailure.userMessageId) {
+      releaseRetainedSend(
+        visibleFailure.agentRef,
+        visibleFailure.chatId ?? null,
+        visibleFailure.userMessageId
+      )
+    }
+    setFailedAgentSend(null)
+    setAgentError(null)
+  }, [visibleFailure, releaseRetainedSend])
+
+  const handleRecoverFailedAgentSend = useCallback(() => {
+    if (
+      !visibleFailure ||
+      visibleFailure.agentRef !== activeChatVisibilityRef.current.selectedAgent ||
+      visibleFailure.chatId !== activeChatVisibilityRef.current.activeChatId
+    )
+      return
+    if (
+      getComposerDraft(activeChatId) ||
+      composerImageAttachments.length ||
+      composerReferenceAttachments.length
+    ) {
+      pushToast('Keep or clear the current draft before recovering the earlier input.', 'error')
+      return
+    }
+    setComposerDraft(activeChatId, visibleFailure.content)
+    handleAddComposerImageAttachments(
+      visibleFailure.attachments.map(attachment => ({
+        ...attachment,
+        previewDataUrl: `data:${attachment.mimeType};base64,${attachment.dataBase64}`,
+      }))
+    )
+    handleAddComposerReferenceAttachments(visibleFailure.references)
+    handleDiscardFailedAgentSend()
+  }, [
+    visibleFailure,
+    activeChatId,
+    composerImageAttachments,
+    composerReferenceAttachments,
+    pushToast,
+    handleAddComposerImageAttachments,
+    handleAddComposerReferenceAttachments,
+    handleDiscardFailedAgentSend,
+  ])
 
   const cancelTask = useCallback(
     async (taskId: string) => {
@@ -2962,8 +3191,8 @@ export function useAgentChatController({
     composerImageAttachments,
     composerReferenceAttachments,
     agentSending,
-    agentError,
-    failedAgentSend,
+    agentError: visibleRetainedFailure?.message ?? agentError,
+    failedAgentSend: visibleFailure,
     chatEndRef,
     scrollChatToBottom,
     activityByMessageId,
@@ -2986,6 +3215,8 @@ export function useAgentChatController({
     loadMoreChatSessions,
     handleSendAgentMessage,
     handleRetryFailedAgentSend,
+    handleRecoverFailedAgentSend,
+    handleDiscardFailedAgentSend,
     clearComposerSendError,
     handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment,

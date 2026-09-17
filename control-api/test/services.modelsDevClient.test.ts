@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PROVIDER_IDS } from '@clerum/llm-providers'
+import { VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT } from '../src/data/modelsDevSnapshot.js'
 import {
   MODELS_DEV_API_URL,
   PROVIDER_KEY_MAP,
@@ -156,12 +157,22 @@ describe('modelsDevClient — loadModelsDevCatalog', () => {
       expect.objectContaining({ redirect: 'error' })
     )
     expect(typeof res.fetchedAt).toBe('string')
+    // Live data IS the observation: acquisition and capture coincide.
+    expect(res.capturedAt).toBe(res.fetchedAt)
   })
 
   it('falls back to the vendored snapshot when the fetch throws (network error)', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'))
-    const res = await loadModelsDevCatalog({ fetchImpl: fetchImpl as unknown as typeof fetch })
+    const res = await loadModelsDevCatalog({
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      // A vendored fallback loaded today is NOT a fresh observation: the capture
+      // stamp stays the snapshot's baked date.
+      now: () => new Date('2026-09-16T12:00:00.000Z'),
+    })
     expect(res.source).toBe('vendored')
+    expect(res.fetchedAt).toBe('2026-09-16T12:00:00.000Z')
+    expect(res.capturedAt).toBe(VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT)
+    expect(res.capturedAt).not.toBe(res.fetchedAt)
     // The vendored snapshot must carry our mapped providers so the sync has data.
     const byProvider = mapCatalogToProviders(res.catalog)
     expect(byProvider.claude.length).toBeGreaterThan(0)

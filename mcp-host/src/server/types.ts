@@ -50,6 +50,10 @@ export interface IncomingMessage {
    * non-allowlisted value is ignored (fail-open on the message).
    */
   model?: string
+  /** Optional CAS base for a visual message's explicit model selection. */
+  modelSelectionRevision?: number
+  /** Server-owned immutable visual selection; incoming callers cannot set it. */
+  imageModel?: { provider: string; model: string }
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -635,6 +639,9 @@ export interface ModelsListResult {
   provider: string
   hostDefault: string
   sessionModel: string | null
+  modelSelectionRevision?: number
+  /** Fingerprint of the projected capability catalog, independent of selection CAS. */
+  catalogRevision?: string
   sessionModelBlocked?: string
   degraded: boolean
   models: RuntimeModelEntry[]
@@ -651,14 +658,21 @@ export type ModelsListHandler = (
  * `model_not_allowed` → 403. The route owns the 400 (missing chatId/model).
  */
 export type SetModelResult =
-  | { ok: true; provider: string; model: string }
-  | { ok: false; reason: 'model_not_allowed'; provider: string; model: string }
+  | { ok: true; provider: string; model: string; modelSelectionRevision?: number }
+  | {
+      ok: false
+      reason: 'model_not_allowed' | 'model_selection_conflict'
+      provider: string
+      model: string
+      modelSelectionRevision?: number
+    }
 
 export type SetModelHandler = (
   userSub: string,
   hostRef: string,
   chatId: string,
-  model: string
+  model: string,
+  expectedRevision?: number
 ) => SetModelResult | Promise<SetModelResult>
 
 /**

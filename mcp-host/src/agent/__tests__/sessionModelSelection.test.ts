@@ -75,7 +75,12 @@ describe('applySessionModelSelection (R2 shared core)', () => {
       'claude-haiku-4-5'
     )
 
-    expect(result).toEqual({ ok: true, provider: 'claude', model: 'claude-haiku-4-5' })
+    expect(result).toEqual({
+      ok: true,
+      provider: 'claude',
+      model: 'claude-haiku-4-5',
+      modelSelectionRevision: 1,
+    })
 
     // The selection landed on the exact row the next task reads.
     const conv = await cm.getOrCreate(sessionKey)
@@ -173,7 +178,12 @@ describe('applySessionModelSelection (R2 shared core)', () => {
 
     // The host-offered model still persists through the same subset view.
     const ok = await applySessionModelSelection(deps, USER, HOST, CHAT, 'claude-opus-4-8')
-    expect(ok).toEqual({ ok: true, provider: 'claude', model: 'claude-opus-4-8' })
+    expect(ok).toEqual({
+      ok: true,
+      provider: 'claude',
+      model: 'claude-opus-4-8',
+      modelSelectionRevision: 1,
+    })
   })
 
   it('applies under a threadless (default) session key, matching resolveTaskSessionKey', async () => {

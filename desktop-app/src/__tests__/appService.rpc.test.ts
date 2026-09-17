@@ -44,6 +44,9 @@ describe('AppService.invokeHostMessage', () => {
       {
         content: 'What workflow recipes can I trigger and what inputs do they require?',
         channelType: 'slack',
+        model: 'vision-model',
+        modelSelectionRevision: 7,
+        imageModel: { provider: 'untrusted', model: 'untrusted' },
         channelId: 'attacker-channel',
         hostRef: 'attacker-host',
         sender: 'attacker-controlled-user',
@@ -64,6 +67,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(forwarded).toEqual({
       content: 'What workflow recipes can I trigger and what inputs do they require?',
       channelType: 'rpc',
+      model: 'vision-model',
+      modelSelectionRevision: 7,
       channelId: 'chatllm',
       hostRef: 'chatllm',
       sender: '00000000-0000-4000-8000-000000000001',

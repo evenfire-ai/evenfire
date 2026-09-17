@@ -62,7 +62,13 @@ export function catalogSize(catalog: RawModelsDevCatalog): number {
 /** A `loadCatalog` stub for syncDiscoveredModels' DI seam. */
 export function loadStub(
   catalog: RawModelsDevCatalog,
-  source: 'live' | 'vendored' = 'live'
+  source: 'live' | 'vendored' = 'live',
+  capturedAt = '2026-08-12T00:00:00.000Z'
 ): () => Promise<ModelsDevCatalogResult> {
-  return async () => ({ source, fetchedAt: '2026-08-12T00:00:00.000Z', catalog })
+  return async () => ({
+    source,
+    fetchedAt: '2026-08-12T00:00:00.000Z',
+    capturedAt,
+    catalog,
+  })
 }

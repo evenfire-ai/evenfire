@@ -14,7 +14,7 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node --check index.cjs",
-    "build": "node --check index.cjs"
+    "test": "node --check index.cjs && node --test imageInput.test.cjs",
+    "build": "node --check index.cjs && node --check imageInput.cjs"
   }
 }

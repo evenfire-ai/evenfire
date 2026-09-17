@@ -1296,7 +1296,13 @@ export function registerIpcHandlers(service: AppService): void {
     'rpc:setHostModel',
     async (
       event,
-      payload: { hostRef: string; chatId: string; model: string; hostRefs?: string[] }
+      payload: {
+        hostRef: string
+        chatId: string
+        model: string
+        hostRefs?: string[]
+        expectedRevision?: number
+      }
     ) => {
       assertTrustedSender(event)
       const hostRef = sanitizeString(payload?.hostRef)
@@ -1305,7 +1311,16 @@ export function registerIpcHandlers(service: AppService): void {
       if (!hostRef || !chatId || !model) {
         throw new Error('hostRef, chatId, and model are required')
       }
-      return service.setHostModel(hostRef, chatId, model, payload?.hostRefs)
+      // Optional CAS precondition (issue #654). Absent on hosts that do not
+      // project `modelSelectionRevision`; the request then omits it entirely.
+      const rawExpectedRevision = payload?.expectedRevision
+      const expectedRevision =
+        typeof rawExpectedRevision === 'number' &&
+        Number.isInteger(rawExpectedRevision) &&
+        rawExpectedRevision >= 0
+          ? rawExpectedRevision
+          : undefined
+      return service.setHostModel(hostRef, chatId, model, payload?.hostRefs, expectedRevision)
     }
   )
 

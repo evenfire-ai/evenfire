@@ -8,7 +8,10 @@
  * Contract (fixed, shared with mcp-host/WRC/control-ui):
  *   - name `clerum-llm-allowed-models`, namespace `mcp-host`
  *   - `data`: one key per provider whose value is a JSON array of
- *     `{ model, displayName?, contextWindowTokens?, vendor? }` (enabled rows only)
+ *     `{ model, displayName?, contextWindowTokens?, vendor?, imageInput? }`
+ *     (enabled rows only). `imageInput` is omitted when the row carries no
+ *     capability metadata, so an allowlist that predates #654 materializes
+ *     byte-identically; a published capability changes the hash on purpose.
  *   - annotation `clerum.io/content-hash` = sha256 over the serialized `data`
  *
  * Anti-drift (spec §3-R3.4 / V7): the K8s write happens OUTSIDE the Postgres

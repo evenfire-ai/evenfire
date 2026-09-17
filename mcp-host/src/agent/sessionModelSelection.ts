@@ -13,10 +13,18 @@
  * maps to the message `threadId`, so the next task's `resolveTaskSessionKey`
  * reads this exact row. `getOrCreate` makes a set-before-first-message land the
  * selection on a persisted session.
+ *
+ * #654 — the write is a durable compare-and-swap, and it is AWAITED before this
+ * function resolves: `expectedRevision` is the revision the caller read, a stale
+ * one is refused with `model_selection_conflict` (the row keeps the winner), and
+ * a legacy call without it still bumps the revision so a straggler is detectable.
+ * A resolution here therefore means "the selection is on disk", not "the op was
+ * queued" — which is what the caller's ACK asserts.
  */
 import type { AllowlistView } from '../config/allowlistCheck'
 import { isModelAllowed } from '../config/modelResolution'
 import type { ConversationManager } from '../core/conversation/conversation'
+import { logger } from '../logger'
 import type { SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session'
 
@@ -40,21 +48,22 @@ export async function applySessionModelSelection(
   userSub: string,
   hostRef: string,
   chatId: string | undefined,
-  model: string
+  model: string,
+  expectedRevision?: number
 ): Promise<SetModelResult> {
   const { modelCfg, allowlistView, convManager } = deps
   const provider = modelCfg?.provider ?? 'unknown'
   if (model.length > MAX_MODEL_LEN) {
-    console.info(
-      JSON.stringify({
-        level: 'info',
+    logger.info(
+      {
         event: 'set_model_rejected',
         userId: userSub,
         chatId,
         provider,
         reason: 'model_too_long',
         modelLength: model.length,
-      })
+      },
+      'set_model_rejected'
     )
     return {
       ok: false as const,
@@ -67,15 +76,15 @@ export async function applySessionModelSelection(
     return { ok: false as const, reason: 'model_not_allowed' as const, provider, model }
   }
   if (!isModelAllowed(allowlistView, provider, model, modelCfg.name)) {
-    console.info(
-      JSON.stringify({
-        level: 'info',
+    logger.info(
+      {
         event: 'set_model_rejected',
         userId: userSub,
         chatId,
         provider,
         model,
-      })
+      },
+      'set_model_rejected'
     )
     return { ok: false as const, reason: 'model_not_allowed' as const, provider, model }
   }
@@ -92,16 +101,51 @@ export async function applySessionModelSelection(
     threadId: chatId,
     source: 'rpc',
   })
-  convManager.setModelSelection(conversation, provider, model)
-  console.info(
-    JSON.stringify({
-      level: 'info',
+  // #654 — the durable CAS write is AWAITED here: this promise resolving is what
+  // lets the route (and the piggybacked `message.model` path) ACK a selection.
+  // A losing CAS leaves the row and the in-RAM map on the winner's value and is
+  // reported as `model_selection_conflict` so the caller can re-read and retry
+  // with the revision that won, instead of silently reverting to the default.
+  const outcome = await convManager.setModelSelection(
+    conversation,
+    provider,
+    model,
+    expectedRevision
+  )
+  if (!outcome.applied) {
+    logger.info(
+      {
+        event: 'set_model_conflict',
+        userId: userSub,
+        chatId,
+        provider,
+        modelSelectionRevision: outcome.modelSelectionRevision,
+      },
+      'set_model_conflict'
+    )
+    return {
+      ok: false as const,
+      reason: 'model_selection_conflict' as const,
+      provider,
+      model,
+      modelSelectionRevision: outcome.modelSelectionRevision,
+    }
+  }
+  logger.info(
+    {
       event: 'set_model',
       userId: userSub,
       chatId,
       provider,
       model,
-    })
+      modelSelectionRevision: outcome.modelSelectionRevision,
+    },
+    'set_model'
   )
-  return { ok: true as const, provider, model }
+  return {
+    ok: true as const,
+    provider,
+    model,
+    modelSelectionRevision: outcome.modelSelectionRevision,
+  }
 }

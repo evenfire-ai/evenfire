@@ -401,6 +401,15 @@ export interface Conversation {
    * `undefined` ⇔ no selection (today's behaviour).
    */
   modelSelections?: Record<string, string>
+  /**
+   * #654 (migration 015) — durable revision of `modelSelections` for this
+   * session, mirrored from `sessions.model_selection_revision` and rehydrated on
+   * cold-load. It is the compare-and-swap token of the selection write: the
+   * writer sends the revision it read, and a write whose base is already stale
+   * is rejected instead of overwriting the row that got there first. `undefined`
+   * ⇔ the row has not been read yet; the durable default is 0.
+   */
+  modelSelectionRevision?: number
 }
 
 /**

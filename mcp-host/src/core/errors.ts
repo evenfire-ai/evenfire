@@ -21,6 +21,7 @@ export class AgentError extends Error {
 // ─── LLM Errors ─────────────────────────────────────────────
 
 export enum LlmErrorCode {
+  InvalidAttachment = 'LLM_INVALID_ATTACHMENT',
   ApiCallFailed = 'LLM_API_CALL_FAILED',
   InvalidResponse = 'LLM_INVALID_RESPONSE',
   ContextLengthExceeded = 'LLM_CONTEXT_LENGTH_EXCEEDED',
@@ -30,6 +31,21 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  /**
+   * Issue #654 — the selected (provider, model) is known NOT to accept the
+   * image carried by this attempt (model evidence `unsupported`, selection
+   * policy denial, or a transport path whose serializer would drop it).
+   * Terminal: never retryable, never failover-eligible
+   * (`classifyFailoverClass` returns null for it).
+   */
+  ImageInputUnsupported = 'LLM_IMAGE_INPUT_UNSUPPORTED',
+  /**
+   * Issue #654 — a required datum for the image decision is missing, stale or
+   * not yet valid (no evidence, malformed metadata, expired `validUntil`).
+   * Terminal for the same reasons as {@link LlmErrorCode.ImageInputUnsupported};
+   * text-only requests are unaffected and are never classified with this code.
+   */
+  ImageInputUnknown = 'LLM_IMAGE_INPUT_UNKNOWN',
 }
 
 export class LlmError extends AgentError {

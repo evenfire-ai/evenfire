@@ -102,4 +102,83 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
       db.rows.some(row => row.provider === 'codex-subscription' && row.model !== 'gpt-5')
     ).toBe(false)
   })
+
+  it('#654 records discovery provenance without ever promoting or clobbering evidence', async () => {
+    const curated = {
+      state: 'supported' as const,
+      evidence: {
+        source: 'curated' as const,
+        reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+        checkedAt: '2026-09-16T00:00:00.000Z',
+      },
+    }
+    const oldDiscovery = {
+      state: 'unknown' as const,
+      evidence: {
+        source: 'discovery' as const,
+        reference: 'https://models.dev/api.json',
+        checkedAt: '2026-07-01T00:00:00.000Z',
+      },
+    }
+    const db = makeFakeDb([
+      // Enabled + curated: published, must stay byte-identical.
+      {
+        provider: 'claude',
+        model: 'claude-opus-4-5',
+        source: 'discovery',
+        enabled: true,
+        image_input: curated,
+      },
+      // Disabled + curated: an operator decision that discovery must not undo.
+      {
+        provider: 'claude',
+        model: 'claude-sonnet-5',
+        source: 'discovery',
+        enabled: false,
+        image_input: curated,
+      },
+      // Disabled + older discovery provenance: refreshed with THIS run's stamp.
+      {
+        provider: 'claude',
+        model: 'claude-haiku-4-5-20251001',
+        source: 'discovery',
+        enabled: false,
+        image_input: oldDiscovery,
+      },
+    ])
+    const catalog = trimSnapshot({
+      anthropic: [
+        'claude-opus-4-5',
+        'claude-sonnet-5',
+        'claude-haiku-4-5-20251001',
+        // Absent from the DB → this run INSERTs it (disabled discovery row).
+        'claude-opus-4-7',
+      ],
+    })
+
+    await syncDiscoveredModels(
+      {
+        loadCatalog: loadStub(catalog, 'live', '2026-08-19T16:16:10.000Z'),
+        ...LOW_FLOOR,
+      },
+      db.connector
+    )
+
+    expect(db.get('claude', 'claude-opus-4-5')!.image_input).toEqual(curated)
+    expect(db.get('claude', 'claude-sonnet-5')!.image_input).toEqual(curated)
+    expect(db.get('claude', 'claude-haiku-4-5-20251001')!.image_input).toEqual({
+      state: 'unknown',
+      evidence: {
+        source: 'discovery',
+        reference: 'https://models.dev/api.json',
+        checkedAt: '2026-08-19T16:16:10.000Z',
+      },
+    })
+    // A freshly inserted row is born disabled AND unverified.
+    const inserted = db.get('claude', 'claude-opus-4-7')!
+    expect(inserted.enabled).toBe(false)
+    expect(inserted.image_input?.state).toBe('unknown')
+    // No row gained a known state from discovery.
+    expect(db.rows.filter(row => row.image_input?.state !== 'unknown').length).toBe(2)
+  })
 })

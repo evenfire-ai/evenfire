@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { HostModelOption } from '@hooks/useChatStore'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostModels } from '@hooks/useHostModels'
+import { isBrokerBackedProvider } from '@lib/hostModelSelectionStore'
+import { resolveImageInputDecision } from '../../../../src/imageInputDecision'
 import { Pill } from '../Common'
 
 export interface ModelSelectorProps {
@@ -20,13 +22,7 @@ export interface ModelSelectorProps {
 /** How long the "applies to your next message" confirmation badge stays up. */
 const APPLIED_BADGE_MS = 4000
 
-/** Broker-backed hosts have no static default; the operator must name a model. */
-const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 const SELECT_MODEL_LABEL = 'Select model'
-
-function isBrokerBackedProvider(provider: string): boolean {
-  return provider === CODEX_SUBSCRIPTION_PROVIDER
-}
 
 function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {
   const isCurrent = Boolean(sessionModel) && option.name === sessionModel
@@ -60,7 +56,18 @@ function modelLabel(name: string, options: HostModelOption[]): string {
  *   - A `model_not_allowed` rejection (R2, 403): inline error, selection unchanged.
  */
 export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSelectorProps) {
-  const { data, saving, error, selectModel, clearError } = useHostModels(agentRef, chatId)
+  const {
+    data,
+    saving,
+    error,
+    selectModel,
+    clearError,
+    refresh,
+    effectiveModel,
+    pending,
+    conflicted,
+    imageInput,
+  } = useHostModels(agentRef, chatId)
   const [open, setOpen] = useState(false)
   const [applied, setApplied] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -92,9 +99,6 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
     return () => window.clearTimeout(timeoutId)
   }, [applied])
 
-  const effectiveModel = data
-    ? (data.sessionModel ?? (isBrokerBackedProvider(data.provider) ? '' : data.hostDefault))
-    : ''
   const effectiveLabel = useMemo(() => {
     if (!data) return ''
     if (!effectiveModel && isBrokerBackedProvider(data.provider)) return SELECT_MODEL_LABEL
@@ -157,8 +161,18 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Model — ${effectiveLabel}`}
+        data-testid="selected-chat-model"
+        data-model-id={effectiveModel}
+        title={
+          imageInput.state === 'supported'
+            ? undefined
+            : imageInput.state === 'unsupported'
+              ? 'This model cannot receive images.'
+              : 'Image input is not verified for this model yet.'
+        }
         onClick={() => {
           clearError()
+          if (!open) void refresh()
           setOpen(prev => !prev)
         }}
       >
@@ -174,7 +188,7 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
         </svg>
       </Pill>
 
-      {applied && (
+      {(applied || pending) && (
         <span className="model-selector-applied" role="status" aria-live="polite">
           Applies to your next message
         </span>
@@ -188,6 +202,11 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
               using the default.
             </p>
           )}
+          {conflicted && (
+            <p className="model-selector-notice model-selector-notice--warning" role="status">
+              This chat’s model changed elsewhere — re-checking the current selection.
+            </p>
+          )}
           {error && (
             <p className="model-selector-notice model-selector-notice--error" role="alert">
               {error}
@@ -197,11 +216,19 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
             <ul className="model-selector-list">
               {offeredModels.map(option => {
                 const isActive = option.name === effectiveModel
+                const optionImageInput = resolveImageInputDecision(option.imageInput)
+                const imageHint =
+                  optionImageInput.state === 'supported'
+                    ? undefined
+                    : optionImageInput.state === 'unsupported'
+                      ? 'no images'
+                      : 'images not verified'
                 return (
                   <li key={option.name}>
                     <button
                       type="button"
                       role="menuitemradio"
+                      data-testid={`model-option-${option.name}`}
                       aria-checked={isActive}
                       className={`model-selector-item${isActive ? ' model-selector-item--active' : ''}`}
                       disabled={saving}
@@ -211,6 +238,11 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
                         {option.displayName?.trim() || option.name}
                         {option.name === data.hostDefault && (
                           <span className="model-selector-item-tag">default</span>
+                        )}
+                        {imageHint && (
+                          <span className="model-selector-item-tag" title={optionImageInput.reason}>
+                            {imageHint}
+                          </span>
                         )}
                       </span>
                       {isActive && (

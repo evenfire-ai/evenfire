@@ -12,6 +12,7 @@
  * implements ONLY those statements; anything else returns an empty result.
  */
 import { vi } from 'vitest'
+import type { ImageInputCapability } from '@clerum/llm-providers'
 
 export interface FakeRow {
   id: string
@@ -23,6 +24,7 @@ export interface FakeRow {
   context_window_tokens: number | null
   display_name: string | null
   vendor: string | null
+  image_input: ImageInputCapability | null
 }
 
 export interface SeedRow {
@@ -34,6 +36,7 @@ export interface SeedRow {
   context_window_tokens?: number | null
   display_name?: string | null
   vendor?: string | null
+  image_input?: ImageInputCapability | null
 }
 
 export interface FakeDb {
@@ -57,7 +60,14 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     context_window_tokens: s.context_window_tokens ?? null,
     display_name: s.display_name ?? null,
     vendor: s.vendor ?? null,
+    image_input: s.image_input ?? null,
   }))
+
+  /** JSONB parameters arrive as canonical JSON text (the services serialize them). */
+  const parseJsonb = (value: unknown): ImageInputCapability | null => {
+    if (value === null || value === undefined) return null
+    return JSON.parse(String(value)) as ImageInputCapability
+  }
 
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
     const empty = { rows: [] as unknown[], rowCount: 0 as number | null }
@@ -77,7 +87,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     // Materializer read (enabled rows). Static stale+enabled still
     // materializes; Codex stale targets stay visible in DB but are not executable.
     if (
-      /SELECT provider, model, vendor, display_name, context_window_tokens\s+FROM llm_allowed_models\s+WHERE enabled/.test(
+      /SELECT provider, model, vendor, display_name, context_window_tokens, image_input\s+FROM llm_allowed_models\s+WHERE enabled/.test(
         sql
       )
     ) {
@@ -90,17 +100,19 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
           vendor: r.vendor,
           display_name: r.display_name,
           context_window_tokens: r.context_window_tokens,
+          image_input: r.image_input,
         }))
       return { rows: out, rowCount: out.length }
     }
 
     // NEW row insert — ON CONFLICT (provider, model) DO NOTHING.
     if (/INSERT INTO llm_allowed_models/.test(sql)) {
-      const [provider, model, ctx, display] = params as [
+      const [provider, model, ctx, display, imageInput] = params as [
         string,
         string,
         number | null,
         string | null,
+        unknown,
       ]
       if (rows.some(r => r.provider === provider && r.model === model)) return empty
       rows.push({
@@ -113,6 +125,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
         context_window_tokens: ctx ?? null,
         display_name: display ?? null,
         vendor: null,
+        image_input: parseJsonb(imageInput),
       })
       return { rows: [], rowCount: 1 }
     }
@@ -120,13 +133,24 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     // PRESENT discovery row refresh — last_seen + stale=false + NULL-fill guarded
     // to disabled rows (COALESCE), never touching `enabled`.
     if (/UPDATE llm_allowed_models[\s\S]*SET\s+last_seen_at/.test(sql)) {
-      const [id, ctx, display] = params as [string, number | null, string | null]
+      const [id, ctx, display, imageInput] = params as [
+        string,
+        number | null,
+        string | null,
+        unknown,
+      ]
       const row = rows.find(r => r.id === id && r.source === 'discovery')
       if (!row) return empty
       row.stale = false
       if (!row.enabled) {
         row.context_window_tokens = row.context_window_tokens ?? ctx ?? null
         row.display_name = row.display_name ?? display ?? null
+        // Mirrors the SQL CASE: NULL gets the provenance, a discovery-sourced
+        // value is refreshed (this run observed the source), and operator-curated
+        // evidence is preserved. Enabled rows are frozen above.
+        const curatedOrOther =
+          row.image_input !== null && row.image_input.evidence?.source !== 'discovery'
+        if (!curatedOrOther) row.image_input = parseJsonb(imageInput)
       }
       return { rows: [], rowCount: 1 }
     }

@@ -16,7 +16,10 @@
  */
 import { isIP } from 'node:net'
 import { type LlmProviderId, PROVIDER_IDS } from '@clerum/llm-providers'
-import { VENDORED_MODELS_DEV_SNAPSHOT } from '../data/modelsDevSnapshot.js'
+import {
+  VENDORED_MODELS_DEV_SNAPSHOT,
+  VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
+} from '../data/modelsDevSnapshot.js'
 
 /**
  * The catalog URL. Defaults to the fixed, trusted public endpoint. It is NOT
@@ -126,7 +129,16 @@ export interface DiscoveredModel {
 /** Result of loading the catalog: which source served it, when, and the data. */
 export interface ModelsDevCatalogResult {
   source: 'live' | 'vendored'
+  /** When THIS RUN acquired the catalog (live fetch time, or fallback time). */
   fetchedAt: string
+  /**
+   * When the returned DATA was captured: the live fetch time, or the vendored
+   * snapshot's baked capture date. Distinct from `fetchedAt` on purpose — a
+   * vendored fallback is loaded today but its rows are as old as the file, so
+   * capability evidence derived from it must carry the capture date. Never
+   * rejuvenate a stale snapshot by stamping it with the load time.
+   */
+  capturedAt: string
   catalog: RawModelsDevCatalog
 }
 
@@ -343,7 +355,9 @@ export async function loadModelsDevCatalog(
     const text = await readCappedText(res, MAX_RESPONSE_BYTES)
     const parsed: unknown = JSON.parse(text)
     if (!isRawCatalog(parsed)) throw new Error('models.dev response failed shape validation')
-    return { source: 'live', fetchedAt: now().toISOString(), catalog: parsed }
+    const fetchedAt = now().toISOString()
+    // Live data IS the observation: capture time == acquisition time.
+    return { source: 'live', fetchedAt, capturedAt: fetchedAt, catalog: parsed }
   } catch (err) {
     // Do NOT log the body. A short reason is enough for operators.
     console.warn(
@@ -353,6 +367,7 @@ export async function loadModelsDevCatalog(
     return {
       source: 'vendored',
       fetchedAt: now().toISOString(),
+      capturedAt: VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT,
       catalog: VENDORED_MODELS_DEV_SNAPSHOT,
     }
   } finally {

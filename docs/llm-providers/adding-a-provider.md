@@ -30,6 +30,7 @@ stay local to **`mcp-host/src/llm/registryCore.ts`** (`RUNTIME_FIELDS`) and
 Example: adding `groq`.
 
 ### 1. Shared package — `packages/llm-providers/`
+
 - `index.cjs`: add the id to `PROVIDER_IDS`, a credential slot to
   `PROVIDER_CREDENTIAL_SLOTS` (use the `apiKeySlot('<id>-api-key', '<ID>_API_KEY')`
   helper), a brand label to `PROVIDER_DISPLAY_LABELS`, and an **empty**
@@ -38,8 +39,10 @@ Example: adding `groq`.
   `LlmProviderId` union derives from it).
 
 ### 2. mcp-host runtime row — `registryCore.ts` `RUNTIME_FIELDS`
+
 Add `{ baseURL, defaultModel, tokenizer: 'fallback' }`. The data-driven arm in
 `makeProvider` picks up anything carrying a `baseURL` — **no driver needed**.
+
 - `baseURL` must be exact so `${baseURL}/chat/completions` resolves. Watch the
   path: some include `/v1` (`https://api.mistral.ai/v1`), some don't
   (`https://api.perplexity.ai`), Fireworks needs an id prefix, DeepInfra is
@@ -47,6 +50,7 @@ Add `{ baseURL, defaultModel, tokenizer: 'fallback' }`. The data-driven arm in
 - `tokenizer: 'fallback'` for non-OpenAI models (`'openai'` only for GPT-family).
 
 ### 3. CRD enums — `charts/clerum-crds/crds/`
+
 - `host.yaml`: add the id to the `spec.model.provider` enum **and** the
   `spec.llmPolicy.fallbacks[].provider` enum.
 - `workflowrecipe.yaml`: add it to both provider enums **iff** the provider is
@@ -54,18 +58,65 @@ Add `{ baseURL, defaultModel, tokenizer: 'fallback' }`. The data-driven arm in
   api-key providers qualify). These enums are additive — old resources stay valid.
 
 ### 4. Allowlist seed — control-api migration (`control-api/src/db.ts`)
+
 Append a new migration (next `NNNN_…` version, append-only + idempotent) that
 `INSERT … ON CONFLICT DO NOTHING`s one sensible default `(provider, model, vendor)`
 into `llm_allowed_models`. Operators curate the rest from `/llm-models`.
 
-### 5. control-ui — `control-ui/lib/llm.ts`
+### 5. Image-input capability — `llm_allowed_models.image_input` (#654)
+
+Declare image support **per exact `(provider, model)` pair**, never from the
+model name, family, or an OpenAI-compatible request shape. Do it in one of two
+ways:
+
+- **Seed it** in the same migration as step 4 for ids the provider's own
+  documentation covers. Keep it to exact ids (no family extrapolation),
+  reference the public `https://` doc page, and set `checkedAt` to the date the
+  doc was **read** — never the deploy date, so re-running the migration cannot
+  rejuvenate evidence.
+- **Let the operator curate it** from `/llm-models` (the same field on the POST
+  and PUT bodies). A row with no metadata reads as `unknown`: text keeps working,
+  images are refused with the model named.
+
+The seed is one idempotent statement, and `image_input IS NULL` is what lets
+operator-curated evidence win over it:
+
+```sql
+UPDATE llm_allowed_models
+   SET image_input = $1::jsonb
+ WHERE provider = $2 AND model = $3 AND image_input IS NULL
+```
+
+Shape (validated by `@clerum/llm-providers` `parseImageInputCapability`;
+`GET /admin/llm-models` always returns it normalized):
+
+```json
+{
+  "state": "supported",
+  "evidence": {
+    "source": "curated",
+    "reference": "https://docs.example.com/models/vision-flash",
+    "checkedAt": "2026-09-16T00:00:00.000Z"
+  }
+}
+```
+
+A `supported`/`unsupported` claim REQUIRES `evidence`; a `discovery`-sourced
+claim also requires `validUntil`. `null` clears (and normalizes to `unknown`),
+and renaming a row's provider/model clears it automatically. The catalog sync
+only ever writes `unknown` provenance — see `discoveryImageInput` in
+`control-api/src/services/llmCatalogSync.ts`.
+
+### 6. control-ui — `control-ui/lib/llm.ts`
+
 Add the provider's default model to `LLM_DEFAULT_MODEL_BY_PROVIDER` (a
 `Record<LlmProvider, …>`, so it **must** be exhaustive — tsc enforces it). The
 provider dropdown (`LLM_PROVIDER_OPTIONS`), the multi-slot secrets form
 (`LLM_CREDENTIAL_GROUPS`) and the field label all **auto-derive** from the
 package — no other UI change. A nicer `SECRET_FIELD_HINTS` placeholder is optional.
 
-### 6. Param compatibility (important)
+### 7. Param compatibility (important)
+
 The OpenAI-compatible driver (`mcp-host/src/llm/openaiCompatible.ts`) shares the
 `openai` provider's request shape. Some providers **reject** params: Groq
 (`n>1`, `logprobs`, `logit_bias`), Cerebras (`frequency_penalty`/`presence_penalty`),
@@ -74,7 +125,8 @@ reasoner (sampling params). Keep the default request to a **conservative,
 portable set** (model + messages + tools). If a provider needs something special,
 gate it per-provider — don't broaden the shared default.
 
-### 7. Tests
+### 8. Tests
+
 `mcp-host` registry tests (provider present + constructs), the control-api
 migration/enum test, and confirm the credential-exclusion leak test still passes
 with the expanded slot set (it derives from `ALL_PROVIDERS`, so it should).
@@ -86,12 +138,14 @@ with the expanded slot set (it derives from `ALL_PROVIDERS`, so it should).
 Everything in Path A, **plus**:
 
 ### makeProvider arm — `registry.ts`
+
 Add an explicit `case '<id>':` that builds the provider. Load any SDK **lazily**
 with a synchronous `require()` inside the arm (mcp-host is CommonJS) so the SDK is
 only parsed when the provider is actually used, and a broken dependency can't take
 down startup. Never route a driver provider through the `baseURL` arm.
 
 ### Credentials & non-secret env
+
 - Multi-credential providers (Bedrock: key pair; Vertex: SA JSON) list every slot
   in `PROVIDER_CREDENTIAL_SLOTS`. The credential-exclusion boundary
   (`userEnvSnapshot`) derives from the full slot set — never `primarySlot()`.
@@ -104,34 +158,36 @@ down startup. Never route a driver provider through the `baseURL` arm.
   mid-workflow (this is why `bedrock` and `azure` are host-only).
 
 ### Azure OpenAI — the reference non-vanilla case
+
 Azure is OpenAI-compatible in shape but not a `baseURL + Bearer` row:
+
 - **No fixed base URL** — the operator supplies `AZURE_OPENAI_ENDPOINT`
   (non-secret env). The driver builds `${endpoint}/openai/v1/` (v1 GA path).
 - **Auth is the `api-key` header**, not `Authorization: Bearer`.
 - **`model` is the deployment name**, not a catalog id.
-Its `RUNTIME_FIELDS.azure` carries a `defaultModel` + `tokenizer: 'openai'` but
-**no static baseURL**, so it takes the explicit `case 'azure':` arm and reads the
-endpoint from `process.env` at construction. Fail-closed if the endpoint is absent.
+  Its `RUNTIME_FIELDS.azure` carries a `defaultModel` + `tokenizer: 'openai'` but
+  **no static baseURL**, so it takes the explicit `case 'azure':` arm and reads the
+  endpoint from `process.env` at construction. Fail-closed if the endpoint is absent.
 
 ---
 
 ## Gotchas encoded in the registry (2026)
 
-| provider | base_url quirk | param / behavior gotcha |
-|---|---|---|
-| fireworks | model id needs prefix `accounts/fireworks/models/<name>` | — |
-| deepinfra | base path is `/v1/openai` (not `/v1`) | tool-calling only on ~most models |
-| perplexity | **no** `/v1` in base URL | every call is web-grounded (returns citations) |
-| deepseek | accepts with or without `/v1` | reasoner mode restricts sampling params |
-| moonshot | `.ai` (global) vs `.cn` (China) host | **no** `tool_choice: 'required'`; temperature `[0,1]` |
-| groq | — | rejects `n>1`, `logprobs`, `logit_bias` |
-| cerebras | — | rejects `frequency_penalty`/`presence_penalty` |
-| openrouter | — | router: same slug may hit different upstreams; tool support per-model |
-| nebius | two brands mid-rename (tokenfactory / studio) | `org/model` namespaced ids |
-| together / novita / nebius | — | `org/model` namespaced ids |
-| gemini (compat) | `…/v1beta/openai/` | beta: unsupported params silently ignored; distinct from `vertex` |
-| minimax | `.io` (international) vs `api.minimaxi.com` (China) host | JWT-shaped api key; portable `[0,2]` temperature (no gating) |
-| azure | per-resource endpoint (env) | `api-key` header; `model` = deployment name |
+| provider                   | base_url quirk                                           | param / behavior gotcha                                               |
+| -------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------- |
+| fireworks                  | model id needs prefix `accounts/fireworks/models/<name>` | —                                                                     |
+| deepinfra                  | base path is `/v1/openai` (not `/v1`)                    | tool-calling only on ~most models                                     |
+| perplexity                 | **no** `/v1` in base URL                                 | every call is web-grounded (returns citations)                        |
+| deepseek                   | accepts with or without `/v1`                            | reasoner mode restricts sampling params                               |
+| moonshot                   | `.ai` (global) vs `.cn` (China) host                     | **no** `tool_choice: 'required'`; temperature `[0,1]`                 |
+| groq                       | —                                                        | rejects `n>1`, `logprobs`, `logit_bias`                               |
+| cerebras                   | —                                                        | rejects `frequency_penalty`/`presence_penalty`                        |
+| openrouter                 | —                                                        | router: same slug may hit different upstreams; tool support per-model |
+| nebius                     | two brands mid-rename (tokenfactory / studio)            | `org/model` namespaced ids                                            |
+| together / novita / nebius | —                                                        | `org/model` namespaced ids                                            |
+| gemini (compat)            | `…/v1beta/openai/`                                       | beta: unsupported params silently ignored; distinct from `vertex`     |
+| minimax                    | `.io` (international) vs `api.minimaxi.com` (China) host | JWT-shaped api key; portable `[0,2]` temperature (no gating)          |
+| azure                      | per-resource endpoint (env)                              | `api-key` header; `model` = deployment name                           |
 
 ## Hand-maintained mirrors — not type-checked
 
@@ -150,6 +206,7 @@ grep -rn --include='*.sh' --include='*.md' --include='*.ts' --include='*.tsx' \
 ```
 
 Surfaces to update:
+
 - `scripts/minikube/apply-llm-secret.sh` — the `SLOTS` array (`<id>-api-key|<ID>_API_KEY|`).
 - `scripts/check-prereqs.sh` — the `PROVIDER_KEYS` list.
 - `scripts/e2e/e2e-plugin-workload-sdk.sh`, `scripts/e2e/seed-e2e-data.sh` — the
@@ -162,6 +219,7 @@ Surfaces to update:
 ## Checklist
 
 **Type-checked source of truth** (tsc fails if missed):
+
 - [ ] `packages/llm-providers/index.cjs` — id, slot(s), label, non-secret env
 - [ ] `packages/llm-providers/index.d.ts` — id in the `PROVIDER_IDS` tuple
 - [ ] `mcp-host/src/llm/registryCore.ts` — `RUNTIME_FIELDS` row (baseURL/defaultModel/tokenizer)
@@ -170,13 +228,22 @@ Surfaces to update:
 - [ ] `control-ui/lib/llm.ts` — `LLM_DEFAULT_MODEL_BY_PROVIDER` entry
 
 **Data / assets** (not type-checked, but required for the provider to work end-to-end):
+
 - [ ] `control-api/src/db.ts` — allowlist seed migration (append-only, idempotent)
+- [ ] `control-api/src/db.ts` — curated `image_input` evidence for the ids whose
+      vision support the provider's own docs state (exact ids, `checkedAt` = the
+      date the doc was read; omit it to leave the row `unknown`)
 - [ ] `control-api/src/data/modelsDevSnapshot.ts` — vendored offline snapshot block, **derived from live models.dev** (the offline catalog-sync fallback; keys must match `PROVIDER_KEY_MAP`)
+- [ ] `control-api/src/data/modelsDevSnapshot.ts` — bump
+      `VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT` to the regeneration commit's
+      date (`git log -1 --format=%cI -- <file>`); discovery provenance is stamped
+      with it, so leaving it stale misdates evidence
 - [ ] `charts/clerum-crds/crds/host.yaml` — both provider enums
 - [ ] `charts/clerum-crds/crds/workflowrecipe.yaml` — enums (single-credential only)
 - [ ] `control-ui/public/provider-icons/<id>.svg` — brand icon (the picker renders `/provider-icons/${provider}.svg`; degrades to the label initial if absent). Add a theme-knockout rule in `control-ui/app/globals.css` only if the mark is monochrome.
 
 **Hand-maintained mirrors** (run both greps above, then):
+
 - [ ] `scripts/minikube/apply-llm-secret.sh` · `scripts/check-prereqs.sh` · both `scripts/e2e/*.sh` case arms
 - [ ] `README.md` · `docs/meta/claims-guardrails.md` · `docs/crds/workflowrecipe.md` · `docs/llms.txt` · `Makefile`
 - [ ] operator doc updated (`docs/deploy/llm-providers.md`) and overview (`docs/llm-providers/README.md`) — counts + tables

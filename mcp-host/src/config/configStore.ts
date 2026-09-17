@@ -37,6 +37,7 @@ import {
   type CodexPolicyBinding,
   toPolicyBinding,
 } from '@clerum/codex-catalog-projection'
+import { type ImageInputCapability, normalizeImageInputCapability } from '@clerum/llm-providers'
 import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
   ALL_PROVIDERS,
@@ -45,6 +46,7 @@ import {
   descriptorFor,
   primarySlot,
 } from '../llm/registryCore'
+import { logger } from '../logger'
 import type { ProviderCredentials } from '../types'
 import { llmAllowlistMissingTotal } from './allowlistMetrics'
 
@@ -110,6 +112,7 @@ export interface ConfigStoreChange {
  */
 export interface AllowedModelEntry {
   model: string
+  imageInput?: ImageInputCapability
   displayName?: string
   contextWindowTokens?: number
   vendor?: string
@@ -511,7 +514,7 @@ export class ConfigStore {
       this.hostCm = new Map(Object.entries(data))
     } catch (err) {
       if (errorCode(err) === 404) return
-      console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedConfigMap failed:')
     }
   }
 
@@ -545,7 +548,7 @@ export class ConfigStore {
       if (errorCode(err) === 404) {
         return this.markAllowlistMissing()
       }
-      console.warn(`[ConfigStore] readNamespacedConfigMap ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedConfigMap failed:')
       return false
     }
   }
@@ -590,31 +593,26 @@ export class ConfigStore {
         // V8 SyntaxError can embed a snippet of the offending value. Mirrors the
         // deliberate no-log-value policy in WRC's modelConfigHandler parser.
         const errName = err instanceof Error ? err.name : 'ParseError'
-        console.error(
-          `[ConfigStore] allowlist key '${provider}' has invalid JSON (${errName}) — skipping`
-        )
+        logger.error({ provider, errName }, 'Allowlist JSON parse failed')
         continue
       }
       if (!Array.isArray(parsed)) {
-        console.error(`[ConfigStore] allowlist key '${provider}' is not a JSON array — skipping`)
+        logger.error({ provider }, 'Allowlist must be a JSON array; skipping provider')
         continue
       }
       let entries: AllowedModelEntry[] = []
       for (const item of parsed) {
         if (!item || typeof item !== 'object') {
-          console.error(
-            `[ConfigStore] allowlist key '${provider}' has a non-object entry — skipping it`
-          )
+          logger.error({ provider }, 'Skipping non-object allowlist entry')
           continue
         }
         const rec = item as Record<string, unknown>
         if (typeof rec.model !== 'string' || rec.model.length === 0) {
-          console.error(
-            `[ConfigStore] allowlist key '${provider}' has an entry without a model — skipping it`
-          )
+          logger.error({ provider }, 'Skipping allowlist entry without a model')
           continue
         }
         const entry: AllowedModelEntry = { model: rec.model }
+        entry.imageInput = normalizeImageInputCapability(rec.imageInput)
         if (typeof rec.displayName === 'string') entry.displayName = rec.displayName
         // Optional, operator-declared: accept only a positive integer; drop
         // NaN/Infinity/negatives silently (it is metadata, not part of the
@@ -658,7 +656,8 @@ export class ConfigStore {
     if (!this.allowlistMissingWarned) {
       this.allowlistMissingWarned = true
       llmAllowlistMissingTotal.inc()
-      console.warn(
+      logger.warn(
+        {},
         '[ConfigStore] LLM allowlist ConfigMap absent — degraded-explicit mode (only the Host-configured model is treated as permitted)'
       )
     }
@@ -674,7 +673,7 @@ export class ConfigStore {
       return (sec.data ?? {}) as Record<string, string>
     } catch (err) {
       if (errorCode(err) === 404) return null
-      console.warn(`[ConfigStore] readNamespacedSecret ${name} failed:`, err)
+      logger.warn({ name: name, err: err }, '[ConfigStore] readNamespacedSecret failed:')
       return null
     }
   }
@@ -700,7 +699,10 @@ export class ConfigStore {
       this.watchAborters[tier] = undefined
       if (this.stopped) return
       const reason = err ? err.message : 'closed'
-      console.log(`[ConfigStore] watch ${tier}/${name} ended (${reason}); reconnecting`)
+      logger.info(
+        { tier: tier, name: name, reason: reason },
+        '[ConfigStore] watch / ended (); reconnecting'
+      )
       this.scheduleReconnect(tier)
     }
 
@@ -715,7 +717,7 @@ export class ConfigStore {
       })
       .catch((err: unknown) => {
         if (this.stopped) return
-        console.warn(`[ConfigStore] watch ${tier}/${name} failed to start:`, err)
+        logger.warn({ tier: tier, name: name, err: err }, '[ConfigStore] watch / failed to start:')
         this.scheduleReconnect(tier)
       })
   }
@@ -874,7 +876,7 @@ export class ConfigStore {
       try {
         h(change)
       } catch (err) {
-        console.warn('[ConfigStore] onChange handler threw:', err)
+        logger.warn({ err: err }, '[ConfigStore] onChange handler threw:')
       }
     }
   }
@@ -952,6 +954,8 @@ function allowlistMapsEqual(
       const y = bEntries[i]
       if (
         x.model !== y.model ||
+        JSON.stringify(x.imageInput ?? { state: 'unknown' }) !==
+          JSON.stringify(y.imageInput ?? { state: 'unknown' }) ||
         x.displayName !== y.displayName ||
         x.contextWindowTokens !== y.contextWindowTokens ||
         x.vendor !== y.vendor

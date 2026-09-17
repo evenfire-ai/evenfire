@@ -6014,6 +6014,91 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
     apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   },
+  {
+    version: '0109_llm_allowed_models_image_input',
+    apply: async db => {
+      // #654 — model-level image-input capability + evidence for the allowlist.
+      //
+      // ADDITIVE and NULLABLE. Every pre-existing row reads as `unknown` (no
+      // affirmative capability): the shared contract
+      // (`@clerum/llm-providers` normalizeImageInputCapability) maps absent or
+      // malformed metadata to `{ state: 'unknown' }`, so a legacy row can never
+      // become affirmative support by accident, and this migration alone changes
+      // no runtime behavior — enforcement acts only where a capability exists.
+      //
+      // The CHECK constrains the ONE field no reader may have to guess (`state`)
+      // against a non-object/scalar payload. The nested evidence is validated
+      // strictly on write by the service (shared parser) and normalized on read,
+      // so `state` here is a backstop, not the only gate.
+      //
+      // All three conjuncts are load-bearing, because a CHECK accepts NULL:
+      // `jsonb_typeof` alone would let `{}` through (`'{}'::jsonb->>'state'` is
+      // NULL, so the IN list yields NULL, not FALSE), and `? 'state'` alone
+      // would let `{"state": null}` through (`?` is true while `->>` is NULL).
+      // COALESCE is what turns that untyped NULL into a real FALSE.
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS image_input JSONB;
+        DO $$ BEGIN
+          ALTER TABLE llm_allowed_models
+            ADD CONSTRAINT llm_allowed_models_image_input_state_check
+            CHECK (
+              image_input IS NULL
+              OR (
+                jsonb_typeof(image_input) = 'object'
+                AND image_input ? 'state'
+                AND COALESCE(
+                  image_input->>'state' IN ('supported','unsupported','unknown'),
+                  false
+                )
+              )
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `)
+
+      // Curated evidence for the two exact ids covered by Z.AI's official docs,
+      // read on 2026-09-16: glm-5.3 is text-only (docs.z.ai/guides/llm/glm-5.3)
+      // and glm-5.3-flash accepts images via `image_url`
+      // (docs.z.ai/guides/vlm/glm-5.3-flash). `checkedAt` is the date the docs
+      // were read — never the migration date, so re-deploying does not
+      // rejuvenate evidence.
+      //
+      // Deliberately narrow: those exact (provider, model) pairs only, no
+      // family/name extrapolation, no invented TTL, and NO model row is created
+      // (#654 does not expand the allowlist). `image_input IS NULL` keeps
+      // operator-curated evidence (curated wins) and keeps the seed idempotent.
+      // A pair that does not exist yet is simply not updated.
+      const checkedAt = '2026-09-16T00:00:00.000Z'
+      const glm53 = {
+        state: 'unsupported',
+        evidence: {
+          source: 'curated',
+          reference: 'https://docs.z.ai/guides/llm/glm-5.3',
+          checkedAt,
+        },
+      }
+      const glm53Flash = {
+        state: 'supported',
+        evidence: {
+          source: 'curated',
+          reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+          checkedAt,
+        },
+      }
+      await db.query(
+        `UPDATE llm_allowed_models
+            SET image_input = CASE model
+                  WHEN 'glm-5.3' THEN $1::jsonb
+                  WHEN 'glm-5.3-flash' THEN $2::jsonb
+                END
+          WHERE provider = 'zai'
+            AND model IN ('glm-5.3', 'glm-5.3-flash')
+            AND image_input IS NULL`,
+        [JSON.stringify(glm53), JSON.stringify(glm53Flash)]
+      )
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

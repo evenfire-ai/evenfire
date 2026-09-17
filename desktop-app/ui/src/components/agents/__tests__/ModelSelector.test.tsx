@@ -6,22 +6,66 @@ import { ModelSelector } from '../ModelSelector'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-// Drive the component purely through the hook's return shape.
-const hookState = {
-  data: undefined as HostModelsResult | null | undefined,
-  loading: false,
-  saving: false,
-  error: null as string | null,
-  selectModel: vi.fn(async (_model: string) => true),
-  clearError: vi.fn(),
+// Drive the component purely through the hook's return shape. Every field of the
+// real return shape must exist here — the component reads them directly.
+type HookState = {
+  data: HostModelsResult | null | undefined
+  loading: boolean
+  saving: boolean
+  error: string | null
+  state: 'unloaded' | 'loading' | 'ready' | 'unavailable'
+  effectiveModel: string
+  intentModel: string | null
+  pending: boolean
+  selectionUnsettled: boolean
+  conflicted: boolean
+  confirmedRevision: number | null
+  imageInput: {
+    state: 'supported' | 'unsupported' | 'unknown'
+    reason: string
+    validUntil?: string
+  }
+  canAttachImages: boolean
+  imageBlockMessage: string | null
+  visualSendBlocked: boolean
+  selectModel: (model: string) => Promise<boolean>
+  clearError: () => void
+  refresh: () => Promise<void>
 }
+
+function makeHookState(overrides: Partial<HookState> = {}): HookState {
+  const data = overrides.data
+  return {
+    data,
+    loading: false,
+    saving: false,
+    error: null,
+    state: data === undefined ? 'unloaded' : data === null ? 'unavailable' : 'ready',
+    effectiveModel: data ? (data.sessionModel ?? data.hostDefault) : '',
+    intentModel: null,
+    pending: false,
+    selectionUnsettled: false,
+    conflicted: false,
+    confirmedRevision: null,
+    imageInput: { state: 'unknown', reason: 'model_unknown' },
+    canAttachImages: false,
+    imageBlockMessage: null,
+    visualSendBlocked: false,
+    selectModel: vi.fn(async (_model: string) => true),
+    clearError: vi.fn(),
+    refresh: vi.fn(async () => undefined),
+    ...overrides,
+  }
+}
+
+let hookState: HookState = makeHookState()
 
 vi.mock('@hooks/useHostModels', () => ({
   useHostModels: () => hookState,
 }))
 
-function setHook(overrides: Partial<typeof hookState>) {
-  Object.assign(hookState, overrides)
+function setHook(overrides: Partial<HookState>) {
+  hookState = makeHookState(overrides)
 }
 
 function baseData(overrides: Partial<HostModelsResult> = {}): HostModelsResult {
@@ -44,14 +88,7 @@ function renderSelector() {
 
 afterEach(() => {
   cleanup()
-  setHook({
-    data: undefined,
-    loading: false,
-    saving: false,
-    error: null,
-    selectModel: vi.fn(async () => true),
-    clearError: vi.fn(),
-  })
+  hookState = makeHookState()
   vi.clearAllMocks()
 })
 

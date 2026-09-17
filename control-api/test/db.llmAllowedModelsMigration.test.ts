@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { parseImageInputCapability } from '@clerum/llm-providers'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -154,5 +155,66 @@ describe('0056_llm_allowed_models migration', () => {
     expect(accessBoundary).toContain(
       'GRANT SELECT, INSERT ON TABLE\n          llm_allowed_models_audit,\n          llm_catalog_sync_runs'
     )
+  })
+
+  it('0109 adds the nullable image_input capability column idempotently (#654)', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+
+    const alter = sqls.find(sql => /ADD COLUMN IF NOT EXISTS image_input JSONB/.test(sql))
+    expect(alter).toBeDefined()
+    // Nullable + no DEFAULT: every existing row reads as `unknown`, and the
+    // migration alone changes no runtime behavior.
+    expect(alter!).not.toMatch(/image_input JSONB\s+NOT NULL/)
+    expect(alter!).not.toMatch(/image_input JSONB\s+DEFAULT/)
+    // The state enum is the DB backstop; the nested evidence shape is validated
+    // by the service through the shared parser.
+    expect(alter!).toMatch(/jsonb_typeof\(image_input\) = 'object'/)
+    expect(alter!).toMatch(/image_input->>'state' IN \('supported','unsupported','unknown'\)/)
+    // The predicate must be TOTAL, because a CHECK accepts NULL: without these
+    // two guards a `{}` (or `{"state": null}`) payload evaluates to NULL and is
+    // ACCEPTED. The real database behaviour is covered by
+    // db.realPostgresMigration.integration.test.ts.
+    expect(alter!).toMatch(/image_input \? 'state'/)
+    expect(alter!).toMatch(
+      /COALESCE\(\s*image_input->>'state' IN \('supported','unsupported','unknown'\),\s*false\s*\)/
+    )
+    expect(alter!).toMatch(/EXCEPTION WHEN duplicate_object THEN NULL/)
+    // Additive only.
+    expect(alter!).not.toMatch(/DROP COLUMN/)
+  })
+
+  it('0109 seeds curated Z.AI evidence for the two documented ids only', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+    const calls = clientQuery.mock.calls.map(([sql, params]) => ({
+      sql: String(sql),
+      params: params as unknown[],
+    }))
+
+    const seed = calls.find(c => /SET image_input = CASE model/.test(c.sql))
+    expect(seed).toBeDefined()
+    // Exact ids only — no family/name extrapolation, and no model row is created
+    // (the seed is an UPDATE, and #654 does not expand the allowlist).
+    expect(seed!.sql).toMatch(/WHERE provider = 'zai'/)
+    expect(seed!.sql).toMatch(/model IN \('glm-5\.3', 'glm-5\.3-flash'\)/)
+    expect(seed!.sql).not.toMatch(/INSERT INTO llm_allowed_models/)
+    // Operator-curated evidence wins; a re-run changes nothing.
+    expect(seed!.sql).toMatch(/image_input IS NULL/)
+
+    const unsupported = JSON.parse(String(seed!.params[0]))
+    const supported = JSON.parse(String(seed!.params[1]))
+    expect(unsupported.state).toBe('unsupported')
+    expect(supported.state).toBe('supported')
+    for (const claim of [unsupported, supported]) {
+      expect(claim.evidence.source).toBe('curated')
+      expect(claim.evidence.reference).toMatch(/^https:\/\/docs\.z\.ai\//)
+      // The stamp is the date the docs were READ, not the migration date.
+      expect(claim.evidence.checkedAt).toBe('2026-09-16T00:00:00.000Z')
+      // The seeded payload must be exactly what the shared contract accepts —
+      // otherwise every reader would normalize it back to `unknown`.
+      expect(parseImageInputCapability(claim)).toEqual(claim)
+    }
   })
 })
