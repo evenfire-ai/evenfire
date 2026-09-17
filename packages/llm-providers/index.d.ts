@@ -89,7 +89,7 @@ export declare function isLlmProviderId(s: unknown): s is LlmProviderId
  */
 export declare function isCredentialSlotOwnedByProvider(
   provider: string,
-  credentialSlot: string,
+  credentialSlot: string
 ): boolean
 
 export type ProviderAuthMode = 'static-credentials' | 'oauth-broker'
@@ -113,12 +113,12 @@ export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, Provider
 export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
 export declare function buildProviderMaps(
   ids: readonly string[],
-  brokerIds: readonly string[],
+  brokerIds: readonly string[]
 ): {
   PROVIDER_AUTH_MODE: Readonly<Record<string, ProviderAuthMode>>
   PROVIDER_MODEL_CATALOG_MODE: Readonly<Record<string, ProviderModelCatalogMode>>
 }
 export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
 export declare function requireStaticCredentialSlot(
-  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>,
+  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>
 ): CredentialSlot

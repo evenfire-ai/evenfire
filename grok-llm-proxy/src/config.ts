@@ -34,9 +34,21 @@ function requiredPem(name: string, raw: string | undefined): string {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyConfig {
   return {
-    runtimePort: requiredPositiveInt('GROK_LLM_PROXY_RUNTIME_PORT', env.GROK_LLM_PROXY_RUNTIME_PORT, 8080),
-    adminPort: requiredPositiveInt('GROK_LLM_PROXY_ADMIN_PORT', env.GROK_LLM_PROXY_ADMIN_PORT, 8081),
-    probePort: requiredPositiveInt('GROK_LLM_PROXY_PROBE_PORT', env.GROK_LLM_PROXY_PROBE_PORT, 9090),
+    runtimePort: requiredPositiveInt(
+      'GROK_LLM_PROXY_RUNTIME_PORT',
+      env.GROK_LLM_PROXY_RUNTIME_PORT,
+      8080
+    ),
+    adminPort: requiredPositiveInt(
+      'GROK_LLM_PROXY_ADMIN_PORT',
+      env.GROK_LLM_PROXY_ADMIN_PORT,
+      8081
+    ),
+    probePort: requiredPositiveInt(
+      'GROK_LLM_PROXY_PROBE_PORT',
+      env.GROK_LLM_PROXY_PROBE_PORT,
+      9090
+    ),
     maxBodyBytes: requiredPositiveInt(
       'GROK_LLM_PROXY_MAX_BODY_BYTES',
       env.GROK_LLM_PROXY_MAX_BODY_BYTES,

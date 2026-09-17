@@ -3,8 +3,8 @@ import {
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
-import { GrokTransportError, streamGrokCompletion } from '../src/grokTransport.js'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
+import { GrokTransportError, streamGrokCompletion } from '../src/grokTransport.js'
 import { GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 
 const REQUEST = {

@@ -80,7 +80,11 @@ export class ControlApiClient {
       receipt: input.receipt,
     })
     if (!isPlainObject(body)) {
-      return { providerAttemptId: input.receipt.providerAttemptId, outcome: input.receipt.outcome, duplicate: false }
+      return {
+        providerAttemptId: input.receipt.providerAttemptId,
+        outcome: input.receipt.outcome,
+        duplicate: false,
+      }
     }
     return {
       providerAttemptId: String(body.providerAttemptId ?? input.receipt.providerAttemptId),
@@ -116,8 +120,13 @@ export class ControlApiClient {
     }
     if (!response.ok) {
       const code =
-        isPlainObject(parsed) && typeof parsed.error === 'string' ? parsed.error : 'provider_unavailable'
-      logger.warn({ event: 'grok_proxy_control_api_denied', code, path }, 'control API request denied')
+        isPlainObject(parsed) && typeof parsed.error === 'string'
+          ? parsed.error
+          : 'provider_unavailable'
+      logger.warn(
+        { event: 'grok_proxy_control_api_denied', code, path },
+        'control API request denied'
+      )
       throw new ControlApiClientError(code, 'control API request denied')
     }
     return parsed
@@ -125,7 +134,11 @@ export class ControlApiClient {
 }
 
 function parseRedeem(body: unknown): RedeemAttemptSuccess {
-  if (!isPlainObject(body) || typeof body.accessToken !== 'string' || !isPlainObject(body.transport)) {
+  if (
+    !isPlainObject(body) ||
+    typeof body.accessToken !== 'string' ||
+    !isPlainObject(body.transport)
+  ) {
     throw new ControlApiClientError('provider_unavailable', 'redeem response is invalid')
   }
   const transport = body.transport
@@ -155,7 +168,8 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
           : 'completion_stream',
       servedModel: transport.servedModel,
       maxStreamDurationMs:
-        typeof transport.maxStreamDurationMs === 'number' && Number.isFinite(transport.maxStreamDurationMs)
+        typeof transport.maxStreamDurationMs === 'number' &&
+        Number.isFinite(transport.maxStreamDurationMs)
           ? transport.maxStreamDurationMs
           : 300_000,
     },

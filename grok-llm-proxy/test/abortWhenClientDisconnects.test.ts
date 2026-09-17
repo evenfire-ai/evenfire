@@ -1,5 +1,5 @@
-import { EventEmitter } from 'node:events'
 import { describe, expect, it } from 'vitest'
+import { EventEmitter } from 'node:events'
 import { abortWhenClientDisconnects } from '../src/server.js'
 
 function fakeReqRes(): {

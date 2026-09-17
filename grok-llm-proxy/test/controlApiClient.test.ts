@@ -1,5 +1,5 @@
-import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { describe, expect, it } from 'vitest'
+import { type IncomingMessage, type Server, createServer } from 'node:http'
 import { ControlApiClient, ControlApiClientError } from '../src/controlApiClient.js'
 
 const LOOPBACK_V4 = ['127', '0', '0', '1'].join('.')
@@ -85,11 +85,13 @@ describe('ControlApiClient', () => {
       expect(second.accessToken).toBe('tok-live')
       expect(seenTokens).toEqual(['ticket-1', 'ticket-2'])
       expect(server.requests[0]?.headers['x-service-token']).toBe('grok-llm-proxy')
-      expect(String(server.requests[0]?.headers.authorization)).toContain('dev-grok-llm-proxy-token')
-      expect(server.requests[0]?.url).toBe('/api/v1/internal/llm/grok/provider-attempts/redeem')
-      expect(server.requests.some(item => item.url === '/api/v1/internal/llm/provider-attempts/redeem')).toBe(
-        false
+      expect(String(server.requests[0]?.headers.authorization)).toContain(
+        'dev-grok-llm-proxy-token'
       )
+      expect(server.requests[0]?.url).toBe('/api/v1/internal/llm/grok/provider-attempts/redeem')
+      expect(
+        server.requests.some(item => item.url === '/api/v1/internal/llm/provider-attempts/redeem')
+      ).toBe(false)
 
       const finalized = await client.finalize({
         attemptReceipt: 'a'.repeat(64),
@@ -109,7 +111,8 @@ describe('ControlApiClient', () => {
 
   it('maps redeem failures to bounded codes and never retries an ambiguous attempt', async () => {
     const server = await listen((req, _body, res) => {
-      ;(res as unknown as { statusCode: number; setHeader: Function; end: Function }).statusCode = 409
+      ;(res as unknown as { statusCode: number; setHeader: Function; end: Function }).statusCode =
+        409
       ;(res as unknown as { setHeader: Function }).setHeader('content-type', 'application/json')
       ;(res as unknown as { end: Function }).end(JSON.stringify({ error: 'ticket_replayed' }))
     })

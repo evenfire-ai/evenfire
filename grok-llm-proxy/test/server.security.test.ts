@@ -1,10 +1,10 @@
-import { generateKeyPairSync } from 'node:crypto'
-import jwt from 'jsonwebtoken'
-import request from 'supertest'
 import { describe, expect, it } from 'vitest'
+import jwt from 'jsonwebtoken'
+import { generateKeyPairSync } from 'node:crypto'
+import request from 'supertest'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
-import { loadConfig, type GrokLlmProxyConfig } from '../src/config.js'
+import { type GrokLlmProxyConfig, loadConfig } from '../src/config.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -82,7 +82,9 @@ describe('grok-llm-proxy security surface', () => {
     const metrics = await request(probeApp).get('/metrics')
     expect(metrics.status).toBe(200)
     expect(metrics.text).not.toMatch(/account|refresh|accessToken/i)
-    expect((await request(runtimeApp).get('/internal/runtime/v1/grok/completions')).status).toBe(404)
+    expect((await request(runtimeApp).get('/internal/runtime/v1/grok/completions')).status).toBe(
+      404
+    )
     expect((await request(adminApp).get('/internal/admin/v1/grok/models')).status).toBe(404)
   })
 

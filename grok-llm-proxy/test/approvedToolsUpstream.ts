@@ -49,10 +49,7 @@ type Exchange = { call: Row; args: Row; result: Row }
 type Decision = { stage: string; args?: Row; result?: Row }
 
 function expectedCall(exchange: Exchange, decision: Decision): void {
-  if (
-    exchange.call.name !== decision.stage ||
-    !isDeepStrictEqual(exchange.args, decision.args)
-  ) {
+  if (exchange.call.name !== decision.stage || !isDeepStrictEqual(exchange.args, decision.args)) {
     throw new Error('unexpected_fixture_call')
   }
 }

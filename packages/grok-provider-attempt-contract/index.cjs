@@ -68,13 +68,14 @@ const CLAIMS_KEYS = new Set([
   'connectionRevision',
   'connectionId',
 ])
-const AUTHORIZE_KEYS = new Set([
+const AUTHORIZE_KEYS = new Set(['providerAttemptId', 'requestHash', 'executionTicket', 'expiresAt'])
+const RECEIPT_KEYS = new Set([
+  'schemaVersion',
   'providerAttemptId',
   'requestHash',
-  'executionTicket',
-  'expiresAt',
+  'outcome',
+  'usage',
 ])
-const RECEIPT_KEYS = new Set(['schemaVersion', 'providerAttemptId', 'requestHash', 'outcome', 'usage'])
 const USAGE_KEYS = new Set(['inputTokens', 'outputTokens'])
 
 function fail(code, message) {
@@ -182,14 +183,16 @@ function parseMessages(raw) {
     const extra = rejectUnknown(item, MESSAGE_KEYS, `messages[${i}]`)
     if (extra) return extra
     if (!MESSAGE_ROLES.has(item.role)) return fail('invalid', `messages[${i}].role is not allowed`)
-    if (typeof item.content !== 'string') return fail('invalid', `messages[${i}].content must be a string`)
+    if (typeof item.content !== 'string')
+      return fail('invalid', `messages[${i}].content must be a string`)
     const message = { role: item.role, content: item.content }
     if (item.name !== undefined) {
       if (!isToolName(item.name)) return fail('invalid', `messages[${i}].name is invalid`)
       message.name = item.name
     }
     if (item.toolCallId !== undefined) {
-      if (!isBoundedId(item.toolCallId)) return fail('invalid', `messages[${i}].toolCallId is invalid`)
+      if (!isBoundedId(item.toolCallId))
+        return fail('invalid', `messages[${i}].toolCallId is invalid`)
       message.toolCallId = item.toolCallId
     }
     if (item.toolCalls !== undefined) {
@@ -409,7 +412,12 @@ function requireHex64(obj, key) {
 
 function requireInt(obj, key, min) {
   const value = obj[key]
-  if (typeof value !== 'number' || !Number.isFinite(value) || !Number.isInteger(value) || value < min) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    !Number.isInteger(value) ||
+    value < min
+  ) {
     return fail('non-finite', `${key} must be a finite integer`)
   }
   return null
@@ -419,7 +427,15 @@ function parseGrokExecutionTicketClaims(input) {
   if (!isPlainObject(input)) return fail('invalid', 'ticket claims must be an object')
   const extra = rejectUnknown(input, CLAIMS_KEYS, 'ticket claims')
   if (extra) return extra
-  for (const key of ['jti', 'sub', 'hostRef', 'invocationId', 'providerAttemptId', 'budgetReservationId', 'model']) {
+  for (const key of [
+    'jti',
+    'sub',
+    'hostRef',
+    'invocationId',
+    'providerAttemptId',
+    'budgetReservationId',
+    'model',
+  ]) {
     const bad = requireId(input, key)
     if (bad) return bad
   }

@@ -8,12 +8,12 @@ import {
   LIMITS,
   TRANSPORT_PROTOCOL_VERSION,
 } from '@clerum/grok-provider-attempt-contract'
+import { GROK_UPSTREAM_USER_AGENT } from '../src/grokUpstreamHeaders.js'
 import {
   GROK_CATALOG_ORIGIN,
   GROK_COMPLETIONS_ORIGIN,
   GROK_TRANSPORT_PROTOCOL,
 } from '../src/originPolicy.js'
-import { GROK_UPSTREAM_USER_AGENT } from '../src/grokUpstreamHeaders.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const fixturePath = join(

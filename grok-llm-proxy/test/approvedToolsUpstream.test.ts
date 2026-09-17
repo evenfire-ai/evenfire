@@ -321,9 +321,7 @@ describe('approved-tools isolated upstream boundary', () => {
 
   it('accepts only the frozen catalog and completion operations without making network calls', async () => {
     const simulator = createApprovedToolsUpstream()
-    const catalog = await simulator.fetchFn(
-      'https://cli-chat-proxy.grok.com/v1/models'
-    )
+    const catalog = await simulator.fetchFn('https://cli-chat-proxy.grok.com/v1/models')
     expect(await catalog.json()).toMatchObject({ models: [{ slug: 'gpt-5.3-grok' }] })
     for (const url of [
       'http://cli-chat-proxy.grok.com/backend-api/grok/responses',

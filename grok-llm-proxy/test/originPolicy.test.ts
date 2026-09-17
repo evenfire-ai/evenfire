@@ -38,27 +38,35 @@ describe('originPolicy', () => {
     expect(() =>
       assertAllowedUpstreamUrl('https://api.x.ai/v1/chat/completions', 'completions')
     ).toThrow(OriginDeniedError)
-    expect(() => assertAllowedUpstreamUrl('http://cli-chat-proxy.grok.com/backend-api/grok/responses', 'completions')).toThrow(
-      /origin_denied/
-    )
-    expect(() => assertAllowedUpstreamUrl(`https://${LOOPBACK_V4}/backend-api/grok/responses`, 'completions')).toThrow(
+    expect(() =>
+      assertAllowedUpstreamUrl(
+        'http://cli-chat-proxy.grok.com/backend-api/grok/responses',
+        'completions'
+      )
+    ).toThrow(/origin_denied/)
+    expect(() =>
+      assertAllowedUpstreamUrl(`https://${LOOPBACK_V4}/backend-api/grok/responses`, 'completions')
+    ).toThrow(OriginDeniedError)
+    expect(() => assertAllowedUpstreamUrl('https://169.254.169.254/', 'catalog')).toThrow(
       OriginDeniedError
     )
-    expect(() => assertAllowedUpstreamUrl('https://169.254.169.254/', 'catalog')).toThrow(OriginDeniedError)
     expect(isBlockedAddress('100.64.0.1')).toBe(true)
     expect(isBlockedAddress('198.18.0.1')).toBe(true)
     expect(isBlockedAddress('198.19.255.1')).toBe(true)
     expect(isBlockedAddress('64:ff9b::1')).toBe(true)
     expect(isBlockedAddress('ff02::1')).toBe(true)
     expect(() =>
-      assertAllowedUpstreamUrl('https://cli-chat-proxy.grok.com/v1/responses?hijack=1', 'completions')
+      assertAllowedUpstreamUrl(
+        'https://cli-chat-proxy.grok.com/v1/responses?hijack=1',
+        'completions'
+      )
     ).toThrow(OriginDeniedError)
     expect(() =>
       assertAllowedUpstreamUrl('https://cli-chat-proxy.grok.com/v1/models?hijack=1', 'catalog')
     ).toThrow(OriginDeniedError)
-    expect(() =>
-      assertAllowedUpstreamUrl('https://api.x.ai/v1/responses', 'completions')
-    ).toThrow(OriginDeniedError)
+    expect(() => assertAllowedUpstreamUrl('https://api.x.ai/v1/responses', 'completions')).toThrow(
+      OriginDeniedError
+    )
   })
 
   it('rejects cross-origin and private-address redirects', () => {
@@ -69,7 +77,10 @@ describe('originPolicy', () => {
       assertRedirectLocation(`https://${LOOPBACK_V4}/loopback`, new URL(GROK_COMPLETIONS_ORIGIN))
     ).toThrow(OriginDeniedError)
     expect(() =>
-      assertRedirectLocation('http://cli-chat-proxy.grok.com/backend-api/grok/responses', new URL(GROK_COMPLETIONS_ORIGIN))
+      assertRedirectLocation(
+        'http://cli-chat-proxy.grok.com/backend-api/grok/responses',
+        new URL(GROK_COMPLETIONS_ORIGIN)
+      )
     ).toThrow(OriginDeniedError)
     expect(
       assertRedirectLocation(

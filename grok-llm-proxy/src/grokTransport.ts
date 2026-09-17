@@ -4,8 +4,8 @@ import {
   hashGrokCompletionRequestV1,
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
-import { grokUpstreamHeaders } from './grokUpstreamHeaders.js'
 import type { FinalizeAttemptSuccess, RedeemAttemptSuccess } from './controlApiClient.js'
+import { grokUpstreamHeaders } from './grokUpstreamHeaders.js'
 import { logger } from './logger.js'
 import {
   GROK_CATALOG_ORIGIN,

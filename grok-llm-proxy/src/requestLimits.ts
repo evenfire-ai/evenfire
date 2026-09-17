@@ -14,12 +14,20 @@ export class RequestLimitError extends Error {
   }
 }
 
-export function assertBoundedDeadline(deadlineMs: number | undefined, maxDeadlineMs: number): number {
+export function assertBoundedDeadline(
+  deadlineMs: number | undefined,
+  maxDeadlineMs: number
+): number {
   const requested = deadlineMs ?? Math.min(maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs)
   if (!Number.isFinite(requested) || !Number.isInteger(requested) || requested <= 0) {
     throw new RequestLimitError('deadline is invalid')
   }
-  return Math.min(requested, maxDeadlineMs, STREAM_LIMITS.maxStreamDurationMs, CONTRACT_LIMITS.maxDeadlineMs)
+  return Math.min(
+    requested,
+    maxDeadlineMs,
+    STREAM_LIMITS.maxStreamDurationMs,
+    CONTRACT_LIMITS.maxDeadlineMs
+  )
 }
 
 export class StreamGate {
