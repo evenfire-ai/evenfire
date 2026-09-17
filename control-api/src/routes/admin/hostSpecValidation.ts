@@ -37,9 +37,11 @@ const logger = rootLogger.child({ module: 'admin-host-spec-validation' })
 
 // A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
 // A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
-// it must satisfy that format. We validate the FORMAT only — the key's existence
-// in the Secret is resolved by mcp-host at runtime (a cheap DB-free write gate
-// cannot see the Secret's contents; spec §3-R5.3). Same pattern as recipes.ts.
+// it must satisfy that format. For every provider we validate the FORMAT only;
+// additionally, for `openai-compatible`, the key must be owned by the provider
+// (ownership gate below). The key's existence in the Secret is resolved by
+// mcp-host at runtime (a cheap DB-free write gate cannot see the Secret's
+// contents). Same pattern as recipes.ts.
 const SECRET_KEY_RE = /^[-._a-zA-Z0-9]+$/
 
 /**
@@ -525,7 +527,8 @@ export async function validateHostSpec(
   // provider and a model enabled in the operator allowlist under that provider
   // (same fail-closed gate as spec.model.name), so a broken fallback is caught
   // on write instead of surfacing only during the incident it was meant to
-  // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
+  // absorb. `credentialSlot`, when present, is format-checked; an
+  // `openai-compatible` fallback's slot must additionally be owned by the provider.
   const hostCodexConnectionRef = resolvedCodexConnectionRef(
     isPlainObject(spec.model) ? spec.model : undefined
   )
@@ -985,15 +988,19 @@ async function validateLlmPolicy(
           ],
         }
       }
-      // Ownership gate (R4-H2): a fallback credentialSlot names a key of the
-      // Host's Secret that mcp-host/HCC mirror verbatim to the provider's egress
-      // broker. For a local `openai-compatible` fallback, an UNOWNED slot
-      // (e.g. `claude-api-key`) would exfiltrate another provider's key to the
-      // admin-chosen LAN IP. Restrict every slot to one OWNED by its provider
-      // (its canonical slot or `<canonical>-<suffix>`) — the exact rule the SDK
-      // prompt-target path already enforces (pluginWorkloadSdk) and the broker
-      // applies at runtime.
-      if (!isCredentialSlotOwnedByProvider(provider, slot)) {
+      // Ownership gate (R4-H2), scoped to `openai-compatible` ONLY. The leak this
+      // closes needs a broker that dials an admin-chosen LAN IP with the slot's
+      // key mirrored verbatim — and HCC only provisions such a broker for an
+      // `openai-compatible` slot (and re-applies the same owner-gate at runtime).
+      // For that provider an UNOWNED slot (e.g. `claude-api-key`) would exfiltrate
+      // another provider's key to the LAN IP, so it is rejected here. For any
+      // other provider the slot is consumed by mcp-host against the vendor's
+      // official endpoint, where an alien slot is a misconfiguration, not
+      // exfiltration to an admin-controlled destination — the CRD CEL scopes its
+      // rule to `openai-compatible` for the same reason, and widening this gate to
+      // every provider broke stored Hosts carrying a valid same-vendor slot.
+      // Owned = the provider's canonical slot or `<canonical>-<suffix>`.
+      if (provider === 'openai-compatible' && !isCredentialSlotOwnedByProvider(provider, slot)) {
         return {
           errors: [
             {

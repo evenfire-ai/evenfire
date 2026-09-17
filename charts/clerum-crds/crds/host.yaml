@@ -253,8 +253,9 @@ spec:
                               for a same-provider-other-key fallback). mcp-host resolves
                               fallback slots from the Host secret. Absent = the provider's
                               normal slots. Existence of the key in the Secret is resolved
-                              by mcp-host at runtime; control-api validates only its format
-                              on write.
+                              by mcp-host at runtime; control-api validates its format
+                              on write and, for 'openai-compatible', that the key is owned
+                              by that provider (see the CEL rule below).
                           baseURL:
                             type: string
                             maxLength: 2048
@@ -273,7 +274,7 @@ spec:
                           # key verbatim to the admin-chosen LAN endpoint; an unowned slot
                           # would exfiltrate another provider's key. Restrict it to the
                           # provider's own slot (backstop for kubectl/GitOps; control-api
-                          # enforces the general rule for every provider).
+                          # enforces the same 'openai-compatible'-only rule on its write path).
                           - rule: "!has(self.credentialSlot) || self.provider != 'openai-compatible' || self.credentialSlot == 'openai-compatible-api-key' || self.credentialSlot.startsWith('openai-compatible-api-key-')"
                             message: "fallbacks[].credentialSlot for 'openai-compatible' must be openai-compatible-api-key or openai-compatible-api-key-<suffix>"
                 approval:

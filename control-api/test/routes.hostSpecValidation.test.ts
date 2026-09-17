@@ -384,6 +384,63 @@ describe('validateHostSpec', () => {
       )
       expect(res).toBeNull()
     })
+
+    it('accepts a non-openai-compatible fallback credentialSlot that is not a registry-owned key, byte-identical to the stored spec (R5-M2)', async () => {
+      // Regression of R4-H2 (b2c889179): the owner-gate ran for EVERY provider,
+      // so a stored Host carrying a same-vendor slot like `backup-claude-key`
+      // (valid on `dev`) became unwritable — any byte-identical PUT answered 422.
+      // The gate is now scoped to `openai-compatible`; a `claude` fallback slot is
+      // format-checked only, so a stored spec re-submitted verbatim validates.
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const spec = {
+        model: { provider: 'claude', name: 'claude-haiku-4-5' },
+        llmPolicy: {
+          fallbacks: [
+            { provider: 'claude', model: 'claude-haiku-4-5', credentialSlot: 'backup-claude-key' },
+          ],
+        },
+      }
+      const res = await validateHostSpec(
+        spec,
+        { isModelAllowed },
+        {
+          stored: JSON.parse(JSON.stringify(spec)),
+          hostRef: { namespace: 'mcp-host', name: 'h' },
+          tolerations: [],
+        }
+      )
+      expect(res).toBeNull()
+    })
+
+    it('still rejects an unowned credentialSlot on an openai-compatible fallback even when stored (R5-M2 must not reopen R4-H2)', async () => {
+      const isModelAllowed = vi.fn().mockResolvedValue(true)
+      const spec = {
+        llmPolicy: {
+          fallbacks: [
+            {
+              provider: 'openai-compatible',
+              model: 'local',
+              baseURL: 'http://192.168.1.50:8000/v1',
+              credentialSlot: 'claude-api-key',
+            },
+          ],
+        },
+      }
+      const res = await validateHostSpec(
+        spec,
+        { isModelAllowed },
+        {
+          stored: JSON.parse(JSON.stringify(spec)),
+          hostRef: { namespace: 'mcp-host', name: 'h' },
+          tolerations: [],
+        }
+      )
+      expect(res).not.toBeNull()
+      expect(res!.errors[0].field).toBe('spec.llmPolicy.fallbacks[0].credentialSlot')
+      expect(res!.errors[0].message).toMatch(/must be a key owned by provider "openai-compatible"/)
+      // Owner-gate still short-circuits before the allowlist lookup.
+      expect(isModelAllowed).not.toHaveBeenCalled()
+    })
   })
 
   // ── Topic 3a per-host allowlist (spec.allowedModels) ────────────────────────
