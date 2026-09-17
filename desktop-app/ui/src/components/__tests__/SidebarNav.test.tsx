@@ -120,15 +120,16 @@ describe('SidebarNav logo', () => {
     expect(settingsMenu?.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
-  it('mounts the GFS solid-folder SVG inside the Files nav item so the icon is visible', () => {
+  it('mounts the paperclip SVG used by Control UI Global File System', () => {
     const { container } = render(<SidebarNav {...baseProps()} />)
     const filesLink = container.querySelector('[data-testid="nav-files"]')
     const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
     expect(icon).toBeTruthy()
-    expect(icon?.getAttribute('viewBox')).toBe('0 0 512 512')
-    // Solid Font Awesome fa-folder path data.
+    expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
+    // Keep the Desktop Files item visually aligned with Control UI's
+    // Global File System paperclip icon.
     expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
-      'M464 128H272l-64-64H48C21.49 64 0 85.49 0 112v288'
+      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49'
     )
   })
 

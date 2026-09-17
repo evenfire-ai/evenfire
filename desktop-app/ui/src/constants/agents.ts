@@ -1,5 +1,5 @@
 export const MAX_VISIBLE_SESSIONS = 6
-export const SESSION_PREVIEW_LIMIT = 9
+export const SESSION_PREVIEW_LIMIT = 5
 /**
  * Distance (px) from the bottom within which a reader still follows the chat.
  * Beyond it, appended content must not pull them away from older history.
