@@ -82,6 +82,7 @@ function truncateDescription(value: string): string {
 export function HostOverviewTab({
   hostName,
   displayName,
+  loadingName = false,
   description,
   statusLabel,
   statusTone,
@@ -166,18 +167,30 @@ export function HostOverviewTab({
                 <span className="cu-host-overview-identity__icon" aria-hidden="true">
                   <IconRobot />
                 </span>
-                {shownName}
+                {/* QA: while the identity data loads the name is a skeleton —
+                 * never the slug fallback (same rule as the page title). */}
+                {loadingName ? (
+                  <span
+                    className="cu-skeleton cu-agent-detail-title-skeleton"
+                    role="progressbar"
+                    aria-label="Loading agent name"
+                  />
+                ) : (
+                  shownName
+                )}
               </div>
-              <button
-                type="button"
-                className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
-                onClick={onStartNameEdit}
-                disabled={savingName}
-                aria-label="Edit agent name"
-                title="Edit agent name"
-              >
-                <IconPencil width={16} height={16} />
-              </button>
+              {loadingName ? null : (
+                <button
+                  type="button"
+                  className="cu-btn cu-btn--icon cu-btn--ghost cu-host-overview-identity__edit"
+                  onClick={onStartNameEdit}
+                  disabled={savingName}
+                  aria-label="Edit agent name"
+                  title="Edit agent name"
+                >
+                  <IconPencil width={16} height={16} />
+                </button>
+              )}
             </>
           )}
         </div>

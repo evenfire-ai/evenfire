@@ -6199,6 +6199,45 @@ td.cu-registry-description {
   font-size: 0.8125rem;
 }
 
+/* TASK-230: live preview of the identifier derived from the free-text agent
+ * name. Sits directly under the Agent name field in the create wizard. */
+.cu-agent-slug-hint {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.15rem var(--cu-space-2);
+  align-items: baseline;
+  padding: var(--cu-space-2) var(--cu-space-3);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-elevated);
+}
+
+.cu-agent-slug-hint__label {
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-2xs);
+  font-weight: var(--cu-font-weight-semibold);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.cu-agent-slug-hint__value {
+  color: var(--cu-text);
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.cu-agent-slug-hint__note {
+  grid-column: 1 / -1;
+  color: var(--cu-text-soft);
+  font-size: var(--cu-font-size-xs);
+  line-height: var(--cu-line-height-normal);
+}
+
+.cu-agent-slug-hint[data-state='invalid'] .cu-agent-slug-hint__note {
+  color: var(--cu-warning);
+}
+
 .cu-agent-section-label {
   color: var(--cu-text-muted);
   font-size: 0.8125rem;
@@ -9043,6 +9082,24 @@ td.cu-registry-description {
   border-bottom: none;
 }
 
+/* Review R1-H1: agent rows in the member/team Agents tabs lead with the
+ * display name (spec.host) and stack the immutable slug underneath whenever
+ * the two differ — display names are not unique, the slug is the stable
+ * identity for navigation, grants, and revoke. */
+.cu-access-agent-copy {
+  display: grid;
+  gap: var(--cu-space-0);
+  justify-items: start;
+}
+
+.cu-access-agent-id {
+  color: var(--cu-text-muted);
+  font-family: var(--cu-font-mono);
+  font-size: var(--cu-font-size-xs);
+  line-height: var(--cu-line-height-tight);
+  overflow-wrap: anywhere;
+}
+
 .cu-table-actions {
   display: flex;
   gap: 0.15rem;
@@ -10285,6 +10342,15 @@ td.cu-registry-description {
   border-radius: 6px;
 }
 
+/* Detail-page header title skeleton: bounded inline block so it reads as a
+ * loading title next to the icon, not a full-width bar (QA: no slug flash). */
+.cu-agent-detail-title-skeleton {
+  display: inline-block;
+  width: 11rem;
+  height: 1.25rem;
+  vertical-align: middle;
+}
+
 .cu-skeleton--text {
   height: 0.875rem;
   width: 100%;
@@ -11248,9 +11314,13 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
-.cu-llm-model-table {
+.cu-llm-model-table,
+.cu-llm-review-table {
+  min-width: 48rem;
+}
+
+.cu-llm-model-table__children {
   min-width: 68rem;
-  table-layout: fixed;
 }
 
 .cu-llm-models-layout {
@@ -11268,17 +11338,16 @@ td.cu-registry-description {
   margin-bottom: 0;
 }
 
-.cu-llm-review-table {
+.cu-llm-review-table__children {
   min-width: 48rem;
-  table-layout: fixed;
+}
+
+.cu-llm-review-table__children .cu-llm-model-row > .cu-px-model {
+  padding-left: var(--cu-space-2);
 }
 
 .cu-llm-review-table .cu-llm-model-row > td:first-child {
   padding-left: 0.85rem;
-}
-
-.cu-llm-model-row > .cu-llm-provider-cell {
-  padding-left: var(--cu-space-2);
 }
 
 .cu-inline-icon-label {
@@ -11383,28 +11452,17 @@ td.cu-registry-description {
   gap: var(--cu-space-2);
 }
 
-.cu-llm-model-group__row > td {
-  padding: 0;
+.cu-llm-model-group .eft-table-group__summary-row > td {
   background: var(--cu-bg-elevated);
 }
 
-.cu-table tbody .cu-llm-model-group__row:hover > td {
+.cu-table .cu-llm-model-group .eft-table-group__summary-row:hover > td {
   background: var(--cu-surface-hover);
 }
 
 .cu-llm-model-group__toggle {
-  display: flex;
-  width: 100%;
   min-height: calc(var(--cu-space-5) * 2.6);
-  align-items: center;
-  gap: var(--cu-space-3);
-  padding: var(--cu-space-3) var(--cu-space-4);
-  border: 0;
-  background: transparent;
   color: var(--cu-text);
-  cursor: pointer;
-  font: inherit;
-  text-align: left;
 }
 
 .cu-llm-model-group__toggle:focus-visible {
@@ -11412,26 +11470,18 @@ td.cu-registry-description {
   outline-offset: -2px;
 }
 
-.cu-llm-model-group__chevron {
-  display: inline-flex;
-  flex: 0 0 auto;
-  color: var(--cu-text-muted);
-}
-
-.cu-llm-model-group__chevron svg {
-  transition: transform var(--cu-control-transition);
-}
-
-.cu-llm-model-group__chevron svg.is-expanded {
-  transform: rotate(90deg);
-}
-
 .cu-llm-model-group__provider {
-  min-width: 10rem;
+  min-width: 0;
+  padding-left: var(--cu-space-2);
+  overflow: hidden;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cu-llm-model-group__count {
+  display: inline-flex;
+  margin-left: calc((var(--cu-space-2) + 1px) * -1);
   padding: calc(var(--cu-space-1) / 2) var(--cu-space-2);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
@@ -11453,9 +11503,12 @@ td.cu-registry-description {
 }
 
 .cu-llm-model-group__action {
-  margin-left: auto;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.cu-llm-model-group__action-cell {
+  text-align: right;
 }
 
 .cu-llm-model-row > td:first-child {

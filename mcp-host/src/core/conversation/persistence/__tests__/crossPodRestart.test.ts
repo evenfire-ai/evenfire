@@ -10,6 +10,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { AgentStateMachine } from '../../../../agent/stateMachine'
 import { TaskLifecycle } from '../../../../lifecycle/taskLifecycle'
+import { logger } from '../../../../logger'
 import { MessageQueue } from '../../../../queue/messageQueue'
 import type { IncomingMessage } from '../../../../server'
 import { ConversationState, type TraceContextV1 } from '../../../types'
@@ -74,6 +75,12 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       parameters: { command: 'rm -rf /' },
       description: 'dangerous',
       context_snapshot: [],
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
     })
     await podA.shutdown()
 
@@ -139,6 +146,12 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       parameters: {},
       description: 'safe',
       context_snapshot: [],
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
     })
     await managerA.approve(convA, false)
     await podA.shutdown()
@@ -171,6 +184,12 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
       parameters: {},
       description: 'unsafe owner fixture',
       context_snapshot: [],
+      task_budget: {
+        elapsedActiveMs: 0,
+        iterationsUsed: 1,
+        durationMs: 86400000,
+        maxIterations: 1000,
+      },
     })
     pod.worker.db
       .prepare('UPDATE sessions SET user_id = ? WHERE id = ?')
@@ -190,17 +209,18 @@ describe('Cross-pod-restart resume — P.3 invariant #3', () => {
     agent.setMcpManager({ getAllTools: () => [], callTool: async () => ({}) } as never)
     agent.setConversationStore(pod.store)
     agent.setColdStartLoader(new SqliteColdStartLoader(pod.store))
-    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const log = vi.spyOn(logger, 'error').mockImplementation(() => undefined)
 
     try {
       await expect(agent.bootstrap()).resolves.toBeUndefined()
       expect(agent.getPendingApprovals()).toEqual([])
       expect(log).toHaveBeenCalledWith(
-        expect.stringContaining('CONV_OWNERSHIP_MISMATCH')
+        expect.objectContaining({ code: 'CONV_OWNERSHIP_MISMATCH' }),
+        'Pending approval ownership rejected'
       )
-      await expect(
-        manager.getOrCreate(sessionKey, { userId: 'user-1' })
-      ).rejects.toMatchObject({ code: 'CONV_OWNERSHIP_MISMATCH' })
+      await expect(manager.getOrCreate(sessionKey, { userId: 'user-1' })).rejects.toMatchObject({
+        code: 'CONV_OWNERSHIP_MISMATCH',
+      })
     } finally {
       log.mockRestore()
       await pod.shutdown()
