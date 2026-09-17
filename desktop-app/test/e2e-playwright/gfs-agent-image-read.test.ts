@@ -327,6 +327,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
     await writeFile(filePath, visual.bytes)
     app = await electron.launch({
       args: [
+        '--no-os-protocol-registration',
         `--user-data-dir=${path.join(local, 'desktop')}`,
         path.resolve(__dirname, '../../dist/main.js'),
       ],
@@ -336,6 +337,16 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
         CLERUM_DESKTOP_CONFIG_PATH: path.join(local, 'runtime-config.json'),
       },
     })
+    // This is process identity verification, not a login or product-state shortcut.
+    const identity = await app.evaluate(({ app }) => ({
+      userData: app.getPath('userData'),
+      packaged: app.isPackaged,
+      argv: process.argv,
+    }))
+    expect(identity.packaged).toBe(false)
+    expect(identity.userData).toBe(path.join(local, 'desktop'))
+    expect(identity.argv).toContain('--no-os-protocol-registration')
+    expect(identity.argv).toContain(path.resolve(__dirname, '../../dist/main.js'))
     const page = await app.firstWindow()
     await test.step('login visibly into the isolated development environment', () =>
       visibleLogin(page))

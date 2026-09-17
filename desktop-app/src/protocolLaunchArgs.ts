@@ -1,5 +1,12 @@
 import { CLERUM_OAUTH_PROTOCOL, SANDBOX_UI_DEEP_LINK_PROTOCOL } from '@clerum/desktop-app-links'
 
+/** Development instances must be able to leave machine-wide URL ownership alone. */
+export function shouldRegisterOsProtocols(argv: string[], isPackaged: boolean): boolean {
+  if (!argv.includes('--no-os-protocol-registration')) return true
+  if (isPackaged) throw new Error('Protocol registration opt-out is development-only')
+  return false
+}
+
 export type InitialProtocolUrls = {
   evenfireUrls: string[]
   clerumUrls: string[]
