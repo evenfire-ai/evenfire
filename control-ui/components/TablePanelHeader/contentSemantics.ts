@@ -26,10 +26,11 @@ export function splitTitleContent(title: ReactNode): {
 
 export function hasInteractiveDescendant(node: ReactNode): boolean {
   if (!isValidElement<{ children?: ReactNode }>(node)) return false
-  if (
-    typeof node.type === 'string' &&
-    ['a', 'button', 'input', 'select', 'textarea'].includes(node.type)
-  ) {
+  if (node.type === Fragment) {
+    return Children.toArray(node.props.children).some(hasInteractiveDescendant)
+  }
+  if (typeof node.type !== 'string') return true
+  if (['a', 'button', 'input', 'select', 'textarea'].includes(node.type)) {
     return true
   }
   return Children.toArray(node.props.children).some(hasInteractiveDescendant)
