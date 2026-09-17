@@ -322,6 +322,12 @@ describe('ALL /desktop/:hostRef/view/*', () => {
 
   it('requires v2 authority, mounts a lease, and strips edge credentials before proxying', async () => {
     const claims = desktopDelegation()
+    const leaseState = { live: true }
+    leaseMock.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
     authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
       claims,
@@ -340,6 +346,7 @@ describe('ALL /desktop/:hostRef/view/*', () => {
 
     expect(authorityMock.authorizeActionV2).toHaveBeenCalledOnce()
     expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce()
+    expect(leaseState.live).toBe(false)
     const proxied = proxyMock.web.mock.calls.at(-1)![0] as express.Request
     expect(proxied.headers.authorization).toBeUndefined()
     expect(proxied.headers.cookie).toBeUndefined()
@@ -483,6 +490,12 @@ describe('handleDesktopUpgrade', () => {
 
   it('mounts a v2 lease and strips edge credentials before WebSocket proxying', async () => {
     const claims = desktopDelegation()
+    const leaseState = { live: true }
+    leaseMock.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
     authorityMock.authorizeActionV2.mockImplementation(async (_claims, bound) => ({
       claims,
@@ -508,6 +521,9 @@ describe('handleDesktopUpgrade', () => {
     expect(req.headers.authorization).toBeUndefined()
     expect(req.headers.cookie).toBeUndefined()
     expect(req.headers['x-clerum-edge-action-context']).toBeUndefined()
+    expect(leaseState.live).toBe(true)
+    socket.emit('close')
+    expect(leaseState.live).toBe(false)
     leaseMock.startActiveViewLease.mock.calls[0]![1].onDenied()
     expect(socket.destroy).toHaveBeenCalled()
   })
