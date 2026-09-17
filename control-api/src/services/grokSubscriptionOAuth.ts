@@ -49,7 +49,6 @@ export const GROK_OAUTH_SCOPES = [
   'conversations:read',
   'conversations:write',
 ] as const
-export const GROK_OAUTH_DEFAULT_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828'
 
 const DEVICE_CODE_TIMEOUT_SECONDS = 15 * 60
 const TOKEN_TIMEOUT_MS = 15_000

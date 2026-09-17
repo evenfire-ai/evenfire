@@ -120,8 +120,8 @@ api_token_url="$(
     "${ROOT}/control-api/src/services/grokSubscriptionOAuth.ts"
 )"
 api_client_id="$(
-  sed -n "s/^export const GROK_OAUTH_DEFAULT_CLIENT_ID = '\\(.*\\)'$/\\1/p" \
-    "${ROOT}/control-api/src/services/grokSubscriptionOAuth.ts"
+  sed -n "s/.*CONTROL_API_GROK_OAUTH_CLIENT_ID || '\\(.*\\)',$/\\1/p" \
+    "${ROOT}/control-api/src/config.ts"
 )"
 if [[ "${api_device_url}" == "${expected_device_url}" &&
       "${api_token_url}" == "${expected_token_url}" &&

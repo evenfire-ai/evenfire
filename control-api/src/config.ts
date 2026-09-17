@@ -819,6 +819,8 @@ export const config: Config = {
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
   grokSubscriptionEnabled: process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true',
+  // Public native client used by Grok CLI / SuperGrok device-code login.
+  // This is not a confidential client secret. Same shape as Codex above.
   grokOAuthClientId:
     process.env.CONTROL_API_GROK_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828',
   // Default 24h. Validated (not merely parsed): the value goes straight into
