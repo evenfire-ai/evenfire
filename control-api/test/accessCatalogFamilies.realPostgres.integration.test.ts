@@ -647,7 +647,7 @@ describeRealPostgres('all aggregate catalog families on real producers', () => {
     )
 
     await databasePool.query(
-      `UPDATE team_members SET status = 'inactive' WHERE team_id = $1 AND user_id = $2`,
+      `UPDATE team_members SET status = 'deleted' WHERE team_id = $1 AND user_id = $2`,
       [teamOnlyTeamId, teamOnlyUserId]
     )
 
