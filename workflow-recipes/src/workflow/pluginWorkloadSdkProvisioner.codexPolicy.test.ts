@@ -7,7 +7,11 @@ import {
   PluginWorkloadSdkProvisioner,
   type PluginWorkloadSdkProvisionerDeps,
 } from './pluginWorkloadSdkProvisioner'
-import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
+import {
+  buildMcpHostPod,
+  pluginWorkloadSdkRuntimeContractHash,
+  recipeDeclaresGrokSubscription,
+} from './podFactory'
 import type { WorkflowRuntimePlan } from './runtimePlan'
 import type { PluginWorkloadSdkCodexBindingProof } from './sdkOnlyCodexBinding'
 import type { WorkflowConfig } from './types'
@@ -160,6 +164,9 @@ function desiredRuntimeContractHash(): string {
         mountWorkflowOutput: false,
         pluginWorkloadSdkCapabilities: ['promptBridge'],
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: TEST_CONFIG.grokSubscriptionEnabled === true,
+        recipeAgentProvider: CODEX_SPEC.agent.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(CODEX_SPEC),
       }
     )
   )
@@ -180,6 +187,9 @@ function grokRuntimeContractHash(): string {
         mountWorkflowOutput: false,
         pluginWorkloadSdkCapabilities: ['promptBridge'],
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: TEST_CONFIG.grokSubscriptionEnabled === true,
+        recipeAgentProvider: GROK_SPEC.agent.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(GROK_SPEC),
       }
     )
   )
@@ -461,6 +471,59 @@ describe('eager Codex policy gate', () => {
 })
 
 describe('eager Grok policy gate', () => {
+  it('injects Grok proxy env when the WRC flag is on and the recipe declares grok-subscription', () => {
+    const pod = buildMcpHostPod(
+      GROK_RECIPE,
+      GROK_SPEC.agent,
+      TEST_CONFIG,
+      GROK_RECIPE,
+      SANDBOX_NS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: true,
+        recipeAgentProvider: GROK_SPEC.agent.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(GROK_SPEC),
+      }
+    )
+    const env = pod.spec?.containers?.[0].env ?? []
+    expect(env).toContainEqual({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
+    expect(env).toContainEqual({
+      name: 'GROK_LLM_PROXY_RUNTIME_URL',
+      value: 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080',
+    })
+  })
+
+  it('omits Grok proxy env when the WRC flag is off', () => {
+    const pod = buildMcpHostPod(
+      GROK_RECIPE,
+      GROK_SPEC.agent,
+      TEST_CONFIG,
+      GROK_RECIPE,
+      SANDBOX_NS,
+      undefined,
+      undefined,
+      undefined,
+      {
+        mountWorkflowOutput: false,
+        pluginWorkloadSdkCapabilities: ['promptBridge'],
+        pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: false,
+        recipeAgentProvider: GROK_SPEC.agent.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(GROK_SPEC),
+      }
+    )
+    const env = pod.spec?.containers?.[0].env ?? []
+    expect(env).not.toContainEqual({
+      name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED',
+      value: 'true',
+    })
+  })
+
   it('accepts a Grok hash on subscriptionBinding and reports ready', async () => {
     const harness = makeHarness(readyGrokBootstrapBody(GROK_MINTED), GROK_SPEC)
     expect(await harness.reconcile({ grokBinding: GROK_MINTED })).toBe('ready')

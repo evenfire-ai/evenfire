@@ -107,6 +107,7 @@ import {
   buildWorkflowOutputPreparePod,
   buildWorkflowOutputPreparePodName,
   declaredPluginWorkloadSdkCapabilities,
+  recipeDeclaresGrokSubscription,
   workflowOutputLabelValue,
 } from './podFactory'
 import {
@@ -2223,6 +2224,7 @@ export class WorkflowReconciler {
               : [],
             grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
             recipeAgentProvider: spec.agent?.provider,
+            recipeDeclaresGrok: recipeDeclaresGrokSubscription(spec),
           }
         )
         await this.createIfNotExists(

@@ -25,6 +25,7 @@ import {
   buildMcpHostPod,
   declaredPluginWorkloadSdkCapabilities,
   pluginWorkloadSdkRuntimeContractHash,
+  recipeDeclaresGrokSubscription,
 } from './podFactory'
 import {
   PLUGIN_WORKLOAD_SDK_LEGACY_TOKEN_DATA_KEY,
@@ -278,6 +279,9 @@ export class PluginWorkloadSdkProvisioner {
         mountWorkflowOutput: false,
         pluginWorkloadSdkCapabilities: capabilities,
         pluginWorkloadSdkRuntimeMode: 'sdk-only',
+        grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
+        recipeAgentProvider: mcpHostAgent?.provider,
+        recipeDeclaresGrok: recipeDeclaresGrokSubscription(spec),
         ...(tokenRefresh?.tokenGeneration
           ? { runtimeTokenGeneration: tokenRefresh.tokenGeneration }
           : {}),

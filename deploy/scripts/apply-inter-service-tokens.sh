@@ -343,6 +343,7 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 # FORCE_CONSUMER_RESTART=true.
 for pair in "control-plane:control-api" \
             "control-plane:codex-llm-proxy" \
+            "control-plane:grok-llm-proxy" \
             "control-plane:workflow-recipes" \
             "control-plane:host-context-controller" \
             "profiles:external-rest-api" \

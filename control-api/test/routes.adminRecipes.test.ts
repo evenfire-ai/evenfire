@@ -295,6 +295,26 @@ describe.sequential('routes/admin/recipes', () => {
     expect(res.body.errors[0].message).toMatch(/at most one oauth-broker/)
   })
 
+  it('POST /admin/recipes — requires a Grok grant when only a step uses grok-subscription', async () => {
+    const res = await api.post('/admin/recipes').send({
+      metadata: { name: 'step-grok' },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [
+          {
+            id: 'draft',
+            instruction: 'Write',
+            timeoutSeconds: 600,
+            agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+          },
+        ],
+      },
+    })
+    expect(res.status).toBe(422)
+    expect(res.body.errors[0].rule).toBe('grokRecipeGrantRequired')
+  })
+
   it('POST /admin/recipes — rejects a Codex recipe without a named grant', async () => {
     const res = await api
       .post('/admin/recipes')

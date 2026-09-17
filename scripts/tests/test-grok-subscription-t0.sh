@@ -53,6 +53,16 @@ assert_executed_counts() {
     rm -f "$normalized"
     return 1
   fi
+  if grep -Eq '(Test Files|Tests).*[1-9][0-9]* todo' "$normalized"; then
+    fail "${name}: Vitest reported todo tests"
+    rm -f "$normalized"
+    return 1
+  fi
+  if grep -Eq '^(#|ℹ) todo[[:space:]]+[1-9]' "$normalized"; then
+    fail "${name}: node:test reported todo tests"
+    rm -f "$normalized"
+    return 1
+  fi
   if grep -Eiq 'no test files|no tests found' "$normalized"; then
     fail "${name}: reporter found no tests"
     rm -f "$normalized"
@@ -85,6 +95,8 @@ require_file packages/grok-provider-attempt-contract/index.test.cjs
 require_file grok-llm-proxy/test/contractFreeze.test.ts
 require_file grok-llm-proxy/test/originPolicy.test.ts
 require_file control-api/test/services.grokSubscriptionOAuth.test.ts
+require_file control-api/test/services.grokProviderAttemptTicket.test.ts
+require_file control-api/test/services.grokSubscriptionConnection.realPostgres.integration.test.ts
 require_file control-api/test/services.grokProviderAttemptRedemption.test.ts
 require_file control-api/test/db.grokSubscriptionMigration.test.ts
 require_file control-api/test/services.llmProviderAttemptAuthorizer.grok.test.ts
@@ -140,8 +152,11 @@ run_group "grok-catalog-projection" \
 run_group "grok-llm-proxy freeze+origin" \
   bash -lc "cd '${ROOT}/grok-llm-proxy' && npx vitest run test/contractFreeze.test.ts test/originPolicy.test.ts test/grokTransport.conformance.test.ts --no-file-parallelism"
 
+run_group "grok-llm-proxy tsc" \
+  bash -lc "cd '${ROOT}/grok-llm-proxy' && npx tsc --noEmit && echo 'pass 1'"
+
 run_group "control-api grok grant/oauth/redeem/authorize" \
-  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts test/routes.adminPluginWorkloadSdk.test.ts test/services.recipeCodexGrantIdentity.test.ts test/hostSpecValidation.codexSubscription.test.ts test/crd.llmProviderEnums.test.ts test/routes.mcp-host.plugin-workload-sdk.test.ts --no-file-parallelism"
+  bash -lc "cd '${ROOT}/control-api' && npx vitest run test/db.grokSubscriptionMigration.test.ts test/services.grokSubscriptionConnection.test.ts test/services.grokSubscriptionOAuth.test.ts test/services.grokSubscriptionCatalog.test.ts test/services.grokProviderAttemptRedemption.test.ts test/services.grokProviderAttemptTicket.test.ts test/services.llmProviderAttemptAuthorizer.grok.test.ts test/subscriptionGrantIdentity.test.ts test/routes.adminPluginWorkloadSdk.test.ts test/services.recipeCodexGrantIdentity.test.ts test/hostSpecValidation.codexSubscription.test.ts test/crd.llmProviderEnums.test.ts test/routes.mcp-host.plugin-workload-sdk.test.ts --no-file-parallelism"
 
 run_group "workflow-recipes grok SDK" \
   bash -lc "cd '${ROOT}/workflow-recipes' && npx vitest run src/workflow/codexRecipeVerdict.test.ts src/workflow/sdkOnlyGrokBinding.test.ts src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts src/reconciler/pluginWorkloadSdkValidator.test.ts tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts --no-file-parallelism"
@@ -159,7 +174,7 @@ else
   pass "grok-llm-proxy deploy contract"
 fi
 
-if [[ "$GROUPS_RUN" -lt 8 ]]; then
+if [[ "$GROUPS_RUN" -lt 9 ]]; then
   fail "T0 ran too few groups (${GROUPS_RUN})"
 fi
 

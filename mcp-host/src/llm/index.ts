@@ -91,6 +91,7 @@ function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
 
 export type CreateLlmProviderOptions = {
   capturedCodexAttemptContext?: CodexAttemptContext
+  capturedGrokAttemptContext?: GrokAttemptContext
 }
 
 /**
@@ -135,7 +136,7 @@ export function createLLMProvider(
       provider === 'codex-subscription'
         ? { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
         : provider === 'grok-subscription'
-          ? { grok: createGrokRuntimeDeps() }
+          ? { grok: createGrokRuntimeDeps(options?.capturedGrokAttemptContext) }
           : undefined
     )
   } catch (err) {

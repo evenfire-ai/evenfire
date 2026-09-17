@@ -348,6 +348,8 @@ describe('grok subscription OAuth device broker', () => {
     await expect(refreshGrokSubscriptionConnection(deps(fetchFn))).rejects.toMatchObject({
       code: 'reauth_required',
     })
+    expect(repos.markMismatch).toHaveBeenCalled()
+    expect(repos.persistRefresh).not.toHaveBeenCalled()
   })
 
   it('maps invalid_grant after a lock/revision change to a lost race', async () => {
@@ -429,6 +431,50 @@ describe('grok subscription OAuth device broker', () => {
     )
     expect(repos.updateInPlace).not.toHaveBeenCalled()
     expect(repos.releaseLock).toHaveBeenCalled()
+  })
+
+  it('persists a rotated refresh before failing closed on an opaque token with no subject', async () => {
+    repos.getSafe.mockResolvedValue({
+      connectionKey: CONNECTION_KEY,
+      status: 'connected',
+      credentialRevision: 7,
+      accountFingerprint: fingerprint('acct_raw_123'),
+      refreshLockHeld: true,
+    })
+    repos.acquireLock.mockResolvedValue(true)
+    repos.loadSecrets.mockResolvedValue({
+      refreshToken: 'old-refresh',
+      accessToken: null,
+      accessTokenExpiresAt: null,
+      credentialRevision: 7,
+    })
+    repos.persistRefresh.mockResolvedValue({
+      connectionKey: CONNECTION_KEY,
+      status: 'connected',
+      credentialRevision: 7,
+    })
+    repos.markMismatch.mockResolvedValue({
+      connectionKey: CONNECTION_KEY,
+      status: 'reauth_required',
+      credentialRevision: 7,
+    })
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        access_token: 'opaque-access-token',
+        refresh_token: 'rotated-refresh',
+      }),
+    })
+    const refreshed = await refreshGrokSubscriptionConnection(deps(fetchFn))
+    expect(refreshed.status).toBe('reauth_required')
+    expect(repos.persistRefresh).toHaveBeenCalledWith(
+      expect.anything(),
+      KEY,
+      expect.objectContaining({ refreshToken: 'rotated-refresh' })
+    )
+    expect(repos.markMismatch).toHaveBeenCalled()
+    expect(repos.updateInPlace).not.toHaveBeenCalled()
   })
 
   it('keeps the stored fingerprint and marks reauth_required when the subject differs', async () => {

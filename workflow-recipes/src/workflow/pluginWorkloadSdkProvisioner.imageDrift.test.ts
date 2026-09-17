@@ -3,7 +3,11 @@ import type { WorkflowRecipeSpec } from '../types'
 import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import { PluginWorkloadSdkProvisioner } from './pluginWorkloadSdkProvisioner'
 import type { PluginWorkloadSdkProvisionerDeps } from './pluginWorkloadSdkProvisioner'
-import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
+import {
+  buildMcpHostPod,
+  pluginWorkloadSdkRuntimeContractHash,
+  recipeDeclaresGrokSubscription,
+} from './podFactory'
 import type { WorkflowRuntimePlan } from './runtimePlan'
 import type { WorkflowConfig } from './types'
 
@@ -131,6 +135,9 @@ function desiredRuntimeContractHash(): string {
       mountWorkflowOutput: false,
       pluginWorkloadSdkCapabilities: ['promptBridge'],
       pluginWorkloadSdkRuntimeMode: 'sdk-only',
+      grokSubscriptionEnabled: TEST_CONFIG.grokSubscriptionEnabled === true,
+      recipeAgentProvider: SPEC.agent.provider,
+      recipeDeclaresGrok: recipeDeclaresGrokSubscription(SPEC),
     }
   )
   return pluginWorkloadSdkRuntimeContractHash(desiredPod)

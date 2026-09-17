@@ -99,11 +99,8 @@ describe('LLM provider CRD enums', () => {
   it('WorkflowRecipe CEL rejects mixed oauth-broker agent and step providers', () => {
     const recipe = readFileSync(resolve(crdsDir, 'workflowrecipe.yaml'), 'utf8')
     expect(recipe).toContain('a WorkflowRecipe may declare at most one oauth-broker provider')
-    expect(recipe).toMatch(
-      /self\.steps\.exists\(s, has\(s\.agent\) && has\(s\.agent\.provider\) && s\.agent\.provider == 'codex-subscription'\)/
-    )
-    expect(recipe).toMatch(
-      /self\.steps\.exists\(s, has\(s\.agent\) && has\(s\.agent\.provider\) && s\.agent\.provider == 'grok-subscription'\)/
+    expect(recipe).toContain(
+      "!(((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'codex-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'codex-subscription'))) && ((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'grok-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'grok-subscription'))))"
     )
   })
 })

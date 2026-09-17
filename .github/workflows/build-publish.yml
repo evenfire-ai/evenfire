@@ -167,6 +167,7 @@ jobs:
               - 'packages/network-policy-core/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/grok-provider-attempt-contract/**'
               - 'scripts/e2e/**'
               - 'tests/e2e/fixtures/**'
             stdio-bridge:

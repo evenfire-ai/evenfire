@@ -221,4 +221,18 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       })
     )
   })
+
+  it('denies Grok spend when the live Host has no oauth-broker target', async () => {
+    const current = deps({
+      resolveAssignment: async () => ({
+        liveBrokerProviders: [],
+        liveConnectionRef: 'team-grok',
+      }),
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), body(), current)).rejects.toMatchObject({
+      code: 'host_binding_mismatch',
+    })
+    expect(grokRepos.getConnection).not.toHaveBeenCalled()
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
 })

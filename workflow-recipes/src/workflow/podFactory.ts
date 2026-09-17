@@ -605,6 +605,15 @@ export interface McpHostPodOptions {
   runtimeTokenGeneration?: string
   grokSubscriptionEnabled?: boolean
   recipeAgentProvider?: string
+  recipeDeclaresGrok?: boolean
+}
+
+export function recipeDeclaresGrokSubscription(spec: {
+  agent?: { provider?: string }
+  steps?: Array<{ agent?: { provider?: string } }>
+}): boolean {
+  if (spec.agent?.provider === 'grok-subscription') return true
+  return (spec.steps ?? []).some(step => step?.agent?.provider === 'grok-subscription')
 }
 
 export function buildMcpHostPod(
@@ -759,7 +768,8 @@ export function buildMcpHostPod(
               value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
             },
             ...(options.grokSubscriptionEnabled &&
-            options.recipeAgentProvider === 'grok-subscription'
+            (options.recipeDeclaresGrok === true ||
+              options.recipeAgentProvider === 'grok-subscription')
               ? [
                   { name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' },
                   {

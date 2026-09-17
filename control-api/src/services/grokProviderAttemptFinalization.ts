@@ -164,7 +164,7 @@ async function ingestGrokFinalizeLedgerRow(
   ) {
     return
   }
-  await ingestUsageEventsInTransaction(
+  const ingest = await ingestUsageEventsInTransaction(
     [
       {
         request_id: attempt.id,
@@ -196,4 +196,10 @@ async function ingestGrokFinalizeLedgerRow(
     undefined,
     { origin: 'finalize' }
   )
+  if (ingest.result.rejected !== 0 || ingest.result.accepted + ingest.result.duplicates !== 1) {
+    throw new GrokProviderAttemptFinalizeError(
+      'invalid_receipt',
+      'Grok usage could not be bound to a single ledger row'
+    )
+  }
 }

@@ -366,6 +366,35 @@ async function authorizeGrokProviderAttempt(
         'attemptGeneration is older than the recorded invocation'
       )
     }
+    const pluginWorkloadSdkProviderAttemptId =
+      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+        ? body.pluginWorkloadSdkProviderAttemptId.trim()
+        : ''
+    let sdkLinkRecipe: { namespace: string; name: string } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'invalid_request',
+          'pluginWorkloadSdkProviderAttemptId must be a UUID'
+        )
+      }
+      if (caller.callerKind === 'host') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'host Grok chat cannot bind a Plugin Workload SDK provider attempt'
+        )
+      }
+      if (!caller.recipeNamespace || !caller.recipeName) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
+    }
+    if (sdkLinkRecipe) {
+      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
+    }
     const presentedReservationId =
       typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
     let budgetReservationId = presentedReservationId || 'unbudgeted'
@@ -407,6 +436,57 @@ async function authorizeGrokProviderAttempt(
       }
       budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
     }
+    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    let reservedSdkAttemptToPromote: {
+      id: string
+      invocationId: string
+      recipeNamespace: string
+      recipeName: string
+      attemptGeneration: number
+      attemptIndex: number
+      model: string
+      targetRef: string
+    } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
+        pluginWorkloadSdkProviderAttemptId,
+        db
+      )
+      const spendExists = sdkAttempt
+        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+        : false
+      if (
+        !sdkAttempt ||
+        spendExists ||
+        sdkAttempt.invocationId !== invocationId ||
+        sdkAttempt.attemptGeneration !== attemptGeneration ||
+        sdkAttempt.attemptIndex !== providerAttemptIndex ||
+        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+        sdkAttempt.recipeName !== caller.recipeName ||
+        sdkAttempt.provider !== GROK_PROVIDER ||
+        sdkAttempt.model !== request.model ||
+        !sdkAttempt.targetRef.trim() ||
+        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
+        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      if (sdkAttempt.status === 'reserved') {
+        reservedSdkAttemptToPromote = {
+          id: sdkAttempt.id,
+          invocationId: sdkAttempt.invocationId,
+          recipeNamespace: sdkAttempt.recipeNamespace,
+          recipeName: sdkAttempt.recipeName,
+          attemptGeneration: sdkAttempt.attemptGeneration,
+          attemptIndex: sdkAttempt.attemptIndex,
+          model: sdkAttempt.model,
+          targetRef: sdkAttempt.targetRef,
+        }
+      }
+    }
     try {
       const attempt = await resolvedDeps.insertAttempt(db, {
         callerKind: caller.callerKind,
@@ -424,7 +504,20 @@ async function authorizeGrokProviderAttempt(
         budgetReservationId,
         connectionRevision: connection.credentialRevision,
         connectionId: connection.id,
+        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
       })
+      if (reservedSdkAttemptToPromote) {
+        const promoted = await promoteReservedOauthBrokerProviderAttempt(
+          { ...reservedSdkAttemptToPromote, provider: GROK_PROVIDER },
+          db
+        )
+        if (!promoted) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Grok authorize'
+          )
+        }
+      }
       const issued = await issueRegisteredGrokExecutionTicket(db, {
         sub: claims.sub,
         hostRef: caller.hostRef,
@@ -800,7 +893,7 @@ export async function authorizeLlmProviderAttempt(
       })
       if (reservedSdkAttemptToPromote) {
         const promoted = await promoteReservedOauthBrokerProviderAttempt(
-          reservedSdkAttemptToPromote,
+          { ...reservedSdkAttemptToPromote, provider: PROVIDER },
           db
         )
         if (!promoted) {

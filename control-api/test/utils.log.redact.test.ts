@@ -55,6 +55,7 @@ describe('token-leak redaction', () => {
       'user_code',
       'accountSubject',
       'account_subject',
+      'access_token',
       '*.access_token',
       '*.refresh_token',
       '*.id_token',

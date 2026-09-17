@@ -424,7 +424,7 @@ async function rotateLockedRefresh(
   }
   const current = await getSafeGrokSubscriptionConnection(deps.db, key)
   const observedRevision = secrets.credentialRevision
-  const token = await exchangeRefreshToken(deps, secrets.refreshToken, {
+  const pair = await exchangeRefreshToken(deps, secrets.refreshToken, {
     expectedRevision: observedRevision,
     lockToken,
     connectionKey: key,
@@ -434,23 +434,36 @@ async function rotateLockedRefresh(
       connectionKey: key,
       expectedRevision: observedRevision,
       lockToken,
-      refreshToken: token.refreshToken,
+      refreshToken: pair.refreshToken,
     })
+    let subject: string
+    try {
+      subject = subjectFromTokens(pair.idToken, pair.accessToken)
+    } catch (err) {
+      const marked = await markGrokRefreshSubjectMismatch(
+        deps.db,
+        key,
+        persisted.credentialRevision
+      )
+      if (marked) return marked
+      throw err
+    }
+    const accountFingerprint = fingerprintAccount(subject)
     const updated = await updateGrokAccessTokenInPlace(
       deps.db,
       deps.encryptionKey,
       persisted.credentialRevision,
       {
-        accessToken: token.accessToken,
-        accessTokenExpiresAt: token.expiresAt,
+        accessToken: pair.accessToken,
+        accessTokenExpiresAt: pair.expiresAt,
       },
       key,
       lockToken
     )
     if (
       current?.accountFingerprint &&
-      token.accountFingerprint &&
-      current.accountFingerprint !== token.accountFingerprint
+      accountFingerprint &&
+      current.accountFingerprint !== accountFingerprint
     ) {
       const marked = await markGrokRefreshSubjectMismatch(deps.db, key, updated.credentialRevision)
       return marked ?? { ...updated, status: 'reauth_required' }
@@ -529,10 +542,14 @@ async function persistGrantedTokens(
   }
 }
 
-type ParsedGrokToken = {
+type GrokTokenPair = {
   accessToken: string
   refreshToken: string
   expiresAt: Date | null
+  idToken: string | null
+}
+
+type ParsedGrokToken = GrokTokenPair & {
   accountFingerprint: string
 }
 
@@ -576,7 +593,7 @@ async function exchangeRefreshToken(
   deps: GrokOAuthDeps,
   refreshToken: string,
   fence: { expectedRevision: number; lockToken: string; connectionKey: string }
-): Promise<ParsedGrokToken> {
+): Promise<GrokTokenPair> {
   const result = await postForm(deps, GROK_OAUTH_TOKEN_URL, {
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
@@ -602,17 +619,18 @@ async function exchangeRefreshToken(
           'invalid_grant observed after a lost refresh race'
         )
       }
+      await markGrokRefreshSubjectMismatch(deps.db, fence.connectionKey, fence.expectedRevision)
       throw new GrokSubscriptionOAuthError('reauth_required', 'refresh token was rejected')
     }
     throw new GrokSubscriptionOAuthError('provider_unavailable', 'refresh token exchange failed')
   }
-  return parseTokenResponse(result.body, { requireRefresh: true })
+  return readGrokTokenPair(result.body, { requireRefresh: true })
 }
 
-function parseTokenResponse(
+function readGrokTokenPair(
   body: Record<string, unknown>,
   opts: { requireRefresh: boolean }
-): ParsedGrokToken {
+): GrokTokenPair {
   const accessToken = requiredString(body.access_token, 'access_token')
   const refreshToken = typeof body.refresh_token === 'string' ? body.refresh_token : ''
   if (opts.requireRefresh && !refreshToken) {
@@ -623,12 +641,22 @@ function parseTokenResponse(
   }
   const expiresIn = typeof body.expires_in === 'number' ? body.expires_in : null
   const idToken = typeof body.id_token === 'string' ? body.id_token : null
-  const subject = subjectFromTokens(idToken, accessToken)
   return {
     accessToken,
     refreshToken,
     expiresAt: expiresIn ? new Date(Date.now() + expiresIn * 1000) : null,
-    accountFingerprint: fingerprintAccount(subject),
+    idToken,
+  }
+}
+
+function parseTokenResponse(
+  body: Record<string, unknown>,
+  opts: { requireRefresh: boolean }
+): ParsedGrokToken {
+  const pair = readGrokTokenPair(body, opts)
+  return {
+    ...pair,
+    accountFingerprint: fingerprintAccount(subjectFromTokens(pair.idToken, pair.accessToken)),
   }
 }
 

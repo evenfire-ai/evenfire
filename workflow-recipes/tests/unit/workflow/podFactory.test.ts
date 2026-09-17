@@ -432,6 +432,32 @@ describe('Pod Factory', () => {
         value: 'http://wrc:8082',
       })
     })
+
+    it('injects Grok proxy env when the flag is on and the recipe declares grok-subscription', () => {
+      const pod = buildMcpHostPod(
+        'my-wf',
+        { provider: 'grok-subscription', model: 'grok-4.6' },
+        config,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          mountWorkflowOutput: false,
+          grokSubscriptionEnabled: true,
+          recipeDeclaresGrok: true,
+        }
+      )
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED',
+        value: 'true',
+      })
+      expect(pod.spec?.containers?.[0].env).toContainEqual({
+        name: 'GROK_LLM_PROXY_RUNTIME_URL',
+        value: 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080',
+      })
+    })
   })
 
   describe('buildMcpHostPod', () => {

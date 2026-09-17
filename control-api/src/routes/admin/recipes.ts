@@ -1264,15 +1264,13 @@ function validateRecipeBody(body: RecipeBody): ValidationError[] {
 }
 
 function recipeUsesCodexBroker(spec?: Record<string, unknown>): boolean {
-  const agent = spec?.agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return false
-  return (agent as { provider?: unknown }).provider === 'codex-subscription'
+  if (!spec) return false
+  return collectRecipeOauthBrokerProviders(spec).includes('codex-subscription')
 }
 
 function recipeUsesGrokBroker(spec?: Record<string, unknown>): boolean {
-  const agent = spec?.agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return false
-  return (agent as { provider?: unknown }).provider === 'grok-subscription'
+  if (!spec) return false
+  return collectRecipeOauthBrokerProviders(spec).includes('grok-subscription')
 }
 
 function recipeHasPluginWorkloadSdk(spec?: Record<string, unknown>): boolean {
@@ -1431,13 +1429,21 @@ function sanitizeRecipeCodexAnnotation(
     const incoming = readRequestedGrokRecipeGrant(body)
     return grokMirrored(isGrokUnassignedConnectionKey(incoming) ? '' : incoming)
   }
-  const incoming = readRequestedCodexRecipeGrant(body)
   const mirrored = (key: string) => ({
     [CODEX_CONNECTION_REF_ANNOTATION]: key,
     [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
   })
   if (recipeUsesCodexBroker(body.spec)) {
     if (!bodyHasCodexGrantAnnotation(body)) return {}
+    const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
+    const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
+    const canonical = (annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] ?? '').trim()
+    if (canonical && alias && canonical !== alias) {
+      throw new RecipeGrantAnnotationDisagreeError('subscription connection annotations disagree')
+    }
+    // Grok writers emit canonical only. Do not promote that leftover to a Codex grant.
+    if (!alias) return mirrored('')
+    const incoming = readRequestedCodexRecipeGrant(body)
     return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
   const leavingCodex = recipeUsesCodexBroker(currentSpec) && !recipeHasPluginWorkloadSdk(body.spec)
@@ -1446,6 +1452,10 @@ function sanitizeRecipeCodexAnnotation(
     return mirrored('')
   }
   if (bodyHasCodexGrantAnnotation(body)) {
+    const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
+    const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
+    if (!alias) return mirrored('')
+    const incoming = readRequestedCodexRecipeGrant(body)
     return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
   void currentAnnotations
