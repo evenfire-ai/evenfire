@@ -37,7 +37,7 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
     `${hostAccessPath}/artifact-read`,
     requireValidRpcAccessTokenAny(['host:task:read']),
     requireRpcTokenUserMatch(),
-    requireRpcTokenHostMatch(),
+    (_req, _res, next) => next(),
     rateLimitMiddleware({
       bucketType: 'host_artifact_pre_admission',
       maxPerMinute: config.hostArtifactReadRlPerMin,
