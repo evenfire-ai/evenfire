@@ -1,10 +1,39 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fs from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import { AppService } from '../appService.js'
 import { __setChatStoreBaseDirForTests } from '../chatStoreBinding.js'
 import { ApiError } from '../httpClient.js'
+import type { HostMessageAttachment } from '../types.js'
+
+const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
+  '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  declaredHeaderPngOfSize: (targetBytes: number) => Buffer
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
+}
+
+const MIB = 1024 * 1024
+const MESSAGE_SCOPES = ['host:message:invoke', 'host:task:read', 'host:wake:write'] as const
+
+function imageAttachment(
+  id: string,
+  sizeBytes: number,
+  mimeType: HostMessageAttachment['mimeType'] = 'image/png'
+): HostMessageAttachment {
+  const bytes =
+    mimeType === 'image/jpeg' ? jpegOfSize(sizeBytes) : declaredHeaderPngOfSize(sizeBytes)
+  return {
+    id,
+    kind: 'image',
+    mimeType,
+    encoding: 'base64',
+    dataBase64: bytes.toString('base64'),
+    filename: `${id}.${mimeType === 'image/jpeg' ? 'jpg' : 'png'}`,
+  }
+}
 
 describe('AppService.invokeHostMessage', () => {
   let chatStoreBaseDir: string
@@ -72,6 +101,114 @@ describe('AppService.invokeHostMessage', () => {
       attachments: undefined,
     })
     expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({ async: true })
+  })
+
+  it('forwards a 5 MiB JPEG without letting the payload choose identity, host, or scopes', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+      teamName: 'Test Team',
+      role: 'member',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ success: true, response: 'ok' }),
+    }
+    const attachment = imageAttachment('photo', 5 * MIB, 'image/jpeg')
+
+    await service.invokeHostMessage(
+      'chatllm',
+      {
+        content: 'look',
+        channelType: 'slack',
+        channelId: 'attacker-channel',
+        hostRef: 'attacker-host',
+        sender: 'attacker-controlled-user',
+        metadata: { teamId: 'attacker-controlled-team' },
+        attachments: [attachment],
+      },
+      ['chatllm']
+    )
+
+    expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'session-token',
+      [...MESSAGE_SCOPES],
+      ['chatllm']
+    )
+    expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(service.rpcClient.invokeHostMessage.mock.calls[0][0]).toBe('rpc-token')
+    expect(service.rpcClient.invokeHostMessage.mock.calls[0][1]).toBe('chatllm')
+    const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2]
+    expect(forwarded).toEqual({
+      content: 'look',
+      channelType: 'rpc',
+      channelId: 'chatllm',
+      hostRef: 'chatllm',
+      sender: '00000000-0000-4000-8000-000000000001',
+      metadata: { teamId: '00000000-0000-4000-8000-0000000000aa' },
+      threadId: undefined,
+      attachments: [attachment],
+    })
+    expect(Buffer.from(forwarded.attachments[0].dataBase64, 'base64')).toHaveLength(5 * MIB)
+  })
+
+  it('forwards a 10 MiB PNG + 5 MiB JPEG on the same authenticated envelope', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+      teamName: 'Test Team',
+      role: 'member',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ success: true, response: 'ok' }),
+    }
+    const attachments = [
+      imageAttachment('ten', 10 * MIB),
+      imageAttachment('five', 5 * MIB, 'image/jpeg'),
+    ]
+
+    await service.invokeHostMessage(
+      'chatllm',
+      {
+        content: 'look',
+        channelType: 'slack',
+        hostRef: 'attacker-host',
+        sender: 'attacker-controlled-user',
+        attachments,
+      },
+      ['chatllm']
+    )
+
+    expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalledWith(
+      'session-token',
+      [...MESSAGE_SCOPES],
+      ['chatllm']
+    )
+    const forwarded = service.rpcClient.invokeHostMessage.mock.calls[0][2]
+    expect(forwarded.channelType).toBe('rpc')
+    expect(forwarded.sender).toBe('00000000-0000-4000-8000-000000000001')
+    expect(forwarded.hostRef).toBe('chatllm')
+    expect(forwarded.channelId).toBe('chatllm')
+    expect(forwarded.attachments).toEqual(attachments)
+    expect(Buffer.from(forwarded.attachments[0].dataBase64, 'base64')).toHaveLength(10 * MIB)
+    expect(Buffer.from(forwarded.attachments[1].dataBase64, 'base64')).toHaveLength(5 * MIB)
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
