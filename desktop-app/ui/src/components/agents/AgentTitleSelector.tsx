@@ -16,8 +16,7 @@ type AgentTitleSelectorProps = {
   selectedLabel: string
 }
 
-// Agent selector for the greeting title row ("Welcome back … New chat with
-// [agent ▾]"). Each row exposes TWO targets:
+// Agent selector for the new-chat greeting title row. Each row exposes TWO targets:
 //   1. the agent name button  → selects the agent (starts/switches a chat)
 //   2. the 3-dots button      → opens a sections sub-menu
 //      (Details / Connectors / Contexts / Agent Files / Activity) that
