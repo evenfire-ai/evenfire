@@ -1,0 +1,13 @@
+| control-api/src/routes/rpc-access/users.ts:32:5:32:53 | require ... read']) | This route handler performs $@, but is not rate-limited. | control-api/src/middleware/rpcAccessAuth.ts:5:5:5:17 | verifyToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:39:47:39:60 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:39:95:39:117 | resolve ... eadHost | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:11:92:11:112 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:43:66:43:79 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:43:114:43:136 | resolve ... eadHost | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:11:92:11:112 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:47:47:47:60 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:47:95:47:117 | fakeRes ... actHost | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:17:93:17:113 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:51:66:51:79 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:51:114:51:134 | wrongEn ... esolver | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:23:63:23:83 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:55:47:55:60 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |
+| rpc-proxy/src/routes/rpc.ts:55:95:55:118 | fallbac ... esolver | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:30:95:30:115 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:55:95:55:118 | fallbac ... esolver | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/routes/rpc.ts:32:65:32:85 | extract ... en(req) | authorization |
+| rpc-proxy/src/routes/rpc.ts:59:66:59:79 | requireRpcAuth | This route handler performs $@, but is not rate-limited. | rpc-proxy/src/middleware/auth.ts:2:82:2:97 | verifyRpcToken() | authorization |

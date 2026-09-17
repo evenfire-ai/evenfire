@@ -7,26 +7,12 @@ import {
   requireValidRpcAccessTokenAny,
 } from '../../middleware/rpcAccessAuth.js'
 import { authorizeRpcHostAccess } from '../../services/access/rpcHostAccessAuthorizer.js'
+import { resolveAuthorizedHostConnection } from './fakeResolveAuthorizedHostConnection.js'
 
 type ArtifactRequest = {
   params: { userId: string; hostRef: string }
   rpcAuth?: { sub?: string }
   artifactReadConnection?: { hostRef: string }
-}
-
-async function resolveAuthorizedHostConnection(
-  req: ArtifactRequest,
-  _res: unknown,
-  gateway: unknown,
-  directory: unknown,
-): Promise<{ hostRef: string } | null> {
-  const userId = String(req.params.userId || '').trim()
-  const hostRef = String(req.params.hostRef || '').trim()
-  const claims = req.rpcAuth
-  if (!claims) return null
-  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
-  if (!authorization.authorized) return null
-  return authorization.connection
 }
 
 export function createRpcAccessUsersRouter(gateway: unknown, options: { directory?: unknown }) {

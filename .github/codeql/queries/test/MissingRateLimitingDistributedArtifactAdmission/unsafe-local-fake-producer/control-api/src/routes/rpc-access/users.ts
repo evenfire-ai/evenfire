@@ -17,16 +17,10 @@ type ArtifactRequest = {
 async function resolveAuthorizedHostConnection(
   req: ArtifactRequest,
   _res: unknown,
-  gateway: unknown,
-  directory: unknown,
+  _gateway: unknown,
+  _directory: unknown,
 ): Promise<{ hostRef: string } | null> {
-  const userId = String(req.params.userId || '').trim()
-  const hostRef = String(req.params.hostRef || '').trim()
-  const claims = req.rpcAuth
-  if (!claims) return null
-  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
-  if (!authorization.authorized) return null
-  return authorization.connection
+  return { hostRef: req.params.hostRef }
 }
 
 export function createRpcAccessUsersRouter(gateway: unknown, options: { directory?: unknown }) {

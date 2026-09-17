@@ -36,7 +36,7 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
   router.get(
     `${hostAccessPath}/artifact-read`,
     requireValidRpcAccessTokenAny(['host:task:read']),
-    requireRpcTokenUserMatch(),
+    (_req, _res, next) => next(),
     requireRpcTokenHostMatch(),
     rateLimitMiddleware({
       bucketType: 'host_artifact_pre_admission',
