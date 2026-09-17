@@ -31,7 +31,7 @@ export function ClampedDescription({ children }: { children: ReactNode }) {
       observer?.disconnect()
       window.removeEventListener('resize', measure)
     }
-  }, [children])
+  }, [tooltipText])
 
   return (
     <span
