@@ -131,6 +131,7 @@ function visualModelFixture(agent: ReturnType<typeof discoverManagedGfsAgent>) {
         return
       // The JSON tests refuse to overwrite a concurrent user's different choice.
       mutate(selected, original)
+      expect(read()).toEqual(original)
     },
   }
 }
@@ -254,7 +255,7 @@ async function freshChat(page: Page, agentName: string): Promise<void> {
   await expect(page.getByTestId('chat-input')).toBeVisible()
 }
 
-async function sendRead(page: Page, prompt: string, denied = false): Promise<void> {
+async function sendRead(page: Page, prompt: string): Promise<void> {
   await page.getByTestId('chat-input').fill(prompt)
   await page.getByTestId('send-button').click()
   // This button is rendered only for a completed task with tool steps. A
@@ -270,7 +271,14 @@ async function sendRead(page: Page, prompt: string, denied = false): Promise<voi
   // including legitimate retries, rather than selecting a positional last row.
   // Failed tool rows expand automatically. Clicking them in the negative guard
   // would hide the denial that the user already sees.
-  if (!denied) for (const row of await reads.all()) await row.click()
+  for (const row of await reads.all()) {
+    const chevron = row.locator('.stepper-step-chevron')
+    await expect(chevron).toHaveCount(1)
+    if (
+      !(await chevron.evaluate(element => element.classList.contains('stepper-step-chevron--open')))
+    )
+      await row.click()
+  }
   const outputs = page.getByTestId('step-output-panel')
   await expect(outputs).not.toHaveCount(0)
   // Keep the actual read result visible, including in failure screenshots.
@@ -395,12 +403,23 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       await sendRead(
         page,
         `Use your GFS tools to read the image at path "/${granted.name}/${fileName}" in drive main. ` +
+          'First use gfs_accessible and gfs_list to find that exact file and its resourceId. ' +
+          'The filename is not a resourceId: do not guess an id or derive one from the filename. ' +
+          'Read the resourceId returned by the listing with gfs_read. ' +
           'Inspect its pixels. Return only JSON with left and right objects, each containing color and shape, ' +
           'Use color names red, green, blue, yellow, orange or purple, and shape names circle, square or triangle. ' +
           'Do not infer contents from the filename. Do not use other tools.'
       )
+      // Evaluate the pixel oracle before secondary UI metadata assertions, so a
+      // failure reports the actual visual answer rather than hiding it behind a
+      // missing preview field.
+      expect(await visualAnswer(page)).toEqual(visual.expected)
+      console.info('[R12] phase=visual-oracle-passed')
+      await expect(page.getByTestId(/^step-row-/).filter({ hasText: 'gfs_list' })).not.toHaveCount(
+        0
+      )
       // Progress previews truncate each line at 200 chars. The resource id is
-      // visible; the trailing delivery field is not. Exact visual facts below
+      // visible; the trailing delivery field is not. Exact visual facts above
       // are the E2E oracle; typed delivery and serialized bytes are integration
       // contracts, not claims inferred from a truncated preview.
       await expect(
@@ -415,7 +434,6 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       ).toBeVisible()
       const response = page.getByTestId('agent-response')
       await expect(response).toBeVisible()
-      expect(await visualAnswer(page)).toEqual(visual.expected)
     })
     await test.step('direct-resource negative guard does not disclose an ungranted image', async () => {
       const deniedVisual = createGfsVisualImageFixture()
@@ -446,8 +464,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
         page,
         `Call clerum__gfs_read with drive main and resourceId ${record!.resourceId}. ` +
           'Attempt this read even if discovery does not list it. Then return only JSON ' +
-          'with status "denied" if access was denied. Do not claim to see an image you cannot read.',
-        true
+          'with status "denied" if access was denied. Do not claim to see an image you cannot read.'
       )
       await expect(
         page.getByTestId('step-output-panel').filter({ hasText: /gfsc 403: forbidden/ })
@@ -457,12 +474,19 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       expect(await visualAnswer(page)).toEqual({
         status: 'denied',
       })
+      console.info('[R12] phase=negative-guard-passed')
     })
   } catch (error) {
     journeyFailure = error
     throw error
   } finally {
-    const cleanupErrors: unknown[] = []
+    const cleanupErrors: string[] = []
+    const cleanupFailure = (phase: string, error: unknown) => {
+      const timedOut =
+        error instanceof Error &&
+        (error.name === 'TimeoutError' || /^R12 .* exceeded \d+ms$/.test(error.message))
+      cleanupErrors.push(`${phase}:${timedOut ? 'timeout' : 'error'}`)
+    }
     try {
       if (app) {
         try {
@@ -476,30 +500,31 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
         }
       }
     } catch (error) {
-      cleanupErrors.push(error)
+      cleanupFailure('electron', error)
     }
     for (const name of seeded) {
       try {
         cleanupGfsFixture(name)
         assertGfsFixtureCleaned(name)
       } catch (error) {
-        cleanupErrors.push(error)
+        cleanupFailure('gfs-fixture', error)
       }
     }
     try {
       await rm(local, { recursive: true, force: true })
     } catch (error) {
-      cleanupErrors.push(error)
+      cleanupFailure('local-directory', error)
     }
     try {
       modelFixture?.restore()
       if (modelFixture) await waitForAgentBinding(agent)
     } catch (error) {
-      cleanupErrors.push(error)
+      cleanupFailure('model-restore', error)
     }
     if (cleanupErrors.length)
-      throw new Error(`GFS visual fixture cleanup failed in ${cleanupErrors.length} operations`, {
+      throw new Error(`GFS visual fixture cleanup failed: ${cleanupErrors.join(', ')}`, {
         cause: journeyFailure,
       })
+    console.info('[R12] phase=cleanup-complete')
   }
 })
