@@ -244,7 +244,9 @@ async function uploadAndPreview(
 async function freshChat(page: Page, agentName: string): Promise<void> {
   await page.getByTestId('nav-chat').click()
   await page.getByTestId('nav-new-chat').click()
-  await expect(page.getByRole('heading', { name: 'New chat with', exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('heading', { name: 'Start a new conversation with:', exact: true })
+  ).toBeVisible()
   await expect(page.getByTestId('agent-response')).toHaveCount(0)
   await expect(page.getByTestId('progress-expand-btn')).toHaveCount(0)
   const selector = page.getByRole('button', { name: 'Switch chat agent', exact: true })
