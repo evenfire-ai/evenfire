@@ -11,6 +11,8 @@ const {
   declaredHeaderPng,
   declaredHeaderPngOfSize,
   jpegOfSize,
+  padJpegToSize,
+  padPngToSize,
   realPng,
   realPngOfSize,
 } = require('./testImageFixtures.cjs')
@@ -1099,6 +1101,21 @@ test('large real PNG: CRCs and inflatable scanlines at 3 MiB and at the 10 MiB c
     )
     assert.equal(parsed.ok, true, `${label}: ${parsed.message}`)
   }
+})
+
+test('shared pads keep a real fixture JPEG/PNG contract-valid at 5 MiB', () => {
+  const jpeg = padJpegToSize(Buffer.from(IMAGE_DATA.jpeg, 'base64'), 5 * MIB)
+  const png = padPngToSize(Buffer.from(IMAGE_DATA.png, 'base64'), 5 * MIB)
+  assert.equal(jpeg.length, 5 * MIB)
+  assert.equal(png.length, 5 * MIB)
+  const jpegParsed = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(jpeg.toString('base64'), 'image/jpeg')])
+  )
+  const pngParsed = contract.parseCodexCompletionRequest(
+    v2WithParts([imagePart(png.toString('base64'))])
+  )
+  assert.equal(jpegParsed.ok, true, jpegParsed.message)
+  assert.equal(pngParsed.ok, true, pngParsed.message)
 })
 
 test('buildCodexProxyEnvelope: exact shape, no outer deadline, exact size boundary', () => {

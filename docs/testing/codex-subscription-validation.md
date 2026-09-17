@@ -54,12 +54,17 @@ than silently skipping them.
 ### Opt-in Desktop image lane
 
 `desktop-app/test/e2e-playwright/codex-image-input.spec.ts` covers direct PNG/JPEG
-uploads through the visible composer. It creates a fresh 64-bit hexadecimal
-challenge rendered only into image pixels. The filename and prompt do not carry
-the answer. An enabled run requires that answer (hexadecimal case is ignored), a non-error response, no
-tool steps substituting OCR/loading for direct image input, and no fallback badge.
+uploads through the visible composer, including a 5 MiB JPEG, a 10+5 MiB pair,
+three 5 MiB images, and composer refusals over 10 MiB, over 15 MiB total, a
+fourth image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
+challenge rendered only into image pixels. Large cases pad that same image so
+the answer stays in pixels while the decoded size matches the hop budget. The
+filename and prompt do not carry the answer. An enabled run requires that
+answer (hexadecimal case is ignored), a non-error response, no tool steps
+substituting OCR/loading for direct image input, and no fallback badge.
 The selector's stable data attributes verify the actual selected Host, provider
 and model. The disabled mode instead requires the explicit capability error.
+Composer budget refusals never send.
 
 This is a real upstream lane, not a mock. Before running it, obtain separate
 authorization for runtime, upstream access and the existing login fixture's

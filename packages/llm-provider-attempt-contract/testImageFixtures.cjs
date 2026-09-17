@@ -133,6 +133,42 @@ function padPngToSize(png, targetBytes) {
 }
 
 /**
+ * Grow a real JPEG to an exact byte length by inserting COM segments after SOI.
+ * The original SOF/SOS/scan/EOI stay intact, so a canvas image remains
+ * decodable while the container still ends on EOI for the contract parser.
+ */
+function padJpegToSize(jpeg, targetBytes) {
+  const bytes = Buffer.isBuffer(jpeg) ? jpeg : Buffer.from(String(jpeg), 'base64')
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+    throw new Error('JPEG SOI marker is missing')
+  }
+  const padding = targetBytes - bytes.length
+  if (padding < 0) {
+    throw new Error(`target ${targetBytes} is smaller than the JPEG ${bytes.length}`)
+  }
+  if (padding === 0) return Buffer.from(bytes)
+  if (padding < 4) {
+    throw new Error('target must leave room for a JPEG COM segment')
+  }
+  const comments = []
+  let remaining = padding
+  while (remaining > 0) {
+    if (remaining < 4) {
+      throw new Error('JPEG COM padding cannot finish on a short segment')
+    }
+    const chunk = Math.min(remaining, 4 + 65533)
+    const payload = chunk - 4
+    const com = Buffer.alloc(chunk)
+    com[0] = 0xff
+    com[1] = 0xfe
+    com.writeUInt16BE(payload + 2, 2)
+    comments.push(com)
+    remaining -= chunk
+  }
+  return Buffer.concat([bytes.subarray(0, 2), ...comments, bytes.subarray(2)])
+}
+
+/**
  * Structurally framed JPEG of an exact byte length: SOI, SOF0 dimensions, SOS,
  * entropy pad, EOI. Marker framing only; scan data is not entropy-decodable.
  */
@@ -176,5 +212,6 @@ module.exports = {
   declaredHeaderPngOfSize,
   realPngOfSize,
   padPngToSize,
+  padJpegToSize,
   jpegOfSize,
 }

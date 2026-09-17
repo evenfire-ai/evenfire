@@ -14,4 +14,5 @@ export declare function realPngOfSize(
   seed: number
 ): Buffer
 export declare function padPngToSize(png: Buffer | string, targetBytes: number): Buffer
+export declare function padJpegToSize(jpeg: Buffer | string, targetBytes: number): Buffer
 export declare function jpegOfSize(targetBytes: number, width?: number, height?: number): Buffer
