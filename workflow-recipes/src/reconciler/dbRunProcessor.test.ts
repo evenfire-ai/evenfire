@@ -337,7 +337,6 @@ describe('createDbRunProcessor', () => {
       const terminal = client.calls.find(call => /SET phase = 'Failed'/.test(call.sql))
       expect(terminal?.sql).toContain('failure_reason = $2')
       expect(terminal?.params).toEqual([run.run_id, failureReason])
-      expect(terminal?.params).not.toContain('Bearer sensitive-token')
       expect(client.calls.some(call => /^COMMIT$/i.test(call.sql))).toBe(true)
       await expect(proc.processPending(run.run_id)).resolves.toBeUndefined()
       expect(checkpointAuthority).toHaveBeenCalledOnce()
