@@ -39,7 +39,8 @@ import type {
   ToolDefinition,
 } from '../core/types'
 import { createOpenRouterImageCapabilityResolver } from '../visualInput/capabilities'
-import type { ImageInputCapability } from '../visualInput/policy'
+import { getDocumentedZaiImageCapability } from '../visualInput/documentedZaiCapabilities'
+import { type ImageInputCapability, VisualInputError } from '../visualInput/policy'
 import { OpenAIProvider } from './openai'
 import type { LlmProvider } from './registryCore'
 import type { ClassifiedError } from './types'
@@ -82,6 +83,7 @@ const BILLING_CODES = new Set(['1113', 'Arrearage'])
 
 export class OpenAICompatibleProvider extends OpenAIProvider {
   private readonly imageCapabilityResolver?: (signal?: AbortSignal) => Promise<ImageInputCapability>
+  private readonly selectedModel: string
   /** Provider temperature upper bound — 1 for Moonshot, else the [0,2] default. */
   private readonly temperatureCeiling: number
   /**
@@ -104,6 +106,7 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
     // fall through to OpenAIProvider's own default ('gpt-5.4-mini'), and this
     // provider would request a non-existent model against its baseURL.
     super(new OpenAI({ apiKey, baseURL: cfg.baseURL }), model ?? cfg.defaultModel)
+    this.selectedModel = model ?? cfg.defaultModel
     this.temperatureCeiling = cfg.id === 'moonshot' ? 1 : 2
     this.downgradesRequiredToolChoice = cfg.id === 'moonshot'
     if (cfg.id === 'openrouter') {
@@ -127,6 +130,10 @@ export class OpenAICompatibleProvider extends OpenAIProvider {
   }
 
   override getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    if (signal?.aborted) throw new VisualInputError('cancelled')
+    if (this.cfg.id === 'zai') {
+      return Promise.resolve(getDocumentedZaiImageCapability(this.selectedModel, this.cfg.baseURL))
+    }
     return this.imageCapabilityResolver?.(signal) ?? Promise.resolve({ status: 'unknown' })
   }
 
