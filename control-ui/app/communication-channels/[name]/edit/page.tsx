@@ -428,12 +428,13 @@ export default function EditCommunicationChannelPage() {
         >
           {loading ? (
             <FormSectionsSkeleton
+              className="cu-channel-edit-form"
               label="Communication channel"
               primaryActionLabel="Save channel"
               sections={3}
             />
           ) : loadError ? (
-            <div className="cu-create-content">
+            <div className="cu-create-content cu-channel-edit-form">
               <div className="cu-banner cu-banner--error" role="alert">
                 {loadError}
               </div>
