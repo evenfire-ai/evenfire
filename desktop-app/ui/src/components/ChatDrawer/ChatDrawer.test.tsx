@@ -26,7 +26,8 @@ afterEach(() => {
 
 function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = {}) {
   const onNewChat = props.onNewChat ?? vi.fn()
-  const onClose = props.onClose ?? vi.fn()
+  const onToggle = props.onToggle ?? vi.fn()
+  const onExpandFullScreen = props.onExpandFullScreen ?? vi.fn()
   const onResizeHandleMouseDown = props.onResizeHandleMouseDown ?? vi.fn()
   const onResizeHandleKeyDown = props.onResizeHandleKeyDown ?? vi.fn()
   const containerRef = props.containerRef ?? createRef<HTMLElement>()
@@ -34,7 +35,8 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
     <ChatDrawer
       header={props.header ?? <span className="chat-drawer__title">Drawer chat</span>}
       onNewChat={onNewChat}
-      onClose={onClose}
+      onExpandFullScreen={onExpandFullScreen}
+      onToggle={onToggle}
       containerRef={containerRef}
       ready={props.ready ?? true}
       onResizeHandleMouseDown={onResizeHandleMouseDown}
@@ -45,7 +47,14 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
       <div data-testid="drawer-chat-page">chat page</div>
     </ChatDrawer>
   )
-  return { ...utils, onNewChat, onClose, onResizeHandleMouseDown, onResizeHandleKeyDown }
+  return {
+    ...utils,
+    onNewChat,
+    onExpandFullScreen,
+    onToggle,
+    onResizeHandleMouseDown,
+    onResizeHandleKeyDown,
+  }
 }
 
 describe('ChatDrawer', () => {
@@ -54,21 +63,24 @@ describe('ChatDrawer', () => {
     expect(screen.getByText('Drawer chat')).toBeTruthy()
     expect(screen.getByTestId('drawer-chat-page')).toBeTruthy()
     expect(screen.getByRole('button', { name: 'New chat' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Close chat drawer' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open chat in full screen' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
   })
 
-  it('wires the new-chat and close actions', () => {
-    const { onNewChat, onClose } = renderDrawer()
+  it('wires the new-chat, full-screen, and collapse actions', () => {
+    const { onNewChat, onExpandFullScreen, onToggle } = renderDrawer()
     fireEvent.click(screen.getByRole('button', { name: 'New chat' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Close chat drawer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Open chat in full screen' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse chat drawer' }))
     expect(onNewChat).toHaveBeenCalledTimes(1)
-    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onExpandFullScreen).toHaveBeenCalledTimes(1)
+    expect(onToggle).toHaveBeenCalledTimes(1)
   })
 
   it('sizes the header CTA icons to the app standard (16px), not the raw viewBox', () => {
     const { container } = renderDrawer()
     const svgs = container.querySelectorAll('.chat-drawer__header-actions .ui-icon-button svg')
-    expect(svgs.length).toBe(2)
+    expect(svgs.length).toBe(3)
     svgs.forEach(svg => {
       expect(getComputedStyle(svg as Element).width).toBe('16px')
       expect(getComputedStyle(svg as Element).height).toBe('16px')
