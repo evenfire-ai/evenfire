@@ -514,6 +514,44 @@ describe('GFS binary content snapshots', () => {
     expect(budget.residentBytes).toBe(0)
   })
 
+  it('cancels stat when the caller aborts and cleans its timer and listener', async () => {
+    vi.useFakeTimers()
+    try {
+      const budget = new VisualInputBudget()
+      const controller = new AbortController()
+      const remove = vi.spyOn(controller.signal, 'removeEventListener')
+      let entered!: () => void
+      const reading = new Promise<void>(resolve => {
+        entered = resolve
+      })
+      const fetchFn = vi.fn((_url: string, init?: RequestInit) => {
+        entered()
+        return new Promise<Response>((_resolve, reject) => {
+          init!.signal!.addEventListener('abort', () => reject(new Error('private detail')), {
+            once: true,
+          })
+        })
+      })
+      const client = createGfscClient({
+        get: () => undefined,
+        readFile: async () => 'unit-gfs-read-identity',
+        fetch: fetchFn,
+      })
+      const failure = expect(
+        client.read(READ_ARGS, { budget, signal: controller.signal })
+      ).rejects.toMatchObject({ code: 'cancelled' })
+      await reading
+      controller.abort()
+      await failure
+      expect(fetchFn).toHaveBeenCalledTimes(1)
+      expect(budget.residentBytes).toBe(0)
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function))
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('bounds the entire metadata request by a deadline', async () => {
     vi.useFakeTimers()
     try {
