@@ -271,6 +271,10 @@ async function sendRead(page: Page, prompt: string, denied = false): Promise<voi
   // Failed tool rows expand automatically. Clicking them in the negative guard
   // would hide the denial that the user already sees.
   if (!denied) for (const row of await reads.all()) await row.click()
+  const outputs = page.getByTestId('step-output-panel')
+  await expect(outputs).not.toHaveCount(0)
+  // Keep the actual read result visible, including in failure screenshots.
+  for (const output of await outputs.all()) await output.scrollIntoViewIfNeeded()
 }
 
 async function visualAnswer(page: Page) {
