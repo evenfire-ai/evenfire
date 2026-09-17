@@ -43,7 +43,8 @@ export function createRpcAccessUsersRouter(gateway: unknown, options: { director
       maxPerMinute: config.hostArtifactReadRlPerMin,
       getBucketKey: req => {
         const subject = (req as ArtifactRequest).rpcAuth?.sub
-        return subject ? `host-artifact-pre-admission:${subject}` : null
+        const hostRef = (req as ArtifactRequest).params.hostRef
+        return subject ? `host-artifact-pre-admission:${subject}:${hostRef}` : null
       },
     }),
     async (req: ArtifactRequest, res, next) => {

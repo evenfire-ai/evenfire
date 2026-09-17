@@ -6,7 +6,7 @@ import {
   requireRpcTokenUserMatch,
   requireValidRpcAccessTokenAny,
 } from '../../middleware/rpcAccessAuth.js'
-import { authorizeRpcHostAccess } from '../../services/access/rpcHostAccessAuthorizer.js'
+import { authorizeRpcHostAccess } from './fakeRpcHostAccessAuthorizer.js'
 
 type ArtifactRequest = {
   params: { userId: string; hostRef: string }
