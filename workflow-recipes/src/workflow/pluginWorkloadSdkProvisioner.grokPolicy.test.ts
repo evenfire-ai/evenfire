@@ -179,11 +179,10 @@ describe('eager Grok policy gate', () => {
       spec: GROK_SPEC,
       config: eagerSdkTestConfig({ grokSubscriptionEnabled: false }),
     })
-    const env = pod.spec?.containers?.[0].env ?? []
-    expect(env).not.toContainEqual({
-      name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED',
-      value: 'true',
-    })
+    const envNames = (pod.spec?.containers?.[0].env ?? []).map(env => env.name)
+    // Name-level: a flag-off pod must carry neither variable, whatever its value.
+    expect(envNames).not.toContain('MCP_HOST_GROK_SUBSCRIPTION_ENABLED')
+    expect(envNames).not.toContain('GROK_LLM_PROXY_RUNTIME_URL')
   })
 
   it('accepts a Grok hash on subscriptionBinding and reports ready', async () => {

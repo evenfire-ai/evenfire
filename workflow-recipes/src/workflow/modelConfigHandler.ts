@@ -10,7 +10,11 @@
  * per-attempt broker.
  */
 import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  GROK_PROVIDER,
   assignedCodexConnectionKey,
+  parseGrokAllowedModelsSnapshot,
+  projectGrokExecution,
   snapshotForAssignedCodexGrant,
 } from '@clerum/codex-catalog-projection'
 import {
@@ -136,7 +140,15 @@ export interface HandleOptions {
   validateDegraded?: DegradedModeValidator
   /** Assigned Codex grant. Empty/missing is unassigned and never inherits. */
   codexConnectionKey?: string
+  /**
+   * Assigned Grok grant (canonical `subscription-connection-ref`). Empty/missing
+   * is unassigned; the Codex key is never consulted for Grok.
+   */
+  grokConnectionKey?: string
 }
+
+/** Per-broker assigned grant keys. Each broker reads only its own key. */
+type BrokerConnectionKeys = Pick<HandleOptions, 'codexConnectionKey' | 'grokConnectionKey'>
 
 // ─── Handler ────────────────────────────────────────────────────────────
 
@@ -200,16 +212,30 @@ function parseAllowedModels(raw: string | undefined, provider: string): Set<stri
   return allowed
 }
 
-function isCodexModelAllowed(
+function isModelAllowed(
   provider: string,
   model: string,
   allowlistCm: { data: Record<string, string>; annotations?: Record<string, string> },
-  connectionKey?: string
+  keys: BrokerConnectionKeys = {}
 ): boolean {
+  const cm = { metadata: { annotations: allowlistCm.annotations ?? {} }, data: allowlistCm.data }
+  if (provider === GROK_PROVIDER) {
+    // Grok redeemability is the Grok projection of the assigned Grok grant:
+    // `grok-enabled`, the grant's own `grok-connections` row (status + models).
+    // The Codex parser would see the flat union of every Grok grant.
+    const grokKey = assignedCodexConnectionKey(keys.grokConnectionKey)
+    if (grokKey === CODEX_UNASSIGNED_CONNECTION_KEY) return false
+    return (
+      projectGrokExecution(
+        { model: { provider, name: model } },
+        parseGrokAllowedModelsSnapshot(cm, grokKey)
+      ).eligibility === 'eligible'
+    )
+  }
   if (isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') {
     const snapshot = snapshotForAssignedCodexGrant(
-      assignedCodexConnectionKey(connectionKey),
-      { metadata: { annotations: allowlistCm.annotations ?? {} }, data: allowlistCm.data },
+      assignedCodexConnectionKey(keys.codexConnectionKey),
+      cm,
       { flagEnabled: false }
     )
     const key = `${provider}:${model}`
@@ -408,7 +434,7 @@ export class ModelConfigHandler {
     if (!allowlistCm.exists) {
       return { status: 503, body: { error: 'Provider configuration unavailable' } }
     }
-    if (!isCodexModelAllowed(target.provider, target.model, allowlistCm)) {
+    if (!isModelAllowed(target.provider, target.model, allowlistCm)) {
       return { status: 403, body: { error: 'Provider target is not enabled' } }
     }
 
@@ -489,12 +515,7 @@ export class ModelConfigHandler {
     )
     const brokerBacked = PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker'
     if (allowlistCm.exists) {
-      const allowed = isCodexModelAllowed(
-        req.provider,
-        req.model,
-        allowlistCm,
-        opts?.codexConnectionKey
-      )
+      const allowed = isModelAllowed(req.provider, req.model, allowlistCm, opts)
       // oauth-broker configure is identity-only. Spend is gated by
       // grantRedeemable on the coordinator and by authorize, not by 4xx here.
       if (!allowed && !brokerBacked) {
@@ -563,8 +584,7 @@ export class ModelConfigHandler {
           model: req.model,
           identityBound: true,
           grantRedeemable:
-            allowlistCm.exists &&
-            isCodexModelAllowed(req.provider, req.model, allowlistCm, opts?.codexConnectionKey),
+            allowlistCm.exists && isModelAllowed(req.provider, req.model, allowlistCm, opts),
         },
       }
     }
@@ -590,7 +610,7 @@ export class ModelConfigHandler {
       req,
       configMap,
       allowlistCm.exists ? allowlistCm : null,
-      opts?.codexConnectionKey
+      opts
     )
 
     // 3. Optional SOUL download
@@ -718,7 +738,7 @@ export class ModelConfigHandler {
     req: ConfigureModelRequest,
     configMap: Record<string, string>,
     allowlist: { data: Record<string, string>; annotations?: Record<string, string> } | null,
-    codexConnectionKey?: string
+    keys?: BrokerConnectionKeys
   ): Promise<Array<{ provider: string; model: string; apiKey: string; llmSecretName: string }>> {
     const fallbacks = req.fallbacks
     if (!fallbacks || fallbacks.length === 0) return []
@@ -743,12 +763,7 @@ export class ModelConfigHandler {
         log.warn('Skipping fallback with invalid provider/model', { stepId: req.stepId })
         continue
       }
-      const allowed = isCodexModelAllowed(
-        entry.provider,
-        entry.model,
-        allowlist,
-        codexConnectionKey
-      )
+      const allowed = isModelAllowed(entry.provider, entry.model, allowlist, keys)
       if (!allowed) {
         log.warn('Skipping fallback model not in allowlist', {
           stepId: req.stepId,

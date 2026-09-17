@@ -1016,6 +1016,10 @@ export class WorkflowReconciler {
       context,
       hostAgent: resolveEagerSdkMcpHostAgent(spec),
       view,
+      // The WRC master switch is an input of the ONE Grok verdict, so scopes,
+      // grok-proxy egress and the SDK bootstrap binding agree with the pod env
+      // (`buildMcpHostPod` gates on the same flag).
+      grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
       log: this.log,
     })
   }

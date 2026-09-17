@@ -12,7 +12,11 @@ import { createLogger } from '../observability/logger'
 import { CRD_GROUP, CRD_VERSION, WORKFLOWRECIPE_PLURAL } from '../reconciler/crdConstants'
 import { getErrorCode } from '../reconciler/k8sErrors'
 import { JwtTokenFactory } from './jwtTokenFactory'
-import { readRecipeCodexConnectionRef } from './llmAllowedModelsSnapshot'
+import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  readRecipeCodexConnectionRef,
+  readRecipeGrokConnectionRef,
+} from './llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from './modelConfigHandler'
 import {
   buildArtifactReaderUrl as buildWorkflowArtifactReaderUrl,
@@ -687,12 +691,21 @@ export function createWorkflowEndpointHandlers(
     const recipe = (await readRecipe(recipeName, recipeNamespaceClaim)) as {
       metadata?: { annotations?: Record<string, string> }
     } | null
+    // Grant keys are per-provider names, so each broker only ever receives
+    // the key read for the provider this request targets; the other broker's
+    // key stays `unassigned` so a same-named grant can never be redeemed.
+    const requestsGrok = body.provider === 'grok-subscription'
     const handleOpts = {
       ...(validateDegraded ? { validateDegraded } : {}),
-      codexConnectionKey: readRecipeCodexConnectionRef(
-        recipe?.metadata?.annotations,
-        typeof body.provider === 'string' ? body.provider : 'codex-subscription'
-      ),
+      codexConnectionKey: requestsGrok
+        ? CODEX_UNASSIGNED_CONNECTION_KEY
+        : readRecipeCodexConnectionRef(
+            recipe?.metadata?.annotations,
+            typeof body.provider === 'string' ? body.provider : 'codex-subscription'
+          ),
+      grokConnectionKey: requestsGrok
+        ? readRecipeGrokConnectionRef(recipe?.metadata?.annotations)
+        : CODEX_UNASSIGNED_CONNECTION_KEY,
     }
     // R5 F6 stop-point: `fallbacks`/`cooldownSeconds`/`triggerOn` are NOT
     // forwarded yet — the broker request carries only the declared step tuple, so

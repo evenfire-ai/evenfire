@@ -106,6 +106,13 @@ export function projectCodexRecipeVerdict(input: {
   context: CodexReconcileContext
   hostAgent: { provider: string; model: string } | undefined
   view: CodexAllowlistView
+  /**
+   * WRC_GROK_SUBSCRIPTION_ENABLED. REQUIRED so the local master switch is part
+   * of the one Grok verdict: off is a DECISION (`ineligible`/`wrc_flag_off`),
+   * so scopes, grok-proxy egress and the bootstrap binding cannot follow an
+   * eligible Control API annotation while the pod env is withheld.
+   */
+  grokSubscriptionEnabled: boolean
   log?: {
     warn(msg: string, fields?: Record<string, unknown>): void
     debug(msg: string, fields?: Record<string, unknown>): void
@@ -128,8 +135,21 @@ export function projectCodexRecipeVerdict(input: {
   const grokKey = context.grokConnectionKey ?? CODEX_UNASSIGNED_CONNECTION_KEY
   const grokSnapshot = parseGrokAllowedModelsSnapshot(view.configMap, grokKey)
   const grokRaw = projectGrokExecution(recipeToCodexHostSpec(resolved.spec), grokSnapshot)
-  const grokProjection =
-    resolved.provenance === 'authoritative'
+  const grokProjection = !input.grokSubscriptionEnabled
+    ? {
+        ...grokRaw,
+        eligibleTargets: [],
+        derivedScopes: [],
+        requiresGrokProxyEgress: false,
+        eligibility: 'ineligible' as const,
+        reason: 'wrc_flag_off',
+        driftHashInput: JSON.stringify({
+          eligibleTargets: [],
+          derivedScopes: [],
+          eligibility: 'ineligible',
+        }),
+      }
+    : resolved.provenance === 'authoritative'
       ? grokRaw
       : {
           ...grokRaw,

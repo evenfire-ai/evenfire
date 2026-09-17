@@ -89,7 +89,14 @@ const verdict = (
     provider: 'codex-subscription',
     model: MODEL,
   }
-) => projectCodexRecipeVerdict({ ownSpec: codexSpec(), context: ctx, hostAgent, view })
+) =>
+  projectCodexRecipeVerdict({
+    ownSpec: codexSpec(),
+    context: ctx,
+    hostAgent,
+    view,
+    grokSubscriptionEnabled: true,
+  })
 
 describe('projectCodexRecipeVerdict', () => {
   it('reports an unreadable ConfigMap as uncertain and withholds the binding', () => {
@@ -266,6 +273,7 @@ describe('projectCodexRecipeVerdict Grok mint', () => {
       context: context({ connectionKey: UNASSIGNED, grokConnectionKey: GROK_GRANT }),
       hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
       view: viewFrom(eligibleGrokConfigMap()),
+      grokSubscriptionEnabled: true,
     })
     expect(v.projection.eligibility).not.toBe('eligible')
     expect(v.hostBinding).toBeNull()
@@ -295,6 +303,7 @@ describe('projectCodexRecipeVerdict Grok mint', () => {
       }),
       hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
       view: viewFrom(eligibleGrokConfigMap()),
+      grokSubscriptionEnabled: true,
     })
     expect(v.grokProjection.eligibility).toBe('uncertain')
     expect(v.grokProjection.reason).toBe('provenance_uncertain')
@@ -309,8 +318,103 @@ describe('projectCodexRecipeVerdict Grok mint', () => {
       context: context({ connectionKey: UNASSIGNED, grokConnectionKey: UNASSIGNED }),
       hostAgent: { provider: 'grok-subscription', model: GROK_MODEL },
       view: viewFrom(eligibleGrokConfigMap()),
+      grokSubscriptionEnabled: true,
     })
     expect(v.grokBinding).toBeNull()
     expect(v.grokBindingReason).toBe('unassigned')
+  })
+})
+
+/*
+ * A-RP-007 / C-RP-011: WRC_GROK_SUBSCRIPTION_ENABLED is part of the ONE Grok
+ * verdict. Scopes, grok-proxy egress, the SDK bootstrap binding and the pod
+ * env all read this verdict (or the same flag), so with the WRC switch off an
+ * eligible catalog annotation must not leave any of them live.
+ */
+describe('projectCodexRecipeVerdict Grok WRC switch', () => {
+  const grokVerdict = (input: {
+    ownSpec?: WorkflowRecipeSpec
+    ctx?: Partial<CodexReconcileContext>
+    hostAgent?: { provider: string; model: string }
+    grokSubscriptionEnabled: boolean
+  }) =>
+    projectCodexRecipeVerdict({
+      ownSpec: input.ownSpec ?? grokSpec(),
+      context: context({ connectionKey: UNASSIGNED, grokConnectionKey: GROK_GRANT, ...input.ctx }),
+      hostAgent: input.hostAgent ?? { provider: 'grok-subscription', model: GROK_MODEL },
+      view: viewFrom(eligibleGrokConfigMap()),
+      grokSubscriptionEnabled: input.grokSubscriptionEnabled,
+    })
+
+  const stepLevelGrokSpec = (): WorkflowRecipeSpec =>
+    ({
+      agent: { provider: 'openai', model: 'gpt-4o' },
+      steps: [{ id: 'grok-step', agent: { provider: 'grok-subscription', model: GROK_MODEL } }],
+    }) as unknown as WorkflowRecipeSpec
+
+  const sdkOnlyGrokSpec = (): WorkflowRecipeSpec =>
+    ({
+      agent: { provider: 'grok-subscription', model: GROK_MODEL },
+      pluginWorkloadSdk: { capabilities: ['promptBridge'] },
+    }) as unknown as WorkflowRecipeSpec
+
+  function expectGrokWithheld(v: ReturnType<typeof grokVerdict>) {
+    expect(v.grokProjection.eligibility).toBe('ineligible')
+    expect(v.grokProjection.reason).toBe('wrc_flag_off')
+    expect(v.grokProjection.derivedScopes).toEqual([])
+    expect(v.grokProjection.eligibleTargets).toEqual([])
+    expect(v.grokProjection.requiresGrokProxyEgress).toBe(false)
+    expect(v.grokBinding).toBeNull()
+    expect(v.grokBindingReason).toBe('wrc_flag_off')
+  }
+
+  it('withholds Grok scope, egress and binding for an ordinary recipe when the WRC flag is off', () => {
+    expectGrokWithheld(grokVerdict({ grokSubscriptionEnabled: false }))
+  })
+
+  it('withholds Grok scope and egress for a step-level Grok recipe when the WRC flag is off', () => {
+    const on = grokVerdict({ ownSpec: stepLevelGrokSpec(), grokSubscriptionEnabled: true })
+    expect(on.grokProjection.derivedScopes).toEqual(['llm:grok:execute'])
+    expect(on.grokProjection.requiresGrokProxyEgress).toBe(true)
+    const off = grokVerdict({ ownSpec: stepLevelGrokSpec(), grokSubscriptionEnabled: false })
+    expect(off.grokProjection.reason).toBe('wrc_flag_off')
+    expect(off.grokProjection.derivedScopes).toEqual([])
+    expect(off.grokProjection.requiresGrokProxyEgress).toBe(false)
+  })
+
+  it('withholds the SDK-only Grok bootstrap binding when the WRC flag is off', () => {
+    const on = grokVerdict({ ownSpec: sdkOnlyGrokSpec(), grokSubscriptionEnabled: true })
+    expect(on.grokBinding).not.toBeNull()
+    expectGrokWithheld(grokVerdict({ ownSpec: sdkOnlyGrokSpec(), grokSubscriptionEnabled: false }))
+  })
+
+  it('is a decision, not uncertainty: the WRC flag off wins over undecidable provenance', () => {
+    const v = grokVerdict({
+      ctx: { runtimeScopeRecipeName: 'parent-recipe', parentSpec: null },
+      grokSubscriptionEnabled: false,
+    })
+    expectGrokWithheld(v)
+  })
+
+  it('leaves the eligible Grok verdict unchanged when the WRC flag is on', () => {
+    const v = grokVerdict({ grokSubscriptionEnabled: true })
+    expect(v.grokProjection.eligibility).toBe('eligible')
+    expect(v.grokProjection.derivedScopes).toEqual(['llm:grok:execute'])
+    expect(v.grokProjection.requiresGrokProxyEgress).toBe(true)
+    expect(v.grokBinding?.connectionKey).toBe(GROK_GRANT)
+  })
+
+  it('never changes the Codex verdict', () => {
+    const on = verdict(context(), viewFrom(eligibleConfigMap()))
+    const off = projectCodexRecipeVerdict({
+      ownSpec: codexSpec(),
+      context: context(),
+      hostAgent: { provider: 'codex-subscription', model: MODEL },
+      view: viewFrom(eligibleConfigMap()),
+      grokSubscriptionEnabled: false,
+    })
+    expect(off.projection).toEqual(on.projection)
+    expect(off.hostBinding).toEqual(on.hostBinding)
+    expect(off.hostBinding).not.toBeNull()
   })
 })
