@@ -130,6 +130,12 @@ describe('codex-subscription contract freeze', () => {
     expect(proxyDeploy).toContain(
       `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "${localContract.LIMITS.maxVisualRequestBodyBytes}"`
     )
+    expect(proxyDeploy).not.toMatch(/CODEX_IMAGE_INPUT_MODELS:/)
+    const hostConfig = readFileSync(join(repoRoot, 'mcp-host/src/config.ts'), 'utf8')
+    const proxyConfig = readFileSync(join(repoRoot, 'codex-llm-proxy/src/config.ts'), 'utf8')
+    expect(hostConfig).toMatch(/CODEX_IMAGE_INPUT_MODELS[\s\S]{0,120}split\(','\)/)
+    expect(proxyConfig).toMatch(/CODEX_IMAGE_INPUT_MODELS[\s\S]{0,120}split\(','\)/)
+    expect(architecture).toContain('Set the same list on both services')
   })
 
   it('requires the sanitized fixture and both freeze documents', () => {

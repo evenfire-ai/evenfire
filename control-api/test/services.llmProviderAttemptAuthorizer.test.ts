@@ -230,6 +230,7 @@ describe('authorizeLlmProviderAttempt', () => {
     ['png', 'attachment', false, 10 * 1024 * 1024],
     ['png', 'tool', true, 5 * 1024 * 1024],
     ['jpeg', 'attachment', true, 5 * 1024 * 1024],
+    ['jpeg', 'tool', true, 5 * 1024 * 1024],
   ] as const)(
     'carries %s from %s (tools=%s) through Host authorization and proxy projection',
     async (format, origin, withTools, imageBytes = 0) => {

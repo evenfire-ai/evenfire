@@ -72,9 +72,12 @@ an inline data URL. The shape is grounded in the official Codex client
 This source evidence is not a successful call to Evenfire's frozen endpoint.
 
 `CODEX_IMAGE_INPUT_MODELS` is an explicit, comma-separated model rollout gate in
-both Host and proxy. It defaults to empty. Set it only for the models whose
-interoperability has been independently verified, after every authorizer/proxy
-replica accepts V2. This gate is not a replacement for catalog authorization.
+both Host and proxy. It defaults to empty. Set the same list on both services:
+enabling it on Host alone still parses the proxy at 1 MiB, and enabling it on
+the proxy alone still returns `image_input_unsupported` from Host. Set it only
+for the models whose interoperability has been independently verified, after
+every authorizer/proxy replica accepts V2. This gate is not a replacement for
+catalog authorization.
 Until enabled, visual input returns `image_input_unsupported`; it is not silently
 removed and does not trigger automatic fallback. Ordinary eligible failures
 retain the existing configured fallback policy. Limit errors, including HTTP
