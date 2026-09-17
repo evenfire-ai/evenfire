@@ -16,6 +16,10 @@ const grokRepos = vi.hoisted(() => ({
   getModelState: vi.fn(),
   issueTicket: vi.fn(),
 }))
+const lockPluginWorkloadSdkRecipe = vi.hoisted(() => vi.fn())
+const getPluginWorkloadSdkProviderAttemptForUpdate = vi.hoisted(() => vi.fn())
+const pluginWorkloadSdkSpendOutcomeExists = vi.hoisted(() => vi.fn())
+const promoteReservedOauthBrokerProviderAttempt = vi.hoisted(() => vi.fn())
 
 vi.mock('../src/services/grokSubscriptionConnection.js', async () => {
   const actual = await vi.importActual<
@@ -46,6 +50,41 @@ vi.mock('../src/services/grokProviderAttemptTicket.js', async () => {
     issueRegisteredGrokExecutionTicket: grokRepos.issueTicket,
   }
 })
+
+vi.mock('../src/services/pluginWorkloadSdkDb.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/pluginWorkloadSdkDb.js')>(
+    '../src/services/pluginWorkloadSdkDb.js'
+  )
+  return {
+    ...actual,
+    lockPluginWorkloadSdkRecipe,
+    getPluginWorkloadSdkProviderAttemptForUpdate,
+    pluginWorkloadSdkSpendOutcomeExists,
+    promoteReservedOauthBrokerProviderAttempt,
+  }
+})
+
+function reservedSdkAttempt(overrides: Record<string, unknown> = {}) {
+  return {
+    id: '44444444-4444-4444-8444-444444444444',
+    invocationId: 'invocation-1',
+    recipeNamespace: 'sandbox-recipes',
+    recipeName: 'prompt-notify',
+    attemptGeneration: 1,
+    attemptIndex: 1,
+    targetRef: 'grok-primary',
+    provider: 'grok-subscription',
+    model: 'grok-4.6',
+    credentialSlot: '',
+    status: 'reserved',
+    credentialJti: null,
+    startedAt: new Date().toISOString(),
+    leaseExpiresAt: null,
+    completedAt: null,
+    usageRequestId: null,
+    ...overrides,
+  }
+}
 
 const REQUEST = {
   schemaVersion: 'grok-completion-request.v1' as const,
@@ -156,6 +195,10 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       expiresAt: new Date('2026-08-20T12:00:00.000Z'),
       claims: { jti: 'jti-ticket' },
     })
+    lockPluginWorkloadSdkRecipe.mockReset().mockResolvedValue(undefined)
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockReset()
+    pluginWorkloadSdkSpendOutcomeExists.mockReset().mockResolvedValue(false)
+    promoteReservedOauthBrokerProviderAttempt.mockReset().mockResolvedValue(true)
   })
 
   afterEach(() => {
@@ -233,6 +276,79 @@ describe('authorizeLlmProviderAttempt grok-subscription', () => {
       code: 'host_binding_mismatch',
     })
     expect(grokRepos.getConnection).not.toHaveBeenCalled()
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('binds a reserved Plugin Workload SDK attempt onto the Grok ledger row', async () => {
+    const sdkAttemptId = reservedSdkAttempt().id
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(reservedSdkAttempt())
+    const current = deps()
+    await authorizeLlmProviderAttempt(
+      claims({
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'prompt-notify',
+        hostRefs: ['sandbox-recipes/prompt-notify'],
+      }),
+      body({ pluginWorkloadSdkProviderAttemptId: sdkAttemptId, targetRef: 'grok-primary' }),
+      current
+    )
+    expect(lockPluginWorkloadSdkRecipe).toHaveBeenCalledWith(
+      expect.anything(),
+      'sandbox-recipes',
+      'prompt-notify'
+    )
+    expect(current.insertAttempt).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        pluginWorkloadSdkProviderAttemptId: sdkAttemptId,
+        callerKind: 'recipe',
+        provider: 'grok-subscription',
+      })
+    )
+    expect(promoteReservedOauthBrokerProviderAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: sdkAttemptId,
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        targetRef: 'grok-primary',
+      }),
+      expect.anything()
+    )
+  })
+
+  it('rejects a reserved SDK attempt whose provider is Codex', async () => {
+    getPluginWorkloadSdkProviderAttemptForUpdate.mockResolvedValue(
+      reservedSdkAttempt({ provider: 'codex-subscription' })
+    )
+    const current = deps()
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims({
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'prompt-notify',
+          hostRefs: ['sandbox-recipes/prompt-notify'],
+        }),
+        body({
+          pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id,
+          targetRef: 'grok-primary',
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+    expect(promoteReservedOauthBrokerProviderAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects a host caller that presents a Plugin Workload SDK attempt id', async () => {
+    const current = deps()
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'no_grant' })
+    expect(getPluginWorkloadSdkProviderAttemptForUpdate).not.toHaveBeenCalled()
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 })

@@ -89,10 +89,20 @@ if cm.count("location / {\n          return 403;") < 2:
 np = networkpolicies.read_text()
 if "name: grok-llm-proxy-ingress" not in np or "name: grok-llm-proxy-egress" not in np:
     errors.append("networkpolicies missing grok-llm-proxy ingress/egress")
-if "app: grok-llm-proxy" not in np[np.find("name: control-api-rpc-gateway"): np.find("name: grok-llm-proxy-ingress") if "name: grok-llm-proxy-ingress" in np else len(np)]:
-    gateway = np[np.find("name: control-api-rpc-gateway"):]
-    if "app: grok-llm-proxy" not in gateway.split("egress:", 1)[0]:
-        errors.append("rpc gateway ingress must admit app: grok-llm-proxy")
+docs = [chunk for chunk in np.split("\n---\n") if chunk.strip()]
+gateway = next(
+    (
+        chunk
+        for chunk in docs
+        if re.search(r"(?m)^  name: control-api-rpc-gateway\s*$", chunk)
+    ),
+    "",
+)
+ingress = ""
+if "\n  ingress:\n" in gateway:
+    ingress = gateway.split("\n  ingress:\n", 1)[1].split("\n  egress:\n", 1)[0]
+if "app: grok-llm-proxy" not in ingress:
+    errors.append("rpc gateway ingress must admit app: grok-llm-proxy")
 if "name: grok-llm-proxy-egress" not in base_kustomize.read_text():
     errors.append("base kustomization must fill grok-llm-proxy-egress except")
 

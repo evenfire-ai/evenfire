@@ -1435,15 +1435,20 @@ function sanitizeRecipeCodexAnnotation(
     [SUBSCRIPTION_CONNECTION_REF_ANNOTATION]: key,
   })
   if (recipeUsesCodexBroker(body.spec)) {
-    if (!bodyHasCodexGrantAnnotation(body)) return {}
+    if (!bodyHasCodexGrantAnnotation(body)) {
+      if (recipeUsesGrokBroker(currentSpec)) return mirrored('')
+      return {}
+    }
     const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
     const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
     const canonical = (annotations[SUBSCRIPTION_CONNECTION_REF_ANNOTATION] ?? '').trim()
     if (canonical && alias && canonical !== alias) {
       throw new RecipeGrantAnnotationDisagreeError('subscription connection annotations disagree')
     }
-    // Grok writers emit canonical only. Do not promote that leftover to a Codex grant.
-    if (!alias) return mirrored('')
+    // Grok writers emit canonical only. A missing Codex alias is leftover only
+    // when the previous spec was Grok — not when a Codex writer sent the
+    // canonical key alone.
+    if (recipeUsesGrokBroker(currentSpec) && !alias) return mirrored('')
     const incoming = readRequestedCodexRecipeGrant(body)
     return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)
   }
@@ -1455,6 +1460,8 @@ function sanitizeRecipeCodexAnnotation(
   if (bodyHasCodexGrantAnnotation(body)) {
     const annotations = recipeAnnotationStrings(body.metadata?.annotations) ?? {}
     const alias = (annotations[CODEX_CONNECTION_REF_ANNOTATION] ?? '').trim()
+    // This path is not a Codex recipe. Missing alias must not promote a
+    // canonical leftover onto the Codex alias.
     if (!alias) return mirrored('')
     const incoming = readRequestedCodexRecipeGrant(body)
     return mirrored(isCodexUnassignedConnectionKey(incoming) ? '' : incoming)

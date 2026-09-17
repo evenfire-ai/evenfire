@@ -97,6 +97,8 @@ require_file grok-llm-proxy/test/originPolicy.test.ts
 require_file control-api/test/services.grokSubscriptionOAuth.test.ts
 require_file control-api/test/services.grokProviderAttemptTicket.test.ts
 require_file control-api/test/services.grokSubscriptionConnection.realPostgres.integration.test.ts
+require_file control-api/test/pluginWorkloadSdkGrokDualLedger.realPostgres.integration.test.ts
+require_file control-api/test/services.grokProviderAttemptRedemption.realPostgres.integration.test.ts
 require_file control-api/test/services.grokProviderAttemptRedemption.test.ts
 require_file control-api/test/db.grokSubscriptionMigration.test.ts
 require_file control-api/test/services.llmProviderAttemptAuthorizer.grok.test.ts

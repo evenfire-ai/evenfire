@@ -275,6 +275,61 @@ describe.sequential('routes/admin/recipes', () => {
     })
   })
 
+  it('POST /admin/recipes — dual-writes a Codex grant sent only on the canonical key', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send({
+        metadata: {
+          name: 'codex-canonical-only',
+          annotations: { 'clerum.io/subscription-connection-ref': 'team-a' },
+        },
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(201)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-a',
+      'clerum.io/subscription-connection-ref': 'team-a',
+    })
+  })
+
+  it('PUT /admin/recipes/:name — does not promote a leftover Grok canonical key onto Codex', async () => {
+    await api
+      .post('/admin/recipes')
+      .send({
+        metadata: {
+          name: 'grok-then-codex',
+          annotations: { 'clerum.io/subscription-connection-ref': 'team-grok' },
+        },
+        spec: {
+          agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/grok-then-codex')
+      .send({
+        metadata: {
+          annotations: { 'clerum.io/subscription-connection-ref': 'team-grok' },
+        },
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': '',
+    })
+  })
+
   it('POST /admin/recipes — rejects mixed oauth-broker providers on agent and steps', async () => {
     const res = await api.post('/admin/recipes').send({
       metadata: { name: 'mixed-broker' },

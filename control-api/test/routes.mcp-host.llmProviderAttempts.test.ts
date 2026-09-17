@@ -122,6 +122,36 @@ describe('POST /api/v1/mcp-host/llm/provider-attempts/authorize', () => {
     expect(unassigned.body).toEqual({ error: 'unassigned_connection' })
   })
 
+  it('injects resolveAssignment from the live Host instead of the empty default', async () => {
+    const getResource = vi.fn().mockResolvedValue({
+      spec: {
+        model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-plus' },
+      },
+    })
+    const app = express()
+    app.use(express.json({ limit: '1mb' }))
+    const api = express.Router()
+    api.use(createMcpHostLlmProviderAttemptRoutes({ getResource } as never))
+    app.use('/api/v1', api)
+    vi.mocked(authorizer.authorizeLlmProviderAttempt).mockResolvedValueOnce({
+      providerAttemptId: '33333333-3333-4333-8333-333333333333',
+      requestHash: 'a'.repeat(64),
+      executionTicket: 'ticket.jwt',
+      expiresAt: '2026-08-20T12:00:00.000Z',
+    })
+    await request(app)
+      .post('/api/v1/mcp-host/llm/provider-attempts/authorize')
+      .set('Authorization', `Bearer ${token()}`)
+      .send({ request: { schemaVersion: 'codex-completion-request.v1' } })
+    expect(authorizer.authorizeLlmProviderAttempt).toHaveBeenCalled()
+    const injected = vi.mocked(authorizer.authorizeLlmProviderAttempt).mock.calls[0]?.[2]
+    expect(injected?.resolveAssignment).toEqual(expect.any(Function))
+    await expect(injected!.resolveAssignment!('research-host')).resolves.toEqual({
+      liveBrokerProviders: ['codex-subscription'],
+      liveConnectionRef: 'team-plus',
+    })
+  })
+
   it('returns the authorize contract without leaking tokens', async () => {
     const app = buildApp()
     vi.mocked(authorizer.authorizeLlmProviderAttempt).mockResolvedValueOnce({
@@ -159,6 +189,20 @@ describe('resolveHostAssignedConnectionKey', () => {
     await expect(resolveHostAssignedAssignment(gateway, 'agent-a')).resolves.toEqual({
       liveBrokerProviders: ['codex-subscription'],
       liveConnectionRef: 'team-plus',
+    })
+  })
+
+  it('reads connectionRef from a Grok Host', async () => {
+    const gateway = {
+      getResource: vi.fn().mockResolvedValue({
+        spec: {
+          model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-grok' },
+        },
+      }),
+    }
+    await expect(resolveHostAssignedAssignment(gateway, 'agent-g')).resolves.toEqual({
+      liveBrokerProviders: ['grok-subscription'],
+      liveConnectionRef: 'team-grok',
     })
   })
 
