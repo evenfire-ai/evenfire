@@ -587,7 +587,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await pr2RuntimeClient.query('SAVEPOINT prohibited_delete')
       await expect(
         pr2RuntimeClient.query('DELETE FROM workflow_authority_bindings WHERE id = $1', [bindingId])
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
       await pr2RuntimeClient.query('ROLLBACK TO SAVEPOINT prohibited_delete')
     } finally {
       await pr2RuntimeClient.query('ROLLBACK').catch(() => undefined)
@@ -701,7 +701,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await linkRuntimeClient.query('SAVEPOINT deny_link_truncate')
       await expect(
         linkRuntimeClient.query('TRUNCATE TABLE gfs_desktop_operator_links')
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
       await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_truncate')
 
       await linkRuntimeClient.query('SAVEPOINT deny_link_delete')
@@ -709,7 +709,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
         linkRuntimeClient.query(`DELETE FROM gfs_desktop_operator_links WHERE user_id = $1`, [
           linkUserId,
         ])
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
       await linkRuntimeClient.query('ROLLBACK TO SAVEPOINT deny_link_delete')
     } finally {
       await linkRuntimeClient.query('ROLLBACK')
@@ -853,7 +853,7 @@ describeRealPostgres('control-api real Postgres migrations', () => {
       await promptPrivilegeClient.query('SET LOCAL ROLE trace_maintenance_runtime')
       await expect(
         promptPrivilegeClient.query('SELECT * FROM governed_approval_prompt_history')
-      ).rejects.toThrow(/permission denied/)
+      ).rejects.toMatchObject({ code: '42501' })
     } finally {
       await promptPrivilegeClient.query('ROLLBACK')
       promptPrivilegeClient.release()
