@@ -9,6 +9,15 @@ afterEach(cleanup)
 beforeEach(() => vi.clearAllMocks())
 
 describe('MarketplaceOrgImages', () => {
+  it('removes card-body padding when embedded below the Marketplace tabs', () => {
+    vi.mocked(api.listOrgImages).mockReturnValue(
+      new Promise(() => undefined) as ReturnType<typeof api.listOrgImages>
+    )
+    const { container } = render(<MarketplaceOrgImages embedded hideHeader orgScope="@acme" />)
+
+    expect(container.querySelector('.cu-marketplace-tab-body')).toBeInTheDocument()
+  })
+
   it('lists real image repos + tags with their full coordinate (read-only)', async () => {
     vi.mocked(api.listOrgImages).mockResolvedValue({
       org: 'acme',
