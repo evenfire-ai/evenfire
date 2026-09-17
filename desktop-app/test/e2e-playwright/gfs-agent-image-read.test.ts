@@ -100,7 +100,11 @@ function visualModelFixture(agent: ReturnType<typeof discoverManagedGfsAgent>) {
     )
   }
   return {
-    apply: () => mutate(original, selected),
+    apply: () => {
+      mutate(original, selected)
+      expect(read()).toEqual(selected)
+      test.info().annotations.push({ type: 'visual-model', description: `${provider}/${model}` })
+    },
     restore: () => {
       const current = read()
       if (
@@ -184,9 +188,15 @@ async function uploadAndPreview(
   await expect(
     browser.getByRole('button', { name: `Open ${folder.childName}`, exact: true })
   ).toBeVisible()
-  const chooser = page.waitForEvent('filechooser')
-  await browser.getByRole('button', { name: 'Upload file', exact: true }).click()
-  await (await chooser).setFiles(filePath)
+  // Chromium exposes the visually-hidden file input as a second button with
+  // the same accessible name. Visible text identifies the actual user action.
+  const upload = browser.getByRole('button').filter({ hasText: /^Upload file$/ })
+  await expect(upload).toBeVisible()
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser', { timeout: 15_000 }),
+    upload.click(),
+  ])
+  await chooser.setFiles(filePath)
   await expect(page.getByText(`Uploaded ${fileName}`, { exact: true })).toBeVisible({
     timeout: 60_000,
   })
@@ -228,7 +238,7 @@ async function freshChat(page: Page, agentName: string): Promise<void> {
   await expect(page.getByTestId('chat-input')).toBeVisible()
 }
 
-async function sendRead(page: Page, prompt: string): Promise<void> {
+async function sendRead(page: Page, prompt: string, denied = false): Promise<void> {
   await page.getByTestId('chat-input').fill(prompt)
   await page.getByTestId('send-button').click()
   // This button is rendered only for a completed task with tool steps. A
@@ -238,19 +248,27 @@ async function sendRead(page: Page, prompt: string): Promise<void> {
   await expect(page.getByTestId('agent-response')).toHaveCount(1)
   await complete.click()
   await expect(complete).toHaveAttribute('aria-expanded', 'true')
-  const reads = page.getByTestId(/^step-row-/).filter({ hasText: /\bgfs_read\b/ })
+  const reads = page.getByTestId(/^step-row-/).filter({ hasText: 'gfs_read' })
   await expect(reads).not.toHaveCount(0)
   // The completed list no longer changes ordering. Open every matching call,
   // including legitimate retries, rather than selecting a positional last row.
-  for (const row of await reads.all()) await row.click()
+  // Failed tool rows expand automatically. Clicking them in the negative guard
+  // would hide the denial that the user already sees.
+  if (!denied) for (const row of await reads.all()) await row.click()
 }
 
-function parseVisualAnswer(raw: string) {
-  const text = raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/, '')
-  return JSON.parse(text) as unknown
+async function visualAnswer(page: Page) {
+  // The response article also contains the stepper. Read its single visible
+  // message body, not the tool metadata and timings that follow it.
+  const body = page.getByTestId('agent-response').locator('.message-block')
+  await expect(body).toHaveCount(1)
+  const raw = await body.innerText()
+  // The business oracle is the JSON's visual facts, independent of a rendered
+  // code block's language label or copy control.
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error('The visible answer contains no JSON object')
+  return JSON.parse(raw.slice(start, end + 1)) as unknown
 }
 
 test('GFS image bytes reach vision after visible upload; a host without a grant cannot read another image', async () => {
@@ -266,6 +284,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
   const local = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-visual-'))
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
   let modelFixture: ReturnType<typeof visualModelFixture>
+  let journeyFailure: unknown
   try {
     modelFixture = visualModelFixture(agent)
     modelFixture?.apply()
@@ -332,7 +351,7 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       ).toBeVisible()
       const response = page.getByTestId('agent-response')
       await expect(response).toBeVisible()
-      expect(parseVisualAnswer(await response.innerText())).toEqual(visual.expected)
+      expect(await visualAnswer(page)).toEqual(visual.expected)
     })
     await test.step('direct-resource negative guard does not disclose an ungranted image', async () => {
       const deniedVisual = createGfsVisualImageFixture()
@@ -363,7 +382,8 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
         page,
         `Call clerum__gfs_read with drive main and resourceId ${record!.resourceId}. ` +
           'Attempt this read even if discovery does not list it. Then return only JSON ' +
-          'with status "denied" if access was denied. Do not claim to see an image you cannot read.'
+          'with status "denied" if access was denied. Do not claim to see an image you cannot read.',
+        true
       )
       await expect(
         page.getByTestId('step-output-panel').filter({ hasText: /gfsc 403: forbidden/ })
@@ -371,10 +391,13 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       await expect(
         page.getByTestId('step-output-panel').filter({ hasText: /"delivery"\s*:\s*"image_input"/ })
       ).toHaveCount(0)
-      expect(parseVisualAnswer(await page.getByTestId('agent-response').innerText())).toEqual({
+      expect(await visualAnswer(page)).toEqual({
         status: 'denied',
       })
     })
+  } catch (error) {
+    journeyFailure = error
+    throw error
   } finally {
     const cleanupErrors: unknown[] = []
     try {
@@ -401,6 +424,8 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
       cleanupErrors.push(error)
     }
     if (cleanupErrors.length)
-      throw new Error(`GFS visual fixture cleanup failed in ${cleanupErrors.length} operations`)
+      throw new Error(`GFS visual fixture cleanup failed in ${cleanupErrors.length} operations`, {
+        cause: journeyFailure,
+      })
   }
 })
