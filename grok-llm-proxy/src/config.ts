@@ -32,6 +32,29 @@ function requiredPem(name: string, raw: string | undefined): string {
   return value
 }
 
+// Fail at startup instead of at the first redeem. Messages name the variable
+// only; the raw value (URL or service token) is never echoed.
+function requiredHttpUrl(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  return value
+}
+
+function requiredNonEmpty(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  return value
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyConfig {
   return {
     runtimePort: requiredPositiveInt(
@@ -67,8 +90,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): GrokLlmProxyCo
     jwtIssuer: env.GROK_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('GROK_LLM_PROXY_JWT_PUBLIC_KEY', env.GROK_LLM_PROXY_JWT_PUBLIC_KEY),
     executionEnabled: env.GROK_LLM_PROXY_EXECUTION_ENABLED === 'true',
-    controlApiBaseUrl: env.GROK_LLM_PROXY_CONTROL_API_URL?.trim() || '',
+    controlApiBaseUrl: requiredHttpUrl(
+      'GROK_LLM_PROXY_CONTROL_API_URL',
+      env.GROK_LLM_PROXY_CONTROL_API_URL
+    ),
     controlApiServiceName: env.GROK_LLM_PROXY_CONTROL_API_SERVICE?.trim() || 'grok-llm-proxy',
-    controlApiServiceToken: env.GROK_LLM_PROXY_CONTROL_API_TOKEN?.trim() || '',
+    controlApiServiceToken: requiredNonEmpty(
+      'GROK_LLM_PROXY_CONTROL_API_TOKEN',
+      env.GROK_LLM_PROXY_CONTROL_API_TOKEN
+    ),
   }
 }

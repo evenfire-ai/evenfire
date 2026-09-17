@@ -4,7 +4,12 @@ import {
   parseGrokCompletionRequestV1,
 } from '@clerum/grok-provider-attempt-contract'
 import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
-import { GrokTransportError, streamGrokCompletion } from '../src/grokTransport.js'
+import {
+  GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED,
+  GrokTransportError,
+  type StreamGrokCompletionInput,
+  streamGrokCompletion,
+} from '../src/grokTransport.js'
 import { GROK_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 
 const REQUEST = {
@@ -14,6 +19,12 @@ const REQUEST = {
   provider: 'grok-subscription' as const,
   model: 'gpt-5.1',
   messages: [{ role: 'user' as const, content: 'hello' }],
+}
+
+type FetchInput = string | URL | Request
+
+function headerOf(init: RequestInit | undefined, name: string): string | undefined {
+  return (init?.headers as Record<string, string> | undefined)?.[name]
 }
 
 const REQUEST_HASH = hashGrokCompletionRequestV1(REQUEST)
@@ -57,6 +68,105 @@ function sseResponse(
 }
 
 describe('streamGrokCompletion', () => {
+  it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
+    const encoder = new TextEncoder()
+    const events = [
+      'data: {"type":"response.output_text.delta","delta":"one"}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"two"}\n\n',
+      'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+    ]
+    let pulls = 0
+    const fetchFn = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const next = events[pulls]
+            pulls += 1
+            if (next === undefined) controller.close()
+            else controller.enqueue(encoder.encode(next))
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    })
+    let releaseDrain: (() => void) | undefined
+    const drained = new Promise<void>(resolve => {
+      releaseDrain = resolve
+    })
+    const frames: unknown[] = []
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-drain',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-drain',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-drain',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-drain',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        frames.push(frame)
+        // First frame fills the client buffer; later frames are accepted.
+        return frames.length === 1 ? drained : undefined
+      },
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(frames).toEqual([{ type: 'text', text: 'one' }])
+    expect(pulls).toBe(1)
+    releaseDrain?.()
+    const result = await pending
+    expect(result.outcome).toBe('success')
+    expect(frames).toEqual([
+      { type: 'text', text: 'one' },
+      { type: 'text', text: 'two' },
+    ])
+  })
+
+  it('does not redeem when the client aborted before the attempt was dispatched', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-pre-abort',
+      outcome: 'canceled' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    const abort = new AbortController()
+    abort.abort()
+    const result = await streamGrokCompletion({
+      executionTicket: 'ticket-pre-abort',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-pre-abort',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-pre-abort',
+      },
+      signal: abort.signal,
+      redeem,
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(result.outcome).toBe('canceled')
+    expect(redeem).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(finalize).not.toHaveBeenCalled()
+  })
+
   it.each(['response.failed', 'unterminated'])(
     'does not emit partial tool calls after %s',
     async terminal => {
@@ -83,9 +193,11 @@ describe('streamGrokCompletion', () => {
           outcome: 'success' as const,
           duplicate: false,
         })),
-        fetchFn: vi.fn(async () => sseResponse(frames)),
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
       if (terminal === 'unterminated') expect((await pending).outcome).toBe('unknown')
       else await expect(pending).rejects.toThrow(/upstream response failed/)
@@ -123,9 +235,11 @@ describe('streamGrokCompletion', () => {
         },
         redeem: vi.fn(async () => redeemSuccess()),
         finalize,
-        fetchFn: vi.fn(async () => sseResponse(frames)),
+        fetchFn: vi.fn(async (_url: FetchInput, _init?: RequestInit) => sseResponse(frames)),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
       if (count === 64) {
         expect((await pending).outcome).toBe('success')
@@ -147,7 +261,7 @@ describe('streamGrokCompletion', () => {
       duplicate: false,
     }))
     const frames: unknown[] = []
-    const fetchFn = vi.fn(async (url: string) => {
+    const fetchFn = vi.fn(async (url: FetchInput, _init?: RequestInit) => {
       expect(url).toBe(GROK_COMPLETIONS_ORIGIN)
       return sseResponse([
         'data: {"type":"response.output_text.delta","delta":"hi"}\n\n',
@@ -171,7 +285,9 @@ describe('streamGrokCompletion', () => {
       finalize,
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => frames.push(frame),
+      onFrame: frame => {
+        frames.push(frame)
+      },
     })
 
     expect(redeem).toHaveBeenCalledOnce()
@@ -190,17 +306,17 @@ describe('streamGrokCompletion', () => {
         receipt: expect.objectContaining({ outcome: 'success', requestHash: REQUEST_HASH }),
       })
     )
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'authorization'))).toContain(
       accessTokenFor('live')
     )
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['user-agent']).toBe('evenfire-grok-subscription')
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['openai-beta']).toBeUndefined()
-    expect(fetchFn.mock.calls[0]?.[1]?.headers?.['x-xai-token-auth']).toBeUndefined()
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'user-agent')).toBe('evenfire-grok-subscription')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'openai-beta')).toBeUndefined()
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'x-xai-token-auth')).toBeUndefined()
     expect(String(fetchFn.mock.calls[0]?.[1]?.body)).toContain('"store":false')
   })
 
   it('flushes a completed event that arrives without a trailing blank line', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1}}}',
       ])
@@ -230,7 +346,7 @@ describe('streamGrokCompletion', () => {
   })
 
   it('parses CRLF-delimited SSE frames', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.completed","response":{"usage":{"input_tokens":4,"output_tokens":5}}}\r\n\r\n',
       ])
@@ -260,7 +376,9 @@ describe('streamGrokCompletion', () => {
   })
 
   it('maps upstream 402/403 to provider_unavailable', async () => {
-    const fetchFn = vi.fn(async () => new Response('paywall', { status: 403 }))
+    const fetchFn = vi.fn(
+      async (_url: FetchInput, _init?: RequestInit) => new Response('paywall', { status: 403 })
+    )
     await expect(
       streamGrokCompletion({
         executionTicket: 'ticket-1',
@@ -276,7 +394,7 @@ describe('streamGrokCompletion', () => {
         redeem: async () => redeemSuccess({ accessToken: 'opaque-token' }),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn,
@@ -326,7 +444,7 @@ describe('streamGrokCompletion', () => {
           redeemSuccess({ transport: { ...redeemSuccess().transport, servedModel: 'other' } }),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn: vi.fn(),
@@ -355,7 +473,7 @@ describe('streamGrokCompletion', () => {
         redeem: async () => redeemSuccess(),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
         fetchFn,
@@ -388,7 +506,7 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -414,10 +532,12 @@ describe('streamGrokCompletion', () => {
         redeem: async () => redeemSuccess(),
         finalize: vi.fn(async () => ({
           providerAttemptId: 'att-1',
-          outcome: 'error',
+          outcome: 'error' as const,
           duplicate: false,
         })),
-        fetchFn: vi.fn(async () => new Response('denied', { status: 401 })),
+        fetchFn: vi.fn(
+          async (_url: FetchInput, _init?: RequestInit) => new Response('denied', { status: 401 })
+        ),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
     ).rejects.toMatchObject({ code: 'connection_unavailable' })
@@ -475,7 +595,7 @@ describe('streamGrokCompletion', () => {
       tokens.push(input.executionTicket)
       return redeemSuccess({ accessToken: accessTokenFor(input.executionTicket) })
     })
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     const ticket = {
@@ -493,7 +613,7 @@ describe('streamGrokCompletion', () => {
       redeem,
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -507,23 +627,23 @@ describe('streamGrokCompletion', () => {
       redeem,
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
     })
     expect(tokens).toEqual(['t-a', 't-b'])
-    expect(String(fetchFn.mock.calls[0]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'authorization'))).toContain(
       accessTokenFor('t-a')
     )
-    expect(String(fetchFn.mock.calls[1]?.[1]?.headers?.['authorization'])).toContain(
+    expect(String(headerOf(fetchFn.mock.calls[1]?.[1], 'authorization'))).toContain(
       accessTokenFor('t-b')
     )
   })
 
   it('does not retry after an ambiguous upstream response', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.output_text.delta","delta":"partial"}\n\n'])
     )
     const result = await streamGrokCompletion({
@@ -540,7 +660,7 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'unknown',
+        outcome: 'unknown' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -576,7 +696,7 @@ describe('streamGrokCompletion', () => {
       transportHints: { promptCacheKey: 'sess-1' },
     }
     const requestHash = hashGrokCompletionRequestV1(request)
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
@@ -593,7 +713,7 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -695,7 +815,9 @@ describe('streamGrokCompletion', () => {
       }),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => emitted.push(frame),
+      onFrame: frame => {
+        emitted.push(frame)
+      },
     })
     expect(result.outcome).toBe('success')
     expect(emitted).toContainEqual({ type: 'tool_call', id: 'new-call', name, arguments: {} })
@@ -744,7 +866,9 @@ describe('streamGrokCompletion', () => {
         finalize,
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-        onFrame: frame => emitted.push(frame),
+        onFrame: frame => {
+          emitted.push(frame)
+        },
       })
     ).rejects.toMatchObject({
       code: 'provider_unavailable',
@@ -760,7 +884,7 @@ describe('streamGrokCompletion', () => {
   })
 
   it('omits Notify-like generation fields on the Responses wire', async () => {
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
@@ -777,7 +901,7 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -791,7 +915,7 @@ describe('streamGrokCompletion', () => {
     expect(body.input).toEqual([{ role: 'user', content: 'hello' }])
   })
 
-  it('keeps analysis instructions and binds max_output_tokens on the Grok wire', async () => {
+  it('keeps analysis instructions, binds max_output_tokens, and withholds probe-gated temperature', async () => {
     const request = {
       ...REQUEST,
       messages: [
@@ -801,7 +925,7 @@ describe('streamGrokCompletion', () => {
       generation: { maxOutputTokens: 4096, temperature: 0.2 },
     }
     const requestHash = hashGrokCompletionRequestV1(request)
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
     )
     await streamGrokCompletion({
@@ -818,7 +942,7 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
@@ -828,17 +952,23 @@ describe('streamGrokCompletion', () => {
     expect(body.instructions).toBe('review this repository')
     expect(body.input).toEqual([{ role: 'user', content: 'findings' }])
     expect(body.max_output_tokens).toBe(4096)
-    expect(body.temperature).toBe(0.2)
+    // B-M10: temperature stays in the authorize hash but is not sent upstream
+    // until a live SuperGrok probe confirms /v1/responses accepts it.
+    expect(GROK_UPSTREAM_TEMPERATURE_PROBE_CONFIRMED).toBe(false)
+    expect(body).not.toHaveProperty('temperature')
+    expect(hashGrokCompletionRequestV1(request)).toBe(requestHash)
     expect(body).not.toHaveProperty('text')
     expect(body).not.toHaveProperty('service_tier')
   })
 
   it('maps upstream 400 to invalid_request and finalizes error without usage', async () => {
-    const finalize = vi.fn(async () => ({
-      providerAttemptId: 'att-1',
-      outcome: 'error' as const,
-      duplicate: false,
-    }))
+    const finalize = vi.fn(
+      async (_input: Parameters<StreamGrokCompletionInput['finalize']>[0]) => ({
+        providerAttemptId: 'att-1',
+        outcome: 'error' as const,
+        duplicate: false,
+      })
+    )
     await expect(
       streamGrokCompletion({
         executionTicket: 'ticket-1',
@@ -853,7 +983,10 @@ describe('streamGrokCompletion', () => {
         },
         redeem: async () => redeemSuccess(),
         finalize,
-        fetchFn: vi.fn(async () => new Response('bad request', { status: 400 })),
+        fetchFn: vi.fn(
+          async (_url: FetchInput, _init?: RequestInit) =>
+            new Response('bad request', { status: 400 })
+        ),
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       })
     ).rejects.toMatchObject({ code: 'invalid_request' })
@@ -867,7 +1000,7 @@ describe('streamGrokCompletion', () => {
 
   it('emits a tool call only after argument deltas complete', async () => {
     const frames: unknown[] = []
-    const fetchFn = vi.fn(async () =>
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
       sseResponse([
         'data: {"type":"response.output_item.added","item":{"type":"function_call","id":"item-1","call_id":"call-9","name":"lookup","arguments":""}}\n\n',
         'data: {"type":"response.function_call_arguments.delta","item_id":"item-1","delta":"{\\"q\\":"}}\n\n',
@@ -890,12 +1023,14 @@ describe('streamGrokCompletion', () => {
       redeem: async () => redeemSuccess(),
       finalize: vi.fn(async () => ({
         providerAttemptId: 'att-1',
-        outcome: 'success',
+        outcome: 'success' as const,
         duplicate: false,
       })),
       fetchFn,
       lookup: async () => [{ address: '1.2.3.4', family: 4 }],
-      onFrame: frame => frames.push(frame),
+      onFrame: frame => {
+        frames.push(frame)
+      },
     })
     expect(frames).toEqual([
       { type: 'tool_call', id: 'call-9', name: 'lookup', arguments: { q: 'x' } },

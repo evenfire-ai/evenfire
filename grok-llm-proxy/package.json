@@ -8,9 +8,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && npm run typecheck:test",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "start": "node dist/main.js",
-    "test": "vitest run",
+    "test": "npm run typecheck:test && vitest run",
     "test:watch": "vitest"
   },
   "license": "SEE LICENSE IN LICENSE",

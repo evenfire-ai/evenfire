@@ -35,23 +35,36 @@ export class StreamGate {
   private queued = 0
 
   constructor(
-    private readonly maxConcurrent = STREAM_LIMITS.maxConcurrentStreams,
-    private readonly maxQueued = STREAM_LIMITS.maxQueuedRequests
+    private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
+    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
   ) {}
 
-  async acquire(): Promise<() => void> {
+  /**
+   * Take a stream slot. When `signal` aborts (client disconnected) while the
+   * caller is still queued, the waiter is rejected and its queue slot freed, so
+   * a dropped client never proceeds to redeem an attempt.
+   */
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) throw new RequestLimitError('stream request was aborted')
     if (this.running >= this.maxConcurrent) {
       if (this.queued >= this.maxQueued) throw new RequestLimitError('stream queue is full')
       this.queued += 1
       try {
-        await new Promise<void>(resolve => {
+        await new Promise<void>((resolve, reject) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          const onAbort = () => {
+            if (timer !== undefined) clearTimeout(timer)
+            reject(new RequestLimitError('stream request was aborted'))
+          }
           const wait = () => {
             if (this.running < this.maxConcurrent) {
+              signal?.removeEventListener('abort', onAbort)
               resolve()
               return
             }
-            setTimeout(wait, 10)
+            timer = setTimeout(wait, 10)
           }
+          signal?.addEventListener('abort', onAbort, { once: true })
           wait()
         })
       } finally {

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 // Conservative standard OpenAI function-name envelope. This is not evidence
-// that the Grok /grok/responses endpoint rejects wider canonical MCP names.
+// that the Grok /v1/responses endpoint rejects wider canonical MCP names.
 const wireNamePattern = /^[A-Za-z0-9_-]{1,64}$/
 
 export class ToolNameMap {

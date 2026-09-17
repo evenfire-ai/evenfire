@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest'
 import jwt from 'jsonwebtoken'
 import { generateKeyPairSync } from 'node:crypto'
 import request from 'supertest'
+import {
+  hashGrokCompletionRequestV1,
+  parseGrokCompletionRequestV1,
+} from '@clerum/grok-provider-attempt-contract'
 import { verifyAdminPermit } from '../src/auth/adminPermitVerifier.js'
 import { verifyExecutionTicket } from '../src/auth/executionTicketVerifier.js'
 import { type GrokLlmProxyConfig, loadConfig } from '../src/config.js'
+import { ControlApiClient, ControlApiClientError } from '../src/controlApiClient.js'
 import { createProxyApps } from '../src/server.js'
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', {
@@ -283,4 +288,160 @@ describe('grok-llm-proxy security surface', () => {
       })
     ).toThrow(/bounded positive integer/)
   })
+})
+
+describe('grok-llm-proxy execution kill switch', () => {
+  const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
+
+  function validCompletionBody(): Record<string, unknown> {
+    const raw = {
+      schemaVersion: 'grok-completion-request.v1',
+      requestId: 'req-kill-switch',
+      idempotencyKey: 'idem-kill-switch',
+      provider: 'grok-subscription',
+      model: 'gpt-5.1',
+      messages: [{ role: 'user', content: 'hello' }],
+    }
+    const parsed = parseGrokCompletionRequestV1(raw)
+    if (!parsed.ok) throw new Error(parsed.message)
+    const requestHash = hashGrokCompletionRequestV1(parsed.value)
+    const executionTicket = sign(
+      {
+        jti: '33333333-3333-4333-8333-333333333333',
+        typ: 'grok-execution-ticket',
+        hostRef: 'research-host',
+        model: 'gpt-5.1',
+        requestHash,
+        providerAttemptId: 'att-kill-switch',
+      },
+      'grok-llm-proxy'
+    )
+    return { executionTicket, requestHash, request: raw }
+  }
+
+  function recordingClient(): { client: ControlApiClient; redeems: unknown[] } {
+    const redeems: unknown[] = []
+    const client = {
+      async redeem(input: unknown) {
+        redeems.push(input)
+        throw new ControlApiClientError('no_grant', 'no grant in kill-switch test')
+      },
+      async finalize() {
+        throw new Error('finalize must not run in kill-switch test')
+      },
+    } as unknown as ControlApiClient
+    return { client, redeems }
+  }
+
+  it('returns 404 disabled for a fully valid runtime JWT + ticket when execution is disabled', async () => {
+    const body = validCompletionBody()
+
+    // Liveness witness: the identical request reaches redeem when enabled.
+    const enabled = recordingClient()
+    const live = createProxyApps(config({ executionEnabled: true, maxBodyBytes: 65_536 }), {
+      controlApiClient: enabled.client,
+      lookup,
+    })
+    const reached = await request(live.runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(body)
+    expect(reached.status).toBe(403)
+    expect(JSON.parse(reached.text)).toEqual({ error: 'no_grant' })
+    expect(enabled.redeems).toHaveLength(1)
+
+    const disabled = recordingClient()
+    const off = createProxyApps(config({ executionEnabled: false, maxBodyBytes: 65_536 }), {
+      controlApiClient: disabled.client,
+      lookup,
+    })
+    const res = await request(off.runtimeApp)
+      .post('/internal/runtime/v1/grok/completions')
+      .set('Authorization', `Bearer ${platformToken()}`)
+      .send(body)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+    expect(disabled.redeems).toHaveLength(0)
+  })
+
+  it('returns 404 disabled for a valid admin permit when execution is disabled', async () => {
+    const upstream = () =>
+      new Response(JSON.stringify({ data: [{ id: 'gpt-5.1' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+
+    // Liveness witness: the identical admin call reaches the catalog upstream when enabled.
+    let enabledCalls = 0
+    const live = createProxyApps(config({ executionEnabled: true, maxBodyBytes: 65_536 }), {
+      fetchFn: (async () => {
+        enabledCalls += 1
+        return upstream()
+      }) as typeof fetch,
+      lookup,
+    })
+    const reached = await request(live.adminApp)
+      .post('/internal/admin/v1/grok/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send({ accessToken: 'tok' })
+    expect(reached.status).toBe(200)
+    expect(reached.body.outcome).toBe('ready')
+    expect(enabledCalls).toBe(1)
+
+    let disabledCalls = 0
+    const off = createProxyApps(config({ executionEnabled: false, maxBodyBytes: 65_536 }), {
+      fetchFn: (async () => {
+        disabledCalls += 1
+        return upstream()
+      }) as typeof fetch,
+      lookup,
+    })
+    const res = await request(off.adminApp)
+      .post('/internal/admin/v1/grok/models')
+      .set('Authorization', `Bearer ${adminPermit()}`)
+      .send({ accessToken: 'tok' })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+    expect(disabledCalls).toBe(0)
+  })
+})
+
+describe('grok-llm-proxy startup config', () => {
+  const base = {
+    GROK_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
+    GROK_LLM_PROXY_CONTROL_API_URL:
+      'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
+    GROK_LLM_PROXY_CONTROL_API_TOKEN: 'dev-grok-llm-proxy-token',
+  }
+
+  it('loads a complete environment', () => {
+    const loaded = loadConfig(base)
+    expect(loaded.controlApiBaseUrl).toBe(base.GROK_LLM_PROXY_CONTROL_API_URL)
+    expect(loaded.controlApiServiceToken).toBe('dev-grok-llm-proxy-token')
+    expect(loaded.controlApiServiceName).toBe('grok-llm-proxy')
+  })
+
+  it.each([undefined, '', '   '])('fails at startup when the control-api URL is %j', value => {
+    expect(() => loadConfig({ ...base, GROK_LLM_PROXY_CONTROL_API_URL: value })).toThrow(
+      /GROK_LLM_PROXY_CONTROL_API_URL/
+    )
+  })
+
+  it.each(['not a url', 'ftp://control-api/api/v1', 'file:///etc/passwd'])(
+    'fails at startup when the control-api URL %j is not http(s)',
+    value => {
+      expect(() => loadConfig({ ...base, GROK_LLM_PROXY_CONTROL_API_URL: value })).toThrow(
+        /GROK_LLM_PROXY_CONTROL_API_URL/
+      )
+    }
+  )
+
+  it.each([undefined, '', '   '])(
+    'fails at startup when the control-api service token is %j',
+    value => {
+      expect(() => loadConfig({ ...base, GROK_LLM_PROXY_CONTROL_API_TOKEN: value })).toThrow(
+        /GROK_LLM_PROXY_CONTROL_API_TOKEN/
+      )
+    }
+  )
 })

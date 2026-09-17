@@ -42,6 +42,7 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.origins.catalog).toBe(GROK_CATALOG_ORIGIN)
     expect(fixture.origins.oauthDevice).toBe('https://auth.x.ai/oauth2/device/code')
     expect(fixture.origins.oauthToken).toBe('https://auth.x.ai/oauth2/token')
+    expect(fixture.origins.oauthRevoke).toBe('https://auth.x.ai/oauth2/revoke')
     expect(fixture.supportedOperations).not.toContain('oauth_browser')
     expect(fixture.supportedOperations).toContain('oauth_device')
     expect(fixture.limits.maxToolCalls).toBe(LIMITS.maxToolCalls)
@@ -55,5 +56,24 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.forbiddenOrigins).toEqual(expect.arrayContaining(['https://api.x.ai']))
     expect(GROK_COMPLETIONS_ORIGIN).not.toContain('api.x.ai')
     expect(GROK_CATALOG_ORIGIN).not.toContain('api.x.ai')
+  })
+
+  it('mirrors the exact OAuth origins control-api dials, including revoke', () => {
+    // control-api owns the OAuth client; the proxy never dials auth.x.ai. Cross-
+    // check the frozen fixture against control-api's exported constants by
+    // source so a drift in either side fails here without importing control-api.
+    const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
+      origins: Record<string, string>
+    }
+    const oauthSource = readFileSync(
+      join(here, '../../control-api/src/services/grokSubscriptionOAuth.ts'),
+      'utf8'
+    )
+    const constant = (name: string): string | undefined =>
+      new RegExp(`export const ${name} = '([^']+)'`).exec(oauthSource)?.[1]
+    expect(constant('GROK_OAUTH_DEVICE_URL')).toBe(fixture.origins.oauthDevice)
+    expect(constant('GROK_OAUTH_TOKEN_URL')).toBe(fixture.origins.oauthToken)
+    expect(constant('GROK_OAUTH_REVOKE_URL')).toBe(fixture.origins.oauthRevoke)
+    expect(fixture.origins.oauthRevoke).toBe('https://auth.x.ai/oauth2/revoke')
   })
 })

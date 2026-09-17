@@ -287,6 +287,7 @@ export function createApprovedToolsUpstream() {
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
       definitionCount: number
+      explicitNonStrictCount: number
       definitionBytes: number
       inputBytes: number
       connectorDefinitionCount: number
@@ -343,6 +344,7 @@ export function createApprovedToolsUpstream() {
       ).length
       evidence.requests.push({
         definitionCount: tools.length,
+        explicitNonStrictCount: tools.filter(tool => tool.strict === false).length,
         definitionBytes: Buffer.byteLength(JSON.stringify(tools)),
         inputBytes: Buffer.byteLength(JSON.stringify(payload.input)),
         connectorDefinitionCount,
