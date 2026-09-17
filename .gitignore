@@ -145,3 +145,8 @@ dist-public/
 # Rendered from patches/k8s-api-ip.yaml.template at setup time — the IP is
 # machine-specific, so the rendered file must never be tracked.
 deploy/overlays/minikube/patches/k8s-api-ip.yaml
+
+# Rendered from patches/llm-egress-cluster-cidrs.yaml.template — the pod/Service
+# and apiserver CIDRs are environment-specific, so the rendered file (which turns
+# on HCC's strong egress-broker guard) must never be tracked.
+deploy/overlays/minikube/patches/llm-egress-cluster-cidrs.yaml

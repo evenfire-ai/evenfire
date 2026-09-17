@@ -1161,6 +1161,11 @@ fi
 # 6b. Deploy via kustomize
 log "Refreshing minikube K8s API endpoint CIDRs..."
 CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+# patches/llm-egress-cluster-cidrs.yaml is the sibling GENERATED, gitignored
+# patch (HCC's fail-closed egress-broker guard), also listed in the overlay's
+# patchesStrategicMerge, so it must be rendered wherever k8s-api-ip is or the
+# overlay fails to build on the missing file.
+CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-cluster-cidrs.sh"
 # patches/k8s-api-ip.yaml is GENERATED and gitignored -- overlays/minikube
 # commits only the .template -- and overlays/minikube-ghcr renders ../minikube,
 # which patches with it.
@@ -1176,6 +1181,7 @@ CONTEXT="${PROFILE}" OVERLAY_DIR="${ACTIVE_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_D
 PROJECT_MINIKUBE_KUSTOMIZE_DIR="${PROJECT_DIR}/deploy/overlays/minikube"
 if [ "$ACTIVE_MINIKUBE_KUSTOMIZE_DIR" != "$PROJECT_MINIKUBE_KUSTOMIZE_DIR" ]; then
   CONTEXT="${PROFILE}" OVERLAY_DIR="${PROJECT_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-k8s-api-ip.sh"
+  CONTEXT="${PROFILE}" OVERLAY_DIR="${PROJECT_MINIKUBE_KUSTOMIZE_DIR}" "${PROJECT_DIR}/deploy/scripts/minikube-detect-cluster-cidrs.sh"
 fi
 ok "Minikube K8s API CIDRs refreshed"
 

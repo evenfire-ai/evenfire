@@ -1,0 +1,43 @@
+# Baseline default-deny (INGRESS + EGRESS) for the llm-egress namespace.
+#
+# The llm-egress namespace holds the per-(Host, local openai-compatible slot)
+# egress brokers HCC provisions dynamically (openaiEgressBrokerReconciler): one
+# Deployment+Service+ConfigMap+Secret mirror plus the three narrow allow-policies
+# HCC emits per broker — the `/32` broker→LAN egress, the mcp-host→broker
+# ingress, and the scoped CoreDNS egress. This static baseline makes every broker
+# pod start fully isolated (denied all inbound AND all outbound) before HCC's
+# allow-policies converge; without the ingress half a pod no policy selects is
+# default-ALLOW ingress, and without the egress half a broker could initiate
+# outbound to any pod/namespace/internet.
+#
+# It composes additively with the controller-managed allow-policies: the runtime
+# `/32` egress policy is what actually lets a broker reach its one LAN endpoint,
+# and the per-broker ingress policy is what admits the referencing mcp-hosts.
+#
+# Kubelet health/readiness probes originate from the node and are unaffected.
+#
+# OWNERSHIP: this baseline is applied by the DEPLOY (a restricted CI identity),
+# NOT by HCC, so it carries `managed-by: llm-egress` and a distinct name — the
+# same convention deploy/base/llm-hooks/networkpolicies.yaml and
+# deploy/base/sandbox-ui/networkpolicies.yaml use for their static baselines. The
+# dynamic per-broker policies HCC creates carry `managed-by: host-context-controller`.
+# Labelling this baseline `managed-by: host-context-controller` would claim an
+# owner that never reconciles it, and the ValidatingAdmissionPolicy
+# `managed-networkpolicy-label-immutability` (deploy/base/cluster-wide/workflowrecipe-admission.yaml)
+# refuses CREATE of a NetworkPolicy carrying a controller's label from anyone but
+# that controller's ServiceAccount or a system:masters bootstrap — so the
+# restricted deploy identity would be denied and the whole apply would abort. A
+# local (cluster-admin) apply is exempt, which is why this only surfaces in CI.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-egress-static-default-deny
+  namespace: llm-egress
+  labels:
+    clerum.io/managed-by: llm-egress
+    clerum.io/policy-type: baseline
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

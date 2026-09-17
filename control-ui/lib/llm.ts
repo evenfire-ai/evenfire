@@ -1,3 +1,4 @@
+import { type LanBaseUrlReason, classifyLanBaseURL } from '@clerum/egress-policy'
 import {
   type LlmProviderId,
   PROVIDER_AUTH_MODE,
@@ -62,6 +63,60 @@ export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: strin
 
 export function catalogGroupKey(provider: string): string {
   return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
+}
+
+// The generic OpenAI-compatible provider for local/self-hosted models on the
+// LAN. Unlike every other provider it carries a per-target `baseURL` — the LAN
+// endpoint the operator declares — on `spec.model` and on each
+// `spec.llmPolicy.fallbacks[i]` (the CRD/CEL requires it).
+export const LLM_LOCAL_PROVIDER: LlmProvider = 'openai-compatible'
+
+// True when the provider needs an operator-supplied LAN `baseURL`. Only the
+// local openai-compatible provider does today.
+export function providerRequiresBaseUrl(provider: string | undefined | null): boolean {
+  return provider === LLM_LOCAL_PROVIDER
+}
+
+// Example endpoint shown as the baseURL placeholder: the private-LAN IPv4 shape
+// the classifier accepts (never a DNS name), with the host octets templated so
+// no concrete RFC1918 literal ships in source — the public/private boundary
+// guard rejects real private IPs outside test fixtures.
+export const LLM_LAN_BASE_URL_PLACEHOLDER = 'http://<lan-ip>:8000/v1'
+
+// Human-facing message per rejection reason, mirroring control-api's
+// LAN_BASE_URL_REASON_MESSAGE (routes/admin/hostSpecValidation.ts). Control-api
+// admission is the AUTHORITATIVE gate (fase 3); this client check is UX only, so
+// it reuses the SAME classifier as control-api, HCC and mcp-host —
+// @clerum/egress-policy.classifyLanBaseURL — instead of re-deriving the LAN rule
+// a fourth time (spec R-4/D4).
+const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
+  invalid_url: 'baseURL must be a valid absolute URL.',
+  not_ip:
+    'baseURL host must be a private-LAN IPv4 literal; DNS names (including *.svc, *.cluster.local, localhost, and metadata endpoints) are not allowed.',
+  not_private_lan:
+    'baseURL host must be an RFC1918 private-LAN IPv4 address (10/8, 172.16/12, or 192.168/16).',
+  link_local: 'baseURL host must not be a link-local address (169.254.0.0/16).',
+  cgnat: 'baseURL host must not be a carrier-grade NAT address (100.64.0.0/10).',
+  cluster_internal: 'baseURL host must not target a cluster-internal address.',
+  cluster_cidr_invalid:
+    'baseURL could not be validated because a cluster-internal CIDR is malformed; contact the operator.',
+  port_denied:
+    'baseURL port must not be a Kubernetes control-plane or node-agent port (2379-2380, 4194, 6443, 8443, 10250-10259).',
+  reserved: 'baseURL host must not be a reserved IPv4 address.',
+}
+
+// Validate a candidate openai-compatible `baseURL` for LAN admission. Returns a
+// human-readable message when it would be rejected (empty is reported as
+// required — the CRD/CEL demands it), or null when acceptable. Purely for inline
+// UX: the control-api admission gate is the source of truth.
+export function validateLlmLanBaseUrl(baseURL: string | undefined | null): string | null {
+  const trimmed = (baseURL ?? '').trim()
+  if (!trimmed) return 'Enter the LAN endpoint URL for this local model.'
+  const decision = classifyLanBaseURL(trimmed)
+  // Narrow via `'reason' in` rather than the `ok` discriminant: this project
+  // builds with strictNullChecks off, under which a boolean-literal discriminant
+  // does not narrow the union (a string/property discriminant still does).
+  return 'reason' in decision ? LAN_BASE_URL_REASON_MESSAGE[decision.reason] : null
 }
 
 export type OpenAiCredentialSource = 'api-key' | 'subscription'
@@ -218,9 +273,14 @@ export const BEDROCK_CREDENTIAL_KEYS: string[] = PROVIDER_CREDENTIAL_SLOTS.bedro
 )
 
 // Completeness follows `authMode`, not "are there required slots?". A
-// zero-slot oauth-broker provider is usable without a Kubernetes Secret.
-// Static-credentials providers stay usable only when every required slot is
-// present. `present`/`total` count required slots (always 0 for brokers).
+// zero-slot oauth-broker provider is usable without a Kubernetes Secret, and a
+// static-credentials provider whose only slot is OPTIONAL (openai-compatible,
+// the local LAN provider — self-hosted servers often need no auth) is likewise
+// usable with no key. Otherwise a static-credentials provider is usable only
+// when every required slot is present. "every required slot present" is
+// trivially true with zero required slots, so the condition below covers both.
+// `present`/`total` count required slots (0 for brokers and for the
+// optional-only local provider).
 export function getLlmGroupCompleteness(
   group: LlmCredentialGroup,
   isPresent: (dataKey: string) => boolean
@@ -233,7 +293,7 @@ export function getLlmGroupCompleteness(
   return {
     present,
     total: required.length,
-    usable: required.length > 0 && present === required.length,
+    usable: present === required.length,
   }
 }
 
@@ -725,6 +785,9 @@ export type LlmFallbackEntry = {
   provider: LlmProvider
   model: string
   credentialSlot?: string
+  // LAN endpoint for a local `openai-compatible` fallback. Required for that
+  // provider (the CRD/CEL enforces it), absent for every other provider.
+  baseURL?: string
 }
 
 export type LlmPolicy = {
@@ -757,10 +820,12 @@ export function providerSupportsFallbackCredentialSlot(provider: LlmProvider): b
 // Dropdown options for a fallback entry's `credentialSlot` (spec R4.5.6): the
 // provider's canonical registry slots first, then any EXTRA keys already present
 // in the LLM Secret that belong to this provider (e.g. `claude-api-key-fb1`).
-// Extra keys are matched only by a canonical registry slot prefix (the
-// suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
-// another provider. A provider-name prefix alone (for example
-// `openai-project`) is not a credential slot and must not be offered.
+// A key is provider-owned when it equals a canonical registry slot key or
+// extends one with a `-` suffix (the suggested `<slot>-fb1` naming) — the exact
+// ownership rule control-api/CEL/HCC apply on the write path. A bare prefix
+// match (`claude-api-key2`, `openai-project`) is NOT owned and must not be
+// offered: the backend would 422 a save that named it. Keys that are canonical
+// slots of another provider are excluded up front.
 // Providers that can't express a single-key slot (Bedrock/Vertex) offer NOTHING —
 // their fallbacks reuse the primary credentials (mirrors the backend gate).
 export function getCredentialSlotOptions(
@@ -772,7 +837,7 @@ export function getCredentialSlotOptions(
   const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
-    .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
+    .filter(key => prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}-`)))
     .sort((a, b) => a.localeCompare(b))
   return Array.from(new Set([...registrySlots, ...extras]))
 }
@@ -796,7 +861,7 @@ export function getPromptBridgeCredentialSlotOptions(
   const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
-    .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
+    .filter(key => prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}-`)))
     .sort((a, b) => a.localeCompare(b))
   return Array.from(new Set([...registrySlots, ...extras]))
 }
@@ -806,7 +871,12 @@ export function getPromptBridgeCredentialSlotOptions(
 // canonical slots would lose operator-minted EXTRA slots (`claude-api-key-fb1`
 // from mintFallbackSlot, or the secrets form's "Add credential slot"), making
 // a Secret that holds ONLY an extra slot of a provider render that provider
-// as absent. Mirrors the extra-key matching in getCredentialSlotOptions:
+// as absent. Deliberately LOOSER than the dropdown builders
+// (getCredentialSlotOptions / getPromptBridgeCredentialSlotOptions): those
+// apply the dashed ownership rule (`<slot>` or `<slot>-…`) because a save is
+// gated by it, so a bare-prefix key like `claude-api-key2` must not be OFFERED
+// as a slot. This is attribution only — no save is gated by it — so it must
+// not HIDE a legacy bare-prefix key from the secrets editor's provider groups:
 //   1. an exact canonical (registry) slot dataKey → its provider;
 //   2. otherwise, a key carrying a provider's `${provider}-` prefix or
 //      extending one of its canonical slot keys (the suggested `<slot>-fbN`
@@ -851,6 +921,13 @@ export function validateLlmPolicy(policy: LlmPolicy, catalog: LlmModelCatalogEnt
       errors.push(`${label}: choose a provider.`)
       return
     }
+    // A local openai-compatible fallback must carry a valid private-LAN baseURL
+    // (mirrors the control-api admission gate). Checked before the model gate so
+    // a missing endpoint is reported even while the model is still empty.
+    if (entry.provider === LLM_LOCAL_PROVIDER) {
+      const baseUrlError = validateLlmLanBaseUrl(entry.baseURL)
+      if (baseUrlError) errors.push(`${label}: ${baseUrlError}`)
+    }
     const model = (entry.model || '').trim()
     if (!model) {
       errors.push(`${label}: choose a model.`)
@@ -892,7 +969,19 @@ export function normalizeLlmPolicy(raw: unknown): LlmPolicy | undefined {
       typeof entry.credentialSlot === 'string' && entry.credentialSlot.trim().length > 0
         ? entry.credentialSlot
         : undefined
-    fallbacks.push({ provider, model, ...(credentialSlot ? { credentialSlot } : {}) })
+    // Preserve a local fallback's LAN endpoint verbatim (mirrors the model
+    // string). An empty/whitespace value is treated as absent so the editor
+    // surfaces it as "required" rather than silently persisting blank.
+    const baseURL =
+      typeof entry.baseURL === 'string' && entry.baseURL.trim().length > 0
+        ? entry.baseURL
+        : undefined
+    fallbacks.push({
+      provider,
+      model,
+      ...(credentialSlot ? { credentialSlot } : {}),
+      ...(baseURL ? { baseURL } : {}),
+    })
   }
   if (fallbacks.length === 0) return undefined
 

@@ -1,6 +1,7 @@
 import { LlmProviderIcon } from '@/components/LlmProviderIcon'
 import {
   type HostAllowedModel,
+  LLM_LOCAL_PROVIDER,
   type LlmPolicy,
   type LlmProvider,
   allowedModelsForProvider,
@@ -10,6 +11,8 @@ import {
 export type LlmProviderSummaryProps = {
   provider: LlmProvider
   model: string
+  // LAN endpoint of a local `openai-compatible` primary; unused otherwise.
+  baseURL?: string
   allowedModels: HostAllowedModel[]
   policy?: LlmPolicy
 }
@@ -36,6 +39,7 @@ function ModelChips({ models, allModelsLabel }: { models: string[]; allModelsLab
 export function LlmProviderSummary({
   provider,
   model,
+  baseURL,
   allowedModels,
   policy,
 }: LlmProviderSummaryProps) {
@@ -68,6 +72,15 @@ export function LlmProviderSummary({
             </div>
           </div>
         </div>
+
+        {provider === LLM_LOCAL_PROVIDER ? (
+          <div className="cu-llm-summary__field">
+            <span className="cu-llm-summary__label">LAN endpoint (baseURL)</span>
+            <div className="cu-llm-summary__value">
+              <span>{baseURL?.trim() || 'No endpoint configured'}</span>
+            </div>
+          </div>
+        ) : null}
 
         <div className="cu-llm-summary__field">
           <span className="cu-llm-summary__label">Allowed models · {providerLabel}</span>
@@ -116,6 +129,14 @@ export function LlmProviderSummary({
                     <span className="cu-llm-summary__separator">·</span>
                     <span>{fallback.model || 'No model configured'}</span>
                   </div>
+                  {fallback.provider === LLM_LOCAL_PROVIDER ? (
+                    <div className="cu-llm-summary__fallback-allowed">
+                      <span className="cu-llm-summary__label">LAN endpoint (baseURL)</span>
+                      <div className="cu-llm-summary__value">
+                        <span>{fallback.baseURL?.trim() || 'No endpoint configured'}</span>
+                      </div>
+                    </div>
+                  ) : null}
                   {fallbackAllowedModels.length > 0 ? (
                     <div className="cu-llm-summary__fallback-allowed">
                       <span className="cu-llm-summary__label">

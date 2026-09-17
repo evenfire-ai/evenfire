@@ -1,4 +1,5 @@
 import { isIP } from 'node:net'
+import { parseCidr } from '@clerum/egress-policy'
 
 /**
  * Loosest plausibly-legitimate prefix for a K8s-API-server allowlist.
@@ -92,4 +93,65 @@ export function parseNodeLocalDnsCidr(raw: string | undefined): string {
     throw new Error(`CONTEXT_MAPPER_NODELOCAL_DNS_CIDR: expected /32 CIDR in "${entry}"`)
   }
   return entry
+}
+
+function intToIpv4(n: number): string {
+  return [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join('.')
+}
+
+/**
+ * Parse + validate a comma-separated cluster-internal CIDR env value
+ * (CONTEXT_MAPPER_CLUSTER_INTERNAL_CIDRS, CONTEXT_MAPPER_CLUSTER_NODE_CIDRS).
+ *
+ * Returns the validated list, or [] when unset/empty. THROWS on any malformed
+ * entry so a bad value fails the process closed at startup — callers MUST NOT
+ * catch-and-fallback. A malformed CIDR that slipped through would leave the LAN
+ * guard OPEN for that entry: the classifier's cidrOverlaps treats an unparseable
+ * CIDR as "no overlap" (= not denied), while the entry still counts toward
+ * `guardConfigured`, so the fail-closed gate believes the guard is set.
+ *
+ * Rules: IPv4 dotted-quad `/n` with 1 <= n <= 32 (/0 is rejected as over-broad);
+ * the address must be the CANONICAL network address for the prefix (10.96.0.5/12
+ * is rejected with the intended 10.96.0.0/12); IPv6 is rejected explicitly
+ * because the LAN classifier is IPv4-only — an IPv6 entry would be silently inert.
+ */
+export function parseClusterCidrList(envName: string, raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === '') {
+    return []
+  }
+  const entries = raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+  if (entries.length === 0) {
+    return []
+  }
+  for (const entry of entries) {
+    const slash = entry.indexOf('/')
+    if (slash === -1) {
+      throw new Error(`${envName}: missing prefix in "${entry}"`)
+    }
+    const addr = entry.slice(0, slash)
+    if (isIP(addr) === 6) {
+      throw new Error(
+        `${envName}: IPv6 CIDR "${entry}" is not supported ` +
+          `(the LAN classifier is IPv4-only; an IPv6 entry would be silently inert)`
+      )
+    }
+    const parsed = parseCidr(entry)
+    if (parsed === null) {
+      throw new Error(`${envName}: invalid IPv4 CIDR "${entry}"`)
+    }
+    const prefix = Number(entry.slice(slash + 1))
+    if (prefix < 1) {
+      throw new Error(`${envName}: over-broad CIDR "${entry}" (prefix must be >= /1)`)
+    }
+    if (!parsed.canonical) {
+      throw new Error(
+        `${envName}: non-canonical CIDR "${entry}" ` +
+          `(did you mean ${intToIpv4(parsed.start)}/${prefix}?)`
+      )
+    }
+  }
+  return entries
 }

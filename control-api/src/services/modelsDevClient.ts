@@ -88,7 +88,14 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  * only ever review candidates — the operator's hand-added `source='manual'`
  * rows (deployment names, `us.anthropic.*` profiles) are never touched (§11.2).
  */
-export type ModelsDevMappedProviderId = Exclude<LlmProviderId, 'codex-subscription'>
+// `codex-subscription` is an oauth-broker with a dynamic catalog, and
+// `openai-compatible` has no models.dev catalog (its modelCatalogMode is
+// 'static' — the operator hand-declares its models in the allowlist). Both are
+// excluded from the models.dev key map: neither has a discoverable catalog.
+export type ModelsDevMappedProviderId = Exclude<
+  LlmProviderId,
+  'codex-subscription' | 'openai-compatible'
+>
 
 export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string>> = {
   openai: 'openai',
@@ -399,7 +406,12 @@ export function mapCatalogToProviders(
 ): Record<LlmProviderId, DiscoveredModel[]> {
   const out = Object.create(null) as Record<LlmProviderId, DiscoveredModel[]>
   for (const providerId of PROVIDER_IDS) {
-    const key = providerId === 'codex-subscription' ? undefined : PROVIDER_KEY_MAP[providerId]
+    // codex-subscription (dynamic broker) and openai-compatible (no models.dev
+    // catalog) are not in PROVIDER_KEY_MAP; both yield an empty list.
+    const key =
+      providerId === 'codex-subscription' || providerId === 'openai-compatible'
+        ? undefined
+        : PROVIDER_KEY_MAP[providerId]
     const entry = key ? catalog[key] : undefined
     const models: DiscoveredModel[] = []
     out[providerId] = models

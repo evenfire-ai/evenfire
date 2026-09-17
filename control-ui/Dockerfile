@@ -11,6 +11,7 @@ COPY packages/display-field ./packages/display-field
 COPY packages/frontend-components ./packages/frontend-components
 COPY packages/gfs-interaction-policy ./packages/gfs-interaction-policy
 COPY packages/llm-providers ./packages/llm-providers
+COPY packages/egress-policy ./packages/egress-policy
 COPY control-ui/package*.json ./control-ui/
 WORKDIR /app/control-ui
 # Next's bundler does not follow file: symlinks reliably, so materialize the
@@ -22,6 +23,8 @@ RUN npm ci \
   && cp -R ../packages/workflow-recipe-capability-policy node_modules/@clerum/workflow-recipe-capability-policy \
   && rm -rf node_modules/@clerum/llm-providers \
   && cp -R ../packages/llm-providers node_modules/@clerum/llm-providers \
+  && rm -rf node_modules/@clerum/egress-policy \
+  && cp -R ../packages/egress-policy node_modules/@clerum/egress-policy \
   && rm -rf node_modules/@clerum/display-field \
   && cp -R ../packages/display-field node_modules/@clerum/display-field \
   && rm -rf node_modules/@clerum/frontend-components \

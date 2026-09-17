@@ -21,9 +21,61 @@ describe('parseLlmPolicy', () => {
       cooldownSeconds: 300,
       triggerOn: ['insufficient_quota', 'auth', 'provider_unavailable', 'rate_limited'],
       fallbacks: [
-        { provider: 'claude', model: 'claude-haiku-4-5', credentialSlot: 'claude-api-key-fb1' },
+        {
+          provider: 'claude',
+          model: 'claude-haiku-4-5',
+          credentialSlot: 'claude-api-key-fb1',
+          slotIndex: 0,
+        },
       ],
     })
+  })
+
+  it('carries baseURL and the RAW fallback index (slotId source for the openai-compatible broker)', () => {
+    const p = parseLlmPolicy({
+      fallbacks: [
+        {
+          provider: 'openai-compatible',
+          model: 'llama-3.3-70b',
+          baseURL: 'http://10.0.0.5:8000/v1',
+        },
+      ],
+    })
+    expect(p?.fallbacks).toEqual([
+      {
+        provider: 'openai-compatible',
+        model: 'llama-3.3-70b',
+        baseURL: 'http://10.0.0.5:8000/v1',
+        slotIndex: 0,
+      },
+    ])
+  })
+
+  it('trims a padded provider at the source so the fallback matches the fail-closed guard', () => {
+    const p = parseLlmPolicy({
+      fallbacks: [
+        {
+          provider: '  openai-compatible ',
+          model: 'llama-3.3-70b',
+          baseURL: 'http://10.0.0.5:8000/v1',
+        },
+      ],
+    })
+    // Canonical provider (not the padded literal), RAW slotIndex preserved. A
+    // padded value here would slip past buildFallbackProvider's null-slotIndex
+    // guard and dial the PRIMARY broker instead of the fallback's own.
+    expect(p?.fallbacks).toEqual([
+      {
+        provider: 'openai-compatible',
+        model: 'llama-3.3-70b',
+        baseURL: 'http://10.0.0.5:8000/v1',
+        slotIndex: 0,
+      },
+    ])
+  })
+
+  it('drops a whitespace-only provider fallback', () => {
+    expect(parseLlmPolicy({ fallbacks: [{ provider: '   ', model: 'm' }] })).toBeNull()
   })
 
   it('honours an explicit cooldown + triggerOn subset, dropping unknown classes', () => {
@@ -53,7 +105,10 @@ describe('parseLlmPolicy', () => {
     const p = parseLlmPolicy({
       fallbacks: [{ provider: 'openai' }, { provider: 'zai', model: 'glm-5.1' }],
     })
-    expect(p?.fallbacks).toEqual([{ provider: 'zai', model: 'glm-5.1' }])
+    // slotIndex is the RAW index (1) — the malformed entry at index 0 was dropped
+    // but must NOT renumber the survivor, or the openai-compatible broker dial
+    // would target the wrong per-slot Service.
+    expect(p?.fallbacks).toEqual([{ provider: 'zai', model: 'glm-5.1', slotIndex: 1 }])
   })
 
   it('ignores a negative / non-integer cooldown, keeping the default', () => {

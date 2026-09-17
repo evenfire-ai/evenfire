@@ -43,8 +43,10 @@ import {
   llmChainRequiresSecret,
   offeredCodexModelNames,
   projectCredentialDraft,
+  providerRequiresBaseUrl,
   resolveCodexGrantModel,
   resolveDefaultModel,
+  validateLlmLanBaseUrl,
   validateLlmSecretData,
 } from '@/lib/llm'
 import { credentialSelectValue, parseCredentialSelect } from '@/lib/llmCredentialSelect'
@@ -189,6 +191,11 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     return state.hostName.trim().length > 0 && agentStepError(state.hostName) === ''
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
+    // A local openai-compatible primary needs a valid private-LAN baseURL before
+    // the operator can advance (the CRD/CEL and control-api admission require it).
+    if (providerRequiresBaseUrl(state.provider) && validateLlmLanBaseUrl(state.baseURL) !== null) {
+      return false
+    }
     if (
       state.provider === 'codex-subscription' &&
       (!state.connectionRef.trim() ||
@@ -290,6 +297,8 @@ export function HostWizard({
     error: modelsError,
   } = useLlmAllowedModels()
   const [modelName, setModelName] = useState('')
+  // LAN endpoint for a local `openai-compatible` primary (spec.model.baseURL).
+  const [baseURL, setBaseURL] = useState('')
   const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
@@ -515,6 +524,7 @@ export function HostWizard({
       llmPolicy,
       provider,
       modelName,
+      baseURL,
       connectionRef,
       codexModels,
     }),
@@ -528,6 +538,7 @@ export function HostWizard({
       llmPolicy,
       provider,
       modelName,
+      baseURL,
       connectionRef,
       codexModels,
     ]
@@ -752,6 +763,8 @@ export function HostWizard({
           provider,
           name: modelName,
           ...(provider === 'codex-subscription' ? { connectionRef } : {}),
+          // Local OpenAI-compatible primary carries its LAN endpoint.
+          ...(provider === 'openai-compatible' ? { baseURL: baseURL.trim() } : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -1046,9 +1059,11 @@ export function HostWizard({
             <LlmProviderConfig
               provider={provider}
               model={modelName}
+              baseURL={baseURL}
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
+                setBaseURL(next.baseURL ?? '')
                 if (next.provider !== 'codex-subscription') {
                   setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                   setCodexModels([])

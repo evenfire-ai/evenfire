@@ -125,12 +125,16 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/display-field/**'
               - 'packages/llm-provider-attempt-contract/**'
+              - 'packages/llm-providers/**'
+              - 'packages/egress-policy/**'
             control-ui:
               - 'control-ui/**'
               - 'packages/workflow-recipe-capability-policy/**'
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'packages/llm-providers/**'
+              - 'packages/egress-policy/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:
@@ -139,10 +143,14 @@ jobs:
               - 'packages/image-policy/**'
               - 'packages/network-policy-core/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
+              - 'packages/egress-policy/**'
             mcp-host:
               - 'mcp-host/**'
               - 'packages/llm-provider-attempt-contract/**'
               - 'packages/codex-catalog-projection/**'
+              - 'packages/llm-providers/**'
+              - 'packages/egress-policy/**'
             mcp-proxy:
               - 'mcp-proxy/**'
             gfs-controller:

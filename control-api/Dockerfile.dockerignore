@@ -8,6 +8,8 @@
 !packages/display-field/**
 !packages/llm-providers/
 !packages/llm-providers/**
+!packages/egress-policy/
+!packages/egress-policy/**
 !packages/workflow-runtime-core/
 !packages/workflow-runtime-core/package.json
 !packages/workflow-runtime-core/package-lock.json

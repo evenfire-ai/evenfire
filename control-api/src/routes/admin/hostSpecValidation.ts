@@ -1,8 +1,11 @@
 import { z } from 'zod'
+import { type LanBaseUrlReason, classifyLanBaseURL } from '@clerum/egress-policy'
 import {
   type LlmProviderId,
+  MAX_LLM_FALLBACKS,
   PROVIDER_AUTH_MODE,
   PROVIDER_CREDENTIAL_SLOTS,
+  isCredentialSlotOwnedByProvider,
   isLlmProviderId,
 } from '@clerum/llm-providers'
 import type { DbClient } from '../../db.js'
@@ -34,9 +37,11 @@ const logger = rootLogger.child({ module: 'admin-host-spec-validation' })
 
 // A Kubernetes Secret/ConfigMap data key: `[-._a-zA-Z0-9]`, max 253 chars.
 // A fallback `credentialSlot` names a key inside the chatllm-api-keys Secret, so
-// it must satisfy that format. We validate the FORMAT only — the key's existence
-// in the Secret is resolved by mcp-host at runtime (a cheap DB-free write gate
-// cannot see the Secret's contents; spec §3-R5.3). Same pattern as recipes.ts.
+// it must satisfy that format. For every provider we validate the FORMAT only;
+// additionally, for `openai-compatible`, the key must be owned by the provider
+// (ownership gate below). The key's existence in the Secret is resolved by
+// mcp-host at runtime (a cheap DB-free write gate cannot see the Secret's
+// contents). Same pattern as recipes.ts.
 const SECRET_KEY_RE = /^[-._a-zA-Z0-9]+$/
 
 /**
@@ -151,6 +156,122 @@ function validateCodexBrokerAdmission(
     }
   }
   return null
+}
+
+/**
+ * Enumerate the `openai-compatible` LLM targets carrying a `baseURL`: the
+ * primary `spec.model` and each `spec.llmPolicy.fallbacks[i]`. Only these two
+ * roles can declare a local endpoint (a per-host `allowedModels` entry is a
+ * catalog pair, not a routing target with its own baseURL).
+ */
+export function collectOpenAiCompatibleBaseUrlTargets(
+  spec: Record<string, unknown>
+): Array<{ field: string; baseURL: unknown }> {
+  const targets: Array<{ field: string; baseURL: unknown }> = []
+  // Match the provider after .trim(), exactly as collectHostLlmTargets and the
+  // allowlist gate do, so a padded value like 'openai-compatible ' cannot slip a
+  // baseURL past this gate. (The CRD enum rejects the padded literal and mcp-host
+  // fails closed on it — it does NOT route as local — but this layer canonicalizes
+  // the same way the rest of the stack does rather than leaning on those backstops.)
+  if (
+    isPlainObject(spec.model) &&
+    typeof spec.model.provider === 'string' &&
+    spec.model.provider.trim() === 'openai-compatible'
+  ) {
+    targets.push({ field: 'spec.model.baseURL', baseURL: spec.model.baseURL })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (
+        isPlainObject(entry) &&
+        typeof entry.provider === 'string' &&
+        entry.provider.trim() === 'openai-compatible'
+      ) {
+        targets.push({ field: `spec.llmPolicy.fallbacks[${i}].baseURL`, baseURL: entry.baseURL })
+      }
+    })
+  }
+  return targets
+}
+
+/**
+ * Enumerate LLM targets (`spec.model` + each fallback) that carry a `baseURL`
+ * under a provider that is NOT `openai-compatible`. `baseURL` is exclusive to
+ * local endpoints; the CRD already rejects it for any other provider (CEL
+ * `:63-64` / `:264-265`), but control-api must mirror the REVERSE check so a
+ * misplaced `baseURL` surfaces as a clean 422 here rather than slipping to the
+ * apiserver (503 via the generic catch) — and so binding Codex over a former
+ * local Host is a usable flow (the bind writer drops it; see codexSubscription).
+ *
+ * Kept separate from `collectOpenAiCompatibleBaseUrlTargets` on purpose: that
+ * helper is the single definition of which locations carry a LOCAL baseURL
+ * (regla D4), relied on verbatim by the read-after-write prune guard in
+ * resources.ts. Broadening it to also return non-local targets would falsify
+ * that contract, so the reverse check gets its own enumerator.
+ */
+function collectMisplacedBaseUrlTargets(spec: Record<string, unknown>): Array<{ field: string }> {
+  const targets: Array<{ field: string }> = []
+  if (isPlainObject(spec.model) && spec.model.baseURL !== undefined) {
+    const provider = typeof spec.model.provider === 'string' ? spec.model.provider.trim() : ''
+    if (provider !== 'openai-compatible') targets.push({ field: 'spec.model.baseURL' })
+  }
+  if (isPlainObject(spec.llmPolicy) && Array.isArray(spec.llmPolicy.fallbacks)) {
+    spec.llmPolicy.fallbacks.forEach((entry, i) => {
+      if (!isPlainObject(entry) || entry.baseURL === undefined) return
+      const provider = typeof entry.provider === 'string' ? entry.provider.trim() : ''
+      if (provider !== 'openai-compatible') {
+        targets.push({ field: `spec.llmPolicy.fallbacks[${i}].baseURL` })
+      }
+    })
+  }
+  return targets
+}
+
+const LAN_BASE_URL_REASON_MESSAGE: Record<LanBaseUrlReason, string> = {
+  invalid_url: 'baseURL must be a valid absolute URL',
+  not_ip:
+    'baseURL host must be a private-LAN IPv4 literal; DNS names (including *.svc, *.cluster.local, localhost, and metadata endpoints) are not allowed',
+  not_private_lan:
+    'baseURL host must be an RFC1918 private-LAN IPv4 address (10/8, 172.16/12, or 192.168/16)',
+  link_local: 'baseURL host must not be a link-local address (169.254.0.0/16)',
+  cgnat: 'baseURL host must not be a carrier-grade NAT address (100.64.0.0/10)',
+  cluster_internal: 'baseURL host must not target a cluster-internal address',
+  cluster_cidr_invalid:
+    'baseURL could not be validated because a cluster-internal CIDR is malformed; contact the operator',
+  port_denied:
+    'baseURL port must not be a Kubernetes control-plane or node-agent port (2379-2380, 4194, 6443, 8443, 10250-10259)',
+  reserved: 'baseURL host must not be a reserved IPv4 address',
+}
+
+/**
+ * Admission pre-gate for local `openai-compatible` endpoints. A local provider
+ * may only point at a private-LAN IPv4 literal — the classifier rejects DNS
+ * names outright (SSRF-by-name and DNS-rebinding are closed at admission; the
+ * authoritative per-IP block is the broker's runtime NetworkPolicy /32).
+ *
+ * clusterInternalCidrs is intentionally NOT wired here: control-api does not
+ * know the pod/service CIDR. The classifier keeps the option so the runtime
+ * layer can supply it later without a surface change.
+ */
+function validateOpenAiCompatibleBaseUrls(
+  spec: Record<string, unknown>
+): Array<{ field: string; message: string }> {
+  const errors: Array<{ field: string; message: string }> = []
+  for (const target of collectOpenAiCompatibleBaseUrlTargets(spec)) {
+    const decision = classifyLanBaseURL(target.baseURL)
+    if (!decision.ok) {
+      errors.push({ field: target.field, message: LAN_BASE_URL_REASON_MESSAGE[decision.reason] })
+    }
+  }
+  // Reverse direction (R4-M2): a baseURL under any other provider is invalid —
+  // mirror the CRD CEL so control-api answers 422 instead of a generic 503.
+  for (const target of collectMisplacedBaseUrlTargets(spec)) {
+    errors.push({
+      field: target.field,
+      message: `${target.field} is only valid when the provider is 'openai-compatible'`,
+    })
+  }
+  return errors
 }
 
 const HostApprovalSchema = z
@@ -317,6 +438,9 @@ export async function validateHostSpec(
   const brokerErrors = validateCodexBrokerAdmission(spec)
   if (brokerErrors) return brokerErrors
 
+  const baseUrlErrors = validateOpenAiCompatibleBaseUrls(spec)
+  if (baseUrlErrors.length > 0) return { errors: baseUrlErrors }
+
   // No-worsening tolerance context (Pieza D), computed once and shared by the 3
   // global-allowlist gates below. On create `context.stored` is absent, so
   // `storedPairs` is empty and no gate can tolerate — a fresh spec may never
@@ -403,7 +527,8 @@ export async function validateHostSpec(
   // provider and a model enabled in the operator allowlist under that provider
   // (same fail-closed gate as spec.model.name), so a broken fallback is caught
   // on write instead of surfacing only during the incident it was meant to
-  // absorb (spec V16). `credentialSlot`, when present, is format-checked only.
+  // absorb. `credentialSlot`, when present, is format-checked; an
+  // `openai-compatible` fallback's slot must additionally be owned by the provider.
   const hostCodexConnectionRef = resolvedCodexConnectionRef(
     isPlainObject(spec.model) ? spec.model : undefined
   )
@@ -784,6 +909,19 @@ async function validateLlmPolicy(
       ],
     }
   }
+  // Cap the list length (pinned to the shared MAX_LLM_FALLBACKS, mirrored by the
+  // CRD `maxItems`). Each local fallback provisions a full egress broker, so an
+  // unbounded list is a per-Host resource-amplification vector.
+  if (fallbacks.length > MAX_LLM_FALLBACKS) {
+    return {
+      errors: [
+        {
+          field: 'spec.llmPolicy.fallbacks',
+          message: `spec.llmPolicy.fallbacks must have at most ${MAX_LLM_FALLBACKS} entries`,
+        },
+      ],
+    }
+  }
 
   for (let i = 0; i < fallbacks.length; i++) {
     const entry = fallbacks[i]
@@ -846,6 +984,28 @@ async function validateLlmPolicy(
             {
               field: `${base}.credentialSlot`,
               message: `${base}.credentialSlot is not supported for provider "${provider}": it uses multiple or JSON credentials and must reuse the primary's credentials (drop credentialSlot)`,
+            },
+          ],
+        }
+      }
+      // Ownership gate (R4-H2), scoped to `openai-compatible` ONLY. The leak this
+      // closes needs a broker that dials an admin-chosen LAN IP with the slot's
+      // key mirrored verbatim — and HCC only provisions such a broker for an
+      // `openai-compatible` slot (and re-applies the same owner-gate at runtime).
+      // For that provider an UNOWNED slot (e.g. `claude-api-key`) would exfiltrate
+      // another provider's key to the LAN IP, so it is rejected here. For any
+      // other provider the slot is consumed by mcp-host against the vendor's
+      // official endpoint, where an alien slot is a misconfiguration, not
+      // exfiltration to an admin-controlled destination — the CRD CEL scopes its
+      // rule to `openai-compatible` for the same reason, and widening this gate to
+      // every provider broke stored Hosts carrying a valid same-vendor slot.
+      // Owned = the provider's canonical slot or `<canonical>-<suffix>`.
+      if (provider === 'openai-compatible' && !isCredentialSlotOwnedByProvider(provider, slot)) {
+        return {
+          errors: [
+            {
+              field: `${base}.credentialSlot`,
+              message: `${base}.credentialSlot "${slot}" must be a key owned by provider "${provider}" (its canonical slot or "<canonical>-<suffix>")`,
             },
           ],
         }
