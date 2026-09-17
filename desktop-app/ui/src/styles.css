@@ -16316,16 +16316,18 @@ pre {
   outline-offset: 2px;
 }
 
-.da-gfs-parent-update-dialog__columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.da-gfs-parent-update-dialog__column {
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.da-gfs-parent-update-dialog__folders {
   display: grid;
   gap: var(--space-1);
-  padding: var(--space-3);
+}
+
+.da-gfs-parent-update-dialog__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
   border: 1px solid rgba(var(--edge-rgb), 0.32);
   border-radius: var(--radius-lg);
   background: var(--bg);

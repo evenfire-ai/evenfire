@@ -105,26 +105,30 @@ describe('deriveGfsInheritedAccess', () => {
         subject: { type: 'user', id: 'miguel' },
         permissions: ['read', 'write'],
         inheritedFrom: ['team-docs'],
-        source: {
-          resourceId: FOLDER_ID,
-          name: 'team-docs',
-          permissions: ['read', 'write'],
-          grantId: 'g1',
-          shareIds: [],
-        },
+        sources: [
+          {
+            resourceId: FOLDER_ID,
+            name: 'team-docs',
+            permissions: ['read', 'write'],
+            grantId: 'g1',
+            shareIds: [],
+          },
+        ],
       },
       {
         subject: { type: 'team', id: 'research' },
         permissions: ['read'],
         // The root's empty name falls back to the drive label.
         inheritedFrom: ['main'],
-        source: {
-          resourceId: ROOT_ID,
-          name: 'main',
-          permissions: ['read'],
-          grantId: null,
-          shareIds: ['s1'],
-        },
+        sources: [
+          {
+            resourceId: ROOT_ID,
+            name: 'main',
+            permissions: ['read'],
+            grantId: null,
+            shareIds: ['s1'],
+          },
+        ],
       },
     ])
   })
@@ -189,16 +193,24 @@ describe('deriveGfsInheritedAccess', () => {
     const merged = items[0]
     expect(merged?.permissions.sort()).toEqual(['read', 'share', 'write'])
     expect(merged?.inheritedFrom).toEqual(['team-docs', 'main'])
-    // The nearest editor folder is the editable source, even though the root
-    // also grants read: editing the weaker ancestor could not change the
-    // subject's effective access.
-    expect(merged?.source).toEqual({
-      resourceId: FOLDER_ID,
-      name: 'team-docs',
-      permissions: ['read', 'write'],
-      grantId: `g-${FOLDER_ID}`,
-      shareIds: [],
-    })
+    // R1-H1: EVERY contributing folder is kept, nearest first — the nearest
+    // editor folder is the upgrade target, both are removal targets.
+    expect(merged?.sources).toEqual([
+      {
+        resourceId: FOLDER_ID,
+        name: 'team-docs',
+        permissions: ['read', 'write'],
+        grantId: `g-${FOLDER_ID}`,
+        shareIds: [],
+      },
+      {
+        resourceId: ROOT_ID,
+        name: 'main',
+        permissions: ['read', 'share'],
+        grantId: `g-${ROOT_ID}`,
+        shareIds: [],
+      },
+    ])
   })
 
   it('unions a grant and a share for one subject on the same folder into one source', async () => {
@@ -246,12 +258,14 @@ describe('deriveGfsInheritedAccess', () => {
     const items = await deriveGfsInheritedAccess(FILE_ID)
 
     expect(items).toHaveLength(1)
-    expect(items[0]?.source).toEqual({
-      resourceId: FOLDER_ID,
-      name: 'team-docs',
-      permissions: ['read', 'write'],
-      grantId: 'g1',
-      shareIds: ['s1'],
-    })
+    expect(items[0]?.sources).toEqual([
+      {
+        resourceId: FOLDER_ID,
+        name: 'team-docs',
+        permissions: ['read', 'write'],
+        grantId: 'g1',
+        shareIds: ['s1'],
+      },
+    ])
   })
 })

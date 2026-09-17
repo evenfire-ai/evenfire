@@ -13980,16 +13980,18 @@ button.cu-gfs-tree__button:focus-visible,
   outline-offset: 2px;
 }
 
-.cu-gfs-parent-update__columns {
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.cu-gfs-parent-update__folders {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--cu-space-2);
+  gap: var(--cu-space-1);
 }
 
-.cu-gfs-parent-update__column {
-  display: grid;
-  gap: var(--cu-space-05);
-  padding: var(--cu-space-2);
+.cu-gfs-parent-update__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-1) var(--cu-space-2);
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: var(--cu-bg-subtle);

@@ -9,10 +9,11 @@ import type { GfsInheritedAccessItem, GfsInheritedAccessSource } from './delegat
  * apply to descendants: grants with inherit=true and shares with
  * includeDescendants=true — the server's allow() rule. The walk is
  * best-effort: ancestors this caller cannot resolve or whose ACL it may not
- * view (view-ACL = manage-ACL server-side) are skipped. Each subject keeps
- * the strongest contributing folder as its editable `source` (with the
- * grant/share ids to mutate), so a confirmed change is applied on the folder
- * that configures the access.
+ * view (view-ACL = manage-ACL server-side) are skipped. Rows are merged per
+ * subject; EVERY contributing ancestor folder is kept as an editable source
+ * (with the grant/share ids to mutate), so a confirmed removal revokes all of
+ * them and a confirmed downgrade lowers each one above the target role
+ * (R1-H1).
  */
 
 const DEFAULT_DRIVE = 'main'
@@ -26,8 +27,46 @@ function subjectKey(subject: { type: string; id?: string }): string {
 }
 
 /** Editor-strength rows (write/delete/manage_acl) outrank read-only rows. */
-function isEditorPermissions(permissions: string[]): boolean {
+export function isEditorPermissions(permissions: string[]): boolean {
   return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
+}
+
+/** The strongest contributing folder: editor beats read, nearest among equals. */
+export function strongestInheritedSource(
+  sources: GfsInheritedAccessSource[]
+): GfsInheritedAccessSource | null {
+  return sources.reduce<GfsInheritedAccessSource | null>(
+    (strongest, source) =>
+      strongest === null ||
+      (!isEditorPermissions(strongest.permissions) && isEditorPermissions(source.permissions))
+        ? source
+        : strongest,
+    null
+  )
+}
+
+/**
+ * Which ancestor folders a confirmed role change to the target role must
+ * touch (R1-H1 semantics, verified against Google Drive):
+ * - downgrade: EVERY source whose role is above the target (ancestors at or
+ *   below the target stay untouched);
+ * - upgrade: the single strongest source (nearest among equals) — the
+ *   effective role is the strongest across sources, so one raise is enough;
+ * - no-op (target equals the effective role): none.
+ */
+export function planInheritedRoleChange(
+  item: Pick<GfsInheritedAccessItem, 'permissions' | 'sources'>,
+  targetRoleIsEditor: boolean
+): GfsInheritedAccessSource[] {
+  const effectiveIsEditor = isEditorPermissions(item.permissions)
+  if (targetRoleIsEditor === effectiveIsEditor) return []
+  if (!targetRoleIsEditor) {
+    // Downgrade: lower every editor source down to Read.
+    return item.sources.filter(source => isEditorPermissions(source.permissions))
+  }
+  // Upgrade: raise the strongest source (nearest among equals) to Editor.
+  const strongest = strongestInheritedSource(item.sources)
+  return strongest ? [strongest] : []
 }
 
 interface InheritingRow {
@@ -35,20 +74,6 @@ interface InheritingRow {
   permissions: string[]
   grantId: string | null
   shareIds: string[]
-}
-
-function sourceFor(
-  row: InheritingRow,
-  folderResourceId: string,
-  folderLabel: string
-): GfsInheritedAccessSource {
-  return {
-    resourceId: folderResourceId,
-    name: folderLabel,
-    permissions: [...row.permissions],
-    grantId: row.grantId,
-    shareIds: [...row.shareIds],
-  }
 }
 
 function mergeInto(
@@ -64,7 +89,15 @@ function mergeInto(
       subject: row.subject,
       permissions: [...row.permissions],
       inheritedFrom: [folderLabel],
-      source: sourceFor(row, folderResourceId, folderLabel),
+      sources: [
+        {
+          resourceId: folderResourceId,
+          name: folderLabel,
+          permissions: [...row.permissions],
+          grantId: row.grantId,
+          shareIds: [...row.shareIds],
+        },
+      ],
     })
     return
   }
@@ -72,23 +105,23 @@ function mergeInto(
   if (!existing.inheritedFrom.includes(folderLabel)) {
     existing.inheritedFrom.push(folderLabel)
   }
-  if (existing.source.resourceId === folderResourceId) {
+  const sameFolder = existing.sources.find(source => source.resourceId === folderResourceId)
+  if (sameFolder) {
     // A grant and a share for one subject on the same folder are edited
     // together: union the ids so the change consolidates both rows.
-    existing.source = {
-      ...existing.source,
-      permissions: [...new Set([...existing.source.permissions, ...row.permissions])],
-      grantId: existing.source.grantId ?? row.grantId,
-      shareIds: [...new Set([...existing.source.shareIds, ...row.shareIds])],
-    }
-  } else if (
-    !isEditorPermissions(existing.source.permissions) &&
-    isEditorPermissions(row.permissions)
-  ) {
-    // The editable source is the strongest contributing folder (nearest
-    // among equals): editing a weaker ancestor could not change the
-    // subject's effective access.
-    existing.source = sourceFor(row, folderResourceId, folderLabel)
+    sameFolder.permissions = [...new Set([...sameFolder.permissions, ...row.permissions])]
+    sameFolder.grantId = sameFolder.grantId ?? row.grantId
+    sameFolder.shareIds = [...new Set([...sameFolder.shareIds, ...row.shareIds])]
+  } else {
+    // R1-H1: keep EVERY contributing ancestor folder — removals revoke all
+    // of them and downgrades lower each one above the target role.
+    existing.sources.push({
+      resourceId: folderResourceId,
+      name: folderLabel,
+      permissions: [...row.permissions],
+      grantId: row.grantId,
+      shareIds: [...row.shareIds],
+    })
   }
 }
 

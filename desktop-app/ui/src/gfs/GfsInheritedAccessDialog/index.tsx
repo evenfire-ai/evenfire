@@ -55,17 +55,10 @@ export function GfsInheritedAccessDialog({
   if (!request) return null
 
   const isRemove = request.mode === 'remove'
-  const nextLabel = isRemove
-    ? request.fileRemainingRole
-      ? ROLE_LABELS[request.fileRemainingRole]
-      : 'No access'
-    : request.nextRole
-      ? ROLE_LABELS[request.nextRole]
-      : ''
-  const parentNextLabel = isRemove ? 'No access' : nextLabel
-  const title = isRemove ? 'Remove access on parent folder?' : 'Update role on parent folder?'
+  const nextLabel = isRemove ? 'Remove' : request.nextRole ? ROLE_LABELS[request.nextRole] : ''
+  const title = isRemove ? 'Remove from parent folder?' : 'Update role on parent folder?'
   const lead = isRemove
-    ? `Removing ${request.memberLabel}'s access to this item will also remove their access on a parent folder.`
+    ? `Removing ${request.memberLabel} from this item will also remove them from a parent folder.`
     : `Changing ${request.memberLabel}'s permissions on this item will also change permissions on a parent folder.`
 
   return (
@@ -105,22 +98,22 @@ export function GfsInheritedAccessDialog({
                   Learn more
                 </button>
               </p>
-              <div className="da-gfs-parent-update-dialog__columns">
-                <div className="da-gfs-parent-update-dialog__column">
-                  <span className="da-gfs-parent-update-dialog__name">
-                    {request.parentFolderName}
-                  </span>
-                  <span className="da-gfs-parent-update-dialog__change">
-                    <span className="da-gfs-parent-update-dialog__role">
-                      {ROLE_LABELS[request.parentCurrentRole]}
+              <div className="da-gfs-parent-update-dialog__folders">
+                {request.folders.map(folder => (
+                  <div className="da-gfs-parent-update-dialog__folder" key={folder.name}>
+                    <span className="da-gfs-parent-update-dialog__name">{folder.name}</span>
+                    <span className="da-gfs-parent-update-dialog__change">
+                      <span className="da-gfs-parent-update-dialog__role">
+                        {ROLE_LABELS[folder.currentRole]}
+                      </span>
+                      <span aria-hidden="true">→</span>
+                      <span className="da-gfs-parent-update-dialog__role da-gfs-parent-update-dialog__role--next">
+                        {nextLabel}
+                      </span>
                     </span>
-                    <span aria-hidden="true">→</span>
-                    <span className="da-gfs-parent-update-dialog__role da-gfs-parent-update-dialog__role--next">
-                      {parentNextLabel}
-                    </span>
-                  </span>
-                </div>
-                <div className="da-gfs-parent-update-dialog__column">
+                  </div>
+                ))}
+                <div className="da-gfs-parent-update-dialog__folder">
                   <span className="da-gfs-parent-update-dialog__name">{request.fileName}</span>
                   <span className="da-gfs-parent-update-dialog__change">
                     <span className="da-gfs-parent-update-dialog__role">

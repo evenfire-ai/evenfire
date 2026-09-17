@@ -40,9 +40,10 @@ import type {
   GfsFileAccessRow,
   GfsGrantPanelProps,
   GfsInheritedAccessItem,
+  GfsInheritedAccessSource,
 } from './GfsGrantPanel.types'
 import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSubjectOptions'
-import { loadGfsInheritedAccess } from './gfsInheritedAccess'
+import { loadGfsInheritedAccess, planInheritedRoleChange } from './gfsInheritedAccess'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
@@ -81,6 +82,12 @@ function roleForPermissions(permissions: string[]): AccessRole {
 
 function hostOnlySubject(subject: { type: string }): boolean {
   return subject.type === 'host'
+}
+
+/** ["a", "b", "c"] → "a, b and c" — folder names for honest outcome toasts. */
+function joinFolderNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 }
 
 /** Stable per-subject merge key. The operator variant carries no id. */
@@ -131,9 +138,16 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const inheritedAccessRequest = useRef(0)
   const inheritedAccessController = useRef<AbortController | null>(null)
   // Pending parent-folder confirmation (role change or removal) for a member
-  // whose access is inherited from an ancestor folder.
+  // whose access is inherited from ancestor folders. change-role carries the
+  // affected folders from the R1-H1 plan (downgrade: every folder above the
+  // target role; upgrade: the single strongest folder).
   const [parentUpdate, setParentUpdate] = useState<
-    | { row: GfsFileAccessRow; mode: 'change-role'; nextRole: AccessRole }
+    | {
+        row: GfsFileAccessRow
+        mode: 'change-role'
+        nextRole: AccessRole
+        affected: GfsInheritedAccessSource[]
+      }
     | { row: GfsFileAccessRow; mode: 'remove' }
     | null
   >(null)
@@ -538,10 +552,15 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   }
 
   /**
-   * Confirmed edit of an inherited row: the change is applied to the parent
-   * folder that configures the access (its grant cascades to everything
-   * inside), and the file's own direct rows are aligned so they cannot mask
-   * the chosen role. Cancel never reaches this path — the dropdown reverts.
+   * Confirmed edit of an inherited row (R1-H1 semantics, verified against
+   * Google Drive): a removal revokes the member's rows on EVERY contributing
+   * ancestor folder; a downgrade lowers every ancestor above the target role;
+   * an upgrade raises the strongest ancestor. The file's own direct rows are
+   * aligned in every case so they cannot mask the outcome. The confirm issues
+   * several sequential calls — on the first failure it stops, refreshes both
+   * lists so the dialog shows the TRUE partial state, and the toast says
+   * exactly how far the change got. Full success is never claimed on partial
+   * completion. Cancel never reaches this path — the dropdown reverts.
    */
   async function confirmParentUpdate() {
     const request = parentUpdate
@@ -552,25 +571,93 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       setParentUpdate(null)
       return
     }
-    const source = inherited.source
+    const sources = inherited.sources
     setParentUpdate(null)
     setBusy(true)
     setError('')
     const reload = async () => {
       await Promise.all([loadExistingAccess(), loadInheritedAccess()])
     }
+    /** Partial-failure honesty: state the true outcome, show the server error, reload. */
+    const failPartially = async (caught: unknown, summary: string) => {
+      if (!isAlreadyMissing(caught)) {
+        setError(caught instanceof Error ? caught.message : 'Failed to update access')
+      }
+      showToast(summary, { tone: 'error' })
+      await reload()
+    }
     try {
-      if (request.mode === 'change-role') {
-        const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
-        await putGfsGrant({
-          drive: DRIVE,
-          resourceId: source.resourceId,
-          subject: row.subject,
-          permissions,
-          inherit: true,
-        })
-        for (const shareId of source.shareIds) await deleteGfsShare(shareId)
+      if (request.mode === 'remove') {
+        let removed = 0
+        for (const source of sources) {
+          try {
+            if (source.grantId) await deleteGfsGrant(source.grantId)
+            for (const shareId of source.shareIds) await deleteGfsShare(shareId)
+            removed += 1
+          } catch (caught) {
+            if (isAlreadyMissing(caught)) {
+              removed += 1
+              continue
+            }
+            await failPartially(
+              caught,
+              `Removed from ${removed} of ${sources.length} folders — ${source.name} still grants access.`
+            )
+            return
+          }
+        }
         if (row.direct) {
+          try {
+            if (row.direct.grantId) await deleteGfsGrant(row.direct.grantId)
+            for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
+          } catch (caught) {
+            if (!isAlreadyMissing(caught)) {
+              await failPartially(
+                caught,
+                `Removed from ${sources.length} of ${sources.length} folders — direct access on ${resource.name} could not be removed.`
+              )
+              return
+            }
+          }
+        }
+        showToast(
+          sources.length === 1
+            ? `Access removed on ${sources[0].name} and everything inside it.`
+            : `Access removed on ${sources.length} folders and everything inside them.`,
+          { tone: 'success' }
+        )
+        await reload()
+        return
+      }
+      const affected = request.affected
+      const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
+      const affectedNames = affected.map(source => source.name)
+      let updated = 0
+      for (const source of affected) {
+        try {
+          await putGfsGrant({
+            drive: DRIVE,
+            resourceId: source.resourceId,
+            subject: row.subject,
+            permissions,
+            inherit: true,
+          })
+          for (const shareId of source.shareIds) await deleteGfsShare(shareId)
+          updated += 1
+        } catch (caught) {
+          if (isAlreadyMissing(caught)) {
+            updated += 1
+            continue
+          }
+          await failPartially(
+            caught,
+            `Updated ${updated} of ${affected.length} folders — ${source.name} still grants access.`
+          )
+          return
+        }
+      }
+      if (row.direct) {
+        try {
           await putGfsGrant({
             drive: DRIVE,
             resourceId: resource.resourceId,
@@ -579,23 +666,20 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             inherit: row.direct.inherit,
           })
           for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
+        } catch (caught) {
+          await failPartially(
+            caught,
+            `Updated ${affected.length} of ${affected.length} folders — direct access on ${resource.name} still shows the old role.`
+          )
+          return
         }
-        showToast(
-          `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${source.name} and everything inside it.`,
-          { tone: 'success' }
-        )
-      } else {
-        if (source.grantId) await deleteGfsGrant(source.grantId)
-        for (const shareId of source.shareIds) await deleteGfsShare(shareId)
-        showToast(`Access removed on ${source.name} and everything inside it.`, {
-          tone: 'success',
-        })
       }
-      await reload()
-    } catch (caught) {
-      if (!isAlreadyMissing(caught)) {
-        setError(caught instanceof Error ? caught.message : 'Failed to update access')
-      }
+      showToast(
+        affectedNames.length > 0
+          ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
+          : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
+        { tone: 'success' }
+      )
       await reload()
     } finally {
       setBusy(false)
@@ -735,18 +819,29 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                             className="cu-gfs-existing-access__role"
                             disabled={actionPending}
                             multiple={false}
-                            onChange={next =>
-                              inherited
-                                ? setParentUpdate({
-                                    row,
-                                    mode: 'change-role',
-                                    nextRole: (next[0] ?? 'read') as AccessRole,
-                                  })
-                                : void updateAccessRole(
-                                    row.direct as GfsExistingAccessItem,
-                                    (next[0] ?? 'read') as AccessRole
-                                  )
-                            }
+                            onChange={next => {
+                              if (!inherited) {
+                                void updateAccessRole(
+                                  row.direct as GfsExistingAccessItem,
+                                  (next[0] ?? 'read') as AccessRole
+                                )
+                                return
+                              }
+                              const nextRole = (next[0] ?? 'read') as AccessRole
+                              const affected = planInheritedRoleChange(
+                                row.inherited as GfsInheritedAccessItem,
+                                nextRole === 'editor'
+                              )
+                              // Selecting the already-held role with only
+                              // inherited access changes nothing: no modal.
+                              if (affected.length === 0 && !row.direct) return
+                              setParentUpdate({
+                                row,
+                                mode: 'change-role',
+                                nextRole,
+                                affected,
+                              })
+                            }}
                             menuClassName="cu-gfs-existing-access__role-menu"
                             options={ROLE_OPTIONS}
                             placeholder="Role"
@@ -838,17 +933,21 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
             ? {
                 mode: parentUpdate.mode,
                 memberLabel: subjectLabel(parentUpdate.row),
-                parentFolderName: parentUpdate.row.inherited.source.name,
                 fileName: resource.name,
-                parentCurrentRole: roleForPermissions(
-                  parentUpdate.row.inherited.source.permissions
-                ),
+                // Removal touches every contributing folder; a role change
+                // touches only the R1-H1 plan's affected folders.
+                folders:
+                  parentUpdate.mode === 'remove'
+                    ? parentUpdate.row.inherited.sources.map(source => ({
+                        name: source.name,
+                        currentRole: roleForPermissions(source.permissions),
+                      }))
+                    : parentUpdate.affected.map(source => ({
+                        name: source.name,
+                        currentRole: roleForPermissions(source.permissions),
+                      })),
                 fileCurrentRole: roleForPermissions(parentUpdate.row.permissions),
                 nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
-                fileRemainingRole:
-                  parentUpdate.mode === 'remove' && parentUpdate.row.direct
-                    ? roleForPermissions(parentUpdate.row.direct.permissions)
-                    : null,
               }
             : null
         }

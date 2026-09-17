@@ -1697,13 +1697,15 @@ describe('FilesPage', () => {
           subject: { type: 'user', id: 'user-2' },
           permissions: ['read', 'write'],
           inheritedFrom: ['Team folder'],
-          source: {
-            resourceId: 'folder-1',
-            name: 'Team folder',
-            permissions: ['read', 'write'],
-            grantId: 'parent-grant-1',
-            shareIds: [],
-          },
+          sources: [
+            {
+              resourceId: 'folder-1',
+              name: 'Team folder',
+              permissions: ['read', 'write'],
+              grantId: 'parent-grant-1',
+              shareIds: [],
+            },
+          ],
         },
       ],
       ...overrides,
@@ -1960,7 +1962,28 @@ describe('FilesPage', () => {
     )
     const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
     const pushToast = vi.fn()
-    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController())
+    // Read-only inherited floor: upgrading to Editor must be judged against
+    // the folder, which cannot grant write.
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read'],
+            inheritedFrom: ['Team folder'],
+            sources: [
+              {
+                resourceId: 'folder-1',
+                name: 'Team folder',
+                permissions: ['read'],
+                grantId: 'parent-grant-1',
+                shareIds: [],
+              },
+            ],
+          },
+        ],
+      })
+    )
 
     renderFilesPage(pushToast)
     await openManageDialog('report.txt')
@@ -1986,7 +2009,7 @@ describe('FilesPage', () => {
     // The dropdown reverts to the server-backed role.
     expect(
       within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
-    ).toContain('Editor')
+    ).toContain('Read')
   })
 
   // R1-M3 — a total derivation failure must not silently read as "no one".
@@ -2032,13 +2055,239 @@ describe('FilesPage', () => {
 
     const confirmDialog = await screen.findByRole('alertdialog')
     expect(
-      within(confirmDialog).getByText('Remove access on parent folder?', { selector: 'h3' })
+      within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' })
     ).toBeTruthy()
     await act(async () => {
       fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
     })
 
     await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('parent-grant-1'))
+  })
+
+  // R1-H1 — Drive-aligned multi-ancestor semantics. Reference scenario:
+  // Marketing (Viewer) → Campaigns (Editor) → report.txt.
+  describe('R1-H1 multi-ancestor edits', () => {
+    const CAMPAIGNS = {
+      resourceId: 'folder-cmp',
+      name: 'Campaigns',
+      permissions: ['read', 'write'],
+      grantId: 'cmp-grant-1',
+      shareIds: [],
+    }
+    const MARKETING = {
+      resourceId: 'folder-mkt',
+      name: 'Marketing',
+      permissions: ['read', 'share'],
+      grantId: 'mkt-grant-1',
+      shareIds: [],
+    }
+    const EDITOR_PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share']
+
+    function multiSourceController(
+      sources: Array<typeof CAMPAIGNS>,
+      overrides: Record<string, unknown> = {}
+    ) {
+      const permissions = [...new Set(sources.flatMap(source => source.permissions))]
+      return inheritedFileController({
+        grants: [],
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions,
+            inheritedFrom: sources.map(source => source.name),
+            sources,
+          },
+        ],
+        ...overrides,
+      })
+    }
+
+    async function openMultiSourceRow(
+      sources: Array<typeof CAMPAIGNS>,
+      pushToast?: (message: string, tone: Tone) => void
+    ) {
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      return row
+    }
+
+    it('removes the member from every contributing ancestor and aligns the file rows', async () => {
+      installInheritedDirectoryMocks()
+      const revokeGrant = vi.fn(async () => undefined)
+      const revokeShare = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      const directShare = {
+        id: 'file-share-1',
+        drive: 'main',
+        resourceId: 'file-1',
+        subject: { type: 'user', id: 'user-2' },
+        permissions: ['read', 'write'],
+        includeDescendants: false,
+      }
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING], {
+          revokeGrant,
+          revokeShare,
+          shares: [directShare],
+        })
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' }))
+      // Every affected folder is listed with its own current role.
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).getByText('Marketing')).toBeTruthy()
+      expect(within(confirmDialog).getByText('report.txt')).toBeTruthy()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+      })
+
+      // Both ancestors' grants are revoked…
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('cmp-grant-1'))
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('mkt-grant-1'))
+      // …and the file's own direct share is aligned with the removal.
+      await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Access removed on 2 folders and everything inside them',
+          'success'
+        )
+      )
+    })
+
+    it('downgrades only the ancestors above the target role', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const pushToast = vi.fn()
+      // Marketing is already at Read; Campaigns sits above the target.
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING])
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // Exactly one folder mutation: the editor source is lowered, the
+      // read-only source stays untouched.
+      await waitFor(() => expect(parentGrant).toHaveBeenCalledTimes(1))
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-cmp',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Test Two is now Read-only on Campaigns and everything inside it',
+          'success'
+        )
+      )
+    })
+
+    it('raises exactly one strongest ancestor on upgrade', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const readCampaigns = { ...CAMPAIGNS, permissions: ['read', 'share'] }
+      const readMarketing = { ...MARKETING }
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([readCampaigns, readMarketing])
+      )
+
+      const row = await openMultiSourceRow([readCampaigns, readMarketing])
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // One raise on the nearest source is enough: effective = strongest.
+      await waitFor(() => expect(parentGrant).toHaveBeenCalledTimes(1))
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-cmp',
+        ['user:user-2'],
+        EDITOR_PERMISSIONS,
+        'main',
+        true
+      )
+    })
+
+    it('states the true partial outcome when a folder removal fails mid-run', async () => {
+      installInheritedDirectoryMocks()
+      const revokeGrant = vi.fn(async (grantId: string) => {
+        if (grantId === 'mkt-grant-1') {
+          throw new Error('403 Forbidden: escalation_rejected')
+        }
+      })
+      const refreshGrants = vi.fn(async () => undefined)
+      const refreshInheritedAccess = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING], {
+          revokeGrant,
+          refreshGrants,
+          refreshInheritedAccess,
+        })
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      })
+      const confirmDialog = await screen.findByRole('alertdialog')
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+      })
+
+      // The nearest folder was removed; Marketing failed — the toast says
+      // exactly how far the removal got, and both lists refresh to the TRUE
+      // partial state.
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          expect.stringContaining('Removed from 1 of 2 folders — Marketing still grants access'),
+          'error'
+        )
+      )
+      expect(pushToast).not.toHaveBeenCalledWith(
+        'Access removed on 2 folders and everything inside them',
+        'success'
+      )
+      await waitFor(() => expect(refreshGrants).toHaveBeenCalled())
+      await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
+    })
   })
 
   it('does not render resource options inside the share dialog', async () => {

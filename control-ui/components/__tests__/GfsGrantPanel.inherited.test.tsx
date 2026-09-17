@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import {
   deleteGfsGrant,
+  deleteGfsShare,
   getAdminTeams,
   getAdminUsers,
   getGfsGrants,
@@ -37,6 +38,7 @@ const mockGetGfsShares = vi.mocked(getGfsShares)
 const mockGetGfsResourceByPath = vi.mocked(getGfsResourceByPath)
 const mockPutGfsGrant = vi.mocked(putGfsGrant)
 const mockDeleteGfsGrant = vi.mocked(deleteGfsGrant)
+const mockDeleteGfsShare = vi.mocked(deleteGfsShare)
 
 const FILE_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const FOLDER_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
@@ -355,10 +357,10 @@ describe('GfsGrantPanel inherited access', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
 
     const dialog = await screen.findByRole('alertdialog')
-    expect(within(dialog).getByText('Remove access on parent folder?')).toBeTruthy()
+    expect(within(dialog).getByText('Remove from parent folder?')).toBeTruthy()
     expect(
       within(dialog).getByText(
-        "Removing Miguel's access to this item will also remove their access on a parent folder. Alternatively, create a folder with limited access."
+        /Removing Miguel from this item will also remove them from a parent folder\. Alternatively, create a folder with limited access\./
       )
     ).toBeTruthy()
     fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }))
@@ -521,7 +523,7 @@ describe('GfsGrantPanel inherited access', () => {
       within(rows[0]).getByRole('button', { name: 'Access role for Miguel' }).textContent
     ).toContain('Editor')
 
-    // A confirmed change routes to the strongest contributing folder.
+    // A confirmed downgrade routes only to the folders above the target.
     await chooseRole(rows[0], 'Read')
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByText('team-docs')).toBeTruthy()
@@ -531,5 +533,244 @@ describe('GfsGrantPanel inherited access', () => {
         expect.objectContaining({ resourceId: FOLDER_ID, inherit: true })
       )
     )
+  })
+
+  // R1-H1 — Drive-aligned multi-ancestor semantics. Reference scenario:
+  // Marketing (Viewer) → Campaigns (Editor) → report.svg. The nested-file
+  // path is '/marketing/campaigns/report.md'.
+  describe('R1-H1 multi-ancestor edits', () => {
+    const MKT_ID = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+    const CMP_ID = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+    const MKT_GRANT_ID = 'mkt-grant-1'
+    const CMP_GRANT_ID = 'cmp-grant-1'
+    const EDITOR = ['read', 'write', 'delete', 'manage_acl', 'share']
+    const VIEWER = ['read', 'share']
+
+    const nestedFile = {
+      resourceId: FILE_ID,
+      name: 'report.svg',
+      gfsUri: 'gfs://main/report',
+      kind: 'file',
+      path: '/marketing/campaigns/report.svg',
+    }
+
+    /** marketing → campaigns → report.svg, with per-folder roles for Miguel. */
+    function driveScenario(folders: {
+      campaigns?: string[] | null
+      marketing?: string[] | null
+      rootShare?: string[] | null
+      fileGrant?: string[] | null
+    }) {
+      mockGetGfsResourceByPath.mockImplementation(async (_drive, path) => {
+        if (path === '/marketing/campaigns') return byPathView(CMP_ID, 'campaigns')
+        if (path === '/marketing') return byPathView(MKT_ID, 'marketing')
+        if (path === '/') return byPathView(ROOT_ID, '')
+        throw Object.assign(new Error('404 not_found'), { status: 404 })
+      })
+      mockGetGfsGrants.mockImplementation(async resourceId => {
+        if (resourceId === CMP_ID && folders.campaigns) {
+          return {
+            items: [
+              {
+                id: CMP_GRANT_ID,
+                drive: 'main',
+                resourceId: CMP_ID,
+                subject: miguel,
+                permissions: folders.campaigns,
+                inherit: true,
+              },
+            ],
+          }
+        }
+        if (resourceId === MKT_ID && folders.marketing) {
+          return {
+            items: [
+              {
+                id: MKT_GRANT_ID,
+                drive: 'main',
+                resourceId: MKT_ID,
+                subject: miguel,
+                permissions: folders.marketing,
+                inherit: true,
+              },
+            ],
+          }
+        }
+        if (resourceId === FILE_ID && folders.fileGrant) {
+          return {
+            items: [
+              {
+                id: FILE_GRANT_ID,
+                drive: 'main',
+                resourceId: FILE_ID,
+                subject: miguel,
+                permissions: folders.fileGrant,
+                inherit: false,
+              },
+            ],
+          }
+        }
+        return { items: [] }
+      })
+      mockGetGfsShares.mockImplementation(async resourceId => {
+        if (resourceId === ROOT_ID && folders.rootShare) {
+          return {
+            items: [
+              {
+                id: ROOT_SHARE_ID,
+                drive: 'main',
+                resourceId: ROOT_ID,
+                subject: miguel,
+                permissions: folders.rootShare,
+                includeDescendants: true,
+              },
+            ],
+          }
+        }
+        return { items: [] }
+      })
+    }
+
+    function grantError(status: number, code: string) {
+      return Object.assign(new Error(`${status} ${code}`), { status, code, serverMessage: code })
+    }
+
+    async function openRoleDialog(resource = nestedFile) {
+      renderPanel(resource)
+      const existing = await screen.findByRole('region', { name: 'People with access' })
+      const row = await within(existing).findByTestId('gfs-access-row-user')
+      return row
+    }
+
+    it('removes the member from EVERY contributing ancestor after confirmation', async () => {
+      driveScenario({ campaigns: EDITOR, rootShare: VIEWER, fileGrant: VIEWER })
+      const row = await openRoleDialog()
+
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for Miguel' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
+
+      const dialog = await screen.findByRole('alertdialog')
+      expect(within(dialog).getByText('Remove from parent folder?')).toBeTruthy()
+      // Every affected folder is listed with its own current role…
+      expect(within(dialog).getByText('campaigns')).toBeTruthy()
+      expect(within(dialog).getByText('main')).toBeTruthy()
+      expect(within(dialog).getByText('report.svg')).toBeTruthy()
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }))
+
+      // …and every ancestor row is revoked: both folders plus the file's
+      // own direct grant.
+      await waitFor(() => expect(mockDeleteGfsGrant).toHaveBeenCalledWith(CMP_GRANT_ID))
+      await waitFor(() => expect(mockDeleteGfsShare).toHaveBeenCalledWith(ROOT_SHARE_ID))
+      await waitFor(() => expect(mockDeleteGfsGrant).toHaveBeenCalledWith(FILE_GRANT_ID))
+      await waitFor(() =>
+        expect(screen.getByText('Access removed on 2 folders and everything inside them.'))
+      )
+    })
+
+    it('downgrades only the ancestors above the target role (Drive: campaigns Editor→Read, marketing untouched)', async () => {
+      driveScenario({ campaigns: EDITOR, marketing: VIEWER })
+      const row = await openRoleDialog()
+
+      await chooseRole(row, 'Read')
+      const dialog = await screen.findByRole('alertdialog')
+      // Only the editor folder is affected; marketing stays untouched.
+      expect(within(dialog).getByText('campaigns')).toBeTruthy()
+      expect(within(dialog).queryByText('marketing')).toBeNull()
+
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+      await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
+      expect(mockPutGfsGrant).toHaveBeenCalledWith({
+        drive: 'main',
+        resourceId: CMP_ID,
+        subject: miguel,
+        permissions: VIEWER,
+        inherit: true,
+      })
+      await waitFor(() =>
+        expect(screen.getByText('Miguel is now Read-only on campaigns and everything inside it.'))
+      )
+    })
+
+    it('lowers EVERY editor ancestor when all sit above the target', async () => {
+      driveScenario({ campaigns: EDITOR, marketing: EDITOR })
+      const row = await openRoleDialog()
+
+      await chooseRole(row, 'Read')
+      const dialog = await screen.findByRole('alertdialog')
+      expect(within(dialog).getByText('campaigns')).toBeTruthy()
+      expect(within(dialog).getByText('marketing')).toBeTruthy()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+      await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(2))
+      const touched = mockPutGfsGrant.mock.calls.map(call => call[0].resourceId)
+      expect(touched).toEqual([CMP_ID, MKT_ID])
+      await waitFor(() =>
+        expect(
+          screen.getByText(
+            'Miguel is now Read-only on campaigns and marketing and everything inside them.'
+          )
+        )
+      )
+    })
+
+    it('raises exactly ONE strongest ancestor on upgrade', async () => {
+      driveScenario({ campaigns: VIEWER, marketing: VIEWER })
+      const row = await openRoleDialog()
+
+      await chooseRole(row, 'Editor')
+      const dialog = await screen.findByRole('alertdialog')
+      expect(within(dialog).getByText('campaigns')).toBeTruthy()
+      expect(within(dialog).queryByText('marketing')).toBeNull()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+      await waitFor(() => expect(mockPutGfsGrant).toHaveBeenCalledTimes(1))
+      expect(mockPutGfsGrant).toHaveBeenCalledWith(
+        expect.objectContaining({ resourceId: CMP_ID, permissions: EDITOR, inherit: true })
+      )
+    })
+
+    it('states the true partial outcome when a folder update fails mid-run', async () => {
+      driveScenario({ campaigns: EDITOR, marketing: EDITOR })
+      mockPutGfsGrant.mockImplementation(async body => {
+        if (body.resourceId === MKT_ID) throw grantError(403, 'escalation_rejected')
+        return { ok: true, resourceId: body.resourceId, updated: [], count: 0 }
+      })
+      const row = await openRoleDialog()
+
+      await chooseRole(row, 'Read')
+      const dialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Update role' }))
+
+      // The nearest folder was updated; marketing failed — the toast says
+      // exactly how far the change got and never claims full success.
+      await waitFor(() =>
+        expect(screen.getByText('Updated 1 of 2 folders — marketing still grants access.'))
+      )
+      // The server verdict is surfaced and both lists reload so the dialog
+      // shows the TRUE partial state.
+      const alert = await screen.findByRole('alert')
+      expect(alert.textContent).toContain('escalation_rejected')
+      await waitFor(() => expect(mockGetGfsGrants.mock.calls.length).toBeGreaterThan(2))
+    })
+
+    it('states the true partial outcome when a folder removal fails mid-run', async () => {
+      driveScenario({ campaigns: EDITOR, marketing: EDITOR })
+      mockDeleteGfsGrant.mockImplementation(async id => {
+        if (id === MKT_GRANT_ID) throw grantError(403, 'escalation_rejected')
+      })
+      const row = await openRoleDialog()
+
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for Miguel' }))
+      fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove access' }))
+      const dialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Remove' }))
+
+      await waitFor(() =>
+        expect(screen.getByText('Removed from 1 of 2 folders — marketing still grants access.'))
+      )
+      expect(mockDeleteGfsGrant).toHaveBeenCalledWith(CMP_GRANT_ID)
+    })
   })
 })

@@ -223,13 +223,15 @@ describe('GfsGrantList', () => {
       subject: { type: 'user', id: 'user-2' },
       permissions: ['read', 'write'],
       inheritedFrom: ['team-docs'],
-      source: {
-        resourceId: 'folder-1',
-        name: 'team-docs',
-        permissions: ['read', 'write'],
-        grantId: 'parent-grant-1',
-        shareIds: [],
-      },
+      sources: [
+        {
+          resourceId: 'folder-1',
+          name: 'team-docs',
+          permissions: ['read', 'write'],
+          grantId: 'parent-grant-1',
+          shareIds: [],
+        },
+      ],
       ...overrides,
     })
 

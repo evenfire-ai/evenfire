@@ -30,7 +30,7 @@ export function GfsInheritedAccessDialog({
 }: GfsInheritedAccessDialogProps): React.JSX.Element | null {
   const titleId = useId()
   const bodyId = useId()
-  const columnsId = useId()
+  const foldersId = useId()
   const cancelButtonRef = useRef<HTMLButtonElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
 
@@ -59,18 +59,11 @@ export function GfsInheritedAccessDialog({
   if (!request) return null
 
   const isRemove = request.mode === 'remove'
-  const nextLabel = isRemove
-    ? request.fileRemainingRole
-      ? ROLE_LABELS[request.fileRemainingRole]
-      : 'No access'
-    : request.nextRole
-      ? ROLE_LABELS[request.nextRole]
-      : ''
-  const parentNextLabel = isRemove ? 'No access' : nextLabel
+  const nextLabel = isRemove ? 'Remove' : request.nextRole ? ROLE_LABELS[request.nextRole] : ''
   const confirmLabel = isRemove ? 'Remove' : 'Update role'
-  const title = isRemove ? 'Remove access on parent folder?' : 'Update role on parent folder?'
+  const title = isRemove ? 'Remove from parent folder?' : 'Update role on parent folder?'
   const lead = isRemove
-    ? `Removing ${request.memberLabel}'s access to this item will also remove their access on a parent folder.`
+    ? `Removing ${request.memberLabel} from this item will also remove them from a parent folder.`
     : `Changing ${request.memberLabel}'s permissions on this item will also change permissions on a parent folder.`
 
   return (
@@ -86,7 +79,7 @@ export function GfsInheritedAccessDialog({
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-describedby={showHelp ? `${bodyId}` : `${bodyId} ${columnsId}`}
+        aria-describedby={showHelp ? `${bodyId}` : `${bodyId} ${foldersId}`}
         onMouseDown={event => event.stopPropagation()}
       >
         <div className="cu-modal-panel__head">
@@ -114,20 +107,22 @@ export function GfsInheritedAccessDialog({
                 Learn more
               </button>
             </p>
-            <div id={columnsId} className="cu-gfs-parent-update__columns">
-              <div className="cu-gfs-parent-update__column">
-                <span className="cu-gfs-parent-update__name">{request.parentFolderName}</span>
-                <span className="cu-gfs-parent-update__change">
-                  <span className="cu-gfs-parent-update__role">
-                    {ROLE_LABELS[request.parentCurrentRole]}
+            <div id={foldersId} className="cu-gfs-parent-update__folders">
+              {request.folders.map(folder => (
+                <div className="cu-gfs-parent-update__folder" key={folder.name}>
+                  <span className="cu-gfs-parent-update__name">{folder.name}</span>
+                  <span className="cu-gfs-parent-update__change">
+                    <span className="cu-gfs-parent-update__role">
+                      {ROLE_LABELS[folder.currentRole]}
+                    </span>
+                    <span aria-hidden="true">→</span>
+                    <span className="cu-gfs-parent-update__role cu-gfs-parent-update__role--next">
+                      {nextLabel}
+                    </span>
                   </span>
-                  <span aria-hidden="true">→</span>
-                  <span className="cu-gfs-parent-update__role cu-gfs-parent-update__role--next">
-                    {parentNextLabel}
-                  </span>
-                </span>
-              </div>
-              <div className="cu-gfs-parent-update__column">
+                </div>
+              ))}
+              <div className="cu-gfs-parent-update__folder">
                 <span className="cu-gfs-parent-update__name">{request.fileName}</span>
                 <span className="cu-gfs-parent-update__change">
                   <span className="cu-gfs-parent-update__role">

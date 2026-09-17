@@ -12,14 +12,13 @@ describe('GfsInheritedAccessDialog', () => {
   const changeRequest = {
     mode: 'change-role' as const,
     memberLabel: 'Test Two',
-    parentFolderName: 'Team folder',
     fileName: 'report.txt',
-    parentCurrentRole: 'editor' as const,
+    folders: [{ name: 'Team folder', currentRole: 'editor' as const }],
     fileCurrentRole: 'editor' as const,
     nextRole: 'read' as const,
   }
 
-  it('renders the two-column before/after for a role change', () => {
+  it('renders the before/after list for a role change', () => {
     render(
       <GfsInheritedAccessDialog request={changeRequest} onCancel={vi.fn()} onConfirm={vi.fn()} />
     )
@@ -37,17 +36,20 @@ describe('GfsInheritedAccessDialog', () => {
     expect(within(dialog).getAllByText('Read')).toHaveLength(2)
   })
 
-  it('adapts to removal with the surviving direct role on the file column', () => {
+  // R1-H1 — removal lists EVERY affected folder plus the file, each dropping
+  // to Remove, with Drive's exact wording.
+  it('lists every affected folder for a removal', () => {
     render(
       <GfsInheritedAccessDialog
         request={{
           mode: 'remove',
           memberLabel: 'Test Two',
-          parentFolderName: 'Team folder',
           fileName: 'report.txt',
-          parentCurrentRole: 'editor',
+          folders: [
+            { name: 'Campaigns', currentRole: 'editor' },
+            { name: 'Marketing', currentRole: 'read' },
+          ],
           fileCurrentRole: 'editor',
-          fileRemainingRole: 'read',
         }}
         onCancel={vi.fn()}
         onConfirm={vi.fn()}
@@ -55,10 +57,26 @@ describe('GfsInheritedAccessDialog', () => {
     )
 
     const dialog = screen.getByRole('alertdialog')
-    expect(within(dialog).getByText('Remove access on parent folder?')).toBeTruthy()
-    // Parent column drops to No access; the file keeps its direct-only role.
-    expect(within(dialog).getAllByText('No access')).toHaveLength(1)
+    expect(within(dialog).getByText('Remove from parent folder?')).toBeTruthy()
+    expect(
+      within(dialog).getByText(
+        /Removing Test Two from this item will also remove them from a parent folder\. Alternatively, create a folder with limited access\./
+      )
+    ).toBeTruthy()
+    // Each affected folder keeps its own current role and drops to Remove…
+    expect(within(dialog).getByText('Campaigns')).toBeTruthy()
+    expect(within(dialog).getByText('Marketing')).toBeTruthy()
+    // …and so does the file (effective role -> Remove).
+    expect(within(dialog).getByText('report.txt')).toBeTruthy()
+    expect(within(dialog).getAllByText('Editor')).toHaveLength(2)
     expect(within(dialog).getAllByText('Read')).toHaveLength(1)
+    // Three transitions to Remove: both folders plus the file (the fourth
+    // "Remove" text is the confirm button).
+    expect(
+      within(dialog).getAllByText('Remove', {
+        selector: '.da-gfs-parent-update-dialog__role--next',
+      })
+    ).toHaveLength(3)
     expect(within(dialog).getByRole('button', { name: 'Remove' })).toBeTruthy()
   })
 
