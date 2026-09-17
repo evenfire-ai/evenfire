@@ -25,6 +25,22 @@ function ridOf(resourceId: string): string {
   return resourceId.replace(/-/g, '').toLowerCase()
 }
 
+/**
+ * Walk semantics (R1-L3, unified with the control-ui walk in
+ * control-ui/components/gfsInheritedAccess.ts):
+ * - BOUNDED in depth: at most GFS_BREADCRUMB_MAX_DEPTH ancestors are visited
+ *   (the control-ui path walk caps itself with the same number via
+ *   GFS_INHERITED_WALK_MAX_DEPTH).
+ * - BEST-EFFORT skip-and-continue: an ancestor whose ACL cannot be listed
+ *   (view-ACL = manage-ACL server-side) is skipped and the walk CONTINUES
+ *   upward — per-ancestor failures never fail the derivation.
+ * - One documented divergence: this walk chains parent ids, so each ancestor
+ *   is only reachable by resolving the one below it. An ancestor that cannot
+ *   be RESOLVED at all therefore ends the walk — its parent id (the only
+ *   route to higher ancestors) is unavailable. The control-ui walk addresses
+ *   ancestors by canonical path instead and skips unresolvable ones while
+ *   continuing with the rest.
+ */
 export async function deriveGfsInheritedAccess(
   resourceId: string,
   drive: string = DEFAULT_DRIVE

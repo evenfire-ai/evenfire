@@ -23,7 +23,26 @@ export { planInheritedRoleChange, strongestInheritedSource } from './gfsInherite
  * (R1-H1).
  */
 
-/** `/docs/report.md` → `['/docs', '/']` (nearest ancestor first). */
+/**
+ * Walk semantics (R1-L3, unified with the desktop walk in
+ * desktop-app/ui/src/gfs/inheritedAccess.ts):
+ * - BOUNDED in depth: at most GFS_INHERITED_WALK_MAX_DEPTH ancestors are
+ *   visited (the desktop rid-chain walk bounds itself with the same number
+ *   via GFS_BREADCRUMB_MAX_DEPTH).
+ * - BEST-EFFORT skip-and-continue: an ancestor that cannot be resolved or
+ *   whose ACL cannot be listed (moved, deleted, rate-limited, unviewable) is
+ *   skipped and the walk CONTINUES with the remaining ancestors — per-ancestor
+ *   failures never fail the derivation. Only a walk that resolves NO ancestor
+ *   at all reports a total failure (R1-M3).
+ * - Because this walk addresses ancestors by canonical PATH, each ancestor is
+ *   independent: skipping one still leaves every higher path reachable. The
+ *   desktop walk chains parent ids instead and can only stop when an ancestor
+ *   cannot be resolved at all — that single divergence is documented at its
+ *   walk site.
+ */
+const GFS_INHERITED_WALK_MAX_DEPTH = 64
+
+/** `/docs/report.md` → `['/docs', '/']` (nearest ancestor first, depth-capped). */
 export function gfsAncestorPaths(path: string): string[] {
   const segments = (path.startsWith('/') ? path : `/${path}`)
     .split('/')
@@ -34,7 +53,8 @@ export function gfsAncestorPaths(path: string): string[] {
     ancestors.push(`/${segments.slice(0, count).join('/')}`)
   }
   ancestors.push('/')
-  return ancestors
+  // Nearest-first cap, mirroring the desktop rid-chain walk's bound.
+  return ancestors.slice(0, GFS_INHERITED_WALK_MAX_DEPTH)
 }
 
 interface InheritingRow {
