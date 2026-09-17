@@ -21,6 +21,7 @@ export declare const LIMITS: {
   readonly maxOutputTokens: 16384
   readonly maxDeadlineMs: 300000
   readonly maxIdLength: 128
+  readonly maxNestingDepth: 64
 }
 
 export type ContractResult<T> =
@@ -133,6 +134,15 @@ export declare function parseGrokCompletionRequestV1(
   input: unknown
 ): ContractResult<GrokCompletionRequestV1>
 export declare function hashGrokCompletionRequestV1(request: GrokCompletionRequestV1): string
+/**
+ * Canonical client hash: JSON wire round-trip, parseGrokCompletionRequestV1,
+ * then hashGrokCompletionRequestV1 of the projection. Send `request` together
+ * with `requestHash`. Never throws; invalid input returns `{ ok: false }`.
+ */
+export declare function hashCanonicalGrokRequest(raw: unknown): ContractResult<{
+  request: GrokCompletionRequestV1
+  requestHash: string
+}>
 export declare function computeGrokPolicyHash(input: {
   model: string
   catalogRevision: number

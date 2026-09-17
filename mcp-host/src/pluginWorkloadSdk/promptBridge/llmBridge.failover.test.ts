@@ -991,6 +991,85 @@ describe('LlmBridge oauth-broker terminal accounting', () => {
     })
   })
 
+  it.each([
+    {
+      provider: 'grok-subscription' as const,
+      model: 'grok-4.6',
+      connectionKey: 'team-grok',
+      key: 'capturedGrokAttemptContext',
+      otherKey: 'capturedCodexAttemptContext',
+    },
+    {
+      provider: 'codex-subscription' as const,
+      model: 'gpt-5.1',
+      connectionKey: 'team-plus',
+      key: 'capturedCodexAttemptContext',
+      otherKey: 'capturedGrokAttemptContext',
+    },
+  ])(
+    'hands createLLMProvider exactly the $provider attempt context bound to its own slot',
+    async ({ provider, model, connectionKey, key, otherKey }) => {
+      const target: PromptBridgeTarget = {
+        targetRef: `${provider}-primary`,
+        provider,
+        model,
+        credentialSlot: '',
+        connectionRef: connectionKey,
+      }
+      // Distinct revisions per slot, none equal to the request's own
+      // policyRevision, so a context built from the wrong source is visible.
+      const grokBinding = {
+        connectionKey: 'team-grok',
+        catalogRevision: 9,
+        credentialRevision: 4,
+        model: 'grok-4.6',
+      }
+      const codexBinding = {
+        connectionKey: 'team-plus',
+        catalogRevision: 17,
+        credentialRevision: 6,
+        model: 'gpt-5.1',
+      }
+      const grokHash = computeGrokPolicyHash(grokBinding)
+      const codexHash = computeCodexPolicyHash(codexBinding)
+      replaceSdkOnlyGrokBinding({ ...grokBinding, bindingHash: grokHash })
+      replaceSdkOnlyCodexBinding({ ...codexBinding, bindingHash: codexHash })
+      const fake = new FakeProvider(() => Promise.resolve(OK))
+      const { bridge, capturedCalls } = makeBridge({ [model]: fake })
+      await bridge.complete({
+        ...request,
+        hostRef: 'research-host',
+        recipeNamespace: 'sandbox-recipes',
+        recipeName: 'prompt-notify',
+        targets: [{ target }],
+        credentialTicketIssuer: {
+          issue: vi.fn(async () => ({
+            credentialTicket: '',
+            providerAttemptId: `sdk-${provider}`,
+            providerAttemptIndex: 3,
+          })),
+        },
+        providerAttemptReporter: { report: vi.fn().mockResolvedValue(undefined) },
+      })
+      expect(capturedCalls).toHaveLength(1)
+      expect(capturedCalls[0]).not.toHaveProperty(otherKey)
+      expect(capturedCalls[0]).toEqual({
+        [key]: {
+          invocationId: 'inv-1',
+          attemptGeneration: 1,
+          providerAttemptIndex: 3,
+          pluginWorkloadSdkProviderAttemptId: `sdk-${provider}`,
+          targetRef: `${provider}-primary`,
+          policyRevision: provider === 'grok-subscription' ? 9 : 17,
+          policyHash: provider === 'grok-subscription' ? grokHash : codexHash,
+          hostRef: 'research-host',
+          recipeNamespace: 'sandbox-recipes',
+          recipeName: 'prompt-notify',
+        },
+      })
+    }
+  )
+
   it('keeps a pre-dispatch Codex budget denial revivable and carries its receipt', async () => {
     installCodexBinding()
     const codex = new FakeProvider(() => Promise.reject(new Error('budget denied')), {

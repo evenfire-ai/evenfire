@@ -472,4 +472,119 @@ describe('Plugin Workload SDK bootstrap identity', () => {
     expect(readSdkOnlyCodexBinding()).toBeNull()
     replaceSdkOnlyGrokBinding(null)
   })
+
+  describe('strict provider binding slots (B-L14)', () => {
+    function grokBinding(connectionKey: string) {
+      const fields = { connectionKey, catalogRevision: 5, credentialRevision: 2, model: 'grok-4.6' }
+      return { ...fields, bindingHash: computeGrokPolicyHash(fields) }
+    }
+    function codexBinding(connectionKey: string) {
+      const fields = {
+        connectionKey,
+        catalogRevision: 4,
+        credentialRevision: 1,
+        model: 'gpt-5.6-luna',
+      }
+      return { ...fields, bindingHash: computeCodexPolicyHash(fields) }
+    }
+    const readyProof = (provider: string, model: string) => ({
+      ready: true,
+      contractVersion: 3,
+      provider,
+      model,
+      policyReady: true,
+      policyState: 'active',
+      bindingReady: true,
+      codexBindingReady: true,
+    })
+
+    it('ignores a hash-valid Grok binding delivered in the Codex slot', async () => {
+      replaceSdkOnlyGrokBinding(null)
+      replaceSdkOnlyCodexBinding(null)
+      const verify = vi.fn()
+      const result = await configurePluginWorkloadSdkBootstrapIdentity(
+        {
+          capabilityFamily: 'promptBridge',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          contractVersion: 3,
+          codexBinding: grokBinding('team-grok'),
+        },
+        { capabilityFamily: 'promptBridge', verify }
+      )
+      expect(result).toMatchObject({
+        configured: true,
+        policyReady: false,
+        policyReason: 'execution_binding_missing',
+        bindingReady: false,
+      })
+      expect(result).not.toHaveProperty('subscriptionBinding')
+      expect(verify).not.toHaveBeenCalled()
+      expect(readSdkOnlyGrokBinding()).toBeNull()
+      expect(readSdkOnlyCodexBinding()).toBeNull()
+    })
+
+    it('ignores a hash-valid Codex binding delivered in the Grok slot', async () => {
+      replaceSdkOnlyGrokBinding(null)
+      replaceSdkOnlyCodexBinding(null)
+      const verify = vi.fn()
+      const result = await configurePluginWorkloadSdkBootstrapIdentity(
+        {
+          capabilityFamily: 'promptBridge',
+          provider: 'codex-subscription',
+          model: 'gpt-5.6-luna',
+          contractVersion: 3,
+          subscriptionBinding: codexBinding('team-plus'),
+        },
+        { capabilityFamily: 'promptBridge', verify }
+      )
+      expect(result).toMatchObject({
+        configured: true,
+        policyReady: false,
+        policyReason: 'codex_execution_binding_missing',
+      })
+      expect(result).not.toHaveProperty('codexBinding')
+      expect(verify).not.toHaveBeenCalled()
+      expect(readSdkOnlyCodexBinding()).toBeNull()
+      expect(readSdkOnlyGrokBinding()).toBeNull()
+    })
+
+    it('installs the Grok binding from subscriptionBinding even when codexBinding also verifies', async () => {
+      const own = grokBinding('team-grok')
+      const verify = vi.fn().mockResolvedValue(readyProof('grok-subscription', 'grok-4.6'))
+      const result = await configurePluginWorkloadSdkBootstrapIdentity(
+        {
+          capabilityFamily: 'promptBridge',
+          provider: 'grok-subscription',
+          model: 'grok-4.6',
+          contractVersion: 3,
+          codexBinding: grokBinding('other-grok'),
+          subscriptionBinding: own,
+        },
+        { capabilityFamily: 'promptBridge', verify }
+      )
+      expect(result).toMatchObject({ subscriptionBinding: own, bindingReady: true })
+      expect(readSdkOnlyGrokBinding()).toEqual(own)
+      replaceSdkOnlyGrokBinding(null)
+    })
+
+    it('installs the Codex binding from codexBinding even when subscriptionBinding also verifies', async () => {
+      const own = codexBinding('team-plus')
+      const verify = vi.fn().mockResolvedValue(readyProof('codex-subscription', 'gpt-5.6-luna'))
+      const result = await configurePluginWorkloadSdkBootstrapIdentity(
+        {
+          capabilityFamily: 'promptBridge',
+          provider: 'codex-subscription',
+          model: 'gpt-5.6-luna',
+          contractVersion: 3,
+          codexBinding: own,
+          subscriptionBinding: codexBinding('other-plus'),
+        },
+        { capabilityFamily: 'promptBridge', verify }
+      )
+      expect(result).toMatchObject({ codexBinding: own })
+      expect(readSdkOnlyCodexBinding()).toEqual(own)
+      replaceSdkOnlyCodexBinding(null)
+    })
+  })
 })

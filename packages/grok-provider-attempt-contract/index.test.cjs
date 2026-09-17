@@ -110,3 +110,223 @@ test('parses Grok ticket claims and rejects Codex typ', () => {
   })
   assert.equal(wrongTyp.ok, false)
 })
+
+// ---------------------------------------------------------------------------
+// Canonical hashing shared by mcp-host (client) and control-api/grok-llm-proxy
+// (server), plus the structural depth cap.
+// ---------------------------------------------------------------------------
+
+const GOLDEN = JSON.parse(
+  fs.readFileSync(path.join(__dirname, 'fixtures/golden-request-hashes.json'), 'utf8')
+)
+
+function nest(depth, key, leaf = {}) {
+  let value = leaf
+  for (let i = 1; i < depth; i++) value = { [key]: value }
+  return value
+}
+
+function nestArrays(depth) {
+  let value = []
+  for (let i = 1; i < depth; i++) value = [value]
+  return value
+}
+
+/** What a JSON peer (control-api authorize, grok-llm-proxy) computes. */
+function serverHash(wireRequest) {
+  const onWire = JSON.parse(JSON.stringify({ request: wireRequest })).request
+  const parsed = contract.parseGrokCompletionRequestV1(onWire)
+  assert.equal(parsed.ok, true, parsed.message)
+  return contract.hashGrokCompletionRequestV1(parsed.value)
+}
+
+test('golden digests: well-formed requests keep their pre-change hashes on every path', () => {
+  const golden = [
+    ...GOLDEN.cases,
+    {
+      name: 'parameters-at-max-depth-64',
+      request: {
+        ...BASE,
+        requestId: 'req-golden',
+        idempotencyKey: 'idem-golden',
+        messages: [{ role: 'user', content: 'deep' }],
+        tools: [{ name: 'deep', description: 'deep schema', parameters: nest(64, 'n') }],
+      },
+      sha256: GOLDEN.depthBoundaryDigests['parameters-at-max-depth-64'],
+    },
+    {
+      name: 'arguments-at-max-depth-64',
+      request: {
+        ...BASE,
+        requestId: 'req-golden',
+        idempotencyKey: 'idem-golden',
+        messages: [
+          {
+            role: 'assistant',
+            content: '',
+            toolCalls: [{ id: 'call-deep', name: 'deep', arguments: nest(64, 'a') }],
+          },
+        ],
+      },
+      sha256: GOLDEN.depthBoundaryDigests['arguments-at-max-depth-64'],
+    },
+  ]
+  assert.equal(golden.length, 6)
+  for (const entry of golden) {
+    const parsed = contract.parseGrokCompletionRequestV1(entry.request)
+    assert.equal(parsed.ok, true, `${entry.name}: ${parsed.message}`)
+    assert.equal(contract.hashGrokCompletionRequestV1(parsed.value), entry.sha256, entry.name)
+    const canonical = contract.hashCanonicalGrokRequest(entry.request)
+    assert.equal(canonical.ok, true, entry.name)
+    assert.equal(canonical.value.requestHash, entry.sha256, entry.name)
+    assert.equal(serverHash(canonical.value.request), entry.sha256, entry.name)
+  }
+})
+
+const DIVERGENT_SHAPES = [
+  ['empty generation from a non-enum tool_choice', { generation: {} }],
+  ['empty tools array', { tools: [] }],
+  ['empty transportHints', { transportHints: {} }],
+  ['transportHints with an undefined cache key', { transportHints: { promptCacheKey: undefined } }],
+  [
+    'undefined optional message fields',
+    { messages: [{ role: 'user', content: 'x', name: undefined, toolCallId: undefined }] },
+  ],
+  [
+    'undefined leaves in assistant tool-call arguments',
+    {
+      messages: [
+        { role: 'user', content: 'x' },
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'c1', name: 't', arguments: { a: undefined, b: [undefined] } }],
+        },
+      ],
+    },
+  ],
+  [
+    'a Date inside tool parameters (serialized by toJSON on the wire)',
+    {
+      tools: [{ name: 't', description: 'd', parameters: { type: 'object', since: new Date(0) } }],
+    },
+  ],
+]
+
+for (const [label, overrides] of DIVERGENT_SHAPES) {
+  test(`hashCanonicalGrokRequest matches the server hash for ${label}`, () => {
+    const raw = { ...BASE, ...overrides }
+    const canonical = contract.hashCanonicalGrokRequest(raw)
+    assert.equal(canonical.ok, true, canonical.message)
+    assert.match(canonical.value.requestHash, /^[a-f0-9]{64}$/)
+    // mcp-host sends the canonical request; a caller that still sent the raw
+    // request must land on the same digest.
+    assert.equal(serverHash(canonical.value.request), canonical.value.requestHash)
+    assert.equal(serverHash(raw), canonical.value.requestHash)
+  })
+}
+
+test('hashCanonicalGrokRequest drops empty optional containers from the canonical request', () => {
+  const canonical = contract.hashCanonicalGrokRequest({
+    ...BASE,
+    generation: {},
+    tools: [],
+    transportHints: {},
+  })
+  assert.equal(canonical.ok, true)
+  assert.deepEqual(Object.keys(canonical.value.request).sort(), Object.keys(BASE).sort())
+})
+
+test('hashCanonicalGrokRequest fails closed without throwing on invalid input', () => {
+  const cases = [
+    [{ ...BASE, generation: { temperature: 3 } }, 'invalid'],
+    [{ ...BASE, provider: 'codex-subscription' }, 'invalid'],
+    [{ ...BASE, headers: { authorization: 'x' } }, 'unknown-field'],
+    [{ ...BASE, deadlineMs: 10n }, 'invalid'],
+    ['not-an-object', 'invalid'],
+  ]
+  for (const [raw, code] of cases) {
+    const result = contract.hashCanonicalGrokRequest(raw)
+    assert.equal(result.ok, false)
+    assert.equal(result.code, code)
+  }
+  const cyclic = { ...BASE, tools: [{ name: 't', description: 'd', parameters: {} }] }
+  cyclic.tools[0].parameters.self = cyclic.tools[0].parameters
+  const cyclicResult = contract.hashCanonicalGrokRequest(cyclic)
+  assert.equal(cyclicResult.ok, false)
+  assert.equal(cyclicResult.code, 'limit')
+})
+
+test('LIMITS publishes the nesting depth cap', () => {
+  assert.equal(contract.LIMITS.maxNestingDepth, 64)
+})
+
+test('tool parameters accept depth 64 and reject depth 65 with a limit failure', () => {
+  const at = contract.parseGrokCompletionRequestV1({
+    ...BASE,
+    tools: [{ name: 'deep', description: 'd', parameters: nest(64, 'n') }],
+  })
+  assert.equal(at.ok, true, at.message)
+  const over = contract.parseGrokCompletionRequestV1({
+    ...BASE,
+    tools: [{ name: 'deep', description: 'd', parameters: nest(65, 'n') }],
+  })
+  assert.equal(over.ok, false)
+  assert.equal(over.code, 'limit')
+  assert.match(over.message, /nesting depth/)
+})
+
+test('assistant tool-call arguments accept depth 64 and reject depth 65', () => {
+  const request = depth => ({
+    ...BASE,
+    messages: [
+      {
+        role: 'assistant',
+        content: '',
+        toolCalls: [{ id: 'c1', name: 'deep', arguments: nest(depth, 'a') }],
+      },
+    ],
+  })
+  const at = contract.parseGrokCompletionRequestV1(request(64))
+  assert.equal(at.ok, true, at.message)
+  const over = contract.parseGrokCompletionRequestV1(request(65))
+  assert.equal(over.ok, false)
+  assert.equal(over.code, 'limit')
+})
+
+for (const depth of [5000, 150000]) {
+  test(`a ${depth}-deep body returns a limit failure instead of a RangeError`, () => {
+    const viaObjects = {
+      ...BASE,
+      tools: [{ name: 't', description: 'd', parameters: nest(depth, 'n') }],
+    }
+    const viaArrays = {
+      ...BASE,
+      tools: [{ name: 't', description: 'd', parameters: { x: nestArrays(depth) } }],
+    }
+    for (const raw of [viaObjects, viaArrays]) {
+      const parsed = contract.parseGrokCompletionRequestV1(raw)
+      assert.equal(parsed.ok, false)
+      assert.equal(parsed.code, 'limit')
+      const canonical = contract.hashCanonicalGrokRequest(raw)
+      assert.equal(canonical.ok, false)
+      assert.equal(canonical.code, 'limit')
+    }
+  })
+}
+
+test('stableStringify rejects over-deep values with a limit error, not a stack overflow', () => {
+  for (const value of [nest(5000, 'n'), nestArrays(150000)]) {
+    assert.throws(
+      () => contract.stableStringify(value),
+      err => err.code === 'limit' && !(err instanceof RangeError)
+    )
+  }
+  // Any request the parser accepts stays serializable.
+  assert.doesNotThrow(() =>
+    contract.stableStringify({
+      tools: [{ parameters: nest(64, 'n') }],
+      m: [[{ a: nest(64, 'a') }]],
+    })
+  )
+})

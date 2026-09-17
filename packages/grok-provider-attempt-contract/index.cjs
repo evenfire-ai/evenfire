@@ -24,7 +24,17 @@ const LIMITS = Object.freeze({
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
+  // Free-form JSON trees (tool parameters, assistant tool-call arguments) may
+  // nest at most this many containers. Bounds recursion before hashing.
+  maxNestingDepth: 64,
 })
+
+// Deepest free-form tree root inside a request: request > messages[] >
+// message > toolCalls[] > call > arguments. A request that nests deeper than
+// this cannot pass the per-tree check, so the whole-request guard (which runs
+// before any recursive JSON work) never rejects an acceptable request.
+const REQUEST_ENVELOPE_DEPTH = 5
+const MAX_REQUEST_DEPTH = LIMITS.maxNestingDepth + REQUEST_ENVELOPE_DEPTH
 
 const ID_PATTERN = /^[A-Za-z0-9._:/-]{1,128}$/
 const SHA256_HEX = /^[a-f0-9]{64}$/
@@ -93,6 +103,16 @@ function ok(value) {
  * Validation rejects non-finite numbers before this runs.
  */
 function stableStringify(value) {
+  return stableStringifyAt(value, 1)
+}
+
+function depthLimitError() {
+  const err = new Error(`value exceeds maximum nesting depth ${MAX_REQUEST_DEPTH}`)
+  err.code = 'limit'
+  return err
+}
+
+function stableStringifyAt(value, depth) {
   if (value === null) return 'null'
   if (value === undefined) return 'null'
   const t = typeof value
@@ -102,8 +122,13 @@ function stableStringify(value) {
   if (t === 'string' || t === 'boolean') {
     return JSON.stringify(value)
   }
+  if (t === 'object' && depth > MAX_REQUEST_DEPTH) {
+    throw depthLimitError()
+  }
   if (Array.isArray(value)) {
-    const items = value.map(item => (item === undefined ? 'null' : stableStringify(item)))
+    const items = value.map(item =>
+      item === undefined ? 'null' : stableStringifyAt(item, depth + 1)
+    )
     return `[${items.join(',')}]`
   }
   if (t === 'object') {
@@ -111,7 +136,9 @@ function stableStringify(value) {
     const keys = Object.keys(obj)
       .filter(k => obj[k] !== undefined)
       .sort()
-    const body = keys.map(k => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')
+    const body = keys
+      .map(k => `${JSON.stringify(k)}:${stableStringifyAt(obj[k], depth + 1)}`)
+      .join(',')
     return `{${body}}`
   }
   return 'null'
@@ -141,7 +168,39 @@ function rejectUnknown(obj, allowed, label) {
   return fail('unknown-field', `${label} rejects field '${extra[0]}'`)
 }
 
-function assertFiniteTree(value, label) {
+/**
+ * Iterative structural pre-check, safe on arbitrarily deep or cyclic input.
+ * Returns a failure when containers nest deeper than `maxDepth`, or when the
+ * value holds more elements than a maxRequestBodyBytes JSON document can encode
+ * (every encoded element takes at least one byte, so no acceptable request
+ * reaches that count; shared references are counted per occurrence, as JSON
+ * would serialize them).
+ */
+function checkStructure(value, maxDepth) {
+  if (value === null || typeof value !== 'object') return null
+  const stack = [value, 1]
+  let elements = 1
+  while (stack.length > 0) {
+    const depth = stack.pop()
+    const node = stack.pop()
+    if (depth > maxDepth) {
+      return fail('limit', `request exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`)
+    }
+    const children = Array.isArray(node)
+      ? node
+      : Object.values(node).filter(child => child !== undefined)
+    elements += children.length
+    if (elements > LIMITS.maxRequestBodyBytes) {
+      return fail('limit', 'request exceeds maxRequestBodyBytes')
+    }
+    for (const child of children) {
+      if (child !== null && typeof child === 'object') stack.push(child, depth + 1)
+    }
+  }
+  return null
+}
+
+function assertFiniteTree(value, label, depth = 1) {
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
       return fail('non-finite', `${label} must be finite`)
@@ -153,9 +212,12 @@ function assertFiniteTree(value, label) {
   if (typeof value === 'bigint' || typeof value === 'function' || typeof value === 'symbol') {
     return fail('invalid', `${label} has an unsupported type`)
   }
+  if (depth > LIMITS.maxNestingDepth) {
+    return fail('limit', `${label} exceeds maximum nesting depth ${LIMITS.maxNestingDepth}`)
+  }
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const inner = assertFiniteTree(value[i], `${label}[${i}]`)
+      const inner = assertFiniteTree(value[i], `${label}[${i}]`, depth + 1)
       if (inner) return inner
     }
     return null
@@ -163,7 +225,7 @@ function assertFiniteTree(value, label) {
   if (typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
       if (v === undefined) continue
-      const inner = assertFiniteTree(v, `${label}.${k}`)
+      const inner = assertFiniteTree(v, `${label}.${k}`, depth + 1)
       if (inner) return inner
     }
   }
@@ -318,7 +380,16 @@ function parseTransportHints(raw) {
 
 function parseGrokCompletionRequestV1(input) {
   if (!isPlainObject(input)) return fail('invalid', 'request must be an object')
-  const encoded = Buffer.byteLength(JSON.stringify(input), 'utf8')
+  // Runs before JSON.stringify: a deeply nested body would otherwise throw a
+  // RangeError out of the parser instead of failing closed.
+  const structure = checkStructure(input, MAX_REQUEST_DEPTH)
+  if (structure) return structure
+  let encoded
+  try {
+    encoded = Buffer.byteLength(JSON.stringify(input), 'utf8')
+  } catch {
+    return fail('invalid', 'request is not JSON-serializable')
+  }
   if (encoded > LIMITS.maxRequestBodyBytes) {
     return fail('limit', 'request exceeds maxRequestBodyBytes')
   }
@@ -373,6 +444,35 @@ function parseGrokCompletionRequestV1(input) {
 
 function hashGrokCompletionRequestV1(request) {
   return createHash('sha256').update(stableStringify(request)).digest('hex')
+}
+
+/**
+ * Client-side canonical hashing. Serializes `raw` exactly as a JSON peer
+ * receives it, parses that wire form with parseGrokCompletionRequestV1, and
+ * hashes the validated projection — the same steps control-api authorize and
+ * grok-llm-proxy perform. Callers send `value.request` with
+ * `value.requestHash`, so shapes the parser normalizes away (empty
+ * generation/tools/transportHints, undefined leaves) cannot make the two ends
+ * disagree. Never throws; invalid input fails closed.
+ */
+function hashCanonicalGrokRequest(raw) {
+  if (!isPlainObject(raw)) return fail('invalid', 'request must be an object')
+  const structure = checkStructure(raw, MAX_REQUEST_DEPTH)
+  if (structure) return structure
+  let wire
+  try {
+    wire = JSON.parse(JSON.stringify(raw))
+  } catch {
+    return fail('invalid', 'request is not JSON-serializable')
+  }
+  const parsed = parseGrokCompletionRequestV1(wire)
+  if (!parsed.ok) return parsed
+  return ok(
+    Object.freeze({
+      request: parsed.value,
+      requestHash: hashGrokCompletionRequestV1(parsed.value),
+    })
+  )
 }
 
 /**
@@ -552,6 +652,7 @@ module.exports = {
   stableStringify,
   parseGrokCompletionRequestV1,
   hashGrokCompletionRequestV1,
+  hashCanonicalGrokRequest,
   computeGrokPolicyHash,
   parseGrokExecutionTicketClaims,
   parseAuthorizeAttemptResponse,

@@ -94,10 +94,13 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   }
   // Always integrity-check a supplied binding before the provider protocol
   // branch. Request-controlled provider/version must not skip this check.
+  // Each provider reads only its own slot: WRC writes Grok proofs to
+  // `subscriptionBinding` and Codex proofs to `codexBinding`, so a proof in the
+  // other slot is never a fallback for a missing one.
   const grok = req.provider === 'grok-subscription'
   const verifiedBinding = grok
-    ? readVerifiedSdkOnlyGrokBinding(req.subscriptionBinding ?? req.codexBinding, model)
-    : readVerifiedSdkOnlyCodexBinding(req.codexBinding ?? req.subscriptionBinding, model)
+    ? readVerifiedSdkOnlyGrokBinding(req.subscriptionBinding, model)
+    : readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
   const missingReason = grok ? 'execution_binding_missing' : 'codex_execution_binding_missing'
   if (isOauthBrokerProvider(req.provider)) {
     if (!verifiedBinding) {

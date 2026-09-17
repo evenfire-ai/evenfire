@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequestV1,
   LIMITS,
-  hashCodexCompletionRequestV1,
+  hashCanonicalCodexRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
 import {
@@ -253,8 +253,16 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (options?.signal?.aborted) {
       throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
-    const request = this.buildRequest(messages, tools, options)
-    const requestHash = hashCodexCompletionRequestV1(request)
+    // Hash and send the validated wire projection — exactly what control-api
+    // authorize and the proxy re-derive. Hashing the locally built object let
+    // shapes the parser normalizes away (an empty `generation` from a
+    // tool-name tool_choice, empty tools/hints) fail authorize with a
+    // requestHash mismatch. An invalid request never leaves the process.
+    const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
+    if (!canonical.ok) {
+      throw new CodexAuthorizeError('invalid_request', canonical.message)
+    }
+    const { request, requestHash } = canonical.value
     const context = this.deps.attemptContext({ model: this.model })
     if (
       !Number.isInteger(context.policyRevision) ||

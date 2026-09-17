@@ -145,6 +145,33 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
 
 export { computeCodexPolicyHash }
 
+// body > request > messages[] > message > toolCalls[] > call > arguments: the
+// deepest free-form tree the contracts accept sits six containers below the
+// body root, and may itself nest maxNestingDepth containers.
+const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.maxNestingDepth) + 6
+
+/**
+ * Reject an over-deep body before anything serializes it. Iterative, so an
+ * attacker-controlled nesting depth cannot overflow the stack here; without it
+ * JSON.stringify throws a RangeError that surfaces as a 500.
+ */
+function assertBodyNestingWithinLimit(body: Record<string, unknown>): void {
+  const stack: Array<[unknown, number]> = [[body, 1]]
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!
+    if (depth > MAX_AUTHORIZE_BODY_DEPTH) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'invalid_request',
+        'request body exceeds the maximum nesting depth'
+      )
+    }
+    const children = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>)
+    for (const child of children) {
+      if (child !== null && typeof child === 'object') stack.push([child, depth + 1])
+    }
+  }
+}
+
 function firstUnknownKey(body: Record<string, unknown>): string | null {
   for (const key of Object.keys(body)) {
     if (!AUTHORIZE_BODY_KEYS.has(key)) return key
@@ -224,6 +251,7 @@ async function authorizeGrokProviderAttempt(
       'mcp-host JWT lacks the llm:grok:execute scope'
     )
   }
+  assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
   if (Buffer.byteLength(serialized, 'utf8') > GROK_LIMITS.maxRequestBodyBytes) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
@@ -582,6 +610,7 @@ export async function authorizeLlmProviderAttempt(
       'mcp-host JWT lacks the llm:codex:execute scope'
     )
   }
+  assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
   if (Buffer.byteLength(serialized, 'utf8') > LIMITS.maxRequestBodyBytes) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
