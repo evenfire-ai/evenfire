@@ -261,7 +261,28 @@ async function sendRead(page: Page, prompt: string): Promise<void> {
   // This button is rendered only for a completed task with tool steps. A
   // visible streaming answer alone cannot satisfy the journey.
   const complete = page.getByTestId('progress-expand-btn')
-  await expect(complete).toBeVisible({ timeout: 180_000 })
+  // A failed turn renders the product error label instead of the completed
+  // control. Fail as soon as that label is visible; do not wait the full
+  // completed-task deadline or scrape provider detail text.
+  const terminalError = page.getByTestId('agent-response').locator('.error-bubble-label')
+  await expect
+    .poll(
+      async () => {
+        // Non-retrying snapshots choose the visible terminal. Success still
+        // requires the completed-task control below; the error label is only
+        // a fail-closed interrupt.
+        if (await complete.isVisible()) return 'complete'
+        if (await terminalError.isVisible()) return 'terminal'
+        return 'pending'
+      },
+      { timeout: 180_000 }
+    )
+    .not.toEqual('pending')
+  if (await terminalError.isVisible()) {
+    const label = (await terminalError.innerText()).replace(/\s+/g, ' ').trim()
+    throw new Error(`R12 visible terminal provider error: ${label}`)
+  }
+  await expect(complete).toBeVisible()
   await expect(page.getByTestId('agent-response')).toHaveCount(1)
   await complete.click()
   await expect(complete).toHaveAttribute('aria-expanded', 'true')
