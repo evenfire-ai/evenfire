@@ -6,6 +6,7 @@
  * Folder/grant/account seeding is a named precondition, never file upload.
  */
 import { type Page, _electron as electron, expect, test } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -14,6 +15,7 @@ import {
   cleanupGfsFixture,
   getE2EUserId,
   getGfsChildResourceSummary,
+  kubectlOut,
   seedGfsDirectoryFixture,
   seedGfsGrant,
   uniqueGfsFixtureName,
@@ -41,6 +43,101 @@ function requireOwnedRuntime(): void {
     if (!['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname))
       throw new Error('This journey is restricted to the owned local development runtime')
   }
+}
+
+/** Named precondition: choose an available model using existing runtime credentials.
+ * Mutations re-enter T2's validated lease. No image, answer, or session is seeded.
+ */
+function visualModelFixture(agent: ReturnType<typeof discoverManagedGfsAgent>) {
+  const provider = process.env.E2E_GFS_VISUAL_PROVIDER
+  const model = process.env.E2E_GFS_VISUAL_MODEL
+  if (!provider && !model) return undefined
+  if (!provider || !model) throw new Error('Visual model fixture needs both provider and model')
+  const read = () => {
+    const [uid, currentProvider, currentModel] = kubectlOut([
+      '-n',
+      agent.namespace,
+      'get',
+      'host',
+      agent.name,
+      '-o',
+      'jsonpath={.metadata.uid}{"\\t"}{.spec.model.provider}{"\\t"}{.spec.model.name}',
+    ])
+      .trim()
+      .split('\t')
+    if (!uid || !currentProvider || !currentModel)
+      throw new Error('Host model fixture identity is incomplete')
+    return { uid, provider: currentProvider, model: currentModel }
+  }
+  const original = read()
+  const selected = { ...original, provider, model }
+  const mutate = (from: typeof original, to: typeof original) => {
+    const root = path.resolve(__dirname, '../../..')
+    execFileSync(
+      'bash',
+      [
+        path.join(root, 'scripts/minikube/with-t2-mutation-lock.sh'),
+        '--',
+        'kubectl',
+        `--context=${process.env.E2E_K8S_CONTEXT}`,
+        '--request-timeout=15s',
+        '-n',
+        agent.namespace,
+        'patch',
+        'host',
+        agent.name,
+        '--type=json',
+        '-p',
+        JSON.stringify([
+          { op: 'test', path: '/metadata/uid', value: from.uid },
+          { op: 'test', path: '/spec/model/provider', value: from.provider },
+          { op: 'test', path: '/spec/model/name', value: from.model },
+          { op: 'replace', path: '/spec/model/provider', value: to.provider },
+          { op: 'replace', path: '/spec/model/name', value: to.model },
+        ]),
+      ],
+      { cwd: root, timeout: 45_000, stdio: ['ignore', 'pipe', 'pipe'] }
+    )
+  }
+  return {
+    apply: () => mutate(original, selected),
+    restore: () => {
+      const current = read()
+      if (
+        current.uid === original.uid &&
+        current.provider === original.provider &&
+        current.model === original.model
+      )
+        return
+      // The JSON tests refuse to overwrite a concurrent user's different choice.
+      mutate(selected, original)
+    },
+  }
+}
+
+async function waitForAgentBinding(
+  agent: ReturnType<typeof discoverManagedGfsAgent>
+): Promise<void> {
+  await expect
+    .poll(
+      () => {
+        try {
+          return discoverManagedGfsAgent()
+        } catch (error) {
+          // During a model change HCC must rebind the same Host generation. Retry
+          // only the missing-binding state; actual Kubernetes failures stay loud.
+          if (
+            error instanceof Error &&
+            (error.message === `HCC agent "${agent.name}" is missing or ambiguous` ||
+              error.message === 'GFS agent E2E requires one unambiguous HCC-managed agent name')
+          )
+            return null
+          throw error
+        }
+      },
+      { timeout: 120_000 }
+    )
+    .toEqual(agent)
 }
 
 async function visibleLogin(page: Page): Promise<void> {
@@ -157,6 +254,7 @@ function parseVisualAnswer(raw: string) {
 }
 
 test('GFS image bytes reach vision after visible upload; a host without a grant cannot read another image', async () => {
+  test.setTimeout(600_000)
   requireOwnedRuntime()
   assertGfsInfraHealthy()
   const agent = discoverManagedGfsAgent()
@@ -167,7 +265,11 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
   const seeded: string[] = []
   const local = await mkdtemp(path.join(os.tmpdir(), 'evenfire-gfs-visual-'))
   let app: Awaited<ReturnType<typeof electron.launch>> | undefined
+  let modelFixture: ReturnType<typeof visualModelFixture>
   try {
+    modelFixture = visualModelFixture(agent)
+    modelFixture?.apply()
+    if (modelFixture) await waitForAgentBinding(agent)
     const granted = seedGfsDirectoryFixture(uniqueGfsFixtureName('e2e-gfs-visual'))
     seeded.push(granted.name)
     const denied = seedGfsDirectoryFixture(uniqueGfsFixtureName('e2e-gfs-visual-denied'))
@@ -289,6 +391,12 @@ test('GFS image bytes reach vision after visible upload; a host without a grant 
     }
     try {
       await rm(local, { recursive: true, force: true })
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      modelFixture?.restore()
+      if (modelFixture) await waitForAgentBinding(agent)
     } catch (error) {
       cleanupErrors.push(error)
     }

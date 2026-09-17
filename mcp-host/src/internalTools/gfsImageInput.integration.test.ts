@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createCanvas } from '@napi-rs/canvas'
+import { Readable } from 'node:stream'
 import { LlmPortAdapter } from '../core/adapters/llmPortAdapter'
 import type { NativeToolConfig } from '../core/interfaces'
 import { appendToolResults } from '../core/orchestration/toolUseLoopMessages'
 import { NativeToolRegistry } from '../core/tools/nativeToolRegistry'
 import type { Attachment, ChatMessage, ToolResult } from '../core/types'
+import { ClaudeProvider } from '../llm/claude'
 import { OpenAIProvider } from '../llm/openai'
 import { OpenAICompatibleProvider } from '../llm/openaiCompatible'
+import type { LlmProvider } from '../llm/registryCore'
+import type { SingleTurnProvider } from '../llm/types'
 import { VisualInputBudget } from '../visualInput/policy'
 import { projectGfsApproval } from '../visualInput/suspension'
 
@@ -43,7 +47,12 @@ const config: NativeToolConfig = {
 
 async function setup(
   bytes: Buffer,
-  options: { name?: string; modalities?: string[]; missing?: boolean } = {}
+  options: {
+    name?: string
+    modalities?: string[]
+    missing?: boolean
+    llm?: { provider: SingleTurnProvider; model: string; name: LlmProvider }
+  } = {}
 ) {
   const { createGfscClient } = await vi.importActual<typeof import('./gfsClient')>('./gfsClient')
   const gfsFetch = vi.fn(async (url: string) =>
@@ -99,20 +108,22 @@ async function setup(
     choices: [{ message: { content: 'Done' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
   })
-  const provider = new OpenAICompatibleProvider(
-    {
-      id: 'openrouter',
-      baseURL: 'https://openrouter.ai/api/v1',
-      defaultModel: model,
-    },
-    'integration-only-provider-identity',
-    model
-  )
+  const provider =
+    options.llm?.provider ??
+    new OpenAICompatibleProvider(
+      {
+        id: 'openrouter',
+        baseURL: 'https://openrouter.ai/api/v1',
+        defaultModel: model,
+      },
+      'integration-only-provider-identity',
+      model
+    )
   const budget = new VisualInputBudget()
   const adapter = new LlmPortAdapter(
     provider,
-    model,
-    'openrouter',
+    options.llm?.model ?? model,
+    options.llm?.name ?? 'openrouter',
     undefined,
     undefined,
     undefined,
@@ -154,6 +165,87 @@ afterEach(() => {
 })
 
 describe('GFS bytes to actual provider request', () => {
+  it.each([
+    ['image/png', false],
+    ['image/jpeg', false],
+    ['image/png', true],
+    ['image/jpeg', true],
+  ] as const)(
+    'delivers %s through Claude with cache=%s without OpenRouter',
+    async (mime, cache) => {
+      const targetModel = 'claude-sonnet-4-6'
+      // Credential-free SDK boundary double. The production provider serializer,
+      // raw metadata stream bridge, client/tool registry and loop still execute.
+      const create = vi.fn(async () => ({
+        content: [{ type: 'text', text: 'Done' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 2 },
+      }))
+      const buildRequest = vi.fn(({ path }) => ({
+        url: `https://api.anthropic.com${path}`,
+        req: { method: 'GET' },
+      }))
+      const metadata = JSON.stringify({
+        type: 'model',
+        id: targetModel,
+        capabilities: { image_input: { supported: true } },
+      })
+      const fetchWithTimeout = vi.fn(async () => ({
+        status: 200,
+        redirected: false,
+        // Exercise the SDK's Node body and an injected native-fetch Web body.
+        body: cache ? new Response(metadata).body : Readable.from([Buffer.from(metadata)]),
+      }))
+      const client = { messages: { create }, buildRequest, fetchWithTimeout }
+      const canvas = createCanvas(8, 8)
+      canvas.getContext('2d').fillRect(1, 1, 4, 4)
+      const bytes =
+        mime === 'image/png' ? canvas.toBuffer('image/png') : canvas.toBuffer('image/jpeg')
+      const subject = await setup(bytes, {
+        llm: {
+          provider: new ClaudeProvider(client as never, targetModel),
+          model: targetModel,
+          name: 'claude',
+        },
+      })
+      expect(subject.output.is_error).toBe(false)
+      await subject.adapter.completeWithTools({
+        messages: subject.messages,
+        tools: [],
+        ...(cache
+          ? {
+              systemPromptParts: {
+                stable: 'system instructions',
+                context: 'context',
+                stableHash: 'fixture',
+                contextHash: 'fixture',
+              },
+            }
+          : {}),
+      })
+      expect(subject.metadataFetch).not.toHaveBeenCalled()
+      expect(buildRequest).toHaveBeenCalledWith({
+        method: 'get',
+        path: `/v1/models/${targetModel}`,
+      })
+      expect(fetchWithTimeout).toHaveBeenCalledOnce()
+      const request = (create.mock.calls as unknown as Array<[Record<string, any>]>)[0][0]
+      const blocks = request.messages.flatMap((m: any) =>
+        Array.isArray(m.content) ? m.content : []
+      )
+      expect(blocks.filter((b: any) => b.type === 'image')).toEqual([
+        {
+          type: 'image',
+          source: { type: 'base64', media_type: mime, data: bytes.toString('base64') },
+        },
+      ])
+      expect(JSON.stringify(blocks.filter((b: any) => b.type !== 'image'))).not.toContain(
+        bytes.toString('base64')
+      )
+      if (cache) expect(request.system[0].cache_control).toEqual({ type: 'ephemeral' })
+      subject.budget.close()
+    }
+  )
   it.each(['unchanged', 'replaced', 'revoked'] as const)(
     'requires a new authorized read after suspension when the resource is %s',
     async state => {

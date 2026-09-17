@@ -1,34 +1,92 @@
 import { type ImageInputCapability, VISUAL_INPUT_LIMITS, VisualInputError } from './policy'
 
-/** The only provider whose model metadata this module interrogates. */
+/** The provider name the OpenRouter catalog resolver reports. */
 export const OPENROUTER_PROVIDER = 'openrouter'
 /** Fixed, bounded provenance string; upstream text never reaches this field. */
 export const OPENROUTER_METADATA_EVIDENCE = 'openrouter-model-metadata'
-/** The catalog changes slowly, so a resolved answer stays reusable for one minute. */
-export const OPENROUTER_CAPABILITY_CACHE_MS = 60_000
 
 /**
- * Fetches `GET /model/{author}/{slug}` relative to the provider's `/api/v1`
- * base. The caller supplies the authenticated transport, so this module reads
- * no key, no environment variable, and no socket of its own.
+ * The provider name the Anthropic Models API resolver reports. It matches
+ * `getProviderType()` on the Claude provider, so an answer carries the same
+ * identity the rest of the LLM layer uses.
  */
-export type OpenRouterMetadataReader = (path: string, signal: AbortSignal) => Promise<Response>
+export const ANTHROPIC_PROVIDER = 'claude'
+/** Fixed, bounded provenance string; upstream text never reaches this field. */
+export const ANTHROPIC_METADATA_EVIDENCE = 'anthropic-model-metadata'
+
+/** Both catalogs change slowly, so a resolved answer stays reusable for one minute. */
+const CAPABILITY_CACHE_MS = 60_000
+
+export const OPENROUTER_CAPABILITY_CACHE_MS = CAPABILITY_CACHE_MS
+export const ANTHROPIC_CAPABILITY_CACHE_MS = CAPABILITY_CACHE_MS
+
+/**
+ * The only parts of one HTTP response this module reads. Native `Response`
+ * satisfies it directly, and so does the `{status, redirected, body}` shape a
+ * caller builds after bridging a Node stream into a Web stream.
+ */
+export interface ModelMetadataResponse {
+  readonly status: number
+  readonly redirected: boolean
+  readonly body: ModelMetadataBody | null
+}
+
+/**
+ * The subset of a Web `ReadableStream` this module consumes, declared
+ * structurally because the fetch layer's `Response` typings and Node's
+ * `Readable.toWeb` bridge do not always resolve to the same `ReadableStream`
+ * declaration. A bounded read only needs `getReader()`, `read()`, `cancel()`,
+ * and `releaseLock()`.
+ */
+export interface ModelMetadataBody {
+  getReader(): ModelMetadataBodyReader
+  cancel(): Promise<void>
+}
+
+export interface ModelMetadataBodyReader {
+  read(): Promise<{ done: boolean; value?: Uint8Array }>
+  cancel(): Promise<void>
+  releaseLock(): void
+}
+
+/**
+ * Fetches one provider-relative metadata path through the caller's authenticated
+ * transport, so this module reads no key, no environment variable, and no socket
+ * of its own. The caller resolves the provider base; the path is always relative.
+ */
+export type MetadataReader = (path: string, signal: AbortSignal) => Promise<ModelMetadataResponse>
+
+/** OpenRouter's `GET /model/{author}/{slug}` reader. */
+export type OpenRouterMetadataReader = MetadataReader
+
+/** Anthropic's `GET /v1/models/{model_id}` reader. */
+export type AnthropicMetadataReader = MetadataReader
 
 const UNKNOWN = Object.freeze({ status: 'unknown' as const })
 const UNSUPPORTED = Object.freeze({ status: 'unsupported' as const })
-const ABORTED = Symbol('openrouter-capability-aborted')
+const ABORTED = Symbol('image-capability-aborted')
+
+/** The provider-specific half of one resolver: path shape plus documented metadata shape. */
+interface ImageCapabilitySource {
+  /** Provider-relative request path for one model id, or undefined when it is not addressable. */
+  buildPath(model: string): string | undefined
+  /** Reads only the documented model shape; an explicit negative is the sole `unsupported`. */
+  parse(metadata: string, model: string): ImageInputCapability
+}
 
 /**
- * Resolves whether one `author/slug` model accepts image input, using only the
- * injected authenticated reader. Every failure mode other than an explicit
- * modality list resolves to `unknown`, so a caller that cannot prove support
- * never treats the model as image-capable.
+ * Resolves whether one model accepts image input, using only the injected
+ * authenticated reader. Every failure mode other than an explicit negative
+ * resolves to `unknown`, so a caller that cannot prove support never treats the
+ * model as image-capable. Both providers share this engine: one bounded read per
+ * uncached call, one absolute per-call deadline, and one private per-resolver cache.
  */
-export function createOpenRouterImageCapabilityResolver(
+function createImageCapabilityResolver(
   model: string,
-  readMetadata: OpenRouterMetadataReader
+  readMetadata: MetadataReader,
+  source: ImageCapabilitySource
 ): (signal?: AbortSignal) => Promise<ImageInputCapability> {
-  const path = buildModelPath(model)
+  const path = source.buildPath(model)
   let cached: { value: ImageInputCapability; expiresAt: number } | undefined
 
   return async function resolveCapability(callerSignal) {
@@ -38,9 +96,11 @@ export function createOpenRouterImageCapabilityResolver(
     const now = Date.now()
     if (cached !== undefined && cached.expiresAt > now) return cached.value
 
-    const outcome = await resolveWithDeadline(model, path, readMetadata, callerSignal)
+    const outcome = await resolveWithDeadline(callerSignal, signal =>
+      requestCapability(path, readMetadata, signal, metadata => source.parse(metadata, model))
+    )
     if (outcome !== ABORTED && outcome.status !== 'unknown') {
-      cached = { value: outcome, expiresAt: Date.now() + OPENROUTER_CAPABILITY_CACHE_MS }
+      cached = { value: outcome, expiresAt: Date.now() + CAPABILITY_CACHE_MS }
     }
     // A caller that aborted never receives a value, even when one arrived first.
     if (callerSignal?.aborted) throw new VisualInputError('cancelled')
@@ -49,17 +109,63 @@ export function createOpenRouterImageCapabilityResolver(
 }
 
 /**
+ * Resolves whether one `author/slug` OpenRouter model accepts image input, using
+ * only the injected authenticated reader.
+ */
+export function createOpenRouterImageCapabilityResolver(
+  model: string,
+  readMetadata: OpenRouterMetadataReader
+): (signal?: AbortSignal) => Promise<ImageInputCapability> {
+  return createImageCapabilityResolver(model, readMetadata, OPENROUTER_SOURCE)
+}
+
+/**
+ * Resolves whether one Anthropic model accepts image input, reading the
+ * documented `capabilities.image_input.supported` flag. Vision is never inferred
+ * from the model name: an absent, mismatched, or malformed flag is `unknown`, and
+ * only an explicit `false` is `unsupported`.
+ */
+export function createAnthropicImageCapabilityResolver(
+  model: string,
+  readMetadata: AnthropicMetadataReader
+): (signal?: AbortSignal) => Promise<ImageInputCapability> {
+  return createImageCapabilityResolver(model, readMetadata, ANTHROPIC_SOURCE)
+}
+
+const OPENROUTER_SOURCE: ImageCapabilitySource = {
+  buildPath: buildOpenRouterModelPath,
+  parse: openRouterCapabilityFromMetadata,
+}
+
+const ANTHROPIC_SOURCE: ImageCapabilitySource = {
+  buildPath: buildAnthropicModelPath,
+  parse: anthropicCapabilityFromMetadata,
+}
+
+/**
  * OpenRouter model ids are exactly `author/slug`; anything else cannot be
  * requested at all. Each segment must stay a single printable-ASCII token, and
  * `encodeURIComponent` escapes the reserved characters that remain, such as the
  * `:` in `author/model:free`.
  */
-function buildModelPath(model: string): string | undefined {
+function buildOpenRouterModelPath(model: string): string | undefined {
   const segments = model.split('/')
   if (segments.length !== 2) return undefined
   const [author, slug] = segments
   if (!isSafePathSegment(author) || !isSafePathSegment(slug)) return undefined
   return `/model/${encodeURIComponent(author)}/${encodeURIComponent(slug)}`
+}
+
+/**
+ * Anthropic model ids address exactly one resource, `GET /v1/models/{model_id}`.
+ * The id must stay a single printable-ASCII token, and `encodeURIComponent`
+ * escapes `/`, `?`, `#`, and `%` so they cannot introduce another path, query, or
+ * fragment. A bare `.` or `..` is refused before encoding, because dots are
+ * unreserved characters that `encodeURIComponent` would otherwise leave intact.
+ */
+function buildAnthropicModelPath(model: string): string | undefined {
+  if (!isSafePathSegment(model)) return undefined
+  return `/v1/models/${encodeURIComponent(model)}`
 }
 
 function isSafePathSegment(segment: string): boolean {
@@ -77,10 +183,8 @@ function isSafePathSegment(segment: string): boolean {
  * cannot abort each other.
  */
 async function resolveWithDeadline(
-  model: string,
-  path: string,
-  readMetadata: OpenRouterMetadataReader,
-  callerSignal: AbortSignal | undefined
+  callerSignal: AbortSignal | undefined,
+  attempt: (signal: AbortSignal) => Promise<ImageInputCapability>
 ): Promise<ImageInputCapability | typeof ABORTED> {
   const controller = new AbortController()
   const onCallerAbort = () => controller.abort()
@@ -88,10 +192,7 @@ async function resolveWithDeadline(
   const deadline = setTimeout(() => controller.abort(), VISUAL_INPUT_LIMITS.validationTimeoutMs)
 
   try {
-    return await Promise.race([
-      requestCapability(model, path, readMetadata, controller.signal),
-      aborted(controller.signal),
-    ])
+    return await Promise.race([attempt(controller.signal), aborted(controller.signal)])
   } finally {
     clearTimeout(deadline)
     callerSignal?.removeEventListener('abort', onCallerAbort)
@@ -113,10 +214,10 @@ function aborted(signal: AbortSignal): Promise<typeof ABORTED> {
 }
 
 async function requestCapability(
-  model: string,
   path: string,
-  readMetadata: OpenRouterMetadataReader,
-  signal: AbortSignal
+  readMetadata: MetadataReader,
+  signal: AbortSignal,
+  parse: (metadata: string) => ImageInputCapability
 ): Promise<ImageInputCapability> {
   try {
     const response = await readMetadata(path, signal)
@@ -132,7 +233,7 @@ async function requestCapability(
     }
 
     const metadata = await readBoundedMetadata(response, signal)
-    return metadata === undefined ? UNKNOWN : capabilityFromMetadata(metadata, model)
+    return metadata === undefined ? UNKNOWN : parse(metadata)
   } catch {
     // An unreadable transport, status, or body cannot prove support: fail closed.
     return UNKNOWN
@@ -145,7 +246,7 @@ async function requestCapability(
  * reports `unknown` instead of parsing a truncated or replaced catalog entry.
  */
 async function readBoundedMetadata(
-  response: Response,
+  response: ModelMetadataResponse,
   signal: AbortSignal
 ): Promise<string | undefined> {
   const body = response.body
@@ -192,20 +293,30 @@ function decodeUtf8(chunks: readonly Uint8Array[], received: number): string | u
 }
 
 /**
- * Reads only the documented catalog shape. Anything absent, mistyped, or
- * describing a different model leaves the answer `unknown`; an explicit
- * modality list without `image` is the single reachable `unsupported`.
+ * Parses a metadata body only when it is one JSON object; anything else proves
+ * nothing about the requested model.
  */
-function capabilityFromMetadata(metadata: string, model: string): ImageInputCapability {
+function parseJsonObject(metadata: string): Record<string, unknown> | undefined {
   let payload: unknown
   try {
     payload = JSON.parse(metadata)
   } catch {
-    return UNKNOWN
+    return undefined
   }
-  if (typeof payload !== 'object' || payload === null) return UNKNOWN
+  if (typeof payload !== 'object' || payload === null) return undefined
+  return payload as Record<string, unknown>
+}
 
-  const data = (payload as { data?: unknown }).data
+/**
+ * Reads only OpenRouter's documented catalog shape. Anything absent, mistyped, or
+ * describing a different model leaves the answer `unknown`; an explicit modality
+ * list without `image` is the single reachable `unsupported`.
+ */
+function openRouterCapabilityFromMetadata(metadata: string, model: string): ImageInputCapability {
+  const payload = parseJsonObject(metadata)
+  if (payload === undefined) return UNKNOWN
+
+  const data = payload.data
   if (typeof data !== 'object' || data === null) return UNKNOWN
 
   // An alias or a neighbouring id is not the requested model; never infer identity.
@@ -227,6 +338,38 @@ function capabilityFromMetadata(metadata: string, model: string): ImageInputCapa
     provider: OPENROUTER_PROVIDER,
     model,
     evidence: OPENROUTER_METADATA_EVIDENCE,
+  })
+}
+
+/**
+ * Reads only Anthropic's documented `GET /v1/models/{model_id}` shape. A missing
+ * or mistyped `type`, a neighbouring id, a malformed capability tree, or a
+ * non-boolean flag all prove nothing and stay `unknown`; the flag's boolean value
+ * is the only thing that decides. Nothing is inferred from the model name.
+ */
+function anthropicCapabilityFromMetadata(metadata: string, model: string): ImageInputCapability {
+  const payload = parseJsonObject(metadata)
+  if (payload === undefined) return UNKNOWN
+
+  // A neighbouring entry, an alias, or an error envelope is not the requested model.
+  if (payload.type !== 'model' || payload.id !== model) return UNKNOWN
+
+  const capabilities = payload.capabilities
+  if (typeof capabilities !== 'object' || capabilities === null) return UNKNOWN
+
+  const imageInput = (capabilities as { image_input?: unknown }).image_input
+  if (typeof imageInput !== 'object' || imageInput === null) return UNKNOWN
+
+  const supported = (imageInput as { supported?: unknown }).supported
+  if (typeof supported !== 'boolean') return UNKNOWN
+  if (!supported) return UNSUPPORTED
+
+  // Frozen because the resolver hands this same instance back from its cache.
+  return Object.freeze({
+    status: 'supported' as const,
+    provider: ANTHROPIC_PROVIDER,
+    model,
+    evidence: ANTHROPIC_METADATA_EVIDENCE,
   })
 }
 

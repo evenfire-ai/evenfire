@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  ANTHROPIC_CAPABILITY_CACHE_MS,
+  ANTHROPIC_METADATA_EVIDENCE,
+  ANTHROPIC_PROVIDER,
+  type AnthropicMetadataReader,
+  type ModelMetadataResponse,
   OPENROUTER_CAPABILITY_CACHE_MS,
   OPENROUTER_METADATA_EVIDENCE,
   OPENROUTER_PROVIDER,
   type OpenRouterMetadataReader,
+  createAnthropicImageCapabilityResolver,
   createOpenRouterImageCapabilityResolver,
 } from './capabilities'
 import { VISUAL_INPUT_LIMITS, VisualInputError } from './policy'
@@ -405,5 +411,348 @@ describe('OpenRouter image capability resolver', () => {
     expect(readA).toHaveBeenCalledTimes(1)
     expect(readB).toHaveBeenCalledTimes(1)
     expect(readB.mock.calls[0][0]).toBe('/model/anthropic/claude-sonnet-4')
+  })
+})
+
+const CLAUDE_MODEL = 'claude-sonnet-4-5'
+const CLAUDE_MODEL_PATH = '/v1/models/claude-sonnet-4-5'
+
+/** The documented `GET /v1/models/{model_id}` body, with a controllable flag. */
+function anthropicModel(id: string, supported: unknown): Response {
+  return new Response(
+    JSON.stringify({ type: 'model', id, capabilities: { image_input: { supported } } }),
+    { status: 200 }
+  )
+}
+
+describe('Anthropic image capability resolver', () => {
+  it('requests the exact model path and reports supported from the documented flag', async () => {
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel(CLAUDE_MODEL, true)
+    )
+    const resolveCapability = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)
+
+    await expect(resolveCapability()).resolves.toEqual({
+      status: 'supported',
+      provider: 'claude',
+      model: CLAUDE_MODEL,
+      evidence: 'anthropic-model-metadata',
+    })
+
+    expect(readMetadata).toHaveBeenCalledTimes(1)
+    expect(readMetadata.mock.calls[0][0]).toBe(CLAUDE_MODEL_PATH)
+    expect(readMetadata.mock.calls[0][1]).toBeInstanceOf(AbortSignal)
+    // The transport receives the path and a per-call signal only: no headers, no key.
+    expect(readMetadata.mock.calls[0]).toHaveLength(2)
+    expect(ANTHROPIC_PROVIDER).toBe('claude')
+    expect(ANTHROPIC_METADATA_EVIDENCE).toBe('anthropic-model-metadata')
+    expect(ANTHROPIC_CAPABILITY_CACHE_MS).toBe(60_000)
+  })
+
+  it('accepts an injected structural response, not only a native Response', async () => {
+    const payload = JSON.stringify({
+      type: 'model',
+      id: CLAUDE_MODEL,
+      capabilities: { image_input: { supported: true } },
+    })
+    const bridged: ModelMetadataResponse = {
+      status: 200,
+      redirected: false,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(payload))
+          controller.close()
+        },
+      }),
+    }
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () => bridged)
+
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)()
+    ).resolves.toMatchObject({ status: 'supported', model: CLAUDE_MODEL })
+  })
+
+  it('keeps a reserved-character model id inside one path segment', async () => {
+    const model = 'claude-sonnet-4.5?x=1#frag'
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () => anthropicModel(model, true))
+
+    await expect(
+      createAnthropicImageCapabilityResolver(model, readMetadata)()
+    ).resolves.toMatchObject({ status: 'supported' })
+
+    const path = readMetadata.mock.calls[0][0]
+    expect(path).toBe(`/v1/models/${encodeURIComponent(model)}`)
+    expect(path.slice('/v1/models/'.length)).not.toContain('/')
+    expect(path).not.toContain('?')
+    expect(path).not.toContain('#')
+  })
+
+  it('encodes a slash in the model id instead of creating another route', async () => {
+    const model = 'models/../admin'
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () => anthropicModel(model, true))
+
+    await expect(
+      createAnthropicImageCapabilityResolver(model, readMetadata)()
+    ).resolves.toMatchObject({ status: 'supported' })
+
+    const path = readMetadata.mock.calls[0][0]
+    expect(path).toBe('/v1/models/models%2F..%2Fadmin')
+    // '' , 'v1', 'models', the encoded id: the id never becomes its own segment.
+    expect(path.split('/')).toHaveLength(4)
+  })
+
+  it('refuses empty, dot, and control identifiers without reading metadata', async () => {
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel(CLAUDE_MODEL, true)
+    )
+    const rejected = [
+      '',
+      '.',
+      '..',
+      ' ..',
+      '.. ',
+      'claude sonnet 4',
+      'claude-sonnet-4\t',
+      `claude-sonnet-4${String.fromCharCode(0)}`,
+      'claude-sonnet-4ü',
+    ]
+
+    for (const model of rejected) {
+      await expect(createAnthropicImageCapabilityResolver(model, readMetadata)()).resolves.toEqual({
+        status: 'unknown',
+      })
+    }
+    expect(readMetadata).not.toHaveBeenCalled()
+  })
+
+  it('reports an explicit false flag as unsupported and caches it', async () => {
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel(CLAUDE_MODEL, false)
+    )
+    const resolveCapability = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)
+
+    await expect(resolveCapability()).resolves.toEqual({ status: 'unsupported' })
+    await expect(resolveCapability()).resolves.toEqual({ status: 'unsupported' })
+    expect(readMetadata).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns unknown for absent, mismatched, or malformed metadata', async () => {
+    const id = JSON.stringify(CLAUDE_MODEL)
+    const bodies = [
+      '',
+      'not json',
+      '{}',
+      '[]',
+      'null',
+      '{"type":"model"}',
+      '{"type":"error","error":{"type":"not_found_error"}}',
+      '{"type":"model","id":"claude-opus-4-1","capabilities":{"image_input":{"supported":true}}}',
+      `{"id":${id},"capabilities":{"image_input":{"supported":true}}}`,
+      `{"type":"model","id":${id}}`,
+      `{"type":"model","id":${id},"capabilities":null}`,
+      `{"type":"model","id":${id},"capabilities":{}}`,
+      `{"type":"model","id":${id},"capabilities":{"image_input":null}}`,
+      `{"type":"model","id":${id},"capabilities":{"image_input":{}}}`,
+      `{"type":"model","id":${id},"capabilities":{"image_input":{"supported":"true"}}}`,
+      `{"type":"model","id":${id},"capabilities":{"image_input":{"supported":null}}}`,
+    ]
+
+    for (const body of bodies) {
+      const readMetadata = vi.fn<AnthropicMetadataReader>(
+        async () => new Response(body, { status: 200 })
+      )
+      await expect(
+        createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)()
+      ).resolves.toEqual({ status: 'unknown' })
+    }
+  })
+
+  it('returns unknown for a non-200 response or a followed redirect and releases the body', async () => {
+    const failed = trackedStream()
+    const readFailed = vi.fn<AnthropicMetadataReader>(
+      async () => new Response(failed.stream, { status: 404 })
+    )
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readFailed)()
+    ).resolves.toEqual({ status: 'unknown' })
+    expect(failed.wasCancelled()).toBe(true)
+
+    const redirected = trackedStream()
+    const readRedirected = vi.fn<AnthropicMetadataReader>(async () => ({
+      status: 200,
+      redirected: true,
+      body: redirected.stream,
+    }))
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readRedirected)()
+    ).resolves.toEqual({ status: 'unknown' })
+    expect(redirected.wasCancelled()).toBe(true)
+  })
+
+  it('caps the metadata body at 64 KiB and cancels an oversized read', async () => {
+    const oversized = trackedStream(METADATA_BYTES + 1)
+    const readOversized = vi.fn<AnthropicMetadataReader>(
+      async () => new Response(oversized.stream, { status: 200 })
+    )
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readOversized)()
+    ).resolves.toEqual({ status: 'unknown' })
+    expect(oversized.wasCancelled()).toBe(true)
+
+    // A complete body of exactly the cap is still read.
+    const base = JSON.stringify({
+      type: 'model',
+      id: CLAUDE_MODEL,
+      capabilities: { image_input: { supported: true } },
+    })
+    const padded = base.padEnd(METADATA_BYTES, ' ')
+    expect(padded.length).toBe(METADATA_BYTES)
+    const readAtCap = vi.fn<AnthropicMetadataReader>(
+      async () => new Response(padded, { status: 200 })
+    )
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readAtCap)()
+    ).resolves.toMatchObject({ status: 'supported' })
+  })
+
+  it('returns unknown when the shared per-call deadline elapses', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    let observed: AbortSignal | undefined
+    const readMetadata = vi.fn<AnthropicMetadataReader>((_path, signal) => {
+      observed = signal
+      return new Promise<ModelMetadataResponse>(() => undefined)
+    })
+    const pending = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)()
+
+    expect(DEADLINE_MS).toBe(5_000)
+    await vi.advanceTimersByTimeAsync(DEADLINE_MS)
+    await expect(pending).resolves.toEqual({ status: 'unknown' })
+    expect(observed?.aborted).toBe(true)
+  })
+
+  it('reports cancellation for an aborted caller and aborts its in-flight read', async () => {
+    const controller = new AbortController()
+    let observed: AbortSignal | undefined
+    const readMetadata = vi.fn<AnthropicMetadataReader>((_path, signal) => {
+      observed = signal
+      return new Promise<ModelMetadataResponse>(() => undefined)
+    })
+    const pending = createAnthropicImageCapabilityResolver(
+      CLAUDE_MODEL,
+      readMetadata
+    )(controller.signal)
+
+    controller.abort()
+    const failure: unknown = await pending.then(
+      () => undefined,
+      (reason: unknown) => reason
+    )
+    expect(failure).toBeInstanceOf(VisualInputError)
+    expect(failure).toMatchObject({ code: 'cancelled' })
+    expect(observed?.aborted).toBe(true)
+  })
+
+  it('fails an already-aborted caller before touching the transport', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel(CLAUDE_MODEL, true)
+    )
+
+    await expect(
+      createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)(controller.signal)
+    ).rejects.toMatchObject({ code: 'cancelled' })
+    expect(readMetadata).not.toHaveBeenCalled()
+  })
+
+  it('cancels the in-flight body when the caller aborts', async () => {
+    const controller = new AbortController()
+    const body = trackedStream()
+    const readMetadata = vi.fn<AnthropicMetadataReader>(
+      async () => new Response(body.stream, { status: 200 })
+    )
+    const pending = createAnthropicImageCapabilityResolver(
+      CLAUDE_MODEL,
+      readMetadata
+    )(controller.signal)
+
+    await flushMicrotasks()
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ code: 'cancelled' })
+    expect(body.wasCancelled()).toBe(true)
+  })
+
+  it('gives every call its own signal and never shares the caller signal with the transport', async () => {
+    const controller = new AbortController()
+    const gate = deferred<void>()
+    const signals: AbortSignal[] = []
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async (_path, signal) => {
+      signals.push(signal)
+      await gate.promise
+      return anthropicModel(CLAUDE_MODEL, true)
+    })
+    const resolveCapability = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)
+    const first = resolveCapability(controller.signal)
+    const second = resolveCapability(controller.signal)
+
+    expect(readMetadata).toHaveBeenCalledTimes(2)
+    expect(signals[0]).not.toBe(controller.signal)
+    expect(signals[1]).not.toBe(controller.signal)
+    expect(signals[0]).not.toBe(signals[1])
+
+    gate.resolve(undefined)
+    await expect(first).resolves.toMatchObject({ status: 'supported' })
+    await expect(second).resolves.toMatchObject({ status: 'supported' })
+  })
+
+  it('serves a cached answer for 60 seconds and refreshes afterwards', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const readMetadata = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel(CLAUDE_MODEL, true)
+    )
+    const resolveCapability = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)
+
+    await resolveCapability()
+    vi.advanceTimersByTime(59_999)
+    await resolveCapability()
+    expect(readMetadata).toHaveBeenCalledTimes(1)
+
+    vi.advanceTimersByTime(1)
+    await resolveCapability()
+    expect(readMetadata).toHaveBeenCalledTimes(2)
+  })
+
+  it('never caches an unknown answer', async () => {
+    const readMetadata = vi.fn<AnthropicMetadataReader>(
+      async () => new Response(null, { status: 500 })
+    )
+    const resolveCapability = createAnthropicImageCapabilityResolver(CLAUDE_MODEL, readMetadata)
+
+    await expect(resolveCapability()).resolves.toEqual({ status: 'unknown' })
+    await expect(resolveCapability()).resolves.toEqual({ status: 'unknown' })
+    expect(readMetadata).toHaveBeenCalledTimes(2)
+  })
+
+  it('binds each resolver to its own model and cache', async () => {
+    const readA = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel('claude-sonnet-4-5', true)
+    )
+    const readB = vi.fn<AnthropicMetadataReader>(async () =>
+      anthropicModel('claude-opus-4-1', false)
+    )
+    const resolveA = createAnthropicImageCapabilityResolver('claude-sonnet-4-5', readA)
+    const resolveB = createAnthropicImageCapabilityResolver('claude-opus-4-1', readB)
+
+    await expect(resolveA()).resolves.toMatchObject({
+      status: 'supported',
+      model: 'claude-sonnet-4-5',
+    })
+    await expect(resolveB()).resolves.toEqual({ status: 'unsupported' })
+    await expect(resolveA()).resolves.toMatchObject({ status: 'supported' })
+    expect(readA).toHaveBeenCalledTimes(1)
+    expect(readB).toHaveBeenCalledTimes(1)
+    expect(readA.mock.calls[0][0]).toBe('/v1/models/claude-sonnet-4-5')
+    expect(readB.mock.calls[0][0]).toBe('/v1/models/claude-opus-4-1')
   })
 })

@@ -2,6 +2,7 @@
  * Anthropic Claude LLM provider with tool/function calling support.
  */
 import Anthropic from '@anthropic-ai/sdk'
+import { Readable } from 'node:stream'
 import { LlmErrorCode } from '../core/errors'
 import type { SystemPromptParts } from '../core/reasoning/systemPrompt'
 import {
@@ -16,6 +17,10 @@ import {
   ToolCompletionResponse,
   ToolDefinition,
 } from '../core/types'
+import { logger } from '../logger'
+import { createAnthropicImageCapabilityResolver } from '../visualInput/capabilities'
+import { type ImageInputCapability, VISUAL_INPUT_LIMITS } from '../visualInput/policy'
+import { assertVisualRequestFits } from '../visualInput/requestPolicy'
 import { convertToClaudeMessages, separateSystemMessage } from './claude/messageTranslate'
 import { classifyByHttpStatus, classifyUnknown } from './errorClassification'
 import type { LlmProvider } from './registryCore'
@@ -24,6 +29,7 @@ import type { ClassifiedError, SingleTurnProvider } from './types'
 export class ClaudeProvider implements SingleTurnProvider {
   private client: Anthropic
   private defaultModel: string
+  private readonly imageCapabilityResolver: (signal?: AbortSignal) => Promise<ImageInputCapability>
 
   constructor(apiKeyOrClient: string | Anthropic, defaultModel: string = 'claude-sonnet-4-6') {
     if (typeof apiKeyOrClient === 'string') {
@@ -32,7 +38,50 @@ export class ClaudeProvider implements SingleTurnProvider {
       this.client = apiKeyOrClient
     }
     this.defaultModel = defaultModel
-    console.log(`[Claude] Initialized with model: ${defaultModel}`)
+    this.imageCapabilityResolver = createAnthropicImageCapabilityResolver(
+      defaultModel,
+      async (path, signal) => {
+        // Use this exact SDK connection/authentication, but consume raw transport
+        // before SDK error parsing, which would otherwise read an unbounded body.
+        const { url, req } = this.client.buildRequest({ method: 'get', path })
+        const controller = new AbortController()
+        const abort = () => controller.abort()
+        signal.addEventListener('abort', abort, { once: true })
+        try {
+          signal.throwIfAborted()
+          const response = await this.client.fetchWithTimeout(
+            url,
+            { ...req, signal: undefined, redirect: 'error' },
+            VISUAL_INPUT_LIMITS.validationTimeoutMs,
+            controller
+          )
+          if (response.status !== 200)
+            logger.warn(
+              { provider: 'claude', model: defaultModel, status: response.status },
+              'Model capability lookup failed'
+            )
+          // SDK 0.32 defaults to node-fetch, while injected fetch implementations
+          // may return Web streams. Cancellation of the Node bridge destroys its body.
+          const body =
+            response.body instanceof Readable
+              ? Readable.toWeb(response.body, {
+                  strategy: {
+                    highWaterMark: VISUAL_INPUT_LIMITS.metadataBytes,
+                    size: chunk => chunk.byteLength,
+                  },
+                })
+              : response.body
+          return { status: response.status, redirected: response.redirected, body }
+        } finally {
+          signal.removeEventListener('abort', abort)
+        }
+      }
+    )
+    logger.info({ model: defaultModel }, 'Claude transport initialized')
+  }
+
+  getImageInputCapability(signal?: AbortSignal): Promise<ImageInputCapability> {
+    return this.imageCapabilityResolver(signal)
   }
 
   /**
@@ -188,6 +237,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     const { systemPrompt, claudeMessages } = this.separateSystemMessage(messages)
@@ -199,17 +249,16 @@ export class ClaudeProvider implements SingleTurnProvider {
       input_schema: t.parameters as Anthropic.Tool['input_schema'],
     }))
 
-    const response = await this.client.messages.create(
-      {
-        model: this.defaultModel,
-        system: systemPrompt || undefined,
-        messages: formattedMessages,
-        tools: claudeTools.length > 0 ? claudeTools : undefined,
-        max_tokens: options?.max_tokens ?? 4096,
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
-    )
+    const request: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.defaultModel,
+      system: systemPrompt || undefined,
+      messages: formattedMessages,
+      tools: claudeTools.length > 0 ? claudeTools : undefined,
+      max_tokens: options?.max_tokens ?? 4096,
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
       response.content
@@ -260,6 +309,7 @@ export class ClaudeProvider implements SingleTurnProvider {
       temperature?: number
       tool_choice?: string
       signal?: AbortSignal
+      verifyImageInput?: boolean
     }
   ): Promise<ToolCompletionResponse> {
     const formattedMessages = this.convertToClaudeMessages(messages)
@@ -288,17 +338,16 @@ export class ClaudeProvider implements SingleTurnProvider {
       } as Anthropic.TextBlockParam)
     }
 
-    const response = await this.client.messages.create(
-      {
-        model: this.defaultModel,
-        system: systemBlocks.length > 0 ? systemBlocks : undefined,
-        messages: formattedMessages,
-        tools: claudeTools.length > 0 ? claudeTools : undefined,
-        max_tokens: options?.max_tokens ?? 4096,
-        temperature: options?.temperature,
-      },
-      { signal: options?.signal }
-    )
+    const request: Anthropic.MessageCreateParamsNonStreaming = {
+      model: this.defaultModel,
+      system: systemBlocks.length > 0 ? systemBlocks : undefined,
+      messages: formattedMessages,
+      tools: claudeTools.length > 0 ? claudeTools : undefined,
+      max_tokens: options?.max_tokens ?? 4096,
+      temperature: options?.temperature,
+    }
+    assertVisualRequestFits(messages, request, options?.verifyImageInput === true)
+    const response = await this.client.messages.create(request, { signal: options?.signal })
 
     const textContent =
       response.content
