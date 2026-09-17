@@ -58,7 +58,26 @@ vi.mock('@components/SidebarNav', () => ({
 }))
 vi.mock('@pages/AgentsPage', () => ({ AgentsPage: () => null }))
 vi.mock('@pages/AuthPage', () => ({ AuthPage: () => null }))
-vi.mock('@pages/ChatPage', () => ({ ChatPage: () => null }))
+// The real ChatPage is heavy; stub it, but surface the two things the drawer/
+// full-screen conversation is supposed to carry — the active chat identity and
+// the composer-focus pulse — through the real composer-state context. That lets
+// the eject test assert the RENDERED conversation (and its focus request) rather
+// than hand-written controller state.
+vi.mock('@pages/ChatPage', async () => {
+  const { useChatComposerStateContext } = await import('@contexts/ChatComposerStateContext')
+  return {
+    ChatPage: () => {
+      const { activeChatId, composerFocusRequestId } = useChatComposerStateContext()
+      return (
+        <div
+          data-testid="chat-page-surface"
+          data-active-chat-id={activeChatId ?? ''}
+          data-composer-focus-request-id={composerFocusRequestId}
+        />
+      )
+    },
+  }
+})
 vi.mock('@pages/ContextDetailsPage', () => ({ ContextDetailsPage: () => null }))
 vi.mock('@pages/ContextsPage', () => ({ ContextsPage: () => null }))
 vi.mock('@pages/FilesPage', () => ({ FilesPage: () => null }))
@@ -269,6 +288,86 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
 
     // Reopen must preserve chat-2, not jump back to the chat-1 origin.
     expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+  })
+
+  // The header's "Open chat in full screen" CTA must EJECT the drawer's ACTIVE
+  // conversation — the one the user switched to inside the drawer, not the launch
+  // origin — to the full-screen chat route. That is the non-drawer branch of
+  // revealChatViewTab (leaveSandboxForChat + a selection WITHOUT keepNavItem),
+  // not the in-drawer swap. Launch from chat-1 but switch to chat-2 first, so the
+  // origin and the active chat differ: only then does asserting the eject carries
+  // chat-2 prove that the switched-to conversation survives the expansion (with
+  // both equal, an eject that hard-coded the origin would pass just the same).
+  it('ejects the switched-to drawer conversation (chat-2) to the full-screen chat route on "Open chat in full screen"', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.chat,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { rerender } = render(<App />)
+
+    // Open both conversations as real tabs (chat-2, then back to chat-1) so the
+    // drawer switcher lists both — the user has chat-2 open and is viewing chat-1
+    // when they launch.
+    act(() => {
+      currentController.activeChatId = 'chat-2'
+      rerender(<App />)
+    })
+    act(() => {
+      currentController.activeChatId = 'chat-1'
+      rerender(<App />)
+    })
+
+    // Launch from chat-1: the drawer opens over the live embed on the apps route.
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(sandboxUiPageHarness.props?.chatDrawerOpen).toBe(true)
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.apps)
+    expect(screen.getByRole('button', { name: 'Collapse chat drawer' })).toBeTruthy()
+
+    // Switch to chat-2 in the drawer switcher — the conversation that must survive
+    // the expansion. Prove it landed through the real switcher AND the rendered
+    // ChatPage surface (its active-chat id), not the controller mock.
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chats' })))
+    act(() => fireEvent.click(screen.getByRole('option', { name: 'Second chat' })))
+    expect(screen.getByRole('button', { name: 'Open chats' }).textContent).toContain('Second chat')
+    const drawerSurface = screen.getByTestId('chat-page-surface')
+    expect(drawerSurface.getAttribute('data-active-chat-id')).toBe('chat-2')
+    const focusBeforeExpand = Number(drawerSurface.getAttribute('data-composer-focus-request-id'))
+
+    // Ignore the selections the switch itself performed; assert only on the CTA.
+    vi.mocked(currentController.handleSelectChatAgent).mockClear()
+
+    act(() => fireEvent.click(screen.getByRole('button', { name: 'Open chat in full screen' })))
+
+    // Ejected to the full-screen chat route, carrying chat-2 (the switched-to
+    // conversation), NOT the chat-1 launch origin. Assert the RENDERED full-screen
+    // conversation surface and the composer-focus pulse the CTA fires — the two
+    // things the expansion is supposed to hand off.
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.chat)
+    const fullScreenSurface = screen.getByTestId('chat-page-surface')
+    expect(fullScreenSurface.getAttribute('data-active-chat-id')).toBe('chat-2')
+    expect(
+      Number(fullScreenSurface.getAttribute('data-composer-focus-request-id'))
+    ).toBeGreaterThan(focusBeforeExpand)
+    // The eject uses the non-drawer branch: the mock only flips navItem when the
+    // selection omits keepNavItem, so this pins the eject path (not the in-drawer
+    // swap) and confirms the selection targets chat-2.
+    expect(currentController.handleSelectChatAgent).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({ chatId: 'chat-2' })
+    )
+    expect(
+      vi.mocked(currentController.handleSelectChatAgent).mock.calls.at(-1)?.[1]?.keepNavItem
+    ).not.toBe(true)
+    // The drawer unmounts once the embed is torn down: its collapse CTA is gone.
+    expect(screen.queryByRole('button', { name: 'Collapse chat drawer' })).toBeNull()
   })
 
   // The drawer's not-ready subtree is `inert`, and a `focus()` fired inside an

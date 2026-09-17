@@ -460,6 +460,17 @@ export function App() {
     }
   }, [closeChatDrawer, openChatDrawer])
 
+  const expandChatDrawerToFullScreen = React.useCallback(() => {
+    // Ejects the drawer's active conversation into the full-screen chat route.
+    // `revealChatViewTab(_, false)` forces the non-drawer branch: it tears the
+    // live embed down and navigates to the chat route. Reset the open intent so a
+    // stale `chatDrawerOpen` doesn't linger now that the drawer is gone (a later
+    // app launch from a chat re-sets it explicitly).
+    revealChatViewTab(activeChatViewTab(chatViewTabsRef.current), false)
+    setChatDrawerOpen(false)
+    setComposerFocusRequestId(value => value + 1)
+  }, [revealChatViewTab])
+
   // minispec 04 approach C: while the app embed is live, an "open conversation"
   // gesture (notification / approval) must surface the chat IN the drawer — open
   // the drawer and pass `keepNavItem` so the vm swaps the shared <ChatPage>
@@ -2166,7 +2177,8 @@ export function App() {
                                           />
                                         }
                                         onNewChat={handleNewChatViewTab}
-                                        onClose={closeChatDrawer}
+                                        onExpandFullScreen={expandChatDrawerToFullScreen}
+                                        onToggle={toggleChatDrawer}
                                         containerRef={chatDrawerRef}
                                         ready={chatDrawerReady}
                                         onResizeHandleMouseDown={
