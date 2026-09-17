@@ -74,8 +74,8 @@ TEST_SERVICES := \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
 	packages/network-policy-core \
-	packages/llm-provider-attempt-contract
-
+	packages/llm-provider-attempt-contract \
+	packages/llm-providers
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
 # ── Optional OSS-launch tooling (public snapshot / infra carve) — monorepo-only

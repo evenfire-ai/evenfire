@@ -69,6 +69,7 @@ jobs:
           - packages/workflow-sdk
           - packages/network-policy-core
           - packages/llm-provider-attempt-contract
+          - packages/llm-providers
           - packages/codex-catalog-projection
           - codex-llm-proxy
 
