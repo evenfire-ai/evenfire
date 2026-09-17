@@ -102,6 +102,20 @@ function asHubRow(
   return { ...row, broker }
 }
 
+// RFC 8628 §3.5 device polling for both brokers: honor the interval the server
+// returns and add 5 seconds on slow_down. Never poll faster than already agreed.
+const DEVICE_SLOW_DOWN_BACKOFF_SECONDS = 5
+
+function nextDevicePollIntervalSeconds(
+  currentSeconds: number,
+  polled: { status: 'pending' | 'slow_down'; intervalSeconds: number }
+): number {
+  const next = Math.max(currentSeconds, polled.intervalSeconds)
+  return polled.status === 'slow_down'
+    ? Math.max(next, currentSeconds + DEVICE_SLOW_DOWN_BACKOFF_SECONDS)
+    : next
+}
+
 const GROK_TOS =
   'Connecting a Grok subscription authenticates Evenfire to xAI with the SuperGrok / Grok Build coding-plan OAuth client. Inference stays on cli-chat-proxy.grok.com and is not the metered xAI API.'
 
@@ -469,8 +483,9 @@ export function CodexSubscriptionHub() {
       setUserCode(started.userCode)
       setVerificationUri(started.verificationUri)
       const deadline = Date.now() + started.intervalSeconds * 1000 * 40
+      let pollIntervalSeconds = started.intervalSeconds
       while (Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, started.intervalSeconds * 1000))
+        await new Promise(resolve => setTimeout(resolve, pollIntervalSeconds * 1000))
         if (epoch !== connectEpoch.current) return
         const polled = grok
           ? await pollGrokDevice(started.state, row.connectionKey)
@@ -505,6 +520,9 @@ export function CodexSubscriptionHub() {
           setVerificationUri(null)
           setError(`${brand} sign-in ${polled.status}. Try again.`)
           return
+        }
+        if ('intervalSeconds' in polled) {
+          pollIntervalSeconds = nextDevicePollIntervalSeconds(pollIntervalSeconds, polled)
         }
       }
       if (epoch !== connectEpoch.current) return

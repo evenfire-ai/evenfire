@@ -78,6 +78,27 @@ export function operatorProviderOptions(opts?: {
   )
 }
 
+/**
+ * Runtime provider picker for the allowlist, price and budget tables: every
+ * provider id (incl. codex-subscription), with Grok hidden until Control API
+ * proves the flag on. A saved known provider the picker no longer offers stays
+ * available, labelled "(disabled)", so editing never silently drops it.
+ */
+export function runtimeProviderOptions(opts?: {
+  grokEnabled?: boolean
+  saved?: ReadonlyArray<string | null | undefined>
+}): Array<{ value: LlmProvider; label: string }> {
+  const options = LLM_PROVIDER_OPTIONS.filter(
+    option => option.value !== GROK_SUBSCRIPTION_PROVIDER || opts?.grokEnabled === true
+  )
+  for (const value of opts?.saved ?? []) {
+    if (!value || !isLlmProviderId(value)) continue
+    if (options.some(option => option.value === value)) continue
+    options.push({ value, label: `${PROVIDER_DISPLAY_LABELS[value]} (disabled)` })
+  }
+  return options
+}
+
 export function catalogGroupKey(provider: string): string {
   return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
 }

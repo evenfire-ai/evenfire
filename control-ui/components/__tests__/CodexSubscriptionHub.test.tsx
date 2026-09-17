@@ -99,6 +99,13 @@ function connection(
   }
 }
 
+// Advance only the (faked) poll-loop setTimeout clock and flush the awaited
+// poll/start promises so the next loop timer is registered.
+async function advanceDevicePoll(ms: number) {
+  await vi.advanceTimersByTimeAsync(ms)
+  await vi.advanceTimersByTimeAsync(0)
+}
+
 describe('CodexSubscriptionHub', () => {
   beforeEach(() => {
     confirmMock.mockReset()
@@ -404,6 +411,54 @@ describe('CodexSubscriptionHub', () => {
     await waitFor(() => {
       expect(revokeCodexSubscription).toHaveBeenCalledWith('codex-aaa')
     })
+  })
+
+  // B-L7: the device poll loop must follow polled.intervalSeconds and back off
+  // on slow_down (RFC 8628 §3.5: +5s), not re-use the start interval forever.
+  it('backs off by 5s on a Codex slow_down before the next device poll', async () => {
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => ({}))
+    )
+    vi.mocked(startCodexDeviceConnect).mockResolvedValue({
+      userCode: 'ABCD-1234',
+      verificationUri: CODEX_DEVICE_VERIFICATION_URI,
+      intervalSeconds: 5,
+      state: 'state-1',
+      intent: 'reconnect',
+    })
+    vi.mocked(pollCodexDevice)
+      .mockResolvedValueOnce({ status: 'slow_down', intervalSeconds: 5, state: 'state-1' })
+      .mockResolvedValue({ status: 'pending', intervalSeconds: 5, state: 'state-1' })
+    render(
+      <ToastProvider>
+        <CodexSubscriptionHub />
+      </ToastProvider>
+    )
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for ChatGPT subscription Team A' })
+    )
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Update' }))
+    const signIn = await screen.findByRole('button', { name: 'Sign in with ChatGPT' })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.click(signIn)
+      // RTL findBy* drains via setTimeout(0), which is faked here — flush manually.
+      await advanceDevicePoll(0)
+      expect(screen.getByTestId('codex-device-code')).toHaveTextContent('ABCD-1234')
+      await advanceDevicePoll(4_900)
+      expect(pollCodexDevice).not.toHaveBeenCalled()
+      await advanceDevicePoll(100)
+      expect(pollCodexDevice).toHaveBeenCalledTimes(1)
+      // slow_down with the same interval: 5s + 5s back-off, never the start 5s.
+      await advanceDevicePoll(9_900)
+      expect(pollCodexDevice).toHaveBeenCalledTimes(1)
+      await advanceDevicePoll(100)
+      expect(pollCodexDevice).toHaveBeenCalledTimes(2)
+      expect(pollCodexDevice).toHaveBeenLastCalledWith('state-1', 'codex-aaa')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -716,5 +771,53 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     expect(screen.getByTestId('codex-device-code')).toHaveTextContent(
       'Open the Grok verification page'
     )
+  })
+
+  it('follows the polled Grok interval and backs off on slow_down between device polls', async () => {
+    const tab = { opener: {} as unknown, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.stubGlobal(
+      'open',
+      vi.fn(() => tab)
+    )
+    vi.mocked(startGrokDeviceConnect).mockResolvedValue({
+      userCode: 'GROK-1234',
+      verificationUri: 'https://auth.x.ai/device?user_code=GROK-1234',
+      intervalSeconds: 5,
+      state: 'grok-state',
+      intent: 'reconnect',
+    })
+    vi.mocked(pollGrokDevice)
+      .mockResolvedValueOnce({ status: 'pending', intervalSeconds: 12, state: 'grok-state' })
+      .mockResolvedValueOnce({ status: 'slow_down', intervalSeconds: 12, state: 'grok-state' })
+      .mockResolvedValue({ status: 'pending', intervalSeconds: 12, state: 'grok-state' })
+    renderHub()
+    fireEvent.click(
+      await screen.findByRole('button', { name: 'Actions for Grok subscription Team Grok' })
+    )
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
+    const signIn = await screen.findByRole('button', { name: 'Sign in with Grok' })
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      fireEvent.click(signIn)
+      // RTL findBy* drains via setTimeout(0), which is faked here — flush manually.
+      await advanceDevicePoll(0)
+      expect(screen.getByTestId('codex-device-code')).toHaveTextContent('GROK-1234')
+      await advanceDevicePoll(5_000)
+      expect(pollGrokDevice).toHaveBeenCalledTimes(1)
+      // pending carried intervalSeconds 12: wait 12s, not the start 5s.
+      await advanceDevicePoll(11_900)
+      expect(pollGrokDevice).toHaveBeenCalledTimes(1)
+      await advanceDevicePoll(100)
+      expect(pollGrokDevice).toHaveBeenCalledTimes(2)
+      // slow_down: 12s + 5s back-off.
+      await advanceDevicePoll(16_900)
+      expect(pollGrokDevice).toHaveBeenCalledTimes(2)
+      await advanceDevicePoll(100)
+      expect(pollGrokDevice).toHaveBeenCalledTimes(3)
+      expect(pollGrokDevice).toHaveBeenLastCalledWith('grok-state', 'grok-aaa')
+      expect(pollCodexDevice).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

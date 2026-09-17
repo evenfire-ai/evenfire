@@ -1,13 +1,15 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import { Button, CheckboxField, Field, FormSection, SelectInput, TextInput } from '@components/ui'
 import type { CreateLlmModelInput } from '@lib/api'
+import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
 import {
   GROK_SUBSCRIPTION_PROVIDER,
   LLM_PROVIDER_OPTIONS,
   isKnownProvider,
   isOauthBrokerProvider,
+  runtimeProviderOptions,
 } from '@lib/llm'
 import type { LlmModelFormProps } from './types'
 
@@ -44,6 +46,12 @@ export function LlmModelForm({
   )
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [showErrors, setShowErrors] = useState(false)
+  const grokEnabled = useGrokSubscriptionEnabled()
+  const savedProvider = initial?.provider ?? prefill?.provider
+  const providerOptions = useMemo(
+    () => runtimeProviderOptions({ grokEnabled, saved: [savedProvider] }),
+    [grokEnabled, savedProvider]
+  )
 
   const providerIsKnown = isKnownProvider(provider)
   // Subscription (oauth-broker) models are enabled by their grant catalog sync,
@@ -87,7 +95,7 @@ export function LlmModelForm({
               onChange={event => setProvider(event.target.value)}
               disabled={saving}
             >
-              {LLM_PROVIDER_OPTIONS.map(option => (
+              {providerOptions.map(option => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
