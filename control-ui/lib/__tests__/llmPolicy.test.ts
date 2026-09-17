@@ -57,6 +57,19 @@ describe('getCredentialSlotOptions (spec R4.5.6)', () => {
     expect(opts).not.toContain('openai-api-key-fb1')
     expect(opts).not.toContain('claude-project')
   })
+
+  it('offers only <canonical> or <canonical>-<suffix> keys — a dash-less suffix is not provider-owned (R5-M2)', () => {
+    // `openai-compatible-api-key2` shares the canonical prefix but is NOT owned
+    // (no `-` separator), so control-api/CEL/HCC reject a save naming it. The
+    // dropdown must not offer it. `-fb1` (dashed) is owned and stays.
+    expect(
+      getCredentialSlotOptions('openai-compatible', [
+        'openai-compatible-api-key2',
+        'openai-compatible-api-key-fb1',
+        'openai-compatible-api-key',
+      ])
+    ).toEqual(['openai-compatible-api-key', 'openai-compatible-api-key-fb1'])
+  })
 })
 
 describe('getPromptBridgeCredentialSlotOptions', () => {
@@ -76,6 +89,15 @@ describe('getPromptBridgeCredentialSlotOptions', () => {
         'claude-project',
         'vertex-service-account-json-fb1',
       ])
+    ).toEqual(['claude-api-key', 'claude-api-key-fb1'])
+  })
+
+  it('offers only <canonical> or <canonical>-<suffix> keys — a dash-less suffix is not provider-owned (R5-M2)', () => {
+    // Same ownership rule as the failover dropdown: `claude-api-key2` shares the
+    // canonical prefix but is not owned, and pluginWorkloadSdk gates the save on
+    // ownership for every provider, so it must not be offered here either.
+    expect(
+      getPromptBridgeCredentialSlotOptions('claude', ['claude-api-key2', 'claude-api-key-fb1'])
     ).toEqual(['claude-api-key', 'claude-api-key-fb1'])
   })
 })

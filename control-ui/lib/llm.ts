@@ -820,10 +820,12 @@ export function providerSupportsFallbackCredentialSlot(provider: LlmProvider): b
 // Dropdown options for a fallback entry's `credentialSlot` (spec R4.5.6): the
 // provider's canonical registry slots first, then any EXTRA keys already present
 // in the LLM Secret that belong to this provider (e.g. `claude-api-key-fb1`).
-// Extra keys are matched only by a canonical registry slot prefix (the
-// suggested `<slot>-fb1` naming), excluding keys that are canonical slots of
-// another provider. A provider-name prefix alone (for example
-// `openai-project`) is not a credential slot and must not be offered.
+// A key is provider-owned when it equals a canonical registry slot key or
+// extends one with a `-` suffix (the suggested `<slot>-fb1` naming) — the exact
+// ownership rule control-api/CEL/HCC apply on the write path. A bare prefix
+// match (`claude-api-key2`, `openai-project`) is NOT owned and must not be
+// offered: the backend would 422 a save that named it. Keys that are canonical
+// slots of another provider are excluded up front.
 // Providers that can't express a single-key slot (Bedrock/Vertex) offer NOTHING —
 // their fallbacks reuse the primary credentials (mirrors the backend gate).
 export function getCredentialSlotOptions(
@@ -835,7 +837,7 @@ export function getCredentialSlotOptions(
   const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
-    .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
+    .filter(key => prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}-`)))
     .sort((a, b) => a.localeCompare(b))
   return Array.from(new Set([...registrySlots, ...extras]))
 }
@@ -859,7 +861,7 @@ export function getPromptBridgeCredentialSlotOptions(
   const prefixes = registrySlots
   const extras = secretKeys
     .filter(key => !ALL_REGISTRY_SLOT_KEYS.has(key))
-    .filter(key => prefixes.some(prefix => key.startsWith(prefix)))
+    .filter(key => prefixes.some(prefix => key === prefix || key.startsWith(`${prefix}-`)))
     .sort((a, b) => a.localeCompare(b))
   return Array.from(new Set([...registrySlots, ...extras]))
 }
@@ -869,7 +871,12 @@ export function getPromptBridgeCredentialSlotOptions(
 // canonical slots would lose operator-minted EXTRA slots (`claude-api-key-fb1`
 // from mintFallbackSlot, or the secrets form's "Add credential slot"), making
 // a Secret that holds ONLY an extra slot of a provider render that provider
-// as absent. Mirrors the extra-key matching in getCredentialSlotOptions:
+// as absent. Deliberately LOOSER than the dropdown builders
+// (getCredentialSlotOptions / getPromptBridgeCredentialSlotOptions): those
+// apply the dashed ownership rule (`<slot>` or `<slot>-…`) because a save is
+// gated by it, so a bare-prefix key like `claude-api-key2` must not be OFFERED
+// as a slot. This is attribution only — no save is gated by it — so it must
+// not HIDE a legacy bare-prefix key from the secrets editor's provider groups:
 //   1. an exact canonical (registry) slot dataKey → its provider;
 //   2. otherwise, a key carrying a provider's `${provider}-` prefix or
 //      extending one of its canonical slot keys (the suggested `<slot>-fbN`
