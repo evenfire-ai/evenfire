@@ -7,6 +7,13 @@ const path = require('node:path')
 const test = require('node:test')
 const zlib = require('node:zlib')
 const contract = require('./index.cjs')
+const {
+  declaredHeaderPng,
+  declaredHeaderPngOfSize,
+  jpegOfSize,
+  realPng,
+  realPngOfSize,
+} = require('./testImageFixtures.cjs')
 
 const FIXTURE = JSON.parse(
   fs.readFileSync(path.join(__dirname, 'fixtures/canonical-request-hashes.json'), 'utf8')
@@ -431,7 +438,6 @@ const IMAGE_DATA = {
   jpeg: VISUAL_FIXTURE.jpeg.messages[0].contentParts.find(part => part.type === 'image').data,
 }
 const MAX_ENCODED_IMAGE_CHARS = 4 * Math.ceil(contract.VISUAL_LIMITS.maxImageBytes / 3)
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 /**
  * Fixture image parts carry `dataRef` (resolved from visual-requests.json) so
@@ -480,138 +486,10 @@ function pngChunks(bytes) {
   return chunks
 }
 
-function pngChunk(type, data) {
-  const length = Buffer.alloc(4)
-  length.writeUInt32BE(data.length, 0)
-  const typeBytes = Buffer.from(type, 'latin1')
-  const crc = Buffer.alloc(4)
-  crc.writeUInt32BE(zlib.crc32(Buffer.concat([typeBytes, data])) >>> 0, 0)
-  return Buffer.concat([length, typeBytes, data, crc])
-}
-
-function pngHeader(width, height) {
-  const ihdr = Buffer.alloc(13)
-  ihdr.writeUInt32BE(width, 0)
-  ihdr.writeUInt32BE(height, 4)
-  ihdr[8] = 8
-  ihdr[9] = 2
-  return ihdr
-}
-
-/** Real PNG: a deflate stream over filtered RGB scanlines plus real CRCs. */
-function realPng(width, height, seed) {
-  const stride = 1 + width * 3
-  const raw = Buffer.alloc(height * stride)
-  let state = seed >>> 0
-  for (let i = 0; i < raw.length; i++) {
-    if (i % stride === 0) continue
-    state ^= state << 13
-    state >>>= 0
-    state ^= state >>> 17
-    state ^= state << 5
-    state >>>= 0
-    raw[i] = state & 0xff
-  }
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    pngChunk('IHDR', pngHeader(width, height)),
-    pngChunk('IDAT', zlib.deflateSync(raw, { level: 6 })),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ])
-}
-
-/**
- * Framed PNG whose IDAT is not a decodable stream. Used only for the declared
- * header budgets: the pixel budget is enforced on IHDR before any decode, which
- * is the documented guarantee boundary of this contract.
- */
-function declaredHeaderPng(width, height) {
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    pngChunk('IHDR', pngHeader(width, height)),
-    pngChunk('IDAT', Buffer.alloc(8)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ])
-}
-
-/**
- * Declared-header container padded to an exact byte length (signature 8,
- * IHDR 25, IDAT 12 + payload, IEND 12). Also a budget probe only.
- */
-function declaredHeaderPngOfSize(targetBytes) {
-  const overhead = 8 + 25 + 12 + 12
-  assert.ok(targetBytes > overhead, 'target must leave room for image data')
-  return Buffer.concat([
-    PNG_SIGNATURE,
-    pngChunk('IHDR', pngHeader(2, 2)),
-    pngChunk('IDAT', Buffer.alloc(targetBytes - overhead)),
-    pngChunk('IEND', Buffer.alloc(0)),
-  ])
-}
-
 const MIB = 1024 * 1024
 // The per-image ceiling this suite replaced. Kept as a literal so the tests
 // prove the raise rather than restating the current constant.
 const FORMER_IMAGE_CEILING = 524288
-
-/**
- * Real PNG (correct CRCs, inflatable scanlines) padded to an exact byte length
- * with an ancillary tEXt chunk inserted before IEND. Ancillary chunks are
- * legal anywhere before IEND, so the image stays decodable while the file size
- * is exact.
- */
-function realPngOfSize(targetBytes, width, height, seed) {
-  const base = realPng(width, height, seed)
-  const padding = targetBytes - base.length
-  assert.ok(padding >= 0, `target ${targetBytes} is smaller than the real PNG ${base.length}`)
-  if (padding === 0) return base
-  assert.ok(padding >= 12, 'target must leave room for the padding chunk')
-  const iend = base.subarray(base.length - 12)
-  const body = base.subarray(0, base.length - 12)
-  const payloadLength = padding - 12
-  const text = Buffer.concat([
-    Buffer.from('pad\0', 'latin1'),
-    Buffer.alloc(Math.max(payloadLength - 4, 0), 0x20),
-  ])
-  assert.equal(text.length, payloadLength)
-  return Buffer.concat([body, pngChunk('tEXt', text), iend])
-}
-
-/**
- * Structurally framed JPEG of an exact byte length: SOI, a frame header that
- * declares the dimensions, a start-of-scan segment, entropy payload and EOI.
- * This is the container the v2 JPEG checks were written against — marker
- * framing and declared dimensions — not an entropy-decodable image; the module
- * documents that it never decodes scan data.
- */
-function jpegOfSize(targetBytes, width = 2, height = 2) {
-  const sofPayload = Buffer.alloc(9)
-  sofPayload[0] = 8
-  sofPayload.writeUInt16BE(height, 1)
-  sofPayload.writeUInt16BE(width, 3)
-  sofPayload[5] = 1
-  sofPayload[6] = 1
-  sofPayload[7] = 0x11
-  sofPayload[8] = 0
-  const segmentLength = Buffer.alloc(2)
-  segmentLength.writeUInt16BE(sofPayload.length + 2, 0)
-  const sof = Buffer.concat([Buffer.from([0xff, 0xc0]), segmentLength, sofPayload])
-
-  const sosPayload = Buffer.alloc(6)
-  const sosLength = Buffer.alloc(2)
-  sosLength.writeUInt16BE(sosPayload.length + 2, 0)
-  const sos = Buffer.concat([Buffer.from([0xff, 0xda]), sosLength, sosPayload])
-
-  const entropyLength = targetBytes - (2 + sof.length + sos.length + 2)
-  assert.ok(entropyLength >= 1, 'target must leave room for entropy-coded data')
-  return Buffer.concat([
-    Buffer.from([0xff, 0xd8]),
-    sof,
-    sos,
-    Buffer.alloc(entropyLength, 0x2a),
-    Buffer.from([0xff, 0xd9]),
-  ])
-}
 
 function imagePart(data, mimeType = 'image/png') {
   return {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
-import { crc32 } from 'node:zlib'
+import { createRequire } from 'node:module'
 import { LIMITS, hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
 import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
 import {
@@ -17,6 +17,13 @@ import {
   computeCodexPolicyHash,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+const { jpegOfSize, padPngToSize } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
+  padPngToSize: (png: Buffer | string, targetBytes: number) => Buffer
+}
 
 // Non-operational sentinel consumed only by the injected external model fixture.
 const FIXTURE_ACCESS_VALUE = 'fixture-only'
@@ -71,48 +78,6 @@ const REQUEST = {
 }
 
 const MIB = 1024 * 1024
-
-/**
- * Structurally framed JPEG of an exact byte length. Matches the shared
- * contract helper: SOI, SOF0 dimensions, SOS, entropy pad, EOI.
- */
-function jpegOfSize(targetBytes: number, width = 2, height = 2): Buffer {
-  const sofPayload = Buffer.alloc(9)
-  sofPayload[0] = 8
-  sofPayload.writeUInt16BE(height, 1)
-  sofPayload.writeUInt16BE(width, 3)
-  sofPayload[5] = 1
-  sofPayload[6] = 1
-  sofPayload[7] = 0x11
-  sofPayload[8] = 0
-  const segmentLength = Buffer.alloc(2)
-  segmentLength.writeUInt16BE(sofPayload.length + 2, 0)
-  const sof = Buffer.concat([Buffer.from([0xff, 0xc0]), segmentLength, sofPayload])
-  const sosPayload = Buffer.alloc(6)
-  const sosLength = Buffer.alloc(2)
-  sosLength.writeUInt16BE(sosPayload.length + 2, 0)
-  const sos = Buffer.concat([Buffer.from([0xff, 0xda]), sosLength, sosPayload])
-  const entropyLength = targetBytes - (2 + sof.length + sos.length + 2)
-  return Buffer.concat([
-    Buffer.from([0xff, 0xd8]),
-    sof,
-    sos,
-    Buffer.alloc(entropyLength, 0x2a),
-    Buffer.from([0xff, 0xd9]),
-  ])
-}
-
-function padPngToSize(pngBase64: string, imageBytes: number): string {
-  const png = Buffer.from(pngBase64, 'base64')
-  const payload = Buffer.alloc(imageBytes - png.length - 12, 65)
-  Buffer.from('Comment\0').copy(payload)
-  const chunk = Buffer.alloc(payload.length + 12)
-  chunk.writeUInt32BE(payload.length)
-  chunk.write('tEXt', 4)
-  payload.copy(chunk, 8)
-  chunk.writeUInt32BE(crc32(chunk.subarray(4, -4)) >>> 0, chunk.length - 4)
-  return Buffer.concat([png.subarray(0, -12), chunk, png.subarray(-12)]).toString('base64')
-}
 
 type VisualImagePart = {
   type: string
@@ -319,7 +284,7 @@ describe('authorizeLlmProviderAttempt', () => {
       if (imageBytes > 0) {
         image.data =
           format === 'png'
-            ? padPngToSize(image.data, imageBytes)
+            ? padPngToSize(image.data, imageBytes).toString('base64')
             : jpegOfSize(imageBytes).toString('base64')
         expect(Buffer.from(image.data, 'base64')).toHaveLength(imageBytes)
       }
@@ -398,7 +363,7 @@ describe('authorizeLlmProviderAttempt', () => {
         expect(template).toBeDefined()
         const data =
           item.format === 'png'
-            ? padPngToSize(template!.data, item.bytes)
+            ? padPngToSize(template!.data, item.bytes).toString('base64')
             : jpegOfSize(item.bytes).toString('base64')
         expect(Buffer.from(data, 'base64')).toHaveLength(item.bytes)
         return {

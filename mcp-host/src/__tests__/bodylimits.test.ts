@@ -16,11 +16,17 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { AddressInfo } from 'net'
+import { createRequire } from 'node:module'
 import type { IncomingMessage } from '../server/types'
 
+const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
+  '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  declaredHeaderPngOfSize: (targetBytes: number) => Buffer
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
+}
+
 const MIB = 1024 * 1024
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
 let baseUrl: string
@@ -51,25 +57,22 @@ afterAll(async () => {
 const pngBase64Cache = new Map<number, string>()
 const jpegBase64Cache = new Map<number, string>()
 
-function imageBase64(cache: Map<number, string>, signature: Buffer, sizeBytes: number): string {
+function cachedBase64(cache: Map<number, string>, bytes: Buffer, sizeBytes: number): string {
   const cached = cache.get(sizeBytes)
   if (cached !== undefined) return cached
-  const bytes = Buffer.alloc(sizeBytes)
-  signature.copy(bytes, 0)
-  bytes.fill(0x41, signature.length)
   const encoded = bytes.toString('base64')
   cache.set(sizeBytes, encoded)
   return encoded
 }
 
-/** Canonical base64 of a PNG whose decoded length is exactly `sizeBytes`. */
+/** Canonical base64 of a contract-framed PNG of exactly `sizeBytes`. */
 function pngBase64(sizeBytes: number): string {
-  return imageBase64(pngBase64Cache, PNG_SIGNATURE, sizeBytes)
+  return cachedBase64(pngBase64Cache, declaredHeaderPngOfSize(sizeBytes), sizeBytes)
 }
 
-/** Canonical base64 of a JPEG whose decoded length is exactly `sizeBytes`. */
+/** Canonical base64 of a contract-framed JPEG of exactly `sizeBytes`. */
 function jpegBase64(sizeBytes: number): string {
-  return imageBase64(jpegBase64Cache, JPEG_SIGNATURE, sizeBytes)
+  return cachedBase64(jpegBase64Cache, jpegOfSize(sizeBytes), sizeBytes)
 }
 
 /**
