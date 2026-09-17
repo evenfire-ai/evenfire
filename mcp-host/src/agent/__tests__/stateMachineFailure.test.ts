@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
-import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
 import { NoopSafety } from '../../core/safety/__tests__/noopSafety.js'
+import { TaskLifecycle } from '../../lifecycle/taskLifecycle'
+import { logger } from '../../logger'
+import { SseProgressReporter, progressReporterRegistry } from '../../progress/sseProgressReporter'
 import { MessageQueue } from '../../queue'
 import type { TaskError } from '../../queue/types'
 import { AgentStateMachine } from '../stateMachine'
@@ -65,7 +66,7 @@ describe('AgentStateMachine.handleTaskFailure', () => {
     queue.enqueue(task)
     queue.dequeue()
 
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
 
     ;(
       machine as unknown as {
@@ -74,9 +75,8 @@ describe('AgentStateMachine.handleTaskFailure', () => {
     ).handleTaskFailure(task, testError)
 
     expect(errSpy).toHaveBeenCalledWith(
-      expect.stringMatching(
-        /code=LLM_INSUFFICIENT_QUOTA retryable=false provider=openai message="out of credit"/
-      )
+      { taskId: task.id, code: 'LLM_INSUFFICIENT_QUOTA', retryable: false, provider: 'openai' },
+      'Task failed'
     )
     errSpy.mockRestore()
   })

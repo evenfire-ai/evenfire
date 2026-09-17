@@ -205,6 +205,12 @@ export default function HostDetailsPage() {
   const [hostNameDraft, setHostNameDraft] = useState(routeName)
   const [hostDisplayDraft, setHostDisplayDraft] = useState('')
   const [hostDisplaySaved, setHostDisplaySaved] = useState('')
+  // Header title gate: until the first Overview read lands there is no display
+  // name, and falling back to the route slug flashes the backend identifier
+  // before the agent's name (QA). The title shows a skeleton instead.
+  // Deliberately one-way: later partial reloads (model/connectors saves call
+  // loadData('model'|'none')) keep the loaded title — no re-flash.
+  const [overviewReady, setOverviewReady] = useState(false)
   const [editingDisplayName, setEditingDisplayName] = useState(false)
   const [hostDescription, setHostDescription] = useState('')
   const [contextRefDraft, setContextRefDraft] = useState('')
@@ -505,6 +511,7 @@ export default function HostDetailsPage() {
         setHostNameDraft(overview.hostName)
         setHostDisplayDraft(overview.hostDisplay)
         setHostDisplaySaved(overview.hostDisplay)
+        setOverviewReady(true)
         setEditingDisplayName(false)
         setHostDescription(String(spec.description || '').trim())
         setContextRefDraft(overview.contextRef)
@@ -1182,7 +1189,20 @@ export default function HostDetailsPage() {
         label: TAB_LABELS[tab],
         href: hostTabHref(tab),
       }))}
-      title={`Agent: ${routeName}`}
+      // Rename propagation: the header leads with the agent's display name
+      // (spec.host, editable on Overview). While the first Overview read is
+      // in flight the title is a skeleton — never the raw slug (QA).
+      title={
+        overviewReady ? (
+          `Agent: ${hostDisplaySaved || routeName}`
+        ) : (
+          <span
+            className="cu-skeleton cu-agent-detail-title-skeleton"
+            role="progressbar"
+            aria-label="Loading agent name"
+          />
+        )
+      }
       titleActions={
         <AgentActionsMenu
           busy={busy || deletingAgent}
@@ -1198,6 +1218,7 @@ export default function HostDetailsPage() {
           <HostOverviewTab
             hostName={routeName}
             displayName={hostDisplaySaved || hostDisplayDraft}
+            loadingName={!overviewReady}
             editingName={editingDisplayName}
             nameDraft={hostDisplayDraft}
             onNameDraftChange={setHostDisplayDraft}

@@ -72,6 +72,25 @@ async function complete(
 }
 
 describe('approved-tools isolated upstream boundary', () => {
+  it('measures explicit non-strict definitions without altering omitted or true values', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const definitions = tools.map((tool, index) => ({
+      ...tool,
+      ...(index === 0 ? { strict: false } : index === 1 ? { strict: true } : {}),
+    }))
+    const before = JSON.stringify(definitions)
+    const result = await request(
+      simulator,
+      [{ role: 'user', content: 'verification receipt' }],
+      definitions
+    )
+    expect(result.response.status).toBe(200)
+    expect(simulator.evidence().requests).toMatchObject([
+      { definitionCount: 3, explicitNonStrictCount: 1 },
+    ])
+    expect(JSON.stringify(definitions)).toBe(before)
+  })
+
   it('accepts the BasicSafety envelope with the real bridge execution target', async () => {
     await complete(
       createApprovedToolsUpstream(),

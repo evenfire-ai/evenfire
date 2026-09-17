@@ -310,6 +310,21 @@ function getEnv(key: string, defaultValue?: string): string | undefined {
   return process.env[key] ?? defaultValue
 }
 
+function getExecutionLimit(key: string, defaultValue: number, allowZero = false): number {
+  const raw = getEnv(key)
+  if (raw === undefined) return defaultValue
+  const value = Number(raw)
+  if (
+    !/^\d+$/.test(raw) ||
+    !Number.isSafeInteger(value) ||
+    value < (allowZero ? 0 : 1) ||
+    value > 2_147_483_647
+  ) {
+    throw new Error(`${key} must be a valid bounded integer`)
+  }
+  return value
+}
+
 function getEnvBool(key: string, defaultValue: boolean): boolean {
   const value = process.env[key]
   if (!value) return defaultValue
@@ -725,9 +740,9 @@ export const config: Config = {
   ),
 
   // Agent configuration
-  agentTaskDelay: parseInt(getEnv('CLERUM_AGENT_TASK_DELAY', '100')!, 10),
-  agentMaxTaskDuration: parseInt(getEnv('CLERUM_AGENT_MAX_TASK_DURATION', '1800000')!, 10),
-  agentMaxToolCallsPerTask: parseInt(getEnv('CLERUM_AGENT_MAX_TOOL_CALLS', '50')!, 10),
+  agentTaskDelay: getExecutionLimit('CLERUM_AGENT_TASK_DELAY', 3, true),
+  agentMaxTaskDuration: getExecutionLimit('CLERUM_AGENT_MAX_TASK_DURATION', 86400000),
+  agentMaxToolCallsPerTask: getExecutionLimit('CLERUM_AGENT_MAX_TOOL_CALLS', 1000),
   agentMaxQueueSize: parseInt(getEnv('CLERUM_AGENT_MAX_QUEUE_SIZE', '100')!, 10),
   // 0 = disabled (default): an unresolved approval never auto-denies in memory,
   // so the request stays available no matter how long the human takes. A
@@ -916,8 +931,8 @@ export const config: Config = {
   // Native tool configuration
   nativeTool: {
     workspacePath: process.env.CLERUM_WORKSPACE_PATH || process.cwd(),
-    shellTimeout: parseInt(getEnv('CLERUM_SHELL_TIMEOUT', '600000')!, 10),
-    toolTimeout: parseInt(getEnv('CLERUM_TOOL_TIMEOUT', '660000')!, 10),
+    shellTimeout: getExecutionLimit('CLERUM_SHELL_TIMEOUT', 1500000),
+    toolTimeout: getExecutionLimit('CLERUM_TOOL_TIMEOUT', 1500000),
     toolProgressInterval: parseInt(getEnv('CLERUM_TOOL_PROGRESS_INTERVAL_MS', '30000')!, 10),
     httpAllowlist: (process.env.CLERUM_HTTP_ALLOWLIST || '')
       .split(',')

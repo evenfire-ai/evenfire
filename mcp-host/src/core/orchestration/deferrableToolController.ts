@@ -91,12 +91,12 @@ export class DeferrableToolController implements LoopController {
     // Codex must reevaluate the live catalog after late connections and provider
     // switches. Never reuse another provider's session latch or promote schemas.
     if (this.codexMode) {
-      if (this.codexMode === 'direct') return upstream
       const deferred = upstream.filter(t => !this.nativeNames.has(t.name))
       const discover =
-        this.codexMode === 'discovery' ||
-        deferred.length > this.threshold ||
-        Buffer.byteLength(JSON.stringify(deferred), 'utf8') > this.discoveryBytes
+        this.codexMode !== 'direct' &&
+        (this.codexMode === 'discovery' ||
+          deferred.length > this.threshold ||
+          Buffer.byteLength(JSON.stringify(deferred), 'utf8') > this.discoveryBytes)
       const presented = discover ? upstream.filter(t => this.nativeNames.has(t.name)) : upstream
       const measurement = {
         mode: this.codexMode,
