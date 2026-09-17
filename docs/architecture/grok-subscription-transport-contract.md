@@ -45,6 +45,7 @@ Exact HTTPS origins (no caller-supplied URL):
 - Device authorization: `https://auth.x.ai/oauth2/device/code`
 - Token: `https://auth.x.ai/oauth2/token`
 - Revoke: `https://auth.x.ai/oauth2/revoke`
+- Device verification page (user-facing, returned by the device endpoint; confirmed by live probe 2026-09-18): `https://accounts.x.ai/oauth2/device`. Control API and Control UI accept only the exact hosts `auth.x.ai` and `accounts.x.ai` over HTTPS.
 - Completions: `https://cli-chat-proxy.grok.com/v1/responses`
 - Catalog (starting candidate): `https://cli-chat-proxy.grok.com/v1/models`
 

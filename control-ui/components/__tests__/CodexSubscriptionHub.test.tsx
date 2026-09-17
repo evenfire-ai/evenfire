@@ -763,7 +763,7 @@ describe('CodexSubscriptionHub with Grok enabled', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Update' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Sign in with Grok' }))
     const link = await screen.findByTestId('codex-device-verification-link')
-    expect(link).toHaveAttribute('href', 'https://auth.x.ai')
+    expect(link).toHaveAttribute('href', 'https://accounts.x.ai/oauth2/device')
     expect(link).not.toHaveAttribute('href', CODEX_DEVICE_VERIFICATION_URI)
     // An unusable URI is never navigated to; the pre-opened tab is closed.
     expect(tab.location.replace).not.toHaveBeenCalled()

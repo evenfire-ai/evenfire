@@ -168,6 +168,51 @@ describe('grok subscription OAuth device broker', () => {
     expect(JSON.stringify(result)).not.toContain('device-secret')
   })
 
+  // Live xAI device endpoint (probed 2026-09-18) returns
+  // verification_uri=https://accounts.x.ai/oauth2/device, not auth.x.ai.
+  it.each([
+    ['https://accounts.x.ai/oauth2/device', true],
+    ['https://auth.x.ai/activate', true],
+    ['http://accounts.x.ai/oauth2/device', false],
+    ['https://accounts.x.ai.evil.example/oauth2/device', false],
+    ['https://evil.x.ai/oauth2/device', false],
+  ])('device start verification_uri %s allowed=%s', async (uri, allowed) => {
+    repos.insertState.mockImplementation(
+      async (
+        _db: unknown,
+        _key: Buffer,
+        input: { state: string; intent: string; expiresAt: Date }
+      ) => ({
+        state: input.state,
+        flow: 'device',
+        intent: input.intent,
+        status: 'pending',
+        connectionKey: CONNECTION_KEY,
+        expiresAt: input.expiresAt,
+        consumedAt: null,
+        cancelledAt: null,
+        createdAt: new Date(),
+      })
+    )
+    const fetchFn = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        device_code: 'device-secret',
+        user_code: 'ABCD-EFGH',
+        verification_uri: uri,
+        expires_in: 1800,
+        interval: 5,
+      }),
+    })
+    const run = startGrokDeviceConnect(deps(fetchFn), 'connect')
+    if (allowed) {
+      await expect(run).resolves.toMatchObject({ verificationUri: new URL(uri).toString() })
+    } else {
+      await expect(run).rejects.toMatchObject({ code: 'provider_unavailable' })
+    }
+  })
+
   it('does not follow OAuth token redirects and treats 3xx as provider_unavailable', async () => {
     repos.peekState.mockResolvedValue({
       safe: {

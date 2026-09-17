@@ -14,7 +14,7 @@ import {
 export const GROK_SUBSCRIPTION_API_BASE = '/api/v1/admin/llm/providers/grok-subscription'
 export const GROK_UNASSIGNED_CONNECTION_KEY = CODEX_UNASSIGNED_CONNECTION_KEY
 export const SUBSCRIPTION_CONNECTION_REF_ANNOTATION = 'clerum.io/subscription-connection-ref'
-export const GROK_DEVICE_VERIFICATION_ORIGIN = 'https://auth.x.ai'
+export const GROK_DEVICE_VERIFICATION_ORIGIN = 'https://accounts.x.ai/oauth2/device'
 
 export type GrokSubscriptionConnectionView = CodexSubscriptionConnectionView
 export type GrokAssignableHost = CodexAssignableHost
@@ -64,7 +64,11 @@ function pickNumber(value: unknown, fallback = 0): number {
 export function isAllowedGrokVerificationUri(value: string): boolean {
   try {
     const parsed = new URL(value)
-    return parsed.protocol === 'https:' && parsed.hostname === 'auth.x.ai'
+    // Exact hosts: the live xAI device page is accounts.x.ai/oauth2/device.
+    return (
+      parsed.protocol === 'https:' &&
+      (parsed.hostname === 'auth.x.ai' || parsed.hostname === 'accounts.x.ai')
+    )
   } catch {
     return false
   }

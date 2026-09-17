@@ -43,6 +43,12 @@ export const GROK_OAUTH_DEVICE_URL = 'https://auth.x.ai/oauth2/device/code'
 export const GROK_OAUTH_TOKEN_URL = 'https://auth.x.ai/oauth2/token'
 export const GROK_OAUTH_REVOKE_URL = 'https://auth.x.ai/oauth2/revoke'
 export const GROK_OAUTH_DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code'
+/**
+ * Exact hosts allowed for the user-facing device verification page. The live
+ * xAI device endpoint returns https://accounts.x.ai/oauth2/device (probed
+ * 2026-09-18); auth.x.ai stays allowed for the OAuth endpoints' own origin.
+ */
+export const GROK_OAUTH_VERIFICATION_HOSTS: readonly string[] = ['auth.x.ai', 'accounts.x.ai']
 export const GROK_OAUTH_SCOPES = [
   'openid',
   'profile',
@@ -758,7 +764,7 @@ function assertVerificationUri(value: string): string {
       'device verification URI is invalid'
     )
   }
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'auth.x.ai') {
+  if (parsed.protocol !== 'https:' || !GROK_OAUTH_VERIFICATION_HOSTS.includes(parsed.hostname)) {
     throw new GrokSubscriptionOAuthError(
       'provider_unavailable',
       'device verification URI origin is not frozen'

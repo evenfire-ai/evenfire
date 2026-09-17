@@ -43,6 +43,18 @@ describe('isAllowedGrokVerificationUri', () => {
     expect(isAllowedGrokVerificationUri('https://auth.x.ai/device?user_code=ABCD')).toBe(true)
   })
 
+  it('accepts the live xAI device verification page on accounts.x.ai', () => {
+    expect(isAllowedGrokVerificationUri('https://accounts.x.ai/oauth2/device')).toBe(true)
+    expect(isAllowedGrokVerificationUri('https://accounts.x.ai/oauth2/device?user_code=ABCD')).toBe(
+      true
+    )
+    expect(isAllowedGrokVerificationUri('http://accounts.x.ai/oauth2/device')).toBe(false)
+    expect(isAllowedGrokVerificationUri('https://accounts.x.ai.evil.example/oauth2/device')).toBe(
+      false
+    )
+    expect(isAllowedGrokVerificationUri('https://evil.x.ai/oauth2/device')).toBe(false)
+  })
+
   it('rejects other schemes, hosts and look-alike hosts', () => {
     expect(isAllowedGrokVerificationUri('http://auth.x.ai/device')).toBe(false)
     expect(isAllowedGrokVerificationUri('https://auth.x.ai.evil.example/device')).toBe(false)
