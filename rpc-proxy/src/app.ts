@@ -20,18 +20,6 @@ export function createApp() {
       credentials: true,
     })
   )
-  // Allow chat payloads with base64 image attachments from desktop composer:
-  // up to 8 MB of images (COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES) plus the text.
-  // The sandbox-ui view proxy streams the raw request body straight to the
-  // recipe's upstream via http-proxy — running body-parser there would drain
-  // the stream, so the proxied request hangs waiting for a body that never
-  // arrives. Skip JSON parsing for that path; every other route still needs it.
-  const jsonParser = express.json({ limit: '10mb' })
-  const VIEW_PROXY_PATH = /^\/api\/v1\/sandbox-ui\/[^/]+\/[^/]+\/view\//
-  app.use((req, res, next) => {
-    if (VIEW_PROXY_PATH.test(req.path)) return next()
-    jsonParser(req, res, next)
-  })
 
   app.use(createHealthRouter())
 

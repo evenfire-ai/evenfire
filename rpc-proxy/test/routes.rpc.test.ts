@@ -424,6 +424,28 @@ describe('routes/rpc', () => {
         attachments: [],
       })
     })
+
+    it('forwards a non-empty image attachments list unchanged', async () => {
+      const attachments = [
+        {
+          kind: 'image',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: 'iVBORw0KGgo=',
+          id: 'a',
+        },
+      ]
+      await request(makeApp())
+        .post('/rpc/hosts/agent2/messages')
+        .set('authorization', 'Bearer rpc-token')
+        .send({ content: 'hi', attachments })
+        .expect(200)
+
+      expect(serviceMock.forwardHostMessageToHost).toHaveBeenCalledOnce()
+      const forwarded = serviceMock.forwardHostMessageToHost.mock.calls[0][1]
+      expect(forwarded.content).toBe('hi')
+      expect(forwarded.attachments).toEqual(attachments)
+    })
   })
 
   // Regression: the `forwardedBody` is an explicit field allow-list, so a new

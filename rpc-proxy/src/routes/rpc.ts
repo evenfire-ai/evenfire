@@ -8,6 +8,7 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
+import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
@@ -270,6 +271,7 @@ export function createRpcRouter(): Router {
     '/rpc/:serverName',
     requireRpcAuth,
     requireScope('mcp:server:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -309,6 +311,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     requireScope('host:message:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
@@ -581,6 +584,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -647,6 +651,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -983,6 +988,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
     requireScope('host:session:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1119,6 +1125,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
     requireScope('host:model:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
