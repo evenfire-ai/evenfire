@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
+import liveReaderFixture from '../__tests__/fixtures/629/gfsc-reader.deployment.json'
 import livePdbFixture from '../__tests__/fixtures/629/gfsc-writer-pdb.json'
 import { createsTotal, existenceReadsTotal, writeSkipsTotal } from '../metrics'
 import { podDisruptionBudgetMatchesDesired } from '../utils'
@@ -34,7 +35,7 @@ const cases = [
   },
   {
     kind: 'Deployment',
-    updates: true,
+    updates: false,
     body: {
       kind: 'Deployment',
       metadata,
@@ -200,7 +201,7 @@ describe.each(cases)('K8sGfsApi $kind read-first', resource => {
     const h = harness(resource.kind)
     h.read.mockRejectedValueOnce({ code: 404 }).mockRejectedValueOnce({ code: 404 })
     h.create.mockRejectedValueOnce({ code: 409 })
-    await expect(apply(h.api)).resolves.toBeUndefined()
+    await expect(apply(h.api)).resolves.toBe('missing')
     expect(h.read).toHaveBeenCalledTimes(2)
     expect(h.create).toHaveBeenCalledTimes(1)
     expect(h.replace).not.toHaveBeenCalled()
@@ -343,5 +344,121 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
       spec: { ...desired.spec, unhealthyPodEvictionPolicy: 'AlwaysAllow' as const },
     }
     expect(podDisruptionBudgetMatchesDesired(desired, live)).toBe(false)
+  })
+})
+
+const REVISION_ANNOTATION = 'deployment.kubernetes.io/revision'
+const RESTARTED_AT = 'kubectl.kubernetes.io/restartedAt'
+
+function desiredReaderFromFixture(): k8s.V1Deployment {
+  const desired = structuredClone(liveReaderFixture) as k8s.V1Deployment
+  if (desired.metadata?.annotations) {
+    delete desired.metadata.annotations[REVISION_ANNOTATION]
+  }
+  return desired
+}
+
+function liveReader(overrides: Partial<k8s.V1DeploymentSpec> = {}): k8s.V1Deployment {
+  const live = structuredClone(liveReaderFixture) as k8s.V1Deployment
+  const selector = overrides.selector ?? live.spec?.selector
+  const template = overrides.template ?? live.spec?.template
+  if (!selector || !template) {
+    throw new Error('gfsc-reader fixture is missing spec.selector or spec.template')
+  }
+  const spec: k8s.V1DeploymentSpec = {
+    ...live.spec,
+    ...overrides,
+    selector,
+    template,
+  }
+  return {
+    ...live,
+    metadata: {
+      ...live.metadata,
+      resourceVersion: '1',
+      uid: 'reader-uid',
+      creationTimestamp: new Date('2026-01-01T00:00:00Z'),
+      managedFields: [{ manager: 'kube-controller-manager', operation: 'Update' }],
+    },
+    spec,
+    status: { observedGeneration: 1, availableReplicas: spec.replicas ?? 2 },
+  }
+}
+
+describe('K8sGfsApi Deployment no-op gate (T3, T8)', () => {
+  const namespace = 'gfs'
+
+  async function deploymentSkipCount() {
+    return (
+      (await writeSkipsTotal.get()).values.find(row => row.labels.kind === 'Deployment')?.value ?? 0
+    )
+  }
+
+  it('T3: skips replace when the live reader matches after revision merge', async () => {
+    const desired = desiredReaderFromFixture()
+    const equal = harness('Deployment')
+    equal.read.mockImplementation(async () => {
+      equal.events.push('GET')
+      return liveReader()
+    })
+    await equal.api.applyDeployment(desired, namespace)
+    expect(equal.read).toHaveBeenCalledTimes(1)
+    expect(equal.replace).toHaveBeenCalledTimes(0)
+    expect(await deploymentSkipCount()).toBe(1)
+  })
+
+  it('T3: writes when live replicas are 0 and restores the desired replica count', async () => {
+    const desired = desiredReaderFromFixture()
+    const scaled = harness('Deployment')
+    scaled.read.mockImplementation(async () => {
+      scaled.events.push('GET')
+      return liveReader({ replicas: 0 })
+    })
+    await scaled.api.applyDeployment(desired, namespace)
+    expect(scaled.read).toHaveBeenCalledTimes(1)
+    expect(scaled.replace).toHaveBeenCalledTimes(1)
+    const replaced = scaled.replace.mock.calls[0][0].body as k8s.V1Deployment
+    expect(replaced.spec?.replicas).toBe(desired.spec?.replicas)
+    expect(await deploymentSkipCount()).toBe(0)
+  })
+
+  it('T8: skips replace when live template has restartedAt and increments writeSkipsTotal', async () => {
+    const desired = desiredReaderFromFixture()
+    const restarted = harness('Deployment')
+    const live = liveReader()
+    const templateMeta = live.spec?.template?.metadata
+    if (!templateMeta) throw new Error('expected pod template metadata')
+    templateMeta.annotations = {
+      ...templateMeta.annotations,
+      [RESTARTED_AT]: '2026-09-16T20:33:45Z',
+    }
+    restarted.read.mockImplementation(async () => {
+      restarted.events.push('GET')
+      return live
+    })
+    await restarted.api.applyDeployment(desired, namespace)
+    expect(restarted.read).toHaveBeenCalledTimes(1)
+    expect(restarted.replace).toHaveBeenCalledTimes(0)
+    expect(await deploymentSkipCount()).toBe(1)
+  })
+
+  it('T3: retries a drifted reader PUT after 409 using a fresh resourceVersion', async () => {
+    const desired = desiredReaderFromFixture()
+    const h = harness('Deployment')
+    let version = 0
+    h.read.mockImplementation(async () => {
+      h.events.push('GET')
+      const live = liveReader({ replicas: 0 })
+      live.metadata = { ...live.metadata, resourceVersion: String(++version) }
+      return live
+    })
+    h.replace.mockImplementationOnce(async ({ body }) => {
+      h.events.push(`PUT:${body.metadata?.resourceVersion}`)
+      throw { code: 409 }
+    })
+    await h.api.applyDeployment(desired, namespace)
+    expect(h.events).toEqual(['GET', 'PUT:1', 'GET', 'PUT:2'])
+    expect(h.replace).toHaveBeenCalledTimes(2)
+    expect(h.create).not.toHaveBeenCalled()
   })
 })

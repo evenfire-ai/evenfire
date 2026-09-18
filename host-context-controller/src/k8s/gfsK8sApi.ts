@@ -3,12 +3,15 @@ import type { GfsK8sApi } from '../gfsReconciler'
 import { createsTotal } from '../metrics'
 import type { GlobalFileSystemStatus } from '../types'
 import {
+  type ResourceApplyResult,
   applyNetworkPolicy,
+  deploymentMatchesDesired,
   ensureResource,
   getErrorCode,
   observeCreate,
   observeExistenceRead,
   podDisruptionBudgetMatchesDesired,
+  preserveDeploymentAnnotations,
   preserveObjectAnnotations,
   replaceWithConflictRetry,
 } from '../utils'
@@ -45,9 +48,12 @@ export class K8sGfsApi implements GfsK8sApi {
     }
   }
 
-  async applyPvc(pvc: k8s.V1PersistentVolumeClaim, namespace: string): Promise<void> {
+  async applyPvc(
+    pvc: k8s.V1PersistentVolumeClaim,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
     const name = pvc.metadata?.name ?? ''
-    await ensureResource<k8s.V1PersistentVolumeClaim>({
+    return ensureResource<k8s.V1PersistentVolumeClaim>({
       read: () =>
         observeExistenceRead('PersistentVolumeClaim', () =>
           this.coreApi.readNamespacedPersistentVolumeClaim({ name, namespace })
@@ -78,17 +84,21 @@ export class K8sGfsApi implements GfsK8sApi {
     }
   }
 
-  async scaleDeployment(name: string, namespace: string, replicas: number): Promise<void> {
+  async scaleDeployment(
+    name: string,
+    namespace: string,
+    replicas: number
+  ): Promise<ResourceApplyResult> {
     let existing: k8s.V1Deployment
     try {
       existing = await this.appsApi.readNamespacedDeployment({ name, namespace })
     } catch (err) {
-      if (getErrorCode(err) === 404) return
+      if (getErrorCode(err) === 404) return 'missing'
       throw err
     }
-    if ((existing.spec?.replicas ?? 0) === replicas) return
+    if ((existing.spec?.replicas ?? 0) === replicas) return 'up_to_date'
 
-    await replaceWithConflictRetry<k8s.V1Deployment>({
+    return replaceWithConflictRetry<k8s.V1Deployment>({
       description: `deployment "${name}" scale in ${namespace}`,
       logPrefix: LOG,
       body: existing,
@@ -106,9 +116,9 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<void> {
+  async applyDeployment(dep: k8s.V1Deployment, namespace: string): Promise<ResourceApplyResult> {
     const name = dep.metadata?.name ?? ''
-    await ensureResource<k8s.V1Deployment>({
+    return ensureResource<k8s.V1Deployment>({
       read: () =>
         observeExistenceRead('Deployment', () =>
           this.appsApi.readNamespacedDeployment({ name, namespace })
@@ -125,13 +135,18 @@ export class K8sGfsApi implements GfsK8sApi {
           body: dep,
           read,
           replace: body => this.appsApi.replaceNamespacedDeployment({ name, namespace, body }),
+          mergeExisting: preserveDeploymentAnnotations,
+          isUpToDate: deploymentMatchesDesired,
         }),
     })
   }
 
-  async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget, namespace: string): Promise<void> {
+  async applyPodDisruptionBudget(
+    pdb: k8s.V1PodDisruptionBudget,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
     const name = pdb.metadata?.name ?? ''
-    await ensureResource<k8s.V1PodDisruptionBudget>({
+    return ensureResource<k8s.V1PodDisruptionBudget>({
       read: () =>
         observeExistenceRead('PodDisruptionBudget', () =>
           this.policyApi.readNamespacedPodDisruptionBudget({ name, namespace })
@@ -155,9 +170,9 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyService(svc: k8s.V1Service, namespace: string): Promise<void> {
+  async applyService(svc: k8s.V1Service, namespace: string): Promise<ResourceApplyResult> {
     const name = svc.metadata?.name ?? ''
-    await ensureResource<k8s.V1Service>({
+    return ensureResource<k8s.V1Service>({
       read: () =>
         observeExistenceRead('Service', () =>
           this.coreApi.readNamespacedService({ name, namespace })
@@ -173,8 +188,11 @@ export class K8sGfsApi implements GfsK8sApi {
     })
   }
 
-  async applyNetworkPolicy(np: k8s.V1NetworkPolicy, namespace: string): Promise<void> {
-    await applyNetworkPolicy(this.networkingApi, np.metadata?.name ?? '', namespace, np, LOG)
+  async applyNetworkPolicy(
+    np: k8s.V1NetworkPolicy,
+    namespace: string
+  ): Promise<ResourceApplyResult> {
+    return applyNetworkPolicy(this.networkingApi, np.metadata?.name ?? '', namespace, np, LOG)
   }
 
   async isDeploymentAvailable(name: string, namespace: string): Promise<boolean> {

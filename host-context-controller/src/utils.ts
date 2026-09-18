@@ -27,6 +27,9 @@ export async function observeCreate<T>(kind: CreateKind, create: () => Promise<T
   }
 }
 
+/** Outcome of a read-first create-or-replace. Callers may ignore this value. */
+export type ResourceApplyResult = 'created' | 'replaced' | 'up_to_date' | 'missing' | 'not_allowed'
+
 /** Observe one existence GET without changing its value or error handling. */
 export async function observeExistenceRead<T>(
   kind: CreateKind,
@@ -53,12 +56,12 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
   create: () => Promise<unknown>
   existing?: T | null
   /** False preserves a caller's non-throwing failure without counting a skip. */
-  converge: (read: () => Promise<T>, observed?: T) => Promise<void | false>
+  converge: (read: () => Promise<T>, observed?: T) => Promise<void | false | ResourceApplyResult>
   onSkipped: () => void
   mutationAllowed?: () => boolean
-}): Promise<void> {
+}): Promise<ResourceApplyResult> {
   const { read, create, converge, onSkipped, mutationAllowed } = opts
-  if (mutationAllowed && !mutationAllowed()) return
+  if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
 
   const validate = (value: T): T => {
     if (!value || typeof value.metadata?.name !== 'string' || !value.metadata.name.trim()) {
@@ -92,7 +95,7 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
   } else if (existing !== null) {
     validate(existing)
   }
-  if (mutationAllowed && !mutationAllowed()) return
+  if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
 
   if (existing !== null) {
     let snapshot: T | undefined = existing
@@ -108,16 +111,22 @@ export async function ensureResource<T extends { metadata?: { name?: string } }>
     if (result !== false && latestReadSucceeded && (!mutationAllowed || mutationAllowed())) {
       onSkipped()
     }
-    return
+    if (result === false) return 'not_allowed'
+    if (typeof result === 'string') return result
+    return latestReadSucceeded ? 'up_to_date' : 'missing'
   }
 
   try {
     await create()
+    return 'created'
   } catch (error) {
     if (error == null || getErrorCode(error) !== 409) throw error
-    if (mutationAllowed && !mutationAllowed()) return
+    if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
     // Absence observed before the POST cannot survive a create conflict.
-    await converge(readFresh)
+    const result = await converge(readFresh)
+    if (result === false) return 'not_allowed'
+    if (typeof result === 'string') return result
+    return latestReadSucceeded ? 'up_to_date' : 'missing'
   }
 }
 
@@ -161,7 +170,7 @@ export async function replaceWithConflictRetry<
     /** Rebuild desired state before each attempt without an unused eager body. */
     | { body?: never; resolveBody: () => T | Promise<T> }
   )
-): Promise<void> {
+): Promise<ResourceApplyResult> {
   const {
     description,
     logPrefix,
@@ -185,7 +194,7 @@ export async function replaceWithConflictRetry<
           scope: logPrefix,
           description,
         })
-        return
+        return 'missing'
       }
       throw err
     }
@@ -198,16 +207,16 @@ export async function replaceWithConflictRetry<
     }
     const next = mergeExisting ? mergeExisting(base, existing) : base
     if (isUpToDate?.(next, existing)) {
-      if (mutationAllowed && !mutationAllowed()) return
+      if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
       writeSkipsTotal.inc({ kind: next.kind ?? 'unknown' })
-      return
+      return 'up_to_date'
     }
-    if (mutationAllowed && !mutationAllowed()) return
+    if (mutationAllowed && !mutationAllowed()) return 'not_allowed'
     try {
       await replace(next)
       writesTotal.inc({ kind: next.kind ?? 'unknown' })
       hccLogger.info('Kubernetes resource updated', { scope: logPrefix, description, attempt })
-      return
+      return 'replaced'
     } catch (err) {
       if (getErrorCode(err) === 409 && attempt < maxAttempts) {
         // Jittered backoff: 25–125ms on attempt 1, 50–250ms on attempt 2.
@@ -219,6 +228,7 @@ export async function replaceWithConflictRetry<
       throw err
     }
   }
+  throw new Error(`replaceWithConflictRetry exhausted attempts for ${description}`)
 }
 
 function mergeAnnotations(
@@ -605,8 +615,8 @@ export async function applyNetworkPolicy(
   validateExisting?: (existing: k8s.V1NetworkPolicy) => void,
   missingIsError = false,
   existing?: k8s.V1NetworkPolicy | null
-): Promise<void> {
-  await ensureResource<k8s.V1NetworkPolicy>({
+): Promise<ResourceApplyResult> {
+  return ensureResource<k8s.V1NetworkPolicy>({
     existing,
     mutationAllowed,
     read: () =>
