@@ -81,7 +81,7 @@ describe('AppService.invokeHostMessage', () => {
 
   it('rejects malformed attachments before issuing an RPC token', async () => {
     const service = new AppService() as any
-    service.sessionToken = 'session-token'
+    service.sessionToken = 'test-token-session'
     service.me = {
       id: '00000000-0000-4000-8000-000000000001',
       email: 'test@clerum.io',
@@ -92,7 +92,7 @@ describe('AppService.invokeHostMessage', () => {
       role: 'member',
     }
     service.rpcTokenManager = {
-      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'test-token-rpc' }),
       clear: vi.fn(),
     }
     service.rpcClient = {

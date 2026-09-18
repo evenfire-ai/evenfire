@@ -147,10 +147,6 @@ type DbRow = Record<string, unknown> & {
 
 describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)', () => {
   const database = `control_api_catalog_sync_${randomBytes(6).toString('hex')}`
-  const connectionString = databaseUrl(
-    adminUrl ?? 'postgresql://postgres@127.0.0.1/postgres',
-    database
-  )
   let adminPool: Pool
   let dbPool: Pool
   const materializer = { materialize: vi.fn(async () => {}) }
@@ -186,7 +182,7 @@ describeRealPostgres('syncDiscoveredModels on real PostgreSQL (#654 image_input)
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
-    dbPool = new Pool({ connectionString })
+    dbPool = new Pool({ connectionString: databaseUrl(adminUrl!, database) })
     await initDb({ connect: () => dbPool.connect() })
 
     // initDb seeds the static allowlist as `source='manual'` rows. Start from
