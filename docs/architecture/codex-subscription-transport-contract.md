@@ -172,7 +172,7 @@ behavior changes:
     with `state_cancelled`.
   - When two first grants race on the same key, the losing active-key insert
     maps to a stale-revision conflict instead of a 500.
-- **Attempt integrity (migration 0114).** A constraint trigger requires a
+- **Attempt integrity (migration 0114_llm_provider_attempts_connection_integrity).** A constraint trigger requires a
   non-null `llm_provider_attempts.connection_id` of a Codex attempt to exist in
   `codex_subscription_connections`. This replaces the FK that 0112 dropped.
   Historic rows are not revalidated, and the migration is forward-only.

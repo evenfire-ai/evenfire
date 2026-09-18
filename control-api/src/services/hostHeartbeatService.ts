@@ -1,7 +1,7 @@
 import { pool } from '../db.js'
 
 /**
- * Stateless heartbeat persistence (host_heartbeats, migration 0051).
+ * Stateless heartbeat persistence (host_heartbeats, migration 0051_host_heartbeats).
  *
  * mcp-host pods POST D8 activity snapshots to control-api's /mcp-host facade
  * (`POST /api/v1/mcp-host/hosts/heartbeat`, identity bound to the runtime

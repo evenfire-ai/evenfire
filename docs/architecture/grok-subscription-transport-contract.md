@@ -77,7 +77,7 @@ an error.
 
 ## Connection lifecycle
 
-- **Grok connection keys are terminal after revoke (migration 0113).**
+- **Grok connection keys are terminal after revoke (migration 0113_grok_subscription_terminal_connection_key).**
   - A revoked key cannot be reconnected. Create a new connection key instead.
   - A device flow that started before the revoke cannot revive the key: it
     fails with `revoked grant cannot be reused`.
@@ -87,7 +87,7 @@ an error.
     `connection_key`.
   - Archived `~revoked~` rows fall outside the key grammar. Admin list and GET
     hide them. The key's own terminal tombstone stays listed as `revoked`.
-- **Attempt integrity (migration 0114).** A constraint trigger on
+- **Attempt integrity (migration 0114_llm_provider_attempts_connection_integrity).** A constraint trigger on
   `llm_provider_attempts` INSERT, and on UPDATE of `provider` or
   `connection_id`, requires a non-null `connection_id` to exist in the
   provider's own connection table:
@@ -245,7 +245,8 @@ Grok annotations. A new control-api also republishes on boot.
    (`GROK_LLM_PROXY_CONTROL_API_TOKEN`) with
    `deploy/scripts/apply-inter-service-tokens.sh`. Both must be in place before
    the merge to `dev` triggers the automatic deploy.
-2. **control-api** with migrations 0109–0114. Wait until every control-api pod
+2. **control-api** with migrations 0109_grok_subscription_connections through
+   0114_llm_provider_attempts_connection_integrity. Wait until every control-api pod
    runs the new image. An old control-api rejects the whole workflow-control
    token issue when the request includes the unknown `llm:grok:execute` scope
    (`invalid_workflow_control_scopes`). HCC or WRC deployed first could
@@ -276,7 +277,8 @@ Grok annotations. A new control-api also republishes on boot.
      shape. In the UI, re-pick the connection.
    - A save that omits the annotations keeps the stored disagreeing pair, so
      it does not repair the grant.
-4. Migrations 0113 (terminal Grok keys) and 0114 (attempt connection
+4. Migrations 0113_grok_subscription_terminal_connection_key (terminal Grok keys)
+   and 0114_llm_provider_attempts_connection_integrity (attempt connection
    integrity) are forward-only. An older control-api still runs against them:
    - The 0114 trigger only rejects connection ids that do not exist.
    - Under 0113, a revoked Grok key can no longer be reconnected by the old
