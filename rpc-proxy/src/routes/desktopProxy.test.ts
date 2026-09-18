@@ -353,6 +353,42 @@ describe('ALL /desktop/:hostRef/view/*', () => {
     expect(proxied.headers['x-clerum-edge-action-context']).toBeUndefined()
   })
 
+  it('closes the Desktop HTTP lease when the client aborts before the response finishes', async () => {
+    const claims = desktopDelegation()
+    const leaseState = { live: true }
+    leaseMock.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockResolvedValue({
+      claims,
+      bound: {},
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    })
+    let proxiedResponse: express.Response | undefined
+    proxyMock.web.mockImplementationOnce((_req, res) => {
+      proxiedResponse = res
+      return res
+    })
+
+    const pending = request(makeApp())
+      .get('/desktop/chatllm/view/index.html')
+      .set('Authorization', 'Bearer v2.valid')
+      .then(response => response)
+    await vi.waitFor(() => expect(leaseMock.startActiveViewLease).toHaveBeenCalledOnce())
+    expect(proxiedResponse).toBeDefined()
+
+    proxiedResponse!.emit('close')
+
+    expect(leaseState.live).toBe(false)
+    proxiedResponse!.end()
+    await expect(pending).resolves.toMatchObject({ status: 200 })
+  })
+
   it('destroys an active v2 HTTP view when its mounted lease denies', async () => {
     const claims = desktopDelegation()
     delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
@@ -526,6 +562,37 @@ describe('handleDesktopUpgrade', () => {
     expect(leaseState.live).toBe(false)
     leaseMock.startActiveViewLease.mock.calls[0]![1].onDenied()
     expect(socket.destroy).toHaveBeenCalled()
+  })
+
+  it('closes the Desktop WebSocket lease when the socket emits an error', async () => {
+    const claims = desktopDelegation()
+    const leaseState = { live: true }
+    leaseMock.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
+    delegationMock.verifyUserDelegationV2.mockReturnValue(claims)
+    authorityMock.authorizeActionV2.mockResolvedValue({
+      claims,
+      bound: {},
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted',
+    })
+    const socket = Object.assign(new EventEmitter(), { write: vi.fn(), destroy: vi.fn() }) as any
+    const req = {
+      url: '/api/v1/desktop/chatllm/view/websockify',
+      headers: { authorization: 'Bearer v2.valid' },
+    } as any
+
+    expect(handleDesktopUpgrade(req, socket, Buffer.alloc(0))).toBe(true)
+    await vi.waitFor(() => expect(proxyMock.ws).toHaveBeenCalledOnce())
+    expect(leaseState.live).toBe(true)
+
+    socket.emit('error', new Error('client transport failed'))
+
+    expect(leaseState.live).toBe(false)
   })
 
   it('does not downgrade malformed declared-v2 WebSockets to a valid legacy session', async () => {
