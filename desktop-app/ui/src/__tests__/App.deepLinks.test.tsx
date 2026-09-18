@@ -2050,6 +2050,66 @@ describe('App deep-link orchestration', () => {
     expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
   })
 
+  // R3-H1: closeActiveSandboxUiEmbedForHandoff has two activation-generation checks
+  // (one guarding the persist after the read, one guarding the close) so a handoff
+  // superseded mid-read never clobbers the live tab's route nor tears down the embed
+  // that now owns the active view. No test exercised them: removing both left the
+  // suite green. This defers the handoff's read, supersedes it with a plain
+  // deactivation (which bumps the generation and closes the embed itself), then
+  // resolves the stale read and asserts the handoff added neither a stale persist
+  // nor a second close.
+  it('does not persist or close for a superseded deep-link handoff (R3-H1, T3)', async () => {
+    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    // The deep link targets an UNAVAILABLE app (ns/missing) so the post-handoff
+    // open fails cleanly instead of relaunching an app and muddying the assertions.
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live, liveRef = A
+    const outgoingId = appTabs()[0]?.id
+
+    closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
+
+    // Defer the HANDOFF's read so a newer activation can bump the generation while
+    // it is in flight (only the handoff reads before the supersede below).
+    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
+    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
+
+    // A cross-team deep link drives closeActiveSandboxUiEmbedForHandoff, which reads
+    // the outgoing route (deferred here) before it would persist + close.
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1))
+
+    // Supersede the handoff: switch to the seeded chat tab. The deactivation effect
+    // bumps the activation generation AND closes A's embed itself, all while the
+    // handoff's read is still pending.
+    await selectTab(0)
+    await waitFor(() => expect(closeSandboxUi).toHaveBeenCalledTimes(1))
+
+    // The superseded handoff read finally resolves with A's earlier route.
+    await act(async () => {
+      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/handoff' })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Both handoff gen checks abort: A is NOT persisted with the stale route (the
+    // persist guard), and the handoff emits NO second close on top of the
+    // deactivation's (the close guard). With both gen checks removed the handoff
+    // clobbers A with '/stale/handoff' AND closes a second time.
+    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
+    expect(appA?.app?.savedRoutePath).not.toBe('/stale/handoff')
+    expect(closeSandboxUi).toHaveBeenCalledTimes(1)
+  })
+
   // R3-M1 (the missing half of R1-H1): the deactivation continuation must validate
   // that the route it read belongs to the OUTGOING tab's app before persisting it.
   // On an app→app switch the incoming `open()` can reach main before this read
