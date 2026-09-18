@@ -162,7 +162,6 @@ function useEmbedBounds(
 }
 
 const APP_PAGE_SIZE = 6
-let pendingSandboxUiUnmountCleanup: number | null = null
 let nextSandboxFindClientRequestId = 0
 
 // Icon-only app action rendered into the native title bar's leading slot. The
@@ -383,20 +382,14 @@ export function SandboxUiPage({
     stopLocalSearch()
   }, [launch.kind, localSearchOpen, stopLocalSearch])
 
-  // Tear down the embed when this page unmounts (user navigates away).
-  useLayoutEffect(() => {
-    if (pendingSandboxUiUnmountCleanup !== null) {
-      window.clearTimeout(pendingSandboxUiUnmountCleanup)
-      pendingSandboxUiUnmountCleanup = null
-    }
-    return () => {
-      pendingSandboxUiUnmountCleanup = window.setTimeout(() => {
-        pendingSandboxUiUnmountCleanup = null
-        void window.clerum.sandboxUi.close()
-        onEmbeddedAppBack?.()
-      }, 0)
-    }
-  }, [onEmbeddedAppBack])
+  // The embed lifecycle is governed by the universal tab store (mini-spec 05
+  // §3), not by this page's mount/unmount: deactivating an app tab persists its
+  // route and closes the embed from App.tsx, so the store is the single
+  // solicited `close()` emitter. The old unmount-driven `close()` +
+  // `setTimeout` cancel lived here; it could not capture the route on an
+  // app→app switch (this page stays mounted) and risked a double close, so it
+  // was removed. Unsolicited teardown still flows through `onClosed` (crash /
+  // quit / partition GC) and the explicit back-to-apps `closeEmbed`.
 
   const openApp = useCallback(
     async (app: SandboxUiLaunchApp): Promise<SandboxUiShortcutOpenResult> => {

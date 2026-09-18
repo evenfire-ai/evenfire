@@ -17,6 +17,7 @@ import {
   selectLastWorkspaceTab,
   selectWorkspaceTab,
   selectWorkspaceTabAt,
+  setAppTabSavedRoutePath,
 } from '../workspaceTabs'
 import type { ActiveChat, SettingsSection, WorkspaceTabsState } from '../workspaceTabs.types'
 
@@ -103,6 +104,65 @@ describe('workspaceTabs — identity rules R6–R9', () => {
     state = openSettingsTab(state, { id: 's-connectors-2', section: 'connectors' })
     expect(state.tabs.filter(t => t.kind === 'settings')).toHaveLength(2)
     expect(state.activeTabId).toBe('s-connectors')
+  })
+})
+
+describe('workspaceTabs — setAppTabSavedRoutePath (mini-spec 05 §3)', () => {
+  it('persists a route on the matching app tab and leaves siblings untouched', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks' })
+    state = openAppTab(state, { id: 'app-2', appRef: 'eventasks' })
+
+    state = setAppTabSavedRoutePath(state, 'app-1', '/tickets/42')
+
+    expect(state.tabs.find(t => t.id === 'app-1')?.app?.savedRoutePath).toBe('/tickets/42')
+    expect(state.tabs.find(t => t.id === 'app-2')?.app?.savedRoutePath).toBeUndefined()
+    expect(state.activeTabId).toBe('app-2') // selection is not disturbed
+  })
+
+  it('clears the saved route (drops the key) when routePath is undefined', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', savedRoutePath: '/tickets/42' })
+
+    state = setAppTabSavedRoutePath(state, 'app-1', undefined)
+
+    const app = state.tabs.find(t => t.id === 'app-1')?.app
+    expect(app?.savedRoutePath).toBeUndefined()
+    expect(Object.prototype.hasOwnProperty.call(app, 'savedRoutePath')).toBe(false)
+  })
+
+  it('is a no-op (same reference) when the route is unchanged', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', savedRoutePath: '/tickets/42' })
+
+    expect(setAppTabSavedRoutePath(state, 'app-1', '/tickets/42')).toBe(state)
+    // Clearing an already-absent route is likewise a no-op.
+    state = openAppTab(state, { id: 'app-2', appRef: 'eventasks' })
+    expect(setAppTabSavedRoutePath(state, 'app-2', undefined)).toBe(state)
+  })
+
+  it('is a no-op when the tab is missing (e.g. a persist racing a close) or not an app', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks' })
+    state = openChatTab(state, { id: 'chat-1', agentRef: 'a', chatId: 'c1' })
+
+    // Closed / unknown tab id → the route write silently no-ops (§3: closing a
+    // tab does not save).
+    expect(setAppTabSavedRoutePath(state, 'gone', '/tickets/42')).toBe(state)
+    // A chat tab is not an app tab → no route is written.
+    expect(setAppTabSavedRoutePath(state, 'chat-1', '/tickets/42')).toBe(state)
+  })
+
+  it('keeps each of two tabs of the same app on its own route (R9, §5)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-a', appRef: 'eventasks' })
+    state = openAppTab(state, { id: 'app-b', appRef: 'eventasks' })
+
+    state = setAppTabSavedRoutePath(state, 'app-a', '/tickets/A')
+    state = setAppTabSavedRoutePath(state, 'app-b', '/tickets/B')
+
+    expect(state.tabs.find(t => t.id === 'app-a')?.app?.savedRoutePath).toBe('/tickets/A')
+    expect(state.tabs.find(t => t.id === 'app-b')?.app?.savedRoutePath).toBe('/tickets/B')
   })
 })
 

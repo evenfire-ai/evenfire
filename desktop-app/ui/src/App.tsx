@@ -71,6 +71,7 @@ import {
   selectLastWorkspaceTab,
   selectWorkspaceTab,
   selectWorkspaceTabAt,
+  setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
@@ -350,6 +351,13 @@ export function App() {
   const relaunchSandboxUiAppRef = React.useRef<
     ((app: ActiveSandboxUiApp, tabId: string) => void) | null
   >(null)
+  // Id of the app tab whose native embed is currently live in the main process
+  // (mini-spec 05 §3). The store governs the embed lifecycle: when the active
+  // app tab changes, this ref tells the deactivation effect which OUTGOING tab
+  // to persist the route onto. `null` = no embed is live (also the reconciled
+  // state after an UNsolicited close — crash/quit/GC — so a later tab switch
+  // does not persist or re-close a dead embed).
+  const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
   workspaceTabsRef.current = workspaceTabs
 
   const leaveSandboxForChat = React.useCallback(() => {
@@ -376,7 +384,20 @@ export function App() {
       }
       if (tab.kind === 'app') {
         const app = availableSandboxUiApps.find(candidate => candidate.appRef === tab.app?.appRef)
-        if (app) relaunchSandboxUiAppRef.current?.(app, tab.id)
+        // Transient-empty survivability (mini-spec 05): when the app can't be
+        // resolved (registry reconciling / periodic refresh emptied the list),
+        // leave the tab intact and do nothing destructive — it recovers when the
+        // list repopulates (the picker / no-embed state, never a tab destroy).
+        if (app) {
+          // Restore the route persisted on deactivation (§3). `savedRoutePath`
+          // lives on the tab, not the app; thread it onto the launch so the
+          // embed re-mounts where the user left off (undefined → default path).
+          const savedRoutePath = tab.app?.savedRoutePath
+          relaunchSandboxUiAppRef.current?.(
+            savedRoutePath !== undefined ? { ...app, routePath: savedRoutePath } : app,
+            tab.id
+          )
+        }
         return
       }
       const agentRef = tab.chat?.agentRef ?? null
@@ -892,6 +913,19 @@ export function App() {
   const handleSandboxUiOpening = React.useCallback((app: ActiveSandboxUiApp) => {
     setSandboxUiMounted(false)
     setActiveSandboxUiApp(app)
+    // Arm the store's embed-liveness ref on EVERY open, however it was launched
+    // (store launch, deep link, relaunch, or the in-page picker grid opening the
+    // embed directly without changing the active tab). The deactivation effect
+    // otherwise only arms it on an active-tab CHANGE, so an embed re-mounted
+    // WITHIN the still-active app tab — after a back-to-apps / unsolicited
+    // onClosed cleared the ref — would never be tracked and would leak (the
+    // native view paints over the next tab). Guard on `null` so this never
+    // clobbers the OUTGOING id the effect still needs on an app→app switch
+    // (ref stays the old tab; the effect reads it, then re-points to the new one).
+    if (liveSandboxUiTabIdRef.current === null) {
+      const active = activeWorkspaceTab(workspaceTabsRef.current)
+      if (active?.kind === 'app') liveSandboxUiTabIdRef.current = active.id
+    }
   }, [])
 
   const handleSandboxUiMounted = React.useCallback(() => {
@@ -899,6 +933,12 @@ export function App() {
   }, [])
 
   const handleSandboxUiClosed = React.useCallback(() => {
+    // Unsolicited close (crash / quit / partition GC) or an explicit back-to-apps
+    // teardown from SandboxUiPage: the embed is already gone, so reconcile the
+    // store's view of the live embed to "not mounted" (§3). The app TAB stays in
+    // the store and recovers on reactivation; only the liveness bookkeeping is
+    // cleared so the deactivation effect won't re-close a dead embed.
+    liveSandboxUiTabIdRef.current = null
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
@@ -907,6 +947,7 @@ export function App() {
   }, [])
 
   const handleSandboxUiRemoved = React.useCallback(() => {
+    liveSandboxUiTabIdRef.current = null
     setActiveSandboxUiApp(null)
     setSandboxUiMounted(false)
     setSandboxUiConversationOrigin(null)
@@ -984,6 +1025,64 @@ export function App() {
   relaunchSandboxUiAppRef.current = (app, tabId) => {
     launchSandboxUiApp(app, null, tabId)
   }
+
+  // Store-governed embed lifecycle (mini-spec 05 §3, replaces the old
+  // SandboxUiPage unmount-cleanup close). The live embed belongs to whichever
+  // app tab is active; when that changes, the OUTGOING app's route is persisted
+  // and the embed is closed — UNLESS another app tab is taking over, in which
+  // case the incoming `open()` replaces the embed in the driver (one-at-a-time,
+  // guarded by `mountGeneration`), so a redundant `close()` here would risk
+  // closing the freshly-opened view. This effect is the single SOLICITED
+  // `close()` emitter for deactivation.
+  const activeSandboxUiTabId =
+    !vm.appsPickerActive && vm.activeWorkspaceTab?.kind === 'app' ? vm.activeWorkspaceTab.id : null
+  React.useEffect(() => {
+    const outgoingTabId = liveSandboxUiTabIdRef.current
+    if (outgoingTabId === activeSandboxUiTabId) return
+    liveSandboxUiTabIdRef.current = activeSandboxUiTabId
+    if (outgoingTabId === null) return
+    const replacedByAnotherApp = activeSandboxUiTabId !== null
+    if (!replacedByAnotherApp) {
+      // Deactivating to a non-app surface (chat/files/settings via strip, sidebar
+      // nav, or closing the tab): drop the embed's React state now so anything
+      // gated on a live app (sidebar auto-collapse, drawer-with-embed) reacts in
+      // this commit. On an app→app switch the incoming launch already owns this
+      // state, so leave it. This restores the reset the removed unmount cleanup
+      // used to do for paths that never call `leaveSandboxForChat` (sidebar nav).
+      setActiveSandboxUiApp(null)
+      setSandboxUiMounted(false)
+    }
+    // Read optimistically, persist, then close in a microtask — the visual tab
+    // switch (already committed above) must not block on the IPC (§4). A read
+    // failure (out-of-prefix throw, destroyed webContents → null) falls back to
+    // the default route rather than blocking the switch.
+    //
+    // app→app ordering: the incoming `open()` is dispatched by SandboxUiPage's
+    // child effect (the shortcut-open effect), which runs BEFORE this parent
+    // effect AND gates its `open()` IPC behind `waitForEmbedSlotRect` (an rAF
+    // loop). This parent effect's `getLocation()` invoke below is dispatched
+    // synchronously here — after `open()` STARTED but before its rAF resolves —
+    // so `getLocation` reaches main (and reads the still-live outgoing view)
+    // strictly before `open()` tears it down. i.e. the read is captured before
+    // the incoming open, not merely "usually first".
+    void (async () => {
+      let routePath: string | undefined
+      try {
+        const location = await window.clerum.sandboxUi.getLocation()
+        routePath = location?.routePath
+      } catch {
+        routePath = undefined
+      }
+      // No-op when the outgoing tab was closed (§3: closing a tab does not save).
+      setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
+      if (replacedByAnotherApp) return
+      try {
+        await window.clerum.sandboxUi.close()
+      } catch {
+        // Idempotent: an unsolicited close may have torn it down already.
+      }
+    })()
+  }, [activeSandboxUiTabId, setWorkspaceTabs])
 
   const handleSidebarNavSelect = React.useCallback(
     (item: NavItem) => {
@@ -1115,9 +1214,26 @@ export function App() {
 
   const closeActiveSandboxUiEmbedForHandoff = React.useCallback(async () => {
     if (!activeSandboxUiApp) return
+    // §3 consistency: persist the outgoing app tab's route before tearing the
+    // embed down for a deep-link handoff, so returning to that tab restores
+    // where the user was rather than the default/stale route. Same read-then-
+    // close as the deactivation effect (try/catch → undefined on failure); read
+    // BEFORE `close()` destroys the webContents. `handleSandboxUiClosed` clears
+    // the ref, so snapshot the outgoing tab id first.
+    const outgoingTabId = liveSandboxUiTabIdRef.current
+    if (outgoingTabId !== null) {
+      let routePath: string | undefined
+      try {
+        const location = await window.clerum.sandboxUi.getLocation()
+        routePath = location?.routePath
+      } catch {
+        routePath = undefined
+      }
+      setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
+    }
     await window.clerum.sandboxUi.close()
     handleSandboxUiClosed()
-  }, [activeSandboxUiApp, handleSandboxUiClosed])
+  }, [activeSandboxUiApp, handleSandboxUiClosed, setWorkspaceTabs])
 
   React.useEffect(() => {
     const enqueue = (link: SandboxUiDeepLinkEnvelope) => {

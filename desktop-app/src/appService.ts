@@ -4926,6 +4926,23 @@ export class AppService {
     })
   }
 
+  // Read the active embed's current in-app route for the renderer's tab store
+  // (mini-spec 05 §1). Mirrors `createSandboxUiDeepLink`'s read: it wraps
+  // `driver.getActiveSandboxUiLocation()` and reshapes to the renderer contract.
+  // Returns null when no embed is mounted or its webContents is destroyed.
+  // An out-of-prefix current URL makes `getActiveSandboxUiLocation` THROW
+  // ('Cannot read the current app route'); that propagates so the renderer can
+  // fall back to the default route instead of persisting a stale one.
+  async getSandboxUiLocation(): Promise<{ appRef: string; routePath?: string } | null> {
+    const driver = await import('./sandboxUiDriver.js')
+    const location = driver.getActiveSandboxUiLocation()
+    if (!location) return null
+    return {
+      appRef: `${location.recipeNs}/${location.recipeName}`,
+      ...(location.path ? { routePath: location.path } : {}),
+    }
+  }
+
   async createSandboxUiDeepLink(teamId?: string): Promise<{ url: string }> {
     const driver = await import('./sandboxUiDriver.js')
     const { buildSandboxUiWebLink } = await import('./sandboxUiDeepLinks.js')

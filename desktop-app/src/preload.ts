@@ -609,6 +609,7 @@ const clerum = Object.freeze({
     }) => ipcRenderer.invoke('sandboxUi:open', args),
     close: () => ipcRenderer.invoke('sandboxUi:close'),
     reload: () => ipcRenderer.invoke('sandboxUi:reload'),
+    getLocation: () => ipcRenderer.invoke('sandboxUi:getLocation'),
     copyDeepLink: (teamId?: string) => ipcRenderer.invoke('sandboxUi:copyDeepLink', { teamId }),
     listPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:listPendingDeepLinks'),
     clearPendingDeepLinks: () => ipcRenderer.invoke('sandboxUi:clearPendingDeepLinks'),

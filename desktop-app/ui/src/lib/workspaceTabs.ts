@@ -1,5 +1,6 @@
 import type {
   ActiveChat,
+  AppTabPayload,
   OpenAppTabInput,
   OpenChatTabInput,
   OpenFilesTabInput,
@@ -158,6 +159,34 @@ export function openAppTab(state: WorkspaceTabsState, input: OpenAppTabInput): W
     },
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
+}
+
+/**
+ * Persist the current in-app route on an app tab (mini-spec 05 §3). The store
+ * governs the embed lifecycle: on deactivation the route is read from the live
+ * embed and written here so reactivation can re-mount at it. `routePath ===
+ * undefined` CLEARS any saved route (the tab reopens at its default path) — the
+ * key is dropped rather than stored as `undefined`. A no-op (same reference)
+ * when the tab is missing, is not an app tab, or already holds this route, so a
+ * `setState` bails out. Closing a tab removes it, so a persist racing a close
+ * simply no-ops.
+ */
+export function setAppTabSavedRoutePath(
+  state: WorkspaceTabsState,
+  tabId: string,
+  routePath: string | undefined
+): WorkspaceTabsState {
+  const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'app')
+  if (!target?.app) return state
+  if (target.app.savedRoutePath === routePath) return state
+  const nextApp: AppTabPayload = {
+    appRef: target.app.appRef,
+    ...(routePath !== undefined ? { savedRoutePath: routePath } : {}),
+  }
+  return {
+    ...state,
+    tabs: state.tabs.map(tab => (tab.id === tabId ? { ...tab, app: nextApp } : tab)),
+  }
 }
 
 /** Files: single instance — focus the existing tab if present (R8). */

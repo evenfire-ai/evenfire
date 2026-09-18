@@ -713,6 +713,7 @@ declare global {
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
