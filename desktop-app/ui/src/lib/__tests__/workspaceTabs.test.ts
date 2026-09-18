@@ -14,6 +14,7 @@ import {
   openFilesTab,
   openSettingsTab,
   reconcileWorkspaceChatTab,
+  reorderWorkspaceTab,
   selectLastWorkspaceTab,
   selectWorkspaceTab,
   selectWorkspaceTabAt,
@@ -407,6 +408,146 @@ describe('workspaceTabs — close (no re-seed; empty allowed §5)', () => {
       chatId: 'c0',
     })
     expect(closeWorkspaceTab(state, 'nope')).toBe(state)
+  })
+})
+
+describe('workspaceTabs — reorderWorkspaceTab', () => {
+  function four(): WorkspaceTabsState {
+    let state = createEmptyWorkspaceTabsState()
+    state = openChatTab(state, { id: 't0', agentRef: 'a', chatId: 'c0' })
+    state = openAppTab(state, { id: 't1', appRef: 'app' })
+    state = openFilesTab(state, { id: 't2' })
+    state = openSettingsTab(state, { id: 't3', section: 'agents' })
+    return { ...state, activeTabId: 't1' }
+  }
+
+  it('moves the first tab to the last position (toIndex = final index)', () => {
+    const state = four()
+    const next = reorderWorkspaceTab(state, 't0', 3)
+    expect(next.tabs.map(t => t.id)).toEqual(['t1', 't2', 't3', 't0'])
+    expect(next.activeTabId).toBe('t1')
+  })
+
+  it('moves the last tab to the first position', () => {
+    const state = four()
+    const next = reorderWorkspaceTab(state, 't3', 0)
+    expect(next.tabs.map(t => t.id)).toEqual(['t3', 't0', 't1', 't2'])
+    expect(next.activeTabId).toBe('t1')
+  })
+
+  it('moves a middle tab forward and backward, landing exactly at toIndex', () => {
+    const state = four()
+    expect(reorderWorkspaceTab(state, 't1', 2).tabs.map(t => t.id)).toEqual([
+      't0',
+      't2',
+      't1',
+      't3',
+    ])
+    expect(reorderWorkspaceTab(state, 't2', 0).tabs.map(t => t.id)).toEqual([
+      't2',
+      't0',
+      't1',
+      't3',
+    ])
+  })
+
+  it('is a no-op (same reference) for the current index, an unknown id, and < 2 tabs', () => {
+    const state = four()
+    expect(reorderWorkspaceTab(state, 't2', 2)).toBe(state) // already at index 2
+    expect(reorderWorkspaceTab(state, 'ghost', 0)).toBe(state) // unknown id
+    const one = openAppTab(createEmptyWorkspaceTabsState(), { id: 'solo', appRef: 'x' })
+    expect(reorderWorkspaceTab(one, 'solo', 5)).toBe(one) // single tab: any target clamps to self
+    expect(reorderWorkspaceTab(createEmptyWorkspaceTabsState(), 'x', 0)).toEqual({
+      tabs: [],
+      activeTabId: null,
+    })
+  })
+
+  it('clamps an out-of-range toIndex instead of throwing or dropping a tab', () => {
+    const state = four()
+    expect(reorderWorkspaceTab(state, 't0', 99).tabs.map(t => t.id)).toEqual([
+      't1',
+      't2',
+      't3',
+      't0',
+    ])
+    expect(reorderWorkspaceTab(state, 't3', -5).tabs.map(t => t.id)).toEqual([
+      't3',
+      't0',
+      't1',
+      't2',
+    ])
+  })
+
+  // T2 property-based: reorder is a pure permutation that fixes the active id.
+  it('property: preserves the id set, length, and activeTabId; lands the tab at clamp(toIndex)', () => {
+    fc.assert(
+      fc.property(
+        fc.array(openOpArb, { minLength: 1, maxLength: 25 }),
+        fc.integer({ min: 0, max: 24 }),
+        fc.integer({ min: -10, max: 40 }),
+        (ops, activeRaw, toIndex) => {
+          const base = applyOpens(ops)
+          if (base.tabs.length === 0) return
+          const activeId = base.tabs[activeRaw % base.tabs.length]!.id
+          const state: WorkspaceTabsState = { ...base, activeTabId: activeId }
+          const idsBefore = state.tabs.map(t => t.id)
+
+          for (const fromId of idsBefore) {
+            const next = reorderWorkspaceTab(state, fromId, toIndex)
+
+            // (3) activeTabId is always preserved.
+            expect(next.activeTabId).toBe(activeId)
+            // (2) length conserved.
+            expect(next.tabs.length).toBe(state.tabs.length)
+            // (1) the id set is identical (no loss, no duplicate).
+            expect(new Set(next.tabs.map(t => t.id))).toEqual(new Set(idsBefore))
+
+            // (4) the moved tab lands exactly at clamp(toIndex, 0, len-1).
+            const clamped = Math.max(0, Math.min(toIndex, state.tabs.length - 1))
+            expect(next.tabs[clamped]!.id).toBe(fromId)
+
+            // (5) a no-op returns the SAME reference.
+            const fromIndex = idsBefore.indexOf(fromId)
+            if (clamped === fromIndex) expect(next).toBe(state)
+          }
+
+          // (5) an unknown id is always the same reference.
+          expect(reorderWorkspaceTab(state, 'no-such-id', toIndex)).toBe(state)
+        }
+      )
+    )
+  })
+
+  // T2 property: idempotence — moving a tab to where it already is, is a no-op.
+  it('property: reorder to a tab’s own index is idempotent (same ref)', () => {
+    fc.assert(
+      fc.property(fc.array(openOpArb, { minLength: 1, maxLength: 20 }), ops => {
+        const state = applyOpens(ops)
+        state.tabs.forEach((tab, index) => {
+          expect(reorderWorkspaceTab(state, tab.id, index)).toBe(state)
+        })
+      })
+    )
+  })
+
+  // T2 property: applying the SAME (id, toIndex) twice is idempotent —
+  // reorder(reorder(s, id, k), id, k) === reorder(s, id, k) for any k. After the
+  // first move the tab already sits at clamp(k), so the second call bails to the
+  // same reference.
+  it('property: applying the same (id, toIndex) twice returns the same ref', () => {
+    fc.assert(
+      fc.property(
+        fc.array(openOpArb, { minLength: 1, maxLength: 20 }),
+        fc.nat(30),
+        (ops, toIndex) => {
+          const state = applyOpens(ops)
+          const { id: fromId } = state.tabs[toIndex % state.tabs.length]!
+          const once = reorderWorkspaceTab(state, fromId, toIndex)
+          expect(reorderWorkspaceTab(once, fromId, toIndex)).toBe(once)
+        }
+      )
+    )
   })
 })
 

@@ -5,5 +5,7 @@ export type WorkspaceTabStripProps = {
   activeTabId: string | null
   onSelect: (id: string) => void
   onClose: (id: string) => void
+  /** Move a tab to `toIndex` (its desired FINAL array index; see reorderWorkspaceTab). */
+  onReorder: (fromId: string, toIndex: number) => void
   panelId?: string
 }

@@ -68,6 +68,7 @@ import {
   newChatTab,
   openAppTab,
   reconcileWorkspaceChatTab,
+  reorderWorkspaceTab,
   selectLastWorkspaceTab,
   selectWorkspaceTab,
   selectWorkspaceTabAt,
@@ -480,6 +481,15 @@ export function App() {
       if (wasActive) revealWorkspaceTab(activeWorkspaceTab(next), false)
     },
     [revealWorkspaceTab, setWorkspaceTabs, vm.clearAppsPicker]
+  )
+
+  // Session-only strip reorder (drag & drop / keyboard). It never changes the
+  // active tab, so no reveal is needed — the route seam stays put.
+  const handleReorderWorkspaceTab = React.useCallback(
+    (fromId: string, toIndex: number) => {
+      setWorkspaceTabs(state => reorderWorkspaceTab(state, fromId, toIndex))
+    },
+    [setWorkspaceTabs]
   )
 
   const handleNewWorkspaceChatTab = React.useCallback(() => {
@@ -2452,6 +2462,7 @@ export function App() {
                                       vm.appsPickerActive ? null : workspaceTabs.activeTabId
                                     }
                                     onClose={handleCloseWorkspaceTab}
+                                    onReorder={handleReorderWorkspaceTab}
                                     onSelect={handleSelectWorkspaceTab}
                                     panelId={
                                       vm.navItem === DESKTOP_ROUTES.chat

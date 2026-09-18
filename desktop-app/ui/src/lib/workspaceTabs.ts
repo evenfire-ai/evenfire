@@ -336,6 +336,38 @@ export function cycleWorkspaceTab(
   return { ...state, activeTabId: state.tabs[targetIndex]!.id }
 }
 
+// ---- reorder (strip drag & drop / keyboard; session-only) -------------------
+
+/**
+ * Move a tab to a new position. `toIndex` is the DESIRED FINAL index of the
+ * moved tab in the resulting array (0..len-1) — not an insertion slot — so the
+ * caller owns "where it lands" and this stays the single source of truth.
+ *
+ * Reordering NEVER changes `activeTabId`: the route seam derives the active
+ * tab's navItem, so with the active id fixed a pure reorder causes no route
+ * churn (dragging an inactive tab past the active one, or dragging the active
+ * tab itself, both keep the same tab active). Order is the array order — there
+ * is no `order` field to keep in sync.
+ *
+ * No-ops return the SAME reference so a `setState` bails out (no render): an
+ * unknown `fromId`, or a `toIndex` that clamps back to the tab's current index
+ * — which by construction includes every workspace with fewer than 2 tabs.
+ */
+export function reorderWorkspaceTab(
+  state: WorkspaceTabsState,
+  fromId: string,
+  toIndex: number
+): WorkspaceTabsState {
+  const fromIndex = state.tabs.findIndex(tab => tab.id === fromId)
+  if (fromIndex < 0) return state
+  const clamped = Math.max(0, Math.min(toIndex, state.tabs.length - 1))
+  if (clamped === fromIndex) return state
+  const tabs = [...state.tabs]
+  const [moved] = tabs.splice(fromIndex, 1)
+  tabs.splice(clamped, 0, moved!)
+  return { ...state, tabs }
+}
+
 // ---- close (no re-seed; empty workspace allowed, §5) ------------------------
 
 /**

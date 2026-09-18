@@ -1,18 +1,21 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListProvider } from '@contexts/ChatListContext'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import {
+  createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
   openAppTab,
   openChatTab,
   openSettingsTab,
+  reorderWorkspaceTab,
 } from '@lib/workspaceTabs'
+import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { WorkspaceTabStrip } from '.'
 
 afterEach(cleanup)
@@ -42,6 +45,7 @@ describe('WorkspaceTabStrip', () => {
         activeTabId="one"
         onSelect={onSelect}
         onClose={onClose}
+        onReorder={vi.fn()}
       />
     )
 
@@ -64,7 +68,13 @@ describe('WorkspaceTabStrip', () => {
       title: longTitle,
     }).tabs
     const { container } = render(
-      <WorkspaceTabStrip tabs={longTabs} activeTabId="one" onSelect={vi.fn()} onClose={vi.fn()} />
+      <WorkspaceTabStrip
+        tabs={longTabs}
+        activeTabId="one"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
     )
 
     const select = screen.getByRole('button', { name: longTitle })
@@ -112,6 +122,7 @@ describe('WorkspaceTabStrip', () => {
       <WorkspaceTabStrip
         activeTabId="one"
         onClose={vi.fn()}
+        onReorder={vi.fn()}
         onSelect={vi.fn()}
         panelId="chat-view-panel"
         tabs={tabs}
@@ -173,7 +184,13 @@ describe('WorkspaceTabStrip', () => {
           sessionStateByChatKey,
         }}
       >
-        <WorkspaceTabStrip tabs={tabs} activeTabId="seed" onSelect={vi.fn()} onClose={vi.fn()} />
+        <WorkspaceTabStrip
+          tabs={tabs}
+          activeTabId="seed"
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+        />
       </ChatListProvider>
     )
 
@@ -227,7 +244,13 @@ describe('WorkspaceTabStrip', () => {
           sessionStateByChatKey,
         }}
       >
-        <WorkspaceTabStrip tabs={tabs} activeTabId="app-1" onSelect={vi.fn()} onClose={vi.fn()} />
+        <WorkspaceTabStrip
+          tabs={tabs}
+          activeTabId="app-1"
+          onSelect={vi.fn()}
+          onClose={vi.fn()}
+          onReorder={vi.fn()}
+        />
       </ChatListProvider>
     )
 
@@ -237,5 +260,196 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.getByRole('button', { name: 'My App' }).getAttribute('aria-pressed')).toBe('true')
     // Only the chat tab carries a live session badge — app/settings do not.
     expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+})
+
+describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
+  // App tabs keep their ids and never dedupe, so this yields three distinct,
+  // stably-ordered tabs [a, b, c] derived from the real store producer (T1).
+  const threeTabs = openAppTab(
+    openAppTab(
+      openAppTab(createEmptyWorkspaceTabsState(), { id: 'a', appRef: 'ns/x', title: 'Alpha' }),
+      { id: 'b', appRef: 'ns/x', title: 'Bravo' }
+    ),
+    { id: 'c', appRef: 'ns/x', title: 'Charlie' }
+  ).tabs
+
+  // jsdom returns a zeroed rect from getBoundingClientRect, so the drop side is
+  // computed as 'after' for any clientX >= 0. Pin a real 100px-wide rect (midpoint
+  // at x=50) on every element so `clientX` selects the half deterministically:
+  // clientX < 50 → 'before', >= 50 → 'after'.
+  let rectSpy: ReturnType<typeof vi.spyOn> | undefined
+  beforeEach(() => {
+    rectSpy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      width: 100,
+      right: 100,
+      top: 0,
+      bottom: 0,
+      height: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+  })
+  afterEach(() => {
+    rectSpy?.mockRestore()
+  })
+
+  const makeDataTransfer = () => {
+    const store: Record<string, string> = {}
+    return {
+      effectAllowed: '',
+      setData: (type: string, value: string) => {
+        store[type] = value
+      },
+      getData: (type: string) => store[type] ?? '',
+    }
+  }
+
+  const containerFor = (root: HTMLElement, name: string): HTMLElement =>
+    screen.getByRole('button', { name }).closest('.chat-view-tab') as HTMLElement
+
+  // jsdom has no DragEvent, so `fireEvent.drop(..., { clientX })` drops clientX on
+  // the floor. Build the event explicitly and pin clientX so the side is real.
+  const fireDrag = (
+    kind: 'dragOver' | 'drop',
+    node: HTMLElement,
+    dataTransfer: unknown,
+    clientX: number
+  ): void => {
+    const event = createEvent[kind](node, { dataTransfer })
+    Object.defineProperty(event, 'clientX', { value: clientX })
+    fireEvent(node, event)
+  }
+
+  it('drags a left tab to the right of a later tab (shift-adjusted final index)', () => {
+    const onReorder = vi.fn()
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const source = containerFor(container, 'Alpha')
+    const target = containerFor(container, 'Charlie')
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(source, { dataTransfer })
+    fireDrag('dragOver', target, dataTransfer, 90)
+    fireDrag('drop', target, dataTransfer, 90)
+    // Drop after 'c' (index 2); 'a' sat before it, so the final index is 2.
+    expect(onReorder).toHaveBeenCalledWith('a', 2)
+  })
+
+  it('drags a right tab to the left of an earlier tab (no shift adjustment)', () => {
+    const onReorder = vi.fn()
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const source = containerFor(container, 'Charlie')
+    const target = containerFor(container, 'Alpha')
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(source, { dataTransfer })
+    fireDrag('dragOver', target, dataTransfer, 10)
+    fireDrag('drop', target, dataTransfer, 10)
+    // Drop before 'a' (index 0); 'c' sat after it, so the final index is 0.
+    expect(onReorder).toHaveBeenCalledWith('c', 0)
+  })
+
+  it('does not reorder when dropped on itself', () => {
+    const onReorder = vi.fn()
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const self = containerFor(container, 'Bravo')
+    const dataTransfer = makeDataTransfer()
+    fireEvent.dragStart(self, { dataTransfer })
+    fireDrag('drop', self, dataTransfer, 90)
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('moves a tab with Alt+ArrowRight / Alt+ArrowLeft from the focused select', () => {
+    const onReorder = vi.fn()
+    render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
+    expect(onReorder).toHaveBeenLastCalledWith('b', 2) // index 1 -> 2
+    fireEvent.keyDown(bravo, { key: 'ArrowLeft', altKey: true })
+    expect(onReorder).toHaveBeenLastCalledWith('b', 0) // index 1 -> 0
+  })
+
+  it('ignores arrow keys without Alt (leaves navigation/select alone)', () => {
+    const onReorder = vi.fn()
+    render(
+      <WorkspaceTabStrip
+        tabs={threeTabs}
+        activeTabId="a"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    fireEvent.keyDown(bravo, { key: 'ArrowRight' })
+    fireEvent.keyDown(bravo, { key: 'ArrowLeft' })
+    expect(onReorder).not.toHaveBeenCalled()
+  })
+
+  it('keeps focus on the moved tab after a keyboard reorder (list keyed by id)', () => {
+    // Drive the real store reducer so the rerender reflects the new order; the
+    // moved tab's DOM node persists (keyed by id) and thus keeps DOM focus.
+    let state: WorkspaceTabsState = { tabs: threeTabs, activeTabId: 'a' }
+    const onReorder = (fromId: string, toIndex: number) => {
+      state = reorderWorkspaceTab(state, fromId, toIndex)
+    }
+    const { rerender } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    const bravo = screen.getByRole('button', { name: 'Bravo' })
+    bravo.focus()
+    expect(document.activeElement).toBe(bravo)
+    fireEvent.keyDown(bravo, { key: 'ArrowRight', altKey: true })
+    rerender(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={onReorder}
+      />
+    )
+    expect(state.tabs.map(t => t.id)).toEqual(['a', 'c', 'b'])
+    // Same DOM node, now last, still focused.
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Bravo' }))
+    expect(document.activeElement).toBe(bravo)
   })
 })

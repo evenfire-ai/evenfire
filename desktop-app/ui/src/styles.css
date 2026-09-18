@@ -16650,6 +16650,38 @@ pre {
   flex: 0 0 auto;
 }
 
+/* Reorder feedback (session-only drag & drop / keyboard). The dragged tab dims;
+   a vertical accent bar marks the insertion side. The bar is a pseudo-element so
+   it composes with the active tab's top accent box-shadow instead of fighting
+   it. */
+.chat-view-tab.is-dragging {
+  opacity: 0.5;
+}
+
+.chat-view-tab.is-drop-before,
+.chat-view-tab.is-drop-after {
+  position: relative;
+}
+
+.chat-view-tab.is-drop-before::after,
+.chat-view-tab.is-drop-after::after {
+  background: var(--accent);
+  bottom: 0;
+  content: '';
+  position: absolute;
+  top: 0;
+  width: 2px;
+  z-index: 2;
+}
+
+.chat-view-tab.is-drop-before::after {
+  left: 0;
+}
+
+.chat-view-tab.is-drop-after::after {
+  right: 0;
+}
+
 .chat-view-workspace {
   --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
 
