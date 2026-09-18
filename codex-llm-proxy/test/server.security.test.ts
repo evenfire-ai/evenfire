@@ -546,6 +546,17 @@ describe('codex-llm-proxy attempt telemetry', () => {
       })) as typeof fetch
   }
 
+  function denyingClient(code: string): ControlApiClient {
+    return {
+      async redeem() {
+        throw new ControlApiClientError(code, 'control API request denied')
+      },
+      async finalize() {
+        throw new Error('finalize must not run after a denied redeem')
+      },
+    } as unknown as ControlApiClient
+  }
+
   function failureCount(metricsText: string, code: string): number {
     const line = metricsText
       .split('\n')
@@ -557,13 +568,14 @@ describe('codex-llm-proxy attempt telemetry', () => {
     providerAttemptId: string,
     textDeltas: number,
     calls: number,
-    tamper?: (raw: Record<string, unknown>) => void
+    tamper?: (raw: Record<string, unknown>) => void,
+    deniedCode?: string
   ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient()
     const apps = createProxyApps(config({ maxBodyBytes: 65_536 }), {
-      controlApiClient: client,
+      controlApiClient: deniedCode ? denyingClient(deniedCode) : client,
       fetchFn: upstream(textDeltas, calls),
       lookup,
     })
@@ -669,5 +681,25 @@ describe('codex-llm-proxy attempt telemetry', () => {
       /codex_llm_proxy_attempts_total\{outcome="success",operation="completion_stream"\} 1/
     )
     expect(failureCount(metricsText, 'tool_call_limit_exceeded')).toBe(0)
+  })
+
+  it('(e) labels the failure metric with a known control-api code', async () => {
+    const { res, lines, metricsText } = await run('att-no-grant', 0, 0, undefined, 'no_grant')
+    expect(res.status).toBe(403)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ outcome: 'failed', code: 'no_grant', httpStatus: 403 })
+    expect(failureCount(metricsText, 'no_grant')).toBe(1)
+    expect(failureCount(metricsText, 'other')).toBe(0)
+  })
+
+  it('(f) labels an unknown control-api code as other and keeps the raw code in the log', async () => {
+    const rawCode = 'k8s says: pod foo not found'
+    const { res, lines, metricsText } = await run('att-unknown-code', 0, 0, undefined, rawCode)
+    expect(res.status).toBe(503)
+    // Witness: the attempt failed and was logged with the code control-api sent.
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({ outcome: 'failed', code: rawCode, httpStatus: 503 })
+    expect(failureCount(metricsText, 'other')).toBe(1)
+    expect(metricsText).not.toContain(rawCode)
   })
 })

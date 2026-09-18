@@ -223,7 +223,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       } catch (err) {
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        metrics.observeAttemptFailure(mapped.code)
+        metrics.observeAttemptFailure(failureLabel(mapped.code))
         const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
         logger.warn(
           {
@@ -362,28 +362,39 @@ export function startProxy(config: CodexLlmProxyConfig): ProxyServers {
   return servers
 }
 
+// Every code the proxy or control-api is known to send. The failure metric
+// uses this as its label allowlist because a control-api error body is not
+// bounded by the proxy.
+const ATTEMPT_ERROR_STATUS: Record<string, number> = {
+  invalid_request: 400,
+  Unauthorized: 401,
+  origin_denied: 403,
+  request_hash_mismatch: 403,
+  ticket_invalid: 403,
+  ticket_expired: 403,
+  no_grant: 403,
+  host_binding_mismatch: 403,
+  model_not_allowed: 403,
+  insufficient_scope: 403,
+  disabled: 404,
+  ticket_replayed: 409,
+  tool_call_limit_exceeded: 422,
+  connection_unavailable: 503,
+  provider_unavailable: 503,
+  sse_buffer_exceeded: 503,
+  invalid_receipt: 503,
+  conflict: 503,
+}
+
+function failureLabel(code: string): string {
+  return Object.hasOwn(ATTEMPT_ERROR_STATUS, code) ? code : 'other'
+}
+
 function mapError(err: unknown): { status: number; code: string } {
   if (err instanceof OriginDeniedError) return { status: 403, code: 'origin_denied' }
   if (err instanceof RequestLimitError) return { status: 503, code: 'provider_unavailable' }
   if (err instanceof CodexTransportError || err instanceof ControlApiClientError) {
-    const statusByCode: Record<string, number> = {
-      invalid_request: 400,
-      Unauthorized: 401,
-      origin_denied: 403,
-      request_hash_mismatch: 403,
-      ticket_invalid: 403,
-      ticket_expired: 403,
-      no_grant: 403,
-      host_binding_mismatch: 403,
-      model_not_allowed: 403,
-      insufficient_scope: 403,
-      disabled: 404,
-      ticket_replayed: 409,
-      tool_call_limit_exceeded: 422,
-      connection_unavailable: 503,
-      provider_unavailable: 503,
-    }
-    return { status: statusByCode[err.code] ?? 503, code: err.code }
+    return { status: ATTEMPT_ERROR_STATUS[err.code] ?? 503, code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
 }
