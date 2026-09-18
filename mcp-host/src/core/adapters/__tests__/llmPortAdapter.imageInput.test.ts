@@ -11,8 +11,14 @@ import type { ImageInputResolver } from '../../../llm/imageInput'
 import type { ClassifiedError, SingleTurnProvider } from '../../../llm/types'
 import { logger } from '../../../logger'
 import { LlmError, LlmErrorCode } from '../../errors'
+import { appendToolResults } from '../../orchestration/toolUseLoopMessages'
 import type { SystemPromptParts } from '../../reasoning/systemPrompt'
-import { type ChatMessage, FinishReason } from '../../types'
+import {
+  type ChatMessage,
+  FinishReason,
+  type MessageContentPart,
+  type ToolResult,
+} from '../../types'
 import { LlmPortAdapter } from '../llmPortAdapter'
 
 const CURATED_EVIDENCE = {
@@ -537,5 +543,164 @@ describe('#654 LlmPortAdapter image guard', () => {
     // SDK call. One tool-originated message never licenses a user attachment.
     expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
     expect(provider.classifyError).not.toHaveBeenCalled()
+  })
+})
+
+describe('#669 LlmPortAdapter malformed tool screenshots', () => {
+  const LINE_WRAPPED = 'QUJD\nRUZH'
+  const DATA_URL = 'data:image/png;base64,QUJD'
+  const NOTICE_SUFFIX =
+    'screenshot(s) returned by tool results were not forwarded: invalid image encoding]'
+
+  function screenshotResult(id: string, data: string): ToolResult {
+    return {
+      tool_call_id: `tc_${id}`,
+      name: 'take_screenshot',
+      content: `captured ${id}`,
+      is_error: false,
+      attachments: [
+        {
+          id: `shot-${id}`,
+          kind: 'image',
+          mimeType: 'image/png',
+          encoding: 'base64',
+          dataBase64: data,
+        },
+      ],
+    }
+  }
+
+  /** Builds the turn exactly as the tool-use loop does, via `appendToolResults`. */
+  function toolTurn(images: string[]): ChatMessage[] {
+    const messages: ChatMessage[] = [textMessage()]
+    appendToolResults(
+      messages,
+      images.map((data, index) => screenshotResult(String(index), data)),
+      []
+    )
+    return messages
+  }
+
+  function adapterFor(
+    provider: ReturnType<typeof fakeProvider>,
+    resolver: ImageInputResolver
+  ): LlmPortAdapter {
+    return new LlmPortAdapter(
+      provider,
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      resolver
+    )
+  }
+
+  function imageParts(messages: ChatMessage[]): MessageContentPart[] {
+    return messages.flatMap(message =>
+      (message.contentParts ?? []).filter(part => part.type === 'image')
+    )
+  }
+
+  it('dispatches a turn with malformed tool screenshots on a model with no image evidence', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      const provider = fakeProvider('openai')
+      const adapter = adapterFor(provider, allow(undefined))
+      const messages = toolTurn([LINE_WRAPPED, DATA_URL])
+      // Precondition: the real builder forwards the malformed data unnormalized.
+      expect(imageParts(messages)).toHaveLength(2)
+
+      await adapter.completeWithTools({ messages, tools: [] })
+
+      // Liveness witness: the turn reached the provider exactly once.
+      expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+      const [dispatched] = provider.completeSingleTurnWithTools.mock.calls[0] as [ChatMessage[]]
+      expect(imageParts(dispatched)).toHaveLength(0)
+      const carrier = dispatched[dispatched.length - 1]
+      expect(carrier.contentParts).toBeUndefined()
+      expect(carrier.imageOrigin).toBeUndefined()
+      expect(carrier.content).toContain(`[2 ${NOTICE_SUFFIX}`)
+      expect(JSON.stringify(dispatched)).not.toContain('RUZH')
+      expect(JSON.stringify(dispatched)).not.toContain('data:image/png')
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          component: 'LlmPortAdapter',
+          method: 'completeWithTools',
+          count: 2,
+        }),
+        'tool screenshots removed before provider dispatch: invalid image encoding'
+      )
+      expect(JSON.stringify(warnSpy.mock.calls)).not.toContain('RUZH')
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('drops malformed tool screenshots but forwards a canonical one on an image-capable model', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = adapterFor(provider, allow({ state: 'supported', evidence: CURATED_EVIDENCE }))
+    const messages = toolTurn([LINE_WRAPPED, 'QUJD', DATA_URL])
+
+    await adapter.completeWithTools({ messages, tools: [] })
+
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const [dispatched] = provider.completeSingleTurnWithTools.mock.calls[0] as [ChatMessage[]]
+    expect(imageParts(dispatched)).toEqual([{ type: 'image', mimeType: 'image/png', data: 'QUJD' }])
+    const carrier = dispatched[dispatched.length - 1]
+    expect(carrier.imageOrigin).toBe('tool_result')
+    expect(carrier.content).toContain(`[2 ${NOTICE_SUFFIX}`)
+    // Providers render `contentParts` instead of `content` when parts are
+    // present, so the notice must also travel as a text part.
+    expect(carrier.contentParts?.at(-1)).toEqual({
+      type: 'text',
+      text: `[2 ${NOTICE_SUFFIX}`,
+    })
+    expect(JSON.stringify(dispatched)).not.toContain('RUZH')
+    expect(JSON.stringify(dispatched)).not.toContain('data:image/png')
+  })
+
+  it('still refuses a malformed USER image with LLM_INVALID_ATTACHMENT', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = adapterFor(provider, allow({ state: 'supported', evidence: CURATED_EVIDENCE }))
+    const messages: ChatMessage[] = [
+      ...toolTurn([DATA_URL]),
+      {
+        role: 'user',
+        content: 'look',
+        contentParts: [{ type: 'image', mimeType: 'image/png', data: LINE_WRAPPED }],
+      },
+    ]
+
+    await expectDenied(
+      () => adapter.completeWithTools({ messages, tools: [] }),
+      LlmErrorCode.InvalidAttachment,
+      'unsupported image format or encoding'
+    )
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(0)
+    expect(provider.classifyError).not.toHaveBeenCalled()
+  })
+
+  it('leaves the caller messages untouched so a failover attempt sees the original', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = adapterFor(provider, allow(undefined))
+    const messages = toolTurn([LINE_WRAPPED, 'QUJD'])
+    const snapshot = structuredClone(messages)
+    const references = [...messages]
+
+    await adapter.completeWithTools({ messages, tools: [] })
+
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const [dispatched] = provider.completeSingleTurnWithTools.mock.calls[0] as [ChatMessage[]]
+    expect(dispatched).not.toBe(messages)
+    expect(messages).toEqual(snapshot)
+    expect(messages).toHaveLength(references.length)
+    messages.forEach((message, index) => expect(message).toBe(references[index]))
+    expect(imageParts(messages).map(part => part.type === 'image' && part.data)).toEqual([
+      LINE_WRAPPED,
+      'QUJD',
+    ])
   })
 })

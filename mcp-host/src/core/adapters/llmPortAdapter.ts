@@ -46,6 +46,19 @@ function prependConcatSystem(parts: SystemPromptParts, messages: ChatMessage[]):
   return [{ role: 'system', content }, ...messages]
 }
 
+/**
+ * An image part the adapter may forward: PNG/JPEG mime and canonical base64
+ * string data. Line-wrapped, `data:`-prefixed, URL-safe or unpadded base64
+ * fails.
+ */
+function isWellFormedImagePart(part: { mimeType: unknown; data: unknown }): boolean {
+  return (
+    isImageAttachmentMime(part.mimeType) &&
+    typeof part.data === 'string' &&
+    isCanonicalBase64Shape(part.data)
+  )
+}
+
 export type AdapterStaticContext = {
   host_ref: string
   context_ref: string | null
@@ -319,13 +332,23 @@ export class LlmPortAdapter implements LlmPort {
    * finish a text task that happens to call a screenshot tool; refusing there
    * would turn a capability gap into a task failure the user never asked for.
    *
+   * Encoding is validated before any capability decision. A malformed USER
+   * image (mime other than PNG/JPEG, non-string data, or data that is not
+   * canonical base64) is a terminal `InvalidAttachment`. A malformed image in a
+   * `tool_result` message came from an external MCP server, not the user, so it
+   * is removed instead: the message keeps its other parts and `content` records
+   * how many were dropped for invalid encoding. It is never forwarded, even to
+   * an image-capable model. A message left with no image part stops being an
+   * image carrier; valid tool images continue through the capability decision.
+   *
    * Returns the message array to dispatch. The input array is never mutated,
    * so a later failover attempt on a supported pair still sees the images.
    */
   private prepareMessagesForImageInput(
-    messages: ChatMessage[],
+    input: ChatMessage[],
     method: ImageTransportOperation
   ): ChatMessage[] {
+    const messages = this.removeMalformedToolImages(input, method)
     for (const message of messages) {
       if (message.contentParts === undefined) continue
       if (
@@ -334,10 +357,7 @@ export class LlmPortAdapter implements LlmPort {
           part =>
             !part ||
             (part.type !== 'text' && part.type !== 'image') ||
-            (part.type === 'image' &&
-              (!isImageAttachmentMime(part.mimeType) ||
-                typeof part.data !== 'string' ||
-                !isCanonicalBase64Shape(part.data)))
+            (part.type === 'image' && !isWellFormedImagePart(part))
         )
       ) {
         throw new LlmError(
@@ -420,6 +440,53 @@ export class LlmPortAdapter implements LlmPort {
           }
         : message
     )
+  }
+
+  /**
+   * Remove image parts with an invalid encoding from `tool_result` messages.
+   * Returns `messages` itself when nothing was removed; otherwise a new array
+   * in which only the affected messages are rebuilt (inputs are not mutated).
+   *
+   * Providers render `contentParts` instead of `content` when parts are
+   * present, so when valid images remain the notice is appended both to
+   * `content` and as a trailing text part. When no image remains, the message
+   * drops `contentParts` and `imageOrigin` and is sent as plain text.
+   */
+  private removeMalformedToolImages(
+    messages: ChatMessage[],
+    method: ImageTransportOperation
+  ): ChatMessage[] {
+    let removedTotal = 0
+    const sanitized = messages.map((message): ChatMessage => {
+      if (message.imageOrigin !== 'tool_result' || !Array.isArray(message.contentParts)) {
+        return message
+      }
+      const kept = message.contentParts.filter(
+        part => !(part && part.type === 'image' && !isWellFormedImagePart(part))
+      )
+      const removed = message.contentParts.length - kept.length
+      if (removed === 0) return message
+      removedTotal += removed
+      const notice = `[${removed} screenshot(s) returned by tool results were not forwarded: invalid image encoding]`
+      const content = `${message.content}\n${notice}`
+      if (kept.some(part => part && part.type === 'image')) {
+        return { ...message, content, contentParts: [...kept, { type: 'text', text: notice }] }
+      }
+      const { contentParts: _dropped, imageOrigin: _origin, ...rest } = message
+      return { ...rest, content }
+    })
+    if (removedTotal === 0) return messages
+    logger.warn(
+      {
+        component: 'LlmPortAdapter',
+        provider: this.providerName,
+        model: this.model,
+        method,
+        count: removedTotal,
+      },
+      'tool screenshots removed before provider dispatch: invalid image encoding'
+    )
+    return sanitized
   }
 
   private recordUsage(
