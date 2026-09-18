@@ -41,7 +41,9 @@ async function assertUploadV2Ready(
   )
   const row = tables.rows[0] as { sessions?: string | null; parts?: string | null } | undefined
   if (!row?.sessions || !row.parts)
-    throw new Error('[gfsc] GFS_UPLOAD_V2_ENABLED requires migration 0091 upload tables')
+    throw new Error(
+      '[gfsc] GFS_UPLOAD_V2_ENABLED requires migration 0097_gfs_upload_sessions upload tables'
+    )
   if (storageRole === 'writer') {
     const info = await stat(storageMountPath)
     if (!info.isDirectory())
