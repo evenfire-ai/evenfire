@@ -574,7 +574,14 @@ declare global {
           hostRef: string,
           chatId: string,
           model: string,
-          hostRefs?: string[]
+          hostRefs?: string[],
+          /**
+           * Optional CAS precondition (issue #654). Only sent when the host
+           * projected `modelSelectionRevision`; a stale value is rejected with
+           * `model_selection_conflict` instead of silently overwriting a newer
+           * selection.
+           */
+          expectedRevision?: number
         ) => Promise<SetHostModelResult>
         /**
          * Spec 15 Fase B — explicit user rename, propagated to the server. Rejects

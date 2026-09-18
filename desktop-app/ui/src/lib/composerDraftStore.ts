@@ -18,6 +18,8 @@ type Listener = () => void
 const NO_CHAT_DRAFT_KEY = '__no_chat__'
 
 const drafts = new Map<string, string>()
+let revision = 0
+const revisions = new Map<string, number>()
 const listenersByKey = new Map<string, Set<Listener>>()
 
 function keyFor(chatId: string | null): string {
@@ -30,6 +32,10 @@ function emit(key: string): void {
   for (const listener of listeners) listener()
 }
 
+export function getComposerDraftRevision(chatId: string | null): number {
+  return revisions.get(keyFor(chatId)) ?? 0
+}
+
 export function getComposerDraft(chatId: string | null): string {
   return drafts.get(keyFor(chatId)) ?? ''
 }
@@ -37,6 +43,7 @@ export function getComposerDraft(chatId: string | null): string {
 export function setComposerDraft(chatId: string | null, value: string): void {
   const key = keyFor(chatId)
   if ((drafts.get(key) ?? '') === value) return
+  revisions.set(key, ++revision)
   if (value) drafts.set(key, value)
   else drafts.delete(key)
   emit(key)
@@ -69,5 +76,6 @@ export function subscribeComposerDraft(chatId: string | null, listener: Listener
 /** Test helper: wipe all drafts and listeners. */
 export function resetComposerDraftStore(): void {
   drafts.clear()
+  revisions.clear()
   listenersByKey.clear()
 }

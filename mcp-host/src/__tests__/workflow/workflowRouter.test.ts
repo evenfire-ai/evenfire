@@ -260,16 +260,22 @@ describe('workflowRouter — JWT auth middleware', () => {
     }
   })
 
-  it('POST /execute with valid token + execute scope passes to handler (200 or 400)', async () => {
+  it.each([
+    { instruction: 'do it', status: 200 },
+    { instruction: null, status: 400 },
+    { instruction: 42, status: 400 },
+    { instruction: {}, status: 400 },
+    { instruction: [], status: 400 },
+  ])('validates the text instruction before executing: %j', async ({ instruction, status }) => {
     const token = await signWorkflowToken({ scopes: ['execute'] })
     const { baseUrl, server } = await createTestApp(publicKeyPem)
     try {
       const res = await fetch(`${baseUrl}/api/v1/workflow/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ stepId: 's1', instruction: 'do it' }),
+        body: JSON.stringify({ stepId: 's1', instruction }),
       })
-      expect([200, 400]).toContain(res.status)
+      expect(res.status).toBe(status)
     } finally {
       server.close()
     }

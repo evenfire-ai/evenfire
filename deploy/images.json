@@ -324,6 +324,13 @@
       "deployed_to_minikube": true
     },
     {
+      "name": "image-capabilities-mcp-host",
+      "path": "tests/e2e/fixtures/image-capabilities",
+      "rooted": true,
+      "published": false,
+      "deployed_to_minikube": false
+    },
+    {
       "name": "codex-approved-tools-control-api-e2e",
       "path": "tests/e2e/fixtures/codex-subscription/approved-tools-oauth",
       "rooted": true,

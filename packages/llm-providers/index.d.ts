@@ -4,6 +4,37 @@
  * DATA-ONLY leaf; runtime-only descriptor fields stay local to mcp-host.
  */
 
+export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
+export interface ImageInputEvidence {
+  source: 'curated' | 'discovery'
+  reference: string
+  checkedAt: string
+  validUntil?: string
+}
+export interface ImageInputCapability {
+  state: ImageInputState
+  evidence?: ImageInputEvidence
+}
+export type ImageInputReason =
+  | 'supported'
+  | 'transport_unsupported'
+  | 'model_unsupported'
+  | 'model_unknown'
+  | 'evidence_expired'
+  | 'evidence_not_yet_valid'
+export interface ImageInputDecision {
+  state: ImageInputState
+  reason: ImageInputReason
+  validUntil?: string
+  evidence?: ImageInputEvidence
+}
+export declare function parseImageInputCapability(value: unknown): ImageInputCapability | null
+export declare function normalizeImageInputCapability(value: unknown): ImageInputCapability
+export declare function resolveImageInputCapability(
+  value: unknown,
+  options: { transportSupported: boolean; now?: number }
+): ImageInputDecision
+
 /** Canonical provider ids, in dev auto-detection priority order. */
 export declare const PROVIDER_IDS: readonly [
   'openai',

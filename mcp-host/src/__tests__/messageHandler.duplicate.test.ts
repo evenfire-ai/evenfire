@@ -13,6 +13,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { EventEmitter } from 'events'
 import { TaskLifecycle } from '../lifecycle/taskLifecycle'
+import { logger } from '../logger'
 import { IncomingMessageHandler, PendingTaskEntry } from '../messageHandler'
 import { MessageQueue } from '../queue/messageQueue'
 import { ResultStore } from '../resultStore'
@@ -65,7 +66,7 @@ describe('IncomingMessageHandler — duplicate delivery suppression', () => {
     expect(firstResult.response).toBe('first answer')
 
     // Second delivery of the SAME message (rpc-proxy redelivery — fresh uuid).
-    const warn = vi.spyOn(console, 'warn')
+    const warn = vi.spyOn(logger, 'warn')
     const second = new IncomingMessageHandler(message, deps)
     const secondResult = await second.execute()
 
@@ -77,7 +78,7 @@ describe('IncomingMessageHandler — duplicate delivery suppression', () => {
     expect(deps.messageQueue.dequeue()).toBeNull()
     expect(deps.taskLifecycle.getStats().total).toBe(1)
     expect(
-      warn.mock.calls.some(args => String(args[0]).includes('duplicate delivery suppressed'))
+      warn.mock.calls.some(args => String(args[1]).includes('duplicate delivery suppressed'))
     ).toBe(true)
     warn.mockRestore()
   })
