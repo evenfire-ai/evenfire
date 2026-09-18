@@ -697,13 +697,15 @@ describe('SQL contracts that a silent edit would otherwise break', () => {
         attemptIndex: 1,
         model: 'gpt-5.1',
         targetRef: 'primary-codex',
+        provider: 'codex-subscription',
       },
       pool
     )
-    const [sql] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
+    const [sql, params] = vi.mocked(pool.query).mock.calls[0] as unknown as [string, unknown[]]
     expect(sql).toContain('AND credential_jti IS NULL')
     expect(sql).toContain("AND status = 'reserved'")
-    expect(sql).toContain("AND provider = 'codex-subscription'")
+    expect(sql).toContain('AND provider = $9')
+    expect(params[8]).toBe('codex-subscription')
   })
 
   it('only revives an invocation that is persisted as failed', async () => {

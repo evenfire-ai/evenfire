@@ -13,8 +13,9 @@ import {
   getLlmPrices,
   getRecipeSecrets,
 } from '@lib/api'
+import { useGrokSubscriptionEnabled } from '@lib/hooks/useGrokSubscriptionEnabled'
 import { useLlmAllowedModels } from '@lib/hooks/useLlmAllowedModels'
-import { LLM_PROVIDER_OPTIONS, budgetUnitAllowedForProviders, getAllModelOptions } from '@lib/llm'
+import { budgetUnitAllowedForProviders, getAllModelOptions, runtimeProviderOptions } from '@lib/llm'
 import { ScopeSelector } from './ScopeSelector'
 import { DEFAULT_CURRENCY, DEFAULT_TIMEZONE } from './constants'
 import type { ScopeDimensionConfig, ScopeOption, TokenBudgetFormProps } from './types'
@@ -27,11 +28,6 @@ function parseNumber(raw: string): number | null {
   const n = Number(trimmed)
   return Number.isFinite(n) ? n : null
 }
-
-const PROVIDER_OPTIONS: ScopeOption[] = LLM_PROVIDER_OPTIONS.map(o => ({
-  value: o.value,
-  label: o.label,
-}))
 
 export function TokenBudgetForm({
   mode,
@@ -61,6 +57,15 @@ export function TokenBudgetForm({
   const [enabled, setEnabled] = useState(initial?.enabled ?? true)
   const [scope, setScope] = useState<Record<string, string[]>>(initial?.scope ?? {})
   const [showErrors, setShowErrors] = useState(false)
+
+  // Grok stays out of the provider scope until the capability probe proves the
+  // flag on; a saved Grok scope value keeps a "(disabled)" label.
+  const grokEnabled = useGrokSubscriptionEnabled()
+  const savedProviders = initial?.scope?.provider
+  const providerOptions = useMemo<ScopeOption[]>(
+    () => runtimeProviderOptions({ grokEnabled, saved: savedProviders }),
+    [grokEnabled, savedProviders]
+  )
 
   // Dimension option sources (best-effort; a failed fetch just leaves a
   // dimension with no select options — the budget can still be saved).
@@ -134,7 +139,7 @@ export function TokenBudgetForm({
 
   const dimensions: ScopeDimensionConfig[] = useMemo(
     () => [
-      { key: 'provider', label: 'Provider', options: PROVIDER_OPTIONS },
+      { key: 'provider', label: 'Provider', options: providerOptions },
       {
         key: 'model',
         label: 'Model',
@@ -148,7 +153,7 @@ export function TokenBudgetForm({
       { key: 'host_ref', label: 'Agent', options: hostOptions },
       { key: 'llm_secret_name', label: 'Secret', options: secretOptions },
     ],
-    [teamOptions, userOptions, hostOptions, secretOptions, modelSuggestions]
+    [providerOptions, teamOptions, userOptions, hostOptions, secretOptions, modelSuggestions]
   )
 
   // Labels for already-selected team/user values so edited budgets show names.

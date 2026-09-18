@@ -318,6 +318,7 @@ ALL_IMAGES=(
   "clerum/rpc-proxy:test"
   "clerum/webhook-proxy:test"
   "clerum/codex-llm-proxy:test"
+  "clerum/grok-llm-proxy:test"
   "clerum/webhook-gateway:test"
   "clerum/channel-reader:test"
   "clerum/workflow-approval-request-reader:test"
@@ -347,6 +348,7 @@ KNOWN_BUILD_NAMES=(
   rpc-proxy
   webhook-proxy
   codex-llm-proxy
+  grok-llm-proxy
   webhook-gateway
   channel-reader
   workflow-approval-request-reader
@@ -1213,6 +1215,11 @@ build_image "codex-llm-proxy" \
   "${PROJECT_DIR}" \
   "clerum/codex-llm-proxy:test" \
   "${PROJECT_DIR}/codex-llm-proxy/Dockerfile"
+
+build_image "grok-llm-proxy" \
+  "${PROJECT_DIR}" \
+  "clerum/grok-llm-proxy:test" \
+  "${PROJECT_DIR}/grok-llm-proxy/Dockerfile"
 
 if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
   build_image codex-approved-tools-control-api-e2e "${PROJECT_DIR}" \

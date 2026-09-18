@@ -27,6 +27,11 @@ import {
   type CodexSubscriptionSafeConnection,
   listLiveCodexSubscriptionConnections,
 } from './codexSubscriptionConnection.js'
+import { listEnabledGrokModelsGroupedByConnection } from './grokSubscriptionCatalog.js'
+import {
+  type GrokSubscriptionSafeConnection,
+  listLiveGrokSubscriptionConnections,
+} from './grokSubscriptionConnection.js'
 import { type AllowedModelEntry, listEnabledGroupedByProvider } from './llmAllowedModels.js'
 
 // CROSS-SERVICE CONTRACT: producer side of the allowlist ConfigMap. Consumers
@@ -40,6 +45,9 @@ export const CONNECTION_REVISION_ANNOTATION = 'clerum.io/connection-revision'
 export const CODEX_CONNECTION_STATUS_ANNOTATION = 'clerum.io/codex-connection-status'
 export const CODEX_ENABLED_ANNOTATION = 'clerum.io/codex-enabled'
 export const CODEX_CONNECTIONS_ANNOTATION = 'clerum.io/codex-connections'
+export const GROK_CONNECTION_STATUS_ANNOTATION = 'clerum.io/grok-connection-status'
+export const GROK_ENABLED_ANNOTATION = 'clerum.io/grok-enabled'
+export const GROK_CONNECTIONS_ANNOTATION = 'clerum.io/grok-connections'
 
 const KNOWN_CONNECTION_STATUSES = new Set([
   'disconnected',
@@ -99,6 +107,48 @@ export function buildCodexReadinessAnnotations(
   }
   if (Object.keys(map).length > 0) {
     annotations[CODEX_CONNECTIONS_ANNOTATION] = JSON.stringify(map)
+  }
+  return annotations
+}
+
+export function mapGrokConnectionStatusForSnapshot(
+  connection: GrokSubscriptionSafeConnection | null
+): 'connected' | 'disconnected' | 'reauth-required' | 'unavailable' | 'revoked' {
+  return mapCodexConnectionStatusForSnapshot(
+    connection as unknown as CodexSubscriptionSafeConnection | null
+  )
+}
+
+export function buildGrokReadinessAnnotations(
+  connections: GrokSubscriptionSafeConnection[] = [],
+  modelsByKey: Record<string, string[]> = {}
+): Record<string, string> {
+  const annotations: Record<string, string> = {
+    [GROK_ENABLED_ANNOTATION]: config.grokSubscriptionEnabled ? 'true' : 'false',
+  }
+  const map: Record<
+    string,
+    {
+      status: ReturnType<typeof mapGrokConnectionStatusForSnapshot>
+      catalogRevision: number
+      connectionRevision: number
+      models: string[]
+    }
+  > = {}
+  for (const row of connections) {
+    map[row.connectionKey] = {
+      status: mapGrokConnectionStatusForSnapshot(row),
+      catalogRevision: row.catalogRevision,
+      connectionRevision: row.credentialRevision,
+      models: modelsByKey[row.connectionKey] ?? [],
+    }
+  }
+  if (Object.keys(map).length > 0) {
+    annotations[GROK_CONNECTIONS_ANNOTATION] = JSON.stringify(map)
+    const first = connections[0]
+    if (first) {
+      annotations[GROK_CONNECTION_STATUS_ANNOTATION] = mapGrokConnectionStatusForSnapshot(first)
+    }
   }
   return annotations
 }
@@ -172,7 +222,12 @@ export class LlmAllowedModelsConfigMapWriter implements AllowedModelsConfigMapMa
     const modelsByKey = await listEnabledCodexModelsGroupedByConnection(db)
     const defaultConnection =
       connections.find(row => row.connectionKey === 'deployment-default') ?? null
-    const readiness = buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey)
+    const grokConnections = await listLiveGrokSubscriptionConnections(db)
+    const grokModelsByKey = await listEnabledGrokModelsGroupedByConnection(db)
+    const readiness = {
+      ...buildCodexReadinessAnnotations(defaultConnection, connections, modelsByKey),
+      ...buildGrokReadinessAnnotations(grokConnections, grokModelsByKey),
+    }
     let lastError: unknown
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       try {

@@ -425,6 +425,9 @@ spec:
     - podSelector:
         matchLabels:
           app: codex-llm-proxy
+    - podSelector:
+        matchLabels:
+          app: grok-llm-proxy
     ports:
     - port: 8090
       protocol: TCP
@@ -646,6 +649,28 @@ spec:
         - podSelector:
             matchLabels:
               app: codex-llm-proxy
+      ports:
+        - port: 8081
+          protocol: TCP
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: control-api-to-grok-llm-proxy
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: control-api
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: grok-llm-proxy
       ports:
         - port: 8081
           protocol: TCP
@@ -893,4 +918,84 @@ spec:
         cidr: 0.0.0.0/0
         # Filled at deploy time by deploy/base/kustomization.yaml replacements
         # from PublicEgressExceptionSet. Keep empty here.
+        except: []
+---
+# Grok LLM proxy: runtime from eligible mcp-host pods, admin from Control API,
+# metrics from monitoring. No sibling or namespace-wide ingress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grok-llm-proxy-ingress
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: grok-llm-proxy
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mcp-host
+      podSelector:
+        matchLabels:
+          clerum.io/managed-by: host-context-controller
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: sandbox-recipes
+      podSelector:
+        matchLabels:
+          clerum.io/component: workflow-mcp-host
+    ports:
+    - port: 8080
+      protocol: TCP
+  - from:
+    - podSelector:
+        matchLabels:
+          app: control-api
+    ports:
+    - port: 8081
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+    ports:
+    - port: 9090
+      protocol: TCP
+---
+# Grok LLM proxy egress: DNS is inherited from allow-dns-egress-control-plane.
+# This policy adds only the RPC gateway redeem/finalize hop and public HTTPS
+# with the canonical private/special-use exclusions. Direct Control API,
+# Postgres, Kubernetes API, metadata, HCC/WRC, and sibling hops stay denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: grok-llm-proxy-egress
+  namespace: control-plane
+  labels:
+    clerum.io/policy-type: service
+spec:
+  podSelector:
+    matchLabels:
+      app: grok-llm-proxy
+  policyTypes:
+  - Egress
+  egress:
+  - ports:
+    - port: 8090
+      protocol: TCP
+    to:
+    - podSelector:
+        matchLabels:
+          app: control-api-rpc-gateway
+  - ports:
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
         except: []

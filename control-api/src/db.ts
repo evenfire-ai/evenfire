@@ -30,7 +30,15 @@ import {
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import {
+  applyGrokCatalogModelsSchema,
+  applyGrokSubscriptionConnectionSchema,
+  applyGrokSubscriptionOAuthStateSchema,
+  applyGrokSubscriptionTerminalConnectionKeySchema,
+  applyLlmProviderAttemptsGrokBrokerSchema,
+} from './services/grokSubscriptionSchema.js'
+import {
   applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptConnectionIntegritySchema,
   applyLlmProviderAttemptSchema,
   applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   applyLlmProviderAttemptSdkLinkSchema,
@@ -6026,6 +6034,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   },
   {
+    version: '0109_grok_subscription_connections',
+    apply: applyGrokSubscriptionConnectionSchema,
+  },
+  {
+    version: '0110_grok_subscription_oauth_states',
+    apply: applyGrokSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '0111_grok_catalog_models',
+    apply: applyGrokCatalogModelsSchema,
+  },
+  {
+    version: '0112_llm_provider_attempts_grok_broker',
+    apply: applyLlmProviderAttemptsGrokBrokerSchema,
+  },
+  {
+    version: '0113_grok_subscription_terminal_connection_key',
+    apply: applyGrokSubscriptionTerminalConnectionKeySchema,
+  },
+  {
+    version: '0114_llm_provider_attempts_connection_integrity',
+    apply: applyLlmProviderAttemptConnectionIntegritySchema,
+  },
+  {
     version: '0109_user_access_foundation',
     legacyVersions: ['0107_user_access_foundation', '0101_user_access_foundation'],
     apply: applyUserAccessFoundationSchema,
@@ -6047,9 +6079,7 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   },
   {
     // Fix-forward for databases that recorded the first composable-catalog
-    // body before the GFS resource-component mapping was completed. The
-    // schema function is intentionally idempotent, so fresh and upgraded
-    // databases converge on the same trigger/function/backfill state.
+    // body before the GFS resource-component mapping was completed.
     version: '010d_gfs_catalog_revision_components',
     legacyVersions: [
       '010b_gfs_catalog_revision_components',

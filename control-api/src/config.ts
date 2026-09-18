@@ -123,6 +123,12 @@ type Config = {
   // Public Codex CLI OAuth client id. Not a secret; PKCE/device flow protect the
   // grant. Override only to pin a documented registration.
   codexOAuthClientId: string
+  // Default OFF. Grok SuperGrok/coding-plan management stays dark until
+  // CONTROL_API_GROK_SUBSCRIPTION_ENABLED=true.
+  grokSubscriptionEnabled: boolean
+  // Public Grok CLI OAuth client id. Not a secret; device-code flow protects
+  // the grant. Override only to pin a documented registration.
+  grokOAuthClientId: string
   llmCatalogSyncIntervalMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
@@ -326,7 +332,22 @@ function parseInternalServiceTokens(input: string): Record<string, string> {
     assertNotPlaceholder(`CONTROL_API_INTERNAL_SERVICE_TOKENS[${key}]`, value)
     result[key] = value
   }
+  assertDistinctBrokerProxyTokens(result)
   return result
+}
+
+function assertDistinctBrokerProxyTokens(tokens: Record<string, string>): void {
+  const brokers = ['codex-llm-proxy', 'grok-llm-proxy']
+  const seen = new Map<string, string>()
+  for (const name of brokers) {
+    const token = tokens[name]
+    if (!token) continue
+    const owner = seen.get(token)
+    if (owner) {
+      throw new Error(`internal service tokens for "${owner}" and "${name}" must be distinct`)
+    }
+    seen.set(token, name)
+  }
 }
 
 function parseCsvList(input: string): string[] {
@@ -664,7 +685,7 @@ export const config: Config = {
   ),
   internalServiceTokens: parseInternalServiceTokens(
     process.env.CONTROL_API_INTERNAL_SERVICE_TOKENS ||
-      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token'
+      'external-rest-api=dev-external-rest-api-token,rpc-proxy=dev-rpc-proxy-token,webhook-proxy=dev-webhook-proxy-token,workflow-approval-reader=dev-wa-reader-token,codex-llm-proxy=dev-codex-llm-proxy-token,grok-llm-proxy=dev-grok-llm-proxy-token'
   ),
   internalControlJwtWrcHmacSecret: requiredOrDevDefault(
     'INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET',
@@ -814,6 +835,11 @@ export const config: Config = {
   // client id; the default CLI client supports device-code connect only.
   codexOAuthClientId:
     process.env.CONTROL_API_CODEX_OAUTH_CLIENT_ID || 'app_EMoamEEZ73f0CkXaXp7hrann',
+  grokSubscriptionEnabled: process.env.CONTROL_API_GROK_SUBSCRIPTION_ENABLED === 'true',
+  // Public native client used by Grok CLI / SuperGrok device-code login.
+  // This is not a confidential client secret. Same shape as Codex above.
+  grokOAuthClientId:
+    process.env.CONTROL_API_GROK_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828',
   // Default 24h. Validated (not merely parsed): the value goes straight into
   // setInterval and each tick opens a Postgres transaction + advisory lock. A
   // 60s floor is orders of magnitude below the default and far above a hot loop.

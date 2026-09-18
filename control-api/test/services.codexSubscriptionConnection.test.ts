@@ -8,9 +8,11 @@ import {
   generateCodexConnectionKey,
   getSafeCodexSubscriptionConnection,
   insertInitialCodexSubscriptionConnection,
+  isCodexConnectionKeyConflict,
   listLiveCodexSubscriptionConnections,
   normalizeCodexConnectionKey,
   readHostCodexConnectionRef,
+  revokeCodexSubscriptionConnection,
   rotateCodexSubscriptionCredentials,
   updateCodexSubscriptionConnectionMetadata,
 } from '../src/services/codexSubscriptionConnection.js'
@@ -185,6 +187,37 @@ describe('codex subscription connection repository', () => {
     expect(sql).toMatch(/credential_revision = \$/)
     expect(sql).toMatch(/revoked_at IS NULL/)
     expect(sql).not.toMatch(/revoked_at = NULL/)
+  })
+
+  it('revokes the live row and cancels pending OAuth states for the key in one statement', async () => {
+    query.mockResolvedValueOnce({ rows: [], rowCount: 0 }).mockResolvedValueOnce({
+      rows: [],
+      rowCount: 0,
+    })
+    await revokeCodexSubscriptionConnection({ query }, 'team-plus')
+    const [sql, values] = query.mock.calls[0] as [string, unknown[]]
+    expect(sql).toMatch(
+      /UPDATE codex_subscription_oauth_states[\s\S]*SET status = 'cancelled'[\s\S]*connection_key = \$1[\s\S]*status = 'pending'/
+    )
+    expect(sql).toMatch(/UPDATE codex_subscription_connections[\s\S]*revoked_at = now\(\)/)
+    expect(sql).toMatch(/UPDATE codex_catalog_models[\s\S]*enabled = false/)
+    expect(values).toEqual(['team-plus'])
+  })
+
+  it('recognizes only the live-key unique violation as a first-grant key race', () => {
+    expect(
+      isCodexConnectionKeyConflict({
+        code: '23505',
+        constraint: 'codex_subscription_connections_active_key',
+      })
+    ).toBe(true)
+    expect(
+      isCodexConnectionKeyConflict({
+        code: '23505',
+        constraint: 'codex_subscription_connections_active_fingerprint',
+      })
+    ).toBe(false)
+    expect(isCodexConnectionKeyConflict(new Error('boom'))).toBe(false)
   })
 
   it('refuses metadata writes on a revoked grant', async () => {
