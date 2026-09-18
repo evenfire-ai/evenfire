@@ -10,6 +10,7 @@ import {
 } from '@hooks/domain/useGfsBrowserController'
 import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { resolveGfsPreview } from '@lib/gfsPreview'
+import { sanitizeAppTabTitle } from '@lib/sanitizeAppTabTitle'
 import { IconChevronRight, IconContexts } from '../icons'
 import type { FileExplorerNodeProps, FileExplorerTreeProps } from './types'
 
@@ -21,6 +22,17 @@ const DOUBLE_CLICK_DELAY_MS = 250
 function errorMessage(error: unknown): string | null {
   if (!error) return null
   return error instanceof Error ? error.message : String(error)
+}
+
+// A GFS name is externally controlled (anyone who can write to a shared drive the
+// viewer sees), so it must not reach the sidebar chrome raw: bidi overrides can
+// disguise an extension, zero-width code points spoof a trusted file, control
+// chars corrupt the tree. Clean it with the same sanitizer the workspace-tab
+// titles use, before it lands in a visible label, an accessible name, or a toast.
+// The raw name is still used for the real on-disk download and for the icon's
+// extension parsing — neither is a display surface.
+function displayName(name: string): string {
+  return sanitizeAppTabTitle(name) || 'Unnamed'
 }
 
 /** Folders first, then files, each alphabetical — the VSCode tree ordering. */
@@ -54,6 +66,7 @@ function FileExplorerNode({
   const isDirectory = node.kind === 'directory'
   const isExpanded = isDirectory && expandedIds.has(node.resourceId)
   const isSelected = selectedId === node.resourceId
+  const label = displayName(node.name)
 
   const childQuery = useInfiniteQuery({
     queryKey: desktopQueryKeys.gfsChildren(scope, node.resourceId, GFS_DRIVE_MAIN),
@@ -137,7 +150,7 @@ function FileExplorerNode({
           <IconButton
             aria-expanded={isExpanded}
             className={`da-file-explorer__toggle${isExpanded ? ' is-expanded' : ''}`}
-            label={`${isExpanded ? 'Collapse' : 'Expand'} ${node.name}`}
+            label={`${isExpanded ? 'Collapse' : 'Expand'} ${label}`}
             onClick={() => onToggle(node.resourceId)}
             size="sm"
             variant="ghost"
@@ -160,7 +173,7 @@ function FileExplorerNode({
           <span className="da-file-explorer__icon" aria-hidden="true">
             {isDirectory ? <IconContexts /> : <GfsFileIcon name={node.name} />}
           </span>
-          <span className="da-file-explorer__name">{node.name}</span>
+          <span className="da-file-explorer__name">{label}</span>
         </Button>
       </div>
       {isExpanded ? (
@@ -266,8 +279,9 @@ export function FileExplorerTree({
       }
       void (async () => {
         try {
+          // The raw name is the real on-disk filename; the toast shows the cleaned one.
           await saveGfsFileToDisk(node.gfsUri, node.name)
-          pushToast(`Downloaded ${node.name}`, 'success')
+          pushToast(`Downloaded ${displayName(node.name)}`, 'success')
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           if (authorityFailure(message, 'operation')) return

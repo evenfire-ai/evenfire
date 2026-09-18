@@ -154,6 +154,40 @@ describe('FileExplorerTree — sort ordering', () => {
   })
 })
 
+describe('FileExplorerTree — sanitizes externally-controlled GFS names in chrome', () => {
+  it('cleans bidi/zero-width code points from the folder label and its toggle accessible name', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () => ({
+        // A GFS folder name carrying a bidi override + zero-width — attacker input.
+        items: [node('evil', `Re‮ports​`, 'directory')],
+        nextCursor: null,
+      })),
+    })
+
+    renderTree()
+
+    // The visible label and the toggle's accessible name both show the sanitized
+    // string; the raw bidi/zero-width variant never reaches the accessible tree.
+    expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Expand Reports' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: `Re‮ports​` })).toBeNull()
+  })
+
+  it('shows the cleaned name in the download toast while the raw name stays for the on-disk file', async () => {
+    installClerum({
+      listAccessible: vi.fn(async () => ({
+        items: [node('z', `arch‮ive.zip`, 'file')],
+        nextCursor: null,
+      })),
+    })
+
+    const { pushToast } = renderTree()
+
+    fireEvent.doubleClick(await screen.findByRole('button', { name: 'archive.zip' }))
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Downloaded archive.zip', 'success'))
+  })
+})
+
 describe('FileExplorerTree — single-vs-double click cancels the deferred single', () => {
   // The real browser fires click → click → dblclick; a single fireEvent.doubleClick
   // dispatches only dblclick, so it never exercises the setTimeout cancellation.
