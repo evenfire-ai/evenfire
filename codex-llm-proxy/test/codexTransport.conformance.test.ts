@@ -119,7 +119,11 @@ describe('streamCodexCompletion', () => {
           (part: { type: string; text?: string; mimeType?: string; data?: string }) =>
             part.type === 'text'
               ? { type: 'input_text', text: part.text }
-              : { type: 'input_image', image_url: `data:${part.mimeType};base64,${part.data}` }
+              : {
+                  type: 'input_image',
+                  image_url: `data:${part.mimeType};base64,${part.data}`,
+                  detail: 'high',
+                }
         )
       )
       expect(JSON.stringify(body)).not.toContain('attachmentId')

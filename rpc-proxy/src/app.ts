@@ -14,25 +14,23 @@ import { isUpstreamTimeoutError } from './services/wakeAndHold.js'
 /**
  * Body budgets for chat payloads carrying base64 image attachments.
  *
- * The interoperable budget is 10MiB per image, at most 3 images (15MiB of image
- * bytes). mcp-host holds its own copy of this policy: the two services share no
- * package (see routes/rpc.ts on SESSIONS_LIMIT_CAP), so each names its own and
- * the two edits must land together.
+ * Usual product target is 5MiB / 9MiB / 14MiB at 2048 px. Hard hop credit is
+ * 16MiB per image and 16MiB total so a poorly compressed 2048 PNG may exceed
+ * 10MiB. mcp-host holds its own copy: the two services share no package, so
+ * both edits must land together.
  *
  * Two ceilings are enforced here:
- *   - MAX_CHAT_BODY_BYTES bounds the raw JSON body on the message route. 10MiB
- *     encodes to ~13.3MiB of base64, so a 10MiB image plus a 5MiB image (the
- *     largest combination the 15MiB total allows) needs ~21MiB plus the
- *     envelope.
- *   - MAX_NON_IMAGE_BODY_BYTES bounds the same body MINUS the base64 of images
- *     counting against the documented budget. Without that subtraction the
- *     attachment budget would silently become a general 24MiB text budget.
+ *   - MAX_CHAT_BODY_BYTES stays 24MiB so 16MiB decoded (~21.3MiB base64) plus
+ *     the 1MiB non-image share still fits.
+ *   - MAX_NON_IMAGE_BODY_BYTES bounds the same body MINUS credited image
+ *     base64. Without that subtraction the attachment budget would become a
+ *     general 24MiB text budget.
  */
 const MAX_CHAT_BODY_BYTES = 24 * 1024 * 1024
 const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 const MAX_CHAT_IMAGES = 3
-const MAX_IMAGE_DECODED_BYTES = 10 * 1024 * 1024
-const MAX_IMAGE_DECODED_BYTES_TOTAL = 15 * 1024 * 1024
+const MAX_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
+const MAX_IMAGE_DECODED_BYTES_TOTAL = 16 * 1024 * 1024
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff])
@@ -76,21 +74,26 @@ function decodedBase64Bytes(dataBase64: string): number | null {
  * Byte length of the base64 that counts against the documented image budget.
  * Only attachments with the exact wire shape the composer produces qualify:
  * `kind: 'image'`, `encoding: 'base64'`, a PNG/JPEG MIME type, canonical
- * base64 whose leading bytes are that image's signature, and at most 10MiB
- * decoded each within a 3-image / 15MiB total budget. Anything else is charged
+ * base64 whose leading bytes are that image's signature, and at most 16MiB
+ * decoded each within a 3-image / 16MiB total budget. A fourth qualifying
+ * image is fail-loud rather than charged as text. Anything else is charged
  * to the non-image budget, so a claim cannot be smuggled through by mislabelling
  * a payload.
  */
-function budgetedImageBase64Length(body: unknown): number {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return 0
+function inspectChatImageBudget(body: unknown): {
+  creditedBase64: number
+  tooManyImages: boolean
+} {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { creditedBase64: 0, tooManyImages: false }
+  }
   const attachments = (body as { attachments?: unknown }).attachments
-  if (!Array.isArray(attachments)) return 0
+  if (!Array.isArray(attachments)) return { creditedBase64: 0, tooManyImages: false }
 
   let credited = 0
   let decodedTotal = 0
   let counted = 0
   for (const attachment of attachments) {
-    if (counted >= MAX_CHAT_IMAGES) break
     if (!attachment || typeof attachment !== 'object') continue
     const candidate = attachment as {
       kind?: unknown
@@ -111,15 +114,20 @@ function budgetedImageBase64Length(body: unknown): number {
         ? signature.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
         : signature.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE)
     if (!matchesSignature) continue
+    if (counted >= MAX_CHAT_IMAGES) {
+      return { creditedBase64: credited, tooManyImages: true }
+    }
     credited += dataBase64.length
     decodedTotal += decoded
     counted += 1
   }
-  return credited
+  return { creditedBase64: credited, tooManyImages: false }
 }
 
 function chatBodyExceedsNonImageBudget(rawBodyBytes: number, body: unknown): boolean {
-  return rawBodyBytes - budgetedImageBase64Length(body) > MAX_NON_IMAGE_BODY_BYTES
+  const budget = inspectChatImageBudget(body)
+  if (budget.tooManyImages) return true
+  return rawBodyBytes - budget.creditedBase64 > MAX_NON_IMAGE_BODY_BYTES
 }
 
 /**

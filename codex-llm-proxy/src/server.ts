@@ -1,4 +1,4 @@
-import express, { type Express, type Request, type Response } from 'express'
+import express, { type Express, type NextFunction, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import { type Server, createServer } from 'node:http'
 import { Registry, collectDefaultMetrics } from 'prom-client'
@@ -21,7 +21,9 @@ import {
   type OriginPolicyOptions,
   defaultAddressLookup,
 } from './originPolicy.js'
-import { RequestLimitError, streamGate } from './requestLimits.js'
+import { RequestLimitError, streamGate, visualStreamGate } from './requestLimits.js'
+
+type GatedRequest = Request & { codexStreamRelease?: () => void }
 
 const COMPLETION_KEYS = new Set(['executionTicket', 'requestHash', 'request', 'deadlineMs'])
 const ADMIN_KEYS = new Set(['accessToken'])
@@ -123,24 +125,58 @@ export function createProxyApps(
   // completion endpoint with an already valid platform identity may use the larger
   // budget. V1 is still bounded by its contract parser, and admin or
   // unauthenticated requests keep the ordinary cap.
-  const selectTransportBudget = (req: Request, res: Response, next: () => void): void => {
+  const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
+    // Visual parse keeps a 24 MiB buffer. Admit that parse inside the visual
+    // gate so two concurrent bodies stay inside the 256Mi pod. Identity is
+    // read from the Authorization header; an anonymous caller cannot force
+    // the larger parser.
     if (config.imageInputModels.length > 0 && verifyPlatformJwt(bearer(req), config)) {
-      visualJson(req, res, next)
+      void (async () => {
+        let release: (() => void) | undefined
+        try {
+          release = await visualStreamGate.acquire()
+        } catch (err) {
+          if (err instanceof RequestLimitError) {
+            reject(res, 503, err.code)
+            return
+          }
+          next()
+          return
+        }
+        req.codexStreamRelease = release
+        visualJson(req, res, err => {
+          if (err) {
+            req.codexStreamRelease?.()
+            req.codexStreamRelease = undefined
+            next(err)
+            return
+          }
+          next()
+        })
+      })()
       return
     }
     ordinaryJson(req, res, next)
   }
   runtimeApp.post(COMPLETION_PATH, runtimeRateLimit, selectTransportBudget, (req, res) => {
+    const gated = req as GatedRequest
+    const releaseAdmission = (): void => {
+      gated.codexStreamRelease?.()
+      gated.codexStreamRelease = undefined
+    }
     if (!req.is('application/json')) {
+      releaseAdmission()
       reject(res, 415, 'unsupported_media_type')
       return
     }
     if (verifyAdminPermit(bearer(req), config)) {
+      releaseAdmission()
       reject(res, 403, 'insufficient_scope')
       return
     }
     const platform = verifyPlatformJwt(bearer(req), config)
     if (!platform) {
+      releaseAdmission()
       reject(res, 401, 'Unauthorized')
       return
     }
@@ -149,33 +185,40 @@ export function createProxyApps(
         ? config.maxVisualBodyBytes
         : config.maxBodyBytes
     if (Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8') > bodyLimit) {
+      releaseAdmission()
       reject(res, 413, 'payload_too_large')
       return
     }
     const extra = Object.keys(req.body ?? {}).find(key => !COMPLETION_KEYS.has(key))
     if (extra) {
+      releaseAdmission()
       reject(res, 400, 'unknown_field')
       return
     }
     const parsed = completionBodySchema.safeParse(req.body)
     if (!parsed.success) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     if (parsed.data.deadlineMs !== undefined && parsed.data.deadlineMs > config.maxDeadlineMs) {
+      releaseAdmission()
       reject(res, 400, 'invalid_request')
       return
     }
     const ticket = verifyExecutionTicket(parsed.data.executionTicket, config)
     if (!ticket) {
+      releaseAdmission()
       reject(res, 403, 'ticket_invalid')
       return
     }
     if (platform.hostRefs.includes('*') || !platform.hostRefs.includes(ticket.hostRef)) {
+      releaseAdmission()
       reject(res, 403, 'host_binding_mismatch')
       return
     }
     if (!config.executionEnabled) {
+      releaseAdmission()
       reject(res, 404, 'disabled')
       return
     }
@@ -188,7 +231,11 @@ export function createProxyApps(
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
       try {
-        release = await streamGate.acquire()
+        release = gated.codexStreamRelease
+        gated.codexStreamRelease = undefined
+        if (!release) {
+          release = await streamGate.acquire()
+        }
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')

@@ -137,7 +137,16 @@ async function postMessage(payload: unknown): Promise<Response> {
 }
 
 describe('mcp-host runtime message body budget', () => {
-  it('delivers a single 10MiB image (the per-image limit) byte-identical', async () => {
+  it('delivers a 12MiB image (exceptional, above 10MiB) byte-identical', async () => {
+    captured = []
+    const attachment = imageAttachment('a1', 12 * MIB)
+    const response = await postMessage(messagePayload([attachment]))
+    expect(response.status).toBe(200)
+    expect(captured).toHaveLength(1)
+    expect(captured[0].attachments).toEqual([attachment])
+  })
+
+  it('delivers a single 10MiB image (the former per-image limit) byte-identical', async () => {
     captured = []
     const attachment = imageAttachment('a1', 10 * MIB)
     const response = await postMessage(messagePayload([attachment]))
@@ -194,9 +203,22 @@ describe('mcp-host runtime message body budget', () => {
     )
   })
 
-  it('rejects a single image over the 10MiB per-image limit', async () => {
+  it('rejects a fourth qualifying image instead of charging it as text', async () => {
     captured = []
-    const response = await postMessage(messagePayload([imageAttachment('a1', 11 * MIB)]))
+    const attachments = [
+      imageAttachment('a1', 64 * 1024),
+      imageAttachment('a2', 64 * 1024),
+      imageAttachment('a3', 64 * 1024),
+      imageAttachment('a4', 64 * 1024),
+    ]
+    const response = await postMessage(messagePayload(attachments))
+    expect(response.status).toBe(413)
+    expect(captured).toHaveLength(0)
+  })
+
+  it('rejects a single image over the 16MiB per-image limit', async () => {
+    captured = []
+    const response = await postMessage(messagePayload([imageAttachment('a1', 17 * MIB)]))
     expect(response.status).toBe(413)
     expect(captured).toHaveLength(0)
   })
@@ -210,12 +232,19 @@ describe('mcp-host runtime message body budget', () => {
     expect(captured).toHaveLength(0)
   })
 
-  it('rejects two 8MiB images on the 15MiB total alone, under the 24MiB ceiling', async () => {
+  it('delivers two 8MiB images that sit on the 16MiB total', async () => {
     captured = []
-    // Each image is under the 10MiB per-image limit and the body fits the 24MiB
-    // ceiling, so the only rule that can reject this pair is the 15MiB total.
+    const attachments = [imageAttachment('a1', 8 * MIB), imageAttachment('a2', 8 * MIB)]
+    const response = await postMessage(messagePayload(attachments))
+    expect(response.status).toBe(200)
+    expect(captured).toHaveLength(1)
+    expect(captured[0].attachments).toEqual(attachments)
+  })
+
+  it('rejects 9MiB + 8MiB on the 16MiB total alone, under the 24MiB ceiling', async () => {
+    captured = []
     const response = await postMessage(
-      messagePayload([imageAttachment('a1', 8 * MIB), imageAttachment('a2', 8 * MIB)])
+      messagePayload([imageAttachment('a1', 9 * MIB), imageAttachment('a2', 8 * MIB)])
     )
     expect(response.status).toBe(413)
     expect(captured).toHaveLength(0)

@@ -322,6 +322,7 @@ describe('authorizeLlmProviderAttempt', () => {
       ).toContainEqual({
         type: 'input_image',
         image_url: `data:${image.mimeType};base64,${image.data}`,
+        detail: 'high',
       })
       if (origin === 'tool') {
         expect((projectedBody!.input as Array<{ type?: string }>).map(item => item.type)).toEqual([
@@ -464,6 +465,7 @@ describe('authorizeLlmProviderAttempt', () => {
         expect(projectedParts).toContainEqual({
           type: 'input_image',
           image_url: `data:${part.mimeType};base64,${part.data}`,
+          detail: 'high',
         })
       }
       expect(result.content).toBe('image received')
@@ -580,6 +582,34 @@ describe('authorizeLlmProviderAttempt', () => {
     await expect(
       authorizeLlmProviderAttempt(claims(), body({ extra: true }), current)
     ).rejects.toMatchObject({ code: 'unknown_field' })
+  })
+
+  it('rejects a V2 authorize wrapper whose invocationId is not a bounded id', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: { ...REQUEST, schemaVersion: 'codex-completion-request.v2' },
+          invocationId: 'x'.repeat(200),
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('keeps the authorize wrapper on the 1 MiB non-image budget when the nested request is V2', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: { ...REQUEST, schemaVersion: 'codex-completion-request.v2' },
+          targetRef: 't'.repeat(2 * MIB),
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
   it('rejects a non-UUID Plugin Workload SDK attempt id', async () => {

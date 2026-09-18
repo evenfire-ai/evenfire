@@ -14,10 +14,10 @@
  * purpose: it is not a looser schema.
  *
  * Two size ceilings, one policy: V1 keeps the 1 MiB body ceiling, and V2 raises
- * it to 24 MiB for image payloads only. Everything a caller writes that is not
- * image data — content, tool definitions, ids — stays on the 1 MiB budget in
- * both versions, and `requestBodyLimitBytes` is the number a pre-parse HTTP
- * body cap should use.
+ * it to 24 MiB so one exceptional 2048-px image larger than 10 MiB still fits
+ * after base64. Everything a caller writes that is not image data — content,
+ * tool definitions, ids — stays on the 1 MiB budget in both versions, and
+ * `requestBodyLimitBytes` is the number a pre-parse HTTP body cap should use.
  */
 
 export declare const SCHEMA_VERSION: 'codex-completion-request.v1'
@@ -41,15 +41,19 @@ export declare const LIMITS: {
 /**
  * Conservative local safety/product budgets for V2 image parts. These are
  * deliberately not upstream facts: the frozen ChatGPT endpoint is not
- * certified by these numbers. The aggregate budget remains below three
- * maximum-sized images, so callers must satisfy both independent byte caps.
+ * certified by these numbers. `typical*` is the usual 2048 JPEG/PNG target;
+ * `max*` is the hard ceiling so one poorly compressed 2048 PNG may exceed
+ * 10 MiB. Model vision capability is owned by issue #654 / PR #669.
  */
 export declare const VISUAL_LIMITS: {
   readonly maxImages: 3
-  readonly maxImageBytes: 10485760
-  readonly maxTotalImageBytes: 15728640
-  readonly maxImageDimension: 8192
-  readonly maxImagePixels: 64000000
+  readonly typicalImageBytes: 5242880
+  readonly typicalTotalImageBytes: 9437184
+  readonly typicalEnvelopeBytes: 14680064
+  readonly maxImageBytes: 16777216
+  readonly maxTotalImageBytes: 16777216
+  readonly maxImageDimension: 2048
+  readonly maxImagePixels: 4194304
 }
 
 export type ContractResult<T> =
@@ -236,6 +240,14 @@ export declare function stableStringify(value: unknown): string
  * with every image payload blanked and keeps that share on the 1 MiB ceiling.
  */
 export declare function requestBodyLimitBytes(request: unknown): number
+/**
+ * Byte length of an authorize document after every image payload inside
+ * `body.request` is blanked. Wrapper fields stay on the 1 MiB non-image
+ * budget even when the nested request declares V2.
+ */
+export declare function measureNonImageAuthorizeBytes(body: unknown): number
+/** Closed identifier used by request ids, ticket claims, and authorize ids. */
+export declare function isBoundedId(value: unknown): value is string
 export declare function parseCodexCompletionRequestV1(
   input: unknown
 ): ContractResult<CodexCompletionRequestV1>

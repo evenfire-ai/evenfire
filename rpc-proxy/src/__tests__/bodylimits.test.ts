@@ -113,7 +113,17 @@ async function postMessage(payload: unknown): Promise<Response> {
 }
 
 describe('rpc-proxy chat message body budget', () => {
-  it('carries a 10MiB image (the per-image limit) to the auth boundary', async () => {
+  it('carries a 12MiB image (exceptional, above 10MiB) to the auth boundary', async () => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', 12 * MIB)],
+    })
+    expect(Buffer.byteLength(body)).toBeGreaterThan(16 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(401)
+  })
+
+  it('carries a 10MiB image (the former per-image limit) to the auth boundary', async () => {
     const body = JSON.stringify({
       content: 'look',
       attachments: [imageAttachment('a1', 10 * MIB)],
@@ -168,12 +178,27 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(401)
   })
 
-  it('rejects a single image over the 10MiB per-image limit', async () => {
-    // Fits the 24MiB body ceiling, so this rejection is the budget gate, not the
-    // parser: an uncredited 11MiB image is charged to the 6MiB non-image budget.
+  it('rejects a fourth qualifying image instead of charging it as text', async () => {
     const body = JSON.stringify({
       content: 'look',
-      attachments: [imageAttachment('a1', 11 * MIB)],
+      attachments: [
+        imageAttachment('a1', 64 * 1024),
+        imageAttachment('a2', 64 * 1024),
+        imageAttachment('a3', 64 * 1024),
+        imageAttachment('a4', 64 * 1024),
+      ],
+    })
+    expect(Buffer.byteLength(body)).toBeLessThan(6 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(413)
+  })
+
+  it('rejects a single image over the 16MiB per-image limit', async () => {
+    // Fits the 24MiB body ceiling, so this rejection is the budget gate, not the
+    // parser: an uncredited 17MiB image is charged to the 6MiB non-image budget.
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', 17 * MIB)],
     })
     expect(Buffer.byteLength(body)).toBeLessThan(24 * MIB)
     const response = await post(MESSAGE_PATH, body)
@@ -189,13 +214,20 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(413)
   })
 
-  it('rejects two 8MiB images on the 15MiB total alone, under the 24MiB ceiling', async () => {
-    // Each image is under the 10MiB per-image limit and the body fits the 24MiB
-    // ceiling, so the only rule that can reject this pair is the 15MiB total:
-    // the over-total image is not credited and lands on the 6MiB non-image budget.
+  it('carries two 8MiB images that sit on the 16MiB total', async () => {
     const body = JSON.stringify({
       content: 'look',
       attachments: [imageAttachment('a1', 8 * MIB), imageAttachment('a2', 8 * MIB)],
+    })
+    expect(Buffer.byteLength(body)).toBeLessThan(24 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(401)
+  })
+
+  it('rejects 9MiB + 8MiB on the 16MiB total alone, under the 24MiB ceiling', async () => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: [imageAttachment('a1', 9 * MIB), imageAttachment('a2', 8 * MIB)],
     })
     expect(Buffer.byteLength(body)).toBeLessThan(24 * MIB)
     const response = await post(MESSAGE_PATH, body)

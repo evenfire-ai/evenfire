@@ -23,9 +23,10 @@ const LIMITS = Object.freeze({
   /**
    * V2 request/envelope ceiling. It is deliberately larger than
    * `maxRequestBodyBytes` because a V2 body carries base64 image payloads, and
-   * it is deliberately larger than the largest legal V2 image set
-   * (`maxImages` * `maxImageBytes` decoded ≈ 21 MiB encoded) so the same number
-   * covers the non-image share and the envelope's ticket and digest. It is not a
+   * it is deliberately larger than one hard-ceiling image (16 MiB decoded ≈
+   * 21.3 MiB encoded) plus the 1 MiB non-image share. Typical 5 / 9 requests
+   * fit in 14 MiB (`VISUAL_LIMITS.typicalEnvelopeBytes`); this 24 MiB number is
+   * the HTTP/nginx hard envelope, not the usual product target. It is not a
    * text/tool allowance: `measureNonImageRequestBytes` keeps that share on the
    * V1 ceiling.
    */
@@ -189,21 +190,49 @@ function requestBodyLimitBytes(request) {
  * request, its hash and its projection are never touched, so this cannot change
  * what is authorized or signed.
  */
+function blankImagePayloadsInMessages(messages) {
+  if (!Array.isArray(messages)) return messages
+  return messages.map(message => {
+    const parts = isPlainObject(message) ? message.contentParts : undefined
+    if (!Array.isArray(parts)) return message
+    return {
+      ...message,
+      contentParts: parts.map(part =>
+        isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
+      ),
+    }
+  })
+}
+
 function measureNonImageRequestBytes(input) {
-  const messages = input.messages
-  const shadowMessages = Array.isArray(messages)
-    ? messages.map(message => {
-        const parts = isPlainObject(message) ? message.contentParts : undefined
-        if (!Array.isArray(parts)) return message
-        return {
-          ...message,
-          contentParts: parts.map(part =>
-            isPlainObject(part) && part.type === 'image' ? { ...part, data: '' } : part
-          ),
-        }
-      })
-    : messages
-  return Buffer.byteLength(JSON.stringify({ ...input, messages: shadowMessages }), 'utf8')
+  return Buffer.byteLength(
+    JSON.stringify({ ...input, messages: blankImagePayloadsInMessages(input.messages) }),
+    'utf8'
+  )
+}
+
+/**
+ * Authorize JSON is a different document from a Codex request or proxy
+ * envelope. `requestBodyLimitBytes(body.request)` still gates the whole
+ * wrapper (24 MiB only when the nested request declares V2). This helper
+ * blanks image payloads inside `body.request` so wrapper fields — ids,
+ * hashes, ticket links — stay on the 1 MiB non-image budget.
+ */
+function measureNonImageAuthorizeBytes(body) {
+  if (!isPlainObject(body)) {
+    return Buffer.byteLength(JSON.stringify(body ?? null), 'utf8')
+  }
+  const request = body.request
+  if (!isPlainObject(request)) {
+    return Buffer.byteLength(JSON.stringify(body), 'utf8')
+  }
+  return Buffer.byteLength(
+    JSON.stringify({
+      ...body,
+      request: { ...request, messages: blankImagePayloadsInMessages(request.messages) },
+    }),
+    'utf8'
+  )
 }
 
 function isBoundedId(value) {
@@ -843,6 +872,8 @@ module.exports = {
   LIMITS,
   VISUAL_LIMITS,
   requestBodyLimitBytes,
+  measureNonImageAuthorizeBytes,
+  isBoundedId,
   stableStringify,
   parseCodexCompletionRequestV1,
   parseCodexCompletionRequestV2,

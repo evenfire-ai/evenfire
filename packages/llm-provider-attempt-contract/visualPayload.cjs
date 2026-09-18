@@ -12,24 +12,30 @@
  *
  * The budget below is a conservative local safety/product decision. It is not
  * an upstream capability fact; the frozen ChatGPT endpoint is not certified by
- * these numbers.
+ * these numbers. Codex charges patches, not file bytes: the official client
+ * resizes to 2048 px and sends `detail: high`. A poorly compressed 2048 PNG
+ * can exceed 10 MiB and must still be authorized; an 8192 px / 48 MP image
+ * will 400 upstream even when it is only 2 MiB.
  *
- * The raised ceiling supports larger original captures, including 8064x6048
- * frames, without requiring a lossy re-encode. `maxImageBytes` and
- * `maxImagePixels` independently bound the payload; the
- * container checks above are unchanged by the raise, and the pixel budget stays
- * a declared-header bound rather than a decode.
- *
- * The 15 MiB aggregate is independent from the 10 MiB per-image ceiling:
- * one large photo can fit without doubling the maximum request allocation.
+ * Two layers share this object:
+ *   - typical* is the usual 2048 JPEG/PNG product target (5 / 9 / 14 MiB).
+ *     It is documentation and UX guidance, not a reject.
+ *   - max* is the hard ceiling: one exceptional 2048 image may be larger
+ *     than 10 MiB. The V2 HTTP envelope stays 24 MiB so 16 MiB decoded
+ *     (~21.3 MiB base64) plus the 1 MiB non-image share still fits.
+ * Model capability lists (which models accept images) belong to issue #654 /
+ * PR #669 (models.dev). This package only bounds Codex transport.
  */
 
 const VISUAL_LIMITS = Object.freeze({
   maxImages: 3,
-  maxImageBytes: 10485760,
-  maxTotalImageBytes: 15728640,
-  maxImageDimension: 8192,
-  maxImagePixels: 64000000,
+  typicalImageBytes: 5242880,
+  typicalTotalImageBytes: 9437184,
+  typicalEnvelopeBytes: 14680064,
+  maxImageBytes: 16777216,
+  maxTotalImageBytes: 16777216,
+  maxImageDimension: 2048,
+  maxImagePixels: 4194304,
 })
 
 // Exact encoded length of a canonical base64 string that decodes to

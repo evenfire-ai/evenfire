@@ -1,7 +1,10 @@
 import {
+  LIMITS,
   buildCodexProxyEnvelope,
   computeCodexPolicyHash,
   hashCodexCompletionRequest,
+  isBoundedId,
+  measureNonImageAuthorizeBytes,
   parseCodexCompletionRequest,
   requestBodyLimitBytes,
 } from '@clerum/llm-provider-attempt-contract'
@@ -198,6 +201,12 @@ export async function authorizeLlmProviderAttempt(
   if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
   }
+  if (measureNonImageAuthorizeBytes(body) > LIMITS.maxRequestBodyBytes) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'invalid_request',
+      'authorize wrapper exceeds the non-image limit'
+    )
+  }
   const unknown = firstUnknownKey(body)
   if (unknown) {
     throw new LlmProviderAttemptAuthorizeError('unknown_field', `unknown field '${unknown}'`)
@@ -225,7 +234,7 @@ export async function authorizeLlmProviderAttempt(
     typeof body.providerAttemptIndex === 'number' ? body.providerAttemptIndex : 1
   const policyRevision = typeof body.policyRevision === 'number' ? body.policyRevision : NaN
   const policyHash = typeof body.policyHash === 'string' ? body.policyHash : ''
-  if (!invocationId || !Number.isInteger(attemptGeneration) || attemptGeneration < 1) {
+  if (!isBoundedId(invocationId) || !Number.isInteger(attemptGeneration) || attemptGeneration < 1) {
     throw new LlmProviderAttemptAuthorizeError(
       'invalid_request',
       'invocationId and attemptGeneration are required'
@@ -407,6 +416,9 @@ export async function authorizeLlmProviderAttempt(
     }
 
     const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    if (presentedTargetRef !== '' && !isBoundedId(presentedTargetRef)) {
+      throw new LlmProviderAttemptAuthorizeError('invalid_request', 'targetRef is invalid')
+    }
     let reservedSdkAttemptToPromote: {
       id: string
       invocationId: string

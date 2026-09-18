@@ -6,6 +6,16 @@ export const STREAM_LIMITS = {
   maxStreamDurationMs: 300_000,
 } as const
 
+/**
+ * Visual JSON parse retains a 24 MiB body. The 256Mi pod cannot hold the
+ * ordinary 8-stream gate across that size, so visual admission is a tighter
+ * sibling. Do not raise proxy memory to widen this.
+ */
+export const VISUAL_STREAM_LIMITS = {
+  maxConcurrentStreams: 2,
+  maxQueuedRequests: 8,
+} as const
+
 export class RequestLimitError extends Error {
   readonly code = 'provider_unavailable'
   constructor(message: string) {
@@ -27,8 +37,8 @@ export class StreamGate {
   private queued = 0
 
   constructor(
-    private readonly maxConcurrent = STREAM_LIMITS.maxConcurrentStreams,
-    private readonly maxQueued = STREAM_LIMITS.maxQueuedRequests
+    private readonly maxConcurrent: number = STREAM_LIMITS.maxConcurrentStreams,
+    private readonly maxQueued: number = STREAM_LIMITS.maxQueuedRequests
   ) {}
 
   async acquire(): Promise<() => void> {
@@ -58,3 +68,7 @@ export class StreamGate {
 }
 
 export const streamGate = new StreamGate()
+export const visualStreamGate = new StreamGate(
+  VISUAL_STREAM_LIMITS.maxConcurrentStreams,
+  VISUAL_STREAM_LIMITS.maxQueuedRequests
+)

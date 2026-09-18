@@ -85,10 +85,13 @@
     "validation": "container-framing-and-dimensions",
     "limits": {
       "maxImages": 3,
-      "maxImageBytes": 10485760,
-      "maxTotalImageBytes": 15728640,
-      "maxImageDimension": 8192,
-      "maxImagePixels": 64000000
+      "typicalImageBytes": 5242880,
+      "typicalTotalImageBytes": 9437184,
+      "typicalEnvelopeBytes": 14680064,
+      "maxImageBytes": 16777216,
+      "maxTotalImageBytes": 16777216,
+      "maxImageDimension": 2048,
+      "maxImagePixels": 4194304
     }
   }
 }

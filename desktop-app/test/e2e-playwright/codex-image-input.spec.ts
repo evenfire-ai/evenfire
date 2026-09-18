@@ -202,7 +202,23 @@ test('5 MiB JPEG follows the same capability lane as a small image', async ({ ap
   })
 })
 
-test('10 MiB PNG + 5 MiB JPEG follow the 15 MiB combined budget', async ({ appPage }) => {
+test('12 MiB PNG follows the exceptional hard ceiling above 10 MiB', async ({ appPage }) => {
+  test.setTimeout(360_000)
+  const image = paddedChallengeImage('png', 12 * MIB)
+  const filename = `visual-${randomUUID()}.png`
+  await startOwnedChat(appPage)
+  await uploadThroughChooser(appPage, [
+    { name: filename, mimeType: 'image/png', buffer: image.bytes },
+  ])
+  await assertPreview(appPage, filename)
+  await sendVisualTurn(appPage, {
+    prompt: visualPrompt(1),
+    filenames: [filename],
+    codes: [image.code],
+  })
+})
+
+test('10 MiB PNG + 5 MiB JPEG stay under the 16 MiB combined hard ceiling', async ({ appPage }) => {
   test.setTimeout(360_000)
   const ten = paddedChallengeImage('png', 10 * MIB)
   const five = paddedChallengeImage('jpeg', 5 * MIB)
@@ -242,25 +258,25 @@ test('three 5 MiB images follow the combined budget', async ({ appPage }) => {
   })
 })
 
-test('refuses a single image over the 10 MiB limit before send', async ({ appPage }) => {
-  const image = paddedChallengeImage('png', 11 * MIB)
+test('refuses a single image over the 16 MiB limit before send', async ({ appPage }) => {
+  const image = paddedChallengeImage('png', 17 * MIB)
   const filename = `over-${randomUUID()}.png`
   await startOwnedChat(appPage)
   await uploadThroughChooser(appPage, [
     { name: filename, mimeType: 'image/png', buffer: image.bytes },
   ])
   await expect(appPage.getByRole('alert')).toContainText(
-    `${filename} is too large. Max size is 10 MiB.`
+    `${filename} is too large. Max size is 16 MiB.`
   )
   await expect(appPage.getByRole('button', { name: filename, exact: true })).toHaveCount(0)
   await expect(appPage.getByTestId('agent-response')).toHaveCount(0)
 })
 
-test('refuses the file that would pass the 15 MiB total and keeps the one that fits', async ({
+test('refuses the file that would pass the 16 MiB total and keeps the one that fits', async ({
   appPage,
 }) => {
   const fits = paddedChallengeImage('png', 10 * MIB)
-  const over = paddedChallengeImage('jpeg', 6 * MIB)
+  const over = paddedChallengeImage('jpeg', 7 * MIB)
   const fitsName = `fits-${randomUUID()}.png`
   const overName = `over-total-${randomUUID()}.jpeg`
   await startOwnedChat(appPage)
@@ -269,7 +285,7 @@ test('refuses the file that would pass the 15 MiB total and keeps the one that f
     { name: overName, mimeType: 'image/jpeg', buffer: over.bytes },
   ])
   await expect(appPage.getByRole('alert')).toContainText(
-    `${overName} was not added. Attachments can total at most 15 MiB per message.`
+    `${overName} was not added. Attachments can total at most 16 MiB per message.`
   )
   await expect(appPage.getByRole('button', { name: fitsName, exact: true })).toBeVisible()
   await expect(appPage.getByRole('button', { name: overName, exact: true })).toHaveCount(0)

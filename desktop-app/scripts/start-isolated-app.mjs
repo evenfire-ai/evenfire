@@ -199,9 +199,47 @@ function createRunDirectory(contract, options) {
   return runPaths
 }
 
+/**
+ * Electron needs a process identity (PATH, HOME, locale). It must not inherit
+ * the operator's session tokens, cloud keys, or SSH agent.
+ */
+const CHILD_ENV_ALLOWLIST = [
+  'PATH',
+  'HOME',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LC_MESSAGES',
+  'TZ',
+  'TERM',
+  'DISPLAY',
+  'WAYLAND_DISPLAY',
+  'XAUTHORITY',
+  'XDG_RUNTIME_DIR',
+  'XDG_SESSION_TYPE',
+  'XDG_CURRENT_DESKTOP',
+  'XDG_DATA_DIRS',
+  '__CF_USER_TEXT_ENCODING',
+]
+
+function allowedParentEnvironment() {
+  const env = {}
+  for (const key of CHILD_ENV_ALLOWLIST) {
+    const value = process.env[key]
+    if (typeof value === 'string' && value !== '') env[key] = value
+  }
+  return env
+}
+
 function childEnvironment(contract, runPaths, options, appPath) {
   return {
-    ...process.env,
+    ...allowedParentEnvironment(),
     [contract.DEV_ISOLATION_ENABLE_ENV]: '1',
     [contract.DEV_ISOLATION_ENV.runDir]: runPaths.runDir,
     [contract.DEV_ISOLATION_ENV.restUrl]: options.restUrl,

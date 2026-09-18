@@ -306,7 +306,11 @@ function toUpstreamPayload(
         content: message.contentParts.map(part =>
           part.type === 'text'
             ? { type: 'input_text', text: part.text }
-            : { type: 'input_image', image_url: `data:${part.mimeType};base64,${part.data}` }
+            : {
+                type: 'input_image',
+                image_url: `data:${part.mimeType};base64,${part.data}`,
+                detail: 'high',
+              }
         ),
       })
     } else {

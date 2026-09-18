@@ -10,9 +10,10 @@ ordered text/image content and local image/envelope budgets. Its
 `fixtures/canonical-request-hashes.v2.json` freezes the new projection separately.
 The image parser validates container structure and dimensions, not decoded pixels.
 
-Capacity checks cover 10 MiB per image, 15 MiB across up to three images, and a
-24 MiB V2 envelope. Exercise 10 MiB, 10+5 MiB and 3x5 MiB acceptance, plus
-individual/aggregate overflow. V1 and V2 non-image fields keep a 1 MiB ceiling;
+Capacity checks cover the usual 5 / 9 / 14 MiB target and the hard 16 MiB
+per-image / 16 MiB aggregate / 24 MiB envelope ceiling, plus the 2048 px
+model bound. Exercise 5 MiB, 12 MiB (exceptional, above 10 MiB), 10+5 MiB
+and 3x5 MiB acceptance, plus overflow above 16 MiB. V1 and V2 non-image fields keep a 1 MiB ceiling;
 unrelated RPC/Host routes keep 6 MiB. The larger proxy parser must not admit an
 anonymous, wrong-scope or admin request, or enlarge V1's effective body limit.
 Changing these budgets does not change OAuth, grants, ticket binding, origins,
@@ -54,9 +55,9 @@ than silently skipping them.
 ### Opt-in Desktop image lane
 
 `desktop-app/test/e2e-playwright/codex-image-input.spec.ts` covers direct PNG/JPEG
-uploads through the visible composer, including a 5 MiB JPEG, a 10+5 MiB pair,
-three 5 MiB images, and composer refusals over 10 MiB, over 15 MiB total, a
-fourth image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
+uploads through the visible composer, including a 5 MiB JPEG, a 12 MiB PNG
+(exceptional), a 10+5 MiB pair, three 5 MiB images, and composer refusals over
+16 MiB, over 16 MiB total, a fourth image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
 challenge rendered only into image pixels. Large cases pad that same image so
 the answer stays in pixels while the decoded size matches the hop budget. The
 filename and prompt do not carry the answer. An enabled run requires that

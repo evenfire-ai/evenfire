@@ -33,11 +33,15 @@ retain one remaining image per MIME/bytes pair and its explanatory text. They do
 not restore pixels removed by pruning. The user-facing attachment collection
 keeps its existing deduplication behavior.
 
-Local visual budgets are three images, 10 MiB decoded per image, 15 MiB decoded
-across a request, 8192 pixels per dimension and 64,000,000 pixels per image.
-The aggregate is independent: one 10 MiB image plus one 5 MiB image fits, as do
-three 5 MiB images; three 10 MiB images do not. Original bytes are preserved.
-These are conservative Evenfire limits, not claims about upstream capabilities.
+Local visual budgets have two layers. The usual product target is three images,
+5 MiB decoded per image, 9 MiB decoded across a request, and a 14 MiB envelope
+at 2048 pixels (the official Codex client size, with `detail: high`). The hard
+ceiling is 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
+PNG may exceed 10 MiB; the HTTP envelope stays 24 MiB so that encoded body
+still fits. Dimensions above 2048 px are rejected here because the frozen
+ChatGPT endpoint 400s them; that is a model/pixel limit, not a byte limit.
+Which models accept images is owned by issue #654 / PR #669 (models.dev).
+These byte numbers are conservative Evenfire limits, not upstream facts.
 The shared pure validator checks canonical base64, MIME/container framing and
 header dimensions; it does not decode pixels or prove image decodability.
 The fixtures contain independently decoded 2x2 PNG/JPEG images.
@@ -54,7 +58,8 @@ The Host uses the same envelope builder. V2 has no outer deadline: its deadline
 is `request.deadlineMs`, part of the authorized hash. A proxy configured below
 the shared visual envelope budget refuses visual activation at startup.
 
-Desktop enforces the 10 MiB individual and 15 MiB combined attachment budgets.
+Desktop enforces the 16 MiB individual and 16 MiB combined hard attachment
+budgets (usual target remains 5 / 9 MiB).
 RPC and Host permit a 24 MiB JSON body only on their message POST routes; their
 6 MiB budget for other content and routes remains unchanged. The proxy's larger
 parser requires a valid platform identity on the visual completion route.
