@@ -128,6 +128,36 @@ describe('#654 visual send and recovery', () => {
     expect(bridge.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the failed payload when its retry is blocked before dispatch (#654 M5)', async () => {
+    bridge.rpc.invokeHostMessage.mockResolvedValueOnce({
+      error: { code: 'LLM_IMAGE_INPUT_UNKNOWN', message: 'Evidence changed', retryable: false },
+    })
+    const { result, spies } = await mountedVisualController()
+    await act(async () => {
+      await result.current.handleSendAgentMessage('inspect this image')
+    })
+    const chat = result.current.activeChatId!
+    expect(result.current.failedAgentSend?.attachments[0]?.dataBase64).toBe(image.dataBase64)
+
+    // The chat now points at a text-only model, so the send-time guard refuses
+    // the retry before it retains anything of its own.
+    await act(async () => {
+      await selectHostModel(modelTransport, 'agent-x', chat, 'glm-5.3')
+    })
+    await act(async () => {
+      await result.current.handleRetryFailedAgentSend()
+    })
+
+    // Witness: the guard ran and refused the retry without dispatching it.
+    expect(spies.pushToast).toHaveBeenCalledWith(
+      expect.stringContaining('for model "glm-5.3"'),
+      'error'
+    )
+    expect(bridge.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    // The failed attempt's snapshot is the only copy of the image; it survives.
+    expect(result.current.failedAgentSend?.attachments[0]?.dataBase64).toBe(image.dataBase64)
+  })
+
   it('keeps asynchronous failure input with its original chat after the tracker releases it', async () => {
     bridge.rpc.invokeHostMessage.mockResolvedValue({ taskId: 'visual-task' })
     bridge.rpc.getTaskResult.mockResolvedValue({

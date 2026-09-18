@@ -494,6 +494,11 @@ export function useAgentChatController({
     failRetainedSend,
   } = retainedSends
   const sendScopeGeneration = useRef(0)
+  // #654 M5 — the userMessageId of the most recent send that retained its
+  // payload. A retry compares it before and after to learn whether it retained
+  // a snapshot of its own; `sendAgentMessage` has several early returns (image
+  // guard, running task, send in flight) that retain nothing.
+  const lastRetainedSendIdRef = useRef<string | null>(null)
   const lastRetentionScope = useRef(`${isAuthenticated}:${authenticatedScope}`)
   useEffect(() => {
     const scope = `${isAuthenticated}:${authenticatedScope}`
@@ -2157,7 +2162,10 @@ export function useAgentChatController({
           case 'reconcile_replaced':
           case 'recovered_from_task_result':
             // The reconcile branch materialized a durable reply. Repaint the
-            // stepper green and flip the FSM to idle.
+            // stepper green and flip the FSM to idle. #654 M6 — the durable reply
+            // exists, so this is as terminal as the `reply` branch below: release
+            // the retained payload instead of leaving it to accumulate.
+            releaseRetainedSendsForTask(state.taskId)
             dropActivity()
             paintProgressDone()
             setIdle()
@@ -2166,6 +2174,8 @@ export function useAgentChatController({
             // The reconcile branch rendered (and toasted) a durable ERROR (budget
             // deny etc.). Repaint the stepper + activity red — a green "completed"
             // under an error bubble would misreport (code-review Should-fix).
+            // The payload stays retained for recovery; `reconcileChat` already
+            // recorded the durable error as its reason before returning here.
             dropActivity()
             updateMessageProgress(agentRef, state.userMessageId, () => ({
               taskId: state.taskId,
@@ -2187,6 +2197,9 @@ export function useAgentChatController({
             // The turn already covered the task, or the chat switched away
             // mid-reconcile — settle without re-rendering (a reopen reconcile
             // re-derives if a newer send didn't already take over via R1).
+            // #654 M6 — either way this task will never produce another terminal,
+            // so its retained payload has no reader left.
+            releaseRetainedSendsForTask(state.taskId)
             dropActivity()
             setIdle()
             break
@@ -2663,6 +2676,7 @@ export function useAgentChatController({
         timestamp: Date.now(),
         draftRevision: originalDraftRevision,
       })
+      lastRetainedSendIdRef.current = userMessageId
       if (
         !preserveComposer &&
         activeChatVisibilityRef.current.selectedAgent === sendAgent &&
@@ -2898,7 +2912,6 @@ export function useAgentChatController({
         // Issue #654 — keep the payload recoverable and record WHO it belongs
         // to, so recovery can never overwrite a different chat's composer or a
         // newer draft. Memory only; released on terminal success/discard.
-        if (sendScope !== sendScopeGeneration.current) return
         failRetainedSend(sendAgent, sendChatId ?? null, userMessageId, 'post_failed', message, kind)
         setFailedAgentSend({
           content: trimmedContent,
@@ -3002,15 +3015,27 @@ export function useAgentChatController({
       ? failedAgentSend
       : null)
 
+  // #654 M5 — a retry re-sends under a NEW `userMessageId`, so the snapshot the
+  // failed attempt retained is not the one the retry writes. Without an explicit
+  // release the old snapshot stays in the store forever, holding its attachment
+  // bytes and still answering `getLatestRetainedSendSnapshotForChat` (which picks
+  // the newest snapshot *carrying a failure*).
   const handleRetryFailedAgentSend = useCallback(async () => {
     if (!visibleFailure) return
-    await sendAgentMessage(
-      visibleFailure.content,
-      visibleFailure.attachments,
-      visibleFailure.references,
-      true
-    )
-  }, [visibleFailure, sendAgentMessage])
+    const previous = visibleFailure
+    const retainedBefore = lastRetainedSendIdRef.current
+    await sendAgentMessage(previous.content, previous.attachments, previous.references, true)
+    // A retry refused before dispatch (image guard, running task, a send already
+    // in flight) retained nothing, so the old snapshot is still the only copy of
+    // the payload: keep it and the failure it shows. Once a newer send has
+    // retained its own snapshot, the old one is redundant whatever that send's
+    // outcome — on failure the payload lives on in the newer snapshot.
+    if (lastRetainedSendIdRef.current === retainedBefore) return
+    if (previous.agentRef && previous.userMessageId) {
+      releaseRetainedSend(previous.agentRef, previous.chatId ?? null, previous.userMessageId)
+    }
+    setFailedAgentSend(null)
+  }, [visibleFailure, sendAgentMessage, releaseRetainedSend])
 
   const handleDiscardFailedAgentSend = useCallback(() => {
     if (visibleFailure?.agentRef && visibleFailure.userMessageId) {
@@ -3106,10 +3131,16 @@ export function useAgentChatController({
       try {
         await window.clerum.rpc.cancelTask(hostRef, taskId)
         markCancelled('Cancelled by user.')
+        // #654 M6 — a cancel is terminal by intent: the user does not want this
+        // payload resent, so nothing will read the retained snapshot again.
+        releaseRetainedSendsForTask(taskId)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         if (message.includes('404') || message.toLowerCase().includes('task not found')) {
           markCancelled('Task already finished or is no longer active.')
+          // The task is gone upstream, so it can no longer produce a terminal
+          // event — same reasoning as the successful cancel above.
+          releaseRetainedSendsForTask(taskId)
           pushToast('That task is no longer active.', 'info')
           return
         }
@@ -3117,7 +3148,7 @@ export function useAgentChatController({
         pushToast(`Failed to cancel task: ${message}`, 'error')
       }
     },
-    [pushToast, selectedAgent]
+    [pushToast, selectedAgent, releaseRetainedSendsForTask]
   )
 
   const setPendingChatSelection = useCallback(
