@@ -55,6 +55,7 @@ import {
   resolveGuardrailHookDescriptors,
   withResolvedHookDescriptors,
 } from './guardrailHookResolver'
+import { sanitizeIncomingAttachments } from './incomingImageAttachments'
 import { HostWatcher, LlmHookWatcher, getHost, getLlmHook } from './k8sClient'
 import { StatelessHeartbeat } from './lifecycle/statelessHeartbeat'
 import { TaskLifecycle } from './lifecycle/taskLifecycle'
@@ -386,37 +387,6 @@ function sanitizeAttachments(raw: Attachment[] | undefined): Attachment[] | unde
       continue
     }
 
-    sanitized.push(attachment)
-  }
-
-  return sanitized.length > 0 ? sanitized : undefined
-}
-
-function sanitizeIncomingAttachments(raw: Attachment[] | undefined): Attachment[] | undefined {
-  if (!raw || raw.length === 0) {
-    return undefined
-  }
-
-  const sanitized: Attachment[] = []
-  for (const attachment of raw) {
-    if (sanitized.length >= config.attachmentMaxCount) {
-      break
-    }
-    const isSupportedImageMime =
-      attachment.mimeType === 'image/jpeg' || attachment.mimeType === 'image/png'
-    if (
-      attachment.kind !== 'image' ||
-      !isSupportedImageMime ||
-      attachment.encoding !== 'base64' ||
-      typeof attachment.dataBase64 !== 'string' ||
-      !attachment.dataBase64.trim()
-    ) {
-      continue
-    }
-    const decodedBytes = approxDecodedBytes(attachment.dataBase64)
-    if (decodedBytes > config.attachmentMaxBytes) {
-      continue
-    }
     sanitized.push(attachment)
   }
 
@@ -1922,7 +1892,10 @@ function handleIncomingMessage(
   message: IncomingMessage,
   options?: { async?: boolean }
 ): MessageResponse | Promise<MessageResponse> {
-  const sanitizedIncomingAttachments = sanitizeIncomingAttachments(message.attachments)
+  const sanitizedIncomingAttachments = sanitizeIncomingAttachments(
+    message.attachments,
+    config.attachmentMaxBytes
+  )
   const normalizedMessage: IncomingMessage = {
     ...message,
     attachments: sanitizedIncomingAttachments,
