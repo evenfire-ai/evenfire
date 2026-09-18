@@ -25,7 +25,7 @@ try {
     await import('/app/control-api/dist/services/codexSubscriptionConnection.js')
   const { rebuildLiveCodexUnionAllowlist } =
     await import('/app/control-api/dist/services/codexSubscriptionCatalog.js')
-  const { createFixtureIdentities, cleanupFixtureIdentities } =
+  const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError } =
     await import('/app/approved-tools-setup/identity-lifecycle.mjs')
   const publish = journal => process.stdout.write(JSON.stringify({ e2eIdentity: journal }) + '\n')
   const adapters = {
@@ -56,8 +56,14 @@ try {
   } else {
     await cleanupFixtureIdentities(input, input.initialJournal, adapters)
   }
-} catch {
-  process.stderr.write('Fixture identity operation failed; retain the host journal for recovery\n')
+} catch (error) {
+  process.stderr.write(
+    JSON.stringify({
+      event: 'fixture_identity_operation_failed',
+      operation: input.action,
+      failure: describeFixtureError(error),
+    }) + '\n'
+  )
   process.exitCode = 1
 } finally {
   await pool.end()
