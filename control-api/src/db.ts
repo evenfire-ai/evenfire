@@ -6277,6 +6277,33 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '011a_workflow_run_failure_reason',
     apply: applyWorkflowRunFailureReasonSchema,
   },
+  {
+    // PR1's image-capability migration follows PR2's 0115-011a range on this
+    // stacked branch, so it receives the next unused additive version.
+    version: '011b_llm_allowed_models_image_input',
+    apply: async db => {
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS image_input JSONB;
+        DO $$ BEGIN
+          ALTER TABLE llm_allowed_models
+            ADD CONSTRAINT llm_allowed_models_image_input_state_check
+            CHECK (
+              image_input IS NULL
+              OR (
+                jsonb_typeof(image_input) = 'object'
+                AND image_input ? 'state'
+                AND COALESCE(
+                  image_input->>'state' IN ('supported','unsupported','unknown'),
+                  false
+                )
+              )
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `)
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {
