@@ -133,6 +133,7 @@ jobs:
               - 'packages/display-field/**'
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
+              - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:

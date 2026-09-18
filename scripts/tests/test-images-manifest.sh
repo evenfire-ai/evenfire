@@ -651,6 +651,45 @@ assert_display_field_change_rebuilds_both_consumers() {
   fi
 }
 
+# control-ui's Dockerfile copies scripts/qa-recorder outside the application
+# directory. Keep that producer relationship explicit in both the manifest and
+# the publish filter so a recorder-only change cannot skip the UI image.
+assert_control_ui_qa_recorder_change_rebuilds_control_ui() {
+  local output rc
+  output="$(node -e '
+    import("'"$REPO_ROOT"'/scripts/release/images-manifest.mjs").then(async m => {
+      const fs = await import("node:fs")
+      const wfPath = "'"$REPO_ROOT"'/.github/workflows/build-publish.yml"
+      const dockerfile = fs.readFileSync("'"$REPO_ROOT"'/control-ui/Dockerfile", "utf8")
+      const wf = fs.readFileSync(wfPath, "utf8")
+      const sourcePath = "scripts/qa-recorder/**"
+      const image = m.IMAGES.find(item => item.name === "control-ui")
+      const problems = []
+      if (!dockerfile.includes("COPY scripts/qa-recorder")) {
+        problems.push("control-ui Dockerfile no longer declares the qa-recorder copy")
+      }
+      if (!image) problems.push("control-ui has no manifest row")
+      else if (!image.source_paths?.includes(sourcePath)) {
+        problems.push("control-ui manifest does not track scripts/qa-recorder/**")
+      }
+      if (!wf.includes(`              - '\''${sourcePath}'\''`)) {
+        problems.push("control-ui publish filter does not track scripts/qa-recorder/**")
+      }
+      console.log(problems.join("; "))
+    }).catch(err => {
+      console.log(`PARSE_ERROR: ${err.message}`)
+      process.exit(1)
+    })' 2>&1)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    fail "Control UI qa-recorder contract parse failed: $output"
+  elif [ -z "$output" ]; then
+    pass "a qa-recorder-only change rebuilds control-ui"
+  else
+    fail "Control UI qa-recorder changed-path contract failed: $output"
+  fi
+}
+
 assert_llm_provider_attempt_contract_change_rebuilds_consumers() {
   local output rc
   output="$(node -e '
@@ -1335,6 +1374,7 @@ assert_every_matrix_image_has_a_manifest_row
 assert_source_paths_match_filters
 assert_network_policy_core_change_rebuilds_all_consumers
 assert_display_field_change_rebuilds_both_consumers
+assert_control_ui_qa_recorder_change_rebuilds_control_ui
 assert_llm_provider_attempt_contract_change_rebuilds_consumers
 assert_codex_catalog_projection_change_rebuilds_consumers
 assert_all_three_image_lists_agree
