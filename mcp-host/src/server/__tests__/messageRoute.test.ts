@@ -42,6 +42,17 @@ function makeRes(): CapturedRes {
 }
 
 describe('handleMessageRoute — rpc sender identity invariant', () => {
+  it.each([null, undefined, 42, {}, []])(
+    'rejects non-string content %j before dispatch',
+    async content => {
+      const messageHandler = vi.fn()
+      const req = { body: { content } } as unknown as Request
+      const captured = makeRes()
+      await handleMessageRoute(req, captured.res, makeHandlers({ messageHandler }))
+      expect(captured.statusCode).toBe(400)
+      expect(messageHandler).not.toHaveBeenCalled()
+    }
+  )
   // Tests assume auth is enabled (production / minikube default).
   beforeEach(() => {
     ;(config as { enableAuth: boolean }).enableAuth = true

@@ -28,6 +28,7 @@ for file in "$MINIKUBE_DIR/profile-readiness.sh" "$ROOT/scripts/tests/test-minik
   "$ROOT/scripts/tests/test-minikube-t2-scenarios.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-proxy-runtime.sh" \
   "$ROOT/scripts/tests/test-minikube-t2-control-api-runtime.sh" \
+  "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh" \
   "$ROOT/scripts/tests/test-minikube-settle-gfs-reader-rollout.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-rollout-shim.sh" \
   "$ROOT/scripts/tests/test-minikube-gfs-provision-order.sh" \
@@ -777,4 +778,5 @@ bash "$ROOT/scripts/tests/test-minikube-build-images-hardening.sh"
 bash "$ROOT/scripts/tests/test-minikube-build-section-headers.sh"
 bash "$ROOT/scripts/tests/test-minikube-pre-gate-shadow.sh"
 
+bash "$ROOT/scripts/tests/test-minikube-image-capability-fixture.sh"
 printf 'PASS: local Minikube T0/T1/T2 contract checks\n'

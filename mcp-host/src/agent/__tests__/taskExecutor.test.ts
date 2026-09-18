@@ -4,6 +4,7 @@ import type {
   TrustedEdgeActionContextV2,
 } from '@clerum/action-context-contracts'
 import { config as appConfig } from '../../config'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { ConversationManager } from '../../core/conversation/conversation'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { SimpleEventEmitter } from '../../core/orchestration/eventEmitter'
@@ -21,6 +22,7 @@ import { anthropicApiError } from '../../llm/__tests__/sdkErrorFixtures'
 import { ClaudeProvider } from '../../llm/claude'
 import { FailoverEngine } from '../../llm/failover/engine'
 import type { LlmPolicy } from '../../llm/failover/types'
+import { OpenAIProvider } from '../../llm/openai'
 import { PromptCache } from '../../llm/promptCache'
 import { logger } from '../../logger'
 import type { Task, TaskError, TaskSource } from '../../queue/types'
@@ -2306,5 +2308,167 @@ describe('adversarial review regressions', () => {
     )
     expect(executeSingleTool).not.toHaveBeenCalled()
     expect(runToolUseLoop).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * #654 — the failover factory must build the SDK client with the model this
+ * attempt actually serves, and every failover attempt re-checks the image-input
+ * capability of its OWN pair before dispatching.
+ */
+describe('#654 failover identity + per-attempt image guard', () => {
+  const EVIDENCE = {
+    source: 'curated' as const,
+    reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+    checkedAt: '2026-09-16T00:00:00Z',
+  }
+
+  const POLICY: LlmPolicy = {
+    cooldownSeconds: 300,
+    triggerOn: ['insufficient_quota', 'auth', 'provider_unavailable', 'rate_limited'],
+    fallbacks: [{ provider: 'openai', model: 'gpt-4o' }],
+  }
+
+  function throttledProvider(type: string) {
+    return {
+      completeSingleTurn: vi.fn(),
+      completeSingleTurnWithTools: vi.fn(async () => {
+        throw new LlmError('429', type, LlmErrorCode.RateLimited, true)
+      }),
+      getProviderType: () => type,
+      classifyError: (err: unknown) => ({
+        code: err instanceof LlmError ? err.code : LlmErrorCode.ApiCallFailed,
+        retryable: true,
+        message: (err as Error).message,
+      }),
+    } as never
+  }
+
+  function conversationStub() {
+    return { id: 'conv-identity' } as never
+  }
+
+  function executorWith(overrides: Partial<TaskExecutorDeps>) {
+    const deps = createDeps(overrides)
+    return { deps, executor: new TaskExecutor(createTask(), deps) as never }
+  }
+
+  it('builds a SAME-provider fallback with the session model, and the SDK sends that model', async () => {
+    const create = vi.fn(async (_input: unknown) => ({
+      choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }))
+    // Mirrors `buildFallbackProvider`: the SDK model comes from `entry.model`.
+    const buildProvider = vi.fn(
+      (entry: { model: string }) =>
+        new OpenAIProvider({ chat: { completions: { create } } } as never, entry.model)
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      failover: {
+        engine: new FailoverEngine(POLICY, { metricInc: () => {} }),
+        policy: POLICY,
+        buildProvider,
+      } as never,
+    })
+
+    // Text-only request, so the #654 image guard is a no-op here and no
+    // resolver is wired. The subject under test is the failover factory's model
+    // identity, not the guard.
+    const primaryPort = new LlmPortAdapter(throttledProvider('openai'), 'gpt-5.4-mini', 'openai')
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    await wrapped.completeWithTools({ messages: [{ role: 'user', content: 'hi' }], tools: [] })
+
+    // The factory receives the EFFECTIVE entry (session model, not entry.model)…
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'openai', model: 'gpt-5.4-mini' })
+    // …and that is the model the SDK really requests (the pre-#654 bug sent 'gpt-4o').
+    expect(create).toHaveBeenCalledTimes(1)
+    expect((create.mock.calls[0]?.[0] as { model?: string }).model).toBe('gpt-5.4-mini')
+  })
+
+  it('re-checks the image capability of the FALLBACK pair before its SDK call', async () => {
+    const claudeCreate = vi.fn(async (_input: unknown) => ({
+      content: [{ type: 'text', text: 'ok' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }))
+    const claudeProvider = new ClaudeProvider(
+      { messages: { create: claudeCreate } } as never,
+      'claude-haiku-4-5'
+    )
+    const buildProvider = vi.fn(() => claudeProvider)
+    const crossProviderPolicy: LlmPolicy = {
+      ...POLICY,
+      fallbacks: [{ provider: 'claude', model: 'claude-haiku-4-5' }],
+    }
+    const imageInput = vi.fn((provider: string) =>
+      provider === 'openai'
+        ? { capability: { state: 'supported', evidence: EVIDENCE } }
+        : { capability: { state: 'unsupported', evidence: EVIDENCE } }
+    )
+    const { executor } = executorWith({
+      modelName: 'gpt-5.4-mini',
+      llmProvider: { getProviderType: () => 'openai' } as never,
+      imageInput: imageInput as never,
+      failover: {
+        engine: new FailoverEngine(crossProviderPolicy, { metricInc: () => {} }),
+        policy: crossProviderPolicy,
+        buildProvider,
+      } as never,
+    })
+
+    // The primary pair MUST pass the image guard, otherwise the refusal happens
+    // before the failover engine ever considers the fallback — that is the
+    // separate "primary denial is terminal" behaviour. The primary dispatch
+    // here and the fallback adapter below read this same resolver, which is
+    // exactly what lets the test prove the fallback is re-checked.
+    const primaryPort = new LlmPortAdapter(
+      throttledProvider('openai'),
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      imageInput as never
+    )
+    const wrapped = (
+      executor as unknown as {
+        wrapFailoverPort: (
+          port: LlmPortAdapter,
+          conv: unknown
+        ) => { completeWithTools: (r: unknown) => Promise<unknown> }
+      }
+    ).wrapFailoverPort(primaryPort, conversationStub())
+
+    const imageMessage = {
+      role: 'user' as const,
+      content: 'look',
+      contentParts: [{ type: 'image' as const, mimeType: 'image/png' as const, data: 'QUJD' }],
+    }
+    let error: LlmError | undefined
+    try {
+      await wrapped.completeWithTools({ messages: [imageMessage], tools: [] })
+    } catch (err) {
+      error = err as LlmError
+    }
+
+    expect(buildProvider).toHaveBeenCalledWith({ provider: 'claude', model: 'claude-haiku-4-5' })
+    expect(error).toBeInstanceOf(LlmError)
+    expect(error?.code).toBe(LlmErrorCode.ImageInputUnsupported)
+    expect(error?.provider).toBe('claude')
+    // The incompatible fallback never reaches its SDK.
+    expect(claudeCreate).not.toHaveBeenCalled()
+    expect(imageInput).toHaveBeenCalledWith('claude', 'claude-haiku-4-5')
   })
 })

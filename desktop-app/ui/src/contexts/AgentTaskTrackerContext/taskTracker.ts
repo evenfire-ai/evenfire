@@ -663,6 +663,29 @@ export class TaskTracker implements AgentTaskTracker {
           if (this.states.get(key)?.taskId !== completedTaskId) return
           const reply = extractAssistantReply(result)
           const attachments = buildResponseFileAttachments(result)
+          // A durable failure may arrive after a terminal event with no error
+          // detail. Preserve that authoritative envelope; treating it as a reply
+          // would release the retained visual input and report false success.
+          const envelope = result as {
+            success?: boolean
+            error?: string | { message?: string; code?: string; provider?: string }
+          }
+          if (envelope.error || envelope.success === false || td.status === 'failed') {
+            const error = envelope.error
+            this.mutate(key, s => {
+              s.status = 'failed'
+              s.terminalResult = {
+                kind: 'error',
+                source: 'failed',
+                message: typeof error === 'string' ? error : (error?.message ?? 'The task failed.'),
+                code: typeof error === 'object' ? error.code : undefined,
+                provider: typeof error === 'object' ? error.provider : undefined,
+                ...(attachments.length ? { attachments } : {}),
+              }
+            })
+            await this.fireTerminal(key)
+            return
+          }
           this.mutate(key, s => {
             s.status = 'completed'
             s.terminalResult = {

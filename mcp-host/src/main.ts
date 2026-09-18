@@ -18,7 +18,13 @@ import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
-import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
+import { createIncomingAdmission } from './agent/incomingAdmission'
+import { IncomingDelivery } from './agent/incomingDelivery'
+import { INCOMING_IMAGE_MAX_COUNT } from './agent/incomingImageAttachments'
+import {
+  type SessionModelSelectionOptions,
+  applySessionModelSelection as applySessionModelSelectionCore,
+} from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
@@ -69,10 +75,11 @@ import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
 import { setGrokPolicyBindingReader } from './llm/grokPolicyBinding'
 import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
+import { type ImageInputResolver } from './llm/imageInput'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
-import './logger'
+import { logger } from './logger'
 import {
   McpManager,
   type McpPrincipal,
@@ -378,53 +385,23 @@ function sanitizeAttachments(raw: Attachment[] | undefined): Attachment[] | unde
       isAllowedWorkflowFileAttachment(attachment) ||
       (config.enableResponseAttachments && isInternalGeneratedArtifactAttachment(attachment))
     if (!supportedImage && !supportedFile) {
-      console.warn(`[Main] Dropping unsupported attachment type: ${attachment.mimeType}`)
+      logger.warn({ mimeType: attachment.mimeType }, '[Main] Dropping unsupported attachment type:')
       continue
     }
     if (attachment.encoding !== 'base64' || typeof attachment.dataBase64 !== 'string') {
-      console.warn('[Main] Dropping attachment with unsupported encoding')
+      logger.warn({}, '[Main] Dropping attachment with unsupported encoding')
       continue
     }
 
     const decodedBytes = approxDecodedBytes(attachment.dataBase64)
     if (decodedBytes > config.attachmentMaxBytes) {
-      console.warn(
-        `[Main] Dropping oversized attachment (${decodedBytes} bytes > ${config.attachmentMaxBytes})`
+      logger.warn(
+        { decodedBytes: decodedBytes, attachmentMaxBytes: config.attachmentMaxBytes },
+        '[Main] Dropping oversized attachment ( bytes > )'
       )
       continue
     }
 
-    sanitized.push(attachment)
-  }
-
-  return sanitized.length > 0 ? sanitized : undefined
-}
-
-function sanitizeIncomingAttachments(raw: Attachment[] | undefined): Attachment[] | undefined {
-  if (!raw || raw.length === 0) {
-    return undefined
-  }
-
-  const sanitized: Attachment[] = []
-  for (const attachment of raw) {
-    if (sanitized.length >= config.attachmentMaxCount) {
-      break
-    }
-    const isSupportedImageMime =
-      attachment.mimeType === 'image/jpeg' || attachment.mimeType === 'image/png'
-    if (
-      attachment.kind !== 'image' ||
-      !isSupportedImageMime ||
-      attachment.encoding !== 'base64' ||
-      typeof attachment.dataBase64 !== 'string' ||
-      !attachment.dataBase64.trim()
-    ) {
-      continue
-    }
-    const decodedBytes = approxDecodedBytes(attachment.dataBase64)
-    if (decodedBytes > config.attachmentMaxBytes) {
-      continue
-    }
     sanitized.push(attachment)
   }
 
@@ -448,8 +425,8 @@ function apiKeysFromConfigStore(store: ConfigStore): ApiKeys {
 
 /** Structured WARN on every failover switch (no secrets). */
 function warnOnFailoverSwitch(event: FailoverSwitchEvent): void {
-  console.warn(
-    JSON.stringify({
+  logger.warn(
+    {
       level: 'warn',
       event: 'llm_fallback_switch',
       fromProvider: event.from.provider,
@@ -457,7 +434,8 @@ function warnOnFailoverSwitch(event: FailoverSwitchEvent): void {
       toProvider: event.to.provider,
       toModel: event.to.model,
       reason: event.reason,
-    })
+    },
+    'Host runtime event'
   )
 }
 
@@ -573,6 +551,18 @@ const UNAVAILABLE_ALLOWLIST: AllowlistView = {
 }
 function allowlistView(): AllowlistView {
   return configStore ?? UNAVAILABLE_ALLOWLIST
+}
+
+// Read the live global catalog for physical attempts. The selectable subset
+// remains enforced at selection admission, not expanded into a failover policy.
+const resolveImageInput: ImageInputResolver = (provider, model) => {
+  const view = allowlistView()
+  const entry = view
+    .allowedModels()
+    .get(provider)
+    ?.find(candidate => candidate.model === model)
+  if (!entry) return undefined
+  return { capability: entry.imageInput }
 }
 
 /**
@@ -691,7 +681,10 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     currentKeys = keys
     const next = createLLMProvider(keys, currentHost.spec.model)
     if (!next) {
-      console.error('[Main] LLM provider rebuild failed after key rotation — Host may be degraded')
+      logger.error(
+        {},
+        '[Main] LLM provider rebuild failed after key rotation — Host may be degraded'
+      )
       return
     }
     currentProvider = next
@@ -704,9 +697,9 @@ async function ensureConfigStore(host: HostCRD): Promise<ConfigStore> {
     failoverEngine?.clearCooldown()
     if (agent) {
       agent.setLLMProvider(next, currentHost.spec.model?.name)
-      console.log('[Main] LLM provider rebuilt and re-attached to agent (key rotated)')
+      logger.info({}, '[Main] LLM provider rebuilt and re-attached to agent (key rotated)')
     } else {
-      console.log('[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
+      logger.info({}, '[Main] LLM provider rebuilt (agent not ready yet, will use on init)')
     }
   })
 
@@ -732,9 +725,9 @@ async function initializeProvider(
   currentHost = host
   currentKeys = keys
 
-  console.log(`[Main] Initializing provider for host: ${host.spec.host}`)
-  console.log(`[Main] Model config:`, host.spec.model)
-  console.log(`[Main] Context ref: ${host.spec.contextRef}`)
+  logger.info({ host: host.spec.host }, '[Main] Initializing provider for host:')
+  logger.info({ model: host.spec.model }, '[Main] Model config:')
+  logger.info({ contextRef: host.spec.contextRef }, '[Main] Context ref:')
 
   currentProvider = createLLMProvider(keys, host.spec.model)
   bootFallbackEntry = null
@@ -761,25 +754,29 @@ async function initializeProvider(
         to: `${entry.provider}/${entry.model}`,
         reason: 'boot',
       })
-      console.warn(
-        JSON.stringify({
+      logger.warn(
+        {
           level: 'warn',
           event: 'llm_fallback_boot',
           fromProvider: host.spec.model?.provider ?? null,
           fromModel: host.spec.model?.name ?? null,
           toProvider: entry.provider,
           toModel: entry.model,
-        })
+        },
+        'Host runtime event'
       )
       break
     }
   }
 
   if (currentProvider) {
-    console.log(
-      bootFallbackEntry
-        ? '[Main] LLM primary inconstructible — serving via boot fallback'
-        : '[Main] LLM provider initialized successfully'
+    logger.info(
+      {
+        detail: bootFallbackEntry
+          ? '[Main] LLM primary inconstructible — serving via boot fallback'
+          : '[Main] LLM provider initialized successfully',
+      },
+      'Host runtime status'
     )
 
     // R5.10 — the primary's credentials just changed (secretRef/provider) and it
@@ -801,7 +798,7 @@ async function initializeProvider(
       agent.setLLMProvider(currentProvider, effectiveModel)
     }
   } else {
-    console.error('[Main] Failed to initialize LLM provider')
+    logger.error({}, '[Main] Failed to initialize LLM provider')
   }
 
   // Phase 6: Propagate approval config to agent
@@ -838,7 +835,10 @@ export async function admitDevelopmentMcpServers(
     try {
       await manager.addServer(server)
     } catch (error) {
-      console.error(`[Main] Dev MCP server admission failed; continuing: ${server.name}`, error)
+      logger.error(
+        { name: server.name, err: error },
+        '[Main] Dev MCP server admission failed; continuing:'
+      )
     }
   }
 }
@@ -1026,15 +1026,16 @@ function revokeMcpAuthority(reason: string, restartPolling: boolean): void {
       mcpAuthorityLastSuccessAt = 0
     },
     coordinator: mcpFleetCoordinator,
-    onCleanupFailure: () => console.error(`[Main] MCP authority cleanup failed (reason=${reason})`),
-    onRevoked: () => console.warn(`[Main] MCP authority revoked (reason=${reason})`),
+    onCleanupFailure: () =>
+      logger.error({ reason: reason }, '[Main] MCP authority cleanup failed (reason=)'),
+    onRevoked: () => logger.warn({ reason: reason }, '[Main] MCP authority revoked (reason=)'),
     shouldRestartPolling: () => !isShuttingDown && !config.devMode,
     startPolling: startContextMapperPolling,
   })
 }
 
 async function initializeMcpServers(): Promise<void> {
-  console.log('[Main] Initializing authenticated MCP server inventory')
+  logger.info({}, '[Main] Initializing authenticated MCP server inventory')
   const initializationGeneration = ++mcpInitializationGeneration
   const isInitializationCurrent = (): boolean =>
     !isShuttingDown && mcpInitializationGeneration === initializationGeneration
@@ -1086,15 +1087,18 @@ async function initializeMcpServers(): Promise<void> {
     throw new Error('MCP manager was not installed after authoritative discovery')
   }
   const connectedServers = mcpManager.getConnectedServers()
-  console.log(
-    config.devMode
-      ? `[Main] Connected to ${connectedServers.length} MCP server(s)`
-      : `[Main] Published the initial MCP fleet manager with ${connectedServers.length} currently connected server(s); background reconciliation may still be in progress`
+  logger.info(
+    {
+      detail: config.devMode
+        ? `[Main] Connected to ${connectedServers.length} MCP server(s)`
+        : `[Main] Published the initial MCP fleet manager with ${connectedServers.length} currently connected server(s); background reconciliation may still be in progress`,
+    },
+    'Host runtime status'
   )
 
   if (connectedServers.length > 0) {
     const tools = mcpManager.getAllTools()
-    console.log(`[Main] Total tools available: ${tools.length}`)
+    logger.info({ length: tools.length }, '[Main] Total tools available:')
   }
 
   // Update agent with MCP manager
@@ -1145,10 +1149,11 @@ async function pollContextMapper(): Promise<void> {
         lastSuccessAt: () => mcpAuthorityLastSuccessAt,
         revoke: revokeMcpAuthority,
         onCallerAuthorizationRejected: () =>
-          console.warn('[Main] HCC poll rejected caller authority'),
+          logger.warn({}, '[Main] HCC poll rejected caller authority'),
         onInventoryAuthorityRevoked: () =>
-          console.warn('[Main] HCC inventory no longer resolves live Host authority'),
-        onUnavailable: () => console.error('[Main] HCC authority poll failed (reason=unavailable)'),
+          logger.warn({}, '[Main] HCC inventory no longer resolves live Host authority'),
+        onUnavailable: () =>
+          logger.error({}, '[Main] HCC authority poll failed (reason=unavailable)'),
       })
     )
   }
@@ -1177,7 +1182,7 @@ export function createCoalescedPollRunner(poll: () => Promise<void>): {
     inFlight = true
     void poll()
       .catch(error => {
-        console.error('[Main] Context Mapper poll runner failed:', error)
+        logger.error({ err: error }, '[Main] Context Mapper poll runner failed:')
       })
       .finally(() => {
         inFlight = false
@@ -1206,8 +1211,9 @@ export function startContextMapperPolling(): void {
   // runner would leave the previous interval dispatching into the new runner.
   stopContextMapperPolling()
 
-  console.log(
-    `[Main] Starting context-mapper polling (interval: ${config.contextMapperPollInterval}ms)`
+  logger.info(
+    { contextMapperPollInterval: config.contextMapperPollInterval },
+    '[Main] Starting context-mapper polling (interval: ms)'
   )
 
   contextMapperPollRunner = createCoalescedPollRunner(() => pollContextMapper())
@@ -1226,7 +1232,7 @@ export function ensureContextMapperPolling(): void {
  */
 export function stopContextMapperPolling(): void {
   if (contextMapperPollTimer) {
-    console.log('[Main] Stopping context-mapper polling')
+    logger.info({}, '[Main] Stopping context-mapper polling')
     clearInterval(contextMapperPollTimer)
     contextMapperPollTimer = null
   }
@@ -1269,14 +1275,14 @@ async function runGrantRevocationSweep(manager: McpManager): Promise<void> {
     if (mcpManager !== manager) return
     const evicted = manager.evictRevokedPartitions(selectRevokedPartitionKeys(partitions, results))
     if (evicted > 0) {
-      console.log(`[Main] Grant-sweep evicted ${evicted} revoked oauth MCP partition(s)`)
+      logger.info({ evicted: evicted }, '[Main] Grant-sweep evicted revoked oauth MCP partition(s)')
     }
   } catch (err: unknown) {
     // Fail-OPEN: a control-api/gateway blip must not tear down live sessions.
     // The thrown error never carries a token (see grantExistenceClient).
-    console.warn(
-      '[Main] MCP grant-revocation sweep failed; conserving partitions (fail-open):',
-      err instanceof Error ? err.message : String(err)
+    logger.warn(
+      { err: err },
+      '[Main] MCP grant-revocation sweep failed; conserving partitions (fail-open):'
     )
   } finally {
     grantRevocationSweepInFlight = false
@@ -1292,15 +1298,16 @@ function startMcpStatusHeartbeat(): void {
   if (mcpStatusHeartbeat) return
   const interval = config.mcpStatusHeartbeatInterval
   const timeoutMs = config.mcpStatusHeartbeatTimeoutMs
-  console.log(
-    `[Main] Starting MCP status heartbeat (interval: ${interval}ms, timeout: ${timeoutMs}ms)`
+  logger.info(
+    { interval: interval, timeoutMs: timeoutMs },
+    '[Main] Starting MCP status heartbeat (interval: ms, timeout: ms)'
   )
   mcpStatusHeartbeat = new McpStatusHeartbeat({
     intervalMs: interval,
     timeoutMs,
     getRefresher: () => mcpManager,
     onError: (err: unknown) => {
-      console.error('[Main] MCP status heartbeat failed:', err)
+      logger.error({ err: err }, '[Main] MCP status heartbeat failed:')
     },
   })
   mcpStatusHeartbeat.start()
@@ -1314,10 +1321,10 @@ function startMcpStatusHeartbeat(): void {
         OAUTH_USER_PARTITION_MAX
       )
       if (evicted > 0) {
-        console.log(`[Main] Evicted ${evicted} idle oauth per-user MCP partition(s)`)
+        logger.info({ evicted: evicted }, '[Main] Evicted idle oauth per-user MCP partition(s)')
       }
     } catch (err: unknown) {
-      console.error('[Main] MCP per-user partition eviction failed:', err)
+      logger.error({ err: err }, '[Main] MCP per-user partition eviction failed:')
     }
     // Then the hot-revocation grant-sweep (mini-spec 13): ask control-api whether
     // the live OAuth partitions still have a grant and evict the revoked ones.
@@ -1328,7 +1335,7 @@ function startMcpStatusHeartbeat(): void {
 
 function stopMcpStatusHeartbeat(): void {
   if (mcpStatusHeartbeat) {
-    console.log('[Main] Stopping MCP status heartbeat')
+    logger.info({}, '[Main] Stopping MCP status heartbeat')
     mcpStatusHeartbeat.stop()
     mcpStatusHeartbeat = null
   }
@@ -1355,14 +1362,17 @@ async function applyResolvedGuardrails(): Promise<void> {
     getLlmHook,
     llmHooksNamespace: config.llmHooksNamespace,
   }).catch(err => {
-    console.error('[Main] Guardrail hook resolution failed; running without installed hooks:', err)
+    logger.error(
+      { err: err },
+      '[Main] Guardrail hook resolution failed; running without installed hooks:'
+    )
     return []
   })
   agent.setGuardrailsConfig(withResolvedHookDescriptors(hostGuardrails, resolved))
 }
 
 async function onHostChange(host: HostCRD): Promise<void> {
-  console.log(`[Main] Host configuration changed: ${host.name}`)
+  logger.info({ name: host.name }, '[Main] Host configuration changed:')
 
   const contextChanged =
     currentHost !== null && currentHost.spec.contextRef !== host.spec.contextRef
@@ -1410,7 +1420,8 @@ async function onHostChange(host: HostCRD): Promise<void> {
     connectionRefChanged ||
     fallbackSlotsChanged
   ) {
-    console.log(
+    logger.info(
+      {},
       '[Main] Rebuilding ConfigStore (provider/secretRef/connectionRef/failover slots changed)'
     )
     await ensureConfigStore(host)
@@ -1445,9 +1456,9 @@ async function onHostChange(host: HostCRD): Promise<void> {
       // so by the time onHostChange runs at runtime it is non-null; the `?.`
       // is defensive for early-boot reconcile paths.
       promptCache?.invalidateAll('identity_reconciled')
-      console.log('[Main] Identity files reconciled from CRD')
+      logger.info({}, '[Main] Identity files reconciled from CRD')
     } catch (err) {
-      console.error('[Main] Failed to apply identity files:', err)
+      logger.error({ err: err }, '[Main] Failed to apply identity files:')
     }
   }
 
@@ -1461,7 +1472,7 @@ async function onHostChange(host: HostCRD): Promise<void> {
  * Handle host deletion.
  */
 function onHostDelete(): void {
-  console.log('[Main] Host CRD deleted, shutting down')
+  logger.info({}, '[Main] Host CRD deleted, shutting down')
   revokeMcpAuthority('host_deleted', false)
   currentHost = null
   currentProvider = null
@@ -1479,7 +1490,7 @@ function setupUsageReporting(): void {
 
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   if (!runtimeAuth) {
-    console.log('[Main] LLM usage reporting disabled — MCP_HOST_RUNTIME_* env not set')
+    logger.info({}, '[Main] LLM usage reporting disabled — MCP_HOST_RUNTIME_* env not set')
     return
   }
 
@@ -1517,8 +1528,9 @@ function setupUsageReporting(): void {
       maxBytes: config.approvalPromptHistoryMaxBytes,
     })
   )
-  console.log(
-    `[Main] LLM usage reporting wired (host=${currentHost.name}, gateway=${auth.baseUrl})`
+  logger.info(
+    { name: currentHost.name, baseUrl: auth.baseUrl },
+    '[Main] LLM usage reporting wired (host=, gateway=)'
   )
 
   // P1 token budgets (§5.1) — reuse the SAME shared McpHostRuntimeAuth (bearer +
@@ -1544,7 +1556,7 @@ function setupUsageReporting(): void {
           }
         : null
     )
-    console.log('[Main] Token budget enforcement wired (CLERUM_BUDGETS_ENABLED=true)')
+    logger.info({}, '[Main] Token budget enforcement wired (CLERUM_BUDGETS_ENABLED=true)')
   }
 }
 
@@ -1576,15 +1588,16 @@ function resolveSessionDbPath(): string {
 async function initializeConversationStore(): Promise<ConversationStoreHandle | null> {
   if (!agent) return null
   if (config.sessionStoreMode === 'memory') {
-    console.log('[Main] Conversation store: memory (legacy fallback)')
+    logger.info({}, '[Main] Conversation store: memory (legacy fallback)')
     return null
   }
 
   const dbPath = resolveSessionDbPath()
   const memoryCfg = currentHost?.spec.memory || config.memory
   if (!memoryCfg?.enabled) {
-    console.warn(
-      `[Main] SQLite state will be ephemeral — workspace memory is disabled. dbPath=${dbPath}`
+    logger.warn(
+      { dbPath: dbPath },
+      '[Main] SQLite state will be ephemeral — workspace memory is disabled. dbPath='
     )
   }
 
@@ -1604,9 +1617,13 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
   })
 
   agent.setConversationStore(handle.store)
-  console.log(
-    `[Main] Conversation store mode=${handle.mode} dbPath=${dbPath} ` +
-      `cacheSize=${config.conversationCacheSize} barrierMode=${barrierMode ? 'full' : 'normal'}`
+  logger.info(
+    {
+      detail:
+        `[Main] Conversation store mode=${handle.mode} dbPath=${dbPath} ` +
+        `cacheSize=${config.conversationCacheSize} barrierMode=${barrierMode ? 'full' : 'normal'}`,
+    },
+    'Host runtime status'
   )
 
   // Wire the cold-start loader so `agent.bootstrap()` (called below) can
@@ -1617,8 +1634,9 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
   const loader = new SqliteColdStartLoader(handle.store, {
     spilloverResolver,
     onExpired: entry => {
-      console.warn(
-        `[Main] Cold-start: dropping approval ${entry.request_id} — spillover ref expired`
+      logger.warn(
+        { request_id: entry.request_id },
+        '[Main] Cold-start: dropping approval {request_id} — spillover ref expired'
       )
     },
   })
@@ -1631,7 +1649,7 @@ async function initializeConversationStore(): Promise<ConversationStoreHandle | 
  * Initialize the message queue and agent.
  */
 async function initializeAgent(): Promise<void> {
-  console.log('[Main] Initializing message queue and agent')
+  logger.info({}, '[Main] Initializing message queue and agent')
 
   // Create message queue
   messageQueue = new MessageQueue(config.agentMaxQueueSize)
@@ -1650,8 +1668,15 @@ async function initializeAgent(): Promise<void> {
     approvalTimeout: config.agentApprovalTimeout,
   })
 
-  console.log(
-    `[Main] Agent config: taskDelay=${config.agentTaskDelay}ms, maxTaskDuration=${config.agentMaxTaskDuration}ms, maxToolCalls=${config.agentMaxToolCallsPerTask}, maxQueueSize=${config.agentMaxQueueSize}, approvalTimeout=${config.agentApprovalTimeout}ms`
+  logger.info(
+    {
+      agentTaskDelay: config.agentTaskDelay,
+      agentMaxTaskDuration: config.agentMaxTaskDuration,
+      agentMaxToolCallsPerTask: config.agentMaxToolCallsPerTask,
+      agentMaxQueueSize: config.agentMaxQueueSize,
+      agentApprovalTimeout: config.agentApprovalTimeout,
+    },
+    '[Main] Agent config: taskDelay=ms, maxTaskDuration=ms, maxToolCalls=, maxQueueSize=, approvalTimeout=ms'
   )
 
   // R2 — inject the per-task model resolver. Closes over the module globals
@@ -1659,6 +1684,7 @@ async function initializeAgent(): Promise<void> {
   // key rotation or allowlist reload is picked up on the next task with no
   // re-wiring. Set once here (the agent is created once).
   agent.setTaskModelResolver(resolveTaskModel)
+  agent.setImageInputResolver(resolveImageInput)
 
   // R5 — inject the provider-fallback support. Closes over the module globals
   // (currentPolicy/failoverEngine/bootFallbackEntry + configStore) so each task
@@ -1679,8 +1705,12 @@ async function initializeAgent(): Promise<void> {
     )
   }
   validateApprovalConfig(approvalCfg, knownNativeToolNames, config.nativeTool.httpAllowlist)
-  console.log(
-    `[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'} (policy: ${approvalCfg?.defaultPolicy || 'none/cli_only'})`
+  logger.info(
+    {
+      detail: config.enableApproval ? 'ENABLED' : 'DISABLED',
+      detail1: approvalCfg?.defaultPolicy || 'none/cli_only',
+    },
+    '[Main] Approval system: (policy: )'
   )
 
   // Shell-tool subprocesses see the ConfigStore user-env snapshot at spawn
@@ -1704,7 +1734,7 @@ async function initializeAgent(): Promise<void> {
     const workspacePath = memoryCfg.workspacePath ?? config.memory.workspacePath ?? './workspace'
     workspaceProvider = new ScopedWorkspaceProvider(workspacePath)
     agent.setWorkspaceProvider(workspaceProvider)
-    console.log(`[Main] Workspace memory enabled at: ${workspacePath}`)
+    logger.info({ workspacePath: workspacePath }, '[Main] Workspace memory enabled at:')
 
     // Dev mode has no Host CRD watch, so apply env-sourced personalization here.
     // In production, the Host watch also applies this path on every CRD update.
@@ -1720,7 +1750,7 @@ async function initializeAgent(): Promise<void> {
           promptCache?.invalidateAll('identity_reconciled')
         })
         .catch(err => {
-          console.error('[Main] Failed to apply identity files at startup:', err)
+          logger.error({ err: err }, '[Main] Failed to apply identity files at startup:')
         })
     }
 
@@ -1738,12 +1768,16 @@ async function initializeAgent(): Promise<void> {
       })
       // Lazy boot sweep (best-effort; failures are logged inside).
       spilloverStorage.sweep().catch(err => {
-        console.error('[Main] Spillover boot sweep failed (non-fatal):', err)
+        logger.error({ err: err }, '[Main] Spillover boot sweep failed (non-fatal):')
       })
       spilloverStorage.startGc()
       agent.setSpilloverStorage(spilloverStorage)
-      console.log(
-        `[Main] Spillover storage enabled (threshold=${config.toolSpilloverThresholdBytes}B, ttl=${config.spilloverTtlMs}ms)`
+      logger.info(
+        {
+          toolSpilloverThresholdBytes: config.toolSpilloverThresholdBytes,
+          spilloverTtlMs: config.spilloverTtlMs,
+        },
+        '[Main] Spillover storage enabled (threshold=B, ttl=ms)'
       )
     }
   }
@@ -1829,19 +1863,23 @@ async function initializeAgent(): Promise<void> {
     // corrupt DB does not block traffic — the metric / log surfaces the issue.
     sessionSearchService.sweepRetention(config.searchRetentionDays).then(
       deleted => {
-        console.log(
-          JSON.stringify({
+        logger.info(
+          {
             event: 'search_retention_sweep',
             deleted_sessions: deleted,
             retention_days: config.searchRetentionDays,
-          })
+          },
+          'Host runtime event'
         )
       },
       err => {
-        console.error('[Main] Session search retention sweep failed (non-fatal):', err)
+        logger.error({ err: err }, '[Main] Session search retention sweep failed (non-fatal):')
       }
     )
-    console.log(`[Main] Session search enabled (retentionDays=${config.searchRetentionDays})`)
+    logger.info(
+      { searchRetentionDays: config.searchRetentionDays },
+      '[Main] Session search enabled (retentionDays=)'
+    )
   }
 
   // T2.2 — Process-wide system-prompt cache. Built unconditionally so the
@@ -1853,13 +1891,16 @@ async function initializeAgent(): Promise<void> {
     const cache = new PromptCache({
       onInvalidate: (key, reason) => {
         clerumPromptCacheInvalidationsTotal.inc({ reason })
-        console.log(`[PromptCache] invalidate sessionKey=${key} reason=${reason}`)
+        logger.info({ key: key, reason: reason }, '[PromptCache] invalidate sessionKey= reason=')
       },
     })
     promptCache = cache
     conversationStoreHandle?.store?.onEvict?.(sessionKey => cache.drop(sessionKey))
     agent.setPromptCache(cache)
-    console.log(`[Main] Prompt cache wired (flag=${config.promptCacheEnabled ? 'on' : 'off'})`)
+    logger.info(
+      { detail: config.promptCacheEnabled ? 'on' : 'off' },
+      '[Main] Prompt cache wired (flag=)'
+    )
   }
 
   // P.3 invariant #3: rehydrate pending_approvals from durable storage
@@ -1874,7 +1915,7 @@ async function initializeAgent(): Promise<void> {
   agent.start()
   cronScheduler.start()
 
-  console.log('[Main] Agent and cron scheduler started')
+  logger.info({}, '[Main] Agent and cron scheduler started')
 }
 
 // R2 — thin wrapper that injects live process state (current Host model config,
@@ -1886,7 +1927,9 @@ function applySessionModelSelection(
   userSub: string,
   hostRef: string,
   chatId: string | undefined,
-  model: string
+  model: string,
+  expectedRevision?: number,
+  options?: SessionModelSelectionOptions
 ): Promise<SetModelResult> {
   return applySessionModelSelectionCore(
     {
@@ -1900,7 +1943,9 @@ function applySessionModelSelection(
     userSub,
     hostRef,
     chatId,
-    model
+    model,
+    expectedRevision,
+    options
   )
 }
 
@@ -1932,127 +1977,55 @@ function applySessionTitle(
  * - Phase 2: After approval/denial, the final response is stored in pendingTaskResults
  *   for channel-reader to poll via GET /task/:id/result.
  */
+const incomingDelivery = new IncomingDelivery()
+
+function dispatchIncomingMessage(
+  message: IncomingMessage,
+  options?: { async?: boolean }
+): MessageResponse | Promise<MessageResponse> {
+  const handler = new IncomingMessageHandler(message, {
+    messageQueue: messageQueue!,
+    agent,
+    pendingTaskResults,
+    getModel: () => currentHost?.spec.model?.name || 'unknown',
+    sanitizeAttachments,
+    sessionProcessor: sessionProcessor ?? undefined,
+    taskLifecycle: taskLifecycle!,
+  })
+
+  if (options?.async) {
+    return handler.executeAsync()
+  }
+
+  return handler.execute()
+}
+
 function handleIncomingMessage(
   message: IncomingMessage,
   options?: { async?: boolean }
 ): MessageResponse | Promise<MessageResponse> {
-  const sanitizedIncomingAttachments = sanitizeIncomingAttachments(message.attachments)
-  const normalizedMessage: IncomingMessage = {
-    ...message,
-    attachments: sanitizedIncomingAttachments,
-  }
-
-  console.log('\n' + '='.repeat(50))
-  console.log('[Main] Received message')
-  console.log(`[Main]   Channel: ${normalizedMessage.channelType}`)
-  console.log(`[Main]   Channel ID: ${normalizedMessage.channelId}`)
-  console.log(`[Main]   Sender: ${normalizedMessage.sender}`)
-  console.log(`[Main]   Time: ${normalizedMessage.timestamp}`)
-  console.log(`[Main]   Message ID: ${normalizedMessage.messageId}`)
-  console.log(
-    `[Main]   Content: ${normalizedMessage.content.substring(0, 100)}${normalizedMessage.content.length > 100 ? '...' : ''}`
+  if (!messageQueue) return prepareIncomingMessage(message, options)
+  return incomingDelivery.run(
+    message,
+    messageQueue,
+    () => prepareIncomingMessage(message, options),
+    () => dispatchIncomingMessage({ ...message, imageModel: undefined }, options)
   )
-  if (normalizedMessage.attachments?.length) {
-    console.log(`[Main]   Attachments: ${normalizedMessage.attachments.length}`)
-  }
-  console.log('='.repeat(50))
-
-  if (!messageQueue) {
-    return {
-      success: false,
-      error: {
-        code: 'LLM_API_CALL_FAILED',
-        message: 'Message queue not initialized',
-        retryable: false,
-        provider: 'unknown',
-      },
-    }
-  }
-
-  // Refuse new tasks while the Host is degraded. Operator fixes the LLM
-  // Secret and the Host returns to ready within ~1 s — no restart.
-  const degraded = computeDegradedReason()
-  if (degraded) {
-    console.warn(`[Main] Refusing message — Host is degraded: ${degraded.reason}`)
-    return {
-      success: false,
-      error: {
-        code: 'LLM_KEY_MISSING',
-        message: degraded.message,
-        retryable: true,
-        provider: currentHost?.spec.model?.provider ?? 'unknown',
-      },
-    }
-  }
-
-  const runHandler = (): MessageResponse | Promise<MessageResponse> => {
-    const handler = new IncomingMessageHandler(normalizedMessage, {
-      messageQueue: messageQueue!,
-      agent,
-      pendingTaskResults,
-      getModel: () => currentHost?.spec.model?.name || 'unknown',
-      sanitizeAttachments,
-      sessionProcessor: sessionProcessor ?? undefined,
-      taskLifecycle: taskLifecycle!,
-    })
-
-    if (options?.async) {
-      return handler.executeAsync()
-    }
-
-    return handler.execute()
-  }
-
-  // R2 — piggybacked per-session model. Because a suspended Host can't serve
-  // `POST /v1/runtime/model`, the desktop rides the user's pick on the message
-  // that wakes us. Apply it to THIS session and AWAIT the write BEFORE the task
-  // is created, so the per-task resolver (`stateMachine` taskModelResolver over
-  // `conv.modelSelections`) reads the row we just wrote. Fail-OPEN on the
-  // message: a rejected/degraded selection is logged and ignored, never dropping
-  // the user's turn (fail-closed only on the selection, inside the helper).
-  const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
-  if (piggybackModel && normalizedMessage.channelType === 'rpc') {
-    return (async () => {
-      try {
-        const applied = await applySessionModelSelection(
-          normalizedMessage.sender,
-          normalizedMessage.channelId,
-          normalizedMessage.threadId,
-          piggybackModel
-        )
-        if (!applied.ok) {
-          console.warn(
-            JSON.stringify({
-              level: 'warn',
-              event: 'message_model_ignored',
-              userId: normalizedMessage.sender,
-              chatId: normalizedMessage.threadId ?? null,
-              provider: applied.provider,
-              model: piggybackModel,
-              reason: applied.reason,
-            })
-          )
-        }
-      } catch (error) {
-        console.warn(
-          JSON.stringify({
-            level: 'warn',
-            event: 'message_model_ignored',
-            userId: normalizedMessage.sender,
-            chatId: normalizedMessage.threadId ?? null,
-            provider: currentHost?.spec.model?.provider ?? 'unknown',
-            model: piggybackModel,
-            reason: 'apply_failed',
-            error: error instanceof Error ? error.message : String(error),
-          })
-        )
-      }
-      return runHandler()
-    })()
-  }
-
-  return runHandler()
 }
+
+const prepareIncomingMessage = createIncomingAdmission({
+  limits: { maxCount: INCOMING_IMAGE_MAX_COUNT, maxBytes: config.attachmentMaxBytes },
+  queueReady: () => Boolean(messageQueue),
+  degradedReason: computeDegradedReason,
+  hostProvider: () => currentHost?.spec.model?.provider,
+  getConversationByKey: (key, userId) =>
+    agent!.getConversationManager().getSessionByKeyForUserAsync(key, userId),
+  resolveTaskModel,
+  resolveImageInput,
+  applySessionModelSelection,
+  dispatch: dispatchIncomingMessage,
+  logger,
+})
 
 function sourceMatchesRuntimeCaller(
   source: { channelType?: string | null; channelId?: string | null; sender?: string | null },
@@ -2077,8 +2050,8 @@ function logRuntimeOwnershipMismatch(
   caller: RuntimeCallerContext,
   source: { channelType?: string | null; channelId?: string | null; sender?: string | null }
 ): void {
-  console.warn(
-    JSON.stringify({
+  logger.warn(
+    {
       event: 'runtime_task_ownership_mismatch',
       route,
       taskId,
@@ -2090,7 +2063,8 @@ function logRuntimeOwnershipMismatch(
       taskChannelType: source.channelType ?? null,
       taskChannelId: source.channelId ?? null,
       taskSender: source.sender ?? null,
-    })
+    },
+    'Host runtime event'
   )
 }
 
@@ -2199,8 +2173,9 @@ async function handleApprovalDecision(
   }
 
   const action = decision.approved ? 'approve' : 'deny'
-  console.log(
-    `[Main] Processing ${action} from userId=${decision.userId} requestId=${decision.requestId}`
+  logger.info(
+    { action: action, userId: decision.userId, requestId: decision.requestId },
+    '[Main] Processing from userId= requestId='
   )
 
   const result = decision.approved
@@ -2219,9 +2194,12 @@ async function handleApprovalDecision(
       )
 
   if (!result.success) {
-    console.error(`[Main] ${action} failed: ${result.error}`)
+    logger.error({ action: action, err: new Error(result.error) }, '[Main] failed:')
   } else {
-    console.log(`[Main] ${action} succeeded for requestId=${decision.requestId}`)
+    logger.info(
+      { action: action, requestId: decision.requestId },
+      '[Main] succeeded for requestId='
+    )
   }
   return result
 }
@@ -2235,9 +2213,13 @@ async function handleProviderWorkflowApprovalDecision(
   run?: Record<string, unknown> | null
   error?: string
 }> {
-  console.log(
-    `[Main] Processing provider workflow approval decision ${decision.decision} ` +
-      `requestId=${decision.approvalRequestId} medium=${decision.providerIdentity.medium}`
+  logger.info(
+    {
+      detail:
+        `[Main] Processing provider workflow approval decision ${decision.decision} ` +
+        `requestId=${decision.approvalRequestId} medium=${decision.providerIdentity.medium}`,
+    },
+    'Host runtime status'
   )
   return submitProviderWorkflowApprovalDecision(decision, runtimeAuth)
 }
@@ -2301,10 +2283,9 @@ export async function handleProviderMessageAuthorization(
     return { authorized: false, reason: 'error' }
   } catch (error) {
     const reason = classifyAuthorizationFailure(error)
-    console.warn(
-      `[Main] Provider message authorization failed closed (${reason}): ${
-        error instanceof Error ? error.message : String(error)
-      }`
+    logger.warn(
+      { reason: reason, err: error },
+      '[Main] Provider message authorization failed closed ():'
     )
     return { authorized: false, reason }
   }
@@ -2318,9 +2299,13 @@ async function handleProviderWorkflowApprovalResolve(
   | { status: 'ambiguous' }
   | { status: 'error'; error: string }
 > {
-  console.log(
-    `[Main] Resolving provider workflow approval recipe=${input.recipeName} ` +
-      `medium=${input.providerIdentity.medium}`
+  logger.info(
+    {
+      detail:
+        `[Main] Resolving provider workflow approval recipe=${input.recipeName} ` +
+        `medium=${input.providerIdentity.medium}`,
+    },
+    'Host runtime status'
   )
   return resolvePendingProviderWorkflowApproval(input, runtimeAuth)
 }
@@ -2345,11 +2330,7 @@ async function handleProviderWorkflowResultRequest(
   try {
     context = await resolveProviderWorkflowCallerContext(message, key => process.env[key])
   } catch (error) {
-    console.warn(
-      `[Main] Provider workflow result access failed closed: ${
-        error instanceof Error ? error.message : String(error)
-      }`
-    )
+    logger.warn({ err: error }, '[Main] Provider workflow result access failed closed:')
     context = null
   }
   if (!context?.targetUserId && !context?.targetTeamId) {
@@ -2663,6 +2644,7 @@ async function startRPCServer(): Promise<void> {
     const view = hostAllowlistView()
     const { degraded, models } = projectModels(view, provider, hostDefault)
     let sessionModel: string | null = null
+    let modelSelectionRevision = 0
     let sessionModelBlocked: string | undefined
     if (chatId && modelCfg?.provider && modelCfg.name) {
       const key = serializeSessionKey({
@@ -2675,6 +2657,7 @@ async function startRPCServer(): Promise<void> {
         .getConversationManager()
         .getSessionByKeyForUserAsync(key, userSub)
       const saved = conversation?.modelSelections?.[provider]
+      modelSelectionRevision = conversation?.modelSelectionRevision ?? 0
       if (saved) {
         const resolution = resolveSessionModel(
           view,
@@ -2688,7 +2671,15 @@ async function startRPCServer(): Promise<void> {
         else sessionModel = saved
       }
     }
-    return { provider, hostDefault, sessionModel, sessionModelBlocked, degraded, models }
+    return {
+      provider,
+      hostDefault,
+      sessionModel,
+      sessionModelBlocked,
+      modelSelectionRevision,
+      degraded,
+      models,
+    }
   }
 
   // R2 — POST /v1/runtime/model. Thin route adapter over the shared
@@ -2696,8 +2687,13 @@ async function startRPCServer(): Promise<void> {
   // degraded → only the Host default; persist the per-session selection; report
   // next-task effectivity). The same core also runs for a piggybacked
   // `message.model` in `handleIncomingMessage`, so the two paths cannot diverge.
-  const handleSetModel = (userSub: string, hostRef: string, chatId: string, model: string) =>
-    applySessionModelSelection(userSub, hostRef, chatId, model)
+  const handleSetModel = (
+    userSub: string,
+    hostRef: string,
+    chatId: string,
+    model: string,
+    expectedRevision?: number
+  ) => applySessionModelSelection(userSub, hostRef, chatId, model, expectedRevision)
 
   // Spec 15 Fase B — PATCH /v1/runtime/sessions/:agent/:chatId/name rename adapter.
   const handleSetTitle = (userSub: string, agentName: string, chatId: string, title: string) =>
@@ -2766,13 +2762,14 @@ async function startRPCServer(): Promise<void> {
     return { unsubscribe }
   })
   rpcServer.onCancel((taskId, requesterUserId) => {
-    console.log(
-      JSON.stringify({
+    logger.info(
+      {
         event: 'cancel_requested',
         taskId,
         requesterUserId: requesterUserId ?? null,
         origin: 'user', // HTTP-initiated cancels are always user-originated. Shutdown drain logs 'system' from stateMachine.stop().
-      })
+      },
+      'Host runtime event'
     )
 
     // Ownership check: if the record carries a submittedBy identity AND the
@@ -2787,13 +2784,14 @@ async function startRPCServer(): Promise<void> {
       requesterUserId &&
       existing.submittedBy !== requesterUserId
     ) {
-      console.warn(
-        JSON.stringify({
+      logger.warn(
+        {
           event: 'cancel_ownership_mismatch',
           taskId,
           submittedBy: existing.submittedBy,
           requester: requesterUserId,
-        })
+        },
+        'Host runtime event'
       )
       // Do NOT leak task existence to unauthorized requesters
       return 'not_found'
@@ -2802,24 +2800,26 @@ async function startRPCServer(): Promise<void> {
     const outcome = taskLifecycle!.transition(taskId, 'cancelled', 'user_requested')
 
     if (outcome.kind === 'applied') {
-      console.log(
-        JSON.stringify({
+      logger.info(
+        {
           event: 'cancel_applied',
           taskId,
           from_state: outcome.from,
           reason: outcome.reason,
-        })
+        },
+        'Host runtime event'
       )
       return 'cancelled'
     }
     if (outcome.kind === 'already_terminal') {
-      console.log(
-        JSON.stringify({
+      logger.info(
+        {
           event: 'already_terminal',
           taskId,
           current_state: outcome.state,
           requested_transition: 'cancelled',
-        })
+        },
+        'Host runtime event'
       )
       return 'already_terminal'
     }
@@ -2827,7 +2827,7 @@ async function startRPCServer(): Promise<void> {
       return 'not_found'
     }
     // kind === 'illegal' — should never happen for cancel
-    console.error('[cancel] illegal transition', outcome)
+    logger.error({ outcome: outcome }, '[cancel] illegal transition')
     return 'not_found'
   })
   await rpcServer.start()
@@ -2954,9 +2954,13 @@ function startStatelessHeartbeat(): void {
   rpcServer.setLifecycleGate(heartbeat)
   heartbeat.start()
   statelessHeartbeat = heartbeat
-  console.log(
-    `[Main] Stateless heartbeat started (interval=${config.statelessHeartbeatIntervalMs}ms, ` +
-      `target=${config.mcpHostGatewayUrl})`
+  logger.info(
+    {
+      detail:
+        `[Main] Stateless heartbeat started (interval=${config.statelessHeartbeatIntervalMs}ms, ` +
+        `target=${config.mcpHostGatewayUrl})`,
+    },
+    'Host runtime status'
   )
 }
 
@@ -2965,13 +2969,13 @@ function startStatelessHeartbeat(): void {
  */
 async function shutdown(signal: string): Promise<void> {
   if (isShuttingDown) {
-    console.log('[Main] Shutdown already in progress...')
+    logger.info({}, '[Main] Shutdown already in progress...')
     return
   }
   isShuttingDown = true
   mcpInitializationGeneration += 1
 
-  console.log(`[Main] Received ${signal}, shutting down`)
+  logger.info({ signal: signal }, '[Main] Received , shutting down')
 
   // Fence MCP authority and detach live tools before any awaited shutdown
   // phase. Delayed polls and in-flight connects cannot reopen a closed manager.
@@ -3010,10 +3014,7 @@ async function shutdown(signal: string): Promise<void> {
       usageReporter.stop()
       await usageReporter.drain()
     } catch (err) {
-      console.warn(
-        '[Main] UsageReporter drain failed during shutdown:',
-        err instanceof Error ? err.message : String(err)
-      )
+      logger.warn({ err: err }, '[Main] UsageReporter drain failed during shutdown:')
     }
   }
   if (governedRunReporter) {
@@ -3021,10 +3022,7 @@ async function shutdown(signal: string): Promise<void> {
       governedRunReporter.stop()
       await governedRunReporter.drain()
     } catch (err) {
-      console.warn(
-        '[Main] GovernedRunReporter drain failed during shutdown:',
-        err instanceof Error ? err.message : String(err)
-      )
+      logger.warn({ err: err }, '[Main] GovernedRunReporter drain failed during shutdown:')
     }
   }
 
@@ -3041,7 +3039,7 @@ async function shutdown(signal: string): Promise<void> {
     try {
       await conversationStoreHandle.shutdown()
     } catch (err) {
-      console.warn('[Main] ConversationStore shutdown raised:', err)
+      logger.warn({ err: err }, '[Main] ConversationStore shutdown raised:')
     }
   }
 
@@ -3052,7 +3050,7 @@ async function shutdown(signal: string): Promise<void> {
  * Start the MCP Host service in dev mode.
  */
 async function startDevMode(): Promise<void> {
-  console.log('[Main] Starting in DEV MODE')
+  logger.info({}, '[Main] Starting in DEV MODE')
 
   // Use API keys from environment variables. Registry-driven: read each
   // provider's credential slots by env var (ALL_PROVIDERS order = dev priority).
@@ -3086,7 +3084,10 @@ async function startDevMode(): Promise<void> {
       ...hostSpec,
       model: { provider, name: defaultModel },
     }
-    console.log(`[Main] Auto-detected provider: ${provider} (based on available API key)`)
+    logger.info(
+      { provider: provider },
+      '[Main] Auto-detected provider: (based on available API key)'
+    )
   }
 
   // Phase 6: Attach approval config to host spec if provided via env var
@@ -3116,13 +3117,13 @@ async function startDevMode(): Promise<void> {
   )
 
   if (config.devMcpServers && config.devMcpServers.length > 0) {
-    console.log(`[Main] Adding ${config.devMcpServers.length} dev MCP server(s)`)
+    logger.info({ length: config.devMcpServers.length }, '[Main] Adding dev MCP server(s)')
     await admitDevelopmentMcpServers(config.devMcpServers, mcpManager)
 
     const tools = mcpManager.getAllTools()
-    console.log(`[Main] Total tools available: ${tools.length}`)
+    logger.info({ length: tools.length }, '[Main] Total tools available:')
   } else {
-    console.log('[Main] No MCP servers configured in dev mode')
+    logger.info({}, '[Main] No MCP servers configured in dev mode')
   }
 
   // Initialize agent (after provider and MCP manager are ready)
@@ -3137,9 +3138,9 @@ async function startDevMode(): Promise<void> {
   // Stage 3 — stateless lifecycle heartbeat + reversible DRAINING fence.
   startStatelessHeartbeat()
 
-  console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
-  console.log('\n[Main] MCP Host running in dev mode. Press Ctrl+C to exit.')
-  console.log('[Main] Waiting for messages from channel-reader...\n')
+  logger.info({ detail: config.enableApproval ? 'ENABLED' : 'DISABLED' }, '[Main] Approval system:')
+  logger.info({}, '[Main] MCP Host running in dev mode. Press Ctrl+C to exit.')
+  logger.info({}, '[Main] Waiting for messages from channel-reader...')
 
   // Handle graceful shutdown
   process.once('SIGTERM', () => shutdown('SIGTERM'))
@@ -3150,15 +3151,15 @@ async function startDevMode(): Promise<void> {
  * Start the MCP Host service in production mode.
  */
 async function startProductionMode(): Promise<void> {
-  console.log('[Main] Starting in PRODUCTION MODE')
-  console.log(`[Main] Host name: ${config.hostName}`)
-  console.log(`[Main] Namespace: ${config.namespace}`)
-  console.log(`[Main] Context Mapper URL: ${config.contextMapperUrl}`)
+  logger.info({}, '[Main] Starting in PRODUCTION MODE')
+  logger.info({ hostName: config.hostName }, '[Main] Host name:')
+  logger.info({ namespace: config.namespace }, '[Main] Namespace:')
+  logger.info({}, 'Context mapper configured')
 
   const host = await getHost(config.hostName)
 
   if (!host) {
-    console.error(`[Main] Host CRD not found: ${config.hostName}`)
+    logger.error({ hostName: config.hostName }, '[Main] Host CRD not found:')
     process.exit(1)
   }
 
@@ -3193,7 +3194,7 @@ async function startProductionMode(): Promise<void> {
       !!hooks &&
       Object.values(hooks).some(refs => Array.isArray(refs) && refs.some(r => r?.id === name))
     if (referenced) {
-      console.log(`[Main] Referenced LlmHook ${name} changed — re-resolving guardrails`)
+      logger.info({ name: name }, '[Main] Referenced LlmHook changed — re-resolving guardrails')
       void applyResolvedGuardrails()
     }
   })
@@ -3216,9 +3217,9 @@ async function startProductionMode(): Promise<void> {
     afterInitialAttempt: () => ensureContextMapperPolling(),
   })
 
-  console.log(`[Main] Approval system: ${config.enableApproval ? 'ENABLED' : 'DISABLED'}`)
-  console.log('[Main] MCP Host running. Press Ctrl+C to exit.')
-  console.log('[Main] Waiting for messages from channel-reader...\n')
+  logger.info({ detail: config.enableApproval ? 'ENABLED' : 'DISABLED' }, '[Main] Approval system:')
+  logger.info({}, '[Main] MCP Host running. Press Ctrl+C to exit.')
+  logger.info({}, '[Main] Waiting for messages from channel-reader...')
 
   // Handle graceful shutdown
   process.once('SIGTERM', () => shutdown('SIGTERM'))
@@ -3238,7 +3239,10 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
     )
   }
 
-  console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
+  logger.info(
+    { workflowRecipeName: config.workflowRecipeName },
+    '[Main] Starting in SDK-ONLY MODE (recipe: )'
+  )
   setCodexPolicyBindingReader(() => sdkOnlyBindingAsPolicy())
   setGrokPolicyBindingReader(() => sdkOnlyGrokBindingAsPolicy())
 
@@ -3307,7 +3311,7 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
     throw err
   }
 
-  console.log('[Main] SDK-only mcp-host ready — waiting for WRC identity bootstrap')
+  logger.info({}, '[Main] SDK-only mcp-host ready — waiting for WRC identity bootstrap')
   process.once('SIGTERM', () => shutdown('SIGTERM'))
   process.once('SIGINT', () => shutdown('SIGINT'))
 }
@@ -3316,15 +3320,16 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
  * Main entry point.
  */
 async function main(): Promise<void> {
-  console.log('='.repeat(50))
-  console.log('MCP Host - Starting')
-  console.log('='.repeat(50))
+  logger.info({ detail: '='.repeat(50) }, 'Host runtime status')
+  logger.info({}, 'MCP Host - Starting')
+  logger.info({ detail: '='.repeat(50) }, 'Host runtime status')
 
   // M-18: Startup validation — crash-fail if auth is enabled but keys are missing.
   // Silently disabling auth leaves workflow endpoints unauthenticated with no indication
   // in metrics or logs that auth is off. In workflow mode this is always a misconfiguration.
   if (config.enableAuth && !config.authJwtPublicKey) {
-    console.error(
+    logger.error(
+      {},
       '[Main] FATAL: enableAuth=true but CLERUM_AUTH_JWT_PUBLIC_KEY is not set — refusing to start'
     )
     process.exit(1)
@@ -3334,8 +3339,9 @@ async function main(): Promise<void> {
     (config.runtimeKind === 'workflow' || config.runtimeKind === 'sdk-only') &&
     !config.wrcPublicKey
   ) {
-    console.error(
-      `[Main] FATAL: enableAuth=true in ${config.runtimeKind} mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start`
+    logger.error(
+      { runtimeKind: config.runtimeKind },
+      '[Main] FATAL: enableAuth=true in mode but WRC_PUBLIC_KEY_PEM is not set — refusing to start'
     )
     process.exit(1)
   }
@@ -3354,7 +3360,7 @@ async function main(): Promise<void> {
     })
   } catch (err) {
     if (err instanceof StatelessBootError) {
-      console.error(`[Main] FATAL: ${err.message}`)
+      logger.error({ err: err }, '[Main] FATAL:')
       process.exit(1)
     }
     throw err
@@ -3367,7 +3373,7 @@ async function main(): Promise<void> {
     })
   } catch (err) {
     if (err instanceof StatelessCronPolicyError) {
-      console.error(`[Main] FATAL: ${err.message}`)
+      logger.error({ err: err }, '[Main] FATAL:')
       process.exit(1)
     }
     throw err
@@ -3379,7 +3385,8 @@ async function main(): Promise<void> {
   // stateless Host could never report activity and would poison HCC's
   // suspend decisions.
   if (config.statelessLifecycle && !config.mcpHostGatewayUrl) {
-    console.error(
+    logger.error(
+      {},
       '[Main] FATAL: CLERUM_STATELESS_LIFECYCLE=true but MCP_HOST_GATEWAY_URL is not set — refusing to start'
     )
     process.exit(1)
@@ -3397,8 +3404,9 @@ async function main(): Promise<void> {
       missingApprovalVars.push('MCP_HOST_WORKFLOW_CONTROL_TOKEN_FILE')
     }
     if (missingApprovalVars.length > 0) {
-      console.error(
-        `[Main] FATAL: Workflow mode enabled but runtime token vars missing: ${missingApprovalVars.join(', ')} — refusing to start`
+      logger.error(
+        { detail: missingApprovalVars.join(', ') },
+        '[Main] FATAL: Workflow mode enabled but runtime token vars missing: — refusing to start'
       )
       process.exit(1)
     }
@@ -3409,7 +3417,10 @@ async function main(): Promise<void> {
   await dispatchMcpHostRuntime(config.runtimeKind, {
     sdkOnly: startPluginWorkloadSdkOnlyMode,
     workflow: async () => {
-      console.log(`[Main] Starting in WORKFLOW MODE (recipe: ${config.workflowRecipeName})`)
+      logger.info(
+        { workflowRecipeName: config.workflowRecipeName },
+        '[Main] Starting in WORKFLOW MODE (recipe: )'
+      )
 
       const { WorkflowService } = await import('./workflow/workflowService')
       const { McpClient, staticTokenProvider } = await import('./mcp/client')
@@ -3526,7 +3537,7 @@ async function main(): Promise<void> {
         await pluginWorkloadSdkServer.start()
       }
 
-      console.log('[Main] Workflow mcp-host ready — waiting for /configure from WRC')
+      logger.info({}, '[Main] Workflow mcp-host ready — waiting for /configure from WRC')
       process.once('SIGTERM', () => shutdown('SIGTERM'))
       process.once('SIGINT', () => shutdown('SIGINT'))
     },
@@ -3551,14 +3562,17 @@ if (require.main === module) {
   // and exit non-zero for a clean k8s restart; an unhandledRejection is logged
   // for triage but is not treated as fatal on its own.
   process.on('uncaughtException', (err, origin) => {
-    console.error(`[Main] FATAL uncaughtException (${origin}):`, err)
+    logger.error({ origin: origin, err: err }, '[Main] FATAL uncaughtException ():')
     process.exit(1)
   })
   process.on('unhandledRejection', reason => {
-    console.error('[Main] unhandledRejection:', reason)
+    logger.error(
+      { err: reason instanceof Error ? reason : new Error('Unhandled rejection') },
+      '[Main] unhandledRejection:'
+    )
   })
   main().catch(error => {
-    console.error('[Main] Fatal error:', error)
+    logger.error({ err: error }, '[Main] Fatal error:')
     process.exit(1)
   })
 }

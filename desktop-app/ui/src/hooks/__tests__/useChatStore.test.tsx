@@ -28,33 +28,31 @@ describe('useChatStore remote request cache', () => {
     expect(listSessions).toHaveBeenCalledTimes(2)
   })
 
-  it('does not reuse remote session or model cache entries across cache scopes', async () => {
+  it('does not reuse remote session cache entries across cache scopes', async () => {
     const listSessions = vi.fn(async () => ({ items: [] }))
-    const getHostModels = vi.fn(async () => ({ models: [] }))
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { rpc: { listSessions, getHostModels } },
+      value: { rpc: { listSessions } },
     })
     const { result } = renderHook(() => useChatStore())
 
     result.current.setRemoteCacheScope('authenticated:team-a')
     await result.current.listSessions('cache-test-host', { limit: 50 })
-    await result.current.getHostModels('cache-test-host', 'chat-1')
     await result.current.listSessions('cache-test-host', { limit: 50 })
-    await result.current.getHostModels('cache-test-host', 'chat-1')
 
     expect(listSessions).toHaveBeenCalledTimes(1)
-    expect(getHostModels).toHaveBeenCalledTimes(1)
 
     result.current.setRemoteCacheScope('authenticated:team-b')
     await result.current.listSessions('cache-test-host', { limit: 50 })
-    await result.current.getHostModels('cache-test-host', 'chat-1')
 
     expect(listSessions).toHaveBeenCalledTimes(2)
-    expect(getHostModels).toHaveBeenCalledTimes(2)
   })
 
-  it('invalidates the scoped host-model cache after changing a model', async () => {
+  // #654 M12 — the host-model catalog has exactly one cache, in
+  // `hostModelSelectionStore`, which also owns revision ordering. A second TTL
+  // layer here could only serve a response read BEFORE a write, which is the
+  // stale revision the CAS must never be armed with.
+  it('never caches host models: each call reaches the IPC bridge', async () => {
     const getHostModels = vi.fn(async () => ({ models: [] }))
     const setHostModel = vi.fn(async () => ({ success: true }))
     Object.defineProperty(window, 'clerum', {
@@ -65,11 +63,31 @@ describe('useChatStore remote request cache', () => {
 
     result.current.setRemoteCacheScope('authenticated:team-a')
     await result.current.getHostModels('cache-test-host', 'chat-1')
-    await result.current.setHostModel('cache-test-host', 'chat-1', 'model-b')
     await result.current.getHostModels('cache-test-host', 'chat-1')
+    // Back-to-back and identical: the old layer answered the second from cache.
+    expect(getHostModels).toHaveBeenCalledTimes(2)
+
+    // Even concurrently — there is no in-flight coalescing at this layer either.
+    await Promise.all([
+      result.current.getHostModels('cache-test-host', 'chat-1'),
+      result.current.getHostModels('cache-test-host', 'chat-1'),
+    ])
+    expect(getHostModels).toHaveBeenCalledTimes(4)
+    expect(getHostModels).toHaveBeenLastCalledWith('cache-test-host', 'chat-1')
+  })
+
+  it('forwards the CAS revision to the model write without a cache round-trip', async () => {
+    const setHostModel = vi.fn(async () => ({ success: true }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { rpc: { setHostModel } },
+    })
+    const { result } = renderHook(() => useChatStore())
+
+    await result.current.setHostModel('cache-test-host', 'chat-1', 'model-b', 7)
 
     expect(setHostModel).toHaveBeenCalledTimes(1)
-    expect(getHostModels).toHaveBeenCalledTimes(2)
+    expect(setHostModel).toHaveBeenCalledWith('cache-test-host', 'chat-1', 'model-b', undefined, 7)
   })
 
   it('does not carry pending model selections across an identity scope change', () => {

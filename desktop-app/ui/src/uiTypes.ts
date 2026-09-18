@@ -163,6 +163,16 @@ export type FailedAgentSend = {
   message: string
   kind: AppErrorKind
   timestamp: number
+  /**
+   * Send identity of the failed attempt (issue #654). Lets the recovery path tie
+   * the retained snapshot to its owner/chat/message instead of guessing, and
+   * never overwrite the composer of a different chat or a newer draft.
+   */
+  agentRef?: string
+  chatId?: string | null
+  userMessageId?: string
+  /** Model validated by the image guard when this attempt carried images. */
+  model?: string
 }
 
 export type HostConnectionTone = 'healthy' | 'degraded' | 'offline'

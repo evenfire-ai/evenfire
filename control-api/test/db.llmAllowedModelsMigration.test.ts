@@ -156,4 +156,54 @@ describe('0056_llm_allowed_models migration', () => {
       'GRANT SELECT, INSERT ON TABLE\n          llm_allowed_models_audit,\n          llm_catalog_sync_runs'
     )
   })
+
+  it('0115 adds the nullable image_input capability column idempotently (#654)', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+    const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
+
+    const alter = sqls.find(sql => /ADD COLUMN IF NOT EXISTS image_input JSONB/.test(sql))
+    expect(alter).toBeDefined()
+    // Nullable + no DEFAULT: every existing row reads as `unknown`, and the
+    // migration alone changes no runtime behavior.
+    expect(alter!).not.toMatch(/image_input JSONB\s+NOT NULL/)
+    expect(alter!).not.toMatch(/image_input JSONB\s+DEFAULT/)
+    // The state enum is the DB backstop; the nested evidence shape is validated
+    // by the service through the shared parser.
+    expect(alter!).toMatch(/jsonb_typeof\(image_input\) = 'object'/)
+    expect(alter!).toMatch(/image_input->>'state' IN \('supported','unsupported','unknown'\)/)
+    // The predicate must be TOTAL, because a CHECK accepts NULL: without these
+    // two guards a `{}` (or `{"state": null}`) payload evaluates to NULL and is
+    // ACCEPTED. The real database behaviour is covered by
+    // db.realPostgresMigration.integration.test.ts.
+    expect(alter!).toMatch(/image_input \? 'state'/)
+    expect(alter!).toMatch(
+      /COALESCE\(\s*image_input->>'state' IN \('supported','unsupported','unknown'\),\s*false\s*\)/
+    )
+    expect(alter!).toMatch(/EXCEPTION WHEN duplicate_object THEN NULL/)
+    // Additive only.
+    expect(alter!).not.toMatch(/DROP COLUMN/)
+  })
+
+  it('0115 is purely additive: it adds the column and writes no image_input data', async () => {
+    const { initDb } = await import('../src/db.js')
+    await initDb()
+    const calls = clientQuery.mock.calls.map(([sql, params]) => ({
+      sql: String(sql),
+      params: params as unknown[],
+    }))
+
+    // Liveness witness FIRST: the migration this test is about actually ran.
+    // Without it, deleting 0115 outright would satisfy both negatives below.
+    expect(calls.find(c => /ADD COLUMN IF NOT EXISTS image_input JSONB/.test(c.sql))).toBeDefined()
+
+    // Evidence is derived by the catalog sync from models.dev, never seeded by a
+    // migration: a seed can only write `curated` provenance, which the sync is
+    // required never to overwrite, so it would permanently freeze the very rows
+    // that need refreshing.
+    expect(calls.filter(c => /SET image_input/.test(c.sql))).toHaveLength(0)
+    expect(
+      calls.filter(c => /UPDATE llm_allowed_models/.test(c.sql) && /image_input/.test(c.sql))
+    ).toHaveLength(0)
+  })
 })

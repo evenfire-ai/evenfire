@@ -76,12 +76,40 @@ describe('resolveSessionModel', () => {
 })
 
 describe('projectModels', () => {
+  it('projects model evidence intersected with the chat transport, never a provider-wide vision flag', () => {
+    const evidence = {
+      source: 'curated' as const,
+      reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+      checkedAt: '2026-01-01T00:00:00Z',
+    }
+    const catalog = view(true, {
+      zai: [
+        { model: 'glm-5.3', imageInput: { state: 'unsupported', evidence } },
+        { model: 'glm-5.3-flash', imageInput: { state: 'supported', evidence } },
+      ],
+      'codex-subscription': [
+        { model: 'visual-model', imageInput: { state: 'supported', evidence } },
+      ],
+    })
+    expect(projectModels(catalog, 'zai', 'glm-5.3').models.map(m => m.imageInput)).toEqual([
+      { state: 'unsupported', reason: 'model_unsupported', evidence },
+      { state: 'supported', reason: 'supported', evidence },
+    ])
+    expect(
+      projectModels(catalog, 'codex-subscription', 'visual-model').models[0].imageInput
+    ).toEqual({ state: 'unsupported', reason: 'transport_unsupported', evidence })
+  })
   it('projects enabled entries with optional metadata', () => {
     expect(projectModels(view(true, CLAUDE_ALLOWLIST), 'claude', 'claude-opus-4-8')).toEqual({
       degraded: false,
       models: [
-        { name: 'claude-opus-4-8', displayName: 'Opus 4.8', contextWindowTokens: 200000 },
-        { name: 'claude-haiku-4-5' },
+        {
+          name: 'claude-opus-4-8',
+          imageInput: { state: 'unknown', reason: 'model_unknown' },
+          displayName: 'Opus 4.8',
+          contextWindowTokens: 200000,
+        },
+        { name: 'claude-haiku-4-5', imageInput: { state: 'unknown', reason: 'model_unknown' } },
       ],
     })
   })
@@ -89,7 +117,9 @@ describe('projectModels', () => {
   it('degraded: collapses to the Host default only', () => {
     expect(projectModels(view(false), 'claude', 'claude-opus-4-8')).toEqual({
       degraded: true,
-      models: [{ name: 'claude-opus-4-8' }],
+      models: [
+        { name: 'claude-opus-4-8', imageInput: { state: 'unknown', reason: 'model_unknown' } },
+      ],
     })
   })
 })
@@ -125,7 +155,14 @@ describe('hostSubsetAllowlistView', () => {
     // metadata still comes from the global entry.
     expect(projectModels(v, 'claude', 'claude-opus-4-8')).toEqual({
       degraded: false,
-      models: [{ name: 'claude-opus-4-8', displayName: 'Opus 4.8', contextWindowTokens: 200000 }],
+      models: [
+        {
+          name: 'claude-opus-4-8',
+          imageInput: { state: 'unknown', reason: 'model_unknown' },
+          displayName: 'Opus 4.8',
+          contextWindowTokens: 200000,
+        },
+      ],
     })
   })
 
@@ -159,7 +196,12 @@ describe('hostSubsetAllowlistView', () => {
       { provider: 'claude', model: 'claude-haiku-4-5' },
     ])
     expect(projectModels(v, 'claude', 'claude-opus-4-8').models).toEqual([
-      { name: 'claude-opus-4-8', displayName: 'Opus 4.8', contextWindowTokens: 200000 },
+      {
+        name: 'claude-opus-4-8',
+        imageInput: { state: 'unknown', reason: 'model_unknown' },
+        displayName: 'Opus 4.8',
+        contextWindowTokens: 200000,
+      },
     ])
     expect(isModelAllowed(v, 'claude', 'claude-haiku-4-5', 'claude-opus-4-8')).toBe(false)
     // A saved selection on the now-unavailable model is surfaced as blocked.
@@ -178,9 +220,11 @@ describe('hostSubsetAllowlistView', () => {
       { provider: 'openai', model: 'gpt-6' },
     ])
     expect(projectModels(v, 'claude', 'claude-opus-4-8').models).toEqual([
-      { name: 'claude-haiku-4-5' },
+      { name: 'claude-haiku-4-5', imageInput: { state: 'unknown', reason: 'model_unknown' } },
     ])
-    expect(projectModels(v, 'openai', 'gpt-5.4').models).toEqual([{ name: 'gpt-6' }])
+    expect(projectModels(v, 'openai', 'gpt-5.4').models).toEqual([
+      { name: 'gpt-6', imageInput: { state: 'unknown', reason: 'model_unknown' } },
+    ])
   })
 
   it('delegates allowlistAvailable so the degraded path is preserved (host default only)', () => {
@@ -192,7 +236,9 @@ describe('hostSubsetAllowlistView', () => {
     expect(v.allowlistAvailable()).toBe(false)
     expect(projectModels(v, 'claude', 'claude-opus-4-8')).toEqual({
       degraded: true,
-      models: [{ name: 'claude-opus-4-8' }],
+      models: [
+        { name: 'claude-opus-4-8', imageInput: { state: 'unknown', reason: 'model_unknown' } },
+      ],
     })
     // Degraded write gate: still only the Host default is permitted.
     expect(isModelAllowed(v, 'claude', 'claude-opus-4-8', 'claude-opus-4-8')).toBe(true)

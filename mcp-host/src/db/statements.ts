@@ -25,6 +25,7 @@ export interface PreparedStatements {
   recomputeSessionMessageSummary: Statement
   updateSessionPromptStableHash: Statement
   updateSessionModelSelections: Statement
+  selectSessionModelSelectionRevision: Statement
   setSessionTitleIfAbsent: Statement
   updateSessionTitle: Statement
   selectSessionBySessionKey: Statement
@@ -171,9 +172,24 @@ export function prepareStatements(db: Database): PreparedStatements {
     // dispatcher passes the already-serialized JSON string; a full overwrite is
     // correct because ConversationManager owns the in-RAM map and re-serializes
     // it on every mutation.
+    //
+    // #654 — the same statement stamps the new revision, so map + revision are
+    // one atomic write inside the dispatcher's transaction. Both values come
+    // from the dispatcher, which is the only place that reads the previous
+    // revision and decides whether the CAS may proceed.
     updateSessionModelSelections: db.prepare(`
       UPDATE sessions
-         SET model_selections = @model_selections
+         SET model_selections = @model_selections,
+             model_selection_revision = @model_selection_revision
+       WHERE id = @id
+    `),
+    // #654 — the CAS base. Read INSIDE the same IMMEDIATE transaction that
+    // writes, so a concurrent writer in another replica cannot slip between the
+    // check and the update. `changes === 0` from the paired UPDATE is not enough
+    // to classify the failure, hence the dedicated read.
+    selectSessionModelSelectionRevision: db.prepare(`
+      SELECT model_selection_revision, model_selections
+        FROM sessions
        WHERE id = @id
     `),
     // Auto-title (spec 15) — write the derived title only if the column is still

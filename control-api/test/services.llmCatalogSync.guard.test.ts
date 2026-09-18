@@ -30,7 +30,11 @@ describe('§4.5 sanity guard', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'vendored'), minPlausibleLiveTotal: 1 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'vendored'),
+        minPlausibleLiveTotal: 1,
+      },
       db.connector
     )
 
@@ -51,7 +55,11 @@ describe('§4.5 sanity guard', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live'),
+        minPlausibleLiveTotal: 1,
+      },
       db.connector
     )
 
@@ -71,7 +79,12 @@ describe('§4.5 sanity guard', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1, providerMinLive: 3 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live'),
+        minPlausibleLiveTotal: 1,
+        providerMinLive: 3,
+      },
       db.connector
     )
 
@@ -89,7 +102,11 @@ describe('§4.5 sanity guard', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 9999 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live'),
+        minPlausibleLiveTotal: 9999,
+      },
       db.connector
     )
 
@@ -109,7 +126,11 @@ describe('§4.5 sanity guard', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5', 'claude-sonnet-5'] })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live'),
+        minPlausibleLiveTotal: 1,
+      },
       db.connector
     )
 
@@ -140,7 +161,12 @@ describe('§4.5 sanity guard', () => {
     })
 
     const res = await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1, providerMinLive: 0 },
+      {
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live'),
+        minPlausibleLiveTotal: 1,
+        providerMinLive: 0,
+      },
       db.connector
     )
 

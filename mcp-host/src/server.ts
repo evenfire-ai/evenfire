@@ -195,8 +195,9 @@ export class RPCServer {
     })
 
     // Image attachments are sent as base64 in /v1/runtime/messages.
-    // 6mb comfortably covers the default 3mb binary limit plus JSON overhead.
-    this.app.use(express.json({ limit: '6mb' }))
+    // 10mb covers the Desktop's 8 MB combined base64 image budget plus the text
+    // and JSON envelope.
+    this.app.use(express.json({ limit: '10mb' }))
     this.registerRoutes()
   }
 

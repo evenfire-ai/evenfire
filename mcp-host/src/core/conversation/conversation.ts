@@ -1,3 +1,4 @@
+import type { ModelSelectionWriteOutcome } from '../../db/worker/protocol'
 import { parseSessionKey } from '../../session/types'
 import { ConversationError, ConversationErrorCode } from '../errors'
 import { isMcpToolName } from '../extensions/mcpApprovalGateController'
@@ -102,6 +103,11 @@ export class ConversationManager {
       auto_approved_tools: new Set(),
       created_at: new Date(),
       updated_at: new Date(),
+      // #654 — a freshly inserted row carries the column default, so the RAM
+      // base revision matches disk from the first write onward. Without it the
+      // projection would omit the revision and the first selection of a new chat
+      // would fall back to the legacy unconditional (no-CAS) write.
+      modelSelectionRevision: 0,
     }
     this.store.set(sessionKey, conv)
     await Promise.resolve(this.store.persistSessionCreate(conv, opts ?? {}))
@@ -656,14 +662,29 @@ export class ConversationManager {
   }
 
   /**
-   * R2 — upsert the session's model selection for a provider and write it
-   * through to the durable `model_selections` column. Full-overwrite of the
-   * in-RAM map (this manager owns it); the store re-serializes on persist. The
-   * per-task resolver reads this map after a cold-load to honour the choice.
+   * Apply a per-provider selection atomically and await its durable outcome.
+   * Conflicts return the winning map as well as its revision so the RAM mirror
+   * and the next /models response cannot pair stale data with a fresh revision.
    */
-  setModelSelection(conversation: Conversation, provider: string, model: string): void {
-    conversation.modelSelections = { ...(conversation.modelSelections ?? {}), [provider]: model }
-    void Promise.resolve(this.store.persistModelSelections?.(conversation))
+  async setModelSelection(
+    conversation: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): Promise<ModelSelectionWriteOutcome> {
+    const outcome = await this.store.applyModelSelection(
+      conversation,
+      provider,
+      model,
+      expectedRevision
+    )
+    // Another accepted write may have completed while this reply was queued.
+    // Never move the mirror backwards; conflicts also carry the winning map.
+    if (outcome.modelSelectionRevision >= (conversation.modelSelectionRevision ?? 0)) {
+      conversation.modelSelections = outcome.modelSelections
+      conversation.modelSelectionRevision = outcome.modelSelectionRevision
+    }
+    return outcome
   }
 
   /**

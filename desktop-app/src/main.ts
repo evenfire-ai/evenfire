@@ -1,9 +1,23 @@
 import { BrowserWindow, app, ipcMain, nativeTheme, powerMonitor } from 'electron'
+import fs from 'node:fs'
 import path from 'node:path'
 import { AppService } from './appService.js'
 import { routeClerumOauthCompleted } from './clerumDeepLink.js'
-import { config } from './config.js'
+import {
+  config,
+  getActiveEnvKey,
+  getDesktopRuntimeConfigState,
+  hydrateDesktopRuntimeConfig,
+} from './config.js'
 import { installDesktopTextContextMenus } from './desktopTextContextMenu.js'
+import {
+  type DevIsolationPlan,
+  devIsolationRuntimePolicy,
+  formatDevIsolationLogLine,
+  publicDevIsolationRecord,
+  resolveDevIsolation,
+  verifyDevIsolationRuntime,
+} from './devIsolation.js'
 import { createEvenfireDeepLinkRouter } from './evenfireDeepLinkRouter.js'
 import { assertTrustedSender, registerIpcHandlers } from './ipc.js'
 import { createMainWindowCoordinator, createRetryableInitializer } from './mainWindowCoordinator.js'
@@ -25,8 +39,23 @@ import { installAdaptiveSystemIcon, resolveSystemIconPath } from './systemIcon.j
 const EVENFIRE_APP_NAME = 'Evenfire'
 const EVENFIRE_APP_ID = 'ai.evenfire.desktop'
 
-process.title = EVENFIRE_APP_NAME
-app.setName(EVENFIRE_APP_NAME)
+/**
+ * Dev isolation is opt-in and fail-closed. A launch that asked for an isolated
+ * instance must never continue into the shared user profile or the machine-wide
+ * OS protocol handler, so an unhonourable request aborts here — before
+ * `registerCustomProtocols()` can touch the default handler.
+ */
+const devIsolation = resolveDevIsolation(process.env, process.argv, app.isPackaged)
+if (devIsolation.mode === 'refused') {
+  console.error(`[Desktop] Dev isolation refused: ${devIsolation.code}: ${devIsolation.message}`)
+  process.exit(1)
+}
+const devIsolationPlan: DevIsolationPlan | null =
+  devIsolation.mode === 'isolated' ? devIsolation.plan : null
+const devIsolationPolicy = devIsolationRuntimePolicy(devIsolationPlan)
+
+process.title = devIsolationPolicy.appName ?? EVENFIRE_APP_NAME
+app.setName(devIsolationPolicy.appName ?? EVENFIRE_APP_NAME)
 app.setAppUserModelId(EVENFIRE_APP_ID)
 
 // Prevent crash on EPIPE when stdout/stderr pipe is broken (e.g., parent terminal closed)
@@ -327,29 +356,87 @@ function handleClerumUrl(rawUrl: string): void {
   focusMainWindow()
 }
 
-registerCustomProtocols()
+// An isolated run leaves the machine-wide default handler exactly as it is: the
+// normal app keeps owning `evenfire:`/`clerum:` deep links.
+if (devIsolationPolicy.registerOsProtocols) {
+  registerCustomProtocols()
+}
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
   app.on('second-instance', (_event, argv) => {
-    const protocolUrls = collectInitialProtocolUrls(argv)
-    protocolUrls.evenfireUrls.forEach(evenfireDeepLinkRouter.handle)
-    protocolUrls.clerumUrls.forEach(handleClerumUrl)
+    // An isolated instance never routes deep links: a URL delivered here belongs
+    // to the session that owns the OS handler, not to this one. A relaunch still
+    // brings this instance's window forward.
+    if (devIsolationPolicy.acceptDeepLinks) {
+      const protocolUrls = collectInitialProtocolUrls(argv)
+      protocolUrls.evenfireUrls.forEach(evenfireDeepLinkRouter.handle)
+      protocolUrls.clerumUrls.forEach(handleClerumUrl)
+    }
     requestMainWindow()
   })
 }
 
-app.on('open-url', (event, rawUrl) => {
-  event.preventDefault()
-  const lowerUrl = rawUrl.toLowerCase()
-  if (lowerUrl.startsWith(`${DESKTOP_SETUP_PROTOCOL}:`)) {
-    evenfireDeepLinkRouter.handle(rawUrl)
-  } else if (lowerUrl.startsWith(`${CLERUM_PROTOCOL}:`)) {
-    handleClerumUrl(rawUrl)
+if (devIsolationPolicy.acceptDeepLinks) {
+  app.on('open-url', (event, rawUrl) => {
+    event.preventDefault()
+    const lowerUrl = rawUrl.toLowerCase()
+    if (lowerUrl.startsWith(`${DESKTOP_SETUP_PROTOCOL}:`)) {
+      evenfireDeepLinkRouter.handle(rawUrl)
+    } else if (lowerUrl.startsWith(`${CLERUM_PROTOCOL}:`)) {
+      handleClerumUrl(rawUrl)
+    }
+  })
+}
+
+/**
+ * Verify the effective runtime against the launcher's declaration and log the
+ * public metadata for this run. Returns false when the process must abort:
+ * continuing would use a profile the operator did not ask for.
+ *
+ * Paths are compared after `realpath`, so a symlinked parent cannot fake a
+ * match, and the config storage path is compared exactly — it is the proof that
+ * the runtime-config layer pointed at the isolated file rather than the shared
+ * `runtime-configs` directory.
+ */
+function verifyDevIsolationBeforeServices(plan: DevIsolationPlan): boolean {
+  hydrateDesktopRuntimeConfig()
+  const runtimeState = getDesktopRuntimeConfigState()
+  const realPath = (value: string): string => {
+    try {
+      return fs.realpathSync.native(value)
+    } catch {
+      return path.resolve(value)
+    }
   }
-})
+  const observed = {
+    pid: process.pid,
+    userDataDir: realPath(app.getPath('userData')),
+    appPath: realPath(app.getAppPath()),
+    restUrl: config.externalRestApiBaseUrl,
+    rpcUrl: config.rpcProxyBaseUrl,
+    configStoragePath: runtimeState.storagePath,
+    envKey: getActiveEnvKey(),
+  }
+  const expected: DevIsolationPlan = {
+    ...plan,
+    userDataDir: realPath(plan.userDataDir),
+    appPath: plan.appPath ? realPath(plan.appPath) : null,
+  }
+  const verdict = verifyDevIsolationRuntime(expected, observed)
+  if (verdict.ok) {
+    console.log(formatDevIsolationLogLine(publicDevIsolationRecord(expected, observed)))
+    return true
+  }
+  const detail = verdict.mismatches.map(mismatch => mismatch.field).join(', ')
+  console.error(
+    `[Desktop] Dev isolation refused: the effective runtime diverges from the launcher: ${detail}`
+  )
+  app.exit(1)
+  return false
+}
 
 async function createWindow(): Promise<void> {
   try {
@@ -368,9 +455,10 @@ async function createWindow(): Promise<void> {
     show: false,
     frame: false,
     title:
-      config.appName === EVENFIRE_APP_NAME
+      devIsolationPolicy.windowTitle ??
+      (config.appName === EVENFIRE_APP_NAME
         ? EVENFIRE_APP_NAME
-        : `${EVENFIRE_APP_NAME} — ${config.appName}`,
+        : `${EVENFIRE_APP_NAME} — ${config.appName}`),
     icon: resolveSystemIconPath(systemIconAssetsDirectory(), nativeTheme.shouldUseDarkColors),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -380,6 +468,14 @@ async function createWindow(): Promise<void> {
     },
   })
   mainWindow = window
+  if (devIsolationPolicy.pinWindowTitle) {
+    // Keep the isolated identity in the window title after the renderer updates
+    // document.title: window/app automation resolves this instance by it.
+    window.webContents.on('page-title-updated', event => {
+      event.preventDefault()
+      window.setTitle(devIsolationPolicy.windowTitle ?? window.getTitle())
+    })
+  }
   wireHostDesktopShortcutRouting(window)
   mainWindowRendererReady = false
   window.on('closed', () => {
@@ -439,6 +535,10 @@ if (gotSingleInstanceLock) {
   app
     .whenReady()
     .then(async () => {
+      // Before any service initializes: an isolated run that cannot prove its
+      // own userData, app path, endpoints and config storage is the declared
+      // isolated ones aborts instead of reading a shared profile.
+      if (devIsolationPlan && !verifyDevIsolationBeforeServices(devIsolationPlan)) return
       installDesktopTextContextMenus()
       wireAdaptiveSystemIcon()
       // Must precede registerIpcHandlers: the SDK IPC handlers resolve the
@@ -456,10 +556,14 @@ if (gotSingleInstanceLock) {
       // Collect startup argv once. The renderer-ready handshake drains queued
       // Evenfire URLs after its listeners are installed; rescanning argv would
       // dispatch setup links twice on Windows/Linux.
-      const initialProtocolUrls = collectInitialProtocolUrls(process.argv)
+      // An isolated run collects nothing: its argv cannot contain a deep link
+      // that belongs to this session.
+      const initialProtocolUrls = devIsolationPolicy.acceptDeepLinks
+        ? collectInitialProtocolUrls(process.argv)
+        : { evenfireUrls: [], clerumUrls: [] }
       initialProtocolUrls.evenfireUrls.forEach(evenfireDeepLinkRouter.enqueuePending)
       await mainWindowCoordinator.ensureWindow()
-      if (process.platform !== 'darwin') {
+      if (devIsolationPolicy.acceptDeepLinks && process.platform !== 'darwin') {
         initialProtocolUrls.clerumUrls.forEach(handleClerumUrl)
       }
     })

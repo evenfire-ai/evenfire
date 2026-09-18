@@ -1,3 +1,4 @@
+import { isImageAttachmentMime } from '../../llm/imageInput'
 import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
@@ -72,7 +73,7 @@ export function appendToolResults(
     if (trustedAttachments.length) {
       for (const att of trustedAttachments) {
         if (att.kind !== 'image') continue
-        if (att.mimeType !== 'image/jpeg' && att.mimeType !== 'image/png') continue
+        if (!isImageAttachmentMime(att.mimeType)) continue
         pendingImages.push({
           type: 'image',
           mimeType: att.mimeType,
@@ -95,6 +96,10 @@ export function appendToolResults(
     messages.push({
       role: 'user',
       content: 'Here are the screenshots from the tool results above.',
+      // #654 — the parts below came from tool results, not from the user. The
+      // adapter withholds them (and says so in `content`) when the model has no
+      // affirmative image-input evidence, instead of failing the whole turn.
+      imageOrigin: 'tool_result',
       contentParts: [
         { type: 'text', text: 'Here are the screenshots from the tool results above.' },
         ...pendingImages,

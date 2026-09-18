@@ -1,4 +1,4 @@
-import type { ReapedSession } from '../../db/worker/protocol'
+import type { ModelSelectionWriteOutcome, ReapedSession } from '../../db/worker/protocol'
 import {
   type Conversation,
   ConversationState,
@@ -317,12 +317,32 @@ export interface ConversationStore {
   persistSystemPromptStableHash(conv: Conversation, stableHash: string): Promise<void> | void
 
   /**
-   * R2 — persist the per-session `{ provider → model }` selection map after a
-   * `set-model`. Async (enqueued via the worker), keyed by sessionKey so it
-   * lands after the session's own `insert_session`. In-memory stores no-op.
-   * Optional so legacy/in-memory stores don't have to implement it.
+   * R2 / #654 — compare-and-swap write of the per-session `{ provider → model }`
+   * selection: the map plus the monotonic `model_selection_revision` that guards
+   * it, committed as ONE durable write.
+   *
+   * `expectedRevision` is the CAS base the caller read:
+   *   - a number → the write lands only while the stored revision still equals
+   *     it. Otherwise the row is untouched and the caller receives
+   *     `applied: false` with the revision that won.
+   *   - `undefined` → the legacy unconditional write (last-write-wins). It STILL
+   *     increments the revision, so an accepted straggler invalidates any CAS
+   *     that was armed against the previous value.
+   *
+   * Callers MUST await the outcome before ACKing a selection to the user: the
+   * write is the durability barrier this method exists to provide (the previous
+   * fire-and-forget enqueue could fail silently and leave RAM ahead of disk).
+   *
+   * The store does NOT mutate the `Conversation`: it only decides and persists.
+   * `ConversationManager` mirrors the accepted outcome into RAM, so a conflicting
+   * write can never leave RAM holding a selection the row does not contain.
    */
-  persistModelSelections?(conv: Conversation): Promise<void> | void
+  applyModelSelection(
+    conv: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): Promise<ModelSelectionWriteOutcome> | ModelSelectionWriteOutcome
 
   /**
    * Spec 15 Fase B — persist a user rename (`sessions.title` overwrite). Async
@@ -509,8 +529,39 @@ export class InMemoryConversationStore implements ConversationStore {
     /* no-op */
   }
 
-  persistModelSelections(_conv: Conversation): void {
-    /* no-op — RAM-only store keeps the selection on the Conversation object */
+  /**
+   * #654 — RAM-only equivalent of the durable CAS. The map lives on the
+   * `Conversation` object and the manager applies the accepted one, so the store
+   * only has to arbitrate on the revision. This is the real `memory`-mode
+   * contract (the dev default), NOT a silent skip: a stale CAS is refused here
+   * exactly as it is in SQLite.
+   */
+  applyModelSelection(
+    conv: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): ModelSelectionWriteOutcome {
+    const current = conv.modelSelectionRevision ?? 0
+    if (!Number.isSafeInteger(current) || current < 0 || current === Number.MAX_SAFE_INTEGER) {
+      throw new Error('Invalid model selection revision')
+    }
+    if (expectedRevision !== undefined && expectedRevision !== current) {
+      return {
+        applied: false,
+        reason: 'model_selection_conflict',
+        modelSelectionRevision: current,
+        modelSelections: { ...conv.modelSelections },
+      }
+    }
+    // Memory mode arbitrates synchronously, before the manager's await yields.
+    conv.modelSelections = { ...conv.modelSelections, [provider]: model }
+    conv.modelSelectionRevision = current + 1
+    return {
+      applied: true,
+      modelSelectionRevision: current + 1,
+      modelSelections: { ...conv.modelSelections },
+    }
   }
 
   persistTitle(_conv: Conversation): void {

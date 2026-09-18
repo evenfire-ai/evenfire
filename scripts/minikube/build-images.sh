@@ -376,6 +376,10 @@ KNOWN_BUILD_NAMES=(
 
 # These isolated test images are opt-in only. Their acquisition must happen
 # before T2 reconciliation, never inside the final Playwright command.
+if [ "$ONLY_SVC" = image-capabilities-mcp-host ]; then
+  ALL_IMAGES+=("clerum/image-capabilities-mcp-host:test")
+  KNOWN_BUILD_NAMES+=(image-capabilities-mcp-host)
+fi
 if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
   ALL_IMAGES+=("clerum/codex-approved-tools-control-api-e2e:test")
   KNOWN_BUILD_NAMES+=(codex-approved-tools-control-api-e2e)
@@ -1025,6 +1029,10 @@ build_image() {
     --build-arg "EVENFIRE_SERVICE_VERSION=${service_version}"
   )
   local derived_base=""
+  if [ "$name" = image-capabilities-mcp-host ]; then
+    docker_args+=(--build-arg MCP_HOST_IMAGE=clerum/mcp-host:test)
+    derived_base="clerum/mcp-host:test"
+  fi
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
@@ -1252,6 +1260,12 @@ build_image "grok-llm-proxy" \
   "clerum/grok-llm-proxy:test" \
   "${PROJECT_DIR}/grok-llm-proxy/Dockerfile"
 
+if [ "$ONLY_SVC" = image-capabilities-mcp-host ]; then
+  build_image image-capabilities-mcp-host "${PROJECT_DIR}" \
+    clerum/image-capabilities-mcp-host:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/image-capabilities/Dockerfile"
+fi
+
 if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
   build_image codex-approved-tools-control-api-e2e "${PROJECT_DIR}" \
     clerum/codex-approved-tools-control-api-e2e:test \
@@ -1375,7 +1389,8 @@ if [ "$SKIP_PUBLIC" = false ]; then
     "postgres:16-alpine"
     "redis:7-alpine"
     "nginx:1.30.1-alpine"
-    "minio/minio:latest"
+    # MinIO is not pulled here: nothing in this distribution consumes the
+    # image; the optional sibling evenfire-registry deployment pulls its own.
     "axllent/mailpit:latest"
     "mongodb/mongodb-community-server:7.0-ubi8"
     "mongodb/mongodb-mcp-server:latest"

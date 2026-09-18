@@ -19,6 +19,7 @@ import {
   startBudgetReservationSweepCron,
   stopBudgetReservationSweepCron,
 } from './services/budgetReservationSweepCron.js'
+import { syncDiscoveredModels } from './services/llmCatalogSync.js'
 import { startLlmCatalogSyncCron, stopLlmCatalogSyncCron } from './services/llmCatalogSyncCron.js'
 import { runBootEnrollment } from './services/memberRegistrationEnrollment.js'
 import {
@@ -92,20 +93,6 @@ async function main(): Promise<void> {
   startBudgetReservationSweepCron(config.budgetReservationSweepIntervalMs)
   startWorkflowApprovalTraceProjector()
 
-  // LLM catalog discovery sync cron (Fase 4). DEFAULT OFF — opt in with
-  // LLM_CATALOG_SYNC_CRON_ENABLED=true. Non-destructive: inserts disabled
-  // discovery rows, only stale-flags vanished ones under the §4.5 guards.
-  if (config.llmCatalogSyncCronEnabled) {
-    startLlmCatalogSyncCron({}, config.llmCatalogSyncIntervalMs)
-    console.log(
-      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
-    )
-  } else {
-    console.log(
-      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
-    )
-  }
-
   if (config.userApprovalRequestArchiveCronEnabled) {
     startArchiveCron({
       retentionDays: config.approvalRetentionDays,
@@ -135,6 +122,28 @@ async function main(): Promise<void> {
     console.log('[ControlAPI] Operational access indexer enabled')
   } else {
     console.log('[ControlAPI] Operational access indexer disabled')
+  }
+
+  // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
+  // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
+  // seconds after start (not awaited — boot never waits on models.dev), then
+  // every interval. Non-destructive: inserts disabled discovery rows, only
+  // stale-flags vanished ones under the §4.5 guards.
+  // Started AFTER the gateway exists (#654): the sync publishes the allowlist
+  // ConfigMap when it changes image-input evidence on an enabled row, so it
+  // needs a materializer — the same one the admin routes use.
+  if (config.llmCatalogSyncCronEnabled) {
+    startLlmCatalogSyncCron(
+      { sync: () => syncDiscoveredModels({ materializer: gateway.llmAllowedModelsConfigMap() }) },
+      config.llmCatalogSyncIntervalMs
+    )
+    console.log(
+      `[ControlAPI] LLM catalog sync cron enabled (interval=${config.llmCatalogSyncIntervalMs}ms)`
+    )
+  } else {
+    console.log(
+      '[ControlAPI] LLM catalog sync cron disabled (LLM_CATALOG_SYNC_CRON_ENABLED not "true")'
+    )
   }
 
   // Assert the platform image-pull credential up front and then on a timer. WRC injects
