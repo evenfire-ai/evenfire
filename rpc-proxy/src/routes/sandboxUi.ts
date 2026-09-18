@@ -113,6 +113,14 @@ function v2ViewAuthority(req: AuthedRequest, res: Response, next: () => void): v
   requireRpcAuth(req, res, () => requireScope('sandbox:ui:view')(req, res, next))
 }
 
+function requireSandboxOAuthAuth(req: AuthedRequest, res: Response, next: NextFunction): void {
+  if (tokenDeclaresV2(extractAuthToken(req))) {
+    v2ViewAuthority(req, res, next)
+    return
+  }
+  requireSandboxUiCookieSession(req, res, next)
+}
+
 function controlApiOAuthHeaders(req: AuthedRequest): Record<string, string> {
   const actionContext = trustedEdgeActionContextHeader(req)
   return {
@@ -549,7 +557,8 @@ export function createSandboxUiSessionRouter(): Router {
   // the user's session is bad).
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
-    v2ViewAuthority,
+    requireSandboxOAuthAuth,
+    jsonBody,
     async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
       const userId = sandboxOAuthUser(req, res)
@@ -634,7 +643,8 @@ export function createSandboxUiSessionRouter(): Router {
   // a best-effort buildRevokeRequest adapter call before delete.
   router.delete(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
-    v2ViewAuthority,
+    requireSandboxOAuthAuth,
+    jsonBody,
     async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
       const userId = sandboxOAuthUser(req, res)
