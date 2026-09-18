@@ -507,6 +507,12 @@ describe('workspaceTabs — reorderWorkspaceTab', () => {
             const clamped = Math.max(0, Math.min(toIndex, state.tabs.length - 1))
             expect(next.tabs[clamped]!.id).toBe(fromId)
 
+            // (6) every tab that did NOT move keeps its relative order: removing
+            // the moved id from both sequences must leave identical orderings.
+            expect(next.tabs.map(t => t.id).filter(id => id !== fromId)).toEqual(
+              idsBefore.filter(id => id !== fromId)
+            )
+
             // (5) a no-op returns the SAME reference.
             const fromIndex = idsBefore.indexOf(fromId)
             if (clamped === fromIndex) expect(next).toBe(state)
