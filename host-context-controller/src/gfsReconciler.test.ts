@@ -1,8 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as k8s from '@kubernetes/client-node'
 import { GfsK8sApi, GfsReconciler, GfsSeedClient } from './gfsReconciler'
 import { GfsFactoryConfig } from './k8s/gfsFactory'
+import { K8sGfsApi } from './k8s/gfsK8sApi'
+import { hccLogger } from './logger'
 import type { GlobalFileSystemCRD, GlobalFileSystemStatus } from './types'
+import type { ResourceApplyResult } from './utils'
 
 const config: GfsFactoryConfig = {
   gfsNamespace: 'gfs',
@@ -48,38 +51,51 @@ class FakeApi implements GfsK8sApi {
   writerAvailabilitySequence: boolean[] = []
   failPvc = false
   statusFailuresRemaining = 0
+  applyOutcome: 'created' | 'replaced' | 'up_to_date' = 'replaced'
+  readerApplyOutcome?: 'created' | 'replaced' | 'up_to_date'
 
-  async applyPvc(pvc: k8s.V1PersistentVolumeClaim): Promise<void> {
+  async applyPvc(pvc: k8s.V1PersistentVolumeClaim): Promise<ResourceApplyResult> {
     if (this.failPvc) throw new Error('simulated PVC apply failure')
     this.pvcs.push(pvc.metadata?.name ?? '')
     this.operations.push(`pvc/${pvc.metadata?.name ?? ''}`)
+    return this.applyOutcome
   }
   async deploymentNeedsUpdate(dep: k8s.V1Deployment): Promise<boolean> {
     return dep.metadata?.name === 'gfsc-writer' ? this.writerNeedsUpdate : false
   }
-  async scaleDeployment(name: string, _namespace: string, replicas: number): Promise<void> {
+  async scaleDeployment(
+    name: string,
+    _namespace: string,
+    replicas: number
+  ): Promise<ResourceApplyResult> {
     this.operations.push(`scale/${name}/${replicas}`)
+    return this.applyOutcome === 'up_to_date' ? 'up_to_date' : 'replaced'
   }
-  async applyDeployment(dep: k8s.V1Deployment): Promise<void> {
+  async applyDeployment(dep: k8s.V1Deployment): Promise<ResourceApplyResult> {
     const name = dep.metadata?.name ?? ''
     this.deployments.push(name)
     this.deploymentManifests.push(dep)
     this.operations.push(`deploy/${name}`)
+    if (name === 'gfsc-reader' && this.readerApplyOutcome) return this.readerApplyOutcome
+    return this.applyOutcome
   }
-  async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget): Promise<void> {
+  async applyPodDisruptionBudget(pdb: k8s.V1PodDisruptionBudget): Promise<ResourceApplyResult> {
     const name = pdb.metadata?.name ?? ''
     this.pdbs.push(name)
     this.operations.push(`pdb/${name}`)
+    return this.applyOutcome
   }
-  async applyService(svc: k8s.V1Service): Promise<void> {
+  async applyService(svc: k8s.V1Service): Promise<ResourceApplyResult> {
     const name = svc.metadata?.name ?? ''
     this.services.push(name)
     this.operations.push(`svc/${name}`)
+    return this.applyOutcome
   }
-  async applyNetworkPolicy(np: k8s.V1NetworkPolicy): Promise<void> {
+  async applyNetworkPolicy(np: k8s.V1NetworkPolicy): Promise<ResourceApplyResult> {
     const name = np.metadata?.name ?? ''
     this.netpols.push(name)
     this.operations.push(`np/${name}`)
+    return this.applyOutcome
   }
   async isDeploymentAvailable(name: string): Promise<boolean> {
     if (name === 'gfsc-writer' && this.writerAvailabilitySequence.length > 0) {
@@ -266,7 +282,9 @@ describe('GfsReconciler.reconcile', () => {
     const reconciler = new GfsReconciler(api, config)
 
     await expect(reconciler.reconcile(gfs)).rejects.toThrow('simulated status patch failure')
-    await expect(reconciler.reconcile(gfs)).resolves.toBeUndefined()
+    await expect(reconciler.reconcile(gfs)).resolves.toEqual(
+      expect.objectContaining({ objects: expect.any(Number) })
+    )
 
     expect(api.statuses).toHaveLength(1)
     expect(api.statuses[0]?.phase).toBe('Ready')
@@ -293,6 +311,164 @@ describe('GfsReconciler.fullReconcile', () => {
     const api = new FakeApi()
     api.failPvc = true
     await expect(new GfsReconciler(api, config).fullReconcile([gfs])).resolves.toBeUndefined()
+  })
+})
+
+function createStoreBackedGfsApi() {
+  const store = new Map<string, Record<string, unknown>>()
+  const reads = { total: 0, secondPass: 0 }
+  const replaces = { deployment: 0, pdb: 0, secondPassDeployment: 0, secondPassPdb: 0 }
+  let pass = 1
+
+  const keyOf = (kind: string, name: string) => `${kind}/${name}`
+
+  const read =
+    (kind: string) =>
+    async ({ name }: { name: string }) => {
+      reads.total += 1
+      if (pass === 2) reads.secondPass += 1
+      const stored = store.get(keyOf(kind, name))
+      if (!stored) throw { code: 404 }
+      return structuredClone(stored)
+    }
+
+  const create =
+    (kind: string) =>
+    async ({ body }: { body: { metadata?: { name?: string } } }) => {
+      const name = body.metadata?.name ?? ''
+      const stored = structuredClone(body) as Record<string, unknown>
+      const metadata = {
+        ...((stored.metadata as Record<string, unknown> | undefined) ?? {}),
+        resourceVersion: '1',
+        ...(kind === 'Deployment'
+          ? {
+              generation: 1,
+              annotations: {
+                ...(((stored.metadata as { annotations?: Record<string, string> } | undefined)
+                  ?.annotations ?? {}) as Record<string, string>),
+                'deployment.kubernetes.io/revision': '1',
+              },
+            }
+          : {}),
+      }
+      stored.metadata = metadata
+      if (kind === 'Deployment') {
+        stored.status = { availableReplicas: 1, observedGeneration: 1 }
+      }
+      store.set(keyOf(kind, name), stored)
+      return structuredClone(stored)
+    }
+
+  const replace =
+    (kind: string) =>
+    async ({ body }: { body: { metadata?: { name?: string } } }) => {
+      if (kind === 'Deployment') {
+        replaces.deployment += 1
+        if (pass === 2) replaces.secondPassDeployment += 1
+      }
+      if (kind === 'PodDisruptionBudget') {
+        replaces.pdb += 1
+        if (pass === 2) replaces.secondPassPdb += 1
+      }
+      const name = body.metadata?.name ?? ''
+      const stored = structuredClone(body) as Record<string, unknown>
+      stored.metadata = {
+        ...((stored.metadata as Record<string, unknown> | undefined) ?? {}),
+        resourceVersion: '2',
+      }
+      store.set(keyOf(kind, name), stored)
+      return structuredClone(stored)
+    }
+
+  const sdk = {
+    readNamespacedPersistentVolumeClaim: read('PersistentVolumeClaim'),
+    createNamespacedPersistentVolumeClaim: create('PersistentVolumeClaim'),
+    readNamespacedService: read('Service'),
+    createNamespacedService: create('Service'),
+    readNamespacedDeployment: read('Deployment'),
+    createNamespacedDeployment: create('Deployment'),
+    replaceNamespacedDeployment: replace('Deployment'),
+    readNamespacedPodDisruptionBudget: read('PodDisruptionBudget'),
+    createNamespacedPodDisruptionBudget: create('PodDisruptionBudget'),
+    replaceNamespacedPodDisruptionBudget: replace('PodDisruptionBudget'),
+    readNamespacedNetworkPolicy: read('NetworkPolicy'),
+    createNamespacedNetworkPolicy: create('NetworkPolicy'),
+    replaceNamespacedNetworkPolicy: replace('NetworkPolicy'),
+    patchNamespacedCustomObjectStatus: async () => ({}),
+  }
+
+  return {
+    api: new K8sGfsApi(
+      sdk as unknown as k8s.CoreV1Api,
+      sdk as unknown as k8s.AppsV1Api,
+      sdk as unknown as k8s.NetworkingV1Api,
+      sdk as unknown as k8s.PolicyV1Api,
+      sdk as unknown as k8s.CustomObjectsApi
+    ),
+    reads,
+    replaces,
+    beginSecondPass() {
+      pass = 2
+    },
+  }
+}
+
+describe('GfsReconciler Deployment gate across two reconciles (T7)', () => {
+  it('T7: second reconcile does not write Deployment or PDB and still reads', async () => {
+    const cluster = createStoreBackedGfsApi()
+    const reconciler = new GfsReconciler(cluster.api, config, undefined, 0, 0)
+    await reconciler.reconcile(gfs)
+    cluster.beginSecondPass()
+    await reconciler.reconcile({ ...gfs, status: { phase: 'Ready' } })
+    expect(cluster.reads.secondPass).toBeGreaterThan(0)
+    expect(cluster.replaces.secondPassDeployment).toBe(0)
+    expect(cluster.replaces.secondPassPdb).toBe(0)
+  })
+})
+
+describe('GfsReconciler resync pass log (D3)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  function resyncCalls() {
+    return vi
+      .mocked(hccLogger.info)
+      .mock.calls.filter(([message]) => message === 'Resync pass completed')
+  }
+
+  it('D3: an already-synced GFS pass logs writes 0 and skips equal to objects', async () => {
+    const api = new FakeApi()
+    api.writerNeedsUpdate = false
+    api.applyOutcome = 'up_to_date'
+    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+    await new GfsReconciler(api, config).fullReconcile([gfs])
+    expect(info).toHaveBeenCalled()
+    const line = resyncCalls().at(-1)
+    expect(line?.[0]).toBe('Resync pass completed')
+    expect(line?.[1]).toEqual(
+      expect.objectContaining({
+        scope: 'GFS',
+        writes: 0,
+        objects: expect.any(Number),
+        skips: expect.any(Number),
+        passMs: expect.any(Number),
+      })
+    )
+    const fields = line?.[1] as { objects: number; skips: number }
+    expect(fields.skips).toBe(fields.objects)
+    expect(fields.objects).toBeGreaterThan(0)
+  })
+
+  it('D3: a drifted reader logs writes 1', async () => {
+    const api = new FakeApi()
+    api.writerNeedsUpdate = false
+    api.applyOutcome = 'up_to_date'
+    api.readerApplyOutcome = 'replaced'
+    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+    await new GfsReconciler(api, config).fullReconcile([gfs])
+    const line = resyncCalls().at(-1)
+    expect(line?.[1]).toEqual(expect.objectContaining({ scope: 'GFS', writes: 1 }))
   })
 })
 

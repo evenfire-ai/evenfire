@@ -9,9 +9,10 @@ const GATED = new Set([
   'reconciler.ts',
   'sharedFileSystemReconciler.ts',
   'llmHookReconciler.ts',
+  'k8s/gfsK8sApi.ts',
 ])
 
-const EXEMPT = new Set(['k8s/gfsK8sApi.ts', 'statelessLifecycleExecutor.ts'])
+const EXEMPT = new Set(['statelessLifecycleExecutor.ts'])
 
 /** Any call, including `replace(params)` — not only inline `({ ... })`. */
 const CALL = /replaceNamespacedDeployment\s*\(/g
@@ -84,6 +85,11 @@ function isDeploymentGated(block: string): boolean {
   )
 }
 
+/** Replica-only scale in K8sGfsApi is not a template replace; it is not a no-op gate. */
+function isReplicaScaleReplace(block: string): boolean {
+  return /replicas/.test(block) && /mergeExisting/.test(block) && !isDeploymentGated(block)
+}
+
 describe('Deployment writer inventory', () => {
   it('every replaceNamespacedDeployment call is gated or explicitly exempt', () => {
     const hits: Array<{ rel: string; count: number; gated: boolean }> = []
@@ -119,6 +125,7 @@ describe('Deployment writer inventory', () => {
             block,
             `${rel} call at index ${index} is not inside replaceWithConflictRetry`
           ).not.toBeNull()
+          if (isReplicaScaleReplace(block ?? '')) continue
           expect(
             isDeploymentGated(block ?? ''),
             `${rel} call at index ${index} is missing an isUpToDate deploymentMatchesDesired gate`

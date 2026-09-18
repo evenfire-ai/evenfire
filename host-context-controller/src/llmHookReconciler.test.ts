@@ -21,6 +21,7 @@ import {
   podKeyResourceName,
   referencedHookIds,
 } from './llmHookReconciler'
+import { hccLogger } from './logger'
 import { HostCRD, LlmHookCRD } from './types'
 
 vi.mock('./config', () => ({
@@ -1031,5 +1032,135 @@ describe('LlmHookReconciler', () => {
     }
     expect(new Set(referencedHookIds(host))).toEqual(new Set(['x', 'y', 'x']))
     expect(referencedHookIds(undefined)).toEqual([])
+  })
+
+  describe('fullReconcile resync pass log (D3)', () => {
+    function lastBody<T>(fn: { mock: { calls: unknown[][] } }): T | undefined {
+      const call = fn.mock.calls.at(-1)?.[0] as { body?: T } | undefined
+      return call?.body
+    }
+
+    function resyncCalls() {
+      return vi
+        .mocked(hccLogger.info)
+        .mock.calls.filter(([message]) => message === 'Resync pass completed')
+    }
+
+    async function seedMatchingHook() {
+      const hook = makeHook({
+        name: 'd3',
+        spec: { target: { image: { ref: IMG, port: 8080 } }, lifecyclePoints: ['preCall'] },
+      })
+      hooks.set('d3', hook)
+      await reconciler.fullReconcile([hook])
+      const dep =
+        lastBody<k8s.V1Deployment>(appsApi.replaceNamespacedDeployment) ??
+        lastBody<k8s.V1Deployment>(appsApi.createNamespacedDeployment)
+      const svc =
+        lastBody<k8s.V1Service>(coreApi.replaceNamespacedService) ??
+        lastBody<k8s.V1Service>(coreApi.createNamespacedService)
+      const np =
+        lastBody<k8s.V1NetworkPolicy>(networkingApi.replaceNamespacedNetworkPolicy) ??
+        lastBody<k8s.V1NetworkPolicy>(networkingApi.createNamespacedNetworkPolicy)
+      if (!dep || !svc || !np) throw new Error('expected LlmHook resources to be written')
+      appsApi.readNamespacedDeployment.mockResolvedValue({
+        ...dep,
+        metadata: { ...dep.metadata, resourceVersion: '1' },
+        status: { readyReplicas: 1 },
+      })
+      coreApi.readNamespacedService.mockResolvedValue({
+        ...svc,
+        metadata: { ...svc.metadata, resourceVersion: '1' },
+        spec: { ...svc.spec, clusterIP: '10.0.0.1' },
+      })
+      networkingApi.readNamespacedNetworkPolicy.mockResolvedValue({
+        ...np,
+        metadata: { ...np.metadata, resourceVersion: '1' },
+      })
+      appsApi.replaceNamespacedDeployment.mockClear()
+      coreApi.replaceNamespacedService.mockClear()
+      networkingApi.replaceNamespacedNetworkPolicy.mockClear()
+      return hook
+    }
+
+    it('D3: an already-synced LlmHook pass logs writes 0 and skips equal to objects', async () => {
+      const hook = await seedMatchingHook()
+      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      await reconciler.fullReconcile([hook])
+      const line = resyncCalls().at(-1)
+      expect(line?.[0]).toBe('Resync pass completed')
+      expect(line?.[1]).toEqual(
+        expect.objectContaining({
+          scope: 'LlmHook',
+          writes: 0,
+          objects: expect.any(Number),
+          skips: expect.any(Number),
+          passMs: expect.any(Number),
+        })
+      )
+      const fields = line?.[1] as { objects: number; skips: number }
+      expect(fields.skips).toBe(fields.objects)
+      expect(fields.objects).toBeGreaterThan(0)
+    })
+
+    it('D3: a drifted LlmHook Deployment logs writes 1', async () => {
+      const hook = await seedMatchingHook()
+      const live = await appsApi.readNamespacedDeployment()
+      appsApi.readNamespacedDeployment.mockResolvedValue({
+        ...live,
+        spec: {
+          ...live.spec,
+          template: {
+            ...live.spec?.template,
+            spec: {
+              ...live.spec?.template?.spec,
+              containers: [{ name: 'hook', image: 'registry.example.com/other:drift' }],
+            },
+          },
+        },
+      })
+      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      await reconciler.fullReconcile([hook])
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+      const line = resyncCalls().at(-1)
+      expect(line?.[1]).toEqual(expect.objectContaining({ scope: 'LlmHook', writes: 1 }))
+    })
+
+    it('D3: a concurrent watch reconcile does not change the resync pass counters', async () => {
+      const hook = await seedMatchingHook()
+      let releaseSweep: (() => void) | undefined
+      const sweepHold = new Promise<void>(resolve => {
+        releaseSweep = resolve
+      })
+      let sweepStarted = false
+      appsApi.listNamespacedDeployment.mockImplementation(async () => {
+        sweepStarted = true
+        await sweepHold
+        return { items: [] }
+      })
+      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      const pass = reconciler.fullReconcile([hook])
+      await vi.waitFor(() => expect(sweepStarted).toBe(true))
+      const live = await appsApi.readNamespacedDeployment()
+      appsApi.readNamespacedDeployment.mockResolvedValue({
+        ...live,
+        spec: {
+          ...live.spec,
+          template: {
+            ...live.spec?.template,
+            spec: {
+              ...live.spec?.template?.spec,
+              containers: [{ name: 'hook', image: 'registry.example.com/watch:drift' }],
+            },
+          },
+        },
+      })
+      await reconciler.reconcile(hook)
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
+      releaseSweep?.()
+      await pass
+      const line = resyncCalls().at(-1)
+      expect(line?.[1]).toEqual(expect.objectContaining({ scope: 'LlmHook', writes: 0 }))
+    })
   })
 })

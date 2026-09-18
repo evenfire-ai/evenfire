@@ -123,7 +123,7 @@ describe('applyNetworkPolicy no-op gate', () => {
 
       await expect(
         applyNetworkPolicy(api as unknown as k8s.NetworkingV1Api, 'np', 'ns', desiredPolicy())
-      ).resolves.toBeUndefined()
+      ).resolves.toBe('missing')
 
       expect(api.createNamespacedNetworkPolicy).toHaveBeenCalledOnce()
       expect(api.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(2)
@@ -199,7 +199,7 @@ describe('applyNetworkPolicy no-op gate', () => {
         '[NetPol]',
         mutationAllowed
       )
-    ).resolves.toBeUndefined()
+    ).resolves.toBe('not_allowed')
 
     expect(mutationAllowed).toHaveBeenCalledOnce()
     expect(api.readNamespacedNetworkPolicy).not.toHaveBeenCalled()
