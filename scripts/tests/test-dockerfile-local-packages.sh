@@ -220,7 +220,11 @@ declared_local_packages() {
   local service="$1"
   node -e '
     const manifest = require(process.argv[1]);
-    const dependencies = manifest.dependencies ?? {};
+    const dependencies = {
+      ...(manifest.dependencies ?? {}),
+      ...(manifest.devDependencies ?? {}),
+      ...(manifest.optionalDependencies ?? {}),
+    };
     for (const [name, value] of Object.entries(dependencies)) {
       const match = /^@clerum\/(.+)$/.exec(name);
       if (match && typeof value === "string" && value.startsWith("file:../packages/")) {
@@ -279,24 +283,33 @@ assert_manifest_declared_local_packages() {
     }
 
     let invalid = false;
-    let consumerCount = 0;
     for (const image of published) {
       const packageJson = `${root}/${image.path}/package.json`;
+      const dockerfile = `${image.path}/${image.dockerfile ?? "Dockerfile"}`;
+      const dockerfilePath = `${root}/${dockerfile}`;
+      if (!fs.existsSync(dockerfilePath)) {
+        console.error(`published image ${image.name} is missing ${dockerfile}`);
+        invalid = true;
+      }
       if (!fs.existsSync(packageJson)) {
-        const hasLocalPackageSource = image.source_paths?.some(path => path.startsWith("packages/"));
-        if (hasLocalPackageSource) {
-          console.error(`local-package image ${image.name} is missing ${image.path}/package.json`);
+        const claimsWorkspacePackages = image.source_paths?.some(path =>
+          path.startsWith("packages/")
+        );
+        const dockerfileText = fs.existsSync(dockerfilePath)
+          ? fs.readFileSync(dockerfilePath, "utf8")
+          : "";
+        const copiesLocalManifest = /^\s*COPY\s+package(?:\.json|\*\.json)\b/m.test(
+          dockerfileText
+        );
+        if (copiesLocalManifest || claimsWorkspacePackages) {
+          console.error(`Node/workspace image ${image.name} is missing ${image.path}/package.json`);
           invalid = true;
         }
-        continue;
       }
-      consumerCount += 1;
-      const dockerfile = `${image.path}/${image.dockerfile ?? "Dockerfile"}`;
       console.log([image.name, image.path, dockerfile].join("\t"));
     }
-
-    if (consumerCount === 0) {
-      console.error("published local-package consumer population must not be empty");
+    if (published.length === 0) {
+      console.error("published image population must not be empty");
       invalid = true;
     }
     if (invalid) process.exit(1);
@@ -310,11 +323,7 @@ assert_manifest_declared_local_packages() {
     const fs = require("node:fs");
     const manifest = require(process.argv[1]);
     const root = process.argv[2];
-    const count = manifest.images.filter(candidate => {
-      if (candidate.published !== true) return false;
-      if (fs.existsSync(`${root}/${candidate.path}/package.json`)) return true;
-      return candidate.source_paths?.some(path => path.startsWith("packages/")) ?? false;
-    }).length;
+    const count = manifest.images.filter(candidate => candidate.published === true).length;
     process.stdout.write(String(count));
   ' "$IMAGES_MANIFEST" "$REPO_ROOT")"
   actual_rows="$(wc -l <"$rows_file" | tr -d '[:space:]')"
@@ -326,8 +335,10 @@ assert_manifest_declared_local_packages() {
 
   while IFS=$'\t' read -r image service dockerfile; do
     [[ -z "$image" ]] && continue
-    assert_declared_local_packages "$service" "$dockerfile"
-    assert_declared_local_package_sources "$image" "$service"
+    if [[ -f "$REPO_ROOT/$service/package.json" ]]; then
+      assert_declared_local_packages "$service" "$dockerfile"
+      assert_declared_local_package_sources "$image" "$service"
+    fi
   done <"$rows_file"
   rm -f -- "$rows_file"
 }
@@ -386,6 +397,22 @@ assert_manifest_source_mutations_rejected() {
     const manifest = require(process.argv[1]);
     const image = manifest.images.find(candidate => candidate.name === "control-api");
     image.source_paths = ["control-api/**"];
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
+  expect_manifest_rejection workflow-recipes-gutted-sources '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    for (const name of ["workflow-recipes", "workflow-coordinator", "workflow-snippet-runner"]) {
+      const image = manifest.images.find(candidate => candidate.name === name);
+      image.source_paths = ["workflow-recipes/**"];
+    }
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
+  expect_manifest_rejection host-context-controller-gutted-sources '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    const image = manifest.images.find(candidate => candidate.name === "host-context-controller");
+    image.source_paths = ["host-context-controller/**"];
     fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
   '
 
