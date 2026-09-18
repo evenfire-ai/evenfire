@@ -358,8 +358,19 @@ function desiredReaderFromFixture(): k8s.V1Deployment {
   return desired
 }
 
-function liveReader(overrides: Partial<k8s.V1Deployment['spec']> = {}): k8s.V1Deployment {
+function liveReader(overrides: Partial<k8s.V1DeploymentSpec> = {}): k8s.V1Deployment {
   const live = structuredClone(liveReaderFixture) as k8s.V1Deployment
+  const selector = overrides.selector ?? live.spec?.selector
+  const template = overrides.template ?? live.spec?.template
+  if (!selector || !template) {
+    throw new Error('gfsc-reader fixture is missing spec.selector or spec.template')
+  }
+  const spec: k8s.V1DeploymentSpec = {
+    ...live.spec,
+    ...overrides,
+    selector,
+    template,
+  }
   return {
     ...live,
     metadata: {
@@ -369,11 +380,8 @@ function liveReader(overrides: Partial<k8s.V1Deployment['spec']> = {}): k8s.V1De
       creationTimestamp: new Date('2026-01-01T00:00:00Z'),
       managedFields: [{ manager: 'kube-controller-manager', operation: 'Update' }],
     },
-    spec: {
-      ...live.spec,
-      ...overrides,
-    },
-    status: { observedGeneration: 1, availableReplicas: live.spec?.replicas ?? 2 },
+    spec,
+    status: { observedGeneration: 1, availableReplicas: spec.replicas ?? 2 },
   }
 }
 
