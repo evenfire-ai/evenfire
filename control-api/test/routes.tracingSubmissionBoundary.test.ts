@@ -3,9 +3,18 @@ import express from 'express'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { config } from '../src/config.js'
+import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createInternalAdministrativeEventsRouter } from '../src/routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from '../src/routes/internal/agentRunEvents.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from '../src/routes/internal/infrastructureTelemetryEvents.js'
+import {
+  TracingIdempotencyConflictError,
+  UnsafeTracingInputError,
+} from '../src/services/tracing/append.js'
+import {
+  InvalidTracingInputError,
+  TracingBindingUnavailableError,
+} from '../src/services/tracing/routeSubmissionService.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 
 function signInternalControl(issuer: 'hcc' | 'wrc'): string {
@@ -281,5 +290,74 @@ describe('internal tracing submission routers', () => {
     expect(response.status).toBe(400)
     expect(response.body).toEqual({ error: 'invalid_telemetry_type', index: 0 })
     expect(service.submit).not.toHaveBeenCalled()
+  })
+})
+
+// HCC settles a submission without retry only on these (status, code) pairs
+// (#326), so the code has to survive the real router and the global handler.
+describe('internal tracing submission routers — rejection code on the wire', () => {
+  type RejectingService = { submit: () => Promise<never> }
+  function rejectingApp(router: (service: RejectingService) => express.Router, err: unknown) {
+    const service = { submit: vi.fn<() => Promise<never>>(async () => Promise.reject(err)) }
+    const app = express()
+    app.use(router(service))
+    app.use(clerumErrorHandler)
+    return { app, service }
+  }
+
+  it.each([
+    [
+      '/internal/tracing/administrative-events',
+      createInternalAdministrativeEventsRouter,
+      { kind: 'linked_outcome', operationId: 'operation-1' },
+      new TracingIdempotencyConflictError('administrative', 'hcc_internal_control', 'e-1'),
+      409,
+      'tracing_idempotency_conflict',
+    ],
+    [
+      '/internal/tracing/infrastructure-telemetry-events',
+      createInternalInfrastructureTelemetryEventsRouter,
+      { telemetryType: 'reconcile_outcome', sourceEventId: 'reconcile-1' },
+      new UnsafeTracingInputError('input.payload.gfs_subject', 'not_permitted'),
+      400,
+      'unsafe_tracing_input',
+    ],
+    [
+      '/internal/tracing/infrastructure-telemetry-events',
+      createInternalInfrastructureTelemetryEventsRouter,
+      { telemetryType: 'reconcile_outcome', sourceEventId: 'reconcile-1' },
+      new InvalidTracingInputError('events[0].hostLookupReference.uid must be a string'),
+      400,
+      'invalid_tracing_input',
+    ],
+  ] as const)('%s answers %#: status and code', async (path, router, event, err, status, code) => {
+    const { app, service } = rejectingApp(router, err)
+
+    const response = await request(app)
+      .post(path)
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({ events: [event] })
+
+    expect(service.submit).toHaveBeenCalledOnce()
+    expect(response.status).toBe(status)
+    expect(response.body).toMatchObject({ code, correlationId: expect.any(String) })
+  })
+
+  it('keeps a binding 403 without a code, so HCC keeps retrying it', async () => {
+    const { app, service } = rejectingApp(
+      createInternalAdministrativeEventsRouter,
+      new TracingBindingUnavailableError('operation', 0)
+    )
+
+    const response = await request(app)
+      .post('/internal/tracing/administrative-events')
+      .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+      .send({ events: [{ kind: 'linked_outcome', operationId: 'operation-1' }] })
+
+    // Liveness: the service rejected and the handler's 4xx branch answered.
+    expect(service.submit).toHaveBeenCalledOnce()
+    expect(response.status).toBe(403)
+    expect(response.body.correlationId).toEqual(expect.any(String))
+    expect(response.body).not.toHaveProperty('code')
   })
 })

@@ -16,6 +16,7 @@ import {
 import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
+  assertNoClientAuthority,
   assertSafeEventPayload,
 } from '../src/services/tracing/append.js'
 import type {
@@ -369,6 +370,75 @@ describe('governed append idempotency', () => {
     ).resolves.toMatchObject({ kind: 'replayed' })
   })
 
+  describe('HCC linked outcomes re-observed at a later time (#327)', () => {
+    const hccAdminPrincipal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-admin',
+      allowedKinds: ['linked_outcome'],
+    } as const satisfies AdministrativeEventSubmitterPrincipalV1
+    const hccOutcome = {
+      kind: 'linked_outcome' as const,
+      sourceEventId: `hcc-admin-outcome:${adminBinding.operationId}:3:succeeded`,
+      occurredAt: '2026-07-10T09:59:59.000Z',
+      reasonCode: 'reconciled',
+      sourceStatusRef: 'host:mcp-host/chatllm:generation=3',
+      payload: { resource_class: 'Host', status: 'succeeded' },
+    }
+    const service = () =>
+      new AdministrativeEventService({
+        transaction: h.transaction,
+        now: () => new Date(NOW),
+        newEventId: () => EVENT_ID,
+      })
+    const insertCalls = () =>
+      h.query.mock.calls.filter(call => String(call[0]).includes('inserted_family'))
+
+    it('replays the same outcome with a different occurredAt and keeps the first one', async () => {
+      await expect(
+        service().append(hccAdminPrincipal, adminBinding, hccOutcome)
+      ).resolves.toMatchObject({ kind: 'accepted', accepted: 1 })
+      await expect(
+        service().append(hccAdminPrincipal, adminBinding, {
+          ...hccOutcome,
+          occurredAt: '2026-07-10T10:05:00.000Z',
+        })
+      ).resolves.toMatchObject({ kind: 'replayed', replayed: 1, eventId: EVENT_ID })
+
+      const inserts = insertCalls()
+      expect(inserts).toHaveLength(1)
+      expect(JSON.stringify(inserts[0][1])).toContain(hccOutcome.occurredAt)
+    })
+
+    it('still conflicts when the same outcome key claims a different reasonCode', async () => {
+      await service().append(hccAdminPrincipal, adminBinding, hccOutcome)
+
+      await expect(
+        service().append(hccAdminPrincipal, adminBinding, {
+          ...hccOutcome,
+          occurredAt: '2026-07-10T10:05:00.000Z',
+          reasonCode: 'reconcile_exception',
+        })
+      ).rejects.toBeInstanceOf(TracingIdempotencyConflictError)
+    })
+
+    it('keeps occurredAt in the digest for every other linked_outcome submitter', async () => {
+      const wrcOutcome = { ...hccOutcome, sourceEventId: 'wrc-outcome-1' }
+      await expect(
+        service().append(adminPrincipal, adminBinding, wrcOutcome)
+      ).resolves.toMatchObject({ kind: 'accepted' })
+
+      await expect(
+        service().append(adminPrincipal, adminBinding, {
+          ...wrcOutcome,
+          occurredAt: '2026-07-10T10:05:00.000Z',
+        })
+      ).rejects.toBeInstanceOf(TracingIdempotencyConflictError)
+      expect(insertCalls()).toHaveLength(1)
+    })
+  })
+
   it('does not collide events from different source services with the same kind and source event id', async () => {
     const secondServicePrincipal = { ...agentPrincipal, sourceService: 'mcp-host-secondary' }
     const lockIdentities: string[] = []
@@ -457,6 +527,51 @@ describe('governed append idempotency', () => {
 })
 
 describe('server-owned tracing fields', () => {
+  it('accepts HCC GFS evidence as a transition and names a non-allowlisted key as such (#328)', () => {
+    expect(() =>
+      assertSafeEventPayload({
+        resource_class: 'Host',
+        reason_code: 'ready',
+        status: 'succeeded',
+        phase: 'deployed',
+        state: 'ready',
+        transition: 'gfs_token:reused',
+      })
+    ).not.toThrow()
+    expect(() =>
+      assertSafeEventPayload({
+        transition: 'gfs_token:reused',
+        gfs_subject: 'host:1st:mcp-host/chatllm',
+      })
+    ).toThrow(
+      expect.objectContaining({
+        code: 'unsafe_tracing_input',
+        reason: 'not_permitted',
+        message: 'tracing input field is not permitted: input.payload.gfs_subject',
+      })
+    )
+    expect(() => assertSafeEventPayload({ transition: { outcome: 'reused' } })).toThrow(
+      expect.objectContaining({
+        code: 'unsafe_tracing_input',
+        reason: 'invalid_value',
+        message: 'tracing input value is not accepted: input.payload.transition',
+      })
+    )
+    expect(() => assertSafeEventPayload({ target_label: 'Label with spaces' })).toThrow(
+      expect.objectContaining({
+        reason: 'invalid_value',
+        message: 'tracing input value is not accepted: input.payload.target_label',
+      })
+    )
+    expect(() => assertNoClientAuthority({ payload: { sourceService: 'hcc' } })).toThrow(
+      expect.objectContaining({
+        code: 'unsafe_tracing_input',
+        message:
+          'tracing input contains a server-owned or monetary field: input.payload.sourceService',
+      })
+    )
+  })
+
   it('accepts a bounded administrator label but rejects arbitrary display text', () => {
     expect(() => assertSafeEventPayload({ target_label: 'deleted_admin' })).not.toThrow()
     expect(() => assertSafeEventPayload({ target_label: 'Deleted admin with spaces' })).toThrow(

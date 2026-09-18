@@ -90,7 +90,11 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
       host.kind !== 'Host' ||
       metadata?.name !== reference.name ||
       metadata.namespace !== reference.namespace ||
-      (reference.generation !== undefined && metadata.generation !== reference.generation)
+      (reference.generation !== undefined && metadata.generation !== reference.generation) ||
+      // A Host deleted and recreated under the same name restarts at generation 1;
+      // only the uid tells the objects apart, so an event observed on the old
+      // object must not bind to its successor (#691).
+      (reference.uid !== undefined && metadata.uid !== reference.uid)
     ) {
       return null
     }

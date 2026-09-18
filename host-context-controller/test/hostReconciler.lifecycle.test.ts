@@ -1493,6 +1493,26 @@ describe('HostReconciler stateless lifecycle — status write idempotence', () =
     ).toHaveLength(1)
   })
 
+  it('binds the committed health transition to the Host uid (#691)', async () => {
+    const infrastructureTelemetryReporter = createTelemetryReporterMock()
+    const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })
+    await reconciler.reconcile({ ...makeStatelessHost(), generation: 3 })
+
+    expect(customApi.patchNamespacedCustomObjectStatus).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledTimes(1)
+    expect(infrastructureTelemetryReporter.enqueueHealthTransition).toHaveBeenCalledWith(
+      expect.objectContaining({
+        hostLookupReference: {
+          name: 'stateless-host',
+          namespace: 'mcp-host',
+          generation: 3,
+          uid: 'stateless-host-uid',
+        },
+        payload: { transition: 'lifecycle:suspended', state: 'suspended' },
+      })
+    )
+  })
+
   it('skips the write when the observed status already matches', async () => {
     const infrastructureTelemetryReporter = createTelemetryReporterMock()
     const { reconciler, customApi } = createReconciler({ infrastructureTelemetryReporter })

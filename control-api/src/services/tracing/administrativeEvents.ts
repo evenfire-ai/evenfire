@@ -59,6 +59,13 @@ export class AdministrativePrincipalBindingInvariantError extends Error {
   }
 }
 
+function isHccLinkedOutcome(
+  principal: AdministrativeEventSubmitterPrincipalV1 | ControlApiLocalAdministrativePrincipalV1,
+  input: AdministrativeEventInputV1
+): boolean {
+  return principal.kind === 'hcc_internal_control' && input.kind === 'linked_outcome'
+}
+
 function assertPrincipalBinding(
   principal: AdministrativeEventSubmitterPrincipalV1 | ControlApiLocalAdministrativePrincipalV1,
   binding: AdministrativeServerBindingV1,
@@ -195,7 +202,14 @@ export class AdministrativeEventService {
       serviceSub: principal.serviceSub,
       sourceKind: principal.kind,
       sourceEventId: input.sourceEventId,
-      occurredAt: occurredAtIso,
+      // HCC linked outcomes are state facts keyed by operation, generation and
+      // outcome. HCC holds no stable observation time (it re-observes the
+      // outcome on every reconcile pass and after every restart), so hashing
+      // occurredAt turned each re-observation into an idempotency conflict
+      // (#327). Storage keeps the first occurredAt; reasonCode, sourceStatusRef,
+      // payload and the server-resolved binding still distinguish a genuinely
+      // different claim. Every other submitter keeps occurredAt in the hash.
+      ...(isHccLinkedOutcome(principal, input) ? {} : { occurredAt: occurredAtIso }),
       kind: input.kind,
       reasonCode: input.reasonCode ?? null,
       sourceStatusRef: input.sourceStatusRef ?? null,
