@@ -8,7 +8,7 @@ describe('PR2 runtime correction migrations', () => {
   it('grants the runtime role only the access used by PR2 services', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0112_pr2_runtime_privileges'
+      candidate => candidate.version === '0118_pr2_runtime_privileges'
     )!
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 
@@ -24,7 +24,7 @@ describe('PR2 runtime correction migrations', () => {
   it('admits workflow recipes while preserving a closed entity vocabulary', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0113_workflow_recipe_authority_entity'
+      candidate => candidate.version === '0119_workflow_recipe_authority_entity'
     )!
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 
@@ -39,7 +39,7 @@ describe('PR2 runtime correction migrations', () => {
   it('adds only the closed workflow authority failure vocabulary', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '0114_workflow_run_failure_reason'
+      candidate => candidate.version === '011a_workflow_run_failure_reason'
     )!
     const query = vi.fn(async () => ({ rows: [], rowCount: 0 }))
 
