@@ -44,6 +44,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
@@ -53,6 +55,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forces host messages onto the authenticated rpc envelope', async () => {
@@ -154,6 +157,7 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invaria
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards userId = auth.sub regardless of client-supplied userId', async () => {
@@ -191,6 +195,7 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny — userId identity invariant'
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards userId = auth.sub regardless of client-supplied userId', async () => {
