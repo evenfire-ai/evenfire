@@ -465,14 +465,14 @@ describe('GfsReconciler resync pass log (D3)', () => {
       const api = new FakeApi()
       api.writerNeedsUpdate = false
       api.applyOutcome = outcome
-      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
       await new GfsReconciler(api, config).fullReconcile([gfs])
       const line = resyncCalls().at(-1)
       const fields = line?.[1] as { objects: number; skips: number; writes: number }
       expect(fields.writes).toBe(0)
       expect(fields.skips).toBe(fields.objects)
       expect(fields.objects).toBeGreaterThan(0)
-      info.mockRestore()
+      vi.mocked(hccLogger.info).mockRestore()
     }
   })
 
@@ -481,7 +481,7 @@ describe('GfsReconciler resync pass log (D3)', () => {
     api.writerNeedsUpdate = false
     api.applyOutcome = 'up_to_date'
     api.readerApplyOutcome = 'replaced'
-    const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+    vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
     await new GfsReconciler(api, config).fullReconcile([gfs])
     const line = resyncCalls().at(-1)
     expect(line?.[1]).toEqual(expect.objectContaining({ scope: 'GFS', writes: 1 }))

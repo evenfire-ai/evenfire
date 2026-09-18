@@ -1085,7 +1085,7 @@ describe('LlmHookReconciler', () => {
 
     it('D3: an already-synced LlmHook pass logs writes 0 and skips equal to objects', async () => {
       const hook = await seedMatchingHook()
-      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
       await reconciler.fullReconcile([hook])
       const line = resyncCalls().at(-1)
       expect(line?.[0]).toBe('Resync pass completed')
@@ -1119,7 +1119,7 @@ describe('LlmHookReconciler', () => {
           },
         },
       })
-      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
       await reconciler.fullReconcile([hook])
       expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalledTimes(1)
       const line = resyncCalls().at(-1)
@@ -1138,7 +1138,7 @@ describe('LlmHookReconciler', () => {
         await sweepHold
         return { items: [] }
       })
-      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
       const pass = reconciler.fullReconcile([hook])
       await vi.waitFor(() => expect(sweepStarted).toBe(true))
       const live = await appsApi.readNamespacedDeployment()
