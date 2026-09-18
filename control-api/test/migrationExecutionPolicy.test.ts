@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecutionPolicy.js'
 import {
+  DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
@@ -28,11 +29,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_authorized_idx',
   'invitation_delivery_commands_invitation_idx',
 ])
-
-const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  '0107_llm_provider_attempts_sdk_link',
-  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-] as const)
 
 describe('D34 migration execution policy', () => {
   it('freezes the owner-approved timeout and Job values', () => {
@@ -251,8 +247,8 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(9)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(9)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(15)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(15)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
