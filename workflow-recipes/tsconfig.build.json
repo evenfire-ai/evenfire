@@ -4,5 +4,13 @@
     "rootDir": "./src",
     "noEmit": false
   },
-  "exclude": ["node_modules", "dist", "test", "tests", "**/*.test.ts", "**/__tests__/**"]
+  "exclude": [
+    "node_modules",
+    "dist",
+    "test",
+    "tests",
+    "**/*.test.ts",
+    "**/*.testFixtures.ts",
+    "**/__tests__/**"
+  ]
 }

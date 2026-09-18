@@ -29,6 +29,7 @@ export declare const PROVIDER_IDS: readonly [
   'minimax',
   'azure',
   'codex-subscription',
+  'grok-subscription',
 ]
 
 /** Union of the canonical provider ids. */
@@ -88,7 +89,7 @@ export declare function isLlmProviderId(s: unknown): s is LlmProviderId
  */
 export declare function isCredentialSlotOwnedByProvider(
   provider: string,
-  credentialSlot: string,
+  credentialSlot: string
 ): boolean
 
 export type ProviderAuthMode = 'static-credentials' | 'oauth-broker'
@@ -102,11 +103,22 @@ export interface ProviderDescriptor {
   credentialSlots: readonly CredentialSlot[]
   nonSecretEnv: readonly NonSecretEnvVar[]
   defaultModel?: string
+  executeScope?: string
+  proxyApp?: string
+  proxyService?: string
 }
 
 export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
+export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
+export declare function buildProviderMaps(
+  ids: readonly string[],
+  brokerIds: readonly string[]
+): {
+  PROVIDER_AUTH_MODE: Readonly<Record<string, ProviderAuthMode>>
+  PROVIDER_MODEL_CATALOG_MODE: Readonly<Record<string, ProviderModelCatalogMode>>
+}
 export declare function providerDescriptor(id: LlmProviderId): ProviderDescriptor
 export declare function requireStaticCredentialSlot(
-  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>,
+  descriptor: Pick<ProviderDescriptor, 'authMode' | 'credentialSlots'>
 ): CredentialSlot

@@ -49,4 +49,15 @@ describe('tool presentation configuration', () => {
       })
     ).toEqual({ bridgeEnabled: enabled })
   })
+  it.each([false, true])('defaults Grok to the same direct presentation as Codex %s', enabled => {
+    expect(resolveToolPresentation('grok-subscription', { dynamicToolsEnabled: enabled })).toEqual({
+      bridgeEnabled: false,
+      codexMode: 'direct',
+    })
+    expect(
+      resolveToolPresentation('zai', { dynamicToolsEnabled: enabled }, [
+        { provider: 'grok-subscription' },
+      ])
+    ).toEqual({ bridgeEnabled: false, codexMode: 'direct' })
+  })
 })

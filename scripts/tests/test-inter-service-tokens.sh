@@ -15,7 +15,14 @@ cat > "$TMP/bin/openssl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "rand" && "${2:-}" == "-hex" ]]; then
-  printf '%064x\n' "$$"
+  count_file="${OPENSSL_RAND_COUNT_FILE:?}"
+  count=0
+  if [[ -f "$count_file" ]]; then
+    count="$(cat "$count_file")"
+  fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$count_file"
+  printf '%064x\n' "$count"
   exit 0
 fi
 echo "unexpected openssl invocation" >&2
@@ -113,7 +120,9 @@ assert_no_secret_material() {
 run_apply() {
   local context="$1" capture="$2"
   shift 2
+  : > "$TMP/openssl-rand-count"
   CAPTURE_FILE="$capture" PATH="$TMP/bin:$PATH" CONTEXT="$context" \
+    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
     CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
     bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"
 }
@@ -122,8 +131,11 @@ run_hcc_apply() {
   local rollout="$1"
   shift
   : > "$rollout"
+  : > "$TMP/openssl-rand-count"
   CAPTURE_FILE="$TMP/hcc-capture.json" ROLLOUT_LOG="$rollout" KUBE_DEPLOY_EXISTS=1 \
-    PATH="$TMP/bin:$PATH" CONTEXT=gke-dev CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
+    PATH="$TMP/bin:$PATH" CONTEXT=gke-dev \
+    OPENSSL_RAND_COUNT_FILE="$TMP/openssl-rand-count" \
+    CLERUM_PROJECT_DIR="$TMP/sibling" "$@" \
     bash "$ROOT/deploy/scripts/apply-inter-service-tokens.sh" >"$TMP/stdout" 2>"$TMP/stderr"
 }
 
@@ -149,6 +161,7 @@ if run_apply clerum-codex-member-registration-test "$duplicate_capture" env \
   exit 1
 fi
 grep -q 'filesystem controller service tokens must be distinct' "$TMP/stderr"
+jq -e '.stringData.CONTROL_API_INTERNAL_SERVICE_TOKENS | contains("grok-llm-proxy=")' "$minikube_capture" >/dev/null
 
 branch_profile_capture="$TMP/branch-profile-control-api-internal-tokens.json"
 run_apply clerum-cursor-46f812cd-185fc31b "$branch_profile_capture" env

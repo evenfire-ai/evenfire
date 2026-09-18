@@ -807,6 +807,51 @@ describe('ANY /api/v1/sandbox-ui/:ns/:name/view/*', () => {
     pending[1].res.status(200).end()
     await Promise.all([firstPromise, secondPromise])
   })
+
+  it('keeps concurrent proxy response security hooks attached to their own response', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+
+    const firstRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/first')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const secondRequest = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/second')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-b'))
+    const firstPromise = firstRequest.then(() => undefined)
+    const secondPromise = secondRequest.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    const firstProxyRes = {
+      statusCode: 302,
+      headers: { location: 'https://outside.example.test/path' } as Record<string, string>,
+    }
+    const secondProxyRes = {
+      statusCode: 200,
+      headers: {} as Record<string, string>,
+    }
+
+    // Deliver B before A: both response hooks must remain live until their own
+    // response arrives, so each response receives the security floor.
+    httpProxyMock._proxy.emit('proxyRes', secondProxyRes, pending[1].req, {})
+    httpProxyMock._proxy.emit('proxyRes', firstProxyRes, pending[0].req, {})
+
+    expect(firstProxyRes.statusCode).toBe(200)
+    expect(firstProxyRes.headers.location).toBeUndefined()
+    expect(firstProxyRes.headers['x-frame-options']).toBe('DENY')
+    expect(secondProxyRes.headers['x-frame-options']).toBe('DENY')
+
+    pending[0].res.status(200).end()
+    pending[1].res.status(200).end()
+    await Promise.all([firstPromise, secondPromise])
+  })
 })
 
 // ─── GET /api/v1/sandbox-ui/apps ───────────────────────────────────

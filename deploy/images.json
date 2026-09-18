@@ -27,6 +27,7 @@
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/llm-providers/**"
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -79,6 +80,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**"
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -94,6 +96,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**"
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -109,6 +112,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**"
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": true
@@ -124,6 +128,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**"
+        "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
       "deployed_to_minikube": false
@@ -184,6 +189,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**",
+        "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -206,6 +212,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**",
+        "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -227,6 +234,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**",
+        "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -249,6 +257,7 @@
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
         "packages/llm-providers/**",
+        "packages/grok-provider-attempt-contract/**",
         "scripts/e2e/**",
         "tests/e2e/fixtures/**"
       ],
@@ -325,6 +334,14 @@
       "path": "codex-llm-proxy",
       "rooted": true,
       "source_paths": ["codex-llm-proxy/**", "packages/llm-provider-attempt-contract/**"],
+      "published": true,
+      "deployed_to_minikube": true
+    },
+    {
+      "name": "grok-llm-proxy",
+      "path": "grok-llm-proxy",
+      "rooted": true,
+      "source_paths": ["grok-llm-proxy/**", "packages/grok-provider-attempt-contract/**"],
       "published": true,
       "deployed_to_minikube": true
     },

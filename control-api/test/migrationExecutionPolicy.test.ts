@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecutionPolicy.js'
 import {
+  DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
-  PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
@@ -30,11 +30,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_invitation_idx',
 ])
 
-const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  '0107_llm_provider_attempts_sdk_link',
-  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-] as const)
-
 describe('D34 migration execution policy', () => {
   it('freezes the owner-approved timeout and Job values', () => {
     expect(MIGRATION_EXECUTION_POLICY).toEqual({
@@ -50,23 +45,15 @@ describe('D34 migration execution policy', () => {
     })
   })
 
-  it('classifies exactly 26 existing-table indexes and no fresh-table index', () => {
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
-    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(26)
+  it('classifies exactly 25 existing-table indexes and no fresh-table index', () => {
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
+    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
     ).toHaveLength(18)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010b'))
     ).toHaveLength(7)
-    expect(
-      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010f'))
-    ).toEqual([
-      expect.objectContaining({
-        name: 'workflow_runs_initiating_authority_binding',
-        phase: 'after-schema',
-      }),
-    ])
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
     ).toBe(false)
@@ -114,10 +101,10 @@ describe('D34 migration execution policy', () => {
         )
       )
     )
-    const historicalPlan = PR1_ONLINE_INDEX_PLAN.filter(index =>
-      ['0109_user_access_foundation', '010b_catalog_utf8_ordering'].includes(index.migrationVersion)
-    )
-    const classified = [...historicalPlan.map(index => index.name), ...FRESH_TABLE_INDEXES].sort()
+    const classified = [
+      ...PR1_ONLINE_INDEX_PLAN.map(index => index.name),
+      ...FRESH_TABLE_INDEXES,
+    ].sort()
 
     expect(historicalNames).toHaveLength(39)
     expect(classified).toEqual(historicalNames)
@@ -129,7 +116,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s+/g, ' ')
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
-    for (const index of historicalPlan) {
+    for (const index of PR1_ONLINE_INDEX_PLAN) {
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -205,62 +192,6 @@ describe('D34 migration execution policy', () => {
 })
 
 describe('D34 PR1 migration runner', () => {
-  it('commits PR2 schema before its concurrent index and records the version afterward', async () => {
-    const order: string[] = []
-    const entry = PR1_ONLINE_INDEX_PLAN.find(
-      index => index.name === 'workflow_runs_initiating_authority_binding'
-    )!
-    const db = {
-      query: vi.fn(async (sql: string, values?: unknown[]) => {
-        order.push(sql)
-        if (sql.includes('FROM pg_class index_rel')) {
-          const created = order.includes(entry.createSql)
-          return {
-            rows: created
-              ? [
-                  {
-                    table_name: entry.table,
-                    indisunique: false,
-                    indisvalid: true,
-                    definition: entry.createSql,
-                  },
-                ]
-              : [],
-            rowCount: created ? 1 : 0,
-          }
-        }
-        return { rows: [], rowCount: 0, values }
-      }),
-    }
-    const allVersions = [
-      ...DEV_POST_0106_MIGRATION_VERSIONS,
-      ...PR1_MIGRATION_VERSIONS,
-      ...PR2_MIGRATION_VERSIONS,
-    ]
-    const target = '010f_workflow_authority_bindings'
-    const migrations = allVersions.map(version => ({
-      version,
-      apply: vi.fn(async (client: typeof db) => {
-        if (version === target) await client.query('APPLY 010f SCHEMA')
-      }),
-    }))
-
-    await applyPendingPr1Migrations({
-      db,
-      migrations,
-      appliedVersions: new Set(allVersions.filter(version => version !== target)),
-      recordMigration: async client => {
-        await client.query('RECORD 010f VERSION')
-      },
-    })
-
-    expect(order.indexOf('APPLY 010f SCHEMA')).toBeLessThan(order.indexOf(entry.createSql))
-    expect(order.indexOf(entry.createSql)).toBeLessThan(order.indexOf('RECORD 010f VERSION'))
-    expect(order[order.indexOf(entry.createSql) - 1]).toContain('statement_timeout')
-    expect(order.filter(sql => sql === 'BEGIN')).toHaveLength(2)
-    expect(order.filter(sql => sql === 'COMMIT')).toHaveLength(2)
-  })
-
   it('commits and records each PR1 version independently in order', async () => {
     const queries: Array<{ sql: string; values?: unknown[] }> = []
     const db = {
@@ -304,10 +235,6 @@ describe('D34 PR1 migration runner', () => {
         version,
         apply: vi.fn(async () => undefined),
       })),
-      ...PR2_MIGRATION_VERSIONS.map(version => ({
-        version,
-        apply: vi.fn(async () => undefined),
-      })),
     ]
 
     await applyPendingPr1Migrations({
@@ -319,18 +246,9 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual([
-      ...DEV_POST_0106_MIGRATION_VERSIONS,
-      ...PR1_MIGRATION_VERSIONS,
-      ...PR2_MIGRATION_VERSIONS,
-    ])
-    const expectedTransactions =
-      DEV_POST_0106_MIGRATION_VERSIONS.length +
-      PR1_MIGRATION_VERSIONS.length +
-      PR2_MIGRATION_VERSIONS.length +
-      2
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(expectedTransactions)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(expectedTransactions)
+    expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(15)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(15)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
@@ -349,10 +267,6 @@ describe('D34 PR1 migration runner', () => {
           applyOrder.push(version)
           if (version === PR1_MIGRATION_VERSIONS[3]) throw new Error('boom')
         }),
-      })),
-      ...PR2_MIGRATION_VERSIONS.map(version => ({
-        version,
-        apply: vi.fn(async () => undefined),
       })),
     ]
     await expect(
@@ -377,7 +291,6 @@ describe('D34 PR1 migration runner', () => {
         migrations: [
           ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
-          ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '010d_unclassified', apply: vi.fn() },
         ],
         appliedVersions: new Set(),
@@ -425,12 +338,6 @@ describe('D34 PR1 migration runner', () => {
             applyOrder.push(version)
           }),
         })),
-        ...PR2_MIGRATION_VERSIONS.map(version => ({
-          version,
-          apply: vi.fn(async () => {
-            applyOrder.push(version)
-          }),
-        })),
       ],
       appliedVersions: new Set(),
       recordMigration: async (_db, version) => {
@@ -438,11 +345,7 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applyOrder).toEqual([
-      ...DEV_POST_0106_MIGRATION_VERSIONS,
-      ...PR1_MIGRATION_VERSIONS,
-      ...PR2_MIGRATION_VERSIONS,
-    ])
+    expect(applyOrder).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
     expect(recorded).toEqual(applyOrder)
   })
 })

@@ -37,14 +37,17 @@ const FIXTURE: RawModelsDevCatalog = {
 }
 
 describe('modelsDevClient — PROVIDER_KEY_MAP', () => {
-  it('maps every static provider to a models.dev key and excludes the Codex broker', () => {
-    const staticIds = PROVIDER_IDS.filter(id => id !== 'codex-subscription')
+  it('maps every static provider to a models.dev key and excludes oauth-broker ids', () => {
+    const staticIds = PROVIDER_IDS.filter(
+      id => id !== 'codex-subscription' && id !== 'grok-subscription'
+    )
     for (const id of staticIds) {
       expect(typeof PROVIDER_KEY_MAP[id]).toBe('string')
       expect(PROVIDER_KEY_MAP[id].length).toBeGreaterThan(0)
     }
     expect(Object.keys(PROVIDER_KEY_MAP).sort()).toEqual([...staticIds].sort())
     expect('codex-subscription' in PROVIDER_KEY_MAP).toBe(false)
+    expect('grok-subscription' in PROVIDER_KEY_MAP).toBe(false)
   })
 
   it('pins the non-obvious / ambiguous choices (zai coding-plan, bailian→alibaba)', () => {

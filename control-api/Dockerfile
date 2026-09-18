@@ -13,6 +13,7 @@ COPY packages/llm-providers ./packages/llm-providers
 COPY packages/display-field ./packages/display-field
 COPY packages/llm-provider-attempt-contract ./packages/llm-provider-attempt-contract
 COPY packages/action-context-contracts ./packages/action-context-contracts
+COPY packages/grok-provider-attempt-contract ./packages/grok-provider-attempt-contract
 
 # Build the shared @clerum/workflow-runtime-core package (TS → dist) BEFORE
 # control-api's npm ci, so its file: dependency on it resolves with the compiled

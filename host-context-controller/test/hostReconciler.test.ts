@@ -1796,7 +1796,7 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
     const deleteBundle = vi
       .spyOn(reconciler as any, 'deleteHostRuntimeResources')
       .mockResolvedValue(undefined)
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
 
     await reconciler.fullReconcile([])
 
@@ -1806,9 +1806,7 @@ describe('orphan sweep on fullReconcile (channel-reader)', () => {
       name: 'channel-reader-orphan',
       namespace: 'channels',
     })
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
-    )
+    expect(warn).toHaveBeenCalledWith('Deferring orphan cleanup', { reason: 'authority_unknown' })
     warn.mockRestore()
   })
 
@@ -1873,17 +1871,17 @@ describe('sweepLegacyStaticChannelReader', () => {
     appsApi.deleteNamespacedDeployment.mockRejectedValue(
       Object.assign(new Error('forbidden'), { code: 403 })
     )
-    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(HostContextLogger.prototype, 'error').mockImplementation(() => {})
 
     // Reviewer-style assertion: startup MUST continue even if the sweep
     // fails — per-Host reconciles are still required.
     await expect(reconciler.sweepLegacyStaticChannelReader()).resolves.toBeUndefined()
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
+    expect(errorSpy).toHaveBeenCalledWith(
       expect.stringContaining('legacy-sweep failed'),
-      expect.anything()
+      expect.objectContaining({ err: expect.anything() })
     )
 
-    consoleErrorSpy.mockRestore()
+    errorSpy.mockRestore()
   })
 
   it('targets the channels namespace (not mcp-host) and the exact name', async () => {
@@ -2055,7 +2053,7 @@ describe('collectHostReconcileFailures benign supersession (#490)', () => {
         `Host "${errorName}" superseded before Host "alpha-host" reconcile admission`
       )
       vi.spyOn(reconciler, 'reconcile').mockRejectedValue(withdrawn)
-      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const errorSpy = vi.spyOn(HostContextLogger.prototype, 'error').mockImplementation(() => {})
       const before = await readFleetBenignSupersessions(errorName)
 
       await expect(reconciler.reconcileHosts([makeHost()])).resolves.toBeUndefined()
@@ -2126,10 +2124,23 @@ describe('HostReconciler oauth:user-token runtime scope provisioning', () => {
       runtimeTokenScopeHash(
         host: HostCRD,
         hasChannelIngress?: boolean,
-        frontsOAuthServer?: boolean
+        frontsOAuthServer?: boolean,
+        projection?: { derivedScopes?: string[]; driftHashInput?: string },
+        grokProjection?: { derivedScopes?: string[]; driftHashInput?: string }
       ): string
     }
   ).runtimeTokenScopeHash
+
+  it('keeps the pre-Grok scope hash when Grok has no derived scopes', () => {
+    const host = makeHost()
+    const codex = { derivedScopes: ['llm:codex:execute'], driftHashInput: '{"k":1}' }
+    expect(scopeHashOf(host, false, false, codex, { derivedScopes: [] })).toBe(
+      scopeHashOf(host, false, false, codex)
+    )
+    expect(
+      scopeHashOf(host, false, false, codex, { derivedScopes: ['llm:grok:execute'] })
+    ).not.toBe(scopeHashOf(host, false, false, codex))
+  })
 
   it('requests oauth:user-token through the real issuance payload when the Host fronts an enabled oauth mcp-server', async () => {
     vi.mocked(issueMcpHostRuntimeTokens).mockClear()

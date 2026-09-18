@@ -136,6 +136,23 @@ describe('ModelSelector', () => {
     expect(root?.classList.contains('model-selector--up')).toBe(true)
   })
 
+  it('does not invent a Grok default when the session has no selected model', () => {
+    setHook({
+      data: baseData({
+        provider: 'grok-subscription',
+        hostDefault: '',
+        sessionModel: null,
+        models: [
+          { name: 'grok-4.6', displayName: 'Grok 4.6' },
+          { name: 'grok-4.5', displayName: 'Grok 4.5' },
+        ],
+      }),
+    })
+    renderSelector()
+    expect(screen.getByRole('button', { name: /Model — Select model/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /Grok 4\.6/ })).toBeNull()
+  })
+
   it('does not invent a Codex default when the session has no selected model', () => {
     setHook({
       data: baseData({

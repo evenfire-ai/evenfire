@@ -88,7 +88,10 @@ export type RawModelsDevCatalog = Record<string, RawModelsDevProvider>
  * only ever review candidates — the operator's hand-added `source='manual'`
  * rows (deployment names, `us.anthropic.*` profiles) are never touched (§11.2).
  */
-export type ModelsDevMappedProviderId = Exclude<LlmProviderId, 'codex-subscription'>
+export type ModelsDevMappedProviderId = Exclude<
+  LlmProviderId,
+  'codex-subscription' | 'grok-subscription'
+>
 
 export const PROVIDER_KEY_MAP: Readonly<Record<ModelsDevMappedProviderId, string>> = {
   openai: 'openai',
@@ -399,7 +402,10 @@ export function mapCatalogToProviders(
 ): Record<LlmProviderId, DiscoveredModel[]> {
   const out = Object.create(null) as Record<LlmProviderId, DiscoveredModel[]>
   for (const providerId of PROVIDER_IDS) {
-    const key = providerId === 'codex-subscription' ? undefined : PROVIDER_KEY_MAP[providerId]
+    const key =
+      providerId === 'codex-subscription' || providerId === 'grok-subscription'
+        ? undefined
+        : PROVIDER_KEY_MAP[providerId]
     const entry = key ? catalog[key] : undefined
     const models: DiscoveredModel[] = []
     out[providerId] = models

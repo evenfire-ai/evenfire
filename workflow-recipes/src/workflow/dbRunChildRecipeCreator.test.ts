@@ -217,6 +217,26 @@ describe('createDbRunChildRecipe', () => {
     ).toBe('team-plus')
   })
 
+  it('copies the canonical subscription annotation onto the DB-run child recipe', async () => {
+    const parent = makeParent()
+    ;(parent.metadata as Record<string, unknown>).annotations = {
+      'clerum.io/subscription-connection-ref': 'personal-pro',
+    }
+    const customApi = {
+      getNamespacedCustomObject: vi.fn().mockResolvedValue(parent),
+      createNamespacedCustomObject: vi.fn().mockResolvedValue({
+        metadata: { name: 'demo-parent-00000000' },
+      }),
+    } as unknown as k8s.CustomObjectsApi
+
+    await createDbRunChildRecipe(customApi, makeRun())
+
+    expect(
+      (customApi.createNamespacedCustomObject as unknown as ReturnType<typeof vi.fn>).mock
+        .calls[0]?.[0]?.body?.metadata?.annotations?.['clerum.io/subscription-connection-ref']
+    ).toBe('personal-pro')
+  })
+
   it('does not invent a Codex grant annotation when the parent has none', async () => {
     const customApi = {
       getNamespacedCustomObject: vi.fn().mockResolvedValue(makeParent()),

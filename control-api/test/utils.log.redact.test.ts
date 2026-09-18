@@ -56,4 +56,22 @@ describe('token-leak redaction', () => {
       expect(REQUIRED_REDACT_PATHS).toContain(p)
     }
   })
+
+  it('redacts Grok device-code and nested token fields', () => {
+    for (const p of [
+      'deviceCode',
+      'device_code',
+      'userCode',
+      'user_code',
+      'accountSubject',
+      'account_subject',
+      'access_token',
+      '*.access_token',
+      '*.refresh_token',
+      '*.id_token',
+    ]) {
+      expect(TOKEN_LEAK_REDACT_PATHS).toContain(p)
+      expect(REQUIRED_REDACT_PATHS).toContain(p)
+    }
+  })
 })

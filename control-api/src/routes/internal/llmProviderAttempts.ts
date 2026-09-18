@@ -3,6 +3,14 @@ import { asyncHandler } from '../../http/asyncHandler.js'
 import { requireInternalService } from '../../middleware/internalServiceAuth.js'
 import { rootLogger } from '../../observability/logger.js'
 import {
+  GrokProviderAttemptFinalizeError,
+  finalizeGrokProviderAttempt,
+} from '../../services/grokProviderAttemptFinalization.js'
+import {
+  GrokProviderAttemptRedeemError,
+  redeemGrokProviderAttempt,
+} from '../../services/grokProviderAttemptRedemption.js'
+import {
   LlmProviderAttemptFinalizeError,
   finalizeLlmProviderAttempt,
 } from '../../services/llmProviderAttemptFinalization.js'
@@ -77,6 +85,56 @@ export function createInternalLlmProviderAttemptRoutes(): Router {
       } catch (err) {
         if (err instanceof LlmProviderAttemptFinalizeError) {
           log.warn({ event: 'codex_attempt_finalize_denied', code: err.code }, err.message)
+          res.status(FINALIZE_STATUS[err.code] ?? 400).json({ error: err.code })
+          return
+        }
+        throw err
+      }
+    })
+  )
+
+  router.use('/internal/llm/grok/provider-attempts', requireInternalService('grok-llm-proxy'))
+
+  router.post(
+    '/internal/llm/grok/provider-attempts/redeem',
+    asyncHandler(async (req, res) => {
+      const body = isPlainObject(req.body) ? req.body : {}
+      try {
+        const result = await redeemGrokProviderAttempt({
+          executionTicket: typeof body.executionTicket === 'string' ? body.executionTicket : '',
+          requestHash: typeof body.requestHash === 'string' ? body.requestHash : '',
+          model: typeof body.model === 'string' ? body.model : undefined,
+          hostRef: typeof body.hostRef === 'string' ? body.hostRef : undefined,
+          operation:
+            body.operation === 'completion_cancel' || body.operation === 'connection_test'
+              ? body.operation
+              : 'completion_stream',
+        })
+        res.status(200).json(result)
+      } catch (err) {
+        if (err instanceof GrokProviderAttemptRedeemError) {
+          log.warn({ event: 'grok_attempt_redeem_denied', code: err.code }, err.message)
+          res.status(REDEEM_STATUS[err.code] ?? 400).json({ error: err.code })
+          return
+        }
+        throw err
+      }
+    })
+  )
+
+  router.post(
+    '/internal/llm/grok/provider-attempts/finalize',
+    asyncHandler(async (req, res) => {
+      const body = isPlainObject(req.body) ? req.body : {}
+      try {
+        const result = await finalizeGrokProviderAttempt({
+          attemptReceipt: typeof body.attemptReceipt === 'string' ? body.attemptReceipt : '',
+          receipt: body.receipt,
+        })
+        res.status(200).json(result)
+      } catch (err) {
+        if (err instanceof GrokProviderAttemptFinalizeError) {
+          log.warn({ event: 'grok_attempt_finalize_denied', code: err.code }, err.message)
           res.status(FINALIZE_STATUS[err.code] ?? 400).json({ error: err.code })
           return
         }

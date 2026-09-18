@@ -419,16 +419,21 @@ assert_publish_root_build_context() {
 # Direct consumers.  The first four are Node services; profile-ui and
 # control-ui are Next.js consumers and therefore also require materialization.
 assert_copy_before_every_ci control-api/Dockerfile \
-  display-field image-policy llm-providers workflow-recipe-capability-policy workflow-runtime-core
+  display-field grok-provider-attempt-contract image-policy llm-provider-attempt-contract \
+  llm-providers workflow-recipe-capability-policy workflow-runtime-core
 assert_copy_before_every_ci control-ui/Dockerfile \
   display-field frontend-components gfs-interaction-policy llm-providers workflow-recipe-capability-policy
 assert_copy_before_every_ci profile-ui/Dockerfile desktop-app-links frontend-components
 assert_copy_before_every_ci host-context-controller/Dockerfile \
   image-policy llm-providers network-policy-core workflow-recipe-capability-policy
-assert_copy_before_every_ci mcp-host/Dockerfile llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.desktop llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.full llm-providers
-assert_copy_before_every_ci mcp-host/Dockerfile.slim llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.desktop \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.full \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
+assert_copy_before_every_ci mcp-host/Dockerfile.slim \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 
 # Derive every published Node image's local-package coverage from its service
 # manifest and deploy/images.json row. Adding a file: dependency cannot leave
@@ -441,8 +446,12 @@ assert_publish_root_build_context rpc-proxy
 # workflow-runtime-core is built in a separate stage before workflow-recipes;
 # these are the packages needed by that stage, while the application install
 # also needs the recipe and image policy packages in its final stage.
-assert_copy_before_every_ci workflow-recipes/Dockerfile llm-providers network-policy-core workflow-runtime-core
-assert_copy_before_every_ci workflow-recipes/Dockerfile.coordinator llm-providers network-policy-core workflow-runtime-core
+assert_copy_before_every_ci workflow-recipes/Dockerfile \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers \
+  network-policy-core workflow-runtime-core
+assert_copy_before_every_ci workflow-recipes/Dockerfile.coordinator \
+  grok-provider-attempt-contract llm-provider-attempt-contract llm-providers \
+  network-policy-core workflow-runtime-core
 assert_copy_before_last_ci workflow-recipes/Dockerfile workflow-recipe-capability-policy
 assert_copy_before_last_ci workflow-recipes/Dockerfile image-policy
 assert_copy_before_last_ci workflow-recipes/Dockerfile.coordinator workflow-recipe-capability-policy
@@ -457,7 +466,11 @@ assert_materialized profile-ui/Dockerfile desktop-app-links
 assert_materialized profile-ui/Dockerfile frontend-components
 
 assert_dockerignore_allows control-api/Dockerfile.dockerignore display-field
+assert_dockerignore_allows control-api/Dockerfile.dockerignore grok-provider-attempt-contract
+assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-provider-attempt-contract
 assert_dockerignore_allows control-api/Dockerfile.dockerignore llm-providers
+assert_dockerignore_allows workflow-recipes/Dockerfile.dockerignore grok-provider-attempt-contract
+assert_dockerignore_allows workflow-recipes/Dockerfile.coordinator.dockerignore grok-provider-attempt-contract
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore display-field
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore gfs-interaction-policy
 assert_dockerignore_allows control-ui/Dockerfile.dockerignore llm-providers

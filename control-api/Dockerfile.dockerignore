@@ -10,6 +10,10 @@
 !packages/display-field/**
 !packages/llm-providers/
 !packages/llm-providers/**
+!packages/llm-provider-attempt-contract/
+!packages/llm-provider-attempt-contract/**
+!packages/grok-provider-attempt-contract/
+!packages/grok-provider-attempt-contract/**
 !packages/workflow-runtime-core/
 !packages/workflow-runtime-core/package.json
 !packages/workflow-runtime-core/package-lock.json

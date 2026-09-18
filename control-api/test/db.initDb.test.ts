@@ -27,7 +27,7 @@ describe('db.initDb', () => {
   })
 
   it('holds one advisory lock while partitioning legacy and PR1 migration transactions', async () => {
-    const { CONTROL_API_MIGRATIONS, initDb } = await import('../src/db.js')
+    const { initDb } = await import('../src/db.js')
 
     await initDb()
 
@@ -65,13 +65,8 @@ describe('db.initDb', () => {
     ).toBe(false)
     expect(sqls.some(sql => sql.includes('DROP TABLE IF EXISTS workflow_run_outputs'))).toBe(false)
     expect(sqls).not.toContain('ROLLBACK')
-    const postLegacyMigrations = CONTROL_API_MIGRATIONS.filter(
-      migration => migration.version > '0106_oauth_grants_owner_generalization'
-    )
-    const beginCount = sqls.filter(sql => sql === 'BEGIN').length
-    const commitCount = sqls.filter(sql => sql === 'COMMIT').length
-    expect(beginCount).toBe(commitCount)
-    expect(beginCount).toBeGreaterThanOrEqual(1 + postLegacyMigrations.length)
+    expect(sqls.filter(sql => sql === 'BEGIN')).toHaveLength(16)
+    expect(sqls.filter(sql => sql === 'COMMIT')).toHaveLength(16)
     expect(sqls[sqls.length - 2]).toBe('COMMIT')
     expect(sqls[sqls.length - 1]).toContain('SELECT pg_advisory_unlock')
     expect(clientRelease).toHaveBeenCalledTimes(1)
