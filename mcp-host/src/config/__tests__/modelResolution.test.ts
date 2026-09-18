@@ -97,7 +97,7 @@ describe('projectModels', () => {
     ])
     expect(
       projectModels(catalog, 'codex-subscription', 'visual-model').models[0].imageInput
-    ).toEqual({ state: 'unsupported', reason: 'transport_unsupported', evidence })
+    ).toEqual({ state: 'supported', reason: 'supported', evidence })
   })
   it('projects enabled entries with optional metadata', () => {
     expect(projectModels(view(true, CLAUDE_ALLOWLIST), 'claude', 'claude-opus-4-8')).toEqual({
