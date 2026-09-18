@@ -1804,13 +1804,38 @@ h3 {
   min-width: 0;
   margin: 0 0 var(--space-1) 0;
   padding-left: var(--sidebar-nav-label-indent);
+  /* Claim the sidebar's leftover height so the tree gets real room; the scroll
+     is contained to .da-file-explorer below instead of the whole nav column. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .da-file-explorer {
   min-width: 0;
-  max-height: min(320px, 42vh);
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
-  scrollbar-width: thin;
+  /* Chromium-only renderer: declaring scrollbar-width/scrollbar-color here would
+     disable the ::-webkit-scrollbar pill below, so the custom thumb owns it. */
+}
+
+.da-file-explorer::-webkit-scrollbar {
+  width: 8px;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb {
+  background: rgba(var(--edge-rgb), 0.4);
+  border-radius: 999px;
+  /* Padded track so the thumb reads as a thin floating pill, not a full-width bar. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--edge-rgb), 0.6);
+  background-clip: padding-box;
 }
 
 .da-file-explorer__message {
