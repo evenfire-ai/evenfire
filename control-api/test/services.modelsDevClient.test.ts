@@ -252,6 +252,17 @@ describe('modelsDevClient — loadModelsDevCatalog', () => {
     const byProvider = mapCatalogToProviders(res.catalog)
     expect(byProvider.claude.length).toBeGreaterThan(0)
     expect(byProvider.openai.length).toBeGreaterThan(0)
+    // #654: it must also carry `modalities.input`. The offline path is the one
+    // taken when there is NO network — exactly where an operator cannot go look
+    // the answer up — so a snapshot regenerated without modalities would report
+    // every model's image capability as `unknown` and make the feature inert
+    // precisely where it is least recoverable. Both verdicts are asserted: a
+    // snapshot that only ever answers `supported` would be just as wrong.
+    const states = Object.values(byProvider)
+      .flat()
+      .map(m => m.image_input_state)
+    expect(states.filter(s => s === 'supported').length).toBeGreaterThan(0)
+    expect(states.filter(s => s === 'unsupported').length).toBeGreaterThan(0)
   })
 
   it('falls back to vendored on a non-2xx response', async () => {

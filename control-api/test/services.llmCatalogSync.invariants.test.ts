@@ -163,7 +163,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
       // after its only stamp, with no way back short of manual curation.
       {
         provider: 'claude',
-        model: 'claude-opus-4-1',
+        model: 'claude-opus-4-6',
         source: 'discovery',
         enabled: true,
         image_input: oldDiscovery,
@@ -183,7 +183,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
           'claude-opus-4-5',
           'claude-sonnet-5',
           'claude-haiku-4-5-20251001',
-          'claude-opus-4-1',
+          'claude-opus-4-6',
           'claude-sonnet-4-5',
           // Absent from the DB → this run INSERTs it (disabled discovery row).
           'claude-opus-4-7',
@@ -191,7 +191,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
       }),
       {
         'claude-haiku-4-5-20251001': ['text', 'image'],
-        'claude-opus-4-1': ['text'],
+        'claude-opus-4-6': ['text'],
         'claude-sonnet-4-5': ['text', 'image'],
         'claude-opus-4-7': ['text', 'image'],
       }
@@ -225,7 +225,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     expect(db.get('claude', 'claude-haiku-4-5-20251001')!.image_input).toEqual(
       discovered('supported')
     )
-    expect(db.get('claude', 'claude-opus-4-1')!.image_input).toEqual(discovered('unsupported'))
+    expect(db.get('claude', 'claude-opus-4-6')!.image_input).toEqual(discovered('unsupported'))
     // A NEWER capture is never regressed by this older one.
     expect(db.get('claude', 'claude-sonnet-4-5')!.image_input).toEqual(newerDiscovery)
     // A freshly inserted row is born disabled, and carries the catalog's verdict.
