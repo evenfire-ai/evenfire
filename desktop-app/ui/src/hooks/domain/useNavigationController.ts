@@ -96,7 +96,8 @@ export function useNavigationController() {
         ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
         : null
     }
-    setWorkspaceTabs(state => newChatTab(state, nextWorkspaceTabId(), null))
+    const id = nextWorkspaceTabId()
+    setWorkspaceTabs(state => newChatTab(state, id, null))
     return null
   }, [nextWorkspaceTabId])
 
@@ -111,15 +112,16 @@ export function useNavigationController() {
   const activateChatTab = useCallback(
     (agentRef: string | null, chatId: string | null, title?: string) => {
       setAppsPickerActive(false)
+      const id = nextWorkspaceTabId()
       setWorkspaceTabs(current =>
         chatId
           ? openChatTab(current, {
-              id: nextWorkspaceTabId(),
+              id,
               agentRef,
               chatId,
               ...(title ? { title } : {}),
             })
-          : newChatTab(current, nextWorkspaceTabId(), agentRef)
+          : newChatTab(current, id, agentRef)
       )
     },
     [nextWorkspaceTabId]
@@ -128,7 +130,8 @@ export function useNavigationController() {
   const openSettingsSection = useCallback(
     (section: Parameters<typeof openSettingsTab>[1]['section']) => {
       setAppsPickerActive(false)
-      setWorkspaceTabs(current => openSettingsTab(current, { id: nextWorkspaceTabId(), section }))
+      const id = nextWorkspaceTabId()
+      setWorkspaceTabs(current => openSettingsTab(current, { id, section }))
     },
     [nextWorkspaceTabId]
   )
@@ -139,7 +142,8 @@ export function useNavigationController() {
   const openFilesSection = useCallback(
     (path: string | null = null) => {
       setAppsPickerActive(false)
-      setWorkspaceTabs(current => openFilesTab(current, { id: nextWorkspaceTabId(), path }))
+      const id = nextWorkspaceTabId()
+      setWorkspaceTabs(current => openFilesTab(current, { id, path }))
     },
     [nextWorkspaceTabId]
   )
