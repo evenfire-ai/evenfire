@@ -168,7 +168,8 @@ export const corePool = pool
 
 async function applyBaselineSchema(db: DbClient): Promise<void> {
   // Baseline includes additive Phase 0 workflow-trigger tables for fresh
-  // clusters. Existing clusters receive the same tables through migration 0016;
+  // clusters. Existing clusters receive the same tables through migration
+  // 0016_workflow_trigger_shared_foundation;
   // that migration also remains responsible for backfill and preflight checks.
   await db.query(`
     CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -1320,7 +1321,7 @@ async function alignWorkflowRunsAuditRecipeIndex(db: DbClient): Promise<void> {
  * Drop the `trigger_grants_audit.operator_user_id_fkey` foreign key on
  * clusters that bootstrapped before commit 68c81bea.
  *
- * Context: the baseline migration (0001) originally declared this FK as
+ * Context: the baseline migration (0001_control_api_baseline) originally declared this FK as
  * `REFERENCES users(id)`. Commit 68c81bea edited the baseline body in place
  * to add an `ALTER TABLE … DROP CONSTRAINT IF EXISTS …` — but baseline was
  * already recorded in `schema_migrations` on every long-lived cluster, so
@@ -4410,8 +4411,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         DROP TRIGGER IF EXISTS infrastructure_cost_daily_components_no_truncate ON infrastructure_cost_daily_components;
         CREATE TRIGGER infrastructure_cost_daily_components_no_truncate BEFORE TRUNCATE ON infrastructure_cost_daily_components FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
 
-        -- Migration 0055 replaces this bootstrap function with the final
-        -- owner-bound retention implementation and dedicated runtime roles.
+        -- Migration 0062_governed_trace_runtime_roles replaces this bootstrap
+        -- function with the final owner-bound retention implementation and
+        -- dedicated runtime roles.
         CREATE OR REPLACE FUNCTION governed_trace_prune_expired_events(
           requested_family TEXT,
           batch_limit INTEGER DEFAULT 1000
@@ -6141,8 +6143,9 @@ async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<
   const roleRow = usersRoleColumn.rows[0] as { exists: boolean } | undefined
   if (roleRow?.exists) {
     // Re-seed the sentinel binding (admins → mcp-host/standalone) into the
-    // canonical table. Migration 0006 seeded it into the legacy table; this is
-    // idempotent against admins that joined since 0006 ran.
+    // canonical table. Migration 0006_seed_sentinel_allowlist_for_admins seeded
+    // it into the legacy table; this is idempotent against admins that joined
+    // since that migration ran.
     await db.query(`
       INSERT INTO user_workflow_triggers (user_id, recipe_namespace, recipe_name)
       SELECT id, 'mcp-host', 'standalone' FROM users WHERE role = 'admin'
