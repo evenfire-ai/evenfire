@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ImageInputResolver } from '../../../llm/imageInput'
 import type { ClassifiedError, SingleTurnProvider } from '../../../llm/types'
+import { logger } from '../../../logger'
 import { LlmError, LlmErrorCode } from '../../errors'
 import type { SystemPromptParts } from '../../reasoning/systemPrompt'
 import { type ChatMessage, FinishReason } from '../../types'
@@ -438,5 +439,103 @@ describe('#654 LlmPortAdapter image guard', () => {
     expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
     const [messages] = provider.completeSingleTurnWithTools.mock.calls[0]
     expect(messages[0].contentParts[0].data).toBe(data)
+  })
+
+  it('withholds tool screenshots from an unverified model and still dispatches the text turn', async () => {
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+    try {
+      const provider = fakeProvider('openai')
+      const adapter = new LlmPortAdapter(
+        provider,
+        'gpt-5.4-mini',
+        'openai',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        allow(undefined)
+      )
+      const request = {
+        messages: [
+          textMessage(),
+          { role: 'tool' as const, content: 'captured', tool_call_id: 'tc_1', name: 'shot' },
+          {
+            role: 'user' as const,
+            content: 'Here are the screenshots from the tool results above.',
+            imageOrigin: 'tool_result' as const,
+            contentParts: [
+              {
+                type: 'text' as const,
+                text: 'Here are the screenshots from the tool results above.',
+              },
+              { type: 'image' as const, mimeType: 'image/png' as const, data: 'QUJD' },
+            ],
+          },
+        ],
+        tools: [],
+      }
+
+      await adapter.completeWithTools(request)
+
+      // Witness: the turn was dispatched. An unverified model must not turn a
+      // screenshot tool call into a task failure.
+      expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+      const [messages] = provider.completeSingleTurnWithTools.mock.calls[0]
+      expect(messages[2].contentParts).toBeUndefined()
+      expect(messages[2].imageOrigin).toBeUndefined()
+      expect(messages[2].content).toContain('were not forwarded')
+      expect(messages[2].content).toContain('Here are the screenshots from the tool results above.')
+      // The text-only messages are passed through by identity.
+      expect(messages[0]).toBe(request.messages[0])
+      expect(messages[1]).toBe(request.messages[1])
+      // Immutability witness: a later failover attempt on a supported pair must
+      // still see the image, so the caller's array is never rewritten in place.
+      expect(request.messages[2].contentParts).toHaveLength(2)
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ withheldImages: 1, reason: 'model_unknown' }),
+        'tool screenshots withheld: model has no affirmative image-input evidence'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('keeps refusing a user-attached image on an unverified model even when tool screenshots are present', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      allow(undefined)
+    )
+
+    await expectDenied(
+      () =>
+        adapter.completeWithTools({
+          messages: [
+            imageMessage(),
+            {
+              role: 'user',
+              content: 'Here are the screenshots from the tool results above.',
+              imageOrigin: 'tool_result',
+              contentParts: [{ type: 'image', mimeType: 'image/png', data: 'QUJD' }],
+            },
+          ],
+          tools: [],
+        }),
+      LlmErrorCode.ImageInputUnknown,
+      'not verified'
+    )
+
+    // Witness: the refusal is the typed terminal error above, raised before the
+    // SDK call. One tool-originated message never licenses a user attachment.
+    expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
+    expect(provider.classifyError).not.toHaveBeenCalled()
   })
 })

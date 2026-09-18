@@ -20,7 +20,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
 import { LlmError, LlmErrorCode } from '../../core/errors'
 import { executeSingleTool, runToolUseLoop } from '../../core/orchestration/toolUseLoop'
+import { appendToolResults } from '../../core/orchestration/toolUseLoopMessages'
 import {
+  type Attachment,
   type ChatMessage,
   FinishReason,
   type ReasoningContext,
@@ -440,6 +442,75 @@ describe('#654 image-input guard wiring', () => {
       retryable: false,
     })
     expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
+  })
+
+  it('a screenshot tool does not terminate a text-only task on an unverified model', async () => {
+    // A cold catalog: the pair resolves to `unknown`, which refuses a USER
+    // image. The task below never carries one — the image comes back from the
+    // agent's own tool, and that must not end the task.
+    const resolver = vi.fn<ImageInputResolver>(() => ({
+      capability: { state: 'unknown' },
+      policyAllowed: true,
+    }))
+    agent.setImageInputResolver(resolver)
+
+    const collectedAttachments: Attachment[] = []
+    let seenResult: RespondResult | undefined
+    vi.mocked(runToolUseLoop).mockImplementation(async (config, messages) => {
+      // The real message builder, so the `imageOrigin` flag under test is the
+      // one production writes rather than one this test invents.
+      appendToolResults(
+        messages,
+        [
+          {
+            tool_call_id: 'tc_1',
+            name: 'browser__screenshot',
+            content: 'captured the page',
+            is_error: false,
+            attachments: [
+              {
+                id: 'shot-1',
+                kind: 'image',
+                mimeType: 'image/png',
+                encoding: 'base64',
+                dataBase64: IMAGE_B64,
+                sourceTool: 'browser__screenshot',
+              } as unknown as Attachment,
+            ],
+          },
+        ],
+        collectedAttachments
+      )
+      seenResult = await dispatchThroughReasoning(config, messages)
+      return { type: 'response', content: 'ok', usage: usage(), attachments: collectedAttachments }
+    })
+
+    const task = imageTask('chat-tool-shot')
+    delete (task.sourceMessage as { attachments?: unknown }).attachments
+    await agent.executeTask(task)
+
+    // Witness: the turn reached the model and came back as text, not as a
+    // typed image refusal.
+    expect(seenResult?.type).toBe('text')
+    expect(errorOf(seenResult)).toBeUndefined()
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    expect(resolver).toHaveBeenCalledWith('openai', 'gpt-4o')
+
+    // The screenshot was withheld from the wire and replaced by the notice.
+    const sent = provider.completeSingleTurnWithTools.mock.calls[0]?.[0] as ChatMessage[]
+    const screenshotMessage = sent.at(-1)
+    expect(screenshotMessage?.contentParts).toBeUndefined()
+    expect(screenshotMessage?.content).toContain('were not forwarded')
+
+    // …and it still reaches the user as an attachment on the reply: withholding
+    // is about what the MODEL can read, not about discarding the bytes.
+    expect(collectedAttachments).toHaveLength(1)
+    expect(task.responseCallback).toHaveBeenCalledWith(
+      expect.objectContaining({
+        response: 'ok',
+        attachments: [expect.objectContaining({ id: 'shot-1', kind: 'image' })],
+      })
+    )
   })
 })
 

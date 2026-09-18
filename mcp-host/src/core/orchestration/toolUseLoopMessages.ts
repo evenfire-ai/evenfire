@@ -96,6 +96,10 @@ export function appendToolResults(
     messages.push({
       role: 'user',
       content: 'Here are the screenshots from the tool results above.',
+      // #654 — the parts below came from tool results, not from the user. The
+      // adapter withholds them (and says so in `content`) when the model has no
+      // affirmative image-input evidence, instead of failing the whole turn.
+      imageOrigin: 'tool_result',
       contentParts: [
         { type: 'text', text: 'Here are the screenshots from the tool results above.' },
         ...pendingImages,

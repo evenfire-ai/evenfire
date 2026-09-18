@@ -148,10 +148,13 @@ export class LlmPortAdapter implements LlmPort {
     // Excluded from the SDK-classification catch below on purpose: a denied
     // image must stay a typed, terminal LlmError instead of being reclassified
     // by `provider.classifyError` (which would make it retryable).
-    this.assertImageInputSupported(request.messages, this.dispatchMethodFor(request, false))
+    const messages = this.prepareMessagesForImageInput(
+      request.messages,
+      this.dispatchMethodFor(request, false)
+    )
     const requestId = newRequestId()
     try {
-      const response = await this.dispatchComplete(request)
+      const response = await this.dispatchComplete({ ...request, messages })
       logger.info({ finishReason: response.finish_reason }, 'Completion returned')
       this.recordUsage(requestId, request.usageContext, response.usage)
       return response
@@ -172,10 +175,13 @@ export class LlmPortAdapter implements LlmPort {
     )
     // Same exclusion as `complete`: deny BEFORE the try/catch that classifies
     // provider SDK errors.
-    this.assertImageInputSupported(request.messages, this.dispatchMethodFor(request, true))
+    const messages = this.prepareMessagesForImageInput(
+      request.messages,
+      this.dispatchMethodFor(request, true)
+    )
     const requestId = newRequestId()
     try {
-      const response = await this.dispatchCompleteWithTools(request)
+      const response = await this.dispatchCompleteWithTools({ ...request, messages })
       const toolCallCount = response.tool_calls?.length ?? 0
       logger.info(
         { finishReason: response.finish_reason, toolCallCount },
@@ -304,14 +310,23 @@ export class LlmPortAdapter implements LlmPort {
   }
 
   /**
-   * Fail closed when this attempt carries an image and the intersection of
+   * Fail closed when this attempt carries a USER image and the intersection of
    * model evidence, selection policy, transport implementation and role is not
    * affirmative. Text-only requests return immediately (no resolver call).
+   *
+   * #654 — images the agent's own tools produced are withheld rather than
+   * fatal: the turn is dispatched without them and `content` records how many
+   * were dropped and why. A model with no image evidence must still be able to
+   * finish a text task that happens to call a screenshot tool; refusing there
+   * would turn a capability gap into a task failure the user never asked for.
+   *
+   * Returns the message array to dispatch. The input array is never mutated,
+   * so a later failover attempt on a supported pair still sees the images.
    */
-  private assertImageInputSupported(
-    messages: readonly ChatMessage[],
+  private prepareMessagesForImageInput(
+    messages: ChatMessage[],
     method: ImageTransportOperation
-  ): void {
+  ): ChatMessage[] {
     for (const message of messages) {
       if (message.contentParts === undefined) continue
       if (
@@ -335,28 +350,76 @@ export class LlmPortAdapter implements LlmPort {
       }
     }
     const roles = imageInputRolesFor(messages)
-    if (roles.length === 0) return
+    if (roles.length === 0) return messages
     const decision = this.decideImageInputForAttempt(method, roles)
-    if (decision.state === 'supported') return
+    if (decision.state === 'supported') return messages
+
+    const carriesImages = (message: ChatMessage): boolean =>
+      message.contentParts?.some(part => part.type === 'image') === true
+    const userImages = messages.some(
+      message => carriesImages(message) && message.imageOrigin !== 'tool_result'
+    )
+    if (userImages) {
+      logger.warn(
+        {
+          component: 'LlmPortAdapter',
+          provider: this.providerName,
+          model: this.model,
+          method,
+          roles,
+          reason: decision.reason,
+          validUntil: decision.validUntil,
+        },
+        'image input denied before provider dispatch'
+      )
+      throw new LlmError(
+        imageInputDenialMessage(decision, { provider: this.providerName, model: this.model }),
+        this.providerName,
+        decision.state === 'unsupported'
+          ? LlmErrorCode.ImageInputUnsupported
+          : LlmErrorCode.ImageInputUnknown,
+        false
+      )
+    }
+
+    const withheld = messages.filter(
+      message => message.imageOrigin === 'tool_result' && carriesImages(message)
+    )
+    const count = withheld.reduce(
+      (total, message) =>
+        total + message.contentParts!.filter(part => part.type === 'image').length,
+      0
+    )
     logger.warn(
       {
         component: 'LlmPortAdapter',
         provider: this.providerName,
         model: this.model,
         method,
-        roles,
         reason: decision.reason,
-        validUntil: decision.validUntil,
+        withheldImages: count,
       },
-      'image input denied before provider dispatch'
+      'tool screenshots withheld: model has no affirmative image-input evidence'
     )
-    throw new LlmError(
-      imageInputDenialMessage(decision, { provider: this.providerName, model: this.model }),
-      this.providerName,
-      decision.state === 'unsupported'
-        ? LlmErrorCode.ImageInputUnsupported
-        : LlmErrorCode.ImageInputUnknown,
-      false
+    const notice = `[${count} screenshot(s) returned by tool results were not forwarded: ${imageInputDenialMessage(
+      decision,
+      { provider: this.providerName, model: this.model }
+    )}]`
+    // The rewritten message drops `contentParts` and `imageOrigin` and keeps
+    // everything else the wire needs. `toolUseLoopMessages` builds this message
+    // with only `role`/`content`/`contentParts`, so `tool_calls` and
+    // `spillover_ref` are never set on it; `tool_call_id`/`name` are carried
+    // anyway so the rewrite stays correct if another producer marks a message
+    // `tool_result` in the future.
+    return messages.map(message =>
+      withheld.includes(message)
+        ? {
+            role: message.role,
+            content: `${message.content}\n${notice}`,
+            ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+            ...(message.name ? { name: message.name } : {}),
+          }
+        : message
     )
   }
 

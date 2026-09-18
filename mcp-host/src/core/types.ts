@@ -20,6 +20,14 @@ export interface ChatMessage {
   role: MessageRole
   content: string
   contentParts?: MessageContentPart[] // only set when tool results have images
+  /**
+   * Issue #654 — set when the image parts were produced by a tool result, never
+   * by the user. A user who attaches an image to a model without affirmative
+   * image-input evidence gets a typed refusal; a screenshot the agent's own
+   * tool returned is withheld instead, so an unverified model can still finish
+   * a text task that happens to call a screenshot tool.
+   */
+  imageOrigin?: 'tool_result'
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
