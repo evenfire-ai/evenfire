@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import {
+  closeWorkspaceTab,
   createEmptyWorkspaceTabsState,
   createWorkspaceTabsState,
   newChatTab,
@@ -451,5 +452,78 @@ describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
     // Same DOM node, now last, still focused.
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Bravo' }))
     expect(document.activeElement).toBe(bravo)
+  })
+
+  // R3-H2: unlike a reorder (which keeps focus because the keyed node survives), a
+  // close removes the focused control, so a keyboard user who closes the ACTIVE tab
+  // would drop to <body>. Focus must follow the workspace to the tab that took over.
+  it('moves keyboard focus to the surviving active tab when the active tab is closed (R3-H2, T3)', () => {
+    // Drive the real store reducer: closing active 'b' (index 1) promotes 'c'.
+    let state: WorkspaceTabsState = { tabs: threeTabs, activeTabId: 'b' }
+    const onClose = (id: string) => {
+      state = closeWorkspaceTab(state, id)
+    }
+    const { rerender } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={onClose}
+        onReorder={vi.fn()}
+      />
+    )
+    const closeActive = screen.getByRole('button', { name: 'Close Bravo' })
+    closeActive.focus()
+    expect(document.activeElement).toBe(closeActive)
+    // Keyboard activation of the close control: Enter/Space fire a click with
+    // `detail === 0` (a pointer click reports >= 1).
+    fireEvent.click(closeActive, { detail: 0 })
+    rerender(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={onClose}
+        onReorder={vi.fn()}
+      />
+    )
+    expect(state.tabs.map(t => t.id)).toEqual(['a', 'c'])
+    expect(state.activeTabId).toBe('c')
+    // Observable result: focus landed on the now-active tab's control, not <body>.
+    const nowActive = screen.getByRole('button', { name: 'Charlie' })
+    expect(document.activeElement).toBe(nowActive)
+  })
+
+  it('keeps keyboard focus in the strip when the last tab is closed (R3-H2)', () => {
+    let state: WorkspaceTabsState = { tabs: [threeTabs[0]!], activeTabId: 'a' }
+    const onClose = (id: string) => {
+      state = closeWorkspaceTab(state, id)
+    }
+    const { container, rerender } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={onClose}
+        onReorder={vi.fn()}
+      />
+    )
+    const closeActive = screen.getByRole('button', { name: 'Close Alpha' })
+    closeActive.focus()
+    fireEvent.click(closeActive, { detail: 0 })
+    rerender(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId={state.activeTabId}
+        onSelect={vi.fn()}
+        onClose={onClose}
+        onReorder={vi.fn()}
+      />
+    )
+    expect(state.tabs).toHaveLength(0)
+    expect(state.activeTabId).toBeNull()
+    // No tab survives, so focus stays in the strip rather than dropping to <body>.
+    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
+    expect(document.activeElement).toBe(strip)
   })
 })

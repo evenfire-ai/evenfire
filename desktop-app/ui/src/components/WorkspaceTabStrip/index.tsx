@@ -1,4 +1,4 @@
-import { useContext, useState } from 'react'
+import { useContext, useLayoutEffect, useRef, useState } from 'react'
 import { makeTaskKey } from '@contexts/AgentTaskTrackerContext/types'
 import { ChatListContext } from '@contexts/ChatListContext'
 import { Button } from '@components/Common'
@@ -39,10 +39,40 @@ export function WorkspaceTabStrip({
   const chatList = useContext(ChatListContext)
   const [draggingId, setDraggingId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<DropTarget | null>(null)
+  const stripRef = useRef<HTMLDivElement | null>(null)
+  // Set when a KEYBOARD close removes the active tab's control: the close, unlike a
+  // reorder, drops the keyed node the user was on, so focus would fall to <body>.
+  // Consumed by the layout effect once the neighbour becomes active this commit.
+  const focusAfterActiveCloseRef = useRef(false)
 
   const clearDrag = () => {
     setDraggingId(null)
     setDropTarget(null)
+  }
+
+  // Restore keyboard focus after a close removed the active tab. The reorder path
+  // keeps focus for free (the moved node survives, keyed by id); the close does not,
+  // so move focus to whichever tab took over — or to the strip itself when the
+  // workspace is now empty — rather than letting it drop to <body>.
+  useLayoutEffect(() => {
+    if (!focusAfterActiveCloseRef.current) return
+    focusAfterActiveCloseRef.current = false
+    const strip = stripRef.current
+    if (!strip) return
+    const nextActive = strip.querySelector<HTMLElement>(
+      '.chat-view-tab.is-active .chat-view-tab__select'
+    )
+    ;(nextActive ?? strip).focus()
+  }, [activeTabId])
+
+  const handleCloseClick = (event: React.MouseEvent<HTMLButtonElement>, tab: WorkspaceTab) => {
+    // Enter/Space on a button reports `detail === 0`; a pointer click reports >= 1.
+    // Only manage focus for keyboard users closing the ACTIVE tab: a pointer user
+    // does not need it, and forcing focus on click could surprise them.
+    if (event.detail === 0 && tab.id === activeTabId) {
+      focusAfterActiveCloseRef.current = true
+    }
+    onClose(tab.id)
   }
 
   const handleDrop = (event: React.DragEvent<HTMLElement>, target: WorkspaceTab) => {
@@ -77,7 +107,13 @@ export function WorkspaceTabStrip({
   }
 
   return (
-    <div className="chat-view-tabs" role="toolbar" aria-label="Workspace tabs">
+    <div
+      className="chat-view-tabs"
+      role="toolbar"
+      aria-label="Workspace tabs"
+      ref={stripRef}
+      tabIndex={-1}
+    >
       <div className="chat-view-tabs__scroller">
         <div className="chat-view-tabs__list">
           {tabs.map((tab, index) => {
@@ -138,7 +174,7 @@ export function WorkspaceTabStrip({
                   aria-label={`Close ${tab.title}`}
                   className="chat-view-tab__close"
                   color="neutral"
-                  onClick={() => onClose(tab.id)}
+                  onClick={event => handleCloseClick(event, tab)}
                   size="xs"
                   variant="ghost"
                 >
