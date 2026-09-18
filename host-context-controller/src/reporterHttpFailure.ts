@@ -1,4 +1,7 @@
 import { ReporterTerminalError, type ReporterTerminalResult } from './boundedOffPathReporter'
+import { hccLogger } from './logger'
+
+const log = hccLogger.child({ module: 'reporter-http-failure' })
 
 /**
  * control-api answers these (status, code) pairs deterministically: resending
@@ -14,12 +17,24 @@ const TERMINAL_RESPONSES: ReadonlyArray<{
   { status: 400, code: 'unsafe_tracing_input', result: 'rejected' },
 ]
 
-async function responseCode(response: Response): Promise<string | undefined> {
+function unreadableBodyReason(error: unknown): 'not_json' | 'aborted' | 'read_failed' {
+  if (error instanceof Error && error.name === 'SyntaxError') return 'not_json'
+  if (error instanceof Error && error.name === 'AbortError') return 'aborted'
+  return 'read_failed'
+}
+
+async function responseCode(response: Response, label: string): Promise<string | undefined> {
   let body: unknown
   try {
     body = await response.json()
-  } catch {
-    // A body that is not JSON carries no code; the caller treats it as retryable.
+  } catch (error) {
+    // No code can be read, so the caller treats the response as retryable.
+    // Only the status and the failure kind are logged, never the body.
+    log.warn('reporter could not read the response code', {
+      label,
+      status: response.status,
+      reason: unreadableBodyReason(error),
+    })
     return undefined
   }
   if (typeof body !== 'object' || body === null) return undefined
@@ -35,7 +50,7 @@ export async function throwForFailedSubmit(response: Response, label: string): P
   if (response.ok) return
   const candidates = TERMINAL_RESPONSES.filter(entry => entry.status === response.status)
   if (candidates.length > 0) {
-    const code = await responseCode(response)
+    const code = await responseCode(response, label)
     const terminal = candidates.find(entry => entry.code === code)
     if (terminal) {
       throw new ReporterTerminalError(

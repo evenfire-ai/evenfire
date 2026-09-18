@@ -469,7 +469,16 @@ describe('HostReconciler', () => {
       .mocked(telemetry.enqueue)
       .mock.calls.map(([projection]) => projection.telemetryType)
     expect(types).toContain('controller_error')
-    expect(types).toContain('reconcile_outcome')
+    // The telemetry reports the exception, not the stale ready status.
+    const failedOutcome = vi
+      .mocked(telemetry.enqueue)
+      .mock.calls.map(([projection]) => projection)
+      .find(projection => projection.telemetryType === 'reconcile_outcome')
+    expect(failedOutcome?.payload).toEqual({
+      resource_class: 'Host',
+      reason_code: 'reconcile_exception',
+      status: 'failed',
+    })
     expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: 'failed',
@@ -479,6 +488,125 @@ describe('HostReconciler', () => {
     expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalledWith(
       expect.objectContaining({ outcome: 'succeeded' })
     )
+  })
+
+  describe('GFS token evidence on reconcile_outcome (#328)', () => {
+    function reconcileOutcomes(reporter: InfrastructureTelemetryReporter) {
+      return vi
+        .mocked(reporter.enqueue)
+        .mock.calls.map(([projection]) => projection)
+        .filter(projection => projection.telemetryType === 'reconcile_outcome')
+    }
+
+    it('reports minted once and not on the next pass', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, rbacApi, coreApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const readSecret = coreApi.readNamespacedSecret.getMockImplementation()!
+      coreApi.readNamespacedSecret.mockImplementation((request: { name?: string } = {}) =>
+        request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+          ? Promise.reject({ code: 404 })
+          : readSecret(request)
+      )
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toEqual({
+        code: 500,
+      })
+
+      // Liveness: both passes emitted an outcome; only the first reached the mint.
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      const [first, second] = reconcileOutcomes(reporter)
+      expect(first?.payload).toMatchObject({ transition: 'gfs_token:minted' })
+      expect(second?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(second?.payload).not.toHaveProperty('transition')
+    })
+
+    it('reports reused when the runtime Secret is kept', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, coreApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      // Reuse needs a refresh token whose `exp` can be read.
+      const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url')
+      const refreshToken = [
+        encode({ alg: 'none' }),
+        encode({ exp: Math.floor(Date.now() / 1000) + 30 * 86_400 }),
+        'unsigned',
+      ].join('.')
+      const issue = vi.mocked(issueMcpHostRuntimeTokens).getMockImplementation()!
+      vi.mocked(issueMcpHostRuntimeTokens).mockImplementationOnce(async (...args) => ({
+        ...(await issue(...args)),
+        refreshToken,
+      }))
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+      const firstWrite = coreApi.replaceNamespacedSecret.mock.calls.find(
+        ([request]) => request.name === 'host-alpha-host-mcp-host-runtime-tokens'
+      )?.[0].body as k8s.V1Secret
+      coreApi.readNamespacedSecret.mockImplementation(({ name }: { name?: string } = {}) => {
+        if (name === 'host-alpha-host-mcp-host-runtime-tokens') return Promise.resolve(firstWrite)
+        return Promise.resolve({ metadata: { resourceVersion: '1' }, data: {} })
+      })
+      await reconciler.reconcile(makeHost({ generation: 3 }))
+
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      expect(reconcileOutcomes(reporter).map(outcome => outcome.payload?.transition)).toEqual([
+        'gfs_token:rotated',
+        'gfs_token:reused',
+      ])
+    })
+
+    it('reports failed on the exception outcome when the mint is rejected', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+      const validationError = new Error('gfs host token subject mismatch')
+      validationError.name = 'GfsHostTokenValidationError'
+      vi.mocked(mintHostGfsToken).mockRejectedValueOnce(validationError)
+
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toThrow(
+        /subject mismatch/
+      )
+
+      expect(reconcileOutcomes(reporter).map(outcome => outcome.payload)).toEqual([
+        {
+          resource_class: 'Host',
+          reason_code: 'reconcile_exception',
+          status: 'failed',
+          transition: 'gfs_token:failed',
+        },
+      ])
+    })
+
+    it('drops the evidence of a superseded pass', async () => {
+      const reporter = createTelemetryReporterMock()
+      const { reconciler, appsApi, rbacApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
+      const mintsBefore = vi.mocked(mintHostGfsToken).mock.calls.length
+      const superseded = new Error('Host spec changed while the Deployment write was in flight')
+      superseded.name = 'HostMutationSpecRevisionChangedError'
+      appsApi.replaceNamespacedDeployment.mockRejectedValueOnce(superseded)
+
+      await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toBe(superseded)
+      // Liveness: the superseded pass minted, and emitted no outcome.
+      expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
+      expect(reconcileOutcomes(reporter)).toHaveLength(0)
+
+      rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+      await expect(reconciler.reconcile(makeHost({ generation: 4 }))).rejects.toEqual({
+        code: 500,
+      })
+
+      const outcomes = reconcileOutcomes(reporter)
+      expect(outcomes).toHaveLength(1)
+      expect(outcomes[0]?.payload).toMatchObject({ reason_code: 'reconcile_exception' })
+      expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+    })
   })
 
   it('emits Host-backed controller_error and failed reconcile_outcome on reconcile failure', async () => {

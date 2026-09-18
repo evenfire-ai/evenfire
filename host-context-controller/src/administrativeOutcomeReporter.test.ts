@@ -163,15 +163,76 @@ const settle = () => new Promise(resolve => setTimeout(resolve, 150))
 describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)', () => {
   beforeEach(() => administrativeOutcomeReporterTotal.reset())
 
-  function reporterWith(fetchFn: typeof fetch, dedupeCapacity?: number) {
+  function reporterWith(
+    fetchFn: typeof fetch,
+    bounds: { capacity?: number; dedupeCapacity?: number } = {}
+  ) {
     return new BoundedAdministrativeOutcomeReporter({
       baseUrl: 'http://control-api.test:8090',
       signToken: () => 'signed',
       fetchFn,
       random: () => 0,
-      ...(dedupeCapacity !== undefined ? { dedupeCapacity } : {}),
+      ...bounds,
     })
   }
+
+  it('deduplicates a key while its first copy is queued or waiting for a retry', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(failedResponse(500)) as unknown as typeof fetch
+    const reporter = reporterWith(fetchFn)
+
+    reporter.enqueueHostOutcome(outcome('in-flight'))
+    reporter.enqueueHostOutcome(outcome('in-flight'))
+    // The first attempt has failed; the retry fires at 25 ms.
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(fetchFn).toHaveBeenCalledOnce()
+    reporter.enqueueHostOutcome(outcome('in-flight'))
+    await settle()
+
+    // Liveness: the one queued copy used its whole retry budget.
+    expect(fetchFn).toHaveBeenCalledTimes(3)
+    expect(await counted('retry_exhausted')).toBe(1)
+    expect(await counted('deduplicated')).toBe(2)
+  })
+
+  it('sends an outcome again after it was dropped because the buffer was full', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
+    const reporter = reporterWith(fetchFn, { capacity: 1, dedupeCapacity: 2 })
+
+    reporter.enqueueHostOutcome(outcome('buffered'))
+    reporter.enqueueHostOutcome(outcome('dropped'))
+    await settle()
+    expect(await counted('buffer_full')).toBe(1)
+    reporter.enqueueHostOutcome(outcome('dropped'))
+    await settle()
+
+    expect(submittedIds(fetchFn)).toEqual(['buffered', 'dropped'])
+    expect(await counted('deduplicated')).toBe(0)
+  })
+
+  it('keeps a key that is seen on every pass ahead of keys seen once', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
+    const reporter = reporterWith(fetchFn, { capacity: 1, dedupeCapacity: 2 })
+
+    for (const id of ['repeated', 'once', 'repeated', 'newer', 'repeated']) {
+      reporter.enqueueHostOutcome(outcome(id))
+      await settle()
+    }
+
+    // 'newer' evicted 'once', not 'repeated', because 'repeated' was seen again.
+    expect(submittedIds(fetchFn)).toEqual(['repeated', 'once', 'newer'])
+    expect(await counted('deduplicated')).toBe(2)
+  })
+
+  it('requires the dedupe bound to exceed the queue capacity', () => {
+    const fetchFn = vi.fn() as unknown as typeof fetch
+
+    expect(() => reporterWith(fetchFn, { capacity: 4, dedupeCapacity: 4 })).toThrow(
+      'dedupeCapacity must be an integer greater than capacity'
+    )
+    expect(reporterWith(fetchFn, { capacity: 4, dedupeCapacity: 5 })).toBeInstanceOf(
+      BoundedAdministrativeOutcomeReporter
+    )
+  })
 
   it('sends an accepted outcome once however often the reconciler re-observes it', async () => {
     const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
@@ -256,10 +317,12 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
 
   it('forgets the oldest settled outcome once the dedupe bound is reached', async () => {
     const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
-    const reporter = reporterWith(fetchFn, 2)
+    const reporter = reporterWith(fetchFn, { capacity: 1, dedupeCapacity: 2 })
 
-    for (const id of ['first', 'second', 'third']) reporter.enqueueHostOutcome(outcome(id))
-    await settle()
+    for (const id of ['first', 'second', 'third']) {
+      reporter.enqueueHostOutcome(outcome(id))
+      await settle()
+    }
     reporter.enqueueHostOutcome(outcome('third'))
     reporter.enqueueHostOutcome(outcome('first'))
     await settle()

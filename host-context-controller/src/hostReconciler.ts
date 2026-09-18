@@ -2175,29 +2175,39 @@ export class HostReconciler {
     this.enqueueAdministrativeOutcome(host, 'failed', reasonCode)
   }
 
-  /**
-   * `administrative` is false on the failed-pass path: the status read here
-   * is then the previous pass's, and must not become a `succeeded` outcome.
-   */
-  private enqueueReconcileOutcome(
-    host: HostCRD,
-    { administrative }: { administrative: boolean }
-  ): void {
+  private enqueueReconcileOutcome(host: HostCRD): void {
     const status = this.getStatus(host.name)
     const succeeded = status.deployed && status.ready
-    const gfsOutcome = this.gfsTokenLifecycleEvidence.get(
-      HostReconciler.gfsLifecycleEvidenceKey(host)
-    )
-    this.enqueueHostTelemetry(host, 'reconcile_outcome', succeeded ? 'ready' : 'not_ready', {
+    this.enqueueReconcileTelemetry(host, succeeded ? 'ready' : 'not_ready', {
       status: succeeded ? 'succeeded' : 'failed',
       phase: status.deployed ? 'deployed' : 'not_deployed',
       state: status.ready ? 'ready' : 'not_ready',
+    })
+    if (succeeded) this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
+  }
+
+  /**
+   * A pass that threw may not have written any status yet, so the status in
+   * memory can still be the previous pass's. Report the failure itself, not
+   * that status, and never an administrative `succeeded` (#327).
+   */
+  private enqueueReconcileExceptionOutcome(host: HostCRD): void {
+    this.enqueueReconcileTelemetry(host, 'reconcile_exception', { status: 'failed' })
+  }
+
+  private enqueueReconcileTelemetry(
+    host: HostCRD,
+    reasonCode: string,
+    payload: HccInfrastructureTelemetryPayload
+  ): void {
+    const evidenceKey = HostReconciler.gfsLifecycleEvidenceKey(host)
+    const gfsOutcome = this.gfsTokenLifecycleEvidence.get(evidenceKey)
+    this.gfsTokenLifecycleEvidence.delete(evidenceKey)
+    this.enqueueHostTelemetry(host, 'reconcile_outcome', reasonCode, {
+      ...payload,
       // control-api allowlists `transition`, not gfs_* keys (#328).
       ...(gfsOutcome ? { transition: `gfs_token:${gfsOutcome}` } : {}),
     })
-    this.gfsTokenLifecycleEvidence.delete(HostReconciler.gfsLifecycleEvidenceKey(host))
-    if (administrative && succeeded)
-      this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
   }
 
   private enqueueAdministrativeOutcome(
@@ -4408,7 +4418,7 @@ export class HostReconciler {
       hostReconcileInFlight.inc({ lane: source })
       try {
         await this.reconcileCore(admittedHost, revalidate)
-        this.enqueueReconcileOutcome(admittedHost, { administrative: true })
+        this.enqueueReconcileOutcome(admittedHost)
         this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
         if (isBenignSupersessionError(error)) {
@@ -4418,11 +4428,18 @@ export class HostReconciler {
           // or an administrative 'failed' outcome. Callers already treat the
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
           // only log the error), so the rethrow is preserved.
+          // Evidence is written only inside reconcileCore and consumed by the
+          // outcome below; this is the one exit that emits no outcome. Keyed by
+          // namespace/name, a leftover would be reported by the next pass, or
+          // by a recreated Host with the same name.
+          this.gfsTokenLifecycleEvidence.delete(
+            HostReconciler.gfsLifecycleEvidenceKey(admittedHost)
+          )
           this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
           throw error
         }
         this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
-        this.enqueueReconcileOutcome(admittedHost, { administrative: false })
+        this.enqueueReconcileExceptionOutcome(admittedHost)
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
       } finally {

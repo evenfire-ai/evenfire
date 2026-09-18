@@ -190,7 +190,9 @@ function validateShape(
     `events[${index}]`
   )
   for (const field of Object.keys(event)) {
-    if (!allowed.has(field)) throw new UnsafeTracingInputError(`events[${index}].${field}`)
+    if (!allowed.has(field)) {
+      throw new UnsafeTracingInputError(`events[${index}].${field}`, 'not_permitted')
+    }
   }
 }
 
@@ -303,7 +305,8 @@ function normalizeInfra(
       ((hostLookupReference as Record<string, unknown>).generation !== undefined &&
         typeof (hostLookupReference as Record<string, unknown>).generation !== 'number') ||
       ((hostLookupReference as Record<string, unknown>).uid !== undefined &&
-        typeof (hostLookupReference as Record<string, unknown>).uid !== 'string'))
+        (typeof (hostLookupReference as Record<string, unknown>).uid !== 'string' ||
+          (hostLookupReference as Record<string, unknown>).uid === '')))
   ) {
     throw new InvalidTracingInputError(
       `events[${index}].hostLookupReference must be a Host lookup reference`

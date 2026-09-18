@@ -172,6 +172,7 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
 
   it('settles a 400 unsafe_tracing_input once and keeps retrying a 500 (#326, #328)', async () => {
     infrastructureTelemetryFlushesTotal.reset()
+    infrastructureTelemetryGapsTotal.reset()
     const response = (status: number, body: unknown) =>
       ({ ok: false, status, json: async () => body }) as unknown as Response
     const fetchFn = vi.fn(async (_url: unknown, init?: RequestInit) => {
@@ -213,6 +214,47 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
     const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
     expect(flushes.find(value => value.labels.result === 'rejected')?.value).toBe(1)
     expect(flushes.find(value => value.labels.result === 'exhausted')?.value).toBe(1)
+    // Both events were lost: one rejected, one after its retries.
+    const gaps = (await infrastructureTelemetryGapsTotal.get()).values.map(value => value.labels)
+    expect(gaps).toEqual(
+      expect.arrayContaining([
+        { telemetry_type: 'lifecycle_transition', reason: 'rejected' },
+        { telemetry_type: 'lifecycle_transition', reason: 'retry_exhausted' },
+      ])
+    )
+    expect(gaps).toHaveLength(2)
+  })
+
+  it('does not count a 409 idempotency conflict as an evidence gap', async () => {
+    infrastructureTelemetryFlushesTotal.reset()
+    infrastructureTelemetryGapsTotal.reset()
+    const fetchFn = vi.fn(
+      async () =>
+        ({
+          ok: false,
+          status: 409,
+          json: async () => ({ code: 'tracing_idempotency_conflict' }),
+        }) as unknown as Response
+    ) as unknown as typeof fetch
+    const reporter = new BoundedInfrastructureTelemetryReporter({
+      baseUrl: 'http://control-api.test:8090',
+      signToken: () => 'signed-request',
+      fetchFn,
+      random: () => 0,
+    })
+
+    reporter.enqueue({
+      ...projection,
+      telemetryType: 'lifecycle_transition',
+      sourceEventId: 'conflicting-event',
+    })
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    // Liveness: the conflict was submitted once and settled.
+    expect(fetchFn).toHaveBeenCalledOnce()
+    const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
+    expect(flushes.find(value => value.labels.result === 'conflict')?.value).toBe(1)
+    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([])
   })
 
   it('isolates a blackholed submission and continues flushing later telemetry', async () => {

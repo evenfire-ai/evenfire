@@ -378,6 +378,7 @@ describe('route tracing submission facade', () => {
   it.each([
     ['accepts', 'host-uid-1', 1],
     ['rejects', 42, 0],
+    ['rejects', '', 0],
   ] as const)(
     '%s a Host lookup reference uid of %o (#691)',
     async (_verdict, uid, expectedResolves) => {
@@ -419,4 +420,38 @@ describe('route tracing submission facade', () => {
       expect(resolve).toHaveBeenCalledTimes(expectedResolves)
     }
   )
+
+  it('names an unknown event field as not permitted, not as server-owned (#328)', async () => {
+    const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+    const h = transactionHarness()
+    const resolve = vi.fn().mockResolvedValue(infraBinding)
+    const service = new RouteTracingSubmissionService({
+      transaction: h.transaction,
+      infrastructureWorkloadBindingResolver: { resolve },
+      infrastructureTelemetryAppender: { appendManyInTransaction: vi.fn() },
+    })
+
+    await expect(
+      service.submit({
+        principal: infraPrincipal,
+        events: [
+          {
+            sourceEventId: 'reconcile-1',
+            occurredAt: NOW,
+            telemetryType: 'reconcile_outcome',
+            hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 1 },
+            payload: { status: 'succeeded', reason_code: 'ready' },
+            gfsEvidence: 'rotated',
+          },
+        ],
+      })
+    ).rejects.toMatchObject({
+      code: 'unsafe_tracing_input',
+      reason: 'not_permitted',
+      message: 'tracing input field is not permitted: events[0].gfsEvidence',
+    })
+    // Liveness: the rejection was counted, so validation ran on this event.
+    expect(rejected).toHaveBeenCalled()
+    expect(resolve).not.toHaveBeenCalled()
+  })
 })

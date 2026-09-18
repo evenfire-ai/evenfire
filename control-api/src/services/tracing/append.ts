@@ -101,11 +101,23 @@ export class TracingIdempotencyConflictError extends Error {
 }
 
 /**
- * `not_permitted`: a payload key outside the metadata allowlist. It used to
- * share the server-owned/monetary message, which misdescribed a keyed field
- * such as `gfs_subject` as authority smuggling (#328).
+ * The code stays `unsafe_tracing_input` for every reason; only the message
+ * differs. The server-owned/monetary message used to cover all three, which
+ * misdescribed a field such as `gfs_subject` as authority smuggling (#328).
+ * - `not_permitted`: a field or payload key outside the allowlist.
+ * - `invalid_value`: an allowlisted key whose value has the wrong type,
+ *   format or size.
  */
-export type UnsafeTracingInputReason = 'server_owned_or_monetary' | 'not_permitted'
+export type UnsafeTracingInputReason =
+  | 'server_owned_or_monetary'
+  | 'not_permitted'
+  | 'invalid_value'
+
+const UNSAFE_TRACING_INPUT_MESSAGES: Record<UnsafeTracingInputReason, string> = {
+  server_owned_or_monetary: 'tracing input contains a server-owned or monetary field',
+  not_permitted: 'tracing input field is not permitted',
+  invalid_value: 'tracing input value is not accepted',
+}
 
 export class UnsafeTracingInputError extends Error {
   readonly code = 'unsafe_tracing_input'
@@ -116,11 +128,7 @@ export class UnsafeTracingInputError extends Error {
     readonly field: string,
     readonly reason: UnsafeTracingInputReason = 'server_owned_or_monetary'
   ) {
-    super(
-      reason === 'not_permitted'
-        ? `tracing payload key is not permitted: ${field}`
-        : `tracing input contains a server-owned or monetary field: ${field}`
-    )
+    super(`${UNSAFE_TRACING_INPUT_MESSAGES[reason]}: ${field}`)
     this.name = 'UnsafeTracingInputError'
   }
 }
@@ -247,7 +255,7 @@ export function assertNoClientAuthority(value: unknown, path = 'input'): void {
 export function assertSafeEventPayload(value: unknown): void {
   if (value === undefined) return
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new UnsafeTracingInputError('input.payload')
+    throw new UnsafeTracingInputError('input.payload', 'invalid_value')
   }
   for (const [key, fieldValue] of Object.entries(value as Record<string, unknown>)) {
     if (!SAFE_METADATA_KEYS.has(key)) {
@@ -257,31 +265,31 @@ export function assertSafeEventPayload(value: unknown): void {
       !['string', 'number'].includes(typeof fieldValue) ||
       (typeof fieldValue === 'number' && !Number.isFinite(fieldValue))
     ) {
-      throw new UnsafeTracingInputError(`input.payload.${key}`)
+      throw new UnsafeTracingInputError(`input.payload.${key}`, 'invalid_value')
     }
     if (
       key === 'tool_kind' &&
       !['internal_tool', 'mcp_server_tool', 'workflow'].includes(String(fieldValue))
     ) {
-      throw new UnsafeTracingInputError('input.payload.tool_kind')
+      throw new UnsafeTracingInputError('input.payload.tool_kind', 'invalid_value')
     }
     if (
       key === 'tool_source_ref' &&
       (typeof fieldValue !== 'string' || fieldValue.length === 0 || fieldValue.length > 128)
     ) {
-      throw new UnsafeTracingInputError('input.payload.tool_source_ref')
+      throw new UnsafeTracingInputError('input.payload.tool_source_ref', 'invalid_value')
     }
     if (
       key === 'target_label' &&
       (typeof fieldValue !== 'string' || !/^[A-Za-z0-9._-]{3,64}$/.test(fieldValue))
     ) {
-      throw new UnsafeTracingInputError('input.payload.target_label')
+      throw new UnsafeTracingInputError('input.payload.target_label', 'invalid_value')
     }
     if (
       key === 'target_principal_kind' &&
       !['operator', 'host', 'context', 'service'].includes(String(fieldValue))
     ) {
-      throw new UnsafeTracingInputError('input.payload.target_principal_kind')
+      throw new UnsafeTracingInputError('input.payload.target_principal_kind', 'invalid_value')
     }
     if (
       key === 'target_principal_ref' &&
@@ -290,14 +298,14 @@ export function assertSafeEventPayload(value: unknown): void {
         fieldValue.length > 256 ||
         !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(fieldValue))
     ) {
-      throw new UnsafeTracingInputError('input.payload.target_principal_ref')
+      throw new UnsafeTracingInputError('input.payload.target_principal_ref', 'invalid_value')
     }
   }
   const payload = value as Record<string, unknown>
   const targetPrincipalKind = payload.target_principal_kind
   const targetPrincipalRef = payload.target_principal_ref
   if ((targetPrincipalKind === undefined) !== (targetPrincipalRef === undefined)) {
-    throw new UnsafeTracingInputError('input.payload.target_principal')
+    throw new UnsafeTracingInputError('input.payload.target_principal', 'invalid_value')
   }
   if (typeof targetPrincipalKind === 'string' && typeof targetPrincipalRef === 'string') {
     const hasCanonicalPrefix =
@@ -305,11 +313,11 @@ export function assertSafeEventPayload(value: unknown): void {
       (targetPrincipalKind !== 'operator' &&
         targetPrincipalRef.startsWith(`${targetPrincipalKind}:`))
     if (!hasCanonicalPrefix) {
-      throw new UnsafeTracingInputError('input.payload.target_principal_ref')
+      throw new UnsafeTracingInputError('input.payload.target_principal_ref', 'invalid_value')
     }
   }
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > 16_384) {
-    throw new UnsafeTracingInputError('input.payload')
+    throw new UnsafeTracingInputError('input.payload', 'invalid_value')
   }
 }
 

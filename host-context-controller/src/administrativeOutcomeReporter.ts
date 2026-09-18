@@ -34,12 +34,6 @@ const DEFAULT_TIMEOUT_MS = 1_000
 const DEFAULT_STOP_TIMEOUT_MS = 1_500
 const DEFAULT_DEDUPE_CAPACITY = 1_024
 
-/**
- * pending: queued or in flight. accepted: control-api stored or replayed it.
- * terminal: control-api rejected it deterministically (conflict or unsafe input).
- */
-type SubmissionState = 'pending' | 'accepted' | 'terminal'
-
 export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutcomeReporter {
   private readonly queue: BoundedOffPathReporter<AdministrativeHostOutcomeProjection>
   private readonly timeoutMs: number
@@ -49,9 +43,12 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
   private readonly dedupeCapacity: number
   // The reconciler re-observes the same outcome on every pass (3-4 fleet
   // passes per 5 minutes) and its sourceEventId is deterministic, so each
-  // fact is sent once per process (#327). Insertion order doubles as the
-  // eviction order.
-  private readonly submissions = new Map<string, SubmissionState>()
+  // fact is sent once per process (#327). A key stays here while it is queued,
+  // in flight, accepted or rejected as terminal; only a drop removes it.
+  // Iteration order is least recently seen first, which is the eviction
+  // order. Past `dedupeCapacity` distinct keys per pass, the oldest are
+  // evicted and resent; control-api answers those resends as replays.
+  private readonly seen = new Set<string>()
 
   constructor(deps: AdministrativeOutcomeReporterDependencies) {
     const capacity = deps.capacity ?? DEFAULT_CAPACITY
@@ -59,8 +56,13 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
       throw new Error('administrative outcome reporter capacity must be a positive integer')
     }
     const dedupeCapacity = deps.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY
-    if (!Number.isSafeInteger(dedupeCapacity) || dedupeCapacity < 1) {
-      throw new Error('administrative outcome reporter dedupeCapacity must be a positive integer')
+    // Up to `capacity` keys are buffered plus one in flight. A smaller set
+    // would evict a key that is still queued, and the next pass would queue
+    // it a second time.
+    if (!Number.isSafeInteger(dedupeCapacity) || dedupeCapacity <= capacity) {
+      throw new Error(
+        'administrative outcome reporter dedupeCapacity must be an integer greater than capacity'
+      )
     }
     this.dedupeCapacity = dedupeCapacity
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -74,44 +76,32 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
       random: deps.random ?? Math.random,
       submit: projection => this.submit(projection),
       onEnqueued: () => administrativeOutcomeReporterTotal.inc({ result: 'enqueued' }),
-      onAccepted: projection => {
-        this.settle(projection.sourceEventId, 'accepted')
-        administrativeOutcomeReporterTotal.inc({ result: 'accepted' })
-      },
-      onTerminal: (projection, result) => {
-        this.settle(projection.sourceEventId, 'terminal')
-        administrativeOutcomeReporterTotal.inc({ result })
-      },
+      onAccepted: () => administrativeOutcomeReporterTotal.inc({ result: 'accepted' }),
+      onTerminal: (_projection, result) => administrativeOutcomeReporterTotal.inc({ result }),
       onDrop: (projection, reason) => {
-        // A dropped outcome was never settled; forgetting it lets the next
+        // A dropped outcome was never delivered; forgetting it lets the next
         // reconcile pass enqueue it again, so no outcome is lost.
-        this.submissions.delete(projection.sourceEventId)
+        this.seen.delete(projection.sourceEventId)
         administrativeOutcomeReporterTotal.inc({ result: reason })
       },
     })
   }
 
   enqueueHostOutcome(projection: AdministrativeHostOutcomeProjection): void {
-    if (this.submissions.has(projection.sourceEventId)) {
+    const { sourceEventId } = projection
+    if (this.seen.delete(sourceEventId)) {
+      // Re-inserted as most recently seen, so a key observed on every pass is
+      // not evicted behind keys observed once.
+      this.seen.add(sourceEventId)
       administrativeOutcomeReporterTotal.inc({ result: 'deduplicated' })
       return
     }
-    this.remember(projection.sourceEventId, 'pending')
-    this.queue.enqueue({ ...projection, hostRef: { ...projection.hostRef } })
-  }
-
-  private remember(sourceEventId: string, state: SubmissionState): void {
-    if (this.submissions.size >= this.dedupeCapacity) {
-      const oldest = this.submissions.keys().next().value
-      if (oldest !== undefined) this.submissions.delete(oldest)
+    if (this.seen.size >= this.dedupeCapacity) {
+      const oldest = this.seen.values().next().value
+      if (oldest !== undefined) this.seen.delete(oldest)
     }
-    this.submissions.set(sourceEventId, state)
-  }
-
-  private settle(sourceEventId: string, state: 'accepted' | 'terminal'): void {
-    // An entry evicted while in flight is not re-added: it would displace a
-    // newer key, and a resend after eviction is accepted as a replay anyway.
-    if (this.submissions.has(sourceEventId)) this.submissions.set(sourceEventId, state)
+    this.seen.add(sourceEventId)
+    this.queue.enqueue({ ...projection, hostRef: { ...projection.hostRef } })
   }
 
   stop(timeoutMs?: number): Promise<void> {

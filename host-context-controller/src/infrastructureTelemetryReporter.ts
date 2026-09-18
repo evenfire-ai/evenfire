@@ -151,7 +151,17 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
       onEnqueued: projection =>
         infrastructureTelemetryEnqueuedTotal.inc({ telemetry_type: projection.telemetryType }),
       onAccepted: () => infrastructureTelemetryFlushesTotal.inc({ result: 'accepted' }),
-      onTerminal: (_projection, result) => infrastructureTelemetryFlushesTotal.inc({ result }),
+      onTerminal: (projection, result) => {
+        infrastructureTelemetryFlushesTotal.inc({ result })
+        // A conflict means a row already exists for the key. A rejected event
+        // is never stored, so it is a gap in the evidence.
+        if (result === 'rejected') {
+          infrastructureTelemetryGapsTotal.inc({
+            telemetry_type: projection.telemetryType,
+            reason: result,
+          })
+        }
+      },
       onRetry: projection =>
         infrastructureTelemetryRetriesTotal.inc({ telemetry_type: projection.telemetryType }),
       onDrop: (projection, reason) => this.recordDrop(projection.telemetryType, reason),

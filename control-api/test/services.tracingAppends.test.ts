@@ -547,7 +547,20 @@ describe('server-owned tracing fields', () => {
       expect.objectContaining({
         code: 'unsafe_tracing_input',
         reason: 'not_permitted',
-        message: 'tracing payload key is not permitted: input.payload.gfs_subject',
+        message: 'tracing input field is not permitted: input.payload.gfs_subject',
+      })
+    )
+    expect(() => assertSafeEventPayload({ transition: { outcome: 'reused' } })).toThrow(
+      expect.objectContaining({
+        code: 'unsafe_tracing_input',
+        reason: 'invalid_value',
+        message: 'tracing input value is not accepted: input.payload.transition',
+      })
+    )
+    expect(() => assertSafeEventPayload({ target_label: 'Label with spaces' })).toThrow(
+      expect.objectContaining({
+        reason: 'invalid_value',
+        message: 'tracing input value is not accepted: input.payload.target_label',
       })
     )
     expect(() => assertNoClientAuthority({ payload: { sourceService: 'hcc' } })).toThrow(
