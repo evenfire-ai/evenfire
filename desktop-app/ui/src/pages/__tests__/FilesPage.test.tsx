@@ -2242,6 +2242,76 @@ describe('FilesPage', () => {
       )
     })
 
+    // N1 — the dropdown shows the MERGED role (direct ⊔ inherited);
+    // re-selecting the already-displayed role must be a no-op, not an
+    // inherited-floor comparison that escalates the parent folder.
+    it('re-selecting the displayed merged role opens no modal and issues no writes', async () => {
+      installInheritedDirectoryMocks()
+      const folderAffordances = (window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> })
+        .affordances
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const pushToast = vi.fn()
+      // Direct Editor grant on the file + inherited Read floor: the row
+      // displays Editor even though the inherited-only role is Read.
+      hookMock.useGfsBrowserController.mockReturnValue(
+        inheritedFileController({
+          grants: [
+            {
+              id: 'grant-1',
+              drive: 'main',
+              resourceId: 'file-1',
+              subject: { type: 'user', id: 'user-2' },
+              permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+              inherit: false,
+            },
+          ],
+          inheritedAccess: [
+            {
+              subject: { type: 'user', id: 'user-2' },
+              permissions: ['read'],
+              inheritedFrom: ['Team folder'],
+              sources: [
+                {
+                  resourceId: 'folder-1',
+                  name: 'Team folder',
+                  permissions: ['read'],
+                  grantId: 'parent-grant-1',
+                  shareIds: [],
+                },
+              ],
+            },
+          ],
+        })
+      )
+
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      // The merged row displays the strongest role across sources.
+      expect(
+        within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      ).toContain('Editor')
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      })
+
+      // No confirmation, no pre-flight, no writes — the displayed role was
+      // re-selected.
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(folderAffordances).not.toHaveBeenCalled()
+      expect(parentGrant).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(
+          within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+        ).toContain('Editor')
+      )
+    })
+
     it('states the true partial outcome when a folder removal fails mid-run', async () => {
       installInheritedDirectoryMocks()
       const revokeGrant = vi.fn(async (grantId: string) => {

@@ -828,6 +828,14 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                                 return
                               }
                               const nextRole = (next[0] ?? 'read') as AccessRole
+                              // N1: the dropdown displays the MERGED
+                              // effective role (direct ⊔ inherited).
+                              // Re-selecting the already-displayed role is a
+                              // no-op — comparing it against the
+                              // inherited-only floor instead would open the
+                              // parent-update modal and escalate the parent
+                              // folder for a non-change.
+                              if (nextRole === roleForPermissions(row.permissions)) return
                               const affected = planInheritedRoleChange(
                                 row.inherited as GfsInheritedAccessItem,
                                 nextRole === 'editor'

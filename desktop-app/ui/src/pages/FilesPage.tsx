@@ -608,6 +608,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     const inherited = row.inherited
     if (!inherited) return
     const subject = inherited.subject
+    // N1: the dropdown displays the MERGED effective role (direct ⊔
+    // inherited). Re-selecting the already-displayed role is a no-op —
+    // comparing it against the inherited-only floor instead would open the
+    // parent-update modal and escalate the parent folder for a non-change.
+    if (role === roleForAccessPermissions(row.permissions)) return
     // R1-H1 plan: downgrade lowers every folder above the target; upgrade
     // raises the single strongest folder; same-role selection touches none.
     const affected = planInheritedRoleChange(inherited, role === 'editor')

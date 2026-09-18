@@ -731,6 +731,28 @@ describe('GfsGrantPanel inherited access', () => {
       )
     })
 
+    // N1 — the dropdown shows the MERGED role (direct ⊔ inherited);
+    // re-selecting the already-displayed role must be a no-op, not an
+    // inherited-floor comparison that escalates the parent folder.
+    it('re-selecting the displayed merged role opens no modal and issues no writes', async () => {
+      // Direct Editor grant on the file + inherited Read floor on campaigns:
+      // the row displays Editor even though the inherited-only role is Read.
+      driveScenario({ campaigns: VIEWER, fileGrant: EDITOR })
+      const row = await openRoleDialog()
+
+      expect(
+        within(row).getByRole('button', { name: 'Access role for Miguel' }).textContent
+      ).toContain('Editor')
+
+      await chooseRole(row, 'Editor')
+
+      // No confirmation, no writes — the displayed role was re-selected.
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(mockPutGfsGrant).not.toHaveBeenCalled()
+      expect(mockDeleteGfsGrant).not.toHaveBeenCalled()
+      expect(mockDeleteGfsShare).not.toHaveBeenCalled()
+    })
+
     it('states the true partial outcome when a folder update fails mid-run', async () => {
       driveScenario({ campaigns: EDITOR, marketing: EDITOR })
       mockPutGfsGrant.mockImplementation(async body => {
