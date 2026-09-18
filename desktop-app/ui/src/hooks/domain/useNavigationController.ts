@@ -60,6 +60,10 @@ export function useNavigationController() {
       return prev
     })
   }, [activeTab, workspaceTabs])
+  // Mirror of `lastActiveChatTabId` for the synchronous read in `focusChatSection`
+  // (it runs against `workspaceTabsRef.current`, not the render's snapshot).
+  const lastActiveChatTabIdRef = useRef(lastActiveChatTabId)
+  lastActiveChatTabIdRef.current = lastActiveChatTabId
 
   const clearAppsPicker = useCallback(() => setAppsPickerActive(false), [])
 
@@ -84,10 +88,20 @@ export function useNavigationController() {
     setAppsPickerActive(false)
     const current = workspaceTabsRef.current
     const active = activeWorkspaceTab(current)
+    // Precedence (mini-spec 08 §1): the active chat wins (no re-homing); else
+    // RESUME the last active chat tab the user left — validated live against the
+    // store so a not-yet-reflected close cannot resurrect a stale id — rather than
+    // the last chat by array order; else the last chat by order (first boot, no
+    // last-active); else seed a blank.
+    const lastActiveId = lastActiveChatTabIdRef.current
+    const resumeTarget =
+      lastActiveId !== null
+        ? current.tabs.find(tab => tab.id === lastActiveId && tab.kind === 'chat')
+        : undefined
     const target =
       active?.kind === 'chat'
         ? active
-        : [...current.tabs].reverse().find(tab => tab.kind === 'chat')
+        : (resumeTarget ?? [...current.tabs].reverse().find(tab => tab.kind === 'chat'))
     if (target) {
       setWorkspaceTabs(state =>
         state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
