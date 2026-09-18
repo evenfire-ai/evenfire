@@ -26,7 +26,7 @@ import { VENDORED_MODELS_DEV_SNAPSHOT } from '../src/data/modelsDevSnapshot.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import { PROVIDER_KEY_MAP, mapCatalogToProviders } from '../src/services/modelsDevClient.js'
 import { type FakeDb, type SeedRow, makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
-import { loadStub, trimSnapshot } from './helpers/modelsDevFixtures.js'
+import { loadStub, trimSnapshot, withModalities } from './helpers/modelsDevFixtures.js'
 
 vi.mock('../src/observability/logger.js', () => ({
   rootLogger: { child: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
@@ -179,14 +179,22 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
         const db = makeFakeDb(seed)
 
         await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), ...LIVE_LOW_FLOOR },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            ...LIVE_LOW_FLOOR,
+          },
           db.connector
         )
         const staleAfter1 = staleSet(db)
         const enabledAfter1 = enabledSet(db)
 
         const res2 = await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), ...LIVE_LOW_FLOOR },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            ...LIVE_LOW_FLOOR,
+          },
           db.connector
         )
 
@@ -207,7 +215,11 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
         const db = makeFakeDb(seed)
 
         await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), ...LIVE_LOW_FLOOR },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            ...LIVE_LOW_FLOOR,
+          },
           db.connector
         )
 
@@ -220,7 +232,11 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
         }
 
         const res2 = await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), ...LIVE_LOW_FLOOR },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            ...LIVE_LOW_FLOOR,
+          },
           db.connector
         )
         // Re-run must not re-stale a healed row.
@@ -244,7 +260,11 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
         const enabledBefore = new Set(seed.filter(r => r.enabled).map(rowKey))
 
         await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), ...LIVE_LOW_FLOOR },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            ...LIVE_LOW_FLOOR,
+          },
           db.connector
         )
 
@@ -274,7 +294,11 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
 
         const res = await syncDiscoveredModels(
           // Impossibly high global floor → every live total is "implausible".
-          { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1_000_000 },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            minPlausibleLiveTotal: 1_000_000,
+          },
           db.connector
         )
 
@@ -306,7 +330,12 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
         const staleBeforeByKey = new Map(seed.map(r => [rowKey(r), r.stale ?? false]))
 
         await syncDiscoveredModels(
-          { loadCatalog: loadStub(catalog, 'live'), minPlausibleLiveTotal: 1, providerMinLive: 0 },
+          {
+            materializer: db.materializer,
+            loadCatalog: loadStub(catalog, 'live'),
+            minPlausibleLiveTotal: 1,
+            providerMinLive: 0,
+          },
           db.connector
         )
 
@@ -319,6 +348,133 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
           }
         }
       }),
+      { numRuns: NUM_RUNS }
+    )
+  })
+
+  it('P5 image_input evidence is monotonic in checkedAt and never overwrites curated', async () => {
+    const CAPTURED_AT = '2026-08-19T16:16:10.000Z'
+    const TTL_MS = 30 * 24 * 60 * 60 * 1000
+    const KEY = 'anthropic'
+    const IDS = Object.keys(VENDORED_MODELS_DEV_SNAPSHOT[KEY]!.models).slice(0, 6)
+    const PROVIDER_ID = KEY_TO_ID[KEY]!
+
+    /** The four evidence shapes a row can already carry when a sync arrives. */
+    type EvidenceKind = 'none' | 'curated' | 'discovery-older' | 'discovery-newer'
+    const evidenceFor = (kind: EvidenceKind, offsetMs: number) => {
+      if (kind === 'none') return null
+      if (kind === 'curated') {
+        return {
+          state: 'supported' as const,
+          evidence: {
+            source: 'curated' as const,
+            reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+            checkedAt: new Date(Date.parse(CAPTURED_AT) - offsetMs).toISOString(),
+          },
+        }
+      }
+      const sign = kind === 'discovery-older' ? -1 : 1
+      const checkedAt = new Date(Date.parse(CAPTURED_AT) + sign * offsetMs).toISOString()
+      return {
+        state: 'unsupported' as const,
+        evidence: {
+          source: 'discovery' as const,
+          reference: 'https://models.dev/api.json',
+          checkedAt,
+          validUntil: new Date(Date.parse(checkedAt) + TTL_MS).toISOString(),
+        },
+      }
+    }
+
+    const rowArb = fc.record({
+      source: fc.constantFrom('discovery', 'manual'),
+      enabled: fc.boolean(),
+      kind: fc.constantFrom<EvidenceKind>('none', 'curated', 'discovery-older', 'discovery-newer'),
+      // Strictly positive so `discovery-older`/`-newer` are never AT the capture
+      // instant, where `<=` makes the outcome a boundary case, not a class.
+      offsetMs: fc.integer({ min: 1_000, max: 90 * 24 * 60 * 60 * 1000 }),
+      supportsImages: fc.boolean(),
+    })
+
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(rowArb, { minLength: IDS.length, maxLength: IDS.length }),
+        async specs => {
+          const seed: SeedRow[] = IDS.map((model, i) => ({
+            provider: PROVIDER_ID,
+            model,
+            source: specs[i]!.source,
+            enabled: specs[i]!.enabled,
+            // Seeded stale so the flag DISCRIMINATES: the discovery branch
+            // clears it on every row it touches, so a manual row still stale
+            // after the run proves the manual statement did not write it.
+            stale: true,
+            image_input: evidenceFor(specs[i]!.kind, specs[i]!.offsetMs),
+          }))
+          const db = makeFakeDb(seed)
+          const catalog = withModalities(
+            trimSnapshot({ [KEY]: IDS }),
+            Object.fromEntries(
+              IDS.map((id, i) => [id, specs[i]!.supportsImages ? ['text', 'image'] : ['text']])
+            )
+          )
+
+          await syncDiscoveredModels(
+            {
+              materializer: db.materializer,
+              loadCatalog: loadStub(catalog, 'live', CAPTURED_AT),
+              imageEvidenceTtlMs: TTL_MS,
+              ...LIVE_LOW_FLOOR,
+            },
+            db.connector
+          )
+
+          // Witness the run was not vacuous: every seeded row is still there.
+          expect(db.rows.length).toBeGreaterThanOrEqual(IDS.length)
+
+          for (const [i, model] of IDS.entries()) {
+            const spec = specs[i]!
+            const before = evidenceFor(spec.kind, spec.offsetMs)
+            const after = db.get(PROVIDER_ID, model)!.image_input
+            const derived = {
+              state: spec.supportsImages ? 'supported' : 'unsupported',
+              evidence: {
+                source: 'discovery',
+                reference: 'https://models.dev/api.json',
+                checkedAt: CAPTURED_AT,
+                validUntil: new Date(Date.parse(CAPTURED_AT) + TTL_MS).toISOString(),
+              },
+            }
+            // The guard is the SAME on both branches (#654), so `source` drops
+            // out of this rule entirely: what decides is the evidence already
+            // on the row, never who owns the row or whether it is enabled.
+            //
+            // Curated evidence outranks discovery whatever its age.
+            if (spec.kind === 'curated') expect(after).toEqual(before)
+            // A capture newer than this run's is never regressed.
+            else if (spec.kind === 'discovery-newer') expect(after).toEqual(before)
+            // Everything else takes the catalog's verdict — manual or not,
+            // enabled or not.
+            else expect(after).toEqual(derived)
+
+            // …but a manual row keeps every column an operator authored. The
+            // seed leaves these null/false, so a leak from the discovery
+            // branch (which writes all three) is observable.
+            const row = db.get(PROVIDER_ID, model)!
+            if (spec.source === 'manual') {
+              expect(row.source).toBe('manual')
+              expect(row.stale).toBe(true)
+              expect(row.display_name).toBeNull()
+              expect(row.context_window_tokens).toBeNull()
+            } else {
+              // The discriminator's other half: the discovery branch DOES clear
+              // `stale`, so `stale === true` above is a choice, not an untouched
+              // row in a run that wrote nothing.
+              expect(row.stale).toBe(false)
+            }
+          }
+        }
+      ),
       { numRuns: NUM_RUNS }
     )
   })

@@ -205,14 +205,18 @@ export function createAdminLlmModelsRouter(gateway: K8sGateway): Router {
   // only; a scheduled trigger is a follow-up). These routes inherit the same
   // control-ui admin auth gate as the rest of `/admin/*` (app.ts).
   //
-  // The sync deliberately does NOT re-materialize the ConfigMap: it never
-  // mutates a `WHERE enabled` / serialized column of an enabled row (new writes
-  // are `enabled=false`), so the allowlist ConfigMap stays byte-identical until an
-  // operator enables a discovered model through the normal PUT path.
+  // The sync owns the re-materialization decision (#654): it publishes only when
+  // it changed `image_input` on an enabled row, and never touches `enabled` or
+  // any other serialized column of one. The route hands it the same gateway
+  // materializer every mutation route uses; a failed write is reported by the
+  // service and surfaces here as a 500 (the DB commit is already durable and the
+  // boot reconcile converges).
   router.post(
     '/admin/llm-models/discovery/sync',
     asyncHandler(async (_req: Request, res: Response) => {
-      const result = await syncDiscoveredModels()
+      const result = await syncDiscoveredModels({
+        materializer: gateway.llmAllowedModelsConfigMap(),
+      })
       res.status(200).json(result)
     })
   )

@@ -6,22 +6,68 @@ import { ModelSelector } from '../ModelSelector'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-// Drive the component purely through the hook's return shape.
-const hookState = {
-  data: undefined as HostModelsResult | null | undefined,
-  loading: false,
-  saving: false,
-  error: null as string | null,
-  selectModel: vi.fn(async (_model: string) => true),
-  clearError: vi.fn(),
+// Drive the component purely through the hook's return shape. Every field of the
+// real return shape must exist here — the component reads them directly.
+type HookState = {
+  data: HostModelsResult | null | undefined
+  loading: boolean
+  saving: boolean
+  error: string | null
+  state: 'unloaded' | 'loading' | 'ready' | 'unavailable' | 'error'
+  effectiveModel: string
+  intentModel: string | null
+  pending: boolean
+  selectionUnsettled: boolean
+  conflicted: boolean
+  confirmedRevision: number | null
+  imageInput: {
+    state: 'supported' | 'unsupported' | 'unknown'
+    reason: string
+    validUntil?: string
+  }
+  canAttachImages: boolean
+  imageBlockMessage: string | null
+  loadError: string | null
+  visualSendBlocked: boolean
+  selectModel: (model: string) => Promise<boolean>
+  clearError: () => void
+  refresh: () => Promise<void>
 }
+
+function makeHookState(overrides: Partial<HookState> = {}): HookState {
+  const data = overrides.data
+  return {
+    data,
+    loading: false,
+    saving: false,
+    error: null,
+    state: data === undefined ? 'unloaded' : data === null ? 'unavailable' : 'ready',
+    effectiveModel: data ? (data.sessionModel ?? data.hostDefault) : '',
+    intentModel: null,
+    pending: false,
+    selectionUnsettled: false,
+    conflicted: false,
+    confirmedRevision: null,
+    imageInput: { state: 'unknown', reason: 'model_unknown' },
+    canAttachImages: false,
+    imageBlockMessage: null,
+    loadError: null,
+    visualSendBlocked: false,
+    selectModel: vi.fn(async (_model: string) => true),
+    clearError: vi.fn(),
+    refresh: vi.fn(async () => undefined),
+    ...overrides,
+  }
+}
+
+let hookState: HookState = makeHookState()
 
 vi.mock('@hooks/useHostModels', () => ({
   useHostModels: () => hookState,
 }))
 
-function setHook(overrides: Partial<typeof hookState>) {
-  Object.assign(hookState, overrides)
+function setHook(overrides: Partial<HookState>) {
+  hookState = makeHookState(overrides)
 }
 
 function baseData(overrides: Partial<HostModelsResult> = {}): HostModelsResult {
@@ -44,14 +90,7 @@ function renderSelector() {
 
 afterEach(() => {
   cleanup()
-  setHook({
-    data: undefined,
-    loading: false,
-    saving: false,
-    error: null,
-    selectModel: vi.fn(async () => true),
-    clearError: vi.fn(),
-  })
+  hookState = makeHookState()
   vi.clearAllMocks()
 })
 
@@ -66,6 +105,80 @@ describe('ModelSelector', () => {
     setHook({ data: null })
     const { container } = renderSelector()
     expect(container.firstChild).toBeNull()
+  })
+
+  // #654 M7 — a failed fetch is not the host saying "I have no models". Hiding
+  // the chip there left the user with a capability-less composer and no way to
+  // recover; the chip stays as the retry affordance.
+  it('shows a retry chip when the model list failed to load', () => {
+    const refresh = vi.fn(async () => undefined)
+    setHook({
+      data: undefined,
+      state: 'error',
+      error: 'The model list could not be loaded. Retry.',
+      loadError: 'The model list could not be loaded. Retry.',
+      refresh,
+    })
+    renderSelector()
+
+    const chip = screen.getByRole('button', { name: /Models unavailable/ })
+    expect(chip.getAttribute('title')).toMatch(/could not be loaded/)
+
+    fireEvent.click(chip)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('announces the image hint through aria-describedby for a model that cannot receive images', () => {
+    setHook({
+      data: baseData(),
+      imageInput: { state: 'unsupported', reason: 'model_unsupported' },
+    })
+    renderSelector()
+    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    const describedBy = chip.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)?.textContent).toBe(
+      'This model cannot receive images.'
+    )
+  })
+
+  it('has no image hint for a model that can receive images', () => {
+    setHook({ data: baseData(), imageInput: { state: 'supported', reason: 'supported' } })
+    renderSelector()
+    // Witness: the chip rendered.
+    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    expect(chip.hasAttribute('aria-describedby')).toBe(false)
+    expect(chip.hasAttribute('title')).toBe(false)
+  })
+
+  it('tags every listed model with its image capability, including supported ones', () => {
+    setHook({
+      data: baseData({
+        models: [
+          {
+            name: 'claude-opus-4-8',
+            displayName: 'Opus 4.8',
+            imageInput: { state: 'supported', reason: 'supported' },
+          },
+          {
+            name: 'claude-haiku-4-5',
+            displayName: 'Haiku 4.5',
+            imageInput: { state: 'unsupported', reason: 'model_unsupported' },
+          },
+          { name: 'claude-sonnet-5', displayName: 'Sonnet 5' },
+        ],
+      }),
+    })
+    renderSelector()
+    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+
+    const tagsOf = (name: RegExp) =>
+      Array.from(
+        screen.getByRole('menuitemradio', { name }).querySelectorAll('.model-selector-item-tag')
+      ).map(tag => tag.textContent)
+    expect(tagsOf(/Opus 4\.8/)).toEqual(['default', 'images'])
+    expect(tagsOf(/Haiku 4\.5/)).toEqual(['no images'])
+    expect(tagsOf(/Sonnet 5/)).toEqual(['images not verified'])
   })
 
   it('shows the effective model (sessionModel over hostDefault)', () => {
