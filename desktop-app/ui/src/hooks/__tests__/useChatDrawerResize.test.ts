@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { CHAT_DRAWER_MIN_WIDTH, clampWidth } from '../useChatDrawerResize'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import {
+  CHAT_DRAWER_DEFAULT_WIDTH,
+  CHAT_DRAWER_MIN_WIDTH,
+  clampWidth,
+} from '../useChatDrawerResize'
 
 // R2-M1: the drawer resize hook's pure logic (clamp, drag mapping) had no direct
 // coverage — an inverted min/max or a reversed drag direction would leave every
@@ -61,5 +67,18 @@ describe('clampWidth embed floor (docked sizing)', () => {
     // simply keeps shrinking and scrolls; the drawer holds its minimum.
     expect(clampWidth(5000, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
     expect(clampWidth(300, 700)).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
+  })
+})
+
+describe('CHAT_DRAWER_DEFAULT_WIDTH CSS pre-mount clamp drift guard', () => {
+  // The CSS `--chat-drawer-width` clamp is the pre-mount / closed-state fallback
+  // React never gets to set inline. Its floor is CHAT_DRAWER_MIN_WIDTH and its
+  // ceiling is CHAT_DRAWER_DEFAULT_WIDTH; nothing else couples the two, so a
+  // default-width edit that skips styles.css would silently diverge. Read the
+  // real stylesheet and pin the exact clamp so that edit turns this red.
+  it('matches clamp(MIN, 32vw, DEFAULT) in styles.css', () => {
+    expect(CHAT_DRAWER_DEFAULT_WIDTH).toBe(525)
+    const css = readFileSync(fileURLToPath(new URL('../../styles.css', import.meta.url)), 'utf8')
+    expect(css).toContain(`clamp(${CHAT_DRAWER_MIN_WIDTH}px, 32vw, ${CHAT_DRAWER_DEFAULT_WIDTH}px)`)
   })
 })
