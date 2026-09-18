@@ -134,6 +134,7 @@ jobs:
               - 'packages/frontend-components/**'
               - 'packages/gfs-interaction-policy/**'
               - 'packages/llm-providers/**'
+              - 'scripts/qa-recorder/**'
             external-rest-api:
               - 'external-rest-api/**'
             host-context-controller:

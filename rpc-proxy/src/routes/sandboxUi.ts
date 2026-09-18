@@ -816,8 +816,8 @@ export function createSandboxUiSessionRouter(): Router {
         }
       }
 
-      sandboxUiProxy.once('proxyReq', onProxyReq)
-      sandboxUiProxy.once('proxyRes', onProxyRes)
+      sandboxUiProxy.on('proxyReq', onProxyReq)
+      sandboxUiProxy.on('proxyRes', onProxyRes)
       // If the request ends without firing (e.g. an early proxy error), make
       // sure the listeners are detached AND the view-request emit fires
       // exactly once with the final status code.

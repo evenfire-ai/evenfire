@@ -41,7 +41,8 @@
         "packages/display-field/**",
         "packages/frontend-components/**",
         "packages/gfs-interaction-policy/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
+        "scripts/qa-recorder/**"
       ],
       "published": true,
       "deployed_to_minikube": true

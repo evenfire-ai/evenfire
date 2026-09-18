@@ -1,6 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
-import { withAccessDatabaseTransaction } from '../src/services/access/accessDatabaseQuery.js'
+import {
+  runAccessDatabaseQuery,
+  withAccessDatabaseTransaction,
+} from '../src/services/access/accessDatabaseQuery.js'
 import {
   AccessBudgetExceededError,
   AccessExecutionBudget,
@@ -48,7 +51,45 @@ describe('physical access database statement accounting', () => {
       budget.close()
     }
   })
+
+  it('uses owned timeout provenance for a localized cancellation message', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockImplementationOnce(
+        () =>
+          new Promise((_, reject) =>
+            setTimeout(
+              () =>
+                reject(Object.assign(new Error('cancelación de declaración'), { code: '57014' })),
+              75
+            )
+          )
+      )
+    const budget = AccessExecutionBudget.create('catalog', {
+      limits: { catalogDeadlineMs: 1_000, statementTimeoutMs: 50 },
+    })
+    const db = budgetedQueryClient(query)
+    try {
+      await runAccessDatabaseQuery(db, budget, 'SET statement_timeout', [], {
+        chargeRows: false,
+        chargeProducer: false,
+        statementTimeoutMs: 50,
+      })
+      await expect(runAccessDatabaseQuery(db, budget, 'SELECT pg_sleep(2)')).rejects.toMatchObject({
+        name: 'AccessBudgetExceededError',
+        limit: 'deadline',
+        authorityRequired: true,
+      })
+    } finally {
+      budget.close()
+    }
+  })
 })
+
+function budgetedQueryClient(query: ReturnType<typeof vi.fn>) {
+  return { query }
+}
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -84,7 +125,11 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
     const budget = AccessExecutionBudget.create('catalog')
     const startedAt = performance.now()
     try {
-      await client.query(`SET statement_timeout = '50ms'`)
+      await runAccessDatabaseQuery(client, budget, `SET statement_timeout = '50ms'`, [], {
+        chargeRows: false,
+        chargeProducer: false,
+        statementTimeoutMs: 50,
+      })
       await expect(catalogQuery(client, budget, 'SELECT pg_sleep(2)', [])).rejects.toMatchObject({
         name: 'AccessBudgetExceededError',
         limit: 'deadline',
@@ -98,13 +143,39 @@ describeRealPostgres('access database cancellation on real PostgreSQL', () => {
     }
   })
 
+  it('does not classify an operator cancellation with the same SQLSTATE as a timeout', async () => {
+    const client = (await pool.connect()) as PoolClient
+    const budget = AccessExecutionBudget.create('catalog')
+    try {
+      await runAccessDatabaseQuery(client, budget, `SET statement_timeout = '500ms'`, [], {
+        chargeRows: false,
+        chargeProducer: false,
+        statementTimeoutMs: 500,
+      })
+      const query = catalogQuery(client, budget, 'SELECT pg_sleep(2)', [])
+      setTimeout(() => {
+        void pool.query('SELECT pg_cancel_backend($1)', [client.processID])
+      }, 10)
+      const error = await query.catch(value => value)
+      expect(error).toMatchObject({ code: '57014' })
+      expect(error).not.toBeInstanceOf(AccessBudgetExceededError)
+    } finally {
+      budget.close()
+      client.release()
+    }
+  })
+
   it('requires rollback and preserves no transactional writes after timeout', async () => {
     const client = (await pool.connect()) as PoolClient
     const budget = AccessExecutionBudget.create('catalog')
     try {
       await client.query(`CREATE TEMP TABLE access_timeout_rollback(value integer)`)
       await client.query('BEGIN')
-      await client.query(`SET LOCAL statement_timeout = '50ms'`)
+      await runAccessDatabaseQuery(client, budget, `SET LOCAL statement_timeout = '50ms'`, [], {
+        chargeRows: false,
+        chargeProducer: false,
+        statementTimeoutMs: 50,
+      })
       await client.query(`INSERT INTO access_timeout_rollback(value) VALUES (1)`)
       await expect(catalogQuery(client, budget, 'SELECT pg_sleep(2)', [])).rejects.toBeInstanceOf(
         AccessBudgetExceededError
