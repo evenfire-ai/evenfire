@@ -44,6 +44,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
@@ -52,6 +54,7 @@ describe('GET /rpc/hosts/:hostRef/sessions — passthrough to mcp-host', () => {
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards to mcp-host and returns the upstream body verbatim', async () => {
@@ -183,6 +186,7 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/messages — passthrou
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards to mcp-host with :agent and :chatId in the path', async () => {
@@ -356,6 +360,7 @@ describe('GET /rpc/hosts/:hostRef/sessions/:agent/:chatId/context-breakdown — 
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards to mcp-host with :agent and :chatId in the path', async () => {

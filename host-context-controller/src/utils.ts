@@ -311,6 +311,34 @@ export function preserveServiceAssignedFields<
 }
 
 /**
+ * True when the desired PodDisruptionBudget is equivalent to the live object.
+ * policy/v1 does not default-fill spec fields on this object, so comparison is
+ * the whole PDB after stripping server-owned metadata. Labels, finalizers, and
+ * ownerReferences are compared in full (mergeExisting keeps annotations only).
+ * Doubt or a malformed object returns false (fail-open-to-write).
+ */
+export function podDisruptionBudgetMatchesDesired(
+  desired: k8s.V1PodDisruptionBudget | undefined,
+  existing: k8s.V1PodDisruptionBudget | undefined
+): boolean {
+  try {
+    if (!desired?.spec || !existing?.spec) return false
+    return (
+      JSON.stringify(normalizePodDisruptionBudgetForComparison(desired)) ===
+      JSON.stringify(normalizePodDisruptionBudgetForComparison(existing))
+    )
+  } catch {
+    return false
+  }
+}
+
+function normalizePodDisruptionBudgetForComparison(pdb: k8s.V1PodDisruptionBudget): unknown {
+  const normalized = structuredClone(pdb)
+  stripServerOwnedMetadata(normalized)
+  return canonicalizeValue(normalized)
+}
+
+/**
  * True when the merged desired Service is equivalent to the live object, so a
  * replace would be a no-op. Canonicalize first: the apiserver default-fills
  * type/sessionAffinity/internalTrafficPolicy/protocol and omitted targetPort,
@@ -438,6 +466,9 @@ function normalizeNetworkPolicyForComparison(policy: k8s.V1NetworkPolicy): unkno
         if (port.protocol === 'TCP') delete port.protocol
       }
     }
+    // Empty slices persist the same as an omitted field for the apiserver.
+    if (spec.ingress?.length === 0) delete spec.ingress
+    if (spec.egress?.length === 0) delete spec.egress
   }
 
   return canonicalizeValue(normalized)
@@ -544,6 +575,7 @@ export function normalizeContainerDefaults(container: k8s.V1Container): void {
     if (probe.httpGet?.scheme === 'HTTP') delete probe.httpGet.scheme
   }
   for (const env of container.env ?? []) {
+    if (env.value === '') delete env.value
     if (env.valueFrom?.fieldRef?.apiVersion === 'v1') {
       delete env.valueFrom.fieldRef.apiVersion
     }

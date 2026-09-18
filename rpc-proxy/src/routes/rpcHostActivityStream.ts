@@ -14,6 +14,17 @@ const activeStreamCountsByUserHost = new Map<string, number>()
 const activeStreams = new Set<string>()
 let streamCounter = 0
 
+/** Clears in-process stream counters. Tests must call this; production never does. */
+export function resetHostActivityStreamRuntimeForTests(): void {
+  if (process.env.VITEST !== 'true' && process.env.NODE_ENV !== 'test') {
+    throw new Error('resetHostActivityStreamRuntimeForTests is test-only')
+  }
+  activeStreamCountsByUser.clear()
+  activeStreamCountsByUserHost.clear()
+  activeStreams.clear()
+  streamCounter = 0
+}
+
 function nextStreamId(): string {
   streamCounter += 1
   return `activity-stream-${Date.now()}-${streamCounter}`

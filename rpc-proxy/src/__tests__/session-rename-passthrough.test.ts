@@ -139,6 +139,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename passthrough', () => {
   beforeEach(() => {
     delegationMock.tokenDeclaresV2.mockReturnValue(false)
@@ -149,6 +151,7 @@ describe('PATCH /rpc/hosts/:hostRef/sessions/:agent/:chatId/name — rename pass
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards PATCH to mcp-host with :agent and :chatId in the path and body verbatim', async () => {

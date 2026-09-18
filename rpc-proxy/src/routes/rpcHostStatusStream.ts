@@ -56,6 +56,17 @@ function sanitizedStreamErrorMessage(): string {
   return 'Status temporarily unavailable'
 }
 
+/** Clears in-process stream counters. Tests must call this; production never does. */
+export function resetHostStatusStreamRuntimeForTests(): void {
+  if (process.env.VITEST !== 'true' && process.env.NODE_ENV !== 'test') {
+    throw new Error('resetHostStatusStreamRuntimeForTests is test-only')
+  }
+  activeStreamCountsByUser.clear()
+  activeStreamCountsByUserHost.clear()
+  activeStreams.clear()
+  streamCounter = 0
+}
+
 export function createRpcHostStatusStreamRouter(): Router {
   const router = Router()
 
