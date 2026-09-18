@@ -1344,7 +1344,6 @@ if [ "$SKIP_PUBLIC" = false ]; then
     "postgres:16-alpine"
     "redis:7-alpine"
     "nginx:1.30.1-alpine"
-    "minio/minio:latest"
     "axllent/mailpit:latest"
     "mongodb/mongodb-community-server:7.0-ubi8"
     "mongodb/mongodb-mcp-server:latest"
