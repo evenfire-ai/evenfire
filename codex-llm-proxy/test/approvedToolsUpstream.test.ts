@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { streamCodexCompletion } from '../src/codexTransport.js'
+import type { RedeemAttemptSuccess } from '../src/controlApiClient.js'
+import { CODEX_COMPLETIONS_ORIGIN } from '../src/originPolicy.js'
 import { createApprovedToolsUpstream } from './approvedToolsUpstream'
 
 const URL = 'https://chatgpt.com/backend-api/codex/responses'
@@ -368,5 +372,162 @@ describe('approved-tools isolated upstream boundary', () => {
       { connectorDefinitionCount: 0, leakedSchema: true },
     ])
     expect(JSON.stringify(simulator.evidence())).not.toContain('workitem_read_001')
+  })
+})
+
+describe('approved-tools tool-call limit probe', () => {
+  const probe = { role: 'user', content: 'Run the tool call limit probe now.' }
+
+  function events(body: string): Entry[] {
+    return body
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.slice('data: '.length)) as Entry)
+  }
+
+  it('answers a probe turn with 65 distinct search calls in one completion', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const { response, body } = await request(simulator, [probe])
+    expect(response.status).toBe(200)
+    const rows = events(body)
+    const calls = rows.slice(0, -1).map(row => row.item as Entry)
+    expect(rows[rows.length - 1]).toEqual({ type: 'response.completed' })
+    expect(calls).toHaveLength(65)
+    expect(new Set(calls.map(call => call.call_id)).size).toBe(65)
+    for (const call of calls) {
+      expect(call).toMatchObject({
+        type: 'function_call',
+        name: 'clerum__tool_search',
+        arguments: JSON.stringify({ query: 'verification receipt', limit: 5 }),
+      })
+    }
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 1, unexpectedRetries: 0 },
+      completions: 1,
+      searchCalls: 0,
+      rejected: 0,
+    })
+    expect(simulator.evidence().requests).toMatchObject([{ stage: 'limit_probe' }])
+  })
+
+  it('rejects a second completion of the same probe turn as unexpected_retry', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const first = await request(simulator, [probe])
+    expect(first.response.status).toBe(200)
+
+    const retry = await request(simulator, [probe])
+    const call = events(first.body)[0]!.item as Entry
+    const continuation = await request(simulator, [
+      probe,
+      call,
+      { type: 'function_call_output', call_id: call.call_id, output: '{}' },
+    ])
+
+    expect(retry.response.status).toBe(422)
+    expect(continuation.response.status).toBe(422)
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 3, unexpectedRetries: 2 },
+      rejected: 2,
+    })
+  })
+
+  it('answers a new probe turn later in the same conversation', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const first = await request(simulator, [probe])
+    const assistant = { role: 'assistant', content: 'The agent stopped.' }
+    const second = await request(simulator, [probe, assistant, probe])
+    expect([first.response.status, second.response.status]).toEqual([200, 200])
+    expect(simulator.evidence().limitProbe).toEqual({
+      turns: 2,
+      completions: 2,
+      unexpectedRetries: 0,
+    })
+  })
+
+  it('makes the real transport fail the probe with tool_call_limit_exceeded', async () => {
+    const simulator = createApprovedToolsUpstream()
+    const probeRequest = {
+      schemaVersion: 'codex-completion-request.v1' as const,
+      requestId: 'req-limit-probe',
+      idempotencyKey: 'idem-limit-probe',
+      provider: 'codex-subscription' as const,
+      model: 'gpt-5.3-codex',
+      messages: [{ role: 'user' as const, content: probe.content }],
+      tools: bridges.map(name => ({
+        name,
+        description: `${name} bridge`,
+        parameters: { type: 'object' },
+      })),
+    }
+    const requestHash = hashCodexCompletionRequestV1(probeRequest)
+    const emitted: Array<{ type: string }> = []
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-limit-probe',
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const pending = streamCodexCompletion({
+      executionTicket: 'ticket-limit-probe',
+      requestHash,
+      request: probeRequest,
+      ticket: {
+        jti: 'jti-limit-probe',
+        hostRef: 'approved-tools-host',
+        model: probeRequest.model,
+        requestHash,
+        providerAttemptId: 'att-limit-probe',
+      },
+      redeem: vi.fn(
+        async (): Promise<RedeemAttemptSuccess> => ({
+          accessToken: `hdr.${Buffer.from(
+            JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct_probe' } })
+          ).toString('base64url')}.sig`,
+          transport: {
+            protocolVersion: 'codex-subscription-transport.v1',
+            completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+            catalogOrigin: 'https://chatgpt.com/backend-api/codex/models?client_version=1.0.0',
+            operation: 'completion_stream',
+            servedModel: probeRequest.model,
+            maxStreamDurationMs: 300_000,
+          },
+          expiryClass: 'short_lived',
+          attemptReceipt: 'b'.repeat(64),
+        })
+      ),
+      finalize,
+      fetchFn: simulator.fetchFn,
+      lookup: async () => [{ address: '104.18.32.47', family: 4 }],
+      onFrame: frame => {
+        emitted.push(frame)
+      },
+    })
+
+    await expect(pending).rejects.toMatchObject({
+      name: 'CodexTransportError',
+      code: 'tool_call_limit_exceeded',
+      details: { limit: 64, observed: 65 },
+    })
+    // Liveness witness: the upstream served exactly one probe completion.
+    expect(simulator.evidence().limitProbe).toEqual({
+      turns: 1,
+      completions: 1,
+      unexpectedRetries: 0,
+    })
+    expect(emitted.filter(frame => frame.type === 'tool_call')).toEqual([])
+    expect(finalize).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves the receipt journey unchanged after a probe turn (ordinary path witness)', async () => {
+    const simulator = createApprovedToolsUpstream()
+    await request(simulator, [probe])
+    await complete(simulator, [{ role: 'user', content: 'verification receipt' }], 'after-probe')
+    expect(simulator.evidence()).toMatchObject({
+      limitProbe: { turns: 1, completions: 1, unexpectedRetries: 0 },
+      searchCalls: 1,
+      describeCalls: 1,
+      businessCalls: 1,
+      finalResponses: 1,
+      rejected: 0,
+    })
   })
 })

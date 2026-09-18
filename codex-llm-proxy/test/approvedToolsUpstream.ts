@@ -1,5 +1,5 @@
 /** External model boundary for the isolated approved-tools E2E image only. */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 
 type Row = Record<string, unknown>
@@ -8,6 +8,10 @@ const CATALOG = 'https://chatgpt.com/backend-api/codex/models?client_version=1.0
 const BRIDGES = ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_call']
 // The deterministic external model is scoped to this fixture's read journey.
 const FIXTURE_QUERY = 'verification receipt'
+// A user turn with this text gets one response carrying more tool calls than
+// the Codex contract allows (maxToolCalls 64), so the proxy must reject it.
+const LIMIT_PROBE = 'tool call limit probe'
+const LIMIT_PROBE_CALLS = 65
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -49,10 +53,7 @@ type Exchange = { call: Row; args: Row; result: Row }
 type Decision = { stage: string; args?: Row; result?: Row }
 
 function expectedCall(exchange: Exchange, decision: Decision): void {
-  if (
-    exchange.call.name !== decision.stage ||
-    !isDeepStrictEqual(exchange.args, decision.args)
-  ) {
+  if (exchange.call.name !== decision.stage || !isDeepStrictEqual(exchange.args, decision.args)) {
     throw new Error('unexpected_fixture_call')
   }
 }
@@ -268,9 +269,11 @@ function workflowDecision(current: Exchange[], prompt: string): Decision {
   throw new Error('unsupported_workflow_transition')
 }
 
-function stream(event: Row): Response {
+function stream(...events: Row[]): Response {
   return new Response(
-    [event, { type: 'response.completed' }].map(row => `data: ${JSON.stringify(row)}\n\n`).join(''),
+    [...events, { type: 'response.completed' }]
+      .map(row => `data: ${JSON.stringify(row)}\n\n`)
+      .join(''),
     {
       headers: { 'content-type': 'text/event-stream' },
     }
@@ -287,6 +290,9 @@ export function createApprovedToolsUpstream() {
     businessCalls: 0,
     finalResponses: 0,
     deniedResponses: 0,
+    // Probe turns answered with an over-limit batch, every completion served
+    // for them, and completions that repeated an already answered probe turn.
+    limitProbe: { turns: 0, completions: 0, unexpectedRetries: 0 },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
       definitionCount: number
@@ -298,6 +304,9 @@ export function createApprovedToolsUpstream() {
       stage: string
     }>,
   }
+  // Digests of the history up to each answered probe user turn. A retry of the
+  // same turn resends that history unchanged.
+  const answeredProbeTurns = new Set<string>()
 
   const fetchFn: typeof fetch = async (input, init) => {
     try {
@@ -325,6 +334,44 @@ export function createApprovedToolsUpstream() {
       const user = history[lastUser]
       if (!user || typeof user.content !== 'string' || !user.content.trim())
         throw new Error('missing_user_request')
+      if (user.content.toLowerCase().includes(LIMIT_PROBE)) {
+        if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
+        evidence.limitProbe.completions++
+        const turn = createHash('sha256')
+          .update(JSON.stringify(history.slice(0, lastUser + 1)))
+          .digest('hex')
+        if (answeredProbeTurns.has(turn)) {
+          evidence.limitProbe.unexpectedRetries++
+          throw new Error('unexpected_retry')
+        }
+        // An over-limit batch never yields tool results, so a continuation
+        // means the limit was not enforced.
+        if (history.length !== lastUser + 1) throw new Error('unexpected_probe_continuation')
+        answeredProbeTurns.add(turn)
+        evidence.limitProbe.turns++
+        evidence.completions++
+        evidence.requests.push({
+          definitionCount: tools.length,
+          explicitNonStrictCount: tools.filter(tool => tool.strict === false).length,
+          definitionBytes: Buffer.byteLength(JSON.stringify(tools)),
+          inputBytes: Buffer.byteLength(JSON.stringify(payload.input)),
+          connectorDefinitionCount: 0,
+          leakedSchema: false,
+          stage: 'limit_probe',
+        })
+        return stream(
+          ...Array.from({ length: LIMIT_PROBE_CALLS }, () => ({
+            type: 'response.output_item.done',
+            item: {
+              type: 'function_call',
+              id: randomUUID(),
+              call_id: randomUUID(),
+              name: BRIDGES[0],
+              arguments: JSON.stringify({ query: FIXTURE_QUERY, limit: 5 }),
+            },
+          }))
+        )
+      }
       const isWorkflow = /\bworkflow\b/i.test(user.content)
       if (!isWorkflow && !user.content.toLowerCase().includes(FIXTURE_QUERY))
         throw new Error('unsupported_fixture_task')
