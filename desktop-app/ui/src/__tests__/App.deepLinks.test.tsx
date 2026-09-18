@@ -1973,6 +1973,7 @@ describe('App deep-link orchestration', () => {
     await launchAppFromSidebar() // tabs: [chat, A]; A is live
 
     closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
 
     // Defer the deactivation read so App A can be reactivated while it is still
     // in flight. Only the deactivation continuation calls getLocation here
@@ -1993,6 +1994,12 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
+    // Liveness witnesses (M4): the negative assertions below pass vacuously if the
+    // deactivation never reads/closes at all, so pin that the read-then-close DID
+    // run (exactly the deferred call) and that A is genuinely re-mounted and live.
+    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+
     // Observable result: the reopened embed was NOT torn down, and the live tab's
     // route was NOT clobbered by the stale value. (At the pre-fix head the stale
     // continuation closes the reopened embed and persists '/stale/route' onto A.)
@@ -2008,6 +2015,7 @@ describe('App deep-link orchestration', () => {
     await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A is live
 
     closeSandboxUi.mockClear()
+    getSandboxUiLocation.mockClear()
 
     const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
     getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
@@ -2025,6 +2033,10 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
+    // Liveness witness (M4): A's deactivation read-then-close DID run (exactly the
+    // deferred call — launching B early-returns before any read), so the negative
+    // assertions below are not vacuously green.
+    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
     // Observable result: B stays the live view and its embed survives (no close).
     // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
     expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app-b')
