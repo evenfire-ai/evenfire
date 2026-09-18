@@ -5,6 +5,7 @@ import {
   MODELS_DEV_API_URL,
   PROVIDER_KEY_MAP,
   type RawModelsDevCatalog,
+  imageInputStateFromModalities,
   loadModelsDevCatalog,
   mapCatalogToProviders,
 } from '../src/services/modelsDevClient.js'
@@ -19,8 +20,13 @@ const FIXTURE: RawModelsDevCatalog = {
         id: 'claude-opus-4-5',
         name: 'Claude Opus 4.5',
         limit: { context: 200000 },
+        modalities: { input: ['text', 'image'] },
       },
-      'claude-haiku-4-5': { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
+      'claude-haiku-4-5': {
+        id: 'claude-haiku-4-5',
+        name: 'Claude Haiku 4.5',
+        modalities: { input: ['text'] },
+      },
     },
   },
   google: {
@@ -67,11 +73,16 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     const byProvider = mapCatalogToProviders(FIXTURE)
     const claude = byProvider.claude
     expect(claude).toEqual([
-      { model_id: 'claude-haiku-4-5', display_name: 'Claude Haiku 4.5' },
+      {
+        model_id: 'claude-haiku-4-5',
+        display_name: 'Claude Haiku 4.5',
+        image_input_state: 'unsupported',
+      },
       {
         model_id: 'claude-opus-4-5',
         display_name: 'Claude Opus 4.5',
         context_window_tokens: 200000,
+        image_input_state: 'supported',
       },
     ])
     // vendor is never derived from models.dev (no reliable per-model field).
@@ -85,6 +96,8 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
         model_id: 'gemini-3.1-flash',
         display_name: 'Gemini 3.1 Flash',
         context_window_tokens: 1000000,
+        // No `modalities` in the fixture — the catalog said nothing, so neither do we.
+        image_input_state: 'unknown',
       },
     ])
   })
@@ -115,7 +128,7 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     }
     const claude = mapCatalogToProviders(catalog).claude
     // Only the well-formed id survives; the three malformed ones are dropped.
-    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok' }])
+    expect(claude).toEqual([{ model_id: 'good', display_name: 'ok', image_input_state: 'unknown' }])
   })
 
   it('CLAMPs an over-long display_name to 400 chars (keeps the model)', () => {
@@ -134,7 +147,69 @@ describe('modelsDevClient — mapCatalogToProviders', () => {
     const catalog: RawModelsDevCatalog = {
       anthropic: { name: 'Anthropic', models: { [id400]: { id: id400 } } },
     }
-    expect(mapCatalogToProviders(catalog).claude).toEqual([{ model_id: id400 }])
+    expect(mapCatalogToProviders(catalog).claude).toEqual([
+      { model_id: id400, image_input_state: 'unknown' },
+    ])
+  })
+
+  it('carries image_input_state per discovered model', () => {
+    const catalog: RawModelsDevCatalog = {
+      anthropic: {
+        name: 'Anthropic',
+        models: {
+          'sees-images': { id: 'sees-images', modalities: { input: ['text', 'image'] } },
+          'text-only': { id: 'text-only', modalities: { input: ['text'] } },
+          'no-modalities': { id: 'no-modalities' },
+        },
+      },
+    }
+    const claude = mapCatalogToProviders(catalog).claude
+    // Witness: all three entries survived the mapping, so the states below are
+    // read off real rows and not off an empty list.
+    expect(claude.map(m => m.model_id)).toEqual(['no-modalities', 'sees-images', 'text-only'])
+    expect(claude.map(m => m.image_input_state)).toEqual(['unknown', 'supported', 'unsupported'])
+  })
+})
+
+describe('modelsDevClient — imageInputStateFromModalities', () => {
+  it('returns supported when modalities.input includes "image"', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'image'] } })).toBe(
+      'supported'
+    )
+    expect(imageInputStateFromModalities({ modalities: { input: ['image'] } })).toBe('supported')
+  })
+
+  it('returns unsupported for a non-empty string array without "image"', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text'] } })).toBe('unsupported')
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'audio'] } })).toBe(
+      'unsupported'
+    )
+    // The token is matched exactly: models.dev writes it lowercase.
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 'Image'] } })).toBe(
+      'unsupported'
+    )
+  })
+
+  it('returns unknown when modalities is absent', () => {
+    expect(imageInputStateFromModalities({})).toBe('unknown')
+    expect(imageInputStateFromModalities({ id: 'm-1', name: 'M1' })).toBe('unknown')
+  })
+
+  it('returns unknown when modalities.input is absent, not an array, or empty', () => {
+    expect(imageInputStateFromModalities({ modalities: {} })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: 'image' } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: null } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: {} } })).toBe('unknown')
+    expect(imageInputStateFromModalities({ modalities: { input: [] } })).toBe('unknown')
+  })
+
+  it('returns unknown when any element is not a string', () => {
+    expect(imageInputStateFromModalities({ modalities: { input: ['text', 1] } })).toBe('unknown')
+    // Load-bearing: the array DOES contain 'image', and the answer is still
+    // unknown — a malformed list is not evidence of anything.
+    expect(imageInputStateFromModalities({ modalities: { input: ['image', null] } })).toBe(
+      'unknown'
+    )
   })
 })
 

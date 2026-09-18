@@ -40,12 +40,24 @@ const MAX_RESPONSE_BYTES = 15 * 1024 * 1024 // ~15MB — api.json is ~3MB today.
 /**
  * One model entry as it appears in the (normalized) catalog. This is a subset
  * of the models.dev per-model object — only the fields discovery consumes. The
- * live api.json carries many more fields; they are ignored, not parsed.
+ * live api.json carries many more fields; only `id`, `name`, `limit.context`
+ * and `modalities.input` are parsed.
  */
 export interface RawModelsDevModel {
   id?: string
   name?: string
   limit?: { context?: number }
+  /**
+   * models.dev per-model input modalities (e.g. `["text","image"]`). Only
+   * `input` is read; `attachment` ("accepts file attachments") is a DIFFERENT
+   * capability — today's catalog has 47 models where the two disagree,
+   * including audio-only models with `attachment: true` and vision models with
+   * `attachment: false` — so it is deliberately not consulted.
+   *
+   * Typed `unknown` on purpose: this is untrusted data at an API boundary and
+   * `imageInputStateFromModalities` is the only place allowed to narrow it.
+   */
+  modalities?: { input?: unknown }
 }
 
 /** One provider entry in the (normalized) catalog: a map of model id → entry. */
@@ -124,6 +136,27 @@ export interface DiscoveredModel {
   context_window_tokens?: number
   vendor?: string
   display_name?: string
+  /** Tri-state derived from `modalities.input`; see `imageInputStateFromModalities`. */
+  image_input_state: ImageInputState
+}
+
+/** Image-input state derived from a models.dev entry — fail-closed. */
+export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
+
+/**
+ * Tri-state read of one catalog entry's input modalities.
+ *
+ * `unknown` is the answer for everything the catalog does not state plainly:
+ * no `modalities`, no `input`, an `input` that is not an array of strings, or
+ * an empty one. The only path to `supported` is an array of strings containing
+ * the exact token `image` — no case folding, because the catalog is lowercase
+ * and folding would be a guess the data never asked for.
+ */
+export function imageInputStateFromModalities(model: RawModelsDevModel): ImageInputState {
+  const input = model.modalities?.input
+  if (!Array.isArray(input) || input.length === 0) return 'unknown'
+  if (!input.every(value => typeof value === 'string')) return 'unknown'
+  return input.includes('image') ? 'supported' : 'unsupported'
 }
 
 /** Result of loading the catalog: which source served it, when, and the data. */
@@ -431,7 +464,10 @@ export function mapCatalogToProviders(
       if (!modelId || seen.has(modelId)) continue
       if (modelId.length > MAX_MODEL_ID_LEN || CONTROL_CHARS.test(modelId)) continue
       seen.add(modelId)
-      const discovered: DiscoveredModel = { model_id: modelId }
+      const discovered: DiscoveredModel = {
+        model_id: modelId,
+        image_input_state: imageInputStateFromModalities(m ?? {}),
+      }
       const ctx = m?.limit?.context
       if (typeof ctx === 'number' && Number.isInteger(ctx) && ctx > 0) {
         discovered.context_window_tokens = ctx

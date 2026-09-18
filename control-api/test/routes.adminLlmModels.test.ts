@@ -106,7 +106,7 @@ describe('admin llm-models routes', () => {
     await request(app()).get('/api/v1/admin/llm-models').expect(401)
   })
 
-  it('POST /admin/llm-models/discovery/sync runs the sync and does NOT materialize the ConfigMap', async () => {
+  it('POST /admin/llm-models/discovery/sync passes the gateway materializer to the sync', async () => {
     const summary = {
       source: 'vendored' as const,
       fetchedAt: '2026-07-13T00:00:00.000Z',
@@ -114,6 +114,8 @@ describe('admin llm-models routes', () => {
       added: 3,
       updated: 5,
       staled: 1,
+      enabledImageInputChanged: 0,
+      materialized: false,
     }
     mockSyncDiscoveredModels.mockResolvedValueOnce(summary)
     const gateway = new MockGateway('mcp-server')
@@ -123,9 +125,19 @@ describe('admin llm-models routes', () => {
     const res = await authed('post', '/api/v1/admin/llm-models/discovery/sync', gateway).expect(200)
     expect(res.body).toEqual(summary)
     expect(mockSyncDiscoveredModels).toHaveBeenCalledTimes(1)
-    // Discovery writes enabled=false rows → the allowlist ConfigMap must NOT be
-    // re-materialized (it would be a no-op, but the invariant is asserted here).
+
+    // The route no longer decides whether to publish: it hands the sync the
+    // cluster-backed materializer and the SERVICE decides (it alone knows
+    // whether an enabled row's evidence changed). Assert the handed object is
+    // the gateway's, by exercising it — `llmAllowedModelsConfigMap()` returns a
+    // fresh wrapper each call, so identity would prove nothing.
+    const passed = mockSyncDiscoveredModels.mock.calls[0]?.[0] as {
+      materializer?: { materialize: () => Promise<void> }
+    }
+    expect(passed.materializer).toBeDefined()
     expect(materialize).not.toHaveBeenCalled()
+    await passed.materializer!.materialize()
+    expect(materialize).toHaveBeenCalledTimes(1)
   })
 
   it('POST /admin/llm-models/discovery/sync requires admin auth (401 unauthenticated)', async () => {

@@ -27,7 +27,6 @@
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import type { CatalogSyncResult } from './llmCatalogSync.js'
-import { syncDiscoveredModels } from './llmCatalogSync.js'
 
 const log = rootLogger.child({ service: 'llm_catalog_sync_cron' })
 
@@ -47,10 +46,15 @@ type LockClient = {
   release: (destroy?: Error | boolean) => void
 }
 
-/** Injectable dependencies (test seam). Both default to production wiring. */
+/**
+ * Injectable dependencies. `connector` defaults to production wiring; `sync` is
+ * REQUIRED because the sync now needs a ConfigMap materializer (#654) and the
+ * cron has no gateway of its own — `main.ts` owns that wiring and passes a
+ * closure. A default here could only be a call the sync would reject.
+ */
 export interface LlmCatalogSyncCronDeps {
   connector?: { connect: () => Promise<LockClient> }
-  sync?: () => Promise<CatalogSyncResult>
+  sync: () => Promise<CatalogSyncResult>
 }
 
 /** Outcome of one tick — returned for tests/observability, never thrown. */
@@ -66,10 +70,10 @@ export interface LlmCatalogSyncTickResult {
  * released in `finally` whether the tick ran, skipped, or failed.
  */
 export async function runLlmCatalogSyncTick(
-  deps: LlmCatalogSyncCronDeps = {}
+  deps: LlmCatalogSyncCronDeps
 ): Promise<LlmCatalogSyncTickResult> {
   const connector = deps.connector ?? pool
-  const sync = deps.sync ?? syncDiscoveredModels
+  const sync = deps.sync
   let lockClient: LockClient | undefined
   let locked = false
   try {

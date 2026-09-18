@@ -11,7 +11,7 @@ import { listEnabledGroupedByProvider } from '../src/services/llmAllowedModels.j
 import { buildConfigMapData } from '../src/services/llmAllowedModelsConfigMap.js'
 import { syncDiscoveredModels } from '../src/services/llmCatalogSync.js'
 import { makeFakeDb } from './helpers/llmCatalogSyncFakeDb.js'
-import { loadStub, trimSnapshot } from './helpers/modelsDevFixtures.js'
+import { loadStub, trimSnapshot, withModalities } from './helpers/modelsDevFixtures.js'
 
 vi.mock('../src/observability/logger.js', () => ({
   rootLogger: { child: () => ({ info() {}, warn() {}, error() {}, debug() {} }) },
@@ -34,7 +34,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
+      { materializer: db.materializer, loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
       db.connector
     )
 
@@ -55,7 +55,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
 
     await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
+      { materializer: db.materializer, loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
       db.connector
     )
 
@@ -94,7 +94,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     ])
     const catalog = trimSnapshot({ anthropic: ['claude-opus-4-5'] })
     await syncDiscoveredModels(
-      { loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
+      { materializer: db.materializer, loadCatalog: loadStub(catalog, 'live'), ...LOW_FLOOR },
       db.connector
     )
     expect(db.get('codex-subscription', 'gpt-5')?.stale).toBe(false)
@@ -103,7 +103,9 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     ).toBe(false)
   })
 
-  it('#654 records discovery provenance without ever promoting or clobbering evidence', async () => {
+  it('#654 derives image_input from modalities without clobbering curated or newer discovery evidence', async () => {
+    const CAPTURED_AT = '2026-08-19T16:16:10.000Z'
+    const TTL_MS = 30 * 24 * 60 * 60 * 1000
     const curated = {
       state: 'supported' as const,
       evidence: {
@@ -118,6 +120,17 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         source: 'discovery' as const,
         reference: 'https://models.dev/api.json',
         checkedAt: '2026-07-01T00:00:00.000Z',
+      },
+    }
+    // Captured AFTER this run's catalog: a later observation must never be
+    // regressed by an older one (a vendored fallback after a live sync).
+    const newerDiscovery = {
+      state: 'supported' as const,
+      evidence: {
+        source: 'discovery' as const,
+        reference: 'https://models.dev/api.json',
+        checkedAt: '2026-09-01T00:00:00.000Z',
+        validUntil: '2026-10-01T00:00:00.000Z',
       },
     }
     const db = makeFakeDb([
@@ -137,7 +150,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         enabled: false,
         image_input: curated,
       },
-      // Disabled + older discovery provenance: refreshed with THIS run's stamp.
+      // Disabled + older discovery provenance: refreshed from this catalog.
       {
         provider: 'claude',
         model: 'claude-haiku-4-5-20251001',
@@ -145,40 +158,89 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         enabled: false,
         image_input: oldDiscovery,
       },
+      // ENABLED + older discovery provenance: also refreshed. The freeze the
+      // other serialized columns obey would expire this row's evidence one TTL
+      // after its only stamp, with no way back short of manual curation.
+      {
+        provider: 'claude',
+        model: 'claude-opus-4-1',
+        source: 'discovery',
+        enabled: true,
+        image_input: oldDiscovery,
+      },
+      // ENABLED + NEWER discovery provenance: untouched (monotonic guard).
+      {
+        provider: 'claude',
+        model: 'claude-sonnet-4-5',
+        source: 'discovery',
+        enabled: true,
+        image_input: newerDiscovery,
+      },
     ])
-    const catalog = trimSnapshot({
-      anthropic: [
-        'claude-opus-4-5',
-        'claude-sonnet-5',
-        'claude-haiku-4-5-20251001',
-        // Absent from the DB → this run INSERTs it (disabled discovery row).
-        'claude-opus-4-7',
-      ],
-    })
+    const catalog = withModalities(
+      trimSnapshot({
+        anthropic: [
+          'claude-opus-4-5',
+          'claude-sonnet-5',
+          'claude-haiku-4-5-20251001',
+          'claude-opus-4-1',
+          'claude-sonnet-4-5',
+          // Absent from the DB → this run INSERTs it (disabled discovery row).
+          'claude-opus-4-7',
+        ],
+      }),
+      {
+        'claude-haiku-4-5-20251001': ['text', 'image'],
+        'claude-opus-4-1': ['text'],
+        'claude-sonnet-4-5': ['text', 'image'],
+        'claude-opus-4-7': ['text', 'image'],
+      }
+    )
 
     await syncDiscoveredModels(
       {
-        loadCatalog: loadStub(catalog, 'live', '2026-08-19T16:16:10.000Z'),
+        materializer: db.materializer,
+        loadCatalog: loadStub(catalog, 'live', CAPTURED_AT),
+        imageEvidenceTtlMs: TTL_MS,
         ...LOW_FLOOR,
       },
       db.connector
     )
 
-    expect(db.get('claude', 'claude-opus-4-5')!.image_input).toEqual(curated)
-    expect(db.get('claude', 'claude-sonnet-5')!.image_input).toEqual(curated)
-    expect(db.get('claude', 'claude-haiku-4-5-20251001')!.image_input).toEqual({
-      state: 'unknown',
+    const discovered = (state: 'supported' | 'unsupported') => ({
+      state,
       evidence: {
         source: 'discovery',
         reference: 'https://models.dev/api.json',
-        checkedAt: '2026-08-19T16:16:10.000Z',
+        checkedAt: CAPTURED_AT,
+        validUntil: new Date(Date.parse(CAPTURED_AT) + TTL_MS).toISOString(),
       },
     })
-    // A freshly inserted row is born disabled AND unverified.
+
+    // Curated evidence is untouchable, enabled or not.
+    expect(db.get('claude', 'claude-opus-4-5')!.image_input).toEqual(curated)
+    expect(db.get('claude', 'claude-sonnet-5')!.image_input).toEqual(curated)
+    // Older discovery evidence is replaced by this catalog's verdict — and the
+    // enabled row is replaced too, because a frozen one would silently expire.
+    expect(db.get('claude', 'claude-haiku-4-5-20251001')!.image_input).toEqual(
+      discovered('supported')
+    )
+    expect(db.get('claude', 'claude-opus-4-1')!.image_input).toEqual(discovered('unsupported'))
+    // A NEWER capture is never regressed by this older one.
+    expect(db.get('claude', 'claude-sonnet-4-5')!.image_input).toEqual(newerDiscovery)
+    // A freshly inserted row is born disabled, and carries the catalog's verdict.
     const inserted = db.get('claude', 'claude-opus-4-7')!
     expect(inserted.enabled).toBe(false)
-    expect(inserted.image_input?.state).toBe('unknown')
-    // No row gained a known state from discovery.
-    expect(db.rows.filter(row => row.image_input?.state !== 'unknown').length).toBe(2)
+    expect(inserted.image_input).toEqual(discovered('supported'))
+    // Witness for every "unchanged" above: the run really did visit each row.
+    expect(db.connector.connect).toHaveBeenCalled()
+    for (const model of ['claude-opus-4-5', 'claude-sonnet-5', 'claude-sonnet-4-5']) {
+      const id = db.get('claude', model)!.id
+      expect(
+        db.calls.some(call => /SET last_seen_at/.test(call.sql) && call.params[0] === id)
+      ).toBe(true)
+    }
+    // Two enabled rows changed evidence → the ConfigMap is republished once.
+    expect(db.materializer.materialize).toHaveBeenCalledTimes(1)
   })
 })

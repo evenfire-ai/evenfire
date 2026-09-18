@@ -21,15 +21,16 @@
  *     NEVER auto-disabled (R3.7): an enabled model that vanished stays enabled +
  *     served, only flagged stale for an operator decision.
  *
- * The sync deliberately does NOT re-materialize the `clerum-llm-allowed-models`
- * ConfigMap, and never has to: the materializer only reads `enabled` rows and
- * only serializes provider/model/vendor/context_window_tokens/display_name, and
- * this sync never mutates any of those columns for an enabled row — new inserts
- * are `enabled=false`, the stale flag is not serialized, and the discovery
- * NULL-fill CASE-guards the serialized columns to disabled rows only. So an
- * enabled row's serialized projection is invariant across syncs → CM stays
- * byte-stable. A discovered model only reaches runtime once an operator enables
- * it via the normal PUT path (which re-materializes).
+ * The sync re-materializes the `clerum-llm-allowed-models` ConfigMap in exactly
+ * one case: it changed `image_input` on an ENABLED row (#654). That column is
+ * served, so leaving the ConfigMap behind would keep mcp-host refusing images
+ * for a model the catalog now says supports them. Every other serialized column
+ * of an enabled row is still invariant across syncs — new inserts are
+ * `enabled=false`, the stale flag is not serialized, and the NULL-fill CASE
+ * guards ctx/display to disabled rows — so a run that changes no enabled row's
+ * evidence writes nothing to the ConfigMap. `enabled` itself is never touched:
+ * a discovered model only reaches runtime once an operator enables it via the
+ * normal PUT path.
  *
  * Each run appends a summary row to `llm_catalog_sync_runs` (the UI's "last
  * synced"). No per-model audit rows — that would flood `llm_allowed_models_audit`
@@ -44,10 +45,13 @@ import {
 import { config } from '../config.js'
 import { pool } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
+import { llmAllowlistConfigMapWriteFailuresTotal } from '../observability/metrics.js'
 import { MAX_CONTEXT_WINDOW_TOKENS } from './llmAllowedModels.js'
+import type { AllowedModelsConfigMapMaterializer } from './llmAllowedModelsConfigMap.js'
 import {
   type DiscoveredModel,
   type FetchLike,
+  type ImageInputState,
   type ModelsDevCatalogResult,
   loadModelsDevCatalog,
   mapCatalogToProviders,
@@ -61,28 +65,44 @@ import {
 export const MODELS_DEV_EVIDENCE_REFERENCE = 'https://models.dev/api.json'
 
 /**
- * The ONLY capability discovery may record from models.dev: `unknown` carrying
- * provenance. models.dev declares no per-row validity or reliability, so a
- * `supported`/`unsupported` claim from it would need an invented TTL — the
- * shared contract rejects a discovery-sourced known state without `validUntil`.
- * The observation is still worth storing: it tells the operator when this pair
- * was last looked at, and it is what curation replaces.
+ * Discovery evidence for one catalog entry (#654).
+ *
+ * `unknown` carries provenance only — this run observed the source, and the
+ * entry said nothing usable about its input modalities. A KNOWN state carries
+ * `validUntil`, because the shared contract refuses a discovery-sourced claim
+ * without an expiry.
  *
  * `capturedAt` is the SOURCE capture time (live fetch time, or the vendored
  * snapshot's baked date) — never "now", so loading an old snapshot cannot make
- * stale data look freshly verified. Returns null when the contract rejects the
- * pair (e.g. a non-canonical capture stamp from a stub), so the caller stores
- * NULL rather than an invalid payload.
+ * stale data look freshly verified, and `validUntil` is derived from it for the
+ * same reason: a vendored run can only claim support for as long as its
+ * snapshot is fresh.
+ *
+ * Throws when the shared contract rejects what we built. Both inputs are ours
+ * (an ISO stamp this process produced and a TTL validated at boot), so a
+ * rejection is a programming error; storing NULL would hide it.
  */
-export function discoveryImageInput(capturedAt: string): ImageInputCapability | null {
-  return parseImageInputCapability({
-    state: 'unknown',
-    evidence: {
-      source: 'discovery',
-      reference: MODELS_DEV_EVIDENCE_REFERENCE,
-      checkedAt: capturedAt,
-    },
-  })
+export function discoveryImageInput(
+  state: ImageInputState,
+  capturedAt: string,
+  ttlMs: number
+): ImageInputCapability {
+  const base = {
+    source: 'discovery' as const,
+    reference: MODELS_DEV_EVIDENCE_REFERENCE,
+    checkedAt: capturedAt,
+  }
+  const evidence =
+    state === 'unknown'
+      ? base
+      : { ...base, validUntil: new Date(Date.parse(capturedAt) + ttlMs).toISOString() }
+  const parsed = parseImageInputCapability({ state, evidence })
+  if (!parsed) {
+    throw new Error(
+      `discoveryImageInput: shared contract rejected discovery evidence (state=${state}, capturedAt=${capturedAt}, ttlMs=${ttlMs})`
+    )
+  }
+  return parsed
 }
 
 type SyncTxClient = {
@@ -107,6 +127,10 @@ export interface CatalogSyncResult {
   added: number
   updated: number
   staled: number
+  /** Enabled rows whose `image_input` this run actually changed (#654). */
+  enabledImageInputChanged: number
+  /** True when that count forced a ConfigMap re-materialization. */
+  materialized: boolean
 }
 
 /** The last persisted sync run, for the status endpoint. */
@@ -157,14 +181,35 @@ function usableContext(ctx: number | undefined): number | null {
  * transient network blip (it would nudge the operator to disable a live model).
  * New inserts + last_seen refresh from a vendored run are harmless and still run.
  */
+/**
+ * Read one UPDATE's RETURNING row. An ENABLED row whose `image_input` actually
+ * changed is the only thing this sync can do that makes the served ConfigMap
+ * wrong — hence the exact `IS DISTINCT FROM` flag rather than `rowCount`, so an
+ * idempotent re-run publishes nothing.
+ */
+function countEnabledEvidenceChange(
+  rows: unknown[],
+  counters: { enabledImageInputChanged: number }
+): void {
+  const row = rows[0] as { enabled?: unknown; image_input_changed?: unknown } | undefined
+  if (row?.enabled === true && row.image_input_changed === true) {
+    counters.enabledImageInputChanged += 1
+  }
+}
+
 async function reconcileProvider(
   client: SyncTxClient,
   provider: LlmProviderId,
   discovered: DiscoveredModel[],
   markStale: boolean,
   providerMinLive: number,
-  imageInputJson: string | null,
-  counters: { added: number; updated: number; staled: number }
+  imageEvidence: { capturedAt: string; ttlMs: number },
+  counters: {
+    added: number
+    updated: number
+    staled: number
+    enabledImageInputChanged: number
+  }
 ): Promise<void> {
   const existingRes = await client.query(
     `SELECT id, model, source FROM llm_allowed_models WHERE provider = $1`,
@@ -188,6 +233,10 @@ async function reconcileProvider(
     const existing = existingByModel.get(model.model_id)
     const ctx = usableContext(model.context_window_tokens)
     const display = model.display_name ?? null
+    // Per ROW, not per run: the payload now carries this model's own state.
+    const imageInputJson = JSON.stringify(
+      discoveryImageInput(model.image_input_state, imageEvidence.capturedAt, imageEvidence.ttlMs)
+    )
 
     if (!existing) {
       // NEW → insert a disabled discovery row. ON CONFLICT DO NOTHING guards only
@@ -219,33 +268,46 @@ async function reconcileProvider(
     // non-null; `enabled` is never assigned. The freshest metadata for an
     // enabled row lands on the operator's next edit (which re-materializes).
     //
-    // `image_input` follows the same freeze, plus one narrower rule: a
-    // discovery-sourced provenance may be refreshed (a sync run IS an
-    // observation of that source at `capturedAt`), while operator-curated
-    // evidence is never overwritten — not even on a disabled row. The refresh
-    // cannot promote a capability: discovery only ever writes `unknown`.
+    // `image_input` deliberately does NOT follow the enabled-row freeze (#654).
+    // It is not operator-authored (operator-authored evidence is `curated`, and
+    // that is never overwritten here); and because the evidence now expires, a
+    // frozen enabled row would be stamped once while disabled, never refreshed,
+    // and would expire exactly one TTL later with no way back short of manual
+    // curation — the feature would fail on its own schedule.
+    //
+    // Instead the write is guarded by MONOTONICITY: discovery evidence is only
+    // replaced by a capture at least as recent as the one already recorded,
+    // compared as `timestamptz` (the parser accepts both `…Z` and `….000Z`
+    // spellings, so a lexical comparison would be wrong). A vendored run can
+    // therefore never regress evidence a later live run stamped. `<=` rather
+    // than `<` so a re-run against the same capture rewrites; the RETURNING
+    // flag keeps the materialization count exact.
     const upd = await client.query(
-      `UPDATE llm_allowed_models
+      `UPDATE llm_allowed_models AS t
           SET last_seen_at = NOW(),
               stale = false,
               context_window_tokens = CASE
-                WHEN enabled THEN context_window_tokens
-                ELSE COALESCE(context_window_tokens, $2)
+                WHEN t.enabled THEN t.context_window_tokens
+                ELSE COALESCE(t.context_window_tokens, $2)
               END,
               display_name = CASE
-                WHEN enabled THEN display_name
-                ELSE COALESCE(display_name, $3)
+                WHEN t.enabled THEN t.display_name
+                ELSE COALESCE(t.display_name, $3)
               END,
               image_input = CASE
-                WHEN enabled THEN image_input
-                WHEN image_input IS NULL THEN $4::jsonb
-                WHEN image_input->'evidence'->>'source' = 'discovery' THEN $4::jsonb
-                ELSE image_input
+                WHEN t.image_input IS NULL THEN $4::jsonb
+                WHEN t.image_input->'evidence'->>'source' = 'discovery'
+                 AND (t.image_input->'evidence'->>'checkedAt')::timestamptz <= $5::timestamptz
+                  THEN $4::jsonb
+                ELSE t.image_input
               END
-        WHERE id = $1 AND source = 'discovery'`,
-      [existing.id, ctx, display, imageInputJson]
+         FROM llm_allowed_models AS prev
+        WHERE t.id = $1 AND prev.id = t.id AND t.source = 'discovery'
+    RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
+      [existing.id, ctx, display, imageInputJson, imageEvidence.capturedAt]
     )
     counters.updated += upd.rowCount ?? 0
+    countEnabledEvidenceChange(upd.rows, counters)
   }
 
   // VANISHED discovery rows → flag stale (never delete, never disable). Only
@@ -293,9 +355,9 @@ async function reconcileProvider(
 /**
  * Run one catalog sync: load the models.dev catalog (live, else vendored), map
  * it to our providers, and source-guarded-reconcile into `llm_allowed_models`
- * inside a single transaction, then persist a run summary. Never re-materializes
- * the ConfigMap — it never mutates a serialized column of an enabled row, so the
- * CM stays byte-stable (see the module header).
+ * inside a single transaction, then persist a run summary. Re-materializes the
+ * ConfigMap after COMMIT only when it changed `image_input` on an enabled row
+ * (see the module header).
  */
 export async function syncDiscoveredModels(
   opts: {
@@ -305,19 +367,26 @@ export async function syncDiscoveredModels(
     minPlausibleLiveTotal?: number
     /** §4.5 layer-2 per-provider floor (default from config). */
     providerMinLive?: number
-  } = {},
+    /**
+     * REQUIRED, with no no-op default: this sync can change what runtime is
+     * served, and a run that changes served capability with no way to publish it
+     * would be a silent failure. Every production caller has a gateway.
+     */
+    materializer: AllowedModelsConfigMapMaterializer
+    /** Image-evidence validity window (default from config). */
+    imageEvidenceTtlMs?: number
+  },
   connector: SyncConnector = pool
 ): Promise<CatalogSyncResult> {
   const load = opts.loadCatalog ?? loadModelsDevCatalog
   const minPlausibleLiveTotal = opts.minPlausibleLiveTotal ?? config.modelsDevMinPlausibleLiveTotal
   const providerMinLive = opts.providerMinLive ?? config.llmCatalogSyncProviderMinLive
+  const imageEvidenceTtlMs = opts.imageEvidenceTtlMs ?? config.llmCatalogImageEvidenceTtlMs
   const { source, fetchedAt, capturedAt, catalog } = await load({ fetchImpl: opts.fetchImpl })
   const byProvider = mapCatalogToProviders(catalog)
-  // Provenance stamped with the SOURCE capture time (see discoveryImageInput).
-  // Serialized once per run: the JSONB parameter is identical for every row.
-  const discoveryImageInputValue = discoveryImageInput(capturedAt)
-  const imageInputJson =
-    discoveryImageInputValue === null ? null : JSON.stringify(discoveryImageInputValue)
+  // Stamped with the SOURCE capture time (see discoveryImageInput); the payload
+  // itself is built per row, because each model carries its own state now.
+  const imageEvidence = { capturedAt, ttlMs: imageEvidenceTtlMs }
 
   // §4.5 sanity guard, LAYER 3 — absolute global plausibility floor. Compared
   // BEFORE touching any row, against a config constant, with NO baseline / no
@@ -356,7 +425,7 @@ export async function syncDiscoveredModels(
     // is applied inside reconcileProvider. A vendored fallback must not stale
     // live models (see reconcileProvider).
     const markStale = sourceIsLive && !globallyImplausible
-    const counters = { added: 0, updated: 0, staled: 0 }
+    const counters = { added: 0, updated: 0, staled: 0, enabledImageInputChanged: 0 }
     for (const provider of PROVIDER_IDS) {
       await reconcileProvider(
         client,
@@ -364,7 +433,7 @@ export async function syncDiscoveredModels(
         byProvider[provider] ?? [],
         markStale,
         providerMinLive,
-        imageInputJson,
+        imageEvidence,
         counters
       )
     }
@@ -383,6 +452,31 @@ export async function syncDiscoveredModels(
 
     const rawRanAt = (runRes.rows[0] as { ran_at?: unknown } | undefined)?.ran_at
     const ranAt = rawRanAt instanceof Date ? rawRanAt.toISOString() : String(rawRanAt)
+
+    // After COMMIT, never inside it: the rows are durable either way, and a
+    // ConfigMap write held inside the transaction would keep the advisory lock
+    // for the length of an API call to the cluster. On failure the run is
+    // reported as failed (the caller surfaces it) and the boot reconcile
+    // converges on restart — the write is never retried silently.
+    let materialized = false
+    if (counters.enabledImageInputChanged > 0) {
+      try {
+        await opts.materializer.materialize()
+        materialized = true
+      } catch (err) {
+        llmAllowlistConfigMapWriteFailuresTotal.inc({ phase: 'sync' })
+        log.error(
+          {
+            event: 'llm_catalog_sync_configmap_write_failed',
+            enabledImageInputChanged: counters.enabledImageInputChanged,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'llm allowed-models ConfigMap write failed after catalog sync commit'
+        )
+        throw err
+      }
+    }
+
     // `fetchedAt` is the catalog acquisition time (from the loader) — how fresh
     // the source data is; `ranAt` is the DB commit time of this run.
     return {
@@ -392,6 +486,8 @@ export async function syncDiscoveredModels(
       added: counters.added,
       updated: counters.updated,
       staled: counters.staled,
+      enabledImageInputChanged: counters.enabledImageInputChanged,
+      materialized,
     }
   } catch (err) {
     if (inTransaction) {

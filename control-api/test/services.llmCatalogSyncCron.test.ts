@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CatalogSyncResult } from '../src/services/llmCatalogSync.js'
 import {
+  type LlmCatalogSyncCronDeps,
   runLlmCatalogSyncTick,
   startLlmCatalogSyncCron,
   stopLlmCatalogSyncCron,
@@ -23,6 +24,8 @@ const OK: CatalogSyncResult = {
   added: 0,
   updated: 0,
   staled: 0,
+  enabledImageInputChanged: 0,
+  materialized: false,
 }
 
 /**
@@ -221,6 +224,16 @@ describe('startLlmCatalogSyncCron', () => {
     startLlmCatalogSyncCron(deps, 1000)
     startLlmCatalogSyncCron(deps, 1000)
     expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires an injected sync (compile-time)', () => {
+    // #654: the sync now needs a ConfigMap materializer and the cron has no
+    // gateway, so a default here could only be a call the sync would reject.
+    // The guarantee is the TYPE, not a runtime branch — hence no assertion on
+    // behaviour, only that omitting `sync` fails to compile.
+    // @ts-expect-error `sync` is required
+    const missingSync: LlmCatalogSyncCronDeps = { connector: makeLockPool({ held: false }, []) }
+    expect(missingSync.connector).toBeDefined()
   })
 })
 
