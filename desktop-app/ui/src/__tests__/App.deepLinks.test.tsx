@@ -2050,11 +2050,14 @@ describe('App deep-link orchestration', () => {
     expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
   })
 
-  // R3-H1: closeActiveSandboxUiEmbedForHandoff has two activation-generation checks
-  // (one guarding the persist after the read, one guarding the close) so a handoff
-  // superseded mid-read never clobbers the live tab's route nor tears down the embed
-  // that now owns the active view. No test exercised them: removing both left the
-  // suite green. This defers the handoff's read, supersedes it with a plain
+  // R3-H1: closeActiveSandboxUiEmbedForHandoff re-checks the activation generation
+  // after its `getLocation()` read, so a handoff superseded mid-read never clobbers
+  // the live tab's route nor tears down the embed that now owns the active view. That
+  // post-read check is the reachable guard: it aborts before both the persist AND the
+  // close, since no `await` separates them (the second gen check right before close is
+  // a defensive re-check for a future edit that would add one — it cannot fire on its
+  // own with today's control flow). No test exercised the reachable guard: removing it
+  // left the suite green. This defers the handoff's read, supersedes it with a plain
   // deactivation (which bumps the generation and closes the embed itself), then
   // resolves the stale read and asserts the handoff added neither a stale persist
   // nor a second close.
@@ -2101,10 +2104,10 @@ describe('App deep-link orchestration', () => {
       await Promise.resolve()
     })
 
-    // Both handoff gen checks abort: A is NOT persisted with the stale route (the
-    // persist guard), and the handoff emits NO second close on top of the
-    // deactivation's (the close guard). With both gen checks removed the handoff
-    // clobbers A with '/stale/handoff' AND closes a second time.
+    // The post-read gen check aborts the superseded continuation: A is NOT persisted
+    // with the stale route, and the handoff emits NO second close on top of the
+    // deactivation's. With that guard removed the handoff clobbers A with
+    // '/stale/handoff' AND closes a second time.
     const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
     expect(appA?.app?.savedRoutePath).not.toBe('/stale/handoff')
     expect(closeSandboxUi).toHaveBeenCalledTimes(1)
