@@ -349,7 +349,8 @@ export function createAdminCodexSubscriptionRouter(
   }
 
   /**
-   * Migration 0113 archives superseded tombstones as `<key>~revoked~<id>`.
+   * Migration 0113_grok_subscription_terminal_connection_key archives
+   * superseded tombstones as `<key>~revoked~<id>`.
    * Those keys sit outside the key grammar, so no keyed route can address
    * them; listing them would only surface unactionable duplicates. The key's
    * own terminal tombstone (status `revoked`, `revokedAt` set) stays listed.
