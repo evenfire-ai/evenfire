@@ -455,8 +455,20 @@ const clerum = Object.freeze({
       ipcRenderer.invoke('rpc:getContextBreakdown', { hostRef, agent, chatId, hostRefs }),
     getHostModels: (hostRef: string, chatId: string, hostRefs?: string[]) =>
       ipcRenderer.invoke('rpc:getHostModels', { hostRef, chatId, hostRefs }),
-    setHostModel: (hostRef: string, chatId: string, model: string, hostRefs?: string[]) =>
-      ipcRenderer.invoke('rpc:setHostModel', { hostRef, chatId, model, hostRefs }),
+    setHostModel: (
+      hostRef: string,
+      chatId: string,
+      model: string,
+      hostRefs?: string[],
+      expectedRevision?: number
+    ) =>
+      ipcRenderer.invoke('rpc:setHostModel', {
+        hostRef,
+        chatId,
+        model,
+        hostRefs,
+        expectedRevision,
+      }),
     // Spec 15 Fase B — explicit user rename. No `hostRefs` fleet arg: the main
     // process scopes the write token to this single host.
     renameSession: (hostRef: string, agent: string, chatId: string, title: string) =>
