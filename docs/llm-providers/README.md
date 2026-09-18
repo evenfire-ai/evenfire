@@ -282,13 +282,20 @@ family, or an "OpenAI-compatible" request shape.
 
 - On upgrade, migration `0115_llm_allowed_models_image_input` only adds the
   nullable column and its `CHECK`; it seeds no evidence. Existing rows stay `unknown` (images refused, text unaffected) until a
-  catalog sync runs, on demand or from the cron; the first sync fills them.
+  catalog sync runs, on demand or from the cron. With the cron enabled (the
+  base deploy enables it) the first sync runs a few seconds after control-api
+  starts, not one interval later, and fills every pair models.dev lists (29 of
+  the 44 seeded pairs). The 15 seeded pairs models.dev does not list stay
+  `unknown` until an operator curates them through the admin API
+  (`PUT /admin/llm-models/:id` with an `image_input` field; see
+  [adding-a-provider.md](adding-a-provider.md)).
 - Discovery evidence expires `LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS` after the
   capture it came from. An expired claim resolves to `unknown` with reason
   `evidence_expired`, and images are refused with that reason until the next
   sync.
-- With `LLM_CATALOG_SYNC_CRON_ENABLED=true` (default off) the refresh is
-  automatic; the config refuses a TTL shorter than twice
+- With `LLM_CATALOG_SYNC_CRON_ENABLED=true` (code default off; set to `true` in
+  `deploy/base/control-plane/configmaps.yaml`) the refresh is automatic: one
+  sync shortly after start, then one every `LLM_CATALOG_SYNC_INTERVAL_MS`; the config refuses a TTL shorter than twice
   `LLM_CATALOG_SYNC_INTERVAL_MS`. Without the cron, run
   `POST /admin/llm-models/discovery/sync` at least once per TTL (monthly at the
   default; every two weeks leaves margin). The endpoint runs the same code path

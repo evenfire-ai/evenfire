@@ -94,9 +94,11 @@ async function main(): Promise<void> {
 
   const gateway = new K8sGateway(config.namespace)
 
-  // LLM catalog discovery sync cron (Fase 4). DEFAULT OFF — opt in with
-  // LLM_CATALOG_SYNC_CRON_ENABLED=true. Non-destructive: inserts disabled
-  // discovery rows, only stale-flags vanished ones under the §4.5 guards.
+  // LLM catalog discovery sync cron (Fase 4). Code default off; the base deploy
+  // sets LLM_CATALOG_SYNC_CRON_ENABLED=true. When on, the first sync runs a few
+  // seconds after start (not awaited — boot never waits on models.dev), then
+  // every interval. Non-destructive: inserts disabled discovery rows, only
+  // stale-flags vanished ones under the §4.5 guards.
   // Started AFTER the gateway exists (#654): the sync publishes the allowlist
   // ConfigMap when it changes image-input evidence on an enabled row, so it
   // needs a materializer — the same one the admin routes use.

@@ -116,8 +116,13 @@ curated evidence and never overwrites newer discovery evidence — see
 
 What operators still curate:
 
-1. ids models.dev does not list — 19 of the 44 pairs the allowlist seeds today,
-   such as Azure deployment names;
+1. ids models.dev does not list — 15 of the 44 pairs the allowlist seeds today
+   (for example `zai:glm-5`, `zai:glm-5.1`, the Bedrock Claude ids,
+   `openai:gpt-5.1-codex`, `openrouter:anthropic/claude-sonnet-latest`). After a
+   deploy, the sync that runs shortly after control-api starts fills
+   `image_input` for the 29 listed pairs; the unlisted ones stay `unknown`
+   (images refused, text unaffected) until an operator curates them with
+   `PUT /admin/llm-models/:id` and an `image_input` field;
 2. models where the vendor documentation disagrees with models.dev (curated
    evidence wins and is never overwritten);
 3. nothing on installations that run the cron — but without it and without a

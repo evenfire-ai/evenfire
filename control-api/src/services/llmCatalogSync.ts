@@ -5,8 +5,8 @@
  *
  * SOURCE-GUARDED reconciliation is the load-bearing invariant (§11.2). The
  * `idx_llm_allowed_models_pm` UNIQUE (provider, model) is NON-partial, so a
- * blind `ON CONFLICT DO UPDATE` would clobber a `source='manual'` row (an Azure
- * deployment name, a hand-added id). Instead we SELECT the provider's rows and
+ * blind `ON CONFLICT DO UPDATE` would clobber a `source='manual'` row (a seeded
+ * allowlist pair, a hand-added id). Instead we SELECT the provider's rows and
  * branch on `source` BEFORE writing:
  *
  *   - NEW (provider, model) not in DB → INSERT source='discovery', enabled=false,
@@ -265,7 +265,7 @@ async function reconcileProvider(
       // statement below. The §11.2 invariant exists to protect those.
       //
       // `image_input` is not among them (#654). 44 pairs are seeded as
-      // `source='manual'`, 25 of which models.dev lists; skipping them entirely
+      // `source='manual'`, 29 of which models.dev lists; skipping them entirely
       // would leave exactly the rows a fresh installation SERVES with no
       // evidence at all, while rows an operator discovered later got some. The
       // guard is the same as the discovery branch — NULL, or discovery-sourced

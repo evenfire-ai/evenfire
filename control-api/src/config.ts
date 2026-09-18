@@ -112,10 +112,10 @@ type Config = {
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
   // LLM catalog discovery sync cron (Fase 4). Runs syncDiscoveredModels()
-  // periodically. DEFAULT OFF — the operator opts in consciously so a fresh
-  // plane never hammers models.dev on boot. When on, one tick every
-  // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
-  // advisory lock inside the cron.
+  // periodically. Code default off; the base deploy enables it
+  // (deploy/base/control-plane/configmaps.yaml). When on, one tick a few
+  // seconds after start and then one every llmCatalogSyncIntervalMs (default
+  // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.

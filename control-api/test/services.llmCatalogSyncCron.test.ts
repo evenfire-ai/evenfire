@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CatalogSyncResult } from '../src/services/llmCatalogSync.js'
 import {
+  LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS,
   type LlmCatalogSyncCronDeps,
   runLlmCatalogSyncTick,
   startLlmCatalogSyncCron,
@@ -189,41 +190,126 @@ describe('runLlmCatalogSyncTick', () => {
 })
 
 describe('startLlmCatalogSyncCron', () => {
-  it('unref()s the interval so it never holds the process open', () => {
-    const unref = vi.fn()
-    const spy = vi
+  // Interval far above the first-run jitter, so advancing past the jitter can
+  // never also reach the first interval tick, whatever Math.random returns.
+  const INTERVAL_MS = 60_000
+
+  it('unref()s both the first-run timeout and the interval so neither holds the process open', () => {
+    const timeoutUnref = vi.fn()
+    const intervalUnref = vi.fn()
+    let firstRun: (() => void) | undefined
+    const timeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void) => {
+      firstRun = fn
+      return { unref: timeoutUnref } as unknown as ReturnType<typeof setTimeout>
+    }) as unknown as typeof setTimeout)
+    const intervalSpy = vi
       .spyOn(global, 'setInterval')
-      .mockReturnValue({ unref } as unknown as ReturnType<typeof setInterval>)
+      .mockReturnValue({ unref: intervalUnref } as unknown as ReturnType<typeof setInterval>)
 
     startLlmCatalogSyncCron(
       { connector: makeLockPool({ held: false }, []), sync: async () => OK },
-      1000
+      INTERVAL_MS
     )
-    expect(unref).toHaveBeenCalledTimes(1)
-    spy.mockRestore()
+    expect(timeoutSpy).toHaveBeenCalledTimes(1)
+    expect(timeoutUnref).toHaveBeenCalledTimes(1)
+    // The interval is armed by the first run, not by start().
+    expect(intervalSpy).not.toHaveBeenCalled()
+    expect(firstRun).toBeTypeOf('function')
+
+    firstRun?.()
+    expect(intervalSpy).toHaveBeenCalledTimes(1)
+    expect(intervalSpy.mock.calls[0]?.[1]).toBe(INTERVAL_MS)
+    expect(intervalUnref).toHaveBeenCalledTimes(1)
   })
 
-  it('fires the tick on the interval and stops firing after stop', async () => {
+  it('schedules the first run inside the jitter window, not one interval later', () => {
+    const timeoutSpy = vi.spyOn(global, 'setTimeout')
+    startLlmCatalogSyncCron(
+      { connector: makeLockPool({ held: false }, []), sync: async () => OK },
+      INTERVAL_MS
+    )
+    expect(timeoutSpy).toHaveBeenCalledTimes(1)
+    const delay = timeoutSpy.mock.calls[0]?.[1]
+    expect(delay).toBeGreaterThanOrEqual(0)
+    expect(delay).toBeLessThan(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+  })
+
+  it('runs one tick shortly after start, then keeps ticking on the interval', async () => {
     vi.useFakeTimers()
     const calls: string[] = []
     const connector = makeLockPool({ held: false }, calls)
     const sync = vi.fn(async () => OK)
 
-    startLlmCatalogSyncCron({ connector, sync }, 1000)
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(sync).toHaveBeenCalledTimes(1)
+    startLlmCatalogSyncCron({ connector, sync }, INTERVAL_MS)
+    // start() does not run the tick synchronously — boot never waits on it.
+    expect(sync).not.toHaveBeenCalled()
+    expect(connector.connect).not.toHaveBeenCalled()
 
-    stopLlmCatalogSyncCron()
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(sync).toHaveBeenCalledTimes(1) // no further ticks after stop
+    await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+    // One full lock-guarded tick, long before the first interval would elapse.
+    expect(sync).toHaveBeenCalledTimes(1)
+    expect(calls).toEqual(['acquire:ok', 'unlock', 'release'])
+
+    // Witness that the interval still runs after the first tick.
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS)
+    expect(sync).toHaveBeenCalledTimes(2)
+    expect(calls).toEqual(['acquire:ok', 'unlock', 'release', 'acquire:ok', 'unlock', 'release'])
   })
 
-  it('is idempotent — a second start does not create a second interval', () => {
-    const spy = vi.spyOn(global, 'setInterval')
-    const deps = { connector: makeLockPool({ held: false }, []), sync: async () => OK }
-    startLlmCatalogSyncCron(deps, 1000)
-    startLlmCatalogSyncCron(deps, 1000)
-    expect(spy).toHaveBeenCalledTimes(1)
+  it('fires the first run and the interval, and stops firing after stop', async () => {
+    vi.useFakeTimers()
+    const calls: string[] = []
+    const connector = makeLockPool({ held: false }, calls)
+    const sync = vi.fn(async () => OK)
+
+    startLlmCatalogSyncCron({ connector, sync }, INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS + INTERVAL_MS)
+    expect(sync).toHaveBeenCalledTimes(2) // first run + one interval tick
+
+    stopLlmCatalogSyncCron()
+    await vi.advanceTimersByTimeAsync(5 * INTERVAL_MS)
+    expect(sync).toHaveBeenCalledTimes(2) // no further ticks after stop
+  })
+
+  it('stop before the first run cancels it; a later start still runs', async () => {
+    vi.useFakeTimers()
+    const connector = makeLockPool({ held: false }, [])
+    const sync = vi.fn(async () => OK)
+
+    startLlmCatalogSyncCron({ connector, sync }, INTERVAL_MS)
+    stopLlmCatalogSyncCron()
+    await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS + 2 * INTERVAL_MS)
+    expect(sync).not.toHaveBeenCalled()
+    expect(connector.connect).not.toHaveBeenCalled()
+
+    // Witness: the same clock and deps DO tick once started again, so the zero
+    // above is the cancelled first run, not a timer that could never fire.
+    startLlmCatalogSyncCron({ connector, sync }, INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+    expect(sync).toHaveBeenCalledTimes(1)
+    expect(connector.connect).toHaveBeenCalledTimes(1)
+  })
+
+  it('is idempotent — a second start creates no second first run and no second interval', async () => {
+    vi.useFakeTimers()
+    const timeoutSpy = vi.spyOn(global, 'setTimeout')
+    const intervalSpy = vi.spyOn(global, 'setInterval')
+    const sync = vi.fn(async () => OK)
+    const deps = { connector: makeLockPool({ held: false }, []), sync }
+
+    startLlmCatalogSyncCron(deps, INTERVAL_MS)
+    startLlmCatalogSyncCron(deps, INTERVAL_MS) // while the first run is pending
+    expect(timeoutSpy).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(LLM_CATALOG_SYNC_FIRST_RUN_JITTER_MS)
+    expect(sync).toHaveBeenCalledTimes(1)
+    expect(intervalSpy).toHaveBeenCalledTimes(1)
+
+    startLlmCatalogSyncCron(deps, INTERVAL_MS) // after the interval is armed
+    await vi.advanceTimersByTimeAsync(INTERVAL_MS)
+    expect(timeoutSpy).toHaveBeenCalledTimes(1)
+    expect(intervalSpy).toHaveBeenCalledTimes(1)
+    expect(sync).toHaveBeenCalledTimes(2) // one first run + one interval tick
   })
 
   it('requires an injected sync (compile-time)', () => {
