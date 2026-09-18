@@ -2312,6 +2312,68 @@ describe('FilesPage', () => {
       )
     })
 
+    // N2 — when the file's affordances are unavailable (empty grantable
+    // bits), the file-alignment grant must be skipped, not sent empty and
+    // rejected after the parent update already succeeded.
+    it('skips the file-alignment grant when the file affordances yield no bits', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const fileGrant = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      // File affordances failed: grantableBits came back empty while the
+      // merged row still shows Editor (direct grant + inherited editor).
+      hookMock.useGfsBrowserController.mockReturnValue(
+        inheritedFileController({
+          affordances: {
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: [],
+            canCreateShare: false,
+          },
+          grant: fileGrant,
+        })
+      )
+
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      })
+      const confirmDialog = await screen.findByRole('alertdialog')
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // The parent update succeeded with its pre-validated folder bits…
+      await waitFor(() =>
+        expect(parentGrant).toHaveBeenCalledWith(
+          'folder-1',
+          ['user:user-2'],
+          ['read', 'share'],
+          'main',
+          true
+        )
+      )
+      // …and no empty-bits grant was sent to the file — the parent outcome
+      // stays a clean success, not a confusing partial failure.
+      expect(fileGrant).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Test Two is now Read-only on Team folder and everything inside it',
+          'success'
+        )
+      )
+      pushToast.mock.calls.forEach(([message, tone]) => {
+        expect(tone).not.toBe('error')
+      })
+    })
+
     it('states the true partial outcome when a folder removal fails mid-run', async () => {
       installInheritedDirectoryMocks()
       const revokeGrant = vi.fn(async (grantId: string) => {

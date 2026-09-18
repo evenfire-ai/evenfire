@@ -740,7 +740,15 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           const fileBits = rolePermissionRequest(subject.type, request.nextRole).filter(bit =>
             affordances?.grantableBits.includes(bit)
           )
-          await ctrl.grant([subjectKey], fileBits, request.row.grant?.inherit ?? false)
+          // N2: an empty bit set means the file's affordances are
+          // unavailable (or grant nothing) — sending it would be rejected
+          // after the parent update already succeeded, turning a successful
+          // action into a confusing partial-failure toast. Skip the
+          // alignment grant; the parent outcome stands and the still-revoked
+          // direct shares cannot mask it.
+          if (fileBits.length > 0) {
+            await ctrl.grant([subjectKey], fileBits, request.row.grant?.inherit ?? false)
+          }
           for (const share of request.row.shares) await ctrl.revokeShare(share.id)
         } catch (updateError) {
           await failPartially(
