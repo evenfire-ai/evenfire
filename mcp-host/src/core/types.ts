@@ -49,6 +49,14 @@ export interface ChatMessage {
    * below keep both fields in sync.
    */
   contentParts?: MessageContentPart[]
+  /**
+   * Issue #654 — set when the image parts were produced by a tool result, never
+   * by the user. A user who attaches an image to a model without affirmative
+   * image-input evidence gets a typed refusal; a screenshot the agent's own
+   * tool returned is withheld instead, so an unverified model can still finish
+   * a text task that happens to call a screenshot tool.
+   */
+  imageOrigin?: 'tool_result'
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
@@ -459,6 +467,15 @@ export interface Conversation {
    * `undefined` ⇔ no selection (today's behaviour).
    */
   modelSelections?: Record<string, string>
+  /**
+   * #654 (migration 015) — durable revision of `modelSelections` for this
+   * session, mirrored from `sessions.model_selection_revision` and rehydrated on
+   * cold-load. It is the compare-and-swap token of the selection write: the
+   * writer sends the revision it read, and a write whose base is already stale
+   * is rejected instead of overwriting the row that got there first. `undefined`
+   * ⇔ the row has not been read yet; the durable default is 0.
+   */
+  modelSelectionRevision?: number
 }
 
 /**

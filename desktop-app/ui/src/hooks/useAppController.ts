@@ -1387,6 +1387,8 @@ export function useAppController() {
     loadMoreChatSessions: chat.loadMoreChatSessions,
     handleSendAgentMessage: chat.handleSendAgentMessage,
     handleRetryFailedAgentSend: chat.handleRetryFailedAgentSend,
+    handleRecoverFailedAgentSend: chat.handleRecoverFailedAgentSend,
+    handleDiscardFailedAgentSend: chat.handleDiscardFailedAgentSend,
     clearComposerSendError: chat.clearComposerSendError,
     handleAddComposerImageAttachments: chat.handleAddComposerImageAttachments,
     handleUpdateComposerImageAttachment: chat.handleUpdateComposerImageAttachment,

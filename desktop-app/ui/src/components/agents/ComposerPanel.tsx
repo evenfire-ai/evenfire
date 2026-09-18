@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -23,12 +23,12 @@ import {
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_IMAGE_DIMENSION,
-  ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
+import { useHostModels } from '@hooks/useHostModels'
 import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
@@ -124,8 +124,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     handleRemoveComposerReferenceAttachment: onRemoveComposerReferenceAttachment,
     handleSendAgentMessage: onSend,
     handleRetryFailedAgentSend: onRetryFailedSend,
+    handleRecoverFailedAgentSend: onRecoverFailedSend,
+    handleDiscardFailedAgentSend: onDiscardFailedSend,
   } = useAgentChatActionsContext()
-  const { hostRuntimeStatus, activeLlmProvider } = useMcpRuntimeContext()
+  const { hostRuntimeStatus } = useMcpRuntimeContext()
   const {
     selectedAgentMcpServers,
     agentContextByName,
@@ -159,7 +161,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
 
-  const activeProviderDoesNotSupportImages = activeLlmProvider === 'zai'
+  // Issue #654: image capability comes from the host-projected per-model
+  // decision shared with the selector and the send path — never from the
+  // provider id. `visualSendBlocked` covers all three blocking shapes:
+  // `unsupported` (known text-only), `unknown` (no/stale evidence) and an
+  // unsettled selection write (the model may still be changing under us).
+  // It gates SENDING images, never selecting them (#678): the picker, paste and
+  // drop always attach, and the notice below explains a blocked send, so the
+  // user can still switch to a capable model with the images kept.
+  const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
+  const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
@@ -320,9 +331,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // The controller clears the draft store only when the send is actually accepted
   // (it bails out early if the chat already has an in-flight task), so a no-op send
   // naturally keeps the text — no optimistic clear needed here.
+  // Issue #654: with pending images and an unsettled/incompatible effective
+  // model, Enter must not reach the controller. The chips and the draft stay
+  // exactly as they are, and the notice below explains the block.
+  const imagesBlockedForSend =
+    composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
+  // Per-instance id: the main panel and the chat drawer can both be mounted.
+  const imageNoticeId = useId()
   const handleSend = useCallback(() => {
+    if (imagesBlockedForSend) return
     void onSend(draft)
-  }, [onSend, draft])
+  }, [onSend, draft, imagesBlockedForSend])
 
   const handleComposerKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -362,14 +381,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
 
   const openUploadPicker = useCallback(() => {
-    if (activeProviderDoesNotSupportImages) {
-      setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
-      return
-    }
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
     composerFileInputRef.current?.click()
-  }, [activeProviderDoesNotSupportImages])
+  }, [])
 
   const openAgentFilesModal = useCallback(() => {
     if (agentFilesLoading) {
@@ -458,13 +473,29 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const prepareComposerImageAttachments = useCallback(
     async (files: File[] | FileList, source: 'picker' | 'clipboard' = 'picker') => {
-      if (activeProviderDoesNotSupportImages) {
-        setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
-        return
-      }
-
       const candidates = Array.from(files || [])
       if (!candidates.length) return
+
+      // Drop and paste can carry any file. Unsupported files are refused here,
+      // before the free image slots are counted, so they never take an image's
+      // place or inflate the skipped count.
+      const validationErrors: string[] = []
+      const imageCandidates: Array<{
+        file: File
+        mimeType: ComposerImageAttachment['mimeType']
+      }> = []
+      for (const file of candidates) {
+        const mimeType = inferComposerImageMimeType(file)
+        if (mimeType && COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
+          imageCandidates.push({ file, mimeType })
+        } else {
+          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
+        }
+      }
+      if (!imageCandidates.length) {
+        setComposerAttachmentError(validationErrors[0] ?? null)
+        return
+      }
 
       const availableSlots = COMPOSER_MAX_IMAGE_ATTACHMENTS - composerImageAttachments.length
       if (availableSlots <= 0) {
@@ -475,19 +506,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
 
       const accepted: ComposerImageAttachment[] = []
-      const validationErrors: string[] = []
-      const selected = candidates.slice(0, availableSlots)
-      if (candidates.length > selected.length) {
+      const selected = imageCandidates.slice(0, availableSlots)
+      if (imageCandidates.length > availableSlots) {
+        const skipped = imageCandidates.length - availableSlots
         validationErrors.push(
-          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message.`
+          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message; ${skipped} ${
+            skipped === 1 ? 'image was' : 'images were'
+          } not added.`
         )
       }
-      for (const [index, file] of selected.entries()) {
-        const mimeType = inferComposerImageMimeType(file)
-        if (!mimeType || !COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
-          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
-          continue
-        }
+
+      for (const [index, { file, mimeType }] of selected.entries()) {
         if (composerImageExceedsPerImageBudget(file.size)) {
           validationErrors.push(
             `${file.name || 'Image'} is too large. Max size is ${formatComposerMebibytes(
@@ -544,7 +573,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       setComposerAttachmentError(validationErrors.length ? (validationErrors[0] ?? null) : null)
     },
     [
-      activeProviderDoesNotSupportImages,
       buildAttachmentName,
       composerImageAttachments,
       inferComposerImageMimeType,
@@ -963,11 +991,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               disabled={
                 isDegraded ||
                 agentSending ||
+                imagesBlockedForSend ||
                 (!draft.trim() &&
                   composerImageAttachments.length === 0 &&
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
+              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
@@ -985,13 +1015,21 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           </span>
         </div>
       </div>
-      {composerAttachmentError && (
+      {imagesBlockedForSend || composerAttachmentError ? (
         <div className="composer-attachments">
-          <p className="composer-attachment-error" role="alert">
-            {composerAttachmentError}
+          <p
+            className="composer-attachment-error"
+            role="alert"
+            id={imagesBlockedForSend ? imageNoticeId : undefined}
+            data-testid={imagesBlockedForSend ? 'composer-image-capability-notice' : undefined}
+          >
+            {imagesBlockedForSend
+              ? (imageAttachmentBlockMessage ??
+                'Image attachments are not available for this model yet.')
+              : composerAttachmentError}
           </p>
         </div>
-      )}
+      ) : null}
       {agentError ? (
         <div className="composer-footer">
           {failedAgentSend?.kind === 'waking' ? (
@@ -1036,6 +1074,18 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
               </div>
             </div>
           )}
+        </div>
+      ) : null}
+      {failedAgentSend ? (
+        <div className="composer-footer">
+          <div className="action-row">
+            <Button onClick={onRecoverFailedSend} disabled={agentSending} size="xs" variant="ghost">
+              Recover input
+            </Button>
+            <Button onClick={onDiscardFailedSend} disabled={agentSending} size="xs" variant="ghost">
+              Discard failed input
+            </Button>
+          </div>
         </div>
       ) : null}
 

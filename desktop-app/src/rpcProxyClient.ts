@@ -34,6 +34,8 @@ export type { SandboxUiApp } from './types.js'
  * convention used by {@link RpcProxyClient.loadSessionMessages}.
  */
 const MODEL_NOT_ALLOWED = 'model_not_allowed'
+/** CAS precondition failure on `POST …/hosts/:hostRef/model` (issue #654). */
+const MODEL_SELECTION_CONFLICT = 'model_selection_conflict'
 
 function wireObject(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -1142,7 +1144,8 @@ export class RpcProxyClient {
     rpcToken: string,
     hostRef: string,
     chatId: string,
-    model: string
+    model: string,
+    expectedRevision?: number
   ): Promise<SetHostModelResult> {
     const response = await fetch(url(`/api/v1/rpc/hosts/${encodeURIComponent(hostRef)}/model`), {
       method: 'POST',
@@ -1150,7 +1153,12 @@ export class RpcProxyClient {
         authorization: `Bearer ${rpcToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({ chatId, model }),
+      // `expectedRevision` is omitted unless the host projected a revision
+      // (issue #654 CAS), so an older host keeps receiving the exact body it
+      // accepts today.
+      body: JSON.stringify(
+        expectedRevision === undefined ? { chatId, model } : { chatId, model, expectedRevision }
+      ),
       signal: withTimeout(),
     })
     if (!response.ok) {
@@ -1165,6 +1173,16 @@ export class RpcProxyClient {
       // renderer detects.
       if (errorCodeFromBody(body) === MODEL_NOT_ALLOWED) {
         throw new ApiError(`Set host model rejected (${MODEL_NOT_ALLOWED})`, response.status, body)
+      }
+      // CAS precondition failed: another writer moved the session selection.
+      // Terminal (never a wake/piggyback case) and surfaced by token so the
+      // renderer can refetch instead of trusting the rejected optimistic state.
+      if (errorCodeFromBody(body) === MODEL_SELECTION_CONFLICT) {
+        throw new ApiError(
+          `Set host model conflicted (${MODEL_SELECTION_CONFLICT})`,
+          response.status,
+          body
+        )
       }
       throw new ApiError(
         `Set host model failed (${response.status}): ${body}`,

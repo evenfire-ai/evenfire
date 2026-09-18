@@ -89,6 +89,7 @@ import { prependTextToParts, textContentFromParts } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
+import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
 import { descriptorFor, isLlmProvider } from '../llm/registryCore'
@@ -236,6 +237,15 @@ export interface TaskExecutorDeps {
    * so `usage_events` records the pair really served). Absent → no failover.
    */
   failover?: ExecutorFailoverSupport
+
+  /**
+   * Issue #654 — live-catalog image-input capability lookup, keyed by the
+   * (provider, model) the adapter is about to send. Threaded to the primary
+   * port AND every failover adapter so the guard checks the pair that really
+   * runs. Absent → images fail closed with `LLM_IMAGE_INPUT_UNKNOWN` and
+   * text-only turns are unchanged.
+   */
+  imageInput?: ImageInputResolver
 
   // Callbacks to coordinator
   onApprovalNeeded: (requestId: string, taskId: string, approval: PendingApproval) => void
@@ -1293,12 +1303,14 @@ export class TaskExecutor {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — a SAME-provider fallback (other key) respects the session's
         // model; a CROSS-provider fallback serves its fixed entry model
-        // (ignoring the session selection). Drives usage_events + the tokenizer.
+        // (ignoring the session selection). #654: resolve the effective model
+        // BEFORE building so the provider's SDK, the token counter, the usage
+        // event and the image guard all name the model that is really sent.
         const servedModel = entry.provider === primaryProvider ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -1315,7 +1327,8 @@ export class TaskExecutor {
             if (conversation.contextBreakdown && usage.input_tokens > 0) {
               conversation.contextBreakdown.totalInputTokens = usage.input_tokens
             }
-          }
+          },
+          this.deps.imageInput
         )
       },
     })
@@ -1358,7 +1371,8 @@ export class TaskExecutor {
         if (conversation.contextBreakdown && usage.input_tokens > 0) {
           conversation.contextBreakdown.totalInputTokens = usage.input_tokens
         }
-      }
+      },
+      this.deps.imageInput
     )
 
     // R5 — wrap the primary port with provider-failover when a policy is wired.

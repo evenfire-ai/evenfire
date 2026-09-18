@@ -23,6 +23,7 @@ describe('LlmPortAdapter diagnostics', () => {
 
     await expect(adapter.complete({ messages: [] })).rejects.toBeInstanceOf(LlmError)
 
+    expect(logSpy).toHaveBeenCalled()
     const logText = JSON.stringify(logSpy.mock.calls)
     expect(logText).not.toContain('sk-live-secret')
     expect(logText).not.toContain('upstream payload included')
@@ -56,6 +57,7 @@ describe('LlmPortAdapter diagnostics', () => {
 
     await expect(adapter.complete({ messages: [] })).rejects.toBeInstanceOf(LlmError)
 
+    expect(logSpy).toHaveBeenCalled()
     const logText = JSON.stringify(logSpy.mock.calls)
     expect(logText).not.toContain(secretishCode)
     expect(logText).not.toContain(secretishCauseCode)

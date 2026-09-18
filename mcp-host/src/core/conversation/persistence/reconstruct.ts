@@ -97,9 +97,28 @@ export function reconstructConversation(persisted: PersistedSession): Reconstruc
     // per-task resolver honours a saved choice after a pod restart. Read-plumbing
     // previously died at this store→Conversation frontier; parse it here.
     modelSelections: parseModelSelections(persisted.session.model_selections),
+    // #654 (migration 015) — rehydrate the CAS base. Without it a cold-loaded
+    // session would arm its next write against `undefined` (legacy
+    // unconditional) and could overwrite a selection that landed while this
+    // replica was cold. `undefined` from a pre-migration row reads as the column
+    // default 0, so the first CAS still has a well-defined base.
+    modelSelectionRevision: normalizeModelSelectionRevision(
+      persisted.session.model_selection_revision
+    ),
   }
 
   return { conversation, highestOrdinal, highestTurnNumber }
+}
+
+/**
+ * #654 — narrow the durable revision to a non-negative safe integer, defaulting
+ * to the column default 0 when the row predates migration 015 or carries a value
+ * SQLite could not have written. Never returns `undefined`: the CAS base is
+ * always an explicit revision so a caller cannot silently fall back to the
+ * unconditional legacy write by omission.
+ */
+function normalizeModelSelectionRevision(raw: number | null | undefined): number {
+  return typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0 ? raw : 0
 }
 
 /**

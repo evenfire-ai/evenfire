@@ -1,9 +1,20 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateContext'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import type { ComposerImageAttachment } from '../../../uiTypes'
+import {
+  COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  COMPOSER_MAX_IMAGE_BYTES,
+  COMPOSER_MAX_IMAGE_DIMENSION,
+} from '@constants/attachments'
+import type { HostModelsResult } from '@hooks/useChatStore'
+import {
+  type ImageInputDecision,
+  imageInputBlockMessage,
+} from '../../../../../src/imageInputDecision'
+import type { ComposerImageAttachment, FailedAgentSend } from '../../../uiTypes'
 import { ComposerPanel } from '../ComposerPanel'
 
 // Resolve the stylesheet relative to THIS test file (not process.cwd()) so the
@@ -12,8 +23,8 @@ import { ComposerPanel } from '../ComposerPanel'
 // to desktop-app/ui/ui/src/styles.css and failed with ENOENT.
 const composerStyles = readFileSync(resolve(__dirname, '../../../styles.css'), 'utf8')
 
-const composerState = {
-  composerImageAttachments: [] as ComposerImageAttachment[],
+const composerState: ChatComposerStateContextValue = {
+  composerImageAttachments: [],
   composerReferenceAttachments: [],
   agentSending: false,
   agentError: null,
@@ -25,9 +36,9 @@ const composerState = {
 
 const draftState = { value: '', set: vi.fn() }
 
-// Stable spies so the image-budget cases can assert exactly what the panel hands
-// to the composer-actions layer.
-const composerActions = {
+/** Stable action spies so guard tests can assert what did (not) reach the controller. */
+const actionsMock = {
+  clearComposerSendError: vi.fn(),
   handleAddComposerImageAttachments: vi.fn(),
   handleUpdateComposerImageAttachment: vi.fn(),
   handleRemoveComposerImageAttachment: vi.fn(),
@@ -35,13 +46,12 @@ const composerActions = {
   handleRemoveComposerReferenceAttachment: vi.fn(),
   handleSendAgentMessage: vi.fn(),
   handleRetryFailedAgentSend: vi.fn(),
+  handleRecoverFailedAgentSend: vi.fn(),
+  handleDiscardFailedAgentSend: vi.fn(),
 }
 
 vi.mock('@contexts/AgentChatActionsContext', () => ({
-  useAgentChatActionsContext: () => ({
-    clearComposerSendError: vi.fn(),
-    ...composerActions,
-  }),
+  useAgentChatActionsContext: () => actionsMock,
 }))
 
 vi.mock('@contexts/ChatComposerStateContext', () => ({
@@ -72,61 +82,44 @@ vi.mock('@hooks/useComposerDraft', () => ({
   useComposerDraft: () => [draftState.value, draftState.set],
 }))
 
+/**
+ * Shared model-selection view (issue #654). Mutable so a test can swap the
+ * capability/state per case; every field of the hook's real return shape must be
+ * present because ModelSelector reads them directly.
+ */
+const composerModelState = {
+  data: {
+    provider: 'claude',
+    hostDefault: 'claude-haiku-4-5',
+    sessionModel: null,
+    degraded: false,
+    models: [{ name: 'claude-haiku-4-5', displayName: 'Haiku 4.5' }],
+  } as HostModelsResult | null | undefined,
+  loading: false,
+  saving: false,
+  error: null as string | null,
+  state: 'ready' as 'unloaded' | 'loading' | 'ready' | 'unavailable',
+  effectiveModel: 'claude-haiku-4-5',
+  intentModel: null as string | null,
+  pending: false,
+  selectionUnsettled: false,
+  conflicted: false,
+  confirmedRevision: null as number | null,
+  imageInput: { state: 'unknown' as const, reason: 'model_unknown' },
+  canAttachImages: false,
+  imageBlockMessage: null as string | null,
+  visualSendBlocked: false,
+  selectModel: vi.fn(async () => true),
+  clearError: vi.fn(),
+  refresh: vi.fn(async () => undefined),
+}
+
 vi.mock('@hooks/useHostModels', () => ({
-  useHostModels: () => ({
-    data: {
-      provider: 'claude',
-      hostDefault: 'claude-haiku-4-5',
-      sessionModel: null,
-      degraded: false,
-      models: [{ name: 'claude-haiku-4-5', displayName: 'Haiku 4.5' }],
-    },
-    loading: false,
-    saving: false,
-    error: null,
-    selectModel: vi.fn(async () => true),
-    clearError: vi.fn(),
-  }),
+  useHostModels: () => composerModelState,
 }))
 vi.mock('../ComposerAgentFilesModal', () => ({ ComposerAgentFilesModal: () => null }))
 vi.mock('../ComposerGlobalFilesModal', () => ({ ComposerGlobalFilesModal: () => null }))
-// The annotation-budget cases drive the panel's own save handler. The canvas is
-// a heavyweight sibling that needs a real 2D context, so it stays a test double
-// (as it always was here) that simply exposes the `onSave` the panel supplies.
-const annotationStub = vi.hoisted(() => ({
-  next: null as null | {
-    id: string
-    addedOrder?: number
-    name: string
-    mimeType: 'image/png' | 'image/jpeg'
-    dataBase64: string
-    sizeBytes: number
-    previewDataUrl: string
-  },
-  /** Message AnnotationCanvas would render from a thrown `onSave`. */
-  threw: null as string | null,
-}))
-
-vi.mock('../AnnotationCanvas', () => ({
-  AnnotationCanvas: ({ onSave }: { onSave: (updated: ComposerImageAttachment) => void }) => (
-    <button
-      type="button"
-      onClick={() => {
-        if (!annotationStub.next) return
-        // AnnotationCanvas awaits `onSave` inside its own try/catch and renders a
-        // thrown message in `.composer-image-preview-error` inside its dialog.
-        annotationStub.threw = null
-        try {
-          onSave(annotationStub.next)
-        } catch (error) {
-          annotationStub.threw = error instanceof Error ? error.message : String(error)
-        }
-      }}
-    >
-      Apply annotation
-    </button>
-  ),
-}))
+vi.mock('../AnnotationCanvas', () => ({ AnnotationCanvas: () => null }))
 
 function setScrollHeight(textarea: HTMLTextAreaElement, value: number) {
   Object.defineProperty(textarea, 'scrollHeight', { configurable: true, value })
@@ -143,11 +136,23 @@ afterEach(() => {
   cleanup()
   draftState.value = ''
   draftState.set.mockReset()
-  composerState.composerFocusRequestId = 0
-  composerState.composerImageAttachments = []
-  annotationStub.next = null
-  annotationStub.threw = null
-  for (const spy of Object.values(composerActions)) spy.mockReset()
+  Object.assign(composerState, {
+    composerImageAttachments: [],
+    composerReferenceAttachments: [],
+    agentSending: false,
+    agentError: null,
+    failedAgentSend: null,
+    activeChatId: null,
+    activeMessageCount: 0,
+    composerFocusRequestId: 0,
+  })
+  Object.assign(composerModelState, {
+    visualSendBlocked: false,
+    canAttachImages: false,
+    imageBlockMessage: null,
+    imageInput: { state: 'unknown', reason: 'model_unknown' },
+  })
+  for (const spy of Object.values(actionsMock)) spy.mockReset()
   delete (window as Partial<typeof window>).clerum
 })
 
@@ -241,14 +246,32 @@ describe.each([
   })
 })
 
-const MIB = 1024 * 1024
+// ---------------------------------------------------------------------------
+// Issue #654: composer image attachments through real DOM events.
+//
+// These drive the real component. jsdom has no file dialog and no DataTransfer,
+// so the helpers below stand in for exactly those unavailable browser
+// primitives; the accept filter, the FileReader byte preparation and every guard
+// stay real. The jsdom environment does provide URL.createObjectURL, so chip
+// previews are real `blob:` object URLs.
+// ---------------------------------------------------------------------------
 
-/**
- * A picked image whose reported size is `sizeBytes`. The guard decides on
- * `File.size` — what the browser reports for the chosen file — so binding the
- * size drives the real code path without allocating and base64-encoding 10MiB
- * blobs per case.
- */
+/** PNG signature bytes, so "the file's bytes reached the controller" is literal. */
+const PNG_BYTES = [137, 80, 78, 71, 13, 10, 26, 10, 0, 1, 2, 3]
+/** JPEG SOI/APP0 bytes for the cases that carry a .jpg file. */
+const JPEG_BYTES = [255, 216, 255, 224, 0, 16, 74, 70, 73, 70]
+
+function imageFile(name: string, type: string, bytes: Uint8Array | number[] = PNG_BYTES): File {
+  return new File([new Uint8Array(bytes)], name, { type })
+}
+
+/** Reported `File.size` without allocating the payload (the picker guards on size). */
+function imageFileWithReportedSize(name: string, type: string, sizeBytes: number): File {
+  const file = imageFile(name, type)
+  Object.defineProperty(file, 'size', { configurable: true, value: sizeBytes })
+  return file
+}
+
 function pngIhdrFile(name: string, width: number, height: number): File {
   const bytes = new Uint8Array(8 + 8 + 13)
   bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
@@ -260,224 +283,479 @@ function pngIhdrFile(name: string, width: number, height: number): File {
   return new File([bytes], name, { type: 'image/png' })
 }
 
-function imageFile(name: string, sizeBytes: number, type = 'image/png'): File {
-  const file = new File([new Uint8Array([0x41])], name, { type })
-  Object.defineProperty(file, 'size', { configurable: true, value: sizeBytes })
-  return file
+function decodedBytes(base64: string): number[] {
+  return Array.from(atob(base64), char => char.charCodeAt(0))
 }
 
-function existingAttachment(name: string, sizeBytes: number): ComposerImageAttachment {
-  return {
-    id: `existing-${name}`,
-    name,
-    mimeType: 'image/png',
-    dataBase64: 'QQ==',
-    sizeBytes,
-    previewDataUrl: '',
-    addedOrder: 0,
+function addedBatches(): ComposerImageAttachment[][] {
+  return actionsMock.handleAddComposerImageAttachments.mock.calls.map(([batch]) => batch)
+}
+
+/** Asserts that the controller received exactly one batch with one prepared image. */
+function expectSinglePreparedImage(): ComposerImageAttachment {
+  const batches = addedBatches()
+  expect(batches).toHaveLength(1)
+  expect(batches[0]).toHaveLength(1)
+  const attachment = batches[0]?.[0]
+  if (!attachment) throw new Error('expected one prepared image attachment')
+  return attachment
+}
+
+function pickerInput(container: HTMLElement): HTMLInputElement {
+  const input = container.querySelector('.composer-file-input')
+  if (!(input instanceof HTMLInputElement)) throw new Error('expected the composer file picker')
+  return input
+}
+
+function capabilityMessage(decision: ImageInputDecision): string {
+  const message = imageInputBlockMessage(composerModelState.effectiveModel, decision)
+  if (!message) throw new Error('expected a blocking image-capability message')
+  return message
+}
+
+/**
+ * jsdom cannot open a native file dialog, so the picker click is the boundary
+ * that stays observable: intercept it, and let the test fire the `change` event
+ * that a real dialog would produce.
+ */
+async function withPickerClick<T>(run: (timesClicked: () => number) => Promise<T>): Promise<T> {
+  const clickSpy = vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(() => {})
+  try {
+    return await run(() => clickSpy.mock.calls.length)
+  } finally {
+    clickSpy.mockRestore()
   }
 }
 
-function pickFiles(container: HTMLElement, files: File[]) {
-  const input = container.querySelector('input[type="file"]') as HTMLInputElement
-  Object.defineProperty(input, 'files', { configurable: true, value: files })
-  fireEvent.change(input)
+const SUPPORTED_CAPABILITY = {
+  imageInput: { state: 'supported', reason: 'supported' } as ImageInputDecision,
+  canAttachImages: true,
+  imageBlockMessage: null,
+  visualSendBlocked: false,
 }
 
-/** Every image the panel handed to the composer-actions layer, in order. */
-function attachedImages(): ComposerImageAttachment[] {
-  return composerActions.handleAddComposerImageAttachments.mock.calls.flatMap(
-    call => call[0] as ComposerImageAttachment[]
-  )
-}
+const BLOCKED_CAPABILITIES: Array<[string, ImageInputDecision]> = [
+  ['unsupported', { state: 'unsupported', reason: 'model_unsupported' }],
+  ['unverified', { state: 'unknown', reason: 'model_unknown' }],
+]
 
-describe('ComposerPanel image budget', () => {
-  it('accepts an image at the 10MiB per-image limit', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('at-limit.png', 10 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(attachedImages()[0]?.sizeBytes).toBe(10 * MIB)
-    expect(screen.queryByRole('alert')).toBeNull()
+describe.each(BLOCKED_CAPABILITIES)(
+  'ComposerPanel with %s image capability',
+  (_label, decision) => {
+    const blockMessage = capabilityMessage(decision)
+
+    beforeEach(() => {
+      Object.assign(composerModelState, {
+        imageInput: decision,
+        canAttachImages: false,
+        imageBlockMessage: blockMessage,
+        visualSendBlocked: true,
+      })
+    })
+
+    // #678: capability gates sending images, never selecting them. The picked
+    // image is kept so the user can switch to a capable model; the send-time
+    // notice (covered below) explains the block once the chip is pending.
+    it('opens the Upload Files picker and attaches the picked image', async () => {
+      await withPickerClick(async timesClicked => {
+        const { container } = render(<ComposerPanel inline />)
+
+        fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Upload Files' }))
+        expect(timesClicked()).toBe(1)
+
+        fireEvent.change(pickerInput(container), {
+          target: { files: [imageFile('photo.png', 'image/png')] },
+        })
+
+        await waitFor(() =>
+          expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+        )
+        expect(expectSinglePreparedImage()).toMatchObject({ name: 'photo.png' })
+        expect(screen.queryByText(blockMessage)).toBeNull()
+      })
+    })
+
+    it('attaches a pasted image', async () => {
+      render(<ComposerPanel inline />)
+      const textarea = screen.getByTestId('chat-input')
+
+      const notPrevented = fireEvent.paste(textarea, {
+        clipboardData: { files: [imageFile('clipboard.png', 'image/png')], items: [] },
+      })
+
+      // Consumed like a real paste so the image never lands as text either.
+      expect(notPrevented).toBe(false)
+      await waitFor(() =>
+        expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+      )
+      expect(expectSinglePreparedImage().mimeType).toBe('image/png')
+      expect(screen.queryByText(blockMessage)).toBeNull()
+    })
+
+    it('attaches a dropped image and clears the drop overlay', async () => {
+      const { container } = render(<ComposerPanel inline />)
+      const shell = container.querySelector('.composer-input-shell') as HTMLElement
+
+      fireEvent.dragEnter(shell, { dataTransfer: { types: ['Files'] } })
+      expect(screen.getByText('Drop files here')).toBeTruthy()
+
+      const notPrevented = fireEvent.drop(shell, {
+        dataTransfer: { files: [imageFile('dropped.png', 'image/png')], types: ['Files'] },
+      })
+
+      expect(notPrevented).toBe(false)
+      await waitFor(() =>
+        expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+      )
+      expect(expectSinglePreparedImage()).toMatchObject({ name: 'dropped.png' })
+      expect(screen.queryByText('Drop files here')).toBeNull()
+      expect(screen.queryByText(blockMessage)).toBeNull()
+    })
+  }
+)
+
+describe('ComposerPanel with an image-capable model', () => {
+  beforeEach(() => {
+    Object.assign(composerModelState, SUPPORTED_CAPABILITY)
   })
 
-  it('accepts 10MiB + 5MiB, the 15MiB per-message total', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('ten.png', 10 * MIB), imageFile('five.png', 5 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(2))
-    expect(screen.queryByRole('alert')).toBeNull()
+  it('opens the picker and hands the picked PNG bytes to the controller', async () => {
+    await withPickerClick(async timesClicked => {
+      const { container } = render(<ComposerPanel inline />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Upload Files' }))
+      expect(timesClicked()).toBe(1)
+
+      const fileInput = pickerInput(container)
+      expect(fileInput.accept).toBe('image/jpeg,image/png')
+      expect(fileInput.multiple).toBe(true)
+      fireEvent.change(fileInput, { target: { files: [imageFile('photo.png', 'image/png')] } })
+
+      await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+      const attachment = expectSinglePreparedImage()
+      expect(attachment).toMatchObject({
+        name: 'photo.png',
+        mimeType: 'image/png',
+        sizeBytes: PNG_BYTES.length,
+      })
+      expect(decodedBytes(attachment.dataBase64)).toEqual(PNG_BYTES)
+      // createObjectURL is available here, so the chip preview is an object URL
+      // for the picked file rather than the FileReader fallback.
+      expect(attachment.previewDataUrl).toMatch(/^blob:/)
+      expect(screen.queryByRole('alert')).toBeNull()
+    })
   })
 
-  it('accepts three 5MiB images', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [
-      imageFile('a.png', 5 * MIB),
-      imageFile('b.png', 5 * MIB),
-      imageFile('c.png', 5 * MIB),
-    ])
-    await waitFor(() => expect(attachedImages()).toHaveLength(3))
-    expect(screen.queryByRole('alert')).toBeNull()
+  it('prepares a pasted PNG once when the clipboard reports it as both file and item', async () => {
+    render(<ComposerPanel inline />)
+    const textarea = screen.getByTestId('chat-input')
+    const pasted = imageFile('image.png', 'image/png')
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        files: [pasted],
+        items: [{ kind: 'file', getAsFile: () => pasted }],
+      },
+    })
+
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    const attachment = expectSinglePreparedImage()
+    // A generic clipboard name is replaced with a distinguishable pasted-image name.
+    expect(attachment.name).toMatch(/^pasted-image-\d+-1\.png$/)
+    expect(attachment.mimeType).toBe('image/png')
+    expect(decodedBytes(attachment.dataBase64)).toEqual(PNG_BYTES)
   })
 
-  it('accepts a 5MiB JPEG at the same budget as PNG', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('photo.jpg', 5 * MIB, 'image/jpeg')])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(attachedImages()[0]?.mimeType).toBe('image/jpeg')
-    expect(attachedImages()[0]?.sizeBytes).toBe(5 * MIB)
-    expect(screen.queryByRole('alert')).toBeNull()
+  it('prepares a dropped JPEG and clears the drop overlay after the drop', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const shell = container.querySelector('.composer-input-shell') as HTMLElement
+
+    fireEvent.dragEnter(shell, { dataTransfer: { types: ['Files'] } })
+    expect(screen.getByText('Drop files here')).toBeTruthy()
+
+    fireEvent.drop(shell, {
+      dataTransfer: {
+        files: [imageFile('dropped.jpg', 'image/jpeg', JPEG_BYTES)],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    const attachment = expectSinglePreparedImage()
+    expect(attachment).toMatchObject({
+      name: 'dropped.jpg',
+      mimeType: 'image/jpeg',
+      sizeBytes: JPEG_BYTES.length,
+    })
+    expect(decodedBytes(attachment.dataBase64)).toEqual(JPEG_BYTES)
+    expect(screen.queryByText('Drop files here')).toBeNull()
+  })
+
+  it('infers the mime type from the file name when the OS reports none', async () => {
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: { files: [imageFile('screenshot.png', '')] },
+    })
+
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    expect(expectSinglePreparedImage().mimeType).toBe('image/png')
+  })
+
+  it('explains a rejected file type and still attaches the valid image in the same batch', async () => {
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [imageFile('animation.gif', 'image/gif'), imageFile('good.png', 'image/png')],
+      },
+    })
+
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    expect(screen.getByRole('alert').textContent).toBe(
+      'animation.gif is not supported. Use PNG or JPEG.'
+    )
+    expect(expectSinglePreparedImage().name).toBe('good.png')
+  })
+
+  it('explains an oversize image and attaches nothing', async () => {
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [imageFileWithReportedSize('huge.png', 'image/png', COMPOSER_MAX_IMAGE_BYTES + 1)],
+      },
+    })
+
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    expect(screen.getByRole('alert').textContent).toBe('huge.png is too large. Max size is 16 MiB.')
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
   it('accepts a 12MiB image above the usual 10MiB target', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('large.png', 12 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(attachedImages()[0]?.sizeBytes).toBe(12 * MIB)
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: { files: [imageFileWithReportedSize('large.png', 'image/png', 12 * 1024 * 1024)] },
+    })
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    expect(expectSinglePreparedImage().sizeBytes).toBe(12 * 1024 * 1024)
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('refuses an image over the 16MiB limit and names the limit in MiB', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('over.png', 17 * MIB)])
+  it('refuses a 2049 px image before send and names the pixel bound', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: { files: [pngIhdrFile('over-res.png', COMPOSER_MAX_IMAGE_DIMENSION + 1, 128)] },
+    })
     await waitFor(() =>
       expect(screen.getByRole('alert').textContent).toContain(
-        'over.png is too large. Max size is 16 MiB.'
+        `over-res.png is too large. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
       )
     )
-    expect(composerActions.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('attaches 20 images from one pick and says how many did not fit', async () => {
+    expect(COMPOSER_MAX_IMAGE_ATTACHMENTS).toBe(20)
+    const { container } = render(<ComposerPanel inline />)
+    const files = Array.from({ length: 22 }, (_, index) =>
+      imageFile(`photo-${index + 1}.png`, 'image/png', [...PNG_BYTES, index])
+    )
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(
+      files.slice(0, 20).map(file => file.name)
+    )
+    expect(screen.getByRole('alert').textContent).toBe(
+      'You can attach up to 20 images per message; 2 images were not added.'
+    )
   })
 
   it('attaches 10MiB + 7MiB in the composer; the hop owns the aggregate', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('fits.png', 10 * MIB), imageFile('over-total.png', 7 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(2))
-    expect(attachedImages().map(attachment => attachment.name)).toEqual([
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [
+          imageFileWithReportedSize('fits.png', 'image/png', 10 * 1024 * 1024),
+          imageFileWithReportedSize('over-total.png', 'image/png', 7 * 1024 * 1024),
+        ],
+      },
+    })
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual([
       'fits.png',
       'over-total.png',
     ])
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('attaches a 7MiB image when 10MiB is already in the composer', async () => {
-    composerState.composerImageAttachments = [existingAttachment('kept.png', 10 * MIB)]
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('over-total.png', 7 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(attachedImages()[0]?.name).toBe('over-total.png')
-    expect(screen.queryByRole('alert')).toBeNull()
-  })
+  it('does not let a dropped non-image take one of the free image slots', async () => {
+    // 18 of the 20 slots are taken; the drop carries a PDF ahead of two PNGs.
+    composerState.composerImageAttachments = Array.from({ length: 18 }, (_, index) => ({
+      id: `attached-${index + 1}`,
+      name: `attached-${index + 1}.png`,
+      mimeType: 'image/png' as const,
+      dataBase64: 'iVBORw0KGgo=',
+      sizeBytes: 8,
+      previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    }))
+    const { container } = render(<ComposerPanel inline />)
+    const shell = container.querySelector('.composer-input-shell') as HTMLElement
 
-  it('accepts a 5MiB image when 10MiB is already attached', async () => {
-    composerState.composerImageAttachments = [existingAttachment('kept.png', 10 * MIB)]
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('five.png', 5 * MIB)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(screen.queryByRole('alert')).toBeNull()
-  })
+    fireEvent.drop(shell, {
+      dataTransfer: {
+        files: [
+          imageFile('doc.pdf', 'application/pdf'),
+          imageFile('a.png', 'image/png', [...PNG_BYTES, 1]),
+          imageFile('b.png', 'image/png', [...PNG_BYTES, 2]),
+        ],
+        types: ['Files'],
+      },
+    })
 
-  it('refuses a 2049 px image before send and names the pixel bound', async () => {
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [pngIhdrFile('over-res.png', 2049, 128)])
     await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toContain(
-        'over-res.png is too large. Max resolution is 2048 px.'
-      )
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
     )
-    expect(composerActions.handleAddComposerImageAttachments).not.toHaveBeenCalled()
-    expect(attachedImages()).toHaveLength(0)
-  })
-
-  it('explains files beyond the 20-image cap instead of dropping them silently', async () => {
-    const small = 64 * 1024
-    composerState.composerImageAttachments = Array.from({ length: 19 }, (_, index) =>
-      existingAttachment(`kept-${index + 1}.png`, small)
-    )
-    const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('twentieth.png', small), imageFile('twenty-first.png', small)])
-    await waitFor(() => expect(attachedImages()).toHaveLength(1))
-    expect(screen.getByRole('alert').textContent).toContain(
-      'You can attach up to 20 images per message.'
-    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['a.png', 'b.png'])
+    // The only message is the PDF refusal: no image was counted as skipped.
+    expect(screen.getByRole('alert').textContent).toBe('doc.pdf is not supported. Use PNG or JPEG.')
   })
 })
 
-/** Open the annotation canvas for the attached image named `name`. */
-function openAnnotation(container: HTMLElement, name: string) {
-  const triggers = Array.from(container.querySelectorAll('.composer-attachment-preview-trigger'))
-  const trigger = triggers.find(node => node.textContent?.includes(name))
-  if (!trigger) throw new Error(`annotation trigger for ${name} not found`)
-  fireEvent.click(trigger)
-}
+describe('ComposerPanel with a pending image after a model switch', () => {
+  const pendingImage: ComposerImageAttachment = {
+    id: 'pending-image-1',
+    name: 'pending.png',
+    mimeType: 'image/png',
+    dataBase64: 'iVBORw0KGgo=',
+    sizeBytes: 8,
+    previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+  }
+  const switchedAway: ImageInputDecision = { state: 'unknown', reason: 'model_unknown' }
 
-function applyAnnotation() {
-  fireEvent.click(screen.getByRole('button', { name: 'Apply annotation' }))
-}
-
-describe('ComposerPanel annotation budget', () => {
-  it('applies an annotation that stays inside both limits', () => {
-    const original = existingAttachment('photo.png', 8 * MIB)
-    composerState.composerImageAttachments = [original]
-    const { container } = render(<ComposerPanel inline={false} />)
-    openAnnotation(container, 'photo.png')
-
-    annotationStub.next = { ...original, sizeBytes: 9 * MIB }
-    applyAnnotation()
-
-    expect(annotationStub.threw).toBeNull()
-    expect(composerActions.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
-    expect(composerActions.handleUpdateComposerImageAttachment.mock.calls[0]?.[0]).toMatchObject({
-      id: original.id,
-      sizeBytes: 9 * MIB,
-    })
+  beforeEach(() => {
+    composerState.composerImageAttachments = [pendingImage]
+    draftState.value = 'inspect this image'
+    Object.assign(composerModelState, SUPPORTED_CAPABILITY)
   })
 
-  it('refuses an annotation over the 16MiB per-image limit and keeps the original', () => {
-    const original = existingAttachment('photo.png', 4 * MIB)
-    composerState.composerImageAttachments = [original]
-    const { container } = render(<ComposerPanel inline={false} />)
-    openAnnotation(container, 'photo.png')
+  it('keeps the pending chip, shows the block notice, and refuses Enter and the send button', () => {
+    const { rerender } = render(<ComposerPanel inline />)
+    expect(screen.queryByTestId('composer-image-capability-notice')).toBeNull()
 
-    annotationStub.next = { ...original, sizeBytes: 17 * MIB }
-    applyAnnotation()
+    // The host now reports the effective model as unable to receive images.
+    Object.assign(composerModelState, {
+      imageInput: switchedAway,
+      canAttachImages: false,
+      imageBlockMessage: capabilityMessage(switchedAway),
+      visualSendBlocked: true,
+    })
+    rerender(<ComposerPanel inline />)
 
-    expect(composerActions.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
-    // The message the annotation dialog renders above its overlay; the original
-    // attachment is never replaced.
-    expect(annotationStub.threw).toContain(
-      'photo.png was kept unchanged. Max size is 16 MiB per image.'
-    )
+    // The pending attachment is still there, with the reason it cannot be sent.
+    expect(screen.getByRole('button', { name: 'Remove pending.png' })).toBeTruthy()
+    const notice = screen.getByTestId('composer-image-capability-notice')
+    expect(notice.getAttribute('role')).toBe('alert')
+    expect(notice.textContent).toBe(capabilityMessage(switchedAway))
+    // The disabled send button points assistive technology at the reason.
+    const describedBy = screen.getByTestId('send-button').getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)).toBe(notice)
+
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
+    expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(true)
+    expect(fireEvent.keyDown(textarea, { key: 'Enter' })).toBe(false)
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
+    // Shift+Enter is still a newline, and still not a send.
+    expect(fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })).toBe(true)
+    expect(actionsMock.handleSendAgentMessage).not.toHaveBeenCalled()
   })
 
-  it('applies an annotation next to a 10MiB sibling when only the hop owns the aggregate', () => {
-    const original = existingAttachment('photo.png', 4 * MIB)
-    composerState.composerImageAttachments = [original, existingAttachment('other.png', 10 * MIB)]
-    const { container } = render(<ComposerPanel inline={false} />)
-    openAnnotation(container, 'photo.png')
+  it('sends the pending image with Enter while the model can receive images', () => {
+    render(<ComposerPanel inline />)
+    expect(screen.queryByTestId('composer-image-capability-notice')).toBeNull()
+    expect(screen.getByTestId('send-button').hasAttribute('aria-describedby')).toBe(false)
+    const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
 
-    annotationStub.next = { ...original, sizeBytes: 7 * MIB }
-    applyAnnotation()
+    expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)
+    expect(fireEvent.keyDown(textarea, { key: 'Enter' })).toBe(false)
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledWith('inspect this image')
 
-    expect(annotationStub.threw).toBeNull()
-    expect(composerActions.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
-    expect(composerActions.handleUpdateComposerImageAttachment.mock.calls[0]?.[0]).toMatchObject({
-      id: original.id,
-      sizeBytes: 7 * MIB,
-    })
+    fireEvent.click(screen.getByTestId('send-button'))
+    expect(actionsMock.handleSendAgentMessage).toHaveBeenCalledTimes(2)
   })
 
-  it('applies an annotation that exactly reaches the former 16MiB composer total', () => {
-    const original = existingAttachment('photo.png', 4 * MIB)
-    composerState.composerImageAttachments = [original, existingAttachment('other.png', 10 * MIB)]
-    const { container } = render(<ComposerPanel inline={false} />)
-    openAnnotation(container, 'photo.png')
+  it('renders the pending image chip and dispatches removal with its id', () => {
+    render(<ComposerPanel inline />)
 
-    annotationStub.next = { ...original, sizeBytes: 6 * MIB }
-    applyAnnotation()
+    expect(screen.getByText('pending.png')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove pending.png' }))
+    expect(actionsMock.handleRemoveComposerImageAttachment).toHaveBeenCalledWith('pending-image-1')
+  })
+})
 
-    expect(annotationStub.threw).toBeNull()
-    expect(composerActions.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
-    expect(composerActions.handleUpdateComposerImageAttachment.mock.calls[0]?.[0]).toMatchObject({
-      id: original.id,
-      sizeBytes: 6 * MIB,
-    })
+describe('ComposerPanel failed-send recovery actions', () => {
+  const failedSend: FailedAgentSend = {
+    content: 'inspect this image',
+    attachments: [],
+    references: [],
+    message: 'Image input evidence changed',
+    kind: 'upstream',
+    timestamp: 1,
+    agentRef: 'agent-1',
+    chatId: 'chat-1',
+  }
+
+  it('offers explicit recovery and dispatch and routes each action to the controller', () => {
+    composerState.failedAgentSend = failedSend
+    composerState.agentError = 'Sending failed'
+    render(<ComposerPanel inline />)
+
+    expect(screen.getByText('Sending failed')).toBeTruthy()
+    expect(screen.getByText('Image input evidence changed')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Recover input' }))
+    expect(actionsMock.handleRecoverFailedAgentSend).toHaveBeenCalledTimes(1)
+    expect(actionsMock.handleDiscardFailedAgentSend).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Discard failed input' }))
+    expect(actionsMock.handleDiscardFailedAgentSend).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry last send' }))
+    expect(actionsMock.handleRetryFailedAgentSend).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables recovery while a send is in flight', () => {
+    composerState.failedAgentSend = failedSend
+    composerState.agentError = 'Sending failed'
+    composerState.agentSending = true
+    render(<ComposerPanel inline />)
+
+    for (const name of ['Recover input', 'Discard failed input', 'Retry last send']) {
+      expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true)
+    }
+  })
+
+  it('explains the waking state and routes its retry to the controller', () => {
+    composerState.failedAgentSend = { ...failedSend, kind: 'waking' }
+    composerState.agentError = 'Sending failed'
+    render(<ComposerPanel inline />)
+
+    const waking = screen.getByTestId('waking-state')
+    expect(waking.getAttribute('role')).toBe('status')
+    expect(waking.textContent).toContain('Agent is waking up')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry last send' }))
+    expect(actionsMock.handleRetryFailedAgentSend).toHaveBeenCalledTimes(1)
   })
 })

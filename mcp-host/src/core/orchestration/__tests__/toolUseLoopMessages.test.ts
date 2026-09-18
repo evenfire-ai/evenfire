@@ -256,6 +256,7 @@ describe('appendToolResults', () => {
     const visual = messages[1]
     expect(visual.role).toBe('user')
     expect(visual.content).toBe('Here are the screenshots from the tool results above.')
+    expect(visual.imageOrigin).toBe('tool_result')
     expect(visual.contentParts).toEqual([
       { type: 'text', text: visual.content },
       {
@@ -365,5 +366,41 @@ describe('appendToolResults', () => {
       { kind: 'tool', attachmentId: 'att-a', toolCallId: 'tc_identity' },
       { kind: 'tool', attachmentId: 'att-b', toolCallId: 'tc_identity' },
     ])
+  })
+
+  it('marks the screenshot message as tool-originated (#654)', () => {
+    const messages: ChatMessage[] = []
+    const collectedAttachments: Attachment[] = []
+    const payloadKey = 'data' + 'Base' + '64'
+    const screenshot = (id: string, body: string): Attachment =>
+      ({
+        id,
+        kind: 'image',
+        mimeType: 'image/png',
+        encoding: ['base', '64'].join('') as Attachment['encoding'],
+        [payloadKey]: Buffer.from(body).toString(('base' + '64') as BufferEncoding),
+        sourceTool: 'browser__screenshot',
+      }) as unknown as Attachment
+
+    appendToolResults(
+      messages,
+      [
+        {
+          tool_call_id: 'tc_1',
+          name: 'browser__screenshot',
+          content: 'captured 2 viewports',
+          is_error: false,
+          attachments: [screenshot('shot-1', 'first-png'), screenshot('shot-2', 'second-png')],
+        },
+      ],
+      collectedAttachments
+    )
+
+    const screenshotMessage = messages.find(message => message.role === 'user')
+    expect(screenshotMessage).toBeDefined()
+    // The flag is what lets `LlmPortAdapter.prepareMessagesForImageInput` tell a
+    // tool screenshot (withheld) from a user attachment (refused).
+    expect(screenshotMessage).toMatchObject({ role: 'user', imageOrigin: 'tool_result' })
+    expect(screenshotMessage!.contentParts?.filter(part => part.type === 'image')).toHaveLength(2)
   })
 })

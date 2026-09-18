@@ -44,6 +44,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
@@ -53,6 +55,7 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forces host messages onto the authenticated rpc envelope', async () => {
@@ -62,6 +65,9 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
       .send({
         content: 'hi',
         channelType: 'slack',
+        model: 'vision-model',
+        modelSelectionRevision: 7,
+        imageModel: { provider: 'untrusted', model: 'untrusted' },
         channelId: 'attacker-channel',
         hostRef: 'attacker-host',
         threadId: 'chat-1',
@@ -86,10 +92,13 @@ describe('POST /rpc/hosts/:hostRef/messages — sender assignment invariant', ()
     // identical turns. Assert it is a non-empty string separately; every OTHER
     // envelope field is still server-derived and overrides client input.
     expect(typeof forwardedBody.messageId).toBe('string')
+    expect(forwardedBody).not.toHaveProperty('imageModel')
     expect((forwardedBody.messageId as string).length).toBeGreaterThan(0)
     expect(forwardedBody).toMatchObject({
       content: 'hi',
       channelType: 'rpc',
+      model: 'vision-model',
+      modelSelectionRevision: 7,
       channelId: 'chatllm',
       hostRef: 'chatllm',
       sender: 'user-uuid-abc',
@@ -154,6 +163,7 @@ describe('POST /rpc/hosts/:hostRef/approvals/approve — userId identity invaria
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards userId = auth.sub regardless of client-supplied userId', async () => {
@@ -191,6 +201,7 @@ describe('POST /rpc/hosts/:hostRef/approvals/deny — userId identity invariant'
 
   afterEach(() => {
     vi.restoreAllMocks()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards userId = auth.sub regardless of client-supplied userId', async () => {

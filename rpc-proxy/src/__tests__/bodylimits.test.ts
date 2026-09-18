@@ -13,11 +13,38 @@
  * Auth is deliberately NOT mocked. A 401 is the proof that the body crossed the
  * parser and only the auth boundary stopped it.
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Server } from 'http'
 import type { AddressInfo } from 'net'
 import { createRequire } from 'node:module'
 import { createApp } from '../app.js'
+
+const authTokenMock = vi.hoisted(() => ({
+  verifyRpcToken: vi.fn(),
+}))
+
+const serviceMock = vi.hoisted(() => ({
+  resolveHostConnectionForUser: vi.fn(),
+  resolveServerConnectionForUser: vi.fn(),
+  forwardHostMessageToHost: vi.fn(),
+  validateRpcRequest: vi.fn(),
+  forwardRpcToServer: vi.fn(),
+}))
+
+vi.mock('../authToken.js', () => authTokenMock)
+vi.mock('../services/mcpProxyService.js', () => serviceMock)
+
+const VALID_CLAIMS = {
+  sub: 'user-uuid-abc',
+  typ: 'user' as const,
+  accessScope: 'team' as const,
+  teamId: 'team-1',
+  scopes: ['host:message:invoke', 'mcp:server:invoke'],
+  hostRefs: ['chatllm'],
+  jti: 'j1',
+  iat: 1,
+  exp: 9999999999,
+}
 
 const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
   '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
@@ -36,6 +63,24 @@ beforeAll(async () => {
   server = createApp().listen(0)
   await new Promise<void>(resolve => server.once('listening', resolve))
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+})
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  authTokenMock.verifyRpcToken.mockReturnValue(VALID_CLAIMS)
+  serviceMock.resolveHostConnectionForUser.mockResolvedValue({
+    name: 'chatllm',
+    url: 'http://chatllm:8080',
+    headers: {},
+  })
+  serviceMock.forwardHostMessageToHost.mockResolvedValue({ success: true, status: 'completed' })
+  serviceMock.resolveServerConnectionForUser.mockResolvedValue({
+    name: 'demo',
+    url: 'http://demo:8080',
+    headers: {},
+  })
+  serviceMock.validateRpcRequest.mockReturnValue({ method: 'ping' })
+  serviceMock.forwardRpcToServer.mockResolvedValue({ jsonrpc: '2.0', id: 1, result: {} })
 })
 
 afterAll(async () => {
@@ -101,7 +146,7 @@ function imageAttachment(
 async function post(path: string, body: string): Promise<Response> {
   return fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', authorization: 'Bearer token' },
     body,
   })
 }
@@ -120,7 +165,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeGreaterThan(16 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('carries a 10MiB image (the former per-image limit) to the auth boundary', async () => {
@@ -131,7 +176,7 @@ describe('rpc-proxy chat message body budget', () => {
     // 10MiB of bytes encodes to more than 13MiB, well past the old 6MiB parser.
     expect(Buffer.byteLength(body)).toBeGreaterThan(13 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('carries a 5MiB JPEG to the auth boundary', async () => {
@@ -141,7 +186,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeGreaterThan(6 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('carries 10MiB PNG + 5MiB JPEG to the auth boundary', async () => {
@@ -151,7 +196,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeGreaterThan(20 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('carries 10MiB + 5MiB (the 15MiB total limit) to the auth boundary', async () => {
@@ -161,7 +206,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeGreaterThan(20 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('carries three 5MiB images to the auth boundary', async () => {
@@ -175,7 +220,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeGreaterThan(20 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('credits twenty small images instead of charging them as text', async () => {
@@ -187,7 +232,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeLessThan(6 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('rejects a 21st qualifying image instead of charging it as text', async () => {
@@ -230,7 +275,7 @@ describe('rpc-proxy chat message body budget', () => {
     })
     expect(Buffer.byteLength(body)).toBeLessThan(24 * MIB)
     const response = await post(MESSAGE_PATH, body)
-    expect(response.status).toBe(401)
+    expect(response.status).toBe(200)
   })
 
   it('rejects 9MiB + 8MiB on the 16MiB total alone, under the 24MiB ceiling', async () => {
@@ -295,11 +340,8 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(413)
   })
 
-  it('keeps the 6MiB parser on every other POST route', async () => {
-    const response = await post(
-      '/api/v1/rpc/hosts/chatllm/wake',
-      JSON.stringify({ a: 'x'.repeat(7 * MIB) })
-    )
+  it('keeps the 10mb parser on authenticated non-chat JSON routes', async () => {
+    const response = await post('/api/v1/rpc/demo', JSON.stringify({ a: 'x'.repeat(11 * MIB) }))
     expect(response.status).toBe(413)
   })
 

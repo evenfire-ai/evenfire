@@ -73,6 +73,9 @@ describe('AppService.invokeHostMessage', () => {
       {
         content: 'What workflow recipes can I trigger and what inputs do they require?',
         channelType: 'slack',
+        model: 'vision-model',
+        modelSelectionRevision: 7,
+        imageModel: { provider: 'untrusted', model: 'untrusted' },
         channelId: 'attacker-channel',
         hostRef: 'attacker-host',
         sender: 'attacker-controlled-user',
@@ -93,6 +96,8 @@ describe('AppService.invokeHostMessage', () => {
     expect(forwarded).toEqual({
       content: 'What workflow recipes can I trigger and what inputs do they require?',
       channelType: 'rpc',
+      model: 'vision-model',
+      modelSelectionRevision: 7,
       channelId: 'chatllm',
       hostRef: 'chatllm',
       sender: '00000000-0000-4000-8000-000000000001',
@@ -209,6 +214,42 @@ describe('AppService.invokeHostMessage', () => {
     expect(forwarded.attachments).toEqual(attachments)
     expect(Buffer.from(forwarded.attachments[0].dataBase64, 'base64')).toHaveLength(10 * MIB)
     expect(Buffer.from(forwarded.attachments[1].dataBase64, 'base64')).toHaveLength(5 * MIB)
+  })
+
+  it('rejects malformed attachments before issuing an RPC token', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'test-token-session'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+      teamName: 'Test Team',
+      role: 'member',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'test-token-rpc' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ success: true, response: 'ok' }),
+    }
+    const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'hello', attachments: {} }, ['chatllm'])
+    ).rejects.toThrow('Image attachments must be a list.')
+    expect(issueToken).not.toHaveBeenCalled()
+    expect(service.rpcTokenManager.getOrIssue).not.toHaveBeenCalled()
+    expect(service.rpcClient.invokeHostMessage).not.toHaveBeenCalled()
+
+    // Positive control: the same call with a well-formed list issues the token
+    // and reaches the Host, so the checks above are not vacuous.
+    await service.invokeHostMessage('chatllm', { content: 'hello', attachments: [] }, ['chatllm'])
+    expect(issueToken).toHaveBeenCalledTimes(1)
+    expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalled()
+    expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
   })
 
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
