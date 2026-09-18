@@ -263,7 +263,10 @@ export function openFilesTab(
  * out. It does NOT re-dedupe — dedupe is an open-time rule only (§3).
  *
  * `title` is the current folder's display name (which the opaque `gfsUri` does
- * not carry), supplied by the browser; absent / empty ⇒ 'Files'.
+ * not carry), supplied by the browser; absent / empty ⇒ 'Files'. It is a GFS
+ * folder name — externally-controlled input in the same threat class as a
+ * preview tab's file name — so it passes through the shared tab-title sanitizer
+ * at this store border (mirrors `openPreviewTab` / `setAppTabTitle`).
  */
 export function setFilesTabPath(
   state: WorkspaceTabsState,
@@ -274,7 +277,7 @@ export function setFilesTabPath(
   const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'files')
   if (!target) return state
   const nextPath = path ?? null
-  const nextTitle = title?.trim() || 'Files'
+  const nextTitle = (title ? sanitizeAppTabTitle(title) : '') || 'Files'
   if ((target.files?.path ?? null) === nextPath && target.title === nextTitle) return state
   return {
     ...state,

@@ -304,6 +304,18 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
     expect(rooted?.title).toBe('Files')
   })
 
+  it('sanitizes an externally-controlled folder name at the files store border', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-1', path: null })
+    // A GFS folder name carrying a bidi override + zero-width is the same threat
+    // class as a preview file name — it must not reach the tab chrome raw.
+    state = setFilesTabPath(state, 'f-1', 'gfs://main/ccc', `In‮voices​`)
+    expect(state.tabs.find(t => t.id === 'f-1')?.title).toBe('Invoices')
+    // A folder name that reduces to empty after sanitizing falls back to 'Files'.
+    state = setFilesTabPath(state, 'f-1', 'gfs://main/blank', `‮​`)
+    expect(state.tabs.find(t => t.id === 'f-1')?.title).toBe('Files')
+  })
+
   it('setFilesTabPath is a no-op (same ref) when nothing moved, or the tab is missing / not files', () => {
     let state = createEmptyWorkspaceTabsState()
     state = openFilesTab(state, { id: 'f-1', path: 'gfs://main/aaa', title: 'Reports' })
