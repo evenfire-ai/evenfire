@@ -49,7 +49,10 @@ import {
 import { HttpMcpHostClient } from '../workflow/httpMcpHostClient'
 import { JwtTokenFactory } from '../workflow/jwtTokenFactory'
 import { K8sSecretReaderImpl } from '../workflow/k8sSecretReaderImpl'
-import { readRecipeCodexConnectionRef } from '../workflow/llmAllowedModelsSnapshot'
+import {
+  readRecipeCodexConnectionRef,
+  readRecipeGrokConnectionRef,
+} from '../workflow/llmAllowedModelsSnapshot'
 import { ModelConfigHandler } from '../workflow/modelConfigHandler'
 import { buildCoordinatorGfsNetworkPolicy } from '../workflow/networkPolicyFactory'
 import type { EagerSdkBootstrapProof } from '../workflow/pluginWorkloadSdkProvisioner'
@@ -1016,6 +1019,7 @@ export class WorkflowRecipeReconciler {
         enableCustomCoordinatorImage: this.config.enableCustomCoordinatorImage,
         enableSnippetRuntime: this.config.enableSnippetRuntime,
         pluginWorkloadSdkEnabled: this.config.pluginWorkloadSdkEnabled,
+        grokSubscriptionEnabled: this.config.grokSubscriptionEnabled,
         maxWorkflowSteps: this.config.maxWorkflowSteps,
         allowedCoordinatorImagePrefixes: this.config.allowedCoordinatorImagePrefixes,
         requireCoordinatorImageDigest: this.config.requireCoordinatorImageDigest,
@@ -1044,7 +1048,9 @@ export class WorkflowRecipeReconciler {
       // configure path (Option A). Same wiring as mcp/server.ts.
       modelConfigHandler: new ModelConfigHandler(
         new K8sSecretReaderImpl(this.coreApi),
-        new HttpMcpHostClient()
+        new HttpMcpHostClient(),
+        undefined,
+        { grokSubscriptionEnabled: this.config.grokSubscriptionEnabled }
       ),
       pluginWorkloadSdkRevocationClient: new HttpPluginWorkloadSdkRevocationClient(),
     }
@@ -1283,6 +1289,7 @@ export class WorkflowRecipeReconciler {
       claimedParent: this.claimedCodexParent(recipe),
       parentSpec: parent.spec,
       connectionKey: readRecipeCodexConnectionRef(grantAnnotations),
+      grokConnectionKey: readRecipeGrokConnectionRef(grantAnnotations),
     })
   }
 

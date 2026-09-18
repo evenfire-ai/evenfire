@@ -203,6 +203,7 @@ describe('validateUsageEvent', () => {
 
   it('rejects reporter Codex events in every reporter shape', () => {
     expect(validateUsageEvent({ ...VALID_EVENT, provider: 'codex-subscription' })).toBeNull()
+    expect(validateUsageEvent({ ...VALID_EVENT, provider: 'grok-subscription' })).toBeNull()
     expect(
       validateUsageEvent({
         ...VALID_EVENT,
@@ -252,6 +253,38 @@ describe('validateUsageEvent', () => {
       source_kind: 'channel',
       user_id: null,
       llm_secret_name: null,
+      request_id: '33333333-3333-4333-8333-333333333333',
+    })
+  })
+
+  it('accepts finalize-origin Grok channel events with a null secret', () => {
+    const ev = validateUsageEvent(
+      {
+        request_id: '33333333-3333-4333-8333-333333333333',
+        ts: '2026-04-29T10:00:00.000Z',
+        run_id: null,
+        host_ref: 'research-host',
+        context_ref: null,
+        team_id: null,
+        provider: 'grok-subscription',
+        model: 'grok-4.6',
+        llm_secret_name: null,
+        source_kind: 'channel',
+        user_id: null,
+        sender: null,
+        channel_type: null,
+        recipe_name: null,
+        cron_job_id: null,
+        task_id: null,
+        iteration: null,
+        input_tokens: 12,
+        output_tokens: 4,
+      },
+      { origin: 'finalize' }
+    )
+    expect(ev).toMatchObject({
+      provider: 'grok-subscription',
+      source_kind: 'channel',
       request_id: '33333333-3333-4333-8333-333333333333',
     })
   })

@@ -40,6 +40,7 @@ SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -50,7 +51,9 @@ SERVICES := \
 	packages/gfs-interaction-policy \
 	packages/workflow-runtime-core \
 	packages/workflow-sdk \
-	packages/llm-provider-attempt-contract
+	packages/llm-provider-attempt-contract \
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
 
 # Services that have unit tests
 TEST_SERVICES := \
@@ -64,6 +67,7 @@ TEST_SERVICES := \
 	mcp-proxy \
 	webhook-proxy \
 	codex-llm-proxy \
+	grok-llm-proxy \
 	webhook-gateway \
 	stdio-bridge \
 	profile-ui \
@@ -75,7 +79,10 @@ TEST_SERVICES := \
 	packages/workflow-sdk \
 	packages/network-policy-core \
 	packages/llm-provider-attempt-contract \
-	packages/llm-providers
+	packages/llm-providers \
+	packages/grok-provider-attempt-contract
+
+
 # ── Optional private infra (gcp-*, promotion) ──────────────────────────────
 -include Makefile.infra
 # ── Optional OSS-launch tooling (public snapshot / infra carve) — monorepo-only
@@ -125,6 +132,14 @@ test-unit-all: ## Run unit tests across all services
 .PHONY: test-codex-subscription-t0
 test-codex-subscription-t0: ## Run the Codex subscription T0 aggregator (counts, no skips)
 	@bash scripts/tests/test-codex-subscription-t0.sh
+
+.PHONY: test-llm-subscription-extract-t0
+test-llm-subscription-extract-t0: ## Run the wave-1 oauth-broker extract T0 aggregator
+	@bash scripts/tests/test-llm-subscription-extract-t0.sh
+
+.PHONY: test-grok-subscription-t0
+test-grok-subscription-t0: ## Run the Grok subscription T0 aggregator (counts, no skips)
+	@bash scripts/tests/test-grok-subscription-t0.sh
 
 # ── Build Preflight ──────────────────────────────────────────────────
 .PHONY: build-preflight

@@ -44,6 +44,7 @@ const MODEL_NOT_ALLOWED_TOKEN = 'model_not_allowed'
 const MODEL_SELECTION_CONFLICT_TOKEN = 'model_selection_conflict'
 /** Broker-backed hosts have no static default; the operator must name a model. */
 const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
+const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
 
 /**
  * `unavailable` means the host answered and has no model endpoint (it predates
@@ -132,7 +133,7 @@ function keyFor(agentRef: string, chatId: string | null): string {
 }
 
 export function isBrokerBackedProvider(provider: string | null | undefined): boolean {
-  return provider === CODEX_SUBSCRIPTION_PROVIDER
+  return provider === CODEX_SUBSCRIPTION_PROVIDER || provider === GROK_SUBSCRIPTION_PROVIDER
 }
 
 function getEntry(agentRef: string, chatId: string | null): Entry {

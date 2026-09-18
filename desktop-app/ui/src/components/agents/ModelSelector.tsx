@@ -22,6 +22,7 @@ export interface ModelSelectorProps {
 /** How long the "applies to your next message" confirmation badge stays up. */
 const APPLIED_BADGE_MS = 4000
 
+/** Broker-backed hosts have no static default; the operator must name a model. */
 const SELECT_MODEL_LABEL = 'Select model'
 
 function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {

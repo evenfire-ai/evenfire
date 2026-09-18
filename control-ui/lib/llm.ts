@@ -51,14 +51,53 @@ export const LLM_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> 
 
 /** Runtime broker id. Never offer this as a second Provider row in operator pickers. */
 export const OPENAI_SUBSCRIPTION_PROVIDER = 'codex-subscription' as const
+export const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription' as const
 
 export function isOpenAiFamily(provider: string | undefined | null): boolean {
   return provider === 'openai' || provider === OPENAI_SUBSCRIPTION_PROVIDER
 }
 
+export function isOauthBrokerProvider(provider: string | undefined | null): boolean {
+  return (
+    typeof provider === 'string' &&
+    isLlmProviderId(provider) &&
+    PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+  )
+}
+
 /** Provider dropdown: one OpenAI entry. Runtime still persists `codex-subscription`. */
 export const OPERATOR_PROVIDER_OPTIONS: Array<{ value: LlmProvider; label: string }> =
   LLM_PROVIDER_OPTIONS.filter(option => option.value !== OPENAI_SUBSCRIPTION_PROVIDER)
+
+/** Hide Grok until Control API proves the flag is on. */
+export function operatorProviderOptions(opts?: {
+  grokEnabled?: boolean
+}): Array<{ value: LlmProvider; label: string }> {
+  return OPERATOR_PROVIDER_OPTIONS.filter(
+    option => option.value !== GROK_SUBSCRIPTION_PROVIDER || opts?.grokEnabled === true
+  )
+}
+
+/**
+ * Runtime provider picker for the allowlist, price and budget tables: every
+ * provider id (incl. codex-subscription), with Grok hidden until Control API
+ * proves the flag on. A saved known provider the picker no longer offers stays
+ * available, labelled "(disabled)", so editing never silently drops it.
+ */
+export function runtimeProviderOptions(opts?: {
+  grokEnabled?: boolean
+  saved?: ReadonlyArray<string | null | undefined>
+}): Array<{ value: LlmProvider; label: string }> {
+  const options = LLM_PROVIDER_OPTIONS.filter(
+    option => option.value !== GROK_SUBSCRIPTION_PROVIDER || opts?.grokEnabled === true
+  )
+  for (const value of opts?.saved ?? []) {
+    if (!value || !isLlmProviderId(value)) continue
+    if (options.some(option => option.value === value)) continue
+    options.push({ value, label: `${PROVIDER_DISPLAY_LABELS[value]} (disabled)` })
+  }
+  return options
+}
 
 export function catalogGroupKey(provider: string): string {
   return provider === OPENAI_SUBSCRIPTION_PROVIDER ? 'openai' : provider
@@ -276,30 +315,61 @@ export function budgetUnitAllowedForProviders(
 // Recipe authoring guard: a broker-backed agent must name an explicit model
 // and must not carry an LLM secretRef or a cost-unit budget. The grant lives
 // on metadata.annotations[clerum.io/codex-connection-ref], not in spec.
+function recipeOauthBrokerAgent(spec: Record<string, unknown>): Record<string, unknown> | null {
+  const consider = (value: unknown): Record<string, unknown> | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const record = value as Record<string, unknown>
+    const provider = typeof record.provider === 'string' ? record.provider : ''
+    if (isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') return record
+    return null
+  }
+  const top = consider(spec.agent)
+  if (top) return top
+  if (!Array.isArray(spec.steps)) return null
+  for (const step of spec.steps) {
+    if (!step || typeof step !== 'object' || Array.isArray(step)) continue
+    const found = consider((step as Record<string, unknown>).agent)
+    if (found) return found
+  }
+  return null
+}
+
 export function brokerBackedRecipeAuthoringError(
   spec: Record<string, unknown>,
   connectionRef?: string
 ): string | null {
-  const agent = spec.agent
-  if (!agent || typeof agent !== 'object' || Array.isArray(agent)) return null
-  const record = agent as Record<string, unknown>
+  const record = recipeOauthBrokerAgent(spec)
+  if (!record) return null
   const provider = typeof record.provider === 'string' ? record.provider : ''
   if (!isLlmProviderId(provider) || PROVIDER_AUTH_MODE[provider] !== 'oauth-broker') {
     return null
   }
   const model = typeof record.model === 'string' ? record.model.trim() : ''
-  if (!model) return 'Codex subscription requires an explicit catalog model.'
+  const grok = provider === GROK_SUBSCRIPTION_PROVIDER
+  if (!model) {
+    return grok
+      ? 'Grok subscription requires an explicit catalog model.'
+      : 'Codex subscription requires an explicit catalog model.'
+  }
   if (record.secretRef != null) {
-    return 'Codex subscription recipes must not declare an LLM secretRef.'
+    return grok
+      ? 'Grok subscription recipes must not declare an LLM secretRef.'
+      : 'Codex subscription recipes must not declare an LLM secretRef.'
   }
   const budget = spec.budget
   if (budget && typeof budget === 'object' && !Array.isArray(budget)) {
     const unit = (budget as Record<string, unknown>).unit
-    if (unit === 'cost') return 'Codex subscription budgets must use unit tokens, not cost.'
+    if (unit === 'cost') {
+      return grok
+        ? 'Grok subscription budgets must use unit tokens, not cost.'
+        : 'Codex subscription budgets must use unit tokens, not cost.'
+    }
   }
   const grant = typeof connectionRef === 'string' ? connectionRef.trim() : ''
   if (!grant || grant === CODEX_UNASSIGNED_CONNECTION_KEY) {
-    return 'Codex subscription recipes must choose an existing ChatGPT grant.'
+    return grok
+      ? 'Grok subscription recipes must choose an existing Grok grant.'
+      : 'Codex subscription recipes must choose an existing ChatGPT grant.'
   }
   return null
 }
@@ -362,6 +432,25 @@ export function isProviderUsable(
   isPresent: (dataKey: string) => boolean
 ): boolean {
   return getLlmGroupCompleteness(getLlmCredentialGroup(provider), isPresent).usable
+}
+
+// Whether a linked LLM Secret (its data keys via `isPresent`) can serve the
+// chain it is linked for. A static primary must itself be usable (asymmetric
+// gate). An oauth-broker primary authenticates through its grant, so the Secret
+// exists only for the static-credential fallbacks: at least one of THOSE must
+// be usable. Broker fallbacks never count — a zero-slot broker is trivially
+// "usable" and would otherwise make any Secret look valid.
+export function isLinkedSecretUsableForChain(
+  primary: LlmProvider,
+  fallbacks: Array<{ provider: string }> | undefined,
+  isPresent: (dataKey: string) => boolean
+): boolean {
+  if (!isOauthBrokerProvider(primary)) return isProviderUsable(primary, isPresent)
+  return (fallbacks ?? []).some(
+    entry =>
+      providerRequiresLlmSecret(entry.provider) &&
+      isProviderUsable(entry.provider as LlmProvider, isPresent)
+  )
 }
 
 // The credential dataKeys currently in the provider domain — the primary's

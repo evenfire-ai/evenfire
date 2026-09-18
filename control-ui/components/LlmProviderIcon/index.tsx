@@ -23,7 +23,11 @@ export function LlmProviderIcon({ provider, label }: LlmProviderIconProps) {
       {failed ? (
         <span>{label.slice(0, 1).toUpperCase()}</span>
       ) : (
-        <img src={`/provider-icons/${provider}.svg`} alt="" onError={() => setFailed(true)} />
+        <img
+          src={`/provider-icons/${provider === 'grok-subscription' ? 'xai' : provider}.svg`}
+          alt=""
+          onError={() => setFailed(true)}
+        />
       )}
     </span>
   )

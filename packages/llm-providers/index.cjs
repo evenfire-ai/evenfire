@@ -53,6 +53,7 @@ const PROVIDER_IDS = Object.freeze([
   'azure',
   // OAuth-broker subscription provider. Not part of env-key autodetection.
   'codex-subscription',
+  'grok-subscription',
 ])
 
 // Model identifiers are transport selectors, not arbitrary user text. Keep
@@ -119,8 +120,9 @@ const PROVIDER_CREDENTIAL_SLOTS = Object.freeze({
   minimax: apiKeySlot('minimax-api-key', 'MINIMAX_API_KEY'),
   // Azure: one API key, sent via the `api-key` header (driver concern, not here).
   azure: apiKeySlot('azure-openai-api-key', 'AZURE_OPENAI_API_KEY'),
-  // Subscription broker: zero Secret slots. Env autodetection must never pick it.
+  // Subscription brokers: zero Secret slots. Env autodetection must never pick them.
   'codex-subscription': Object.freeze([]),
+  'grok-subscription': Object.freeze([]),
 })
 
 /**
@@ -151,6 +153,7 @@ const PROVIDER_DISPLAY_LABELS = Object.freeze({
   minimax: 'MiniMax',
   azure: 'Azure OpenAI',
   'codex-subscription': 'OpenAI Codex Subscription',
+  'grok-subscription': 'xAI Grok Subscription',
 })
 
 /**
@@ -193,6 +196,7 @@ const PROVIDER_NON_SECRET_ENV = Object.freeze({
     Object.freeze({ envName: 'AZURE_OPENAI_API_VERSION', required: false }),
   ]),
   'codex-subscription': Object.freeze([]),
+  'grok-subscription': Object.freeze([]),
 })
 
 // SECURITY: use an own-property check, NOT `in`. `in` walks the prototype chain
@@ -221,22 +225,50 @@ function isCredentialSlotOwnedByProvider(provider, credentialSlot) {
   return canonical.includes(credentialSlot)
 }
 
-/** @type {Record<string, 'static-credentials' | 'oauth-broker'>} */
-const PROVIDER_AUTH_MODE = Object.freeze(
-  Object.fromEntries(
-    PROVIDER_IDS.map(id => [
-      id,
-      id === 'codex-subscription' ? 'oauth-broker' : 'static-credentials',
-    ])
-  )
+const OAUTH_BROKER_IDS = Object.freeze(['codex-subscription', 'grok-subscription'])
+
+/**
+ * Pure map builder so tests can inject a second broker id without editing
+ * production PROVIDER_IDS. Production maps call this with OAUTH_BROKER_IDS.
+ * @param {readonly string[]} ids
+ * @param {readonly string[]} brokerIds
+ */
+function buildProviderMaps(ids, brokerIds) {
+  const brokers = new Set(brokerIds)
+  return {
+    PROVIDER_AUTH_MODE: Object.freeze(
+      Object.fromEntries(
+        ids.map(id => [id, brokers.has(id) ? 'oauth-broker' : 'static-credentials'])
+      )
+    ),
+    PROVIDER_MODEL_CATALOG_MODE: Object.freeze(
+      Object.fromEntries(ids.map(id => [id, brokers.has(id) ? 'dynamic' : 'static']))
+    ),
+  }
+}
+
+const { PROVIDER_AUTH_MODE, PROVIDER_MODEL_CATALOG_MODE } = buildProviderMaps(
+  PROVIDER_IDS,
+  OAUTH_BROKER_IDS
 )
 
-/** @type {Record<string, 'static' | 'dynamic'>} */
-const PROVIDER_MODEL_CATALOG_MODE = Object.freeze(
-  Object.fromEntries(
-    PROVIDER_IDS.map(id => [id, id === 'codex-subscription' ? 'dynamic' : 'static'])
-  )
-)
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_EXECUTE_SCOPE = Object.freeze({
+  'codex-subscription': 'llm:codex:execute',
+  'grok-subscription': 'llm:grok:execute',
+})
+
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_PROXY_APP = Object.freeze({
+  'codex-subscription': 'codex-llm-proxy',
+  'grok-subscription': 'grok-llm-proxy',
+})
+
+/** @type {Record<string, string | undefined>} */
+const PROVIDER_PROXY_SERVICE = Object.freeze({
+  'codex-subscription': 'codex-llm-proxy',
+  'grok-subscription': 'grok-llm-proxy',
+})
 
 function providerDescriptor(id) {
   if (!isLlmProviderId(id)) {
@@ -249,6 +281,9 @@ function providerDescriptor(id) {
     modelCatalogMode: PROVIDER_MODEL_CATALOG_MODE[id],
     credentialSlots: PROVIDER_CREDENTIAL_SLOTS[id],
     nonSecretEnv: PROVIDER_NON_SECRET_ENV[id],
+    executeScope: PROVIDER_EXECUTE_SCOPE[id],
+    proxyApp: PROVIDER_PROXY_APP[id],
+    proxyService: PROVIDER_PROXY_SERVICE[id],
   })
 }
 
@@ -275,6 +310,8 @@ module.exports = {
   PROVIDER_NON_SECRET_ENV,
   PROVIDER_AUTH_MODE,
   PROVIDER_MODEL_CATALOG_MODE,
+  OAUTH_BROKER_IDS,
+  buildProviderMaps,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,
   isRunnableLlmModelId,

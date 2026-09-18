@@ -343,6 +343,35 @@ describe('CodexSubscriptionProvider', () => {
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
   })
 
+  it.each([
+    ['unknown', 'partial codex text', 'outcome_unknown'],
+    ['canceled', '', 'canceled'],
+    ['canceled', 'partial codex text', 'canceled'],
+  ] as const)(
+    'rejects a non-success %s terminal outcome (text=%j) instead of completing',
+    async (outcome, text, code) => {
+      const stream = vi.fn().mockResolvedValue({ text, toolCalls: [], outcome })
+      const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps({ stream }) as never)
+
+      const single = provider.completeSingleTurn([{ role: 'user', content: 'hi' }])
+      await expect(single).rejects.toBeInstanceOf(CodexProxyError)
+      await expect(single).rejects.toMatchObject({ code, dispatched: true })
+
+      await expect(
+        provider.completeSingleTurnWithTools(
+          [{ role: 'user', content: 'hi' }],
+          [{ name: 'echo', description: 'echo', parameters: {} }]
+        )
+      ).rejects.toMatchObject({ code, dispatched: true })
+
+      const classified = provider.classifyError(new CodexProxyError(code, 'terminal'))
+      expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
+      expect(classified.retryable).toBe(false)
+      expect(classified.providerDispatched).toBe(true)
+      expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+    }
+  )
+
   it('keeps insufficient_scope distinguishable', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
     const classified = provider.classifyError(
