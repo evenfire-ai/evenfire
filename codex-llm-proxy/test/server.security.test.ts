@@ -458,8 +458,11 @@ describe('codex-llm-proxy attempt telemetry', () => {
   const lookup = async () => [{ address: '1.2.3.4', family: 4 }]
   const FORBIDDEN_LOG_KEYS = ['body', 'request', 'executionTicket', 'arguments']
 
-  function completionBody(providerAttemptId: string): Record<string, unknown> {
-    const raw = {
+  function completionBody(
+    providerAttemptId: string,
+    tamper?: (raw: Record<string, unknown>) => void
+  ): Record<string, unknown> {
+    const raw: Record<string, unknown> = {
       schemaVersion: 'codex-completion-request.v1',
       requestId: `req-${providerAttemptId}`,
       idempotencyKey: `idem-${providerAttemptId}`,
@@ -470,6 +473,8 @@ describe('codex-llm-proxy attempt telemetry', () => {
     const parsed = parseCodexCompletionRequestV1(raw)
     if (!parsed.ok) throw new Error(parsed.message)
     const requestHash = hashCodexCompletionRequestV1(parsed.value)
+    // Applied after hashing: the ticket stays bound to the untampered request.
+    tamper?.(raw)
     const executionTicket = sign(
       {
         jti: '44444444-4444-4444-8444-444444444444',
@@ -548,7 +553,12 @@ describe('codex-llm-proxy attempt telemetry', () => {
     return line ? Number(line.split(' ').pop()) : 0
   }
 
-  async function run(providerAttemptId: string, textDeltas: number, calls: number) {
+  async function run(
+    providerAttemptId: string,
+    textDeltas: number,
+    calls: number,
+    tamper?: (raw: Record<string, unknown>) => void
+  ) {
     const info = vi.spyOn(logger, 'info')
     const warn = vi.spyOn(logger, 'warn')
     const { client, receipts } = grantingClient()
@@ -561,7 +571,7 @@ describe('codex-llm-proxy attempt telemetry', () => {
       const res = await request(apps.runtimeApp)
         .post('/internal/runtime/v1/codex/completions')
         .set('Authorization', `Bearer ${platformToken()}`)
-        .send(completionBody(providerAttemptId))
+        .send(completionBody(providerAttemptId, tamper))
       const metricsText = (await request(apps.probeApp).get('/metrics')).text
       const lines = [...info.mock.calls, ...warn.mock.calls]
         .map(call => call[0] as unknown as Record<string, unknown>)
@@ -614,6 +624,27 @@ describe('codex-llm-proxy attempt telemetry', () => {
       toolCalls: 0,
     })
     expect('httpStatus' in lines[0]!).toBe(false)
+    expectNoForbiddenKeys(lines[0]!)
+  })
+
+  it('(d) logs an invalid request without the caller-supplied parse message', async () => {
+    const secretField = 'sk-live-0123456789abcdef'
+    const { res, lines } = await run('att-invalid', 0, 0, raw => {
+      ;(raw.messages as Record<string, unknown>[])[0]![secretField] = 'x'
+    })
+    expect(res.status).toBe(400)
+    expect(JSON.parse(res.text)).toEqual({ error: 'invalid_request' })
+    // Witness: the attempt line is still emitted for the rejected request.
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toMatchObject({
+      providerAttemptId: 'att-invalid',
+      outcome: 'failed',
+      code: 'invalid_request',
+      deliveredAs: 'http_status',
+      httpStatus: 400,
+    })
+    expect('reason' in lines[0]!).toBe(false)
+    expect(JSON.stringify(lines[0])).not.toContain(secretField)
     expectNoForbiddenKeys(lines[0]!)
   })
 

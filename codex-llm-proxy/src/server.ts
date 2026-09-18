@@ -231,7 +231,9 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
             ...attempt,
             outcome: 'failed',
             code: mapped.code,
-            ...(err instanceof CodexTransportError
+            // An invalid_request message is the contract parser's, which
+            // names caller-supplied fields; the code alone is logged for it.
+            ...(err instanceof CodexTransportError && err.code !== 'invalid_request'
               ? { reason: err.message, ...(err.details ? { details: err.details } : {}) }
               : {}),
             deliveredAs,
