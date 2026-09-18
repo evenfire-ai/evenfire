@@ -154,8 +154,8 @@ describe('codex-subscription contract freeze', () => {
     }
 
     expect(limits).not.toHaveProperty('maxTools')
-    expect(limits?.maxToolCalls).toBe(64)
-    expect(limits?.maxMessages).toBe(256)
+    expect(limits?.maxToolCalls).toBe(256)
+    expect(limits?.maxMessages).toBe(1024)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
 
     const errors = contract.errorTaxonomy

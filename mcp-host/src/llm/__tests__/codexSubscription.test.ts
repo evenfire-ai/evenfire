@@ -84,18 +84,18 @@ describe('CodexSubscriptionProvider', () => {
     })
   }
 
-  it('returns a successful proxy batch of exactly 64 tool calls', async () => {
-    const wired = successfulBatch(64)
+  it('returns a successful proxy batch of exactly 256 tool calls', async () => {
+    const wired = successfulBatch(256)
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     const result = await provider.completeSingleTurnWithTools(
       [{ role: 'user', content: 'hi' }],
       [{ name: 'echo', description: 'echo', parameters: {} }]
     )
-    expect(result.tool_calls).toHaveLength(64)
+    expect(result.tool_calls).toHaveLength(256)
   })
 
-  it('rejects a 65-call proxy batch with tool_call_limit_exceeded before returning any executable tools', async () => {
-    const wired = successfulBatch(65)
+  it('rejects a 257-call proxy batch with tool_call_limit_exceeded before returning any executable tools', async () => {
+    const wired = successfulBatch(257)
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     await expect(
       provider.completeSingleTurnWithTools(
@@ -105,14 +105,14 @@ describe('CodexSubscriptionProvider', () => {
     ).rejects.toMatchObject({
       name: 'CodexProxyError',
       code: 'tool_call_limit_exceeded',
-      message: 'tool calls exceed 64',
+      message: 'tool calls exceed 256',
     })
     // Liveness witness: the batch really came back from the proxy.
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
 
-  it('surfaces a 65-call stream through the port adapter as a non-retryable LlmError', async () => {
-    const wired = successfulBatch(65)
+  it('surfaces a 257-call stream through the port adapter as a non-retryable LlmError', async () => {
+    const wired = successfulBatch(257)
     const adapter = new LlmPortAdapter(
       new CodexSubscriptionProvider('gpt-5.3-codex', wired as never),
       'gpt-5.3-codex',
@@ -134,7 +134,7 @@ describe('CodexSubscriptionProvider', () => {
     })
   })
 
-  it('rejects more than 256 messages before authorize or dispatch', async () => {
+  it('rejects more than 1024 messages before authorize or dispatch', async () => {
     const wired = deps()
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     const history = (count: number) =>
@@ -143,17 +143,17 @@ describe('CodexSubscriptionProvider', () => {
         content: `message ${index}`,
       }))
 
-    const rejected = provider.completeSingleTurn(history(257))
+    const rejected = provider.completeSingleTurn(history(1025))
     await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
     await expect(rejected).rejects.toMatchObject({
       code: 'request_limit_exceeded',
-      message: 'messages exceed 256',
+      message: 'messages exceed 1024',
     })
     expect(wired.authorize).not.toHaveBeenCalled()
     expect(wired.stream).not.toHaveBeenCalled()
 
     // Liveness witness: at the limit the same provider authorizes and streams.
-    await provider.completeSingleTurn(history(256))
+    await provider.completeSingleTurn(history(1024))
     expect(wired.authorize).toHaveBeenCalledTimes(1)
     expect(wired.stream).toHaveBeenCalledTimes(1)
   })
@@ -486,24 +486,24 @@ describe('CodexSubscriptionProvider', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
 
     const toolLimit = provider.classifyError(
-      new CodexProxyError('tool_call_limit_exceeded', 'tool calls exceed 64')
+      new CodexProxyError('tool_call_limit_exceeded', 'tool calls exceed 256')
     )
     expect(toolLimit).toEqual({
       code: LlmErrorCode.ToolCallLimitExceeded,
       retryable: false,
-      message: 'tool calls exceed 64',
+      message: 'tool calls exceed 256',
       providerCode: 'tool_call_limit_exceeded',
       providerDispatched: true,
     })
     expect(classifyFailoverClass(toolLimit.code, toolLimit.retryable)).toBeNull()
 
     const history = provider.classifyError(
-      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 256')
+      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 1024')
     )
     expect(history).toEqual({
       code: LlmErrorCode.ContextLengthExceeded,
       retryable: false,
-      message: 'messages exceed 256',
+      message: 'messages exceed 1024',
       providerCode: 'request_limit_exceeded',
       providerDispatched: false,
     })

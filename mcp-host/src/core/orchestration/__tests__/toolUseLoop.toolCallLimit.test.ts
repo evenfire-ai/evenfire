@@ -34,7 +34,7 @@ function reasoningFailingAfterToolResults(error: LlmError) {
 describe('runToolUseLoop tool-call limit', () => {
   it('ends the loop with LLM_TOOL_CALL_LIMIT_EXCEEDED and no workflow fallback', async () => {
     const limit = new LlmError(
-      'tool calls exceed 64',
+      'tool calls exceed 256',
       'codex-subscription',
       LlmErrorCode.ToolCallLimitExceeded,
       false

@@ -275,9 +275,9 @@ for (const count of [1, 32, 33, 83, 150, 250]) {
 }
 
 test('tool definition count never widens the independent assistant call limit', () => {
-  assert.equal(contract.LIMITS.maxToolCalls, 64)
+  assert.equal(contract.LIMITS.maxToolCalls, 256)
   assert.equal(Object.hasOwn(contract.LIMITS, 'maxTools'), false)
-  for (const count of [64, 65]) {
+  for (const count of [256, 257]) {
     const parsed = contract.parseCodexCompletionRequestV1({
       ...BASE,
       tools: catalog(250),
@@ -285,20 +285,20 @@ test('tool definition count never widens the independent assistant call limit', 
         id: `call-${index}`, name: `eventasks__read_${index}`, arguments: {},
       })) }],
     })
-    assert.equal(parsed.ok, count === 64)
-    if (!parsed.ok) assert.equal(parsed.message, 'messages[0].toolCalls exceed 64')
+    assert.equal(parsed.ok, count === 256)
+    if (!parsed.ok) assert.equal(parsed.message, 'messages[0].toolCalls exceed 256')
   }
 })
 
 test('message count is bounded at maxMessages', () => {
-  assert.equal(contract.LIMITS.maxMessages, 256)
-  for (const count of [256, 257]) {
+  assert.equal(contract.LIMITS.maxMessages, 1024)
+  for (const count of [1024, 1025]) {
     const parsed = contract.parseCodexCompletionRequestV1({
       ...BASE,
       messages: Array.from({ length: count }, (_, index) => ({ role: 'user', content: `m${index}` })),
     })
-    assert.equal(parsed.ok, count === 256)
-    if (!parsed.ok) assert.equal(parsed.message, 'messages exceed 256')
+    assert.equal(parsed.ok, count === 1024)
+    if (!parsed.ok) assert.equal(parsed.message, 'messages exceed 1024')
   }
 })
 

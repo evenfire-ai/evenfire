@@ -52,8 +52,8 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 | Limit                | Value   |
 | -------------------- | ------- |
 | maxRequestBodyBytes  | 1048576 |
-| maxMessages          | 256     |
-| maxToolCalls         | 64      |
+| maxMessages          | 1024    |
+| maxToolCalls         | 256     |
 | maxOutputTokens      | 16384   |
 | maxStreamDurationMs  | 300000  |
 | maxDeadlineMs        | 300000  |
@@ -64,14 +64,14 @@ one physical execution per ticket. A retry or fallback must mint a new attempt.
 Tool definitions have no independent count ceiling in the Evenfire request
 contract. The entire serialized request, including all definitions, remains
 bounded by `maxRequestBodyBytes` (1 MiB). Every definition still undergoes
-name, schema, finite-value and unknown-field validation. `maxToolCalls` (64)
+name, schema, finite-value and unknown-field validation. `maxToolCalls` (256)
 bounds calls in each assistant history message and each newly returned
 response. The proxy buffers tool calls until successful completion and
 validates the bound before publishing any executable call; the Host validates
 it again before returning the batch. A response over the bound fails with
 `tool_call_limit_exceeded`, which is not retried and does not fail over. It is
 not a catalog size limit and does not widen execution concurrency.
-`maxMessages` (256) bounds the request history. The Host rejects a longer
+`maxMessages` (1024) bounds the request history. The Host rejects a longer
 history with `request_limit_exceeded` before authorization, so no ticket is
 minted for it.
 

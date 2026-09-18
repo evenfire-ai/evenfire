@@ -336,7 +336,7 @@ describe('streamCodexCompletion', () => {
       expect(emitted).toEqual([])
     }
   )
-  it.each([64, 65])(
+  it.each([256, 257])(
     'validates the complete %s-call response before emitting executable calls',
     async count => {
       const emitted: Array<{ type: string }> = []
@@ -373,15 +373,15 @@ describe('streamCodexCompletion', () => {
           emitted.push(frame)
         },
       })
-      if (count === 64) {
+      if (count === 256) {
         expect((await pending).outcome).toBe('success')
-        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(64)
+        expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(256)
       } else {
         await expect(pending).rejects.toMatchObject({
           name: 'CodexTransportError',
           code: 'tool_call_limit_exceeded',
-          message: 'tool calls exceed 64',
-          details: { limit: 64, observed: 65 },
+          message: 'tool calls exceed 256',
+          details: { limit: 256, observed: 257 },
         })
         expect(emitted.filter(frame => frame.type === 'tool_call')).toHaveLength(0)
         expect(finalize).toHaveBeenCalledWith(

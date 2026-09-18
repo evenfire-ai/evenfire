@@ -12,6 +12,7 @@
 import { type Page, expect, test } from '@playwright/test'
 import {
   type Scenario,
+  type UpstreamEvidence,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -522,9 +523,10 @@ for (const scenario of cases) {
 }
 
 // Only the deterministic upstream can answer with more function calls than the
-// contract allows, so this case is registered in deterministic mode only. It
-// runs after the approved-tools journeys and reuses the first prepared agent,
-// whose subscription model binding those journeys persisted.
+// contract allows, or with exactly that many, so these cases are registered in
+// deterministic mode only. They run after the approved-tools journeys and reuse
+// the first prepared agent, whose subscription model binding those journeys
+// persisted.
 if (mode === 'deterministic') {
   test('tool call limit: Desktop shows Too Many Tool Calls without retry or connector call', async () => {
     const scenario = cases[0]!
@@ -570,6 +572,66 @@ if (mode === 'deterministic') {
         expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
         const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
         expect(requests.map(request => request.stage)).toEqual(['limit_probe'])
+        expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+      })
+      journeyPassed = true
+    } finally {
+      try {
+        await app.close()
+      } catch {
+        if (journeyPassed) throw new Error('Desktop cleanup failed')
+        // Preserve the original assertion failure when cleanup also fails.
+      }
+    }
+  })
+
+  test('tool call limit boundary: Desktop completes a turn of exactly 256 tool calls', async () => {
+    const scenario = cases[0]!
+    const before = await readEvidence(scenario)
+    const upstreamBefore = await readUpstreamEvidence(scenario)
+    const app = await launchDesktopApp()
+    let journeyPassed = false
+    try {
+      const desktop = await app.firstWindow()
+      await test.step('Sign in visibly to Desktop and start a chat with the prepared agent', async () => {
+        await openAgentChat(desktop, scenario)
+      })
+      const responses = await newAgentResponses(desktop)
+      await test.step('Send the boundary turn and wait for the final answer', async () => {
+        await send(desktop, 'tool call limit boundary')
+        await expect(responses).toHaveCount(1, { timeout: 240_000 })
+        await expect(responses).toContainText(
+          'Tool call limit boundary complete: 256 tool results received.',
+          { timeout: 240_000 }
+        )
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+      })
+      await test.step('The answer is not an error and names no tool-call limit', async () => {
+        await expect(responses).not.toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
+        await expect(responses.getByText(/Too Many Tool Calls/)).toHaveCount(0)
+      })
+      await test.step('All 256 results reached the model once, with no retry', async () => {
+        const upstreamAfter = await readUpstreamEvidence(scenario)
+        const delta = (field: keyof UpstreamEvidence['limitBoundary']) =>
+          upstreamAfter.limitBoundary[field] - upstreamBefore.limitBoundary[field]
+        expect(delta('turns')).toBe(1)
+        expect(delta('completions')).toBe(2)
+        expect(delta('toolResults')).toBe(256)
+        expect(delta('finalResponses')).toBe(1)
+        expect(upstreamAfter.limitBoundary.unexpectedRetries).toBe(0)
+        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
+        expect(requests.map(request => request.stage)).toEqual([
+          'limit_boundary',
+          'limit_boundary_final',
+        ])
+        // The continuation carried 256 calls and 256 results, so its input is
+        // far larger than the request that started the turn.
+        expect(requests[1]!.inputBytes).toBeGreaterThan(requests[0]!.inputBytes)
+        // Only discovery searches ran; the connector was never called.
         expect((await readEvidence(scenario)).calls).toEqual(before.calls)
       })
       journeyPassed = true

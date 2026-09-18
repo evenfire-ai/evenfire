@@ -9,9 +9,13 @@ const BRIDGES = ['clerum__tool_search', 'clerum__tool_describe', 'clerum__tool_c
 // The deterministic external model is scoped to this fixture's read journey.
 const FIXTURE_QUERY = 'verification receipt'
 // A user turn with this text gets one response carrying more tool calls than
-// the Codex contract allows (maxToolCalls 64), so the proxy must reject it.
+// the Codex contract allows (maxToolCalls 256), so the proxy must reject it.
 const LIMIT_PROBE = 'tool call limit probe'
-const LIMIT_PROBE_CALLS = 65
+const LIMIT_PROBE_CALLS = 257
+// A user turn with this text gets exactly maxToolCalls distinct search calls;
+// the continuation must carry every result back before the final answer.
+const LIMIT_BOUNDARY = 'tool call limit boundary'
+const LIMIT_BOUNDARY_CALLS = 256
 
 function record(value: unknown): Row {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -80,6 +84,27 @@ function exchanges(rows: Row[]): Exchange[] {
 
 function failed(result: Row): boolean {
   return result.isError === true || result.is_error === true || Boolean(result.error)
+}
+
+// Every call sent for the boundary turn must come back once, with a real
+// search result after it. Returns the number of correlated results.
+function boundaryResults(rows: Row[], sent: Set<string>): number {
+  const calls = rows.filter(row => row.type === 'function_call')
+  const outputs = rows.filter(row => row.type === 'function_call_output')
+  if (calls.length !== sent.size || outputs.length !== sent.size)
+    throw new Error('incomplete_boundary_batch')
+  if (new Set(calls.map(call => call.call_id)).size !== calls.length)
+    throw new Error('duplicate_call_id')
+  for (const call of calls) {
+    if (call.name !== BRIDGES[0] || typeof call.call_id !== 'string' || !sent.has(call.call_id))
+      throw new Error('uncorrelated_boundary_call')
+    const matched = outputs.filter(output => output.call_id === call.call_id)
+    if (matched.length !== 1 || rows.indexOf(matched[0]!) < rows.indexOf(call))
+      throw new Error('uncorrelated_result')
+    const result = textResult(matched[0]!.output, BRIDGES[0])
+    if (failed(result) || !Array.isArray(result.results)) throw new Error('boundary_search_failed')
+  }
+  return calls.length
 }
 
 function described(exchange: Exchange): string {
@@ -293,6 +318,15 @@ export function createApprovedToolsUpstream() {
     // Probe turns answered with an over-limit batch, every completion served
     // for them, and completions that repeated an already answered probe turn.
     limitProbe: { turns: 0, completions: 0, unexpectedRetries: 0 },
+    // Boundary turns answered with exactly maxToolCalls calls, completions
+    // served for them, correlated results received and final answers sent.
+    limitBoundary: {
+      turns: 0,
+      completions: 0,
+      toolResults: 0,
+      finalResponses: 0,
+      unexpectedRetries: 0,
+    },
     // Only bounded measurements, never request or result contents.
     requests: [] as Array<{
       definitionCount: number
@@ -307,6 +341,8 @@ export function createApprovedToolsUpstream() {
   // Digests of the history up to each answered probe user turn. A retry of the
   // same turn resends that history unchanged.
   const answeredProbeTurns = new Set<string>()
+  // Call IDs sent for each boundary turn, and whether its final answer was sent.
+  const boundaryTurns = new Map<string, { sent: Set<string>; finalized: boolean }>()
 
   const fetchFn: typeof fetch = async (input, init) => {
     try {
@@ -334,6 +370,62 @@ export function createApprovedToolsUpstream() {
       const user = history[lastUser]
       if (!user || typeof user.content !== 'string' || !user.content.trim())
         throw new Error('missing_user_request')
+      if (user.content.toLowerCase().includes(LIMIT_BOUNDARY)) {
+        if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
+        evidence.limitBoundary.completions++
+        const turn = createHash('sha256')
+          .update(JSON.stringify(history.slice(0, lastUser + 1)))
+          .digest('hex')
+        const known = boundaryTurns.get(turn)
+        const rows = history.slice(lastUser + 1)
+        const measured = (stage: string) => ({
+          definitionCount: tools.length,
+          explicitNonStrictCount: tools.filter(tool => tool.strict === false).length,
+          definitionBytes: Buffer.byteLength(JSON.stringify(tools)),
+          inputBytes: Buffer.byteLength(JSON.stringify(payload.input)),
+          connectorDefinitionCount: 0,
+          leakedSchema: false,
+          stage,
+        })
+        if (rows.length === 0) {
+          if (known) {
+            evidence.limitBoundary.unexpectedRetries++
+            throw new Error('unexpected_retry')
+          }
+          // Distinct arguments: identical consecutive calls trip the host's
+          // doom-loop guard, which would test that guard instead of the limit.
+          const calls = Array.from({ length: LIMIT_BOUNDARY_CALLS }, (_, index) => ({
+            type: 'function_call',
+            id: randomUUID(),
+            call_id: randomUUID(),
+            name: BRIDGES[0],
+            arguments: JSON.stringify({ query: `limit boundary ${index}`, limit: 1 }),
+          }))
+          boundaryTurns.set(turn, {
+            sent: new Set(calls.map(call => call.call_id)),
+            finalized: false,
+          })
+          evidence.limitBoundary.turns++
+          evidence.completions++
+          evidence.requests.push(measured('limit_boundary'))
+          return stream(...calls.map(item => ({ type: 'response.output_item.done', item })))
+        }
+        if (!known) throw new Error('unknown_boundary_turn')
+        if (known.finalized) {
+          evidence.limitBoundary.unexpectedRetries++
+          throw new Error('unexpected_retry')
+        }
+        const received = boundaryResults(rows, known.sent)
+        known.finalized = true
+        evidence.limitBoundary.toolResults += received
+        evidence.limitBoundary.finalResponses++
+        evidence.completions++
+        evidence.requests.push(measured('limit_boundary_final'))
+        return stream({
+          type: 'response.output_text.delta',
+          delta: `Tool call limit boundary complete: ${received} tool results received.`,
+        })
+      }
       if (user.content.toLowerCase().includes(LIMIT_PROBE)) {
         if (evidence.requests.length >= 512) throw new Error('evidence_capacity_exceeded')
         evidence.limitProbe.completions++

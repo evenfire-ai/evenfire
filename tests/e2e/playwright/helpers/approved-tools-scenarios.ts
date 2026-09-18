@@ -27,6 +27,13 @@ export type UpstreamEvidence = {
   finalResponses: number
   deniedResponses: number
   limitProbe: { turns: number; completions: number; unexpectedRetries: number }
+  limitBoundary: {
+    turns: number
+    completions: number
+    toolResults: number
+    finalResponses: number
+    unexpectedRetries: number
+  }
   requests: Array<{
     definitionCount: number
     explicitNonStrictCount: number
@@ -139,6 +146,17 @@ export async function readUpstreamEvidence(scenario: Scenario): Promise<Upstream
     const value = evidence.limitProbe?.[field]
     if (!Number.isSafeInteger(value) || value < 0)
       throw new Error(`Missing upstream limit probe evidence ${field}`)
+  }
+  for (const field of [
+    'turns',
+    'completions',
+    'toolResults',
+    'finalResponses',
+    'unexpectedRetries',
+  ] as const) {
+    const value = evidence.limitBoundary?.[field]
+    if (!Number.isSafeInteger(value) || value < 0)
+      throw new Error(`Missing upstream limit boundary evidence ${field}`)
   }
   if (!Array.isArray(evidence.requests)) throw new Error('Missing upstream request evidence')
   return evidence
