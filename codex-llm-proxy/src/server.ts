@@ -161,6 +161,17 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       // to req 'close' aborts the ChatGPT hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
+      // One `codex_proxy_attempt_finished` line per attempt. Identifiers and
+      // counts only: never the body, ticket, frames, tool names or arguments.
+      const attempt = {
+        providerAttemptId: ticket.providerAttemptId,
+        hostRef: ticket.hostRef,
+        model: ticket.model,
+        requestHash: ticket.requestHash,
+      }
+      const attemptStarted = Date.now()
+      let toolCalls = 0
+      let textChunks = 0
       try {
         release = await streamGate.acquire(abort.signal)
         res.status(200)
@@ -185,23 +196,58 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           finalize: input => client.finalize(input),
           fetchFn,
           lookup,
-          onFrame: frame => writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal),
+          onFrame: frame => {
+            if (frame.type === 'tool_call') toolCalls += 1
+            else textChunks += 1
+            return writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal)
+          },
         })
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
         )
         metrics.observeAttempt(result.outcome, 'completion_stream')
         metrics.observeStream(Date.now() - started)
+        const finished = {
+          event: 'codex_proxy_attempt_finished',
+          ...attempt,
+          outcome: result.outcome,
+          deliveredAs: 'sse_done',
+          toolCalls,
+          textChunks,
+          durationMs: Date.now() - attemptStarted,
+          ...(result.usage ? { usage: result.usage } : {}),
+        }
+        if (result.outcome === 'success') logger.info(finished, 'codex attempt finished')
+        else logger.warn(finished, 'codex attempt finished')
         res.end()
       } catch (err) {
         const mapped = mapError(err)
         metrics.observeAttempt('error', 'completion_stream')
-        if (res.headersSent) {
+        metrics.observeAttemptFailure(mapped.code)
+        const deliveredAs = res.headersSent ? 'sse_error' : 'http_status'
+        logger.warn(
+          {
+            event: 'codex_proxy_attempt_finished',
+            ...attempt,
+            outcome: 'failed',
+            code: mapped.code,
+            ...(err instanceof CodexTransportError
+              ? { reason: err.message, ...(err.details ? { details: err.details } : {}) }
+              : {}),
+            deliveredAs,
+            ...(deliveredAs === 'http_status' ? { httpStatus: mapped.status } : {}),
+            toolCalls,
+            textChunks,
+            durationMs: Date.now() - attemptStarted,
+          },
+          'codex attempt finished'
+        )
+        if (deliveredAs === 'sse_error') {
           res.write(`data: ${JSON.stringify({ type: 'error', code: mapped.code })}\n\n`)
           res.end()
           return
         }
-        reject(res, mapped.status, mapped.code)
+        res.status(mapped.status).json({ error: mapped.code })
       } finally {
         release?.()
       }
@@ -327,6 +373,7 @@ function mapError(err: unknown): { status: number; code: string } {
       insufficient_scope: 403,
       disabled: 404,
       ticket_replayed: 409,
+      tool_call_limit_exceeded: 422,
       connection_unavailable: 503,
       provider_unavailable: 503,
     }
