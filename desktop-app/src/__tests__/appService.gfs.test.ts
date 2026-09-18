@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AppService, legacyEncodedFile, migrateDesktopGfsUploadState } from '../appService.js'
 import { config, getActiveEnvKey } from '../config.js'
-import { DesktopUploadCapabilityError, normalizeUploadProductMaxBytes } from '../gfs/upload.js'
+import {
+  DesktopGfsUploadJob,
+  DesktopUploadCapabilityError,
+  normalizeUploadProductMaxBytes,
+} from '../gfs/upload.js'
+import { ApiError } from '../httpClient.js'
 
 vi.mock('../chatStoreBinding.js', () => ({
   bindChatStoreForUser: vi.fn(),
@@ -290,6 +295,8 @@ type UploadScopeTestService = {
   ) => Promise<T>
   startGfsFileUpload: AppService['startGfsFileUpload']
   startGfsFileReplace: AppService['startGfsFileReplace']
+  createGfsFileFromPath: AppService['createGfsFileFromPath']
+  replaceGfsFileFromPath: AppService['replaceGfsFileFromPath']
 }
 
 function authenticatedUploadService(statePath: string): UploadScopeTestService {
@@ -425,6 +432,69 @@ describe('AppService GFS upload security scope', () => {
       await expect(
         service.startGfsFileUpload('parent-rid', 'oversized-legacy.bin', filePath, 'main')
       ).rejects.toThrow('legacy GFS is limited to 16 MiB')
+      expect(service.gfsClient.createResource).not.toHaveBeenCalled()
+      expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves the capability failure when an oversized file cannot use legacy fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'evenfire-gfs-capability-failure-context-'))
+    try {
+      const filePath = join(root, 'oversized.bin')
+      await writeFile(filePath, Buffer.alloc(0))
+      await truncate(filePath, 16 * 1024 * 1024 + 1)
+
+      const capabilityError = await new DesktopGfsUploadJob({
+        baseUrl: 'https://api.example',
+        token: 'token',
+        filePath,
+        name: 'oversized.bin',
+        drive: 'main',
+        operation: 'create',
+        parentRid: 'parent-rid',
+        transport: {
+          async requestJson() {
+            throw new ApiError(
+              '404 Not Found: gfs_upload_capabilities_unavailable',
+              404,
+              JSON.stringify({ error: 'gfs_upload_capabilities_unavailable' })
+            )
+          },
+          async requestPart() {
+            throw new Error('part request was not expected')
+          },
+        },
+      })
+        .start()
+        .catch(error => error)
+
+      expect(capabilityError).toBeInstanceOf(DesktopUploadCapabilityError)
+      const service = authenticatedUploadService(join(root, 'gfs-upload-sessions.json'))
+      service.startDesktopGfsUpload.mockRejectedValue(capabilityError)
+      service.gfsClient = {
+        createResource: vi.fn(),
+        replaceFile: vi.fn(),
+      }
+
+      const createError = await service
+        .createGfsFileFromPath('parent-rid', 'oversized.bin', filePath, 'main')
+        .catch(error => error)
+      expect(createError).toBeInstanceOf(Error)
+      expect(createError.message).toMatch(
+        /GFS resumable upload capabilities are unavailable \(HTTP 404: gfs_upload_capabilities_unavailable\)/
+      )
+      expect(createError.cause).toBe(capabilityError)
+
+      const replaceError = await service
+        .replaceGfsFileFromPath(RESOURCE_ID, filePath, 'main', 3)
+        .catch(error => error)
+      expect(replaceError).toBeInstanceOf(Error)
+      expect(replaceError.message).toMatch(
+        /GFS resumable upload capabilities are unavailable \(HTTP 404: gfs_upload_capabilities_unavailable\)/
+      )
+      expect(replaceError.cause).toBe(capabilityError)
       expect(service.gfsClient.createResource).not.toHaveBeenCalled()
       expect(service.gfsClient.replaceFile).not.toHaveBeenCalled()
     } finally {

@@ -366,7 +366,67 @@ const gfsUploadTransport: DesktopUploadTransport = {
 const LEGACY_GFS_MAX_FILE_BYTES = 16 * 1024 * 1024
 const LEGACY_GFS_READ_BUFFER_BYTES = 1024 * 1024
 
-async function readBoundedLegacyFile(handle: fs.promises.FileHandle): Promise<Buffer> {
+function legacyGfsSizeLimitError(capabilityError?: DesktopUploadCapabilityError): Error {
+  const legacyMessage = `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(LEGACY_GFS_MAX_FILE_BYTES)}.`
+  if (!capabilityError) return new Error(legacyMessage)
+
+  const cause = (capabilityError as DesktopUploadCapabilityError & { cause?: unknown }).cause
+  const status =
+    cause && typeof cause === 'object' && typeof (cause as { status?: unknown }).status === 'number'
+      ? Number((cause as { status: number }).status)
+      : undefined
+  let upstreamCode: string | undefined
+  const bodyText =
+    cause &&
+    typeof cause === 'object' &&
+    typeof (cause as { bodyText?: unknown }).bodyText === 'string'
+      ? String((cause as { bodyText: string }).bodyText)
+      : undefined
+  if (bodyText) {
+    try {
+      const body = JSON.parse(bodyText) as { error?: unknown }
+      if (typeof body.error === 'string' && /^[a-z0-9._:-]{1,64}$/i.test(body.error)) {
+        upstreamCode = body.error
+      }
+    } catch {
+      // The response body is deliberately not copied into the user-facing error.
+    }
+  }
+  const causeObject = cause && typeof cause === 'object' ? (cause as Record<string, unknown>) : null
+  const nestedCause =
+    causeObject?.cause && typeof causeObject.cause === 'object'
+      ? (causeObject.cause as Record<string, unknown>)
+      : null
+  const causeCode =
+    typeof causeObject?.code === 'string'
+      ? causeObject.code
+      : typeof nestedCause?.code === 'string'
+        ? nestedCause.code
+        : undefined
+  const networkFailure =
+    cause instanceof TypeError ||
+    ['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT'].includes(
+      causeCode ?? ''
+    ) ||
+    (cause instanceof Error && /socket hang up|fetch failed|network error/i.test(cause.message))
+  const transportContext =
+    status !== undefined
+      ? `HTTP ${status}${upstreamCode ? `: ${upstreamCode}` : ''}`
+      : cause instanceof Error && cause.name === 'TimeoutError'
+        ? 'timeout'
+        : networkFailure
+          ? 'network failure'
+          : undefined
+  const failureContext = transportContext
+    ? `${capabilityError.message} (${transportContext})`
+    : capabilityError.message
+  return new Error(`${failureContext}; ${legacyMessage}`, { cause: capabilityError })
+}
+
+async function readBoundedLegacyFile(
+  handle: fs.promises.FileHandle,
+  capabilityError?: DesktopUploadCapabilityError
+): Promise<Buffer> {
   const chunks: Buffer[] = []
   let totalBytes = 0
   for (;;) {
@@ -376,16 +436,17 @@ async function readBoundedLegacyFile(handle: fs.promises.FileHandle): Promise<Bu
     if (bytesRead === 0) break
     totalBytes += bytesRead
     if (totalBytes > LEGACY_GFS_MAX_FILE_BYTES) {
-      throw new Error(
-        `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(LEGACY_GFS_MAX_FILE_BYTES)}.`
-      )
+      throw legacyGfsSizeLimitError(capabilityError)
     }
     chunks.push(chunk.subarray(0, bytesRead))
   }
   return Buffer.concat(chunks, totalBytes)
 }
 
-export async function legacyEncodedFile(filePath: string): Promise<string> {
+export async function legacyEncodedFile(
+  filePath: string,
+  capabilityError?: DesktopUploadCapabilityError
+): Promise<string> {
   const noFollow = typeof fs.constants.O_NOFOLLOW === 'number' ? fs.constants.O_NOFOLLOW : 0
   let handle: fs.promises.FileHandle
   try {
@@ -400,9 +461,7 @@ export async function legacyEncodedFile(filePath: string): Promise<string> {
     const info = await handle.stat()
     if (!info.isFile()) throw new Error('selected upload path is not a regular file')
     if (info.size > LEGACY_GFS_MAX_FILE_BYTES) {
-      throw new Error(
-        `This writer does not advertise resumable uploads; legacy GFS is limited to ${formatGfsUploadLimit(LEGACY_GFS_MAX_FILE_BYTES)}.`
-      )
+      throw legacyGfsSizeLimitError(capabilityError)
     }
 
     // O_NOFOLLOW is not available on every Electron target. The post-open
@@ -421,7 +480,7 @@ export async function legacyEncodedFile(filePath: string): Promise<string> {
     ) {
       throw new Error('selected upload path changed while it was being opened')
     }
-    const bytes = await readBoundedLegacyFile(handle)
+    const bytes = await readBoundedLegacyFile(handle, capabilityError)
     const finalInfo = await handle.stat()
     if (
       finalInfo.size !== info.size ||
@@ -2318,7 +2377,7 @@ export class AppService {
       )
         throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
-        const encodedData = await legacyEncodedFile(filePath)
+        const encodedData = await legacyEncodedFile(filePath, error)
         this.assertCurrentDesktopGfsUploadScope(scope)
         return this.gfsClient.createResource(
           { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
@@ -2357,7 +2416,7 @@ export class AppService {
       )
         throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
-        const encodedData = await legacyEncodedFile(filePath)
+        const encodedData = await legacyEncodedFile(filePath, error)
         this.assertCurrentDesktopGfsUploadScope(scope)
         return this.gfsClient.replaceFile(
           { resourceId, drive: canonicalDrive, ifMatch, encodedData },
@@ -2522,7 +2581,7 @@ export class AppService {
       if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
         throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
-        const encodedData = await legacyEncodedFile(filePath)
+        const encodedData = await legacyEncodedFile(filePath, error)
         this.assertCurrentDesktopGfsUploadScope(scope)
         return this.gfsClient.createResource(
           { parentResourceId, drive: canonicalDrive, name, kind: 'file', encodedData },
@@ -2568,7 +2627,7 @@ export class AppService {
       if (!(error instanceof DesktopUploadCapabilityError) || !error.allowLegacyFallback)
         throw error
       const resource = await this.runScopedLegacyGfsUpload(scope, async (token, signal) => {
-        const encodedData = await legacyEncodedFile(filePath)
+        const encodedData = await legacyEncodedFile(filePath, error)
         this.assertCurrentDesktopGfsUploadScope(scope)
         return this.gfsClient.replaceFile(
           { resourceId, drive: canonicalDrive, ifMatch, encodedData },
