@@ -13,6 +13,9 @@ WAIT_FULL_STACK="${E2E_WAIT_FULL_STACK:-}"
 VITEST_SUITE_GROUP="${E2E_VITEST_SUITE_GROUP:-cluster}"
 DEFAULT_NODE_UNIT_VITEST_SUITES=(
   gfsUploadV2Fixtures.test.ts
+  # Codex subscription contract freeze: reads only repository files, so it
+  # belongs in the node-unit group and not behind a cluster.
+  integration/codex-subscription-contract-freeze.test.ts
 )
 DEFAULT_CLUSTER_VITEST_SUITES=(
   gfsUploadProductMutation.test.ts
