@@ -301,6 +301,7 @@ function requireStaticCredentialSlot(descriptor) {
 }
 
 module.exports = {
+  ...require('./imageInput.cjs'),
   PROVIDER_IDS,
   RUNNABLE_LLM_MODEL_ID_MAX_LENGTH,
   RUNNABLE_LLM_MODEL_ID_PATTERN,

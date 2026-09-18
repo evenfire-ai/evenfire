@@ -15,6 +15,7 @@ import {
   openChatTab,
   openSettingsTab,
   reorderWorkspaceTab,
+  setAppTabTitle,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import { WorkspaceTabStrip } from '.'
@@ -261,6 +262,62 @@ describe('WorkspaceTabStrip', () => {
     expect(screen.getByRole('button', { name: 'My App' }).getAttribute('aria-pressed')).toBe('true')
     // Only the chat tab carries a live session badge — app/settings do not.
     expect(screen.getAllByRole('status')).toHaveLength(1)
+  })
+})
+
+const cp = (code: number) => String.fromCodePoint(code)
+
+describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chrome', () => {
+  // The reviewer's ask: prove the FINAL workspace-tab label and the FINAL
+  // close-button accessible name are clean — not just the pure helper. The title
+  // travels the real border (`setAppTabTitle`) into the real store producer, so
+  // the render inherits whatever that path actually stores (T1: no hand-built
+  // tab). A pointer user sees the label; a screen-reader user hears the close
+  // button's accessible name; both must be free of the bidi/invisible payload.
+  it('strips bidi marks and invisibles from the tab label and close aria-label', () => {
+    // RLO + "EVIL" + PDF + " report" + LRM + ZWSP: a directional-override attack
+    // that would reverse the visible order plus a trailing invisible.
+    const raw = `${cp(0x202e)}EVIL${cp(0x202c)} report${cp(0x200e)}${cp(0x200b)}`
+    const state = setAppTabTitle(
+      openAppTab(createEmptyWorkspaceTabsState(), { id: 'app-1', appRef: 'ns/app', title: 'App' }),
+      'app-1',
+      raw
+    )
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId="app-1"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe('EVIL report')
+    expect(screen.getByRole('button', { name: 'Close EVIL report' })).toBeTruthy()
+  })
+
+  it('keeps a legitimate ZWJ emoji sequence joined in the rendered label', () => {
+    // The 👩‍💻 sequence (👩 + ZWJ + 💻) must survive the border and render as one
+    // glyph, not split into 👩💻 — the shaping joiner is legitimate, not a hazard.
+    const withEmoji = `Build ${cp(0x1f469)}${cp(0x200d)}${cp(0x1f4bb)}`
+    const state = setAppTabTitle(
+      openAppTab(createEmptyWorkspaceTabsState(), { id: 'app-1', appRef: 'ns/app', title: 'App' }),
+      'app-1',
+      withEmoji
+    )
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId="app-1"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe(withEmoji)
+    expect(screen.getByRole('button', { name: `Close ${withEmoji}` })).toBeTruthy()
   })
 })
 

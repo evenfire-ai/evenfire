@@ -221,6 +221,45 @@ describe('workspaceTabs — setAppTabTitle (mini-spec 06 §2)', () => {
     expect(setAppTabTitle(state, 'files-1', 'X')).toBe(state)
     expect(state.tabs.find(t => t.id === 'chat-1')?.title).toBe('Chat')
   })
+
+  // §2 (mini-spec 08, R4-B2): the plugin-controlled title is sanitized at this
+  // entry border, so every render site inherits the cleaned value. These go
+  // through the real channel `setAppTabTitle(state, tabId, raw)` (T1).
+  it('strips control, bidi override, and zero-width characters from the title (§2, R4-B2)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    // A plugin document.title carrying a bidi override, a zero-width space, and a
+    // C0 control character between visible runs.
+    state = setAppTabTitle(state, 'app-1', 'Ticket‮42​Acme')
+    const stored = state.tabs.find(t => t.id === 'app-1')?.title ?? ''
+    expect(stored).not.toMatch(/[‮​]/)
+    expect(stored).toBe('Ticket42Acme')
+  })
+
+  it('collapses whitespace runs (tabs/newlines) to single spaces (§2, R4-B2)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    state = setAppTabTitle(state, 'app-1', 'Ticket\t42\n\n Acme')
+    expect(state.tabs.find(t => t.id === 'app-1')?.title).toBe('Ticket 42 Acme')
+  })
+
+  it('truncates an over-long reported title with a trailing ellipsis (§2, R4-B2)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    state = setAppTabTitle(state, 'app-1', 'A'.repeat(200))
+    const stored = state.tabs.find(t => t.id === 'app-1')?.title ?? ''
+    // MAX_TAB_TITLE_LEN is 64; the stored title never exceeds it and ends with …
+    expect(stored.length).toBeLessThanOrEqual(64)
+    expect(stored.endsWith('…')).toBe(true)
+  })
+
+  it('ignores a title that reduces to empty after sanitizing, keeping the previous (§2, R4-B2)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'Doc' })
+    // All-control/invisible input sanitizes to '' → no-op (same reference).
+    expect(setAppTabTitle(state, 'app-1', '‮​﻿')).toBe(state)
+    expect(state.tabs.find(t => t.id === 'app-1')?.title).toBe('Doc')
+  })
 })
 
 describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', () => {

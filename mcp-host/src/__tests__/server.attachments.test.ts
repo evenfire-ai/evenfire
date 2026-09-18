@@ -143,3 +143,72 @@ describe('RPCServer attachment responses', () => {
     }
   })
 })
+
+describe('RPCServer message body limit', () => {
+  // Desktop sends up to 8 MB of base64 images inline (COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES).
+  const IMAGE_BUDGET_BYTES = 8 * 1024 * 1024
+  const BODY_LIMIT_BYTES = 10 * 1024 * 1024
+
+  function messageBody(dataBase64Length: number): string {
+    return JSON.stringify({
+      content: 'describe these images',
+      channelType: 'telegram',
+      channelId: 'chan-1',
+      sender: 'user-1',
+      timestamp: new Date().toISOString(),
+      messageId: 'msg-large',
+      hostRef: 'chatllm',
+      attachments: [{ ...sampleAttachment, dataBase64: 'A'.repeat(dataBase64Length) }],
+    })
+  }
+
+  async function postMessage(baseUrl: string, body: string): Promise<Response> {
+    return fetch(`${baseUrl}/v1/runtime/messages`, {
+      method: 'POST',
+      headers: channelReaderEdgeHeaders(
+        { channelType: 'telegram', channelId: 'chan-1', sender: 'user-1' },
+        { 'Content-Type': 'application/json' }
+      ),
+      body,
+    })
+  }
+
+  it('accepts a message carrying the full 8 MB image budget', async () => {
+    const received: number[] = []
+    const { server, baseUrl } = await startServer(rpcServer => {
+      rpcServer.onMessage(async message => {
+        received.push(message.attachments?.[0]?.dataBase64.length ?? -1)
+        return { success: true, status: 'completed', response: 'ok' }
+      })
+    })
+
+    try {
+      const response = await postMessage(baseUrl, messageBody(IMAGE_BUDGET_BYTES))
+      expect(response.status).toBe(200)
+      expect(received).toEqual([IMAGE_BUDGET_BYTES])
+    } finally {
+      await server.stop()
+    }
+  })
+
+  it('rejects a body over 10 MB with 413 before the message handler runs', async () => {
+    const received: number[] = []
+    const { server, baseUrl } = await startServer(rpcServer => {
+      rpcServer.onMessage(async message => {
+        received.push(message.attachments?.[0]?.dataBase64.length ?? -1)
+        return { success: true, status: 'completed', response: 'ok' }
+      })
+    })
+
+    try {
+      const body = messageBody(BODY_LIMIT_BYTES)
+      expect(body.length).toBeGreaterThan(BODY_LIMIT_BYTES)
+      const response = await postMessage(baseUrl, body)
+      // Witness: the server read and judged the body (413 is its answer).
+      expect(response.status).toBe(413)
+      expect(received).toEqual([])
+    } finally {
+      await server.stop()
+    }
+  })
+})

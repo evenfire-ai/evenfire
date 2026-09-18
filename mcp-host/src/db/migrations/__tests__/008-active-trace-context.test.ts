@@ -76,6 +76,7 @@ describe('migration 008 — active trace context', () => {
         '012-session-ownership-backfill',
         '013-pending-approval-connect',
         '014-pending-approval-task-budget',
+        '015-session-model-selection-revision',
       ],
       pending: [],
     })

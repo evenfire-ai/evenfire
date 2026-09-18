@@ -2,7 +2,12 @@
 import { describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
-import { closeWorkspaceTab, openChatTab } from '../../../lib/workspaceTabs'
+import {
+  closeWorkspaceTab,
+  openChatTab,
+  openFilesTab,
+  selectWorkspaceTab,
+} from '../../../lib/workspaceTabs'
 import { useNavigationController } from '../useNavigationController'
 
 describe('useNavigationController — agent-centric navigation (Fase 2)', () => {
@@ -107,6 +112,40 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     )
     expect(result.current.activeTab?.id).toBe(firstId)
     expect(result.current.workspaceTabs.tabs.filter(t => t.kind === 'preview')).toHaveLength(1)
+  })
+
+  it('resumes the last active chat, not the last chat by array order, on re-entry (§1, R4-B1)', () => {
+    const { result } = renderHook(() => useNavigationController())
+    // Build [blank chat, files, A, B] with all real store producers, then leave
+    // A as the last active chat while B sits after it in array order.
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openChatTab(state, { id: 'chat-a', agentRef: 'alpha', chatId: 'c1' })
+      )
+    )
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openChatTab(state, { id: 'chat-b', agentRef: 'beta', chatId: 'c2' })
+      )
+    )
+    // Re-activate A so it is the LAST ACTIVE chat while B is the last by order.
+    act(() => result.current.setWorkspaceTabs(state => selectWorkspaceTab(state, 'chat-a')))
+    expect(result.current.lastActiveChatTabId).toBe('chat-a')
+
+    // Leave the chat section for files (the "return to Chats later" scenario).
+    act(() => result.current.setWorkspaceTabs(state => openFilesTab(state, { id: 'files-2' })))
+    expect(result.current.activeTab?.kind).toBe('files')
+    expect(result.current.lastActiveChatTabId).toBe('chat-a')
+
+    // Re-entering Chats must resume A (the chat the user left), not B (the last
+    // chat by array order that the pre-fix precedence would pick).
+    let focused: { agentRef: string; chatId: string } | null = null
+    act(() => {
+      focused = result.current.handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+    expect(result.current.activeTab?.id).toBe('chat-a')
+    expect(focused).toEqual({ agentRef: 'alpha', chatId: 'c1' })
   })
 
   it('no longer exposes the removed context/teams handlers or state', () => {

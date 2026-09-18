@@ -1,3 +1,4 @@
+import { sanitizeAppTabTitle } from './sanitizeAppTabTitle'
 import type {
   ActiveChat,
   AppTabPayload,
@@ -195,23 +196,26 @@ export function setAppTabSavedRoutePath(
  * §2), so the strip names the tab after what the plugin currently shows. A
  * mirror of `setAppTabSavedRoutePath`: a no-op (same reference) when the tab is
  * missing, is not an app tab, or already holds this title, so a `setState`
- * bails out. An empty / whitespace-only title is IGNORED (keeps the previous
- * title) — a mid-navigation blank must not blank the tab label; precedence
- * `document.title → app.label → 'App'` is resolved by the caller, not here.
+ * bails out. The plugin-controlled title is sanitized at this entry border
+ * (mini-spec 08 §2) so every render site inherits the cleaned value; a title
+ * that is empty / whitespace-only OR reduces to empty after sanitizing is
+ * IGNORED (keeps the previous title) — a mid-navigation blank must not blank the
+ * tab label; precedence `document.title → app.label → 'App'` is resolved by the
+ * caller, not here.
  */
 export function setAppTabTitle(
   state: WorkspaceTabsState,
   tabId: string,
   title: string
 ): WorkspaceTabsState {
-  const trimmed = title.trim()
-  if (!trimmed) return state
+  const clean = sanitizeAppTabTitle(title)
+  if (!clean) return state
   const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'app')
   if (!target) return state
-  if (target.title === trimmed) return state
+  if (target.title === clean) return state
   return {
     ...state,
-    tabs: state.tabs.map(tab => (tab.id === tabId ? { ...tab, title: trimmed } : tab)),
+    tabs: state.tabs.map(tab => (tab.id === tabId ? { ...tab, title: clean } : tab)),
   }
 }
 

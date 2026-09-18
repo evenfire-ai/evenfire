@@ -3322,6 +3322,10 @@ export class AppService {
     if (!targetHostRef) {
       throw new Error('hostRef is required')
     }
+    // A malformed request is rejected before any token is issued for it.
+    if (request.attachments != null && !Array.isArray(request.attachments)) {
+      throw new Error('Image attachments must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
@@ -3350,6 +3354,9 @@ export class AppService {
       // as its own allow-list (routes/rpc.ts `forwardedBody`), so `model` must be
       // forwarded there too — it does not pass the body through unchanged.
       ...(typeof request.model === 'string' && request.model ? { model: request.model } : {}),
+      ...(request.modelSelectionRevision === undefined
+        ? {}
+        : { modelSelectionRevision: request.modelSelectionRevision }),
     }
     try {
       return await this.rpcClient.invokeHostMessage(
@@ -4398,7 +4405,8 @@ export class AppService {
     hostRef: string,
     chatId: string,
     model: string,
-    hostRefs?: string[]
+    hostRefs?: string[],
+    expectedRevision?: number
   ): Promise<SetHostModelResult> {
     const targetHostRef = String(hostRef || '').trim()
     const targetModel = String(model || '').trim()
@@ -4407,7 +4415,13 @@ export class AppService {
     }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(HOST_MODEL_SCOPES, effectiveHostRefs)
-    return this.rpcClient.setHostModel(rpc.token, targetHostRef, chatId, targetModel)
+    return this.rpcClient.setHostModel(
+      rpc.token,
+      targetHostRef,
+      chatId,
+      targetModel,
+      expectedRevision
+    )
   }
 
   /**
