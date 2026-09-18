@@ -1,11 +1,10 @@
-export const COMPOSER_MAX_IMAGE_ATTACHMENTS = 10
+export const COMPOSER_MAX_IMAGE_ATTACHMENTS = 20
 /**
- * Composer hard image budget. Mirrors rpc-proxy / mcp-host hop credit: 16MiB
- * per image and 16MiB total in a 24MiB JSON body so a poorly compressed 2048
- * PNG may exceed 10MiB. The usual product target is 5 / 9 / 14 MiB.
+ * Composer per-image ceiling. The 16 MiB aggregate lives on the rpc-proxy /
+ * mcp-host hop and the shared contract, not in this picker. A poorly
+ * compressed 2048 PNG may exceed 10 MiB and must still attach here.
  */
 export const COMPOSER_MAX_IMAGE_BYTES = 16 * 1024 * 1024
-export const COMPOSER_MAX_TOTAL_IMAGE_BYTES = 16 * 1024 * 1024
 /** Official Codex client long-side bound. The hop 400s frames above this. */
 export const COMPOSER_MAX_IMAGE_DIMENSION = 2048
 export const COMPOSER_ACCEPT_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png'] as const

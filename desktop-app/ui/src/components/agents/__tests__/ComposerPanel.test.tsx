@@ -346,27 +346,24 @@ describe('ComposerPanel image budget', () => {
     expect(composerActions.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
-  it('refuses the over-total file in a selection and keeps the one that fits', async () => {
+  it('attaches 10MiB + 7MiB in the composer; the hop owns the aggregate', async () => {
     const { container } = render(<ComposerPanel inline={false} />)
     pickFiles(container, [imageFile('fits.png', 10 * MIB), imageFile('over-total.png', 7 * MIB)])
-    await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toContain(
-        'over-total.png was not added. Attachments can total at most 16 MiB per message.'
-      )
-    )
-    expect(attachedImages().map(attachment => attachment.name)).toEqual(['fits.png'])
+    await waitFor(() => expect(attachedImages()).toHaveLength(2))
+    expect(attachedImages().map(attachment => attachment.name)).toEqual([
+      'fits.png',
+      'over-total.png',
+    ])
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('refuses an added image that would pass the total with 10MiB already attached', async () => {
+  it('attaches a 7MiB image when 10MiB is already in the composer', async () => {
     composerState.composerImageAttachments = [existingAttachment('kept.png', 10 * MIB)]
     const { container } = render(<ComposerPanel inline={false} />)
     pickFiles(container, [imageFile('over-total.png', 7 * MIB)])
-    await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toContain(
-        'can total at most 16 MiB per message'
-      )
-    )
-    expect(composerActions.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+    await waitFor(() => expect(attachedImages()).toHaveLength(1))
+    expect(attachedImages()[0]?.name).toBe('over-total.png')
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('accepts a 5MiB image when 10MiB is already attached', async () => {
@@ -389,15 +386,16 @@ describe('ComposerPanel image budget', () => {
     expect(attachedImages()).toHaveLength(0)
   })
 
-  it('explains files beyond the 10-image cap instead of dropping them silently', async () => {
-    composerState.composerImageAttachments = Array.from({ length: 9 }, (_, index) =>
-      existingAttachment(`kept-${index + 1}.png`, MIB)
+  it('explains files beyond the 20-image cap instead of dropping them silently', async () => {
+    const small = 64 * 1024
+    composerState.composerImageAttachments = Array.from({ length: 19 }, (_, index) =>
+      existingAttachment(`kept-${index + 1}.png`, small)
     )
     const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('tenth.png', MIB), imageFile('eleventh.png', MIB)])
+    pickFiles(container, [imageFile('twentieth.png', small), imageFile('twenty-first.png', small)])
     await waitFor(() => expect(attachedImages()).toHaveLength(1))
     expect(screen.getByRole('alert').textContent).toContain(
-      'You can attach up to 10 images per message.'
+      'You can attach up to 20 images per message.'
     )
   })
 })
@@ -449,24 +447,24 @@ describe('ComposerPanel annotation budget', () => {
     )
   })
 
-  it('refuses an annotation that would push the message past the 16MiB total', () => {
+  it('applies an annotation next to a 10MiB sibling when only the hop owns the aggregate', () => {
     const original = existingAttachment('photo.png', 4 * MIB)
     composerState.composerImageAttachments = [original, existingAttachment('other.png', 10 * MIB)]
     const { container } = render(<ComposerPanel inline={false} />)
     openAnnotation(container, 'photo.png')
 
-    // 10MiB sibling + 7MiB annotation = 17MiB. The annotated image alone is under
-    // the per-image limit, so only the per-message total can refuse this.
     annotationStub.next = { ...original, sizeBytes: 7 * MIB }
     applyAnnotation()
 
-    expect(composerActions.handleUpdateComposerImageAttachment).not.toHaveBeenCalled()
-    expect(annotationStub.threw).toContain(
-      'photo.png was kept unchanged. Attachments can total at most 16 MiB per message.'
-    )
+    expect(annotationStub.threw).toBeNull()
+    expect(composerActions.handleUpdateComposerImageAttachment).toHaveBeenCalledTimes(1)
+    expect(composerActions.handleUpdateComposerImageAttachment.mock.calls[0]?.[0]).toMatchObject({
+      id: original.id,
+      sizeBytes: 7 * MIB,
+    })
   })
 
-  it('applies an annotation that exactly reaches the 16MiB total', () => {
+  it('applies an annotation that exactly reaches the former 16MiB composer total', () => {
     const original = existingAttachment('photo.png', 4 * MIB)
     composerState.composerImageAttachments = [original, existingAttachment('other.png', 10 * MIB)]
     const { container } = render(<ComposerPanel inline={false} />)

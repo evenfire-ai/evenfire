@@ -23,7 +23,6 @@ import {
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
   COMPOSER_MAX_IMAGE_DIMENSION,
-  COMPOSER_MAX_TOTAL_IMAGE_BYTES,
   ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
@@ -92,20 +91,9 @@ function composerImageDimensionRejection(
   return null
 }
 
-type ComposerImageBudgetRejection = 'image-too-large' | 'total-too-large' | null
-
-/**
- * Budget decision for one image of `sizeBytes` placed next to `otherImagesBytes`
- * already attached. Shared by the picker/paste/drop path and the annotation-save
- * path so neither route can exceed the per-image limit or the per-message total.
- */
-function composerImageBudgetRejection(
-  sizeBytes: number,
-  otherImagesBytes: number
-): ComposerImageBudgetRejection {
-  if (sizeBytes > COMPOSER_MAX_IMAGE_BYTES) return 'image-too-large'
-  if (otherImagesBytes + sizeBytes > COMPOSER_MAX_TOTAL_IMAGE_BYTES) return 'total-too-large'
-  return null
+/** Per-image ceiling only. Aggregate bytes are enforced on the chat hop. */
+function composerImageExceedsPerImageBudget(sizeBytes: number): boolean {
+  return sizeBytes > COMPOSER_MAX_IMAGE_BYTES
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
@@ -494,30 +482,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message.`
         )
       }
-      // The budget runs across the images already attached plus the ones accepted
-      // below, so a selection cannot exceed the per-message total even when every
-      // file is individually allowed.
-      let plannedBytes = composerImageAttachments.reduce(
-        (total, attachment) => total + attachment.sizeBytes,
-        0
-      )
-
       for (const [index, file] of selected.entries()) {
         const mimeType = inferComposerImageMimeType(file)
         if (!mimeType || !COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
           validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
           continue
         }
-        const rejection = composerImageBudgetRejection(file.size, plannedBytes)
-        if (rejection) {
+        if (composerImageExceedsPerImageBudget(file.size)) {
           validationErrors.push(
-            rejection === 'image-too-large'
-              ? `${file.name || 'Image'} is too large. Max size is ${formatComposerMebibytes(
-                  COMPOSER_MAX_IMAGE_BYTES
-                )} MiB.`
-              : `${file.name || 'Image'} was not added. Attachments can total at most ${formatComposerMebibytes(
-                  COMPOSER_MAX_TOTAL_IMAGE_BYTES
-                )} MiB per message.`
+            `${file.name || 'Image'} is too large. Max size is ${formatComposerMebibytes(
+              COMPOSER_MAX_IMAGE_BYTES
+            )} MiB.`
           )
           continue
         }
@@ -555,7 +530,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             sizeBytes: file.size,
             previewDataUrl: previewUrl || dataUrl,
           })
-          plannedBytes += file.size
         } catch (error) {
           revokePreviewUrl(previewUrl)
           validationErrors.push(
@@ -596,40 +570,27 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
    */
   const handleAnnotatedImageSave = useCallback(
     (updated: ComposerImageAttachment) => {
-      const otherImagesBytes = composerImageAttachments.reduce(
-        (total, attachment) =>
-          attachment.id === updated.id ? total : total + attachment.sizeBytes,
-        0
-      )
-      const rejection = composerImageBudgetRejection(updated.sizeBytes, otherImagesBytes)
       const dimensionError = composerImageDimensionRejection(
         updated.name || 'Image',
         updated.mimeType,
         updated.dataBase64
       )
-      if (!rejection && !dimensionError) {
+      if (!composerImageExceedsPerImageBudget(updated.sizeBytes) && !dimensionError) {
         onUpdateComposerImageAttachment(updated)
         return
       }
-      if (rejection === 'image-too-large') {
+      if (composerImageExceedsPerImageBudget(updated.sizeBytes)) {
         throw new Error(
           `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
             COMPOSER_MAX_IMAGE_BYTES
           )} MiB per image.`
         )
       }
-      if (rejection === 'total-too-large') {
-        throw new Error(
-          `${updated.name || 'Image'} was kept unchanged. Attachments can total at most ${formatComposerMebibytes(
-            COMPOSER_MAX_TOTAL_IMAGE_BYTES
-          )} MiB per message.`
-        )
-      }
       throw new Error(
         `${updated.name || 'Image'} was kept unchanged. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
       )
     },
-    [composerImageAttachments, onUpdateComposerImageAttachment]
+    [onUpdateComposerImageAttachment]
   )
 
   const handleComposerPaste = useCallback(

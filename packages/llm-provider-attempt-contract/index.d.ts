@@ -47,7 +47,7 @@ export declare const LIMITS: {
  * 10 MiB. Model vision capability is owned by issue #654 / PR #669.
  */
 export declare const VISUAL_LIMITS: {
-  readonly maxImages: 10,
+  readonly maxImages: 20,
   readonly typicalImageBytes: 5242880
   readonly typicalTotalImageBytes: 9437184
   readonly typicalEnvelopeBytes: 14680064

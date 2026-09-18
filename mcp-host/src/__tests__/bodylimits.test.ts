@@ -203,9 +203,9 @@ describe('mcp-host runtime message body budget', () => {
     )
   })
 
-  it('delivers ten small images in order', async () => {
+  it('delivers twenty small images in order', async () => {
     captured = []
-    const attachments = Array.from({ length: 10 }, (_, index) =>
+    const attachments = Array.from({ length: 20 }, (_, index) =>
       imageAttachment(`a${index + 1}`, 64 * 1024)
     )
     const response = await postMessage(messagePayload(attachments))
@@ -214,9 +214,9 @@ describe('mcp-host runtime message body budget', () => {
     expect(captured[0].attachments?.map(item => item.id)).toEqual(attachments.map(item => item.id))
   })
 
-  it('rejects an 11th qualifying image instead of charging it as text', async () => {
+  it('rejects a 21st qualifying image instead of charging it as text', async () => {
     captured = []
-    const attachments = Array.from({ length: 11 }, (_, index) =>
+    const attachments = Array.from({ length: 21 }, (_, index) =>
       imageAttachment(`a${index + 1}`, 64 * 1024)
     )
     const response = await postMessage(messagePayload(attachments))

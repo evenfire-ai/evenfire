@@ -35,7 +35,7 @@ keeps its existing deduplication behavior.
 
 Local visual budgets have two layers. The usual product target is 5 MiB decoded
 per image, 9 MiB decoded across a request, and a 14 MiB envelope at 2048 pixels
-(the official Codex client size, with `detail: high`). The hard ceiling is 10
+(the official Codex client size, with `detail: high`). The hard ceiling is 20
 images, 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
 PNG may exceed 10 MiB; the HTTP envelope stays 24 MiB so that encoded body
 still fits. Dimensions above 2048 px are rejected here because the frozen

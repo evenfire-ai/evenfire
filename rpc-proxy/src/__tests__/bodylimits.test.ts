@@ -178,10 +178,10 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(401)
   })
 
-  it('credits ten small images instead of charging them as text', async () => {
+  it('credits twenty small images instead of charging them as text', async () => {
     const body = JSON.stringify({
       content: 'look',
-      attachments: Array.from({ length: 10 }, (_, index) =>
+      attachments: Array.from({ length: 20 }, (_, index) =>
         imageAttachment(`a${index + 1}`, 64 * 1024)
       ),
     })
@@ -190,10 +190,10 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(401)
   })
 
-  it('rejects an 11th qualifying image instead of charging it as text', async () => {
+  it('rejects a 21st qualifying image instead of charging it as text', async () => {
     const body = JSON.stringify({
       content: 'look',
-      attachments: Array.from({ length: 11 }, (_, index) =>
+      attachments: Array.from({ length: 21 }, (_, index) =>
         imageAttachment(`a${index + 1}`, 64 * 1024)
       ),
     })
