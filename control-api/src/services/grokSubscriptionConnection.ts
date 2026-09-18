@@ -56,7 +56,8 @@ export class GrokSubscriptionFingerprintConflictError extends Error {
 /**
  * A write lost the connection_key uniqueness race: another writer created the
  * key first, or the key is a revoked tombstone (revocation is terminal per key
- * since migration 0113). Callers re-read with
+ * since migration 0113_grok_subscription_terminal_connection_key). Callers
+ * re-read with
  * `getGrokSubscriptionConnectionIncludingRevoked` to tell the two apart.
  */
 export class GrokSubscriptionConnectionKeyConflictError extends Error {

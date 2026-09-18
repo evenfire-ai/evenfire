@@ -352,7 +352,8 @@ export interface PluginWorkloadSdkInvocationRecord {
 }
 
 // Schema lives in pluginWorkloadSdkSchema.ts (type-only db dependency) so
-// db.ts can register migration 0027 without a runtime import cycle.
+// db.ts can register migration 0034_plugin_workload_sdk without a runtime
+// import cycle.
 export { applyPluginWorkloadSdkSchema } from './pluginWorkloadSdkSchema.js'
 
 // ─── Hashing helpers ─────────────────────────────────────────────────────
