@@ -189,6 +189,31 @@ export function setAppTabSavedRoutePath(
   }
 }
 
+/**
+ * Persist the live `document.title` of an app embed on its tab (mini-spec 06
+ * §2), so the strip names the tab after what the plugin currently shows. A
+ * mirror of `setAppTabSavedRoutePath`: a no-op (same reference) when the tab is
+ * missing, is not an app tab, or already holds this title, so a `setState`
+ * bails out. An empty / whitespace-only title is IGNORED (keeps the previous
+ * title) — a mid-navigation blank must not blank the tab label; precedence
+ * `document.title → app.label → 'App'` is resolved by the caller, not here.
+ */
+export function setAppTabTitle(
+  state: WorkspaceTabsState,
+  tabId: string,
+  title: string
+): WorkspaceTabsState {
+  const trimmed = title.trim()
+  if (!trimmed) return state
+  const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'app')
+  if (!target) return state
+  if (target.title === trimmed) return state
+  return {
+    ...state,
+    tabs: state.tabs.map(tab => (tab.id === tabId ? { ...tab, title: trimmed } : tab)),
+  }
+}
+
 /** Files: single instance — focus the existing tab if present (R8). */
 export function openFilesTab(
   state: WorkspaceTabsState,

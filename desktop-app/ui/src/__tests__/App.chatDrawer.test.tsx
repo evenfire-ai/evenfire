@@ -959,6 +959,92 @@ describe('App chat drawer — reopen preserves the last-viewed chat', () => {
   })
 })
 
+// Mini-spec 06 §2 — an app tab is named after the embed's live `document.title`.
+// The main process forwards `page-title-updated` over `sandboxUi.onTitleChanged`;
+// App renames the LIVE app tab (never a background one), ignoring empty titles so
+// the tab keeps its `app.label`. Driven through the real store producer + the real
+// WorkspaceTabStrip so the assertion is on the rendered tab label (T4).
+describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
+  let currentController: AppController
+  let titleChangedCb: ((args: { appRef: string; title: string }) => void) | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    titleChangedCb = null
+    currentController = makeController()
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          onTitleChanged: vi.fn((cb: (args: { appRef: string; title: string }) => void) => {
+            titleChangedCb = cb
+            return vi.fn()
+          }),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('renames the live app tab to the embed document.title, and an empty title keeps the label', () => {
+    render(<App />)
+
+    // Launch an app: its tab starts named after the registry label ('App').
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
+
+    // The embed reports its live document.title → the tab renames to it.
+    act(() => titleChangedCb?.({ appRef: 'ns/app', title: 'Ticket 42 — Acme' }))
+    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'App' })).toBeNull()
+
+    // A subsequent EMPTY title (mid-navigation blank) must not blank the label —
+    // the tab keeps the last real title.
+    act(() => titleChangedCb?.({ appRef: 'ns/app', title: '   ' }))
+    expect(screen.getByRole('button', { name: 'Ticket 42 — Acme' })).toBeTruthy()
+  })
+
+  it('ignores a title event whose appRef does not match the live tab', () => {
+    render(<App />)
+    act(() => {
+      sidebarHarness.props?.onOpenSandboxUiApp?.({
+        appRef: 'ns/app',
+        label: 'App',
+        defaultPath: '/',
+      })
+    })
+    // A stale title from a different app must not relabel the live tab.
+    act(() => titleChangedCb?.({ appRef: 'ns/other', title: 'Wrong' }))
+    expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull()
+  })
+})
+
 // Mini-spec 05: below the minimum panel width the drawer is SUPPRESSED (hidden,
 // app takes full width) without clearing the user's open intent, so it reappears
 // when the window re-widens; a MANUAL close clears the intent, so it stays gone.

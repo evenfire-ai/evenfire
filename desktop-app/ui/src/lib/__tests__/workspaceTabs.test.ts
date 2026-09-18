@@ -18,6 +18,7 @@ import {
   selectWorkspaceTab,
   selectWorkspaceTabAt,
   setAppTabSavedRoutePath,
+  setAppTabTitle,
 } from '../workspaceTabs'
 import type { ActiveChat, SettingsSection, WorkspaceTabsState } from '../workspaceTabs.types'
 
@@ -163,6 +164,56 @@ describe('workspaceTabs — setAppTabSavedRoutePath (mini-spec 05 §3)', () => {
 
     expect(state.tabs.find(t => t.id === 'app-a')?.app?.savedRoutePath).toBe('/tickets/A')
     expect(state.tabs.find(t => t.id === 'app-b')?.app?.savedRoutePath).toBe('/tickets/B')
+  })
+})
+
+describe('workspaceTabs — setAppTabTitle (mini-spec 06 §2)', () => {
+  it('renames the matching app tab and leaves siblings untouched', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    state = openAppTab(state, { id: 'app-2', appRef: 'eventasks', title: 'App' })
+
+    state = setAppTabTitle(state, 'app-1', 'Ticket 42 — Acme')
+
+    expect(state.tabs.find(t => t.id === 'app-1')?.title).toBe('Ticket 42 — Acme')
+    expect(state.tabs.find(t => t.id === 'app-2')?.title).toBe('App')
+    expect(state.activeTabId).toBe('app-2') // selection is not disturbed
+  })
+
+  it('trims the reported title before storing it', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    state = setAppTabTitle(state, 'app-1', '  Padded title  ')
+    expect(state.tabs.find(t => t.id === 'app-1')?.title).toBe('Padded title')
+  })
+
+  it('is a no-op (same reference) when the title is unchanged', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'Doc' })
+    expect(setAppTabTitle(state, 'app-1', 'Doc')).toBe(state)
+    // A trimmed value equal to the stored one is likewise a no-op.
+    expect(setAppTabTitle(state, 'app-1', '  Doc  ')).toBe(state)
+  })
+
+  it('ignores an empty / whitespace-only title, keeping the previous one', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'Doc' })
+    expect(setAppTabTitle(state, 'app-1', '')).toBe(state)
+    expect(setAppTabTitle(state, 'app-1', '   ')).toBe(state)
+    expect(state.tabs.find(t => t.id === 'app-1')?.title).toBe('Doc')
+  })
+
+  it('is a no-op when the tab is missing (persist racing a close) or not an app', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openAppTab(state, { id: 'app-1', appRef: 'eventasks', title: 'App' })
+    state = openChatTab(state, { id: 'chat-1', agentRef: 'a', chatId: 'c1', title: 'Chat' })
+    state = openFilesTab(state, { id: 'files-1' })
+
+    expect(setAppTabTitle(state, 'gone', 'X')).toBe(state)
+    // A chat / files tab is never renamed by the app-title path.
+    expect(setAppTabTitle(state, 'chat-1', 'X')).toBe(state)
+    expect(setAppTabTitle(state, 'files-1', 'X')).toBe(state)
+    expect(state.tabs.find(t => t.id === 'chat-1')?.title).toBe('Chat')
   })
 })
 

@@ -676,6 +676,11 @@ const clerum = Object.freeze({
       ipcRenderer.on('sandboxUi:refreshError', listener)
       return () => ipcRenderer.off('sandboxUi:refreshError', listener)
     },
+    onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => {
+      const listener = (_event: unknown, args: { appRef: string; title: string }) => callback(args)
+      ipcRenderer.on('sandboxUi:titleChanged', listener)
+      return () => ipcRenderer.off('sandboxUi:titleChanged', listener)
+    },
   },
   /**
    * Plugin permissions, trusted-renderer half: the consent modal and the

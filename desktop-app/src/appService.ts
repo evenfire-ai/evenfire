@@ -4827,6 +4827,7 @@ export class AppService {
     onClosed?: () => void
     onRefreshError?: (message: string) => void
     onOauthError?: (message: string) => void
+    onTitleChanged?: (title: string) => void
   }): Promise<void> {
     return this.enqueueSandboxUiLifecycle(() => this.openSandboxUiNow(args))
   }
@@ -4842,6 +4843,7 @@ export class AppService {
     onClosed?: () => void
     onRefreshError?: (message: string) => void
     onOauthError?: (message: string) => void
+    onTitleChanged?: (title: string) => void
   }): Promise<void> {
     const recipeNs = String(args.recipeNs || '').trim()
     const recipeName = String(args.recipeName || '').trim()
@@ -4874,6 +4876,9 @@ export class AppService {
         const surface = driver.getActiveSandboxUi()
         if (!active || !surface) return
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
+      },
+      onTitleChanged: title => {
+        args.onTitleChanged?.(title)
       },
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(

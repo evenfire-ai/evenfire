@@ -72,6 +72,7 @@ import {
   selectWorkspaceTab,
   selectWorkspaceTabAt,
   setAppTabSavedRoutePath,
+  setAppTabTitle,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
@@ -1287,6 +1288,24 @@ export function App() {
       .catch(() => undefined)
     return unsubscribe
   }, [setPendingSandboxUiDeepLinkState])
+
+  // Name the live app tab after the embed's `document.title` (mini-spec 06 §2).
+  // Only the tab whose embed is live (`liveSandboxUiTabIdRef`) is renamed, and
+  // only when the reported `appRef` still matches it, so a late title event from
+  // a torn-down embed can't relabel whichever app is live now. The store ignores
+  // empty titles, so the tab keeps its `app.label` until a real title arrives.
+  React.useEffect(() => {
+    const off = window.clerum.sandboxUi.onTitleChanged?.(({ appRef, title }) => {
+      const tabId = liveSandboxUiTabIdRef.current
+      if (!tabId) return
+      setWorkspaceTabs(state => {
+        const tab = state.tabs.find(candidate => candidate.id === tabId && candidate.kind === 'app')
+        if (!tab || tab.app?.appRef !== appRef) return state
+        return setAppTabTitle(state, tabId, title)
+      })
+    })
+    return () => off?.()
+  }, [setWorkspaceTabs])
 
   React.useEffect(() => {
     if (

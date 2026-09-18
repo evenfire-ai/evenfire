@@ -756,6 +756,7 @@ declare global {
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void
