@@ -101,3 +101,6 @@ images:
   - name: clerum/codex-llm-proxy
     newName: ghcr.io/evenfire-ai/codex-llm-proxy
     newTag: v0.8.1
+  - name: clerum/grok-llm-proxy
+    newName: ghcr.io/evenfire-ai/grok-llm-proxy
+    newTag: v0.8.1

@@ -10146,6 +10146,7 @@ describe('WorkflowRecipeReconciler', () => {
       claimedParent: true,
       parentSpec: null,
       connectionKey: 'unassigned',
+      grokConnectionKey: 'unassigned',
     })
   })
 
@@ -10204,6 +10205,7 @@ describe('WorkflowRecipeReconciler', () => {
       claimedParent: true,
       parentSpec,
       connectionKey: 'unassigned',
+      grokConnectionKey: 'unassigned',
     })
   })
 
@@ -10265,6 +10267,7 @@ describe('WorkflowRecipeReconciler', () => {
       claimedParent: true,
       parentSpec,
       connectionKey: 'team-plus',
+      grokConnectionKey: 'unassigned',
     })
   })
 

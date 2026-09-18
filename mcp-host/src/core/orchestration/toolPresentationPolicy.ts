@@ -24,11 +24,15 @@ export function resolveToolPresentation(
   // A fallback reuses the same tool request, so choose a presentation executable
   // and optimized across the configured provider chain before the first attempt.
   if (
-    provider === 'codex-subscription' ||
-    fallbacks.some(entry => entry.provider === 'codex-subscription')
+    isOauthBrokerPresentationTarget(provider) ||
+    fallbacks.some(entry => isOauthBrokerPresentationTarget(entry.provider))
   ) {
     const codexMode = config.codexToolPresentation ?? 'direct'
     return { bridgeEnabled: codexMode !== 'direct', codexMode }
   }
   return { bridgeEnabled: config.dynamicToolsEnabled }
+}
+
+function isOauthBrokerPresentationTarget(provider: string): boolean {
+  return provider === 'codex-subscription' || provider === 'grok-subscription'
 }

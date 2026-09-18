@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import * as api from '../../lib/api'
 import {
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '../../lib/grokSubscription'
+import {
   buildHostReferencesForContext,
   materializeContextResource,
   materializeHostResource,
@@ -25,6 +29,15 @@ import { ToastProvider } from '../Toast'
  *
  * These tests lock the new behavior so it cannot regress.
  */
+
+vi.mock('../../lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockRejectedValue({ status: 404 }),
+    listGrokConnectionModels: vi.fn().mockResolvedValue([]),
+  }
+})
 
 vi.mock('../../lib/codexSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
@@ -1045,6 +1058,49 @@ async function selectCodexSubscription(model = 'gpt-5.1') {
   expect(screen.queryByRole('radio', { name: /^ChatGPT subscription$/i })).not.toBeInTheDocument()
 }
 
+function mockGrokGrant() {
+  vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+    {
+      connectionKey: 'team-grok',
+      displayName: 'Team Grok',
+      status: 'connected',
+      defaultModel: 'grok-4.6',
+      credentialRevision: 2,
+      catalogRevision: 5,
+      accountFingerprint: 'fp',
+      catalogStatus: 'ready',
+      catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+      lastRefreshAt: '2026-08-20T00:00:00.000Z',
+      lastAuthAt: '2026-08-20T00:00:00.000Z',
+      refreshLockHeld: false,
+    },
+  ])
+  vi.mocked(listGrokConnectionModels).mockResolvedValue([
+    { model: 'grok-4.6', enabled: true, stale: false },
+  ])
+}
+
+async function selectGrokSubscription(model = 'grok-4.6') {
+  fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+  fireEvent.click(await screen.findByRole('option', { name: /Team Grok/i }))
+  await waitFor(() => {
+    expect(
+      screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
+    ).toHaveTextContent(model)
+  })
+}
+
+async function addOpenAiFallback() {
+  fireEvent.click(screen.getByRole('button', { name: /Fallback providers/i }))
+  fireEvent.click(screen.getByRole('button', { name: /Add fallback provider/i }))
+  fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-fallback-0-provider' }), {
+    target: { value: 'openai' },
+  })
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /Select secret/i })).toBeInTheDocument()
+  })
+}
+
 describe('HostWizard — broker-backed Codex authoring', () => {
   it('creates a Codex-only Host without secretRef or a Secret POST', async () => {
     await renderWizard()
@@ -1086,6 +1142,62 @@ describe('HostWizard — broker-backed Codex authoring', () => {
     ).toBe(false)
   }, 15_000)
 
+  it('creates a Grok-only Host with connectionRef', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        defaultModel: 'grok-4.6',
+        credentialRevision: 2,
+        catalogRevision: 5,
+        accountFingerprint: 'fp',
+        catalogStatus: 'ready',
+        catalogSyncedAt: '2026-08-20T00:00:00.000Z',
+        lastRefreshAt: '2026-08-20T00:00:00.000Z',
+        lastAuthAt: '2026-08-20T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ])
+    vi.mocked(listGrokConnectionModels).mockResolvedValue([
+      { model: 'grok-4.6', enabled: true, stale: false },
+    ])
+    await renderWizard()
+    await walkToModelStep({ agentName: 'grok-only' })
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      ).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }), {
+      target: { value: 'grok-subscription' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Select LLM Secret/i }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'grok-only' },
+          spec: expect.objectContaining({
+            model: {
+              provider: 'grok-subscription',
+              name: 'grok-4.6',
+              connectionRef: 'team-grok',
+            },
+          }),
+        })
+      )
+    })
+  }, 15_000)
+
   it('blocks Next until a ChatGPT subscription is chosen', async () => {
     await renderWizard()
     await walkToModelStep({ agentName: 'codex-needs-grant' })
@@ -1111,6 +1223,126 @@ describe('HostWizard — broker-backed Codex authoring', () => {
       screen.getByLabelText('Default model', { selector: '#llm-primary-model' })
     ).toHaveTextContent('gpt-5.1')
     expect(screen.getByText(/Use an existing LLM Secret/i)).toBeInTheDocument()
+  }, 15_000)
+
+  it('creates a Grok primary + OpenAI fallback Host with an existing Secret and the Grok grant', async () => {
+    mockGrokGrant()
+    await renderWizard()
+    await walkToModelStep({ agentName: 'grok-mixed' })
+    await selectGrokSubscription()
+    await addOpenAiFallback()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+    expect(screen.getByText('Select an existing LLM Secret.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'grok-mixed' },
+          spec: expect.objectContaining({
+            secretRef: 'secret-a',
+            model: {
+              provider: 'grok-subscription',
+              name: 'grok-4.6',
+              connectionRef: 'team-grok',
+            },
+            llmPolicy: expect.objectContaining({
+              fallbacks: [expect.objectContaining({ provider: 'openai' })],
+            }),
+          }),
+        })
+      )
+    })
+    expect(
+      vi
+        .mocked(api.apiSend)
+        .mock.calls.some(call => call[0] === 'POST' && call[1] === '/api/v1/admin/secrets')
+    ).toBe(false)
+  }, 15_000)
+
+  it('creates a Codex primary + OpenAI fallback Host with an existing Secret and the Codex grant', async () => {
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-mixed-submit' })
+    await selectCodexSubscription()
+    await addOpenAiFallback()
+    fireEvent.click(screen.getByRole('button', { name: /Select secret/i }))
+    fireEvent.click(screen.getByRole('option', { name: /secret-a/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Next' })).toBeEnabled()
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    continueToConnectorsStep()
+    submitFromConnectorsStep()
+    await waitFor(() => {
+      expect(api.apiSend).toHaveBeenCalledWith(
+        'POST',
+        '/api/v1/admin/hosts',
+        expect.objectContaining({
+          metadata: { name: 'codex-mixed-submit' },
+          spec: expect.objectContaining({
+            secretRef: 'secret-a',
+            model: {
+              provider: 'codex-subscription',
+              name: 'gpt-5.1',
+              connectionRef: 'codex-aaa',
+            },
+          }),
+        })
+      )
+    })
+  }, 15_000)
+
+  it('resets the Codex grant when the primary switches to Grok (never loads Grok models with a Codex key)', async () => {
+    mockGrokGrant()
+    await renderWizard()
+    await walkToModelStep({ agentName: 'codex-to-grok' })
+    await selectCodexSubscription()
+    vi.mocked(listGrokConnectionModels).mockClear()
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    fireEvent.click(screen.getByRole('option', { name: 'xAI Grok Subscription' }))
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText('Provider', { selector: '#llm-primary-provider' })
+      ).toHaveTextContent('xAI Grok Subscription')
+    })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(listGrokConnectionModels).not.toHaveBeenCalledWith('codex-aaa')
+    expect(screen.queryByText('Could not load Grok grant models')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Select LLM Secret/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled()
+  }, 15_000)
+
+  it('hides the Grok provider when the Grok capability probe reports disabled', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockRejectedValue({ status: 404 })
+    await renderWizard()
+    await walkToModelStep({ agentName: 'grok-flag-off' })
+    await waitFor(() => {
+      expect(listGrokSubscriptionConnections).toHaveBeenCalled()
+    })
+    fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+    expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'xAI Grok Subscription' })).not.toBeInTheDocument()
+  }, 15_000)
+
+  it('offers the Grok provider once the Grok capability probe succeeds', async () => {
+    mockGrokGrant()
+    await renderWizard()
+    await walkToModelStep({ agentName: 'grok-flag-on' })
+    await waitFor(() => {
+      fireEvent.click(screen.getByLabelText('Provider', { selector: '#llm-primary-provider' }))
+      expect(screen.getByRole('option', { name: 'xAI Grok Subscription' })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('option', { name: /^OpenAI$/ })).toBeInTheDocument()
   }, 15_000)
 
   it('requires exact credential slots when a static fallback joins a Codex primary', async () => {

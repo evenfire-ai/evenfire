@@ -90,6 +90,15 @@ describe('OpenAI family presentation', () => {
     expect(isOpenAiFamily('codex-subscription')).toBe(true)
   })
 
+  it('does not fold Grok subscription into the OpenAI family', () => {
+    expect(isOpenAiFamily('grok-subscription')).toBe(false)
+    expect(catalogGroupKey('grok-subscription')).toBe('grok-subscription')
+    expect(getProviderLabel('grok-subscription')).not.toBe('OpenAI')
+    expect(OPERATOR_PROVIDER_OPTIONS.some(option => option.value === 'grok-subscription')).toBe(
+      true
+    )
+  })
+
   it('marks a model as API key, subscription, or both', () => {
     const catalog: LlmModelCatalogEntry[] = [
       { provider: 'openai', model: 'gpt-5.1', enabled: true },
@@ -193,8 +202,17 @@ describe('LLM_CREDENTIAL_GROUPS (spec R4.5.1/R4.5.2)', () => {
     expect(resolveDefaultModel('codex-subscription', ['gpt-5.1'])).toBe('')
   })
 
+  it('models Grok as a zero-slot broker with no invented default model', () => {
+    const grok = LLM_CREDENTIAL_GROUPS.find(g => g.provider === 'grok-subscription')!
+    expect(grok.slots).toEqual([])
+    expect(LLM_DEFAULT_MODEL_BY_PROVIDER['grok-subscription']).toBeUndefined()
+  })
+
   it('keeps oauth-broker providers off the Kubernetes Secret editor list', () => {
     expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'codex-subscription')).toBe(
+      false
+    )
+    expect(LLM_SECRET_EDITOR_GROUPS.some(group => group.provider === 'grok-subscription')).toBe(
       false
     )
     expect(LLM_SECRET_EDITOR_GROUPS.every(group => group.slots.length > 0)).toBe(true)
@@ -331,5 +349,23 @@ describe('broker-backed authoring helpers', () => {
         budget: { unit: 'cost' },
       })
     ).toMatch(/unit tokens/)
+  })
+
+  it('requires a Grok grant when only a step agent uses grok-subscription', () => {
+    expect(
+      brokerBackedRecipeAuthoringError({
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+      })
+    ).toMatch(/Grok grant/)
+    expect(
+      brokerBackedRecipeAuthoringError(
+        {
+          agent: { provider: 'openai', model: 'gpt-5.1' },
+          steps: [{ agent: { provider: 'grok-subscription', model: 'grok-4.6' } }],
+        },
+        'team-grok'
+      )
+    ).toBeNull()
   })
 })

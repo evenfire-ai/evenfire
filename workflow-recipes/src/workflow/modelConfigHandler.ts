@@ -10,7 +10,11 @@
  * per-attempt broker.
  */
 import {
+  CODEX_UNASSIGNED_CONNECTION_KEY,
+  GROK_PROVIDER,
   assignedCodexConnectionKey,
+  parseGrokAllowedModelsSnapshot,
+  projectGrokExecution,
   snapshotForAssignedCodexGrant,
 } from '@clerum/codex-catalog-projection'
 import {
@@ -22,6 +26,7 @@ import {
 } from '@clerum/llm-providers'
 import { createLogger } from '../observability/logger'
 import { readVerifiedSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -107,7 +112,16 @@ export interface McpHostClient {
       provider?: string
       model?: string
       contractVersion?: 2 | 3
+      /** Codex bootstrap only. */
       codexBinding?: {
+        connectionKey: string
+        catalogRevision: number
+        credentialRevision: number
+        model: string
+        bindingHash: string
+      } | null
+      /** Grok bootstrap only. */
+      subscriptionBinding?: {
         connectionKey: string
         catalogRevision: number
         credentialRevision: number
@@ -135,7 +149,27 @@ export interface HandleOptions {
   validateDegraded?: DegradedModeValidator
   /** Assigned Codex grant. Empty/missing is unassigned and never inherits. */
   codexConnectionKey?: string
+  /**
+   * Assigned Grok grant (canonical `subscription-connection-ref`). Empty/missing
+   * is unassigned; the Codex key is never consulted for Grok.
+   */
+  grokConnectionKey?: string
 }
+
+/** Per-broker assigned grant keys. Each broker reads only its own key. */
+type BrokerConnectionKeys = Pick<HandleOptions, 'codexConnectionKey' | 'grokConnectionKey'>
+
+/** WRC process switches the broker needs to agree with the recipe verdict. */
+export interface ModelConfigHandlerOptions {
+  /**
+   * WRC_GROK_SUBSCRIPTION_ENABLED. Off (the default) means no Grok grant is
+   * redeemable here, matching `projectCodexRecipeVerdict`, which already
+   * withholds the Grok scope, egress, binding and pod env.
+   */
+  grokSubscriptionEnabled?: boolean
+}
+
+type AllowlistGate = BrokerConnectionKeys & { grokSubscriptionEnabled: boolean }
 
 // ─── Handler ────────────────────────────────────────────────────────────
 
@@ -199,16 +233,33 @@ function parseAllowedModels(raw: string | undefined, provider: string): Set<stri
   return allowed
 }
 
-function isCodexModelAllowed(
+function isModelAllowed(
   provider: string,
   model: string,
   allowlistCm: { data: Record<string, string>; annotations?: Record<string, string> },
-  connectionKey?: string
+  gate: AllowlistGate
 ): boolean {
+  const cm = { metadata: { annotations: allowlistCm.annotations ?? {} }, data: allowlistCm.data }
+  if (provider === GROK_PROVIDER) {
+    // The local master switch comes first: with it off the recipe pod has no
+    // Grok provider, so no grant can be redeemed whatever the ConfigMap says.
+    if (!gate.grokSubscriptionEnabled) return false
+    // Grok redeemability is the Grok projection of the assigned Grok grant:
+    // `grok-enabled`, the grant's own `grok-connections` row (status + models).
+    // The Codex parser would see the flat union of every Grok grant.
+    const grokKey = assignedCodexConnectionKey(gate.grokConnectionKey)
+    if (grokKey === CODEX_UNASSIGNED_CONNECTION_KEY) return false
+    return (
+      projectGrokExecution(
+        { model: { provider, name: model } },
+        parseGrokAllowedModelsSnapshot(cm, grokKey)
+      ).eligibility === 'eligible'
+    )
+  }
   if (isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker') {
     const snapshot = snapshotForAssignedCodexGrant(
-      assignedCodexConnectionKey(connectionKey),
-      { metadata: { annotations: allowlistCm.annotations ?? {} }, data: allowlistCm.data },
+      assignedCodexConnectionKey(gate.codexConnectionKey),
+      cm,
       { flagEnabled: false }
     )
     const key = `${provider}:${model}`
@@ -220,11 +271,24 @@ function isCodexModelAllowed(
 }
 
 export class ModelConfigHandler {
+  private readonly grokSubscriptionEnabled: boolean
+
   constructor(
     private readonly k8s: K8sSecretReader,
     private readonly mcpHost: McpHostClient,
-    private readonly objectStorage?: ObjectStorageReader
-  ) {}
+    private readonly objectStorage?: ObjectStorageReader,
+    options: ModelConfigHandlerOptions = {}
+  ) {
+    this.grokSubscriptionEnabled = options.grokSubscriptionEnabled === true
+  }
+
+  private allowlistGate(keys: BrokerConnectionKeys = {}): AllowlistGate {
+    return {
+      codexConnectionKey: keys.codexConnectionKey,
+      grokConnectionKey: keys.grokConnectionKey,
+      grokSubscriptionEnabled: this.grokSubscriptionEnabled,
+    }
+  }
 
   /**
    * Publish an SDK host's public bootstrap binding without resolving a Secret.
@@ -265,7 +329,12 @@ export class ModelConfigHandler {
           ...(model ? { model } : {}),
           ...(provider === 'codex-subscription'
             ? { contractVersion: 3, ...(codexBinding ? { codexBinding } : {}) }
-            : { contractVersion: 2 }),
+            : provider === 'grok-subscription'
+              ? {
+                  contractVersion: 3,
+                  ...(codexBinding ? { subscriptionBinding: codexBinding } : {}),
+                }
+              : { contractVersion: 2 }),
         }
       )
       if (result.status >= 400) {
@@ -277,7 +346,8 @@ export class ModelConfigHandler {
             typeof result.body.policyReady === 'boolean' &&
             typeof result.body.policyState === 'string'
           : isBootstrapIdentityProof(result.body)
-      const expectedContractVersion = provider === 'codex-subscription' ? 3 : 2
+      const expectedContractVersion =
+        provider === 'codex-subscription' || provider === 'grok-subscription' ? 3 : 2
       if (
         result.body.configured !== true ||
         result.body.ready !== true ||
@@ -317,9 +387,17 @@ export class ModelConfigHandler {
       // Without a model there is no pin to apply, and an unpinned
       // binding could be for another model. Refuse it rather than accept it
       // blind — the pin is the point of this call.
-      const verifiedCodexBinding = model
-        ? readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
-        : null
+      // Strict slots, matching mcp-host: a Codex binding travels only as
+      // `codexBinding`, a Grok binding only as `subscriptionBinding`, and a
+      // provider never republishes the other broker's slot.
+      const verifiedCodexBinding =
+        model && provider === 'codex-subscription'
+          ? readVerifiedSdkOnlyCodexBinding(result.body.codexBinding, model)
+          : null
+      const verifiedGrokBinding =
+        model && provider === 'grok-subscription'
+          ? readVerifiedSdkOnlyGrokBinding(result.body.subscriptionBinding, model)
+          : null
       return {
         status: 202,
         body: {
@@ -330,6 +408,7 @@ export class ModelConfigHandler {
           contractVersion: expectedContractVersion,
           capabilityFamily,
           ...(verifiedCodexBinding ? { codexBinding: verifiedCodexBinding } : {}),
+          ...(verifiedGrokBinding ? { subscriptionBinding: verifiedGrokBinding } : {}),
           ...(typeof result.body.policyReady === 'boolean'
             ? { policyReady: result.body.policyReady }
             : {}),
@@ -397,7 +476,7 @@ export class ModelConfigHandler {
     if (!allowlistCm.exists) {
       return { status: 503, body: { error: 'Provider configuration unavailable' } }
     }
-    if (!isCodexModelAllowed(target.provider, target.model, allowlistCm)) {
+    if (!isModelAllowed(target.provider, target.model, allowlistCm, this.allowlistGate())) {
       return { status: 403, body: { error: 'Provider target is not enabled' } }
     }
 
@@ -478,12 +557,7 @@ export class ModelConfigHandler {
     )
     const brokerBacked = PROVIDER_AUTH_MODE[req.provider] === 'oauth-broker'
     if (allowlistCm.exists) {
-      const allowed = isCodexModelAllowed(
-        req.provider,
-        req.model,
-        allowlistCm,
-        opts?.codexConnectionKey
-      )
+      const allowed = isModelAllowed(req.provider, req.model, allowlistCm, this.allowlistGate(opts))
       // oauth-broker configure is identity-only. Spend is gated by
       // grantRedeemable on the coordinator and by authorize, not by 4xx here.
       if (!allowed && !brokerBacked) {
@@ -553,7 +627,7 @@ export class ModelConfigHandler {
           identityBound: true,
           grantRedeemable:
             allowlistCm.exists &&
-            isCodexModelAllowed(req.provider, req.model, allowlistCm, opts?.codexConnectionKey),
+            isModelAllowed(req.provider, req.model, allowlistCm, this.allowlistGate(opts)),
         },
       }
     }
@@ -579,7 +653,7 @@ export class ModelConfigHandler {
       req,
       configMap,
       allowlistCm.exists ? allowlistCm : null,
-      opts?.codexConnectionKey
+      opts
     )
 
     // 3. Optional SOUL download
@@ -707,7 +781,7 @@ export class ModelConfigHandler {
     req: ConfigureModelRequest,
     configMap: Record<string, string>,
     allowlist: { data: Record<string, string>; annotations?: Record<string, string> } | null,
-    codexConnectionKey?: string
+    keys?: BrokerConnectionKeys
   ): Promise<Array<{ provider: string; model: string; apiKey: string; llmSecretName: string }>> {
     const fallbacks = req.fallbacks
     if (!fallbacks || fallbacks.length === 0) return []
@@ -732,11 +806,11 @@ export class ModelConfigHandler {
         log.warn('Skipping fallback with invalid provider/model', { stepId: req.stepId })
         continue
       }
-      const allowed = isCodexModelAllowed(
+      const allowed = isModelAllowed(
         entry.provider,
         entry.model,
         allowlist,
-        codexConnectionKey
+        this.allowlistGate(keys)
       )
       if (!allowed) {
         log.warn('Skipping fallback model not in allowlist', {
@@ -780,7 +854,8 @@ function mcpHostConfigureRejected(result: {
 }
 
 function isBootstrapIdentityProof(body: Record<string, unknown>): boolean {
-  const expectedVersion = body.provider === 'codex-subscription' ? 3 : 2
+  const expectedVersion =
+    body.provider === 'codex-subscription' || body.provider === 'grok-subscription' ? 3 : 2
   return (
     body.configured === true &&
     body.ready === true &&
