@@ -147,6 +147,11 @@ async function writeUniqueDownload(
   throw new Error('Could not create a unique artifact download filename')
 }
 
+/** A model-selection revision (issue #654 CAS base): a non-negative integer. */
+function isSelectionRevision(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+}
+
 function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   const parsed = raw as HostMessageRequest
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -154,6 +159,15 @@ function parseHostMessageRequest(raw: unknown): HostMessageRequest {
   }
   if (typeof parsed.content !== 'string' || !parsed.content.trim()) {
     throw new Error('Invalid host message request')
+  }
+  if (parsed.model !== undefined && (typeof parsed.model !== 'string' || !parsed.model.trim())) {
+    throw new Error('Invalid host message request: model')
+  }
+  if (
+    parsed.modelSelectionRevision !== undefined &&
+    !isSelectionRevision(parsed.modelSelectionRevision)
+  ) {
+    throw new Error('Invalid host message request: modelSelectionRevision')
   }
   return parsed
 }
@@ -1313,13 +1327,12 @@ export function registerIpcHandlers(service: AppService): void {
       }
       // Optional CAS precondition (issue #654). Absent on hosts that do not
       // project `modelSelectionRevision`; the request then omits it entirely.
-      const rawExpectedRevision = payload?.expectedRevision
-      const expectedRevision =
-        typeof rawExpectedRevision === 'number' &&
-        Number.isInteger(rawExpectedRevision) &&
-        rawExpectedRevision >= 0
-          ? rawExpectedRevision
-          : undefined
+      // A present but invalid revision is refused: dropping it would turn a
+      // conditional write into an unconditional one.
+      const expectedRevision = payload?.expectedRevision
+      if (expectedRevision !== undefined && !isSelectionRevision(expectedRevision)) {
+        throw new Error('expectedRevision must be a non-negative integer')
+      }
       return service.setHostModel(hostRef, chatId, model, payload?.hostRefs, expectedRevision)
     }
   )
