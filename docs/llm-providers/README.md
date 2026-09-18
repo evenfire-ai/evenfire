@@ -280,7 +280,7 @@ family, or an "OpenAI-compatible" request shape.
 
 #### Rollout and refresh cadence
 
-- On upgrade, migration `0115_llm_allowed_models_image_input` only adds the
+- On upgrade, migration `011b_llm_allowed_models_image_input` only adds the
   nullable column and its `CHECK`; it seeds no evidence. Existing rows stay `unknown` (images refused, text unaffected) until a
   catalog sync runs, on demand or from the cron. With the cron enabled (the
   base deploy enables it) the first sync runs a few seconds after control-api

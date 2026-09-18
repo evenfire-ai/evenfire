@@ -21,6 +21,24 @@
 import type { Pool, PoolClient } from 'pg'
 import { type Logger, createLogger } from '../observability/logger.js'
 import type { WorkflowRecipeCRD } from '../types.js'
+import { WorkflowAuthorityCheckpointError } from './workflowActionCheckpointClient.js'
+
+const AUTHORITY_FAILURE_REASON = Object.freeze({
+  denied: 'workflow_authority_denied',
+  not_found: 'workflow_authority_not_found',
+  access_path_stale: 'workflow_authority_access_path_stale',
+  invalid_binding: 'workflow_authority_invalid_binding',
+} as const)
+
+function terminalAuthorityFailureReason(
+  failure: WorkflowAuthorityCheckpointError['failure']
+): (typeof AUTHORITY_FAILURE_REASON)[keyof typeof AUTHORITY_FAILURE_REASON] | null {
+  if (failure === 'denied') return AUTHORITY_FAILURE_REASON.denied
+  if (failure === 'not_found') return AUTHORITY_FAILURE_REASON.not_found
+  if (failure === 'access_path_stale') return AUTHORITY_FAILURE_REASON.access_path_stale
+  if (failure === 'invalid_binding') return AUTHORITY_FAILURE_REASON.invalid_binding
+  return null
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -45,6 +63,24 @@ export interface DbRunRow {
   started_at: string | null
   child_recipe_name: string | null
   child_recipe_namespace: string | null
+  authority_binding?: WorkflowRunAuthorityBinding | null
+}
+
+export interface WorkflowRunAuthorityBinding {
+  version: 2
+  userId: string
+  sid: string
+  sessionVersion: number
+  delegationJti: string
+  operationId: string
+  resource: Record<string, unknown>
+  target: Record<string, string> | null
+  targetHash: string
+  accessPathId: string
+  authorizationRevision: string
+  pathKind: 'direct' | 'team'
+  effectiveTeamId: string | null
+  behaviorBindingHash: string
 }
 
 export interface ChildRecipeRef {
@@ -71,6 +107,8 @@ export interface DbRunProcessorOptions {
   runPollMs: number
   /** Builds + creates the child WorkflowRecipe for a run (injected). */
   createChildRecipe: ChildRecipeCreator
+  /** Live Control API checkpoint required before protected v2 queued work. */
+  checkpointAuthority?: (run: DbRunRow) => Promise<void>
   /** Checks whether a previously created child WorkflowRecipe still exists. */
   childRecipeExists?: ChildRecipeExistenceChecker
   /** Called after the DB commit that claims a run as Running. */
@@ -93,14 +131,32 @@ export interface DbRunProcessor {
 // ─── SQL literal helpers ───────────────────────────────────────────────
 
 const SELECT_RUN_FOR_UPDATE = `
-  SELECT run_id, recipe_namespace, recipe_name, phase,
-         team_id, usage_team_id, actor_type, actor_id, inputs, intermediate_parameters,
-         output_overrides, trigger_source, owner_instance_id,
-         max_duration_seconds, started_at,
-         child_recipe_name, child_recipe_namespace
-    FROM workflow_runs
-   WHERE run_id = $1
-   FOR UPDATE`
+  SELECT run.run_id, run.recipe_namespace, run.recipe_name, run.phase,
+         run.team_id, run.usage_team_id, run.actor_type, run.actor_id,
+         run.inputs, run.intermediate_parameters, run.output_overrides,
+         run.trigger_source, run.owner_instance_id, run.max_duration_seconds,
+         run.started_at, run.child_recipe_name, run.child_recipe_namespace,
+         CASE WHEN binding.id IS NULL THEN NULL ELSE jsonb_build_object(
+           'version', binding.binding_version,
+           'userId', binding.user_id,
+           'sid', binding.session_id,
+           'sessionVersion', binding.session_version,
+           'delegationJti', binding.delegation_jti,
+           'operationId', binding.operation_id,
+           'resource', binding.resource,
+           'target', binding.target,
+           'targetHash', binding.target_hash,
+           'accessPathId', binding.access_path_id,
+           'authorizationRevision', binding.authorization_revision,
+           'pathKind', binding.path_kind,
+           'effectiveTeamId', binding.effective_team_id,
+           'behaviorBindingHash', binding.behavior_binding_hash
+         ) END AS authority_binding
+    FROM workflow_runs run
+    LEFT JOIN workflow_authority_bindings binding
+      ON binding.id = run.initiating_authority_binding_id
+   WHERE run.run_id = $1
+   FOR UPDATE OF run`
 
 const CLAIM_PENDING = `
   UPDATE workflow_runs
@@ -114,6 +170,16 @@ const CLAIM_PENDING = `
    WHERE run_id = $4
      AND phase = 'Pending'
      AND (owner_instance_id IS NULL OR owner_instance_id = $1)`
+
+const FAIL_PENDING_AUTHORITY = `
+  UPDATE workflow_runs
+     SET phase = 'Failed',
+         failure_reason = $2,
+         completed_at = now(),
+         last_reconciled_at = now(),
+         updated_at = now()
+   WHERE run_id = $1
+     AND phase = 'Pending'`
 
 const UPDATE_RUN_TERMINAL = `
   UPDATE workflow_runs
@@ -441,6 +507,29 @@ export function createDbRunProcessor(opts: DbRunProcessorOptions): DbRunProcesso
         return
       }
 
+      if (run.authority_binding) {
+        if (!opts.checkpointAuthority) {
+          throw new Error('workflow_authority_checkpointer_unavailable')
+        }
+        try {
+          await opts.checkpointAuthority(run)
+        } catch (error) {
+          if (error instanceof WorkflowAuthorityCheckpointError && !error.retryable) {
+            const failureReason = terminalAuthorityFailureReason(error.failure)
+            if (!failureReason) throw error
+            await client.query(FAIL_PENDING_AUTHORITY, [run.run_id, failureReason])
+            await client.query('COMMIT')
+            committed = true
+            log.warn('pending run failed after permanent authority rejection', {
+              run_id: run.run_id,
+              authority_failure: error.failure,
+            })
+            notifyRunTerminal(run.run_id, 'Failed')
+            return
+          }
+          throw error
+        }
+      }
       const child = await opts.createChildRecipe(run)
       const claimRes = await client.query(CLAIM_PENDING, [
         opts.instanceId,

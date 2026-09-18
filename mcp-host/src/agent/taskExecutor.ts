@@ -101,6 +101,13 @@ import {
   progressReporterRegistry,
 } from '../progress/sseProgressReporter.js'
 import type { Task, TaskError, TaskSource } from '../queue/types'
+import {
+  RuntimeActionAuthorityError,
+  type RuntimeActionCheckpoint,
+  withRuntimeActionAuthority,
+  withRuntimeActionAuthorityForContextManager,
+  withRuntimeActionAuthorityForLlmPort,
+} from '../runtime/actionAuthority'
 import { resolveCronTaskSessionKey, serializeSessionKey } from '../session'
 import { GovernedRunReporter, UsageReporter } from '../usage/usageReporter.js'
 import { resolveProviderWorkflowCallerContext } from '../workflow/providerWorkflowCallerContextClient'
@@ -237,6 +244,8 @@ export interface TaskExecutorDeps {
    */
   failover?: ExecutorFailoverSupport
 
+  /** Live, service-authenticated checkpoint for v2 runtime effects. */
+  actionAuthorityCheckpoint?: RuntimeActionCheckpoint
   /**
    * Issue #654 — live-catalog image-input capability lookup, keyed by the
    * (provider, model) the adapter is about to send. Threaded to the primary
@@ -887,6 +896,14 @@ export class TaskExecutor {
    * Anything else → retryable ApiCallFailed with provider from the LLM.
    */
   private toTaskError(error: unknown): TaskError {
+    if (error instanceof RuntimeActionAuthorityError) {
+      return {
+        code: error.code,
+        message: error.code,
+        retryable: error.code === 'authority_unavailable',
+        provider: 'unknown',
+      }
+    }
     if (error instanceof TaskLimitError)
       return {
         code: error.code,
@@ -1161,7 +1178,8 @@ export class TaskExecutor {
         try {
           await this.deps.conversationManager.suspendForApproval(
             this.conversation!,
-            result.approval
+            result.approval,
+            this.task.sourceMessage ? { ...this.task.sourceMessage } : undefined
           )
         } catch (err) {
           if (!result.approval.replaces_request_id)
@@ -1301,7 +1319,7 @@ export class TaskExecutor {
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
-        return new LlmPortAdapter(
+        const fallbackPort = new LlmPortAdapter(
           provider,
           servedModel,
           provider.getProviderType(),
@@ -1317,6 +1335,11 @@ export class TaskExecutor {
           },
           this.deps.imageInput
         )
+        const authorityBinding = this.task.sourceMessage?.authorityV2
+        if (!authorityBinding) return fallbackPort
+        const checkpoint =
+          this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+        return withRuntimeActionAuthorityForLlmPort(fallbackPort, authorityBinding, checkpoint)
       },
     })
   }
@@ -1404,11 +1427,16 @@ export class TaskExecutor {
       this.contextMaxTokens()
     )
     const parts = await this.maybeGetOrBuildParts(registry.listDefinitions())
-    const reasoning = parts
+    const unguardedReasoning = parts
       ? reasoningFactory.createWithParts(parts)
       : reasoningFactory.create(await this.buildSystemIdentity(llmPort))
+    const authorityBinding = this.task.sourceMessage?.authorityV2
+    const checkpoint = this.deps.actionAuthorityCheckpoint ?? (async () => 'unavailable' as const)
+    const reasoning = authorityBinding
+      ? withRuntimeActionAuthority(unguardedReasoning, authorityBinding, checkpoint)
+      : unguardedReasoning
 
-    const contextManager = new PressureContextManager(
+    const unguardedContextManager = new PressureContextManager(
       this.contextMaxTokens(),
       this.deps.workspaceService,
       hookedLlmPort,
@@ -1443,6 +1471,13 @@ export class TaskExecutor {
           : undefined,
       }
     )
+    const contextManager = authorityBinding
+      ? withRuntimeActionAuthorityForContextManager(
+          unguardedContextManager,
+          authorityBinding,
+          checkpoint
+        )
+      : unguardedContextManager
 
     const loopConfig = buildLoopConfig({
       reasoning,
@@ -1720,15 +1755,14 @@ export class TaskExecutor {
     const t = this.task
     if (t.source === 'channel') {
       if (t.sourceMessage?.channelType === 'rpc') {
-        const teamId =
-          typeof t.sourceMessage.metadata?.teamId === 'string'
-            ? t.sourceMessage.metadata.teamId.trim()
-            : ''
+        const authority = t.sourceMessage.authorityV2
+        const rawTeamId = authority ? authority.effectiveTeamId : t.sourceMessage.metadata?.teamId
+        const teamId = typeof rawTeamId === 'string' ? rawTeamId.trim() : ''
         return {
           source_kind: 'desktop',
           traceContext: t.traceContext ?? null,
           team_id: teamId || null,
-          user_id: t.sourceMessage.sender ?? null,
+          user_id: authority?.userId ?? t.sourceMessage.sender ?? null,
           task_id: t.id,
         }
       }

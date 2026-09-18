@@ -13,6 +13,7 @@ import {
 } from '../oauth/callback.js'
 import { deriveOAuthEncryptionKey } from '../oauth/encryption.js'
 import { integrationNotConfigured, isSecretNotFound } from '../oauth/integrationNotConfigured.js'
+import { resolveExactRecipeOAuthClient } from '../oauth/recipeOAuthClient.js'
 import { listBackgroundUserGrants } from '../oauth/store.js'
 import { getAccessToken } from '../oauth/tokenHelper.js'
 import { K8sNotFoundError } from '../services/resourceService.js'
@@ -105,7 +106,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
         if (!recipe) {
           return res.status(404).json({ error: 'recipe_not_found' })
         }
-        const clientDecl = recipe.spec?.oauthClients?.find(c => c.id === oauthClientId)
+        const clientDecl = resolveExactRecipeOAuthClient(recipe, oauthClientId)
         if (!clientDecl || clientDecl.backgroundAccess !== true) {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         }
@@ -198,8 +199,10 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
         const oauthClientId = (req.body ?? {}).oauthClientId
         const userId = (req.body ?? {}).userId
         if (
-          typeof oauthClientId !== 'string' || oauthClientId.length === 0 ||
-          typeof userId !== 'string' || userId.length === 0
+          typeof oauthClientId !== 'string' ||
+          oauthClientId.length === 0 ||
+          typeof userId !== 'string' ||
+          userId.length === 0
         ) {
           return res.status(400).json({ error: 'invalid_request' })
         }
@@ -214,13 +217,20 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
           throw err
         }
         if (!recipe) return res.status(404).json({ error: 'recipe_not_found' })
-        const clientDecl = recipe.spec?.oauthClients?.find(c => c.id === oauthClientId)
+        const clientDecl = resolveExactRecipeOAuthClient(recipe, oauthClientId)
         if (!clientDecl || clientDecl.backgroundAccess !== true) {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         }
 
         const result = await getAccessToken(
-          { grantKind: 'user', recipeNamespace, recipeName, userId, oauthClientId, requireBackground: true },
+          {
+            grantKind: 'user',
+            recipeNamespace,
+            recipeName,
+            userId,
+            oauthClientId,
+            requireBackground: true,
+          },
           {
             db: { query: (text, values) => pool.query(text, values) },
             recipeReader,
@@ -232,7 +242,14 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
 
         const audit = (outcome: string) =>
           req.log?.info(
-            { event: 'recipe_oauth_user_token_issued', recipeNamespace, recipeName, userId, oauthClientId, outcome },
+            {
+              event: 'recipe_oauth_user_token_issued',
+              recipeNamespace,
+              recipeName,
+              userId,
+              oauthClientId,
+              outcome,
+            },
             'recipe oauth user token issued'
           )
 
@@ -254,13 +271,17 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
             return res.status(400).json({ error: 'unknown_oauth_client' })
           case 'unsupported_provider':
             audit('unsupported_provider')
-            return res.status(400).json({ error: 'unsupported_provider', provider: result.provider })
+            return res
+              .status(400)
+              .json({ error: 'unsupported_provider', provider: result.provider })
           case 'secret_missing':
             audit('integration_not_configured')
             return res.status(503).json(integrationNotConfigured(oauthClientId, result.secret))
           case 'refresh_failed':
             audit('refresh_failed')
-            return res.status(502).json({ error: 'refresh_failed', status: result.status, detail: result.detail })
+            return res
+              .status(502)
+              .json({ error: 'refresh_failed', status: result.status, detail: result.detail })
         }
       } catch (err) {
         next(err)
@@ -303,7 +324,7 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
           }
           throw err
         }
-        const clientDecl = recipe?.spec?.oauthClients?.find(c => c.id === oauthClientId)
+        const clientDecl = recipe ? resolveExactRecipeOAuthClient(recipe, oauthClientId) : null
         if (!clientDecl || clientDecl.backgroundAccess !== true) {
           return res.status(400).json({ error: 'unknown_oauth_client' })
         }
@@ -314,7 +335,13 @@ export function createRecipeOauthRouter(gateway: K8sGateway): Router {
         )
 
         req.log?.info(
-          { event: 'recipe_oauth_users_listed', recipeNamespace, recipeName, oauthClientId, count: users.length },
+          {
+            event: 'recipe_oauth_users_listed',
+            recipeNamespace,
+            recipeName,
+            oauthClientId,
+            count: users.length,
+          },
           'recipe oauth users listed'
         )
         return res.status(200).json({ users })

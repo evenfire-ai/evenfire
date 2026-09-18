@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { Pool } from 'pg'
 import { GfsError } from '../../gfs-controller/src/api/errors.js'
+import type { FilesystemActionAuthorityV2 } from '../../gfs-controller/src/auth/actionAuthority.js'
 import type { GfsUploadConfig } from '../../gfs-controller/src/config.js'
 import { CommitOutcomeUnknownError, PgTransactor } from '../../gfs-controller/src/db/writeStore.js'
 import type {
@@ -130,6 +131,30 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
   let tempRoot: string
   let uploads: GfsUploadSessionService
 
+  function authority(resourceId: string): FilesystemActionAuthorityV2 {
+    const now = Math.floor(Date.now() / 1000)
+    return {
+      binding: {
+        version: 2,
+        userId: '11111111-1111-4111-8111-111111111111',
+        sid: '22222222-2222-4222-8222-222222222222',
+        sessionVersion: 1,
+        delegationJti: randomUUID(),
+        operationId: 'gfs.write',
+        resource: { type: 'gfs_resource', logicalId: resourceId },
+        target: { drive, action: 'upload', resourceId },
+        targetHash: 'ath1_upload_target',
+        accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        pathKind: 'direct',
+        effectiveTeamId: null,
+        behaviorBindingHash: 'abh1_upload_behavior',
+      },
+      sourceIssuedAt: now,
+      sourceExpiresAt: now + 300,
+    }
+  }
+
   beforeAll(async () => {
     adminPool = new Pool({ connectionString: adminUrl })
     await adminPool.query(`CREATE DATABASE ${quoteIdent(database)}`)
@@ -197,6 +222,31 @@ describeRealPostgres('GFS Upload v2 session engine on real PostgreSQL', () => {
       [drive, idempotencyKey]
     )
     expect(count.rows[0]?.count).toBe(1)
+  })
+
+  it('persists immutable v2 authority provenance without storing a bearer credential', async () => {
+    const resourceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    const actionAuthority = authority(resourceId)
+    const created = await uploads.create({
+      drive,
+      ownerSubject: actionAuthority.binding.userId,
+      primarySubject: actionAuthority.binding.userId,
+      operation: 'create',
+      parentRid: resourceId,
+      name: 'authority-bound.bin',
+      sizeBytes: 1,
+      idempotencyKey: randomUUID(),
+      actionAuthority,
+    })
+
+    const persisted = await pool.query(
+      `SELECT action_authority
+         FROM gfs_upload_sessions
+        WHERE upload_id = $1`,
+      [created.session.uploadId]
+    )
+    expect(persisted.rows[0]?.action_authority).toEqual(actionAuthority)
+    expect(JSON.stringify(persisted.rows[0]?.action_authority)).not.toContain('Bearer ')
   })
 
   it('commits indexed parts out of order, paginates status, and deduplicates replay bytes', async () => {

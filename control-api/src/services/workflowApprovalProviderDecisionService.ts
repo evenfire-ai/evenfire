@@ -6,6 +6,7 @@ import { enqueueWorkflowApprovalTraceProjection } from './tracing/workflowApprov
 import {
   ApprovalConsumeError,
   ApprovalTriggerRunIdempotencyConflictError,
+  WorkflowApprovalAuthorityRequiredError,
   parseWorkflowTriggerIntent,
   recordDecision,
 } from './userApprovalRequestService.js'
@@ -374,6 +375,10 @@ export async function recordProviderApprovalDecision(
         db
       )
     } catch (err) {
+      if (err instanceof WorkflowApprovalAuthorityRequiredError) {
+        await markProviderEvent({ ...eventRef, result: 'workflow_approval_authority_required' })
+        return { ok: false, status: 403, error: 'workflow_approval_authority_required' }
+      }
       if (err instanceof ApprovalConsumeError) {
         await markProviderEvent({ ...eventRef, result: err.code })
         const status =

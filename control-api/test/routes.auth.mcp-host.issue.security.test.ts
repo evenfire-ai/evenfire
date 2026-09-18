@@ -45,8 +45,20 @@ const mockPoolQueryDispatch = vi.fn(async (sql: unknown, params?: unknown[]) => 
   if (/rate_limit_buckets/i.test(text)) {
     return { rows: [{ count: 1 }], rowCount: 1 }
   }
+  if (
+    text === 'BEGIN' ||
+    text === 'COMMIT' ||
+    text === 'ROLLBACK' ||
+    text === 'SET TRANSACTION READ ONLY' ||
+    /SELECT set_config\('statement_timeout'/i.test(text)
+  ) {
+    return { rows: [], rowCount: 0 }
+  }
   if (/clock_timestamp\(\)/i.test(text)) {
     return { rows: [{ db_now: new Date('2026-09-01T12:00:00.000Z') }], rowCount: 1 }
+  }
+  if (/FROM pr2_readiness_activations/i.test(text)) {
+    return { rows: [], rowCount: 0 }
   }
   if (
     /external_user_session_security_epochs/i.test(text) &&
@@ -305,6 +317,36 @@ describe('Security: External /decide endpoint', () => {
     })
   })
 
+  it('returns a typed conflict when decision authority becomes unavailable', async () => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [
+        {
+          id: APPROVAL_ID,
+          status: 'pending',
+          target_user_id: USER_ID,
+          target_team_id: null,
+          recipe_namespace: NS,
+          recipe_name: RECIPE,
+        },
+      ],
+      rowCount: 1,
+    })
+    vi.mocked(userApprovalRequestService.allowlistCheck).mockResolvedValueOnce(true)
+    vi.mocked(userApprovalRequestService.recordDecision).mockRejectedValueOnce(
+      new userApprovalRequestService.WorkflowApprovalAuthorityRequiredError()
+    )
+
+    const res = await withInternalAuth(
+      request(app)
+        .post(`/api/v1/external/workflow-approvals/${APPROVAL_ID}/decide`)
+        .set('x-user-session-token', sessionToken)
+        .send({ decision: 'approve' })
+    )
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'workflow_approval_authority_required' })
+  })
+
   it('rejects malformed approval ids before any DB lookup', async () => {
     const res = await withInternalAuth(
       request(app)
@@ -315,7 +357,9 @@ describe('Security: External /decide endpoint', () => {
 
     expect(res.status).toBe(400)
     expect(res.body.error).toBe('Invalid approval id format')
-    expect(mockPoolQuery).not.toHaveBeenCalled()
+    expect(
+      mockPoolQuery.mock.calls.some(([sql]) => String(sql).includes('workflow_approval_requests'))
+    ).toBe(false)
     expect(userApprovalRequestService.recordDecision).not.toHaveBeenCalled()
   })
 

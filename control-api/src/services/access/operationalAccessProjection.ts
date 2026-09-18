@@ -144,7 +144,7 @@ function behaviorFingerprint(key: string, value: unknown): string {
   return createHmac('sha256', key).update(canonicalJson(value)).digest('base64url')
 }
 
-function relationshipInstanceId(parts: readonly string[]): string {
+export function relationshipInstanceId(parts: readonly string[]): string {
   return `rel1_${createHash('sha256').update(parts.join('\0')).digest('base64url')}`
 }
 

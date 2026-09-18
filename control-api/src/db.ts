@@ -8,6 +8,7 @@ import { config } from './config.js'
 import { migrationSessionBoundsSql } from './migrations/migrationExecutionPolicy.js'
 import { applyPendingPr1Migrations } from './migrations/migrationRunner.js'
 import { rootLogger } from './observability/logger.js'
+import { applyPr2ReadinessEvidenceSchema } from './services/access/pr2ReadinessEvidenceSchema.js'
 import {
   applyCatalogUtf8OrderingSchema,
   applyComposableCatalogRevisionSchema,
@@ -25,6 +26,7 @@ import {
 import { applyCodexSubscriptionOAuthStateSchema } from './services/codexSubscriptionOAuthState.js'
 import { applyInvitationDeliveryCommandFoundation } from './services/directory/invitationDeliverySchema.js'
 import {
+  applyGfsUploadAuthorityBindingSchema,
   applyGfsUploadCleanupSchema,
   applyGfsUploadFinalizingSchema,
   applyGfsUploadSessionSchema,
@@ -3049,6 +3051,162 @@ async function applyControlAdminSessionVersionDefaultSchema(db: DbClient): Promi
           CHECK (session_version >= 1);
       END IF;
     END $$;
+  `)
+}
+
+async function applyWorkflowAuthorityBindingsSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS workflow_authority_bindings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      binding_kind TEXT NOT NULL CHECK (binding_kind IN (
+        'trigger', 'workflow_read', 'approval_decision', 'approval_consume',
+        'run_management', 'artifact_list', 'artifact_read', 'artifact_delete'
+      )),
+      entity_type TEXT NOT NULL CHECK (entity_type IN (
+        'workflow_trigger', 'workflow_run', 'workflow_approval', 'workflow_artifact'
+      )),
+      entity_id TEXT NOT NULL CHECK (
+        NULLIF(BTRIM(entity_id), '') IS NOT NULL AND char_length(entity_id) <= 1024
+      ),
+      binding_version SMALLINT NOT NULL CHECK (binding_version = 2),
+      binding_hash TEXT NOT NULL CHECK (binding_hash ~ '^[0-9a-f]{64}$'),
+      parent_binding_id UUID NULL REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT,
+      transition_id TEXT NULL CHECK (
+        transition_id IS NULL OR transition_id = 'workflow.approval.decide->workflow.approval.consume'
+      ),
+      user_id UUID NOT NULL,
+      session_id UUID NOT NULL,
+      session_version INTEGER NOT NULL CHECK (session_version >= 1),
+      delegation_jti UUID NOT NULL,
+      operation_id TEXT NOT NULL,
+      resource JSONB NOT NULL CHECK (jsonb_typeof(resource) = 'object'),
+      target JSONB NULL CHECK (target IS NULL OR jsonb_typeof(target) = 'object'),
+      target_hash TEXT NOT NULL,
+      access_path_id TEXT NOT NULL,
+      authorization_revision TEXT NOT NULL,
+      path_kind TEXT NOT NULL CHECK (path_kind IN ('direct', 'team')),
+      effective_team_id UUID NULL,
+      behavior_binding_hash TEXT NOT NULL,
+      source_issued_at TIMESTAMPTZ NOT NULL,
+      source_expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CHECK (source_expires_at > source_issued_at),
+      CHECK (
+        (path_kind = 'direct' AND effective_team_id IS NULL)
+        OR (path_kind = 'team' AND effective_team_id IS NOT NULL)
+      ),
+      CHECK (
+        (parent_binding_id IS NULL AND transition_id IS NULL)
+        OR (
+          parent_binding_id IS NOT NULL
+          AND transition_id = 'workflow.approval.decide->workflow.approval.consume'
+          AND binding_kind = 'approval_consume'
+          AND entity_type = 'workflow_approval'
+          AND operation_id = 'workflow.approval.consume'
+        )
+      ),
+      UNIQUE (binding_kind, entity_type, entity_id, binding_hash)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS workflow_authority_bindings_delegation_kind_unique
+      ON workflow_authority_bindings (delegation_jti, binding_kind);
+    CREATE INDEX IF NOT EXISTS workflow_authority_bindings_entity
+      ON workflow_authority_bindings (entity_type, entity_id, created_at DESC);
+
+    CREATE OR REPLACE FUNCTION enforce_workflow_authority_binding_parent()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    DECLARE
+      parent_kind TEXT;
+      parent_entity_type TEXT;
+      parent_entity_id TEXT;
+      parent_operation TEXT;
+    BEGIN
+      IF NEW.parent_binding_id IS NULL THEN
+        RETURN NEW;
+      END IF;
+      SELECT binding_kind, entity_type, entity_id, operation_id
+        INTO parent_kind, parent_entity_type, parent_entity_id, parent_operation
+        FROM workflow_authority_bindings
+       WHERE id = NEW.parent_binding_id;
+      IF parent_kind IS DISTINCT FROM 'approval_decision'
+         OR parent_entity_type IS DISTINCT FROM 'workflow_approval'
+         OR parent_entity_id IS DISTINCT FROM NEW.entity_id
+         OR parent_operation IS DISTINCT FROM 'workflow.approval.decide' THEN
+        RAISE EXCEPTION 'invalid workflow authority transition parent'
+          USING ERRCODE = '23514';
+      END IF;
+      RETURN NEW;
+    END $$;
+    DROP TRIGGER IF EXISTS workflow_authority_binding_parent_guard
+      ON workflow_authority_bindings;
+    CREATE TRIGGER workflow_authority_binding_parent_guard
+      BEFORE INSERT OR UPDATE OF parent_binding_id, transition_id, binding_kind,
+        entity_type, entity_id, operation_id
+      ON workflow_authority_bindings
+      FOR EACH ROW EXECUTE FUNCTION enforce_workflow_authority_binding_parent();
+
+    ALTER TABLE workflow_runs
+      ADD COLUMN IF NOT EXISTS initiating_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS trigger_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS decision_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    ALTER TABLE workflow_approval_requests
+      ADD COLUMN IF NOT EXISTS consume_authority_binding_id UUID NULL
+      REFERENCES workflow_authority_bindings(id) ON DELETE RESTRICT;
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'workflow_recipes_runtime') THEN
+        GRANT SELECT ON TABLE workflow_authority_bindings TO workflow_recipes_runtime;
+        GRANT SELECT (initiating_authority_binding_id) ON TABLE workflow_runs
+          TO workflow_recipes_runtime;
+      END IF;
+    END $$;
+  `)
+}
+
+async function applyPr2RuntimePrivilegesSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'control_api_runtime') THEN
+        GRANT SELECT, INSERT ON TABLE workflow_authority_bindings TO control_api_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE pr2_readiness_activations TO control_api_runtime;
+        GRANT SELECT, INSERT, UPDATE ON TABLE pr2_readiness_evidence TO control_api_runtime;
+      END IF;
+    END $$;
+  `)
+}
+
+async function applyWorkflowRecipeAuthorityEntitySchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE workflow_authority_bindings
+      DROP CONSTRAINT IF EXISTS workflow_authority_bindings_entity_type_check;
+    ALTER TABLE workflow_authority_bindings
+      ADD CONSTRAINT workflow_authority_bindings_entity_type_check CHECK (entity_type IN (
+        'workflow_trigger', 'workflow_recipe', 'workflow_run',
+        'workflow_approval', 'workflow_artifact'
+      ));
+  `)
+}
+
+async function applyWorkflowRunFailureReasonSchema(db: DbClient): Promise<void> {
+  await db.query(`
+    ALTER TABLE workflow_runs
+      ADD COLUMN IF NOT EXISTS failure_reason TEXT NULL;
+    ALTER TABLE workflow_runs
+      DROP CONSTRAINT IF EXISTS workflow_runs_failure_reason_check;
+    ALTER TABLE workflow_runs
+      ADD CONSTRAINT workflow_runs_failure_reason_check CHECK (
+        failure_reason IS NULL OR failure_reason IN (
+          'workflow_authority_denied',
+          'workflow_authority_not_found',
+          'workflow_authority_access_path_stale',
+          'workflow_authority_invalid_binding'
+        )
+      );
   `)
 }
 
@@ -6098,30 +6256,34 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
   {
-    // Renumbered from 0109 when `dev` was merged: `dev` had already shipped
-    // `0109_grok_subscription_connections`, so this one moves to the end of the
-    // list rather than claiming a version another migration already uses.
-    version: '0115_llm_allowed_models_image_input',
+    version: '0115_workflow_authority_bindings',
+    apply: applyWorkflowAuthorityBindingsSchema,
+  },
+  {
+    version: '0116_gfs_upload_authority_bindings',
+    apply: applyGfsUploadAuthorityBindingSchema,
+  },
+  {
+    version: '0117_pr2_readiness_evidence',
+    apply: applyPr2ReadinessEvidenceSchema,
+  },
+  {
+    version: '0118_pr2_runtime_privileges',
+    apply: applyPr2RuntimePrivilegesSchema,
+  },
+  {
+    version: '0119_workflow_recipe_authority_entity',
+    apply: applyWorkflowRecipeAuthorityEntitySchema,
+  },
+  {
+    version: '011a_workflow_run_failure_reason',
+    apply: applyWorkflowRunFailureReasonSchema,
+  },
+  {
+    // PR1's image-capability migration follows PR2's 0115-011a range on this
+    // stacked branch, so it receives the next unused additive version.
+    version: '011b_llm_allowed_models_image_input',
     apply: async db => {
-      // #654 — model-level image-input capability + evidence for the allowlist.
-      //
-      // ADDITIVE and NULLABLE. Every pre-existing row reads as `unknown` (no
-      // affirmative capability): the shared contract
-      // (`@clerum/llm-providers` normalizeImageInputCapability) maps absent or
-      // malformed metadata to `{ state: 'unknown' }`, so a legacy row can never
-      // become affirmative support by accident, and this migration alone changes
-      // no runtime behavior — enforcement acts only where a capability exists.
-      //
-      // The CHECK constrains the ONE field no reader may have to guess (`state`)
-      // against a non-object/scalar payload. The nested evidence is validated
-      // strictly on write by the service (shared parser) and normalized on read,
-      // so `state` here is a backstop, not the only gate.
-      //
-      // All three conjuncts are load-bearing, because a CHECK accepts NULL:
-      // `jsonb_typeof` alone would let `{}` through (`'{}'::jsonb->>'state'` is
-      // NULL, so the IN list yields NULL, not FALSE), and `? 'state'` alone
-      // would let `{"state": null}` through (`?` is true while `->>` is NULL).
-      // COALESCE is what turns that untyped NULL into a real FALSE.
       await db.query(`
         ALTER TABLE llm_allowed_models
           ADD COLUMN IF NOT EXISTS image_input JSONB;
@@ -6142,14 +6304,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         EXCEPTION WHEN duplicate_object THEN NULL;
         END $$;
       `)
-
-      // This migration is PURELY ADDITIVE: it adds the column and the CHECK, and
-      // writes no data. It used to hand-curate two Z.AI ids from their public
-      // docs, which was a stand-in for not knowing any model's image capability.
-      // The catalog sync now derives that from models.dev `modalities.input` for
-      // every model, including those two (#654), so the seed would only have
-      // pinned `curated` provenance the sync is required never to overwrite —
-      // freezing exactly the rows a test harness needs to be able to refresh.
     },
   },
 ]

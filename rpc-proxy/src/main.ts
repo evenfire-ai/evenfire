@@ -3,6 +3,7 @@ import type { Socket } from 'net'
 import { createApp } from './app.js'
 import { config } from './config.js'
 import { handleDesktopUpgrade } from './routes/desktopProxy.js'
+import { startPr2ReadinessReporter } from './services/pr2ReadinessReporter.js'
 import { hostWakeCoordinator } from './services/wakeAndHold.js'
 
 /**
@@ -21,6 +22,7 @@ async function bootstrap(): Promise<void> {
   }
 
   const app = createApp()
+  let stopReadinessReporter: () => void = () => undefined
   const server = http.createServer(app)
 
   server.once('error', error => {
@@ -45,6 +47,7 @@ async function bootstrap(): Promise<void> {
   const shutdown = (signal: string): void => {
     if (shuttingDown) return
     shuttingDown = true
+    stopReadinessReporter()
     console.log(`[RPC_PROXY] ${signal} received — draining wake holds and shutting down`)
     // Settle held requests first so `server.close()` is not blocked waiting on
     // them, then stop accepting new connections.
@@ -70,6 +73,7 @@ async function bootstrap(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'))
 
   server.listen(config.port, () => {
+    stopReadinessReporter = startPr2ReadinessReporter()
     console.log(`[RPC_PROXY] listening on :${config.port}`)
   })
 }

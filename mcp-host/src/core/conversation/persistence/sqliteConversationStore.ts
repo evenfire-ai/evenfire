@@ -560,6 +560,7 @@ export class SqliteConversationStore implements ConversationStore {
         : undefined
       out.push({
         sessionKey,
+        channelType: row.ownership.channel_type,
         approval,
         taskId: row.approval.task_id,
         sourceMessage,
@@ -1035,7 +1036,11 @@ export class SqliteConversationStore implements ConversationStore {
     })
   }
 
-  async persistSuspend(conv: Conversation, approval: PendingApproval): Promise<void> {
+  async persistSuspend(
+    conv: Conversation,
+    approval: PendingApproval,
+    sourceMessage?: Record<string, unknown>
+  ): Promise<void> {
     const sessionKey = this.sessionKeyById.get(conv.id)
     if (!sessionKey) return
     if (!conv.activeTaskId) {
@@ -1057,7 +1062,7 @@ export class SqliteConversationStore implements ConversationStore {
         ? JSON.stringify(approval.completed_results)
         : null,
       intent_summary: approval.intent_summary ?? null,
-      source_message: null,
+      source_message: sourceMessage ? JSON.stringify(sourceMessage) : null,
       registered_at: now / 1000,
       expires_at:
         (now + (this.opts.pendingApprovalTtlMs ?? DEFAULT_PENDING_APPROVAL_TTL_MS)) / 1000,

@@ -427,6 +427,13 @@ describe('sharedFileSystemFactory — buildDeployment (controller + root initCon
     expect(byName.WSF_MAX_UPLOAD_BYTES?.value).toBe(String(100 * 1024 * 1024))
     expect(byName.WSF_MAX_LIST_ENTRIES?.value).toBe('5000')
     expect(byName.WSF_MAX_PATH_DEPTH?.value).toBe('32')
+    expect(byName.WSF_CONTROL_API_BASE_URL?.value).toBe(
+      'http://control-api.control-plane.svc.cluster.local:8090'
+    )
+    expect(byName.WSF_CONTROL_API_SERVICE_TOKEN?.valueFrom?.secretKeyRef).toEqual({
+      name: 'workspace-files-controller-service-token',
+      key: 'token',
+    })
   })
 
   it('uses Recreate strategy so RWO upgrades do not deadlock on volume re-attach', () => {
@@ -486,7 +493,7 @@ describe('sharedFileSystemFactory — NetworkPolicies', () => {
     expect(np.metadata?.labels?.['clerum.io/policy-type']).toBe(WFC_POLICY_TYPE)
   })
 
-  it('egress policy allows DNS only', () => {
+  it('egress policy allows only DNS and the Control API checkpoint', () => {
     const sfs = makeSfs()
     const np = buildEgressNetworkPolicy(sfs, config)
     expect(np.spec?.policyTypes).toEqual(['Egress'])
@@ -500,5 +507,15 @@ describe('sharedFileSystemFactory — NetworkPolicies', () => {
       { port: 53, protocol: 'UDP' },
       { port: 53, protocol: 'TCP' },
     ])
+    expect(np.spec?.egress?.[1]).toEqual({
+      to: [
+        {
+          namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'control-plane' } },
+          podSelector: { matchLabels: { app: 'control-api' } },
+        },
+      ],
+      ports: [{ port: 8090, protocol: 'TCP' }],
+    })
+    expect(np.spec?.egress).toHaveLength(2)
   })
 })

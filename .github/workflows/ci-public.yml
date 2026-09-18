@@ -72,6 +72,7 @@ jobs:
           - packages/llm-providers
           - packages/grok-provider-attempt-contract
           - packages/codex-catalog-projection
+          - packages/action-context-contracts
           - codex-llm-proxy
           - grok-llm-proxy
 
@@ -98,6 +99,12 @@ jobs:
         if: matrix.service == 'workflow-recipes' || matrix.service == 'control-api' || matrix.service == 'packages/workflow-sdk'
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      # Producer-backed suites execute real sibling source/tooling. Discover
+      # those dependencies from the test references so new consumers cannot
+      # silently fall outside a hand-maintained service matrix.
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh "${{ matrix.service }}"
 
       # keytar is a native Desktop dependency. When its prebuild is unavailable,
       # node-gyp requires libsecret development metadata on Linux.
@@ -189,7 +196,7 @@ jobs:
       # no tsconfig and no typescript dependency), so `npx tsc` there would fetch
       # the unrelated `tsc` package from the registry instead of typechecking.
       - name: Typecheck (tsc --noEmit)
-        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection'
+        if: matrix.service != 'mcp-servers' && matrix.service != 'packages/desktop-app-links' && matrix.service != 'packages/gfs-interaction-policy' && matrix.service != 'packages/network-policy-core' && matrix.service != 'packages/llm-provider-attempt-contract' && matrix.service != 'packages/grok-provider-attempt-contract' && matrix.service != 'packages/llm-providers' && matrix.service != 'packages/codex-catalog-projection' && matrix.service != 'packages/action-context-contracts'
         working-directory: ${{ matrix.service }}
         run: npx tsc --noEmit
 
@@ -240,6 +247,9 @@ jobs:
       - name: Build workflow-runtime-core
         working-directory: packages/workflow-runtime-core
         run: npm run build
+
+      - name: Install producer-backed test dependencies
+        run: bash scripts/ci/install-test-producer-dependencies.sh control-api
 
       - name: Run control-api real Postgres suites (migration + GFS)
         working-directory: control-api
@@ -300,8 +310,11 @@ jobs:
             services.llmProviderAttemptAuthorization.realPostgres.integration \
             services.llmProviderAttemptStore.realPostgres.integration \
             services.llmProviderAttemptRedemption.realPostgres.integration \
+            services.llmProviderAttemptFinalization.realPostgres.integration \
+            pr2ReadinessEvidence.realPostgres.integration \
             userAccessRuntimeContract.realPostgres.integration \
             userSessionDatabaseClock.realPostgres.integration \
+            workflowAuthorityBindings.realPostgres.integration \
             pluginWorkloadSdkCodexDualLedger.realPostgres.integration \
             pluginWorkloadSdkGrokDualLedger.realPostgres.integration \
             services.grokSubscriptionConnection.realPostgres.integration \
@@ -515,6 +528,9 @@ jobs:
           done < <(find deploy/scripts scripts -type f -name '*.sh' 2>/dev/null)
           exit $fail
 
+      - name: Test producer-backed dependency materialization
+        run: bash scripts/tests/test-ci-producer-dependency-materialization.sh
+
       - name: Validate governed tracing operations gate orchestration
         run: bash scripts/tests/test-governed-tracing-operations-gate.sh
 
@@ -611,6 +627,9 @@ jobs:
 
       - name: Test the image manifest
         run: bash scripts/tests/test-images-manifest.sh
+
+      - name: Test real-Postgres suite-list continuation
+        run: bash scripts/tests/test-ci-public-real-postgres-suite-list.sh
 
       - name: Test the ghcr-images kustomize component
         run: bash scripts/tests/test-ghcr-component.sh

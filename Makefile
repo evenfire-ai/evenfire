@@ -79,6 +79,7 @@ TEST_SERVICES := \
 	packages/workflow-sdk \
 	packages/network-policy-core \
 	packages/llm-provider-attempt-contract \
+	packages/action-context-contracts \
 	packages/llm-providers \
 	packages/grok-provider-attempt-contract
 

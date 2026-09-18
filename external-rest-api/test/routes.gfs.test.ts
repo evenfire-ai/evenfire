@@ -310,6 +310,33 @@ describe('routes/gfs /me/gfs/* (user session passthrough → /external/gfs/*)', 
     expect(res.headers['x-request-id']).toBe(REQUEST_ID)
   })
 
+  it('forwards the exact v2 action delegation when minting a gfs token', async () => {
+    authTokenMock.verifyToken.mockReturnValue({
+      userId: 'u1',
+      email: 'u@example.com',
+      teamId: null,
+      role: 'member',
+      exp: 9_999_999_999,
+      sessionContract: 'v2',
+    })
+    clientMock.controlApiRequest.mockResolvedValue({ token: 'gfs-tok', expiresInSeconds: 300 })
+
+    await request(buildApp())
+      .post('/me/gfs/token')
+      .set('authorization', 'Bearer sess-xyz')
+      .set('x-evenfire-action-delegation', 'delegation.fixture.value')
+      .send({ scopes: ['gfs.read'] })
+      .expect(200)
+
+    expect(clientMock.controlApiRequest).toHaveBeenCalledWith('POST', '/external/gfs/token', {
+      userSessionToken: 'sess-xyz',
+      body: { scopes: ['gfs.read'] },
+      extraHeaders: expect.objectContaining({
+        'x-evenfire-action-delegation': 'delegation.fixture.value',
+      }),
+    })
+  })
+
   it('forwards a user delegation grant to /external/gfs/grants', async () => {
     clientMock.controlApiRequest.mockResolvedValue({ ok: true })
     const body = {

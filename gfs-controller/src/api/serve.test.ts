@@ -1,47 +1,47 @@
-import { describe, expect, it } from "vitest";
-import type { IncomingMessage, ServerResponse } from "node:http";
-import { Readable, Writable } from "node:stream";
-import { GfsAuthError, type GfsScope, type GfsVerifiedClaims } from "../auth/verify";
-import type { AuthzContext } from "../authz/permissionClient";
-import type { GfsPermission } from "../authz/resolve";
-import { GfsSubjectResolutionDeniedError } from "../authz/subjectResolver";
-import { GfsError } from "./errors";
-import { GfsResource } from "./read";
-import { GfsServingHandler, ServingDeps } from "./serve";
-import type { UploadPartStatus, UploadSessionReceipt } from "../upload/uploadSession";
+import { describe, expect, it } from 'vitest'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { Readable, Writable } from 'node:stream'
+import { GfsAuthError, type GfsScope, type GfsVerifiedClaims } from '../auth/verify'
+import type { AuthzContext } from '../authz/permissionClient'
+import type { GfsPermission } from '../authz/resolve'
+import { GfsSubjectResolutionDeniedError } from '../authz/subjectResolver'
+import type { UploadPartStatus, UploadSessionReceipt } from '../upload/uploadSession'
+import { GfsError } from './errors'
+import { GfsResource } from './read'
+import { GfsServingHandler, ServingDeps } from './serve'
 
 /** A minimal ServerResponse stand-in: a Writable that also records status/headers. */
 class FakeRes extends Writable {
-  statusCode = 0;
-  headers: Record<string, string> = {};
-  headersSent = false;
-  private chunks: Buffer[] = [];
+  statusCode = 0
+  headers: Record<string, string> = {}
+  headersSent = false
+  private chunks: Buffer[] = []
   writeHead(status: number, headers?: Record<string, string>): this {
-    this.statusCode = status;
-    this.headersSent = true;
-    if (headers) Object.assign(this.headers, headers);
-    return this;
+    this.statusCode = status
+    this.headersSent = true
+    if (headers) Object.assign(this.headers, headers)
+    return this
   }
   setHeader(name: string, value: string): this {
-    this.headers[name] = value;
-    return this;
+    this.headers[name] = value
+    return this
   }
   _write(chunk: Buffer | string, _enc: BufferEncoding, cb: (e?: Error | null) => void): void {
-    this.chunks.push(Buffer.from(chunk));
-    cb();
+    this.chunks.push(Buffer.from(chunk))
+    cb()
   }
   get body(): string {
-    return Buffer.concat(this.chunks).toString("utf8");
+    return Buffer.concat(this.chunks).toString('utf8')
   }
   get json(): unknown {
-    return JSON.parse(this.body);
+    return JSON.parse(this.body)
   }
 }
 
 function req(url: string, opts: { method?: string; auth?: string } = {}): IncomingMessage {
-  const headers: Record<string, string> = {};
-  if (opts.auth !== undefined) headers["authorization"] = opts.auth;
-  return { url, method: opts.method ?? "GET", headers } as unknown as IncomingMessage;
+  const headers: Record<string, string> = {}
+  if (opts.auth !== undefined) headers['authorization'] = opts.auth
+  return { url, method: opts.method ?? 'GET', headers } as unknown as IncomingMessage
 }
 
 /** A request carrying a JSON body — a real Readable so readJsonBody can consume it. */
@@ -49,66 +49,66 @@ function reqBody(
   url: string,
   opts: { method: string; auth?: string; body?: unknown; rawBody?: string }
 ): IncomingMessage {
-  const json = opts.rawBody ?? (opts.body === undefined ? "" : JSON.stringify(opts.body));
+  const json = opts.rawBody ?? (opts.body === undefined ? '' : JSON.stringify(opts.body))
   const stream = Readable.from(
-    json ? [Buffer.from(json, "utf8")] : []
-  ) as unknown as IncomingMessage;
-  stream.url = url;
-  stream.method = opts.method;
-  stream.headers = opts.auth !== undefined ? { authorization: opts.auth } : {};
-  return stream;
+    json ? [Buffer.from(json, 'utf8')] : []
+  ) as unknown as IncomingMessage
+  stream.url = url
+  stream.method = opts.method
+  stream.headers = opts.auth !== undefined ? { authorization: opts.auth } : {}
+  return stream
 }
 
 function reqPart(
   url: string,
   headers: Record<string, string>,
-  body = Buffer.from("part")
+  body = Buffer.from('part')
 ): IncomingMessage {
-  const stream = Readable.from([body]) as unknown as IncomingMessage;
-  stream.url = url;
-  stream.method = "PUT";
-  stream.headers = { authorization: "Bearer t", ...headers };
-  return stream;
+  const stream = Readable.from([body]) as unknown as IncomingMessage
+  stream.url = url
+  stream.method = 'PUT'
+  stream.headers = { authorization: 'Bearer t', ...headers }
+  return stream
 }
 
 const CLAIMS: GfsVerifiedClaims = {
-  sub: "user-1",
-  drive: "main",
-  scopes: ["gfs.read"],
+  sub: 'user-1',
+  drive: 'main',
+  scopes: ['gfs.read'],
   pathBindings: [],
   iat: 0,
   exp: 0,
-};
+}
 
 const CTX: AuthzContext = {
-  drive: "main",
-  subjects: ["user:user-1"],
+  drive: 'main',
+  subjects: ['user:user-1'],
   isOperator: false,
-  primarySubject: "user-1",
-};
+  primarySubject: 'user-1',
+}
 
 const FILE: GfsResource = {
-  resourceId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-  drive: "main",
-  parentResourceId: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-  name: "report.pdf",
-  kind: "file",
-  pathCache: "/docs/report.pdf",
+  resourceId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  drive: 'main',
+  parentResourceId: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+  name: 'report.pdf',
+  kind: 'file',
+  pathCache: '/docs/report.pdf',
   version: 2,
   bytes: 11,
   blobKey: null,
   contentSha256: null,
   deletedAt: null,
-  updatedAt: "2026-01-01T00:00:00.000Z",
-};
+  updatedAt: '2026-01-01T00:00:00.000Z',
+}
 const DIR: GfsResource = {
   ...FILE,
-  kind: "directory",
-  name: "docs",
-  pathCache: "/docs",
+  kind: 'directory',
+  name: 'docs',
+  pathCache: '/docs',
   bytes: 0,
-};
-const RID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // FILE.resourceId, hyphen-stripped
+}
+const RID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' // FILE.resourceId, hyphen-stripped
 
 /** Build deps with sensible allow-all defaults; override per test. */
 function deps(over: Partial<ServingDeps> = {}): ServingDeps {
@@ -121,421 +121,545 @@ function deps(over: Partial<ServingDeps> = {}): ServingDeps {
       getResource: async () => FILE,
       listChildren: async () => [FILE],
     },
-    blobs: { read: async () => Readable.from(Buffer.from("hello world")) },
+    blobs: { read: async () => Readable.from(Buffer.from('hello world')) },
     ...over,
-  };
+  }
 }
 
 /** Run the handler against a FakeRes (cast to the ServerResponse the API wants). */
 function run(d: ServingDeps, request: IncomingMessage, res: FakeRes): Promise<boolean> {
-  return new GfsServingHandler(d).tryHandle(request, res as unknown as ServerResponse);
+  return new GfsServingHandler(d).tryHandle(request, res as unknown as ServerResponse)
 }
 
-describe("GfsReadServer.tryHandle — routing", () => {
-  it("returns false for a path it does not own (caller falls through to 404)", async () => {
-    const res = new FakeRes();
-    const handled = await run(deps(), req("/healthz"), res);
-    expect(handled).toBe(false);
-    expect(res.statusCode).toBe(0); // untouched
-  });
+describe('GfsReadServer.tryHandle — routing', () => {
+  it('returns false for a path it does not own (caller falls through to 404)', async () => {
+    const res = new FakeRes()
+    const handled = await run(deps(), req('/healthz'), res)
+    expect(handled).toBe(false)
+    expect(res.statusCode).toBe(0) // untouched
+  })
 
-  it("handles a matched read path with the wrong method as a 404", async () => {
-    const res = new FakeRes();
+  it('handles a matched read path with the wrong method as a 404', async () => {
+    const res = new FakeRes()
     const handled = await run(
       deps(),
-      req(`/v1/resources/${RID}`, { method: "POST", auth: "Bearer t" }),
+      req(`/v1/resources/${RID}`, { method: 'POST', auth: 'Bearer t' }),
       res
-    );
-    expect(handled).toBe(true);
-    expect(res.statusCode).toBe(404);
-  });
-});
+    )
+    expect(handled).toBe(true)
+    expect(res.statusCode).toBe(404)
+  })
 
-describe("GFS Upload v2 capability route", () => {
-  it("requires auth and returns an honest disabled capability", async () => {
-    const unauthenticated = new FakeRes();
-    await run(deps(), req("/v1/capabilities"), unauthenticated);
-    expect(unauthenticated.statusCode).toBe(401);
+  it('blocks the protected read effect when a v2 live checkpoint is unavailable', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    let resourceLoads = 0
+    const authorityClaims: GfsVerifiedClaims = {
+      ...CLAIMS,
+      sub: '11111111-1111-4111-8111-111111111111',
+      iat: now,
+      exp: now + 300,
+      actionAuthority: {
+        binding: {
+          version: 2,
+          userId: '11111111-1111-4111-8111-111111111111',
+          sid: '22222222-2222-4222-8222-222222222222',
+          sessionVersion: 1,
+          delegationJti: '33333333-3333-4333-8333-333333333333',
+          operationId: 'gfs.read',
+          resource: {
+            environmentId: 'development:local-cluster',
+            type: 'gfs_resource',
+            canonicalId: `gfs_resource:${FILE.resourceId}`,
+            logicalId: FILE.resourceId,
+            displayName: FILE.resourceId,
+          },
+          target: { drive: 'main', resourceId: FILE.resourceId },
+          targetHash: 'ath1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          pathKind: 'direct',
+          effectiveTeamId: null,
+          behaviorBindingHash: 'abh1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        sourceIssuedAt: now,
+        sourceExpiresAt: now + 300,
+      },
+    }
+    const res = new FakeRes()
+    await run(
+      deps({
+        verifyToken: () => authorityClaims,
+        checkpointAuthority: async () => {
+          throw new GfsError('not_mounted', 'checkpoint unavailable')
+        },
+        store: {
+          getResource: async () => {
+            resourceLoads += 1
+            return FILE
+          },
+          listChildren: async () => [FILE],
+        },
+      }),
+      req(`/v1/resources/${RID}`, { auth: 'Bearer t' }),
+      res
+    )
 
-    const authenticated = new FakeRes();
-    await run(deps(), req("/v1/capabilities", { auth: "Bearer t" }), authenticated);
-    expect(authenticated.statusCode).toBe(200);
-    expect(authenticated.headers["Cache-Control"]).toBe("no-store");
-    expect(authenticated.body).toContain('"resumableV2":{"enabled":false');
-    expect(authenticated.body).toContain('"legacyBase64":{"enabled":true');
-  });
+    expect(res.statusCode).toBe(503)
+    expect(resourceLoads).toBe(0)
+  })
+})
 
-  it("does not treat an unsupported verb as a capability request", async () => {
-    const res = new FakeRes();
-    await run(deps(), req("/v1/capabilities", { method: "POST", auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(404);
-  });
-});
+describe('GFS Upload v2 capability route', () => {
+  it('requires auth and returns an honest disabled capability', async () => {
+    const unauthenticated = new FakeRes()
+    await run(deps(), req('/v1/capabilities'), unauthenticated)
+    expect(unauthenticated.statusCode).toBe(401)
 
-const UPLOAD_ID = "11111111-1111-4111-8111-111111111111";
+    const authenticated = new FakeRes()
+    await run(deps(), req('/v1/capabilities', { auth: 'Bearer t' }), authenticated)
+    expect(authenticated.statusCode).toBe(200)
+    expect(authenticated.headers['Cache-Control']).toBe('no-store')
+    expect(authenticated.body).toContain('"resumableV2":{"enabled":false')
+    expect(authenticated.body).toContain('"legacyBase64":{"enabled":true')
+  })
+
+  it('does not treat an unsupported verb as a capability request', async () => {
+    const res = new FakeRes()
+    await run(deps(), req('/v1/capabilities', { method: 'POST', auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(404)
+  })
+})
+
+const UPLOAD_ID = '11111111-1111-4111-8111-111111111111'
 const UPLOAD_SESSION: UploadSessionReceipt = {
   uploadId: UPLOAD_ID,
-  drive: "main",
-  operation: "create",
+  drive: 'main',
+  operation: 'create',
   expectedBytes: 4,
   partBytes: 4,
   partCount: 1,
-  state: "uploading",
+  state: 'uploading',
   contiguousBytes: 0,
   committedBytes: 0,
   committedPartCount: 0,
   activePartCount: 0,
   expiresAt: new Date(Date.now() + 60_000).toISOString(),
-};
+}
 const UPLOAD_PART: UploadPartStatus = {
   partNumber: 0,
   offsetBytes: 0,
   lengthBytes: 4,
-  sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-};
+  sha256: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+}
 
 function uploadDeps(over: Partial<ServingDeps> = {}): ServingDeps {
   const service = {
     create: async () => ({ created: true, session: UPLOAD_SESSION }),
-    target: async () => ({ operation: "create" as const, targetRid: RID }),
+    target: async () => ({ operation: 'create' as const, targetRid: RID }),
     get: async () => UPLOAD_SESSION,
     status: async () => ({ session: UPLOAD_SESSION, parts: [UPLOAD_PART] }),
     putPart: async () => ({ part: UPLOAD_PART, session: UPLOAD_SESSION }),
-    pause: async () => ({ ...UPLOAD_SESSION, state: "paused" }),
+    pause: async () => ({ ...UPLOAD_SESSION, state: 'paused' }),
     resume: async () => UPLOAD_SESSION,
-    complete: async () => ({ ...UPLOAD_SESSION, state: "completed" }),
+    complete: async () => ({ ...UPLOAD_SESSION, state: 'completed' }),
     cancel: async () => undefined,
-  };
+  }
   return deps({
     verifyToken: () => USER_WRITE_CLAIMS,
-    uploadService: service as unknown as ServingDeps["uploadService"],
+    uploadService: service as unknown as ServingDeps['uploadService'],
     ...over,
-  });
+  })
 }
 
-describe("GFS Upload v2 route contract", () => {
-  it("preserves signed authority metadata for the upload service reauthorization", async () => {
-    const desktopUserId = "11111111-1111-4111-8111-111111111111";
-    const controlAdminId = "22222222-2222-4222-8222-222222222222";
+describe('GFS Upload v2 route contract', () => {
+  it('rejects a v2 upload body target substitution before creating a session', async () => {
+    const now = Math.floor(Date.now() / 1000)
+    let creates = 0
+    const claims: GfsVerifiedClaims = {
+      ...USER_WRITE_CLAIMS,
+      sub: '11111111-1111-4111-8111-111111111111',
+      iat: now,
+      exp: now + 300,
+      actionAuthority: {
+        binding: {
+          version: 2,
+          userId: '11111111-1111-4111-8111-111111111111',
+          sid: '22222222-2222-4222-8222-222222222222',
+          sessionVersion: 1,
+          delegationJti: '33333333-3333-4333-8333-333333333333',
+          operationId: 'gfs.write',
+          resource: { type: 'gfs_resource', logicalId: RID },
+          target: { drive: 'main', action: 'upload', resourceId: RID },
+          targetHash: 'ath1_upload_target',
+          accessPathId: 'ap1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          authorizationRevision: 'ar1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          pathKind: 'direct',
+          effectiveTeamId: null,
+          behaviorBindingHash: 'abh1_upload_behavior',
+        },
+        sourceIssuedAt: now,
+        sourceExpiresAt: now + 300,
+      },
+    }
+    const service = {
+      ...uploadDeps().uploadService,
+      create: async () => {
+        creates += 1
+        return { created: true, session: UPLOAD_SESSION }
+      },
+    } as ServingDeps['uploadService']
+    const res = new FakeRes()
+
+    await run(
+      uploadDeps({
+        verifyToken: () => claims,
+        checkpointAuthority: async () => undefined,
+        uploadService: service,
+      }),
+      reqBody('/v1/uploads', {
+        method: 'POST',
+        auth: 'Bearer t',
+        body: {
+          operation: 'create',
+          parentRid: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          name: 'payload.bin',
+          sizeBytes: 4,
+          idempotencyKey: UPLOAD_ID,
+        },
+      }),
+      res
+    )
+
+    expect(res.statusCode).toBe(403)
+    expect(creates).toBe(0)
+  })
+
+  it('preserves signed authority metadata for the upload service reauthorization', async () => {
+    const desktopUserId = '11111111-1111-4111-8111-111111111111'
+    const controlAdminId = '22222222-2222-4222-8222-222222222222'
     const brokeredAuthority = {
       desktopUserId,
       controlAdminId,
-      authoritySource: "linked-admin" as const,
-      linkLineageId: "33333333-3333-4333-8333-333333333333",
+      authoritySource: 'linked-admin' as const,
+      linkLineageId: '33333333-3333-4333-8333-333333333333',
       linkGeneration: 2,
       desktopUserGeneration: 4,
-    };
+    }
     const claims: GfsVerifiedClaims = {
       ...USER_WRITE_CLAIMS,
       sub: controlAdminId,
       authGeneration: 7,
-      principalType: "control-admin",
+      principalType: 'control-admin',
       brokeredAuthority,
-    };
+    }
     const context: AuthzContext = {
       ...CTX,
       primarySubject: controlAdminId,
       effectiveControlAdminId: controlAdminId,
       desktopUserId,
-      authoritySource: "linked-admin",
-    };
-    let received: Record<string, unknown> | undefined;
+      authoritySource: 'linked-admin',
+    }
+    let received: Record<string, unknown> | undefined
     const service = {
       ...uploadDeps().uploadService,
       create: async (input: Record<string, unknown>) => {
-        received = input;
-        return { created: true, session: UPLOAD_SESSION };
+        received = input
+        return { created: true, session: UPLOAD_SESSION }
       },
-    } as ServingDeps["uploadService"];
-    const res = new FakeRes();
+    } as ServingDeps['uploadService']
+    const res = new FakeRes()
     await run(
       uploadDeps({
         verifyToken: () => claims,
         resolveContext: async () => context,
         uploadService: service,
       }),
-      reqBody("/v1/uploads", {
-        method: "POST",
-        auth: "Bearer t",
+      reqBody('/v1/uploads', {
+        method: 'POST',
+        auth: 'Bearer t',
         body: {
-          operation: "create",
+          operation: 'create',
           parentRid: RID,
-          name: "payload.bin",
+          name: 'payload.bin',
           sizeBytes: 4,
           idempotencyKey: UPLOAD_ID,
         },
       }),
-      res,
-    );
-    expect(res.statusCode).toBe(201);
+      res
+    )
+    expect(res.statusCode).toBe(201)
     expect(received).toMatchObject({
-      drive: "main",
+      drive: 'main',
       ownerSubject: controlAdminId,
       primarySubject: controlAdminId,
       authGeneration: 7,
-      principalType: "control-admin",
+      principalType: 'control-admin',
       brokeredAuthority,
-    });
-  });
+    })
+  })
 
-  it("creates a session with a Location and writer authorization", async () => {
-    const res = new FakeRes();
-    const authorize = async () => ({ allowed: true });
+  it('creates a session with a Location and writer authorization', async () => {
+    const res = new FakeRes()
+    const authorize = async () => ({ allowed: true })
     await run(
       uploadDeps({ authorize }),
-      reqBody("/v1/uploads", {
-        method: "POST",
-        auth: "Bearer t",
+      reqBody('/v1/uploads', {
+        method: 'POST',
+        auth: 'Bearer t',
         body: {
-          operation: "create",
+          operation: 'create',
           parentRid: RID,
-          name: "payload.bin",
+          name: 'payload.bin',
           sizeBytes: 4,
           idempotencyKey: UPLOAD_ID,
         },
       }),
-      res,
-    );
-    expect(res.statusCode).toBe(201);
-    expect(res.headers.Location).toBe(`/v1/uploads/${UPLOAD_ID}`);
-    expect(res.headers["Upload-Length"]).toBe("4");
-    expect(res.json).toMatchObject({ ok: true, data: { uploadId: UPLOAD_ID } });
-  });
+      res
+    )
+    expect(res.statusCode).toBe(201)
+    expect(res.headers.Location).toBe(`/v1/uploads/${UPLOAD_ID}`)
+    expect(res.headers['Upload-Length']).toBe('4')
+    expect(res.json).toMatchObject({ ok: true, data: { uploadId: UPLOAD_ID } })
+  })
 
-  it("rejects a binary part when the path/header part number differs", async () => {
-    const res = new FakeRes();
+  it('rejects a binary part when the path/header part number differs', async () => {
+    const res = new FakeRes()
     const putPart = async () => {
-      throw new Error("putPart must not be reached");
-    };
+      throw new Error('putPart must not be reached')
+    }
     await run(
-      uploadDeps({ uploadService: { ...uploadDeps().uploadService, putPart } as ServingDeps["uploadService"] }),
-      reqPart(`/v1/uploads/${UPLOAD_ID}/parts/0`, {
-        "upload-part-number": "1",
-        "upload-offset": "0",
-        "upload-chunk-length": "4",
-        "upload-checksum": "sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
-        "content-type": "application/offset+octet-stream",
-        "content-length": "4",
+      uploadDeps({
+        uploadService: { ...uploadDeps().uploadService, putPart } as ServingDeps['uploadService'],
       }),
-      res,
-    );
-    expect(res.statusCode).toBe(400);
-    expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-  });
+      reqPart(`/v1/uploads/${UPLOAD_ID}/parts/0`, {
+        'upload-part-number': '1',
+        'upload-offset': '0',
+        'upload-chunk-length': '4',
+        'upload-checksum': 'sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=',
+        'content-type': 'application/offset+octet-stream',
+        'content-length': '4',
+      }),
+      res
+    )
+    expect(res.statusCode).toBe(400)
+    expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+  })
 
-  it("returns the indexed part receipt and base64 checksum headers", async () => {
-    const res = new FakeRes();
+  it('returns the indexed part receipt and base64 checksum headers', async () => {
+    const res = new FakeRes()
     await run(
       uploadDeps(),
       reqPart(`/v1/uploads/${UPLOAD_ID}/parts/0`, {
-        "upload-part-number": "0",
-        "upload-offset": "0",
-        "upload-chunk-length": "4",
-        "upload-checksum": "sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=",
-        "content-type": "application/offset+octet-stream",
-        "content-length": "4",
+        'upload-part-number': '0',
+        'upload-offset': '0',
+        'upload-chunk-length': '4',
+        'upload-checksum': 'sha256 n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=',
+        'content-type': 'application/offset+octet-stream',
+        'content-length': '4',
       }),
-      res,
-    );
-    expect(res.statusCode).toBe(204);
-    expect(res.headers["Upload-Part-Number"]).toBe("0");
-    expect(res.headers["Upload-Checksum"]).toMatch(/^sha256 [A-Za-z0-9+/]{43}={1}$/);
-  });
+      res
+    )
+    expect(res.statusCode).toBe(204)
+    expect(res.headers['Upload-Part-Number']).toBe('0')
+    expect(res.headers['Upload-Checksum']).toMatch(/^sha256 [A-Za-z0-9+/]{43}={1}$/)
+  })
 
-  it("exposes a bounded Retry-After and limit for writer quota responses", async () => {
-    const res = new FakeRes();
+  it('exposes a bounded Retry-After and limit for writer quota responses', async () => {
+    const res = new FakeRes()
     const quota = new GfsError(
-      "quota_exceeded",
-      "global upload stream concurrency limit reached",
+      'quota_exceeded',
+      'global upload stream concurrency limit reached',
       undefined,
-      { retryAfterSeconds: 1, limit: "active_part_streams_global", rateLimitLimit: 4 },
-    );
+      { retryAfterSeconds: 1, limit: 'active_part_streams_global', rateLimitLimit: 4 }
+    )
     await run(
       uploadDeps({
         uploadService: {
           ...uploadDeps().uploadService,
           get: async () => {
-            throw quota;
+            throw quota
           },
-        } as ServingDeps["uploadService"],
+        } as ServingDeps['uploadService'],
       }),
-      req(`/v1/uploads/${UPLOAD_ID}`, { method: "HEAD", auth: "Bearer t" }),
-      res,
-    );
-    expect(res.statusCode).toBe(429);
-    expect(res.headers["Retry-After"]).toBe("1");
-    expect(res.headers["X-RateLimit-Limit"]).toBe("4");
-    expect(res.headers["X-GFS-RateLimit-Scope"]).toBe("active_part_streams_global");
+      req(`/v1/uploads/${UPLOAD_ID}`, { method: 'HEAD', auth: 'Bearer t' }),
+      res
+    )
+    expect(res.statusCode).toBe(429)
+    expect(res.headers['Retry-After']).toBe('1')
+    expect(res.headers['X-RateLimit-Limit']).toBe('4')
+    expect(res.headers['X-GFS-RateLimit-Scope']).toBe('active_part_streams_global')
     expect(res.json).toMatchObject({
       ok: false,
-      error: { code: "quota_exceeded", retryAfterSeconds: 1, limit: "active_part_streams_global" },
-    });
-  });
-});
+      error: { code: 'quota_exceeded', retryAfterSeconds: 1, limit: 'active_part_streams_global' },
+    })
+  })
+})
 
-describe("GfsReadServer.tryHandle — auth chain (fail-closed)", () => {
-  it("401 when the Authorization header is missing", async () => {
-    const res = new FakeRes();
-    await run(deps(), req(`/v1/resources/${RID}`), res);
-    expect(res.statusCode).toBe(401);
-    expect((res.json as { error: { code: string } }).error.code).toBe("unauthorized");
-  });
+describe('GfsReadServer.tryHandle — auth chain (fail-closed)', () => {
+  it('401 when the Authorization header is missing', async () => {
+    const res = new FakeRes()
+    await run(deps(), req(`/v1/resources/${RID}`), res)
+    expect(res.statusCode).toBe(401)
+    expect((res.json as { error: { code: string } }).error.code).toBe('unauthorized')
+  })
 
-  it("401 when token verification fails", async () => {
-    const res = new FakeRes();
+  it('401 when token verification fails', async () => {
+    const res = new FakeRes()
     const d = deps({
       verifyToken: () => {
-        throw new GfsAuthError("bad signature");
+        throw new GfsAuthError('bad signature')
       },
-    });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer bad" }), res);
-    expect(res.statusCode).toBe(401);
-  });
+    })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer bad' }), res)
+    expect(res.statusCode).toBe(401)
+  })
 
-  it("503 (fail-closed) when subject resolution hits a store error", async () => {
-    const res = new FakeRes();
+  it('503 (fail-closed) when subject resolution hits a store error', async () => {
+    const res = new FakeRes()
     const d = deps({
       resolveContext: async () => {
-        throw new Error("permission store down");
+        throw new Error('permission store down')
       },
-    });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(503);
-    expect((res.json as { error: { code: string } }).error.code).toBe("not_mounted");
-  });
+    })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(503)
+    expect((res.json as { error: { code: string } }).error.code).toBe('not_mounted')
+  })
 
-  it("403 when the subject is retired or its authority generation is stale", async () => {
-    const res = new FakeRes();
+  it('403 when the subject is retired or its authority generation is stale', async () => {
+    const res = new FakeRes()
     const d = deps({
       resolveContext: async () => {
-        throw new GfsSubjectResolutionDeniedError("user is retired or token generation is stale");
+        throw new GfsSubjectResolutionDeniedError('user is retired or token generation is stale')
       },
-    });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(403);
+    })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(403)
     expect((res.json as { error: { code: string; message: string } }).error).toEqual({
-      code: "forbidden",
-      message: "principal is not authorized for GFS",
-    });
-  });
+      code: 'forbidden',
+      message: 'principal is not authorized for GFS',
+    })
+  })
 
-  it("403 when the store denies — and NO resource metadata is leaked", async () => {
-    const res = new FakeRes();
-    const d = deps({ authorize: async () => ({ allowed: false }) });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(403);
-    expect(res.body).not.toContain("report.pdf"); // no existence/name leak
-  });
+  it('403 when the store denies — and NO resource metadata is leaked', async () => {
+    const res = new FakeRes()
+    const d = deps({ authorize: async () => ({ allowed: false }) })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(403)
+    expect(res.body).not.toContain('report.pdf') // no existence/name leak
+  })
 
-  it("403 when the token ceiling denies (scope absent) — store never consulted", async () => {
-    const res = new FakeRes();
-    let authorizeCalled = false;
+  it('403 when the token ceiling denies (scope absent) — store never consulted', async () => {
+    const res = new FakeRes()
+    let authorizeCalled = false
     const d = deps({
       verifyToken: () => ({ ...CLAIMS, scopes: [] }), // no gfs.read
       authorize: async () => {
-        authorizeCalled = true;
-        return { allowed: true };
+        authorizeCalled = true
+        return { allowed: true }
       },
-    });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(403);
-    expect(authorizeCalled).toBe(false); // ceiling short-circuits before the store
-  });
+    })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(403)
+    expect(authorizeCalled).toBe(false) // ceiling short-circuits before the store
+  })
 
-  it("503 (fail-closed) when the store authorize throws not_mounted", async () => {
-    const res = new FakeRes();
+  it('503 (fail-closed) when the store authorize throws not_mounted', async () => {
+    const res = new FakeRes()
     const d = deps({
       authorize: async () => {
-        throw new GfsError("not_mounted", "permission store unavailable");
+        throw new GfsError('not_mounted', 'permission store unavailable')
       },
-    });
-    await run(d, req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(503);
-  });
+    })
+    await run(d, req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(503)
+  })
 
-  it("400 path_invalid for a malformed rid (never reaches the store as a 503)", async () => {
-    const res = new FakeRes();
-    await run(deps(), req("/v1/resources/not-a-valid-rid!!", { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(400);
-    expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-  });
-});
+  it('400 path_invalid for a malformed rid (never reaches the store as a 503)', async () => {
+    const res = new FakeRes()
+    await run(deps(), req('/v1/resources/not-a-valid-rid!!', { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(400)
+    expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+  })
+})
 
-describe("GfsReadServer.tryHandle — served reads", () => {
-  it("200 stat returns the resource VIEW with a stable gfsUri", async () => {
-    const res = new FakeRes();
-    await run(deps(), req(`/v1/resources/${RID}`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(200);
-    const data = (res.json as { ok: boolean; data: { gfsUri: string; name: string; updatedAt: string } }).data;
-    expect(data.name).toBe("report.pdf");
-    expect(data.gfsUri).toBe(`gfs://main/${RID}`);
-    expect(data.updatedAt).toBe("2026-01-01T00:00:00.000Z");
-  });
+describe('GfsReadServer.tryHandle — served reads', () => {
+  it('200 stat returns the resource VIEW with a stable gfsUri', async () => {
+    const res = new FakeRes()
+    await run(deps(), req(`/v1/resources/${RID}`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(200)
+    const data = (
+      res.json as { ok: boolean; data: { gfsUri: string; name: string; updatedAt: string } }
+    ).data
+    expect(data.name).toBe('report.pdf')
+    expect(data.gfsUri).toBe(`gfs://main/${RID}`)
+    expect(data.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+  })
 
-  it("200 children returns the paged items", async () => {
-    const res = new FakeRes();
+  it('200 children returns the paged items', async () => {
+    const res = new FakeRes()
     // The listed resource must be a directory; a file would (correctly) 409.
-    const d = deps({ store: { getResource: async () => DIR, listChildren: async () => [FILE] } });
-    await run(d, req(`/v1/resources/${RID}/children?limit=10`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(200);
-    const data = (res.json as { data: { items: unknown[]; nextCursor: string | null } }).data;
-    expect(data.items).toHaveLength(1);
-    expect(data.nextCursor).toBeNull();
-  });
+    const d = deps({ store: { getResource: async () => DIR, listChildren: async () => [FILE] } })
+    await run(d, req(`/v1/resources/${RID}/children?limit=10`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(200)
+    const data = (res.json as { data: { items: unknown[]; nextCursor: string | null } }).data
+    expect(data.items).toHaveLength(1)
+    expect(data.nextCursor).toBeNull()
+  })
 
-  it("200 content streams the raw bytes with length + uri headers", async () => {
-    const res = new FakeRes();
-    await run(deps(), req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(200);
-    expect(res.headers["Content-Length"]).toBe("11");
-    expect(res.headers["X-Gfs-Uri"]).toBe(`gfs://main/${RID}`);
-    expect(res.body).toBe("hello world");
-  });
+  it('200 content streams the raw bytes with length + uri headers', async () => {
+    const res = new FakeRes()
+    await run(deps(), req(`/v1/resources/${RID}/content`, { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(200)
+    expect(res.headers['Content-Length']).toBe('11')
+    expect(res.headers['X-Gfs-Uri']).toBe(`gfs://main/${RID}`)
+    expect(res.body).toBe('hello world')
+  })
 
-  it("destroys the blob stream when the client disconnects mid-download", async () => {
+  it('destroys the blob stream when the client disconnects mid-download', async () => {
     // fd-leak regression: pipe() does not propagate destination close to the
     // source, so a client abort must destroy the blob stream explicitly.
-    const res = new FakeRes();
-    const source = new Readable({ read() {} });
-    source.push("partial");
-    const d = deps({ blobs: { read: async () => source } });
-    const handled = run(d, req(`/v1/resources/${RID}/content`, { auth: "Bearer t" }), res);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    res.emit("close");
-    await handled;
-    expect(source.destroyed).toBe(true);
-  });
+    const res = new FakeRes()
+    const source = new Readable({ read() {} })
+    source.push('partial')
+    const d = deps({ blobs: { read: async () => source } })
+    const handled = run(d, req(`/v1/resources/${RID}/content`, { auth: 'Bearer t' }), res)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    res.emit('close')
+    await handled
+    expect(source.destroyed).toBe(true)
+  })
 
-  it("200 resolve maps a gfs:// uri (same drive) to its view", async () => {
-    const res = new FakeRes();
+  it('200 resolve maps a gfs:// uri (same drive) to its view', async () => {
+    const res = new FakeRes()
     await run(
       deps(),
-      req(`/v1/resolve?uri=${encodeURIComponent(`gfs://main/${RID}`)}`, { auth: "Bearer t" }),
+      req(`/v1/resolve?uri=${encodeURIComponent(`gfs://main/${RID}`)}`, { auth: 'Bearer t' }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect((res.json as { data: { name: string } }).data.name).toBe("report.pdf");
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect((res.json as { data: { name: string } }).data.name).toBe('report.pdf')
+  })
 
-  it("403 resolve across a DIFFERENT drive than the token (no cross-drive existence probe)", async () => {
-    const res = new FakeRes();
+  it('403 resolve across a DIFFERENT drive than the token (no cross-drive existence probe)', async () => {
+    const res = new FakeRes()
     await run(
       deps(),
-      req(`/v1/resolve?uri=${encodeURIComponent(`gfs://other/${RID}`)}`, { auth: "Bearer t" }),
+      req(`/v1/resolve?uri=${encodeURIComponent(`gfs://other/${RID}`)}`, { auth: 'Bearer t' }),
       res
-    );
-    expect(res.statusCode).toBe(403);
-  });
+    )
+    expect(res.statusCode).toBe(403)
+  })
 
-  it("200 accessible returns direct resources and effective permissions for the principal", async () => {
-    const res = new FakeRes();
-    const listAccessible: ServingDeps["listAccessible"] = async () => ({
+  it('200 accessible returns direct resources and effective permissions for the principal', async () => {
+    const res = new FakeRes()
+    const listAccessible: ServingDeps['listAccessible'] = async () => ({
       items: [
         {
           resourceId: FILE.resourceId,
           rid: RID,
           gfsUri: `gfs://main/${RID}`,
-          drive: "main",
+          drive: 'main',
           parentResourceId: FILE.parentResourceId,
           name: FILE.name,
           kind: FILE.kind,
@@ -543,321 +667,324 @@ describe("GfsReadServer.tryHandle — served reads", () => {
           version: FILE.version,
           bytes: FILE.bytes,
           updatedAt: FILE.updatedAt,
-          permissions: ["read", "write"],
-          sources: ["grant"],
+          permissions: ['read', 'write'],
+          sources: ['grant'],
           coversDescendants: true,
         },
       ],
       nextCursor: null,
-    });
-    await run(deps({ listAccessible }), req("/v1/accessible?limit=20", { auth: "Bearer t" }), res);
-    expect(res.statusCode).toBe(200);
-    const data = (res.json as { data: { items: Array<{ gfsUri: string; permissions: string[]; updatedAt?: string }> } })
-      .data;
-    expect(data.items[0]?.gfsUri).toBe(`gfs://main/${RID}`);
-    expect(data.items[0]?.permissions).toContain("write");
-    expect(data.items[0]?.updatedAt).toBe("2026-01-01T00:00:00.000Z");
-  });
+    })
+    await run(deps({ listAccessible }), req('/v1/accessible?limit=20', { auth: 'Bearer t' }), res)
+    expect(res.statusCode).toBe(200)
+    const data = (
+      res.json as {
+        data: { items: Array<{ gfsUri: string; permissions: string[]; updatedAt?: string }> }
+      }
+    ).data
+    expect(data.items[0]?.gfsUri).toBe(`gfs://main/${RID}`)
+    expect(data.items[0]?.permissions).toContain('write')
+    expect(data.items[0]?.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+  })
 
-  it("403 accessible requires a read scope even if the store would return rows", async () => {
-    const res = new FakeRes();
+  it('403 accessible requires a read scope even if the store would return rows', async () => {
+    const res = new FakeRes()
     await run(
       deps({
         verifyToken: () => ({ ...CLAIMS, scopes: [] }),
         listAccessible: async () => ({ items: [], nextCursor: null }),
       }),
-      req("/v1/accessible", { auth: "Bearer t" }),
+      req('/v1/accessible', { auth: 'Bearer t' }),
       res
-    );
-    expect(res.statusCode).toBe(403);
-  });
+    )
+    expect(res.statusCode).toBe(403)
+  })
 
-  it("403 accessible honors path-scoped token ceilings", async () => {
-    const res = new FakeRes();
+  it('403 accessible honors path-scoped token ceilings', async () => {
+    const res = new FakeRes()
     await run(
       deps({
         verifyToken: () => ({
           ...CLAIMS,
-          pathBindings: [{ path: "/docs", permissions: ["read"] }],
+          pathBindings: [{ path: '/docs', permissions: ['read'] }],
         }),
         listAccessible: async () => ({ items: [], nextCursor: null }),
       }),
-      req("/v1/accessible", { auth: "Bearer t" }),
+      req('/v1/accessible', { auth: 'Bearer t' }),
       res
-    );
-    expect(res.statusCode).toBe(403);
-  });
-});
+    )
+    expect(res.statusCode).toBe(403)
+  })
+})
 
-const WRITE_SCOPES: GfsScope[] = ["gfs.read", "gfs.write", "gfs.delete"];
+const WRITE_SCOPES: GfsScope[] = ['gfs.read', 'gfs.write', 'gfs.delete']
 const AGENT_CLAIMS: GfsVerifiedClaims = {
   ...CLAIMS,
-  sub: "host:1st:mcp-host/standalone",
+  sub: 'host:1st:mcp-host/standalone',
   scopes: WRITE_SCOPES,
-};
-const USER_WRITE_CLAIMS: GfsVerifiedClaims = { ...CLAIMS, scopes: WRITE_SCOPES };
+}
+const USER_WRITE_CLAIMS: GfsVerifiedClaims = { ...CLAIMS, scopes: WRITE_SCOPES }
 
 /** A recording write service; each method records its input and returns a row. */
 function recordingWriteService() {
-  const calls: Array<{ op: string; input: unknown }> = [];
+  const calls: Array<{ op: string; input: unknown }> = []
   const svc = {
     async create(input: unknown) {
-      calls.push({ op: "create", input });
-      return { ...FILE, name: (input as { name: string }).name, version: 0 };
+      calls.push({ op: 'create', input })
+      return { ...FILE, name: (input as { name: string }).name, version: 0 }
     },
     async replace(input: unknown) {
-      calls.push({ op: "replace", input });
-      return { ...FILE, version: 3 };
+      calls.push({ op: 'replace', input })
+      return { ...FILE, version: 3 }
     },
     async delete(input: unknown) {
-      calls.push({ op: "delete", input });
+      calls.push({ op: 'delete', input })
     },
-  };
-  return { svc: svc as unknown as ServingDeps["writeService"], calls };
+  }
+  return { svc: svc as unknown as ServingDeps['writeService'], calls }
 }
 
 function writeDeps(over: Partial<ServingDeps> = {}): {
-  d: ServingDeps;
-  calls: Array<{ op: string; input: unknown }>;
-  authzOps: GfsPermission[];
+  d: ServingDeps
+  calls: Array<{ op: string; input: unknown }>
+  authzOps: GfsPermission[]
 } {
-  const { svc, calls } = recordingWriteService();
-  const authzOps: GfsPermission[] = [];
+  const { svc, calls } = recordingWriteService()
+  const authzOps: GfsPermission[] = []
   const d = deps({
     verifyToken: () => AGENT_CLAIMS,
     authorize: async (_ctx, _rid, op) => {
-      authzOps.push(op);
-      return { allowed: true };
+      authzOps.push(op)
+      return { allowed: true }
     },
     writeService: svc,
     ...over,
-  });
-  return { d, calls, authzOps };
+  })
+  return { d, calls, authzOps }
 }
 
-describe("GfsServingHandler — write routes (governed mutation)", () => {
-  it("keeps linked actor, effective admin, token subject, and request id distinct through publication", async () => {
-    const desktopUserId = "11111111-1111-4111-8111-111111111111";
-    const controlAdminId = "22222222-2222-4222-8222-222222222222";
-    const requestId = "33333333-3333-4333-8333-333333333333";
+describe('GfsServingHandler — write routes (governed mutation)', () => {
+  it('keeps linked actor, effective admin, token subject, and request id distinct through publication', async () => {
+    const desktopUserId = '11111111-1111-4111-8111-111111111111'
+    const controlAdminId = '22222222-2222-4222-8222-222222222222'
+    const requestId = '33333333-3333-4333-8333-333333333333'
     const brokeredAuthority = {
       desktopUserId,
       controlAdminId,
-      authoritySource: "linked-admin" as const,
-    };
+      authoritySource: 'linked-admin' as const,
+    }
     const linkedClaims: GfsVerifiedClaims = {
       ...USER_WRITE_CLAIMS,
       sub: controlAdminId,
-      principalType: "control-admin",
+      principalType: 'control-admin',
       brokeredAuthority,
-    };
+    }
     const linkedContext: AuthzContext = {
-      drive: "main",
-      subjects: ["operator:"],
+      drive: 'main',
+      subjects: ['operator:'],
       isOperator: true,
       primarySubject: controlAdminId,
       effectiveControlAdminId: controlAdminId,
       desktopUserId,
-      authoritySource: "linked-admin",
+      authoritySource: 'linked-admin',
       requestId,
-    };
+    }
     const { d, calls } = writeDeps({
       verifyToken: () => linkedClaims,
       resolveContext: async (claims, resolvedRequestId) => {
         expect(claims).toEqual({
           sub: controlAdminId,
-          drive: "main",
-          principalType: "control-admin",
+          drive: 'main',
+          principalType: 'control-admin',
           brokeredAuthority,
-        });
-        expect(resolvedRequestId).toBe(requestId);
-        return linkedContext;
+        })
+        expect(resolvedRequestId).toBe(requestId)
+        return linkedContext
       },
-    });
+    })
     const request = reqBody(`/v1/resources/${RID}/children`, {
-      method: "POST",
-      auth: "Bearer t",
-      body: { name: "linked.txt", content: "hi" },
-    });
-    request.headers["x-request-id"] = requestId;
+      method: 'POST',
+      auth: 'Bearer t',
+      body: { name: 'linked.txt', content: 'hi' },
+    })
+    request.headers['x-request-id'] = requestId
 
-    const res = new FakeRes();
-    await run(d, request, res);
+    const res = new FakeRes()
+    await run(d, request, res)
 
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode).toBe(201)
     expect(calls[0].input).toMatchObject({
       mutation: {
         subject: controlAdminId,
         requestId,
         actorOnBehalfOf: controlAdminId,
         desktopUserId,
-        authoritySource: "linked-admin",
+        authoritySource: 'linked-admin',
       },
-    });
-  });
+    })
+  })
 
-  it("does not expose internal blob keys or physical paths in a failure response", async () => {
-    const res = new FakeRes();
+  it('does not expose internal blob keys or physical paths in a failure response', async () => {
+    const res = new FakeRes()
     const { d } = writeDeps({
       writeService: {
         create: async () => {
           throw new Error(
-            "immutable blob failed: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-4111-8111-111111111111 at /data/gfs/private"
-          );
+            'immutable blob failed: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/11111111-1111-4111-8111-111111111111 at /data/gfs/private'
+          )
         },
-      } as unknown as ServingDeps["writeService"],
-    });
+      } as unknown as ServingDeps['writeService'],
+    })
     await run(
       d,
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { name: "n.txt", content: "hi" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { name: 'n.txt', content: 'hi' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(500);
+    )
+    expect(res.statusCode).toBe(500)
     expect(res.json).toEqual({
       ok: false,
-      error: { code: "internal", message: "internal server error" },
-    });
-    expect(res.body).not.toContain("11111111-1111-4111-8111-111111111111");
-    expect(res.body).not.toContain("/data/gfs/private");
-  });
+      error: { code: 'internal', message: 'internal server error' },
+    })
+    expect(res.body).not.toContain('11111111-1111-4111-8111-111111111111')
+    expect(res.body).not.toContain('/data/gfs/private')
+  })
 
-  it("201 create (POST children) authorizes WRITE on the parent and calls the write service", async () => {
-    const res = new FakeRes();
-    const { d, calls, authzOps } = writeDeps();
+  it('201 create (POST children) authorizes WRITE on the parent and calls the write service', async () => {
+    const res = new FakeRes()
+    const { d, calls, authzOps } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { name: "n.txt", content: "hi" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { name: 'n.txt', content: 'hi' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(201);
-    expect(authzOps).toEqual(["write"]); // create needs write on the parent
-    expect(calls[0].op).toBe("create");
-    expect((calls[0].input as { name: string; content: Buffer }).name).toBe("n.txt");
-    expect((calls[0].input as { content: Buffer }).content.toString("utf8")).toBe("hi");
-  });
+    )
+    expect(res.statusCode).toBe(201)
+    expect(authzOps).toEqual(['write']) // create needs write on the parent
+    expect(calls[0].op).toBe('create')
+    expect((calls[0].input as { name: string; content: Buffer }).name).toBe('n.txt')
+    expect((calls[0].input as { content: Buffer }).content.toString('utf8')).toBe('hi')
+  })
 
-  it("201 create directory sends kind=directory without file content", async () => {
-    const res = new FakeRes();
-    const { d, calls, authzOps } = writeDeps();
+  it('201 create directory sends kind=directory without file content', async () => {
+    const res = new FakeRes()
+    const { d, calls, authzOps } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { name: "docs", kind: "directory" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { name: 'docs', kind: 'directory' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(201);
-    expect(authzOps).toEqual(["write"]);
-    expect(calls[0].op).toBe("create");
-    expect(calls[0].input).toMatchObject({ name: "docs", kind: "directory" });
-    expect((calls[0].input as { content?: Buffer }).content).toBeUndefined();
-  });
+    )
+    expect(res.statusCode).toBe(201)
+    expect(authzOps).toEqual(['write'])
+    expect(calls[0].op).toBe('create')
+    expect(calls[0].input).toMatchObject({ name: 'docs', kind: 'directory' })
+    expect((calls[0].input as { content?: Buffer }).content).toBeUndefined()
+  })
 
-  it.each(["../evil.txt", "..", "", "bad\u0000name"])(
-    "400 path_invalid when create name is not a single safe path segment: %j",
-    async (name) => {
-      const res = new FakeRes();
-      const { d, calls, authzOps } = writeDeps();
+  it.each(['../evil.txt', '..', '', 'bad\u0000name'])(
+    '400 path_invalid when create name is not a single safe path segment: %j',
+    async name => {
+      const res = new FakeRes()
+      const { d, calls, authzOps } = writeDeps()
       await run(
         d,
         reqBody(`/v1/resources/${RID}/children`, {
-          method: "POST",
-          auth: "Bearer t",
-          body: { name, content: "hi" },
+          method: 'POST',
+          auth: 'Bearer t',
+          body: { name, content: 'hi' },
         }),
         res
-      );
+      )
 
-      expect(res.statusCode).toBe(400);
-      expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-      expect(authzOps).toEqual([]);
-      expect(calls).toHaveLength(0);
+      expect(res.statusCode).toBe(400)
+      expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+      expect(authzOps).toEqual([])
+      expect(calls).toHaveLength(0)
     }
-  );
+  )
 
-  it("200 replace (PUT content) by an agent WITH If-Match bumps the file", async () => {
-    const res = new FakeRes();
-    const { d, calls, authzOps } = writeDeps();
+  it('200 replace (PUT content) by an agent WITH If-Match bumps the file', async () => {
+    const res = new FakeRes()
+    const { d, calls, authzOps } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
-        body: { content: "new", ifMatch: 2 },
+        method: 'PUT',
+        auth: 'Bearer t',
+        body: { content: 'new', ifMatch: 2 },
       }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect(authzOps).toEqual(["write"]);
-    expect((calls[0].input as { ifMatch: number }).ifMatch).toBe(2);
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect(authzOps).toEqual(['write'])
+    expect((calls[0].input as { ifMatch: number }).ifMatch).toBe(2)
+  })
 
-  it("200 replace accepts encoded file content", async () => {
-    const res = new FakeRes();
-    const { d, calls } = writeDeps();
+  it('200 replace accepts encoded file content', async () => {
+    const res = new FakeRes()
+    const { d, calls } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
-        body: { contentBase64: "bmV3", ifMatch: 2 },
+        method: 'PUT',
+        auth: 'Bearer t',
+        body: { contentBase64: 'bmV3', ifMatch: 2 },
       }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect((calls[0].input as { content: Buffer }).content.toString("utf8")).toBe("new");
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect((calls[0].input as { content: Buffer }).content.toString('utf8')).toBe('new')
+  })
 
-  it("200 replace accepts a large (>4.47MB) base64 body without a regex stack overflow", async () => {
+  it('200 replace accepts a large (>4.47MB) base64 body without a regex stack overflow', async () => {
     // 5MiB raw -> ~6.99MB base64, well past the ~4.47MB-char threshold where the
     // previous grouped-quantifier regex /(?:[A-Za-z0-9+/]{4})*.../ overflowed V8's
     // regexp backtrack stack (RangeError -> bogus 500 `internal` on any large upload).
-    const rawBytes = 5 * 1024 * 1024;
-    const largeBase64 = Buffer.alloc(rawBytes, 0x41).toString("base64");
-    const res = new FakeRes();
-    const { d, calls } = writeDeps();
+    const rawBytes = 5 * 1024 * 1024
+    const largeBase64 = Buffer.alloc(rawBytes, 0x41).toString('base64')
+    const res = new FakeRes()
+    const { d, calls } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
+        method: 'PUT',
+        auth: 'Bearer t',
         body: { contentBase64: largeBase64, ifMatch: 2 },
       }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect((calls[0].input as { content: Buffer }).content.length).toBe(rawBytes);
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect((calls[0].input as { content: Buffer }).content.length).toBe(rawBytes)
+  })
 
-  it("400 path_invalid for invalid encoded file content", async () => {
-    const res = new FakeRes();
-    const { d, calls, authzOps } = writeDeps();
+  it('400 path_invalid for invalid encoded file content', async () => {
+    const res = new FakeRes()
+    const { d, calls, authzOps } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
-        body: { contentBase64: "@@@not-base64@@@", ifMatch: 2 },
+        method: 'PUT',
+        auth: 'Bearer t',
+        body: { contentBase64: '@@@not-base64@@@', ifMatch: 2 },
       }),
       res
-    );
-    expect(res.statusCode).toBe(400);
-    expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-    expect(authzOps).toEqual([]);
-    expect(calls).toHaveLength(0);
-  });
+    )
+    expect(res.statusCode).toBe(400)
+    expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+    expect(authzOps).toEqual([])
+    expect(calls).toHaveLength(0)
+  })
 
-  it("413 payload_too_large advertises Connection: close (request body not fully received)", async () => {
+  it('413 payload_too_large advertises Connection: close (request body not fully received)', async () => {
     // When readJsonBody aborts mid-stream (body over MAX_WRITE_BODY_BYTES), the
     // client is still sending: the socket cannot be reused and Node will reset
     // it. Without `Connection: close`, a pooling client (undici in control-api's
@@ -865,152 +992,152 @@ describe("GfsServingHandler — write routes (governed mutation)", () => {
     // ECONNRESET -> 502 gfsc_unreachable (reproduced live: 413 then-immediate
     // request failed deterministically). Real IncomingMessage semantics:
     // `complete` is false while the body has not been fully received.
-    const res = new FakeRes();
-    const { d, calls } = writeDeps();
-    const oversized = "A".repeat(16 * 1024 * 1024 + 4);
+    const res = new FakeRes()
+    const { d, calls } = writeDeps()
+    const oversized = 'A'.repeat(16 * 1024 * 1024 + 4)
     const request = reqBody(`/v1/resources/${RID}/content`, {
-      method: "PUT",
-      auth: "Bearer t",
+      method: 'PUT',
+      auth: 'Bearer t',
       rawBody: `{"contentBase64":"${oversized}","ifMatch":2}`,
-    });
-    (request as unknown as { complete: boolean }).complete = false;
-    await run(d, request, res);
-    expect(res.statusCode).toBe(413);
-    expect((res.json as { error: { code: string } }).error.code).toBe("payload_too_large");
-    expect(res.headers["Connection"]).toBe("close");
-    expect(calls).toHaveLength(0);
-  });
+    })
+    ;(request as unknown as { complete: boolean }).complete = false
+    await run(d, request, res)
+    expect(res.statusCode).toBe(413)
+    expect((res.json as { error: { code: string } }).error.code).toBe('payload_too_large')
+    expect(res.headers['Connection']).toBe('close')
+    expect(calls).toHaveLength(0)
+  })
 
-  it("does NOT close the connection on an error whose request body WAS fully received", async () => {
+  it('does NOT close the connection on an error whose request body WAS fully received', async () => {
     // A fully-consumed body (here: valid JSON, invalid base64) leaves the socket
     // clean — keep-alive must survive, only the mid-stream abort case may close.
-    const res = new FakeRes();
-    const { d } = writeDeps();
+    const res = new FakeRes()
+    const { d } = writeDeps()
     const request = reqBody(`/v1/resources/${RID}/content`, {
-      method: "PUT",
-      auth: "Bearer t",
-      body: { contentBase64: "@@@not-base64@@@", ifMatch: 2 },
-    });
-    (request as unknown as { complete: boolean }).complete = true;
-    await run(d, request, res);
-    expect(res.statusCode).toBe(400);
-    expect(res.headers["Connection"]).toBeUndefined();
-  });
+      method: 'PUT',
+      auth: 'Bearer t',
+      body: { contentBase64: '@@@not-base64@@@', ifMatch: 2 },
+    })
+    ;(request as unknown as { complete: boolean }).complete = true
+    await run(d, request, res)
+    expect(res.statusCode).toBe(400)
+    expect(res.headers['Connection']).toBeUndefined()
+  })
 
-  it("412 precondition_failed: an AGENT replace WITHOUT If-Match is rejected before the store", async () => {
-    const res = new FakeRes();
-    const { d, calls } = writeDeps();
+  it('412 precondition_failed: an AGENT replace WITHOUT If-Match is rejected before the store', async () => {
+    const res = new FakeRes()
+    const { d, calls } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
-        body: { content: "new" },
+        method: 'PUT',
+        auth: 'Bearer t',
+        body: { content: 'new' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(412);
-    expect(calls).toHaveLength(0); // never reached the write service
-  });
+    )
+    expect(res.statusCode).toBe(412)
+    expect(calls).toHaveLength(0) // never reached the write service
+  })
 
-  it.each([-1, 1.5, "2"])(
-    "400 path_invalid for an invalid If-Match value before authorization: %j",
-    async (ifMatch) => {
-      const res = new FakeRes();
-      const { d, calls, authzOps } = writeDeps();
+  it.each([-1, 1.5, '2'])(
+    '400 path_invalid for an invalid If-Match value before authorization: %j',
+    async ifMatch => {
+      const res = new FakeRes()
+      const { d, calls, authzOps } = writeDeps()
       await run(
         d,
         reqBody(`/v1/resources/${RID}/content`, {
-          method: "PUT",
-          auth: "Bearer t",
-          body: { content: "new", ifMatch },
+          method: 'PUT',
+          auth: 'Bearer t',
+          body: { content: 'new', ifMatch },
         }),
         res
-      );
-      expect(res.statusCode).toBe(400);
-      expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-      expect(authzOps).toEqual([]);
-      expect(calls).toHaveLength(0);
+      )
+      expect(res.statusCode).toBe(400)
+      expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+      expect(authzOps).toEqual([])
+      expect(calls).toHaveLength(0)
     }
-  );
+  )
 
-  it("a NON-agent (user) replace WITHOUT If-Match is allowed (agent invariant only)", async () => {
-    const res = new FakeRes();
-    const { d, calls } = writeDeps({ verifyToken: () => USER_WRITE_CLAIMS });
+  it('a NON-agent (user) replace WITHOUT If-Match is allowed (agent invariant only)', async () => {
+    const res = new FakeRes()
+    const { d, calls } = writeDeps({ verifyToken: () => USER_WRITE_CLAIMS })
     await run(
       d,
       reqBody(`/v1/resources/${RID}/content`, {
-        method: "PUT",
-        auth: "Bearer t",
-        body: { content: "new" },
+        method: 'PUT',
+        auth: 'Bearer t',
+        body: { content: 'new' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect(calls[0].op).toBe("replace");
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect(calls[0].op).toBe('replace')
+  })
 
-  it("DELETE authorizes the destructive DELETE bit (not write)", async () => {
-    const res = new FakeRes();
-    const { d, authzOps } = writeDeps();
+  it('DELETE authorizes the destructive DELETE bit (not write)', async () => {
+    const res = new FakeRes()
+    const { d, authzOps } = writeDeps()
     await run(
       d,
-      reqBody(`/v1/resources/${RID}`, { method: "DELETE", auth: "Bearer t", body: { ifMatch: 2 } }),
+      reqBody(`/v1/resources/${RID}`, { method: 'DELETE', auth: 'Bearer t', body: { ifMatch: 2 } }),
       res
-    );
-    expect(res.statusCode).toBe(200);
-    expect(authzOps).toEqual(["delete"]); // destructive bit, agents default-denied
-  });
+    )
+    expect(res.statusCode).toBe(200)
+    expect(authzOps).toEqual(['delete']) // destructive bit, agents default-denied
+  })
 
-  it("403 when the store denies the write — the write service is never called", async () => {
-    const res = new FakeRes();
-    const { svc, calls } = recordingWriteService();
+  it('403 when the store denies the write — the write service is never called', async () => {
+    const res = new FakeRes()
+    const { svc, calls } = recordingWriteService()
     const d = deps({
       verifyToken: () => AGENT_CLAIMS,
       authorize: async () => ({ allowed: false }),
       writeService: svc,
-    });
+    })
     await run(
       d,
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { name: "x", content: "y" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { name: 'x', content: 'y' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(403);
-    expect(calls).toHaveLength(0);
-  });
+    )
+    expect(res.statusCode).toBe(403)
+    expect(calls).toHaveLength(0)
+  })
 
-  it("404 when a write hits a server with NO write service (verb not served, not a silent no-op)", async () => {
-    const res = new FakeRes();
+  it('404 when a write hits a server with NO write service (verb not served, not a silent no-op)', async () => {
+    const res = new FakeRes()
     // default deps() has no writeService
     await run(
       deps({ verifyToken: () => AGENT_CLAIMS }),
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { name: "x", content: "y" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { name: 'x', content: 'y' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(404);
-  });
+    )
+    expect(res.statusCode).toBe(404)
+  })
 
-  it("400 path_invalid when create is missing a required body field", async () => {
-    const res = new FakeRes();
-    const { d } = writeDeps();
+  it('400 path_invalid when create is missing a required body field', async () => {
+    const res = new FakeRes()
+    const { d } = writeDeps()
     await run(
       d,
       reqBody(`/v1/resources/${RID}/children`, {
-        method: "POST",
-        auth: "Bearer t",
-        body: { content: "no name" },
+        method: 'POST',
+        auth: 'Bearer t',
+        body: { content: 'no name' },
       }),
       res
-    );
-    expect(res.statusCode).toBe(400);
-    expect((res.json as { error: { code: string } }).error.code).toBe("path_invalid");
-  });
-});
+    )
+    expect(res.statusCode).toBe(400)
+    expect((res.json as { error: { code: string } }).error.code).toBe('path_invalid')
+  })
+})
