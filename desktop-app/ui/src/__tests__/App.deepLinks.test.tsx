@@ -421,7 +421,10 @@ describe('App deep-link orchestration', () => {
     })
   })
 
-  it('collapses the sidebar when an app opens and restores it when the app closes', () => {
+  // With universal-tabs an open app is a `kind:'app'` tab in the global strip, so
+  // opening/closing an app no longer auto-collapses or restores the sidebar. The
+  // manual toggle and its persistence are the only things that move the sidebar.
+  it('does not collapse or restore the sidebar when an app opens and closes', () => {
     window.localStorage.clear()
     currentController = makeController({
       initialExperienceLoading: false,
@@ -437,15 +440,19 @@ describe('App deep-link orchestration', () => {
         defaultPath: '/',
       })
     })
-    expect(sidebarHarness.props?.collapsed).toBe(true)
-    // Auto-collapse is ephemeral: it must not overwrite the saved preference.
+    // Guard against a vacuous assertion: the app must actually be active for
+    // "the sidebar didn't move" to mean anything.
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
+    // Opening an app leaves the sidebar exactly as it was, and touches nothing in
+    // the saved preference.
+    expect(sidebarHarness.props?.collapsed).toBe(false)
     expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBeNull()
 
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
     expect(sidebarHarness.props?.collapsed).toBe(false)
   })
 
-  it('lets a manual sidebar toggle win while an app is open', () => {
+  it('keeps the manual sidebar toggle and its persistence intact while an app is open', () => {
     window.localStorage.clear()
     currentController = makeController({
       initialExperienceLoading: false,
@@ -460,56 +467,25 @@ describe('App deep-link orchestration', () => {
         defaultPath: '/',
       })
     })
-    expect(sidebarHarness.props?.collapsed).toBe(true)
+    expect(sidebarHarness.props?.collapsed).toBe(false)
 
-    // The user expands the sidebar back while the app is still open.
+    // The user collapses the sidebar manually while the app is open: it collapses
+    // and the choice persists.
+    act(() => sidebarHarness.props?.onCollapsedChange?.(true))
+    expect(sidebarHarness.props?.collapsed).toBe(true)
+    expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('1')
+
+    // Expanding again is likewise user-driven and persists.
     act(() => sidebarHarness.props?.onCollapsedChange?.(false))
     expect(sidebarHarness.props?.collapsed).toBe(false)
-    // A manual toggle is user-driven, so it persists.
     expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('0')
 
-    // Closing the app must not override the user's manual choice.
+    // Closing the app leaves the user's manual state untouched.
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppBack?.())
     expect(sidebarHarness.props?.collapsed).toBe(false)
   })
 
-  it('keeps a manual expand when switching directly between apps', () => {
-    window.localStorage.clear()
-    currentController = makeController({
-      initialExperienceLoading: false,
-      navItem: DESKTOP_ROUTES.apps,
-    } as Partial<AppController>)
-    render(<App />)
-
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app-a',
-        label: 'App A',
-        defaultPath: '/',
-      })
-    })
-    expect(sidebarHarness.props?.collapsed).toBe(true)
-
-    // The user expands the sidebar back while app A is open.
-    act(() => sidebarHarness.props?.onCollapsedChange?.(false))
-    expect(sidebarHarness.props?.collapsed).toBe(false)
-    expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('0')
-
-    // Switching straight to another app keeps the open/closed edge unchanged, so
-    // the auto-collapse effect must not re-collapse nor re-remember: the manual
-    // expand stands.
-    act(() => {
-      sandboxUiPageHarness.props?.onEmbeddedAppOpening?.({
-        appRef: 'ns/app-b',
-        label: 'App B',
-        defaultPath: '/',
-      })
-    })
-    expect(sidebarHarness.props?.collapsed).toBe(false)
-    expect(window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY)).toBe('0')
-  })
-
-  it('restores a saved collapsed preference after an app closes', () => {
+  it('respects a saved collapsed preference regardless of app open/close', () => {
     window.localStorage.clear()
     window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, '1')
     currentController = makeController({
@@ -526,6 +502,8 @@ describe('App deep-link orchestration', () => {
         defaultPath: '/',
       })
     })
+    // Guard against a vacuous assertion: the app must actually be active here.
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app')
     expect(sidebarHarness.props?.collapsed).toBe(true)
 
     act(() => sandboxUiPageHarness.props?.onEmbeddedAppRemoved?.())
