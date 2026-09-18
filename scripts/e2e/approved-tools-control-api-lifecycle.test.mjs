@@ -445,3 +445,48 @@ test('recovery refuses changed original deployment, foreign run and unfinished r
     assert.deepEqual(calls, [])
   }
 })
+test('recovery accepts only the exact fixture /tmp storage on a live fixture deployment', async () => {
+  const recover = async live => {
+    const calls = []
+    const result = recoverControlApiForCleanup({
+      state: recoveryState(),
+      profile,
+      get: () => {
+        calls.push('get')
+        return live
+      },
+      patch: () => calls.push('patch'),
+      wait: () => calls.push('wait'),
+      verify: () => calls.push('verify'),
+    })
+    return { result, calls }
+  }
+  const exact = await recover(fixture())
+  assert.equal(await exact.result, true)
+  assert.deepEqual(exact.calls, ['get', 'wait', 'verify'])
+  for (const mutate of [
+    d => {
+      d.spec.template.spec.volumes = [{ name: controlApiFixtureVolume, hostPath: { path: '/' } }]
+    },
+    d => {
+      d.spec.template.spec.volumes.push({ name: controlApiFixtureVolume, emptyDir: {} })
+    },
+    d => {
+      delete d.spec.template.spec.volumes
+    },
+    d => {
+      d.spec.template.spec.containers[0].volumeMounts = [
+        { name: 'other', mountPath: controlApiFixtureMountPath },
+      ]
+    },
+    d => {
+      delete d.spec.template.spec.containers[0].volumeMounts
+    },
+  ]) {
+    const live = fixture()
+    mutate(live)
+    const { result, calls } = await recover(live)
+    await assert.rejects(result, /Control API fixture environment changed/)
+    assert.deepEqual(calls, ['get'])
+  }
+})
