@@ -151,6 +151,36 @@ describe('ModelSelector', () => {
     expect(chip.hasAttribute('title')).toBe(false)
   })
 
+  it('tags every listed model with its image capability, including supported ones', () => {
+    setHook({
+      data: baseData({
+        models: [
+          {
+            name: 'claude-opus-4-8',
+            displayName: 'Opus 4.8',
+            imageInput: { state: 'supported', reason: 'supported' },
+          },
+          {
+            name: 'claude-haiku-4-5',
+            displayName: 'Haiku 4.5',
+            imageInput: { state: 'unsupported', reason: 'model_unsupported' },
+          },
+          { name: 'claude-sonnet-5', displayName: 'Sonnet 5' },
+        ],
+      }),
+    })
+    renderSelector()
+    fireEvent.click(screen.getByRole('button', { name: /Model —/ }))
+
+    const tagsOf = (name: RegExp) =>
+      Array.from(
+        screen.getByRole('menuitemradio', { name }).querySelectorAll('.model-selector-item-tag')
+      ).map(tag => tag.textContent)
+    expect(tagsOf(/Opus 4\.8/)).toEqual(['default', 'images'])
+    expect(tagsOf(/Haiku 4\.5/)).toEqual(['no images'])
+    expect(tagsOf(/Sonnet 5/)).toEqual(['images not verified'])
+  })
+
   it('shows the effective model (sessionModel over hostDefault)', () => {
     setHook({ data: baseData() })
     renderSelector()

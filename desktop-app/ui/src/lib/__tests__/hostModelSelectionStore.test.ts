@@ -208,7 +208,32 @@ describe('hostModelSelectionStore — list fetch failure', () => {
     expect(view.canAttachImages).toBe(false)
   })
 
-  it('says a forced refetch is checking, not that the model lacks evidence', async () => {
+  it('says the first load is checking, not that the model lacks evidence', async () => {
+    const firstRead = deferred<HostModelsResult>()
+    const getHostModels = vi
+      .fn<HostModelSelectionTransport['getHostModels']>()
+      .mockReturnValueOnce(firstRead.promise)
+    const { transport } = makeTransport({ getHostModels })
+
+    const pending = loadHostModels(transport, AGENT, CHAT)
+    const during = readHostModelSelection(AGENT, CHAT)
+    expect(getHostModels).toHaveBeenCalledTimes(1)
+    expect(during.loading).toBe(true)
+    expect(during.visualSendBlocked).toBe(true)
+    expect(during.imageBlockMessage).toMatch(/^Checking the model’s image support/)
+    expect(during.imageBlockMessage).not.toMatch(/operator/)
+
+    firstRead.resolve(baseResult({ sessionModel: 'glm-5.3-flash' }))
+    await pending
+    const after = readHostModelSelection(AGENT, CHAT)
+    expect(after.canAttachImages).toBe(true)
+    expect(after.imageBlockMessage).toBeNull()
+  })
+
+  // Closing the OS file picker refocuses the window, and the focus listener
+  // forces a refetch right before the picked files arrive. A refetch over a
+  // settled read must not turn a supported model into "checking".
+  it('keeps a settled capability while a forced background refetch is in flight', async () => {
     const refetch = deferred<HostModelsResult>()
     const getHostModels = vi
       .fn<HostModelSelectionTransport['getHostModels']>()
@@ -220,17 +245,41 @@ describe('hostModelSelectionStore — list fetch failure', () => {
 
     const pending = loadHostModels(transport, AGENT, CHAT, { force: true })
     const during = readHostModelSelection(AGENT, CHAT)
+    // Witness: the refetch is really in flight while capability is read.
     expect(getHostModels).toHaveBeenCalledTimes(2)
     expect(during.loading).toBe(true)
-    expect(during.visualSendBlocked).toBe(true)
-    expect(during.imageBlockMessage).toMatch(/^Checking the model’s image support/)
-    expect(during.imageBlockMessage).not.toMatch(/operator/)
+    expect(during.imageInput.state).toBe('supported')
+    expect(during.canAttachImages).toBe(true)
+    expect(during.visualSendBlocked).toBe(false)
+    expect(during.imageBlockMessage).toBeNull()
 
     refetch.resolve(baseResult({ sessionModel: 'glm-5.3-flash' }))
     await pending
     const after = readHostModelSelection(AGENT, CHAT)
+    expect(after.loading).toBe(false)
     expect(after.canAttachImages).toBe(true)
-    expect(after.imageBlockMessage).toBeNull()
+  })
+
+  it('applies the refetched selection when it lands during a background refetch', async () => {
+    const refetch = deferred<HostModelsResult>()
+    const getHostModels = vi
+      .fn<HostModelSelectionTransport['getHostModels']>()
+      .mockResolvedValueOnce(baseResult({ sessionModel: 'glm-5.3-flash' }))
+      .mockReturnValueOnce(refetch.promise)
+    const { transport } = makeTransport({ getHostModels })
+    await loadHostModels(transport, AGENT, CHAT)
+
+    const pending = loadHostModels(transport, AGENT, CHAT, { force: true })
+    expect(readHostModelSelection(AGENT, CHAT).canAttachImages).toBe(true)
+
+    // Another client moved this chat to a text-only model.
+    refetch.resolve(baseResult({ sessionModel: 'glm-5.3', modelSelectionRevision: 8 }))
+    await pending
+    const after = readHostModelSelection(AGENT, CHAT)
+    expect(getHostModels).toHaveBeenCalledTimes(2)
+    expect(after.effectiveModel).toBe('glm-5.3')
+    expect(after.imageInput.state).toBe('unsupported')
+    expect(after.visualSendBlocked).toBe(true)
   })
 
   it('keeps a previous good read usable when a later fetch fails', async () => {

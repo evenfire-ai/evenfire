@@ -18,8 +18,8 @@
  *     last confirmed state, drops the rejected intent so it is never silently
  *     piggybacked, and blocks image capability until a refetch lands.
  *   - Image capability is always resolved for the EFFECTIVE model from the host
- *     projection. Loading, refetching or conflicted state reads as `unknown`,
- *     which blocks images and never text.
+ *     projection. A first load or a conflicted state reads as `unknown`, which
+ *     blocks images and never text; a refetch over a settled read keeps it.
  *
  * Module singletons on purpose: this store is read by `ModelSelector`,
  * `useHostModels` and the send path in `useAgentChatController`, which never
@@ -81,7 +81,7 @@ export interface HostModelSelectionView {
   conflicted: boolean
   /** Revision the last read/write was based on; null → never send `expectedRevision`. */
   confirmedRevision: number | null
-  /** Image capability of `effectiveModel` (unknown while loading/conflicted). */
+  /** Image capability of `effectiveModel` (unknown during the first load or a conflict). */
   imageInput: ImageInputDecision
   canAttachImages: boolean
   /** User copy explaining why images are blocked; null when allowed. */
@@ -214,10 +214,16 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
             : 'ready'
   const loadError = state === 'error' ? entry.error : null
 
-  // Image capability is only trusted from a settled read: while a fetch is in
-  // flight or a CAS conflict is unresolved the snapshot may be stale, so images
-  // read as unknown (text stays allowed).
-  const unsettledEvidence = entry.loading || entry.conflicted
+  // Image capability is only trusted from a settled read: before the first read
+  // lands or while a CAS conflict is unresolved, images read as unknown (text
+  // stays allowed). A background refetch (window focus, menu open, post-send)
+  // over an existing read does not unsettle it: the model list is host-level,
+  // the refetch result replaces the view when it lands, and the host re-checks
+  // the selected model's capability when it admits the message. Treating
+  // every refetch as unknown blocked images whenever the OS file picker closed
+  // and refocused the window.
+  const firstLoad = entry.loading && data === undefined
+  const unsettledEvidence = firstLoad || entry.conflicted
   const imageInput: ImageInputDecision = unsettledEvidence
     ? { state: 'unknown', reason: 'model_unknown' }
     : resolveModelImageInput(data?.models, effectiveModel, nowMs)
@@ -232,9 +238,9 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
       ? 'The model list could not be loaded, so image capability cannot be checked. Retry the model list.'
       : entry.saving
         ? 'Applying the model change — wait for it to settle before sending images.'
-        : // A fetch in flight (first load, window focus, menu open, post-send
-          // refresh) is not a verdict about the model's evidence either.
-          entry.loading
+        : // The first fetch in flight is not a verdict about the model's
+          // evidence either.
+          firstLoad
           ? 'Checking the model’s image support — images can be sent once the model list refreshes.'
           : entry.conflicted
             ? 'This chat’s model changed elsewhere — re-checking the current selection before images can be sent.'

@@ -253,9 +253,11 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
               {offeredModels.map(option => {
                 const isActive = option.name === effectiveModel
                 const optionImageInput = resolveImageInputDecision(option.imageInput)
+                // Every option carries an image tag, so a missing tag is never
+                // read as "not checked".
                 const imageHint =
                   optionImageInput.state === 'supported'
-                    ? undefined
+                    ? 'images'
                     : optionImageInput.state === 'unsupported'
                       ? 'no images'
                       : 'images not verified'

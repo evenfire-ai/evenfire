@@ -125,6 +125,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // provider id. `visualSendBlocked` covers all three blocking shapes:
   // `unsupported` (known text-only), `unknown` (no/stale evidence) and an
   // unsettled selection write (the model may still be changing under us).
+  // It gates SENDING images, never selecting them (#678): the picker, paste and
+  // drop always attach, and the notice below explains a blocked send, so the
+  // user can still switch to a capable model with the images kept.
   const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
   const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
   const selectedAgentContext = selectedAgent
@@ -337,16 +340,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   )
 
   const openUploadPicker = useCallback(() => {
-    if (hostModelSelection.visualSendBlocked) {
-      setComposerAttachmentError(
-        imageAttachmentBlockMessage ?? 'Image attachments are not available for this model yet.'
-      )
-      return
-    }
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
     composerFileInputRef.current?.click()
-  }, [hostModelSelection.visualSendBlocked, imageAttachmentBlockMessage])
+  }, [])
 
   const openAgentFilesModal = useCallback(() => {
     if (agentFilesLoading) {
@@ -435,13 +432,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const prepareComposerImageAttachments = useCallback(
     async (files: File[] | FileList, source: 'picker' | 'clipboard' = 'picker') => {
-      if (hostModelSelection.visualSendBlocked) {
-        setComposerAttachmentError(
-          imageAttachmentBlockMessage ?? 'Image attachments are not available for this model yet.'
-        )
-        return
-      }
-
       const candidates = Array.from(files || [])
       if (!candidates.length) return
 
@@ -509,8 +499,6 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       setComposerAttachmentError(validationErrors.length ? (validationErrors[0] ?? null) : null)
     },
     [
-      hostModelSelection.visualSendBlocked,
-      imageAttachmentBlockMessage,
       buildAttachmentName,
       composerImageAttachments.length,
       inferComposerImageMimeType,

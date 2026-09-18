@@ -330,22 +330,30 @@ describe.each(BLOCKED_CAPABILITIES)(
       })
     })
 
-    it('blocks the Upload Files picker with the capability message and never opens the dialog', async () => {
+    // #678: capability gates sending images, never selecting them. The picked
+    // image is kept so the user can switch to a capable model; the send-time
+    // notice (covered below) explains the block once the chip is pending.
+    it('opens the Upload Files picker and attaches the picked image', async () => {
       await withPickerClick(async timesClicked => {
         const { container } = render(<ComposerPanel inline />)
 
         fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
         fireEvent.click(screen.getByRole('menuitem', { name: 'Upload Files' }))
+        expect(timesClicked()).toBe(1)
 
-        // The picker is still part of the composer; it was simply never asked to open.
-        expect(pickerInput(container)).toBeTruthy()
-        expect(timesClicked()).toBe(0)
-        expect(screen.getByRole('alert').textContent).toBe(blockMessage)
-        expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+        fireEvent.change(pickerInput(container), {
+          target: { files: [imageFile('photo.png', 'image/png')] },
+        })
+
+        await waitFor(() =>
+          expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+        )
+        expect(expectSinglePreparedImage()).toMatchObject({ name: 'photo.png' })
+        expect(screen.queryByText(blockMessage)).toBeNull()
       })
     })
 
-    it('blocks a pasted image with the capability message and adds nothing', async () => {
+    it('attaches a pasted image', async () => {
       render(<ComposerPanel inline />)
       const textarea = screen.getByTestId('chat-input')
 
@@ -355,11 +363,14 @@ describe.each(BLOCKED_CAPABILITIES)(
 
       // Consumed like a real paste so the image never lands as text either.
       expect(notPrevented).toBe(false)
-      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(blockMessage))
-      expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+      )
+      expect(expectSinglePreparedImage().mimeType).toBe('image/png')
+      expect(screen.queryByText(blockMessage)).toBeNull()
     })
 
-    it('blocks a dropped image with the capability message and clears the drop overlay', async () => {
+    it('attaches a dropped image and clears the drop overlay', async () => {
       const { container } = render(<ComposerPanel inline />)
       const shell = container.querySelector('.composer-input-shell') as HTMLElement
 
@@ -371,9 +382,12 @@ describe.each(BLOCKED_CAPABILITIES)(
       })
 
       expect(notPrevented).toBe(false)
-      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(blockMessage))
+      await waitFor(() =>
+        expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+      )
+      expect(expectSinglePreparedImage()).toMatchObject({ name: 'dropped.png' })
       expect(screen.queryByText('Drop files here')).toBeNull()
-      expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+      expect(screen.queryByText(blockMessage)).toBeNull()
     })
   }
 )
