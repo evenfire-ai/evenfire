@@ -14,6 +14,7 @@ import { decodeJwt } from 'jose'
 import { randomBytes } from 'node:crypto'
 import { isIP } from 'node:net'
 import type { Pool } from 'pg'
+import { GROK_EXECUTE_SCOPE } from '@clerum/codex-catalog-projection'
 import {
   hasInvalidDigest,
   hasLatestTag,
@@ -106,6 +107,7 @@ import {
   buildWorkflowOutputPreparePod,
   buildWorkflowOutputPreparePodName,
   declaredPluginWorkloadSdkCapabilities,
+  recipeDeclaresGrokSubscription,
   workflowOutputLabelValue,
 } from './podFactory'
 import {
@@ -365,6 +367,7 @@ const WORKFLOW_CONTROL_SCOPE_ORDER: WorkflowControlScope[] = [
 const EFFECTIVE_WORKFLOW_CONTROL_SCOPE_ORDER: EffectiveWorkflowControlScope[] = [
   ...WORKFLOW_CONTROL_SCOPE_ORDER,
   'llm:codex:execute',
+  'llm:grok:execute',
 ]
 
 export type { CodexReconcileContext } from './codexRecipeVerdict'
@@ -946,7 +949,8 @@ export class WorkflowReconciler {
         runtime,
         awaitsTriggeredRun,
         codexProjection,
-        eagerSdkMcpHost
+        eagerSdkMcpHost,
+        grokProjection
       ) =>
         this.applyWorkflowNetworkPolicies(
           recipeName,
@@ -955,7 +959,8 @@ export class WorkflowReconciler {
           runtime,
           awaitsTriggeredRun,
           codexProjection,
-          eagerSdkMcpHost
+          eagerSdkMcpHost,
+          grokProjection
         ),
       ensureMcpHostHeadlessService: recipeName => this.ensureMcpHostHeadlessService(recipeName),
       createIfNotExists: (createFn, label) => this.createIfNotExists(createFn, label),
@@ -1011,6 +1016,10 @@ export class WorkflowReconciler {
       context,
       hostAgent: resolveEagerSdkMcpHostAgent(spec),
       view,
+      // The WRC master switch is an input of the ONE Grok verdict, so scopes,
+      // grok-proxy egress and the SDK bootstrap binding agree with the pod env
+      // (`buildMcpHostPod` gates on the same flag).
+      grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
       log: this.log,
     })
   }
@@ -1030,16 +1039,22 @@ export class WorkflowReconciler {
   private resolveEffectiveControlScopes(
     spec: WorkflowRecipeSpec,
     verdict: CodexRecipeVerdict
-  ): { scopes: EffectiveWorkflowControlScope[]; codexScopeUncertain: boolean } {
+  ): {
+    scopes: EffectiveWorkflowControlScope[]
+    codexScopeUncertain: boolean
+    grokScopeUncertain: boolean
+  } {
     const workflow = deriveWorkflowControlScopes(spec, {
       pluginWorkloadSdkEnabled: this.deps.config.pluginWorkloadSdkEnabled,
     })
-    const derived = verdict.projection.derivedScopes.filter(
-      scope => !workflow.includes(scope as WorkflowControlScope)
-    )
+    const derived = [
+      ...verdict.projection.derivedScopes,
+      ...(verdict.grokProjection?.derivedScopes ?? []),
+    ].filter(scope => !workflow.includes(scope as WorkflowControlScope))
     return {
       scopes: [...workflow, ...derived] as EffectiveWorkflowControlScope[],
       codexScopeUncertain: verdict.projection.eligibility === 'uncertain',
+      grokScopeUncertain: verdict.grokProjection?.eligibility === 'uncertain',
     }
   }
 
@@ -1227,6 +1242,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-gfs`,
       `${recipeName}-mcp-host-to-approval-gateway`,
       `${recipeName}-mcp-host-to-codex-proxy`,
+      `${recipeName}-mcp-host-to-grok-proxy`,
     ]
     const networkPolicyNames = preserveWorkflowRuntime
       ? sdkNetworkPolicyNames
@@ -2132,7 +2148,9 @@ export class WorkflowReconciler {
         spec,
         runtime,
         awaitsTriggeredRun,
-        codexVerdict.projection
+        codexVerdict.projection,
+        false,
+        codexVerdict.grokProjection
       )
 
       // 6. Create Pods — mcp-host FIRST, then coordinator. If the coordinator
@@ -2208,6 +2226,9 @@ export class WorkflowReconciler {
             pluginWorkloadSdkCapabilities: this.deps.config.pluginWorkloadSdkEnabled
               ? declaredPluginWorkloadSdkCapabilities(spec.pluginWorkloadSdk)
               : [],
+            grokSubscriptionEnabled: this.deps.config.grokSubscriptionEnabled === true,
+            recipeAgentProvider: spec.agent?.provider,
+            recipeDeclaresGrok: recipeDeclaresGrokSubscription(spec),
           }
         )
         await this.createIfNotExists(
@@ -2910,7 +2931,15 @@ export class WorkflowReconciler {
      * decision could rest on a different snapshot than the binding did.
      */
     codexProjection: CodexExecutionProjection,
-    eagerSdkMcpHost = false
+    eagerSdkMcpHost = false,
+    grokProjection: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean } = {
+      ...codexProjection,
+      derivedScopes: [],
+      requiresCodexProxyEgress: false,
+      requiresGrokProxyEgress: false,
+      eligibility: 'ineligible',
+      reason: 'static_only',
+    }
   ): Promise<k8s.V1NetworkPolicy[]> {
     const runtimeHttpEgressPolicyNames = this.runtimeHttpEgressPolicyNames(recipeName, spec)
     const runtimeHttpEgressState =
@@ -2942,6 +2971,7 @@ export class WorkflowReconciler {
       snippetRunnerPort: 8095,
       includeMcpHost,
       includeCodexProxyEgress: codexProjection.requiresCodexProxyEgress && includeMcpHost,
+      includeGrokProxyEgress: grokProjection.requiresGrokProxyEgress === true && includeMcpHost,
       // A stepless eager SDK host has no coordinator pod. Keep the mcp-host
       // control/egress lanes, but do not manufacture coordinator policies
       // whose selectors can never match a real workload.
@@ -3034,7 +3064,8 @@ export class WorkflowReconciler {
     runtime: WorkflowRuntimePlan,
     awaitsTriggeredRun: boolean,
     codexProjection: CodexExecutionProjection,
-    eagerSdkMcpHost = false
+    eagerSdkMcpHost = false,
+    grokProjection?: CodexExecutionProjection & { requiresGrokProxyEgress?: boolean }
   ): Promise<void> {
     const policies = await this.buildWorkflowNetworkPoliciesForSpec(
       recipeName,
@@ -3043,18 +3074,28 @@ export class WorkflowReconciler {
       runtime,
       awaitsTriggeredRun,
       codexProjection,
-      eagerSdkMcpHost
+      eagerSdkMcpHost,
+      grokProjection
     )
     for (const policy of policies) {
       await this.applyNetworkPolicy(policy)
     }
     const policyNames = new Set(policies.map(policy => policy.metadata?.name))
     const codexProxyPolicyName = `${recipeName}-mcp-host-to-codex-proxy`
+    const grokProxyPolicyName = `${recipeName}-mcp-host-to-grok-proxy`
 
     if (!policyNames.has(codexProxyPolicyName) && codexProjection.eligibility !== 'uncertain') {
       await this.safeDelete(() =>
         this.deps.networkingApi.deleteNamespacedNetworkPolicy({
           name: codexProxyPolicyName,
+          namespace: this.deps.config.sandboxNamespace,
+        })
+      )
+    }
+    if (!policyNames.has(grokProxyPolicyName) && grokProjection?.eligibility !== 'uncertain') {
+      await this.safeDelete(() =>
+        this.deps.networkingApi.deleteNamespacedNetworkPolicy({
+          name: grokProxyPolicyName,
           namespace: this.deps.config.sandboxNamespace,
         })
       )
@@ -3390,6 +3431,7 @@ export class WorkflowReconciler {
       `${recipeName}-mcp-host-to-llm-api`,
       `${recipeName}-mcp-host-to-approval-gateway`,
       `${recipeName}-mcp-host-to-codex-proxy`,
+      `${recipeName}-mcp-host-to-grok-proxy`,
       `${recipeName}-coord-to-snippet-runner`,
       `${recipeName}-coord-to-snippet-runner-ingress`,
       `${recipeName}-snippet-runner-egress`,
@@ -3773,7 +3815,8 @@ export class WorkflowReconciler {
       runtimeScopeRecipeName,
       effectiveScopes.scopes,
       deriveRecipeHostGfsScopes(spec),
-      effectiveScopes.codexScopeUncertain
+      effectiveScopes.codexScopeUncertain,
+      effectiveScopes.grokScopeUncertain
     )
     if (this.deps.config.pluginWorkloadSdkEnabled && spec.pluginWorkloadSdk) {
       await this.pluginWorkloadSdkProvisioner.ensurePluginWorkloadSdkTokenSecret(recipeName, spec)
@@ -4709,7 +4752,8 @@ export class WorkflowReconciler {
     runtimeScopeRecipeName = recipeName,
     workflowControlScopes: EffectiveWorkflowControlScope[] = [],
     gfsScopes: WorkflowRecipeGfsScope[] = ['gfs.read'],
-    codexScopeUncertain = false
+    codexScopeUncertain = false,
+    grokScopeUncertain = false
   ): Promise<McpHostRuntimeTokenRefreshResult> {
     const secretName = `wf-${recipeName}-mcp-host-runtime-tokens`
     const sandboxNamespace = this.deps.config.sandboxNamespace
@@ -4726,7 +4770,8 @@ export class WorkflowReconciler {
         workflowControlScopes,
         gfsScopes,
         existing,
-        codexScopeUncertain
+        codexScopeUncertain,
+        grokScopeUncertain
       )
     } catch (err) {
       if (getErrorCode(err) !== 404) throw err
@@ -4773,7 +4818,8 @@ export class WorkflowReconciler {
         workflowControlScopes,
         gfsScopes,
         existing,
-        codexScopeUncertain
+        codexScopeUncertain,
+        grokScopeUncertain
       )
       this.log.info(`Secret "${secretName}" already exists (skip)`)
       return tokenRefresh
@@ -4801,7 +4847,8 @@ export class WorkflowReconciler {
     requestedWorkflowControlScopes: EffectiveWorkflowControlScope[],
     expectedGfsScopes: WorkflowRecipeGfsScope[],
     existing: k8s.V1Secret,
-    codexScopeUncertain = false
+    codexScopeUncertain = false,
+    grokScopeUncertain = false
   ): Promise<McpHostRuntimeTokenRefreshResult> {
     const rawAccess = existing.data?.['mcp-host-runtime-access-token']
     const rawRefresh = existing.data?.['mcp-host-runtime-refresh-token']
@@ -4835,9 +4882,22 @@ export class WorkflowReconciler {
         scope: CODEX_EXECUTE_SCOPE,
       })
     }
-    const workflowControlScopes: EffectiveWorkflowControlScope[] = preservedCodexScope
-      ? [...requestedWorkflowControlScopes, CODEX_EXECUTE_SCOPE]
-      : requestedWorkflowControlScopes
+    const preservedGrokScope =
+      grokScopeUncertain &&
+      accessScopes.includes(GROK_EXECUTE_SCOPE) &&
+      !requestedWorkflowControlScopes.includes(GROK_EXECUTE_SCOPE)
+    if (preservedGrokScope) {
+      this.log.warn('Grok catalog is undecidable; preserving the live Grok scope', {
+        recipeName,
+        runtimeScopeRecipeName,
+        scope: GROK_EXECUTE_SCOPE,
+      })
+    }
+    const workflowControlScopes: EffectiveWorkflowControlScope[] = [
+      ...requestedWorkflowControlScopes,
+      ...(preservedCodexScope ? [CODEX_EXECUTE_SCOPE] : []),
+      ...(preservedGrokScope ? [GROK_EXECUTE_SCOPE] : []),
+    ]
     const rawMcpHostControl = existing.data?.['mcp-host-workflow-control-token']
     const mcpHostControlJwt = rawMcpHostControl
       ? Buffer.from(rawMcpHostControl, 'base64').toString('utf-8')

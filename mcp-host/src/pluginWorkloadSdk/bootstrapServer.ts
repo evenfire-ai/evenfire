@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { rateLimit } from 'express-rate-limit'
 import type http from 'node:http'
+import { logger } from '../logger'
 import type { ConfigureResponse, PluginWorkloadSdkBootstrapRequest } from '../workflow/types'
 import {
   requireWorkflowAuth,
@@ -11,6 +12,23 @@ import {
 const CONTROL_RATE_LIMIT_WINDOW_MS = 60_000
 const CONTROL_RATE_LIMIT_MAX = 60
 const CONTROL_RATE_LIMIT_MAX_BUCKETS = 10_000
+
+type BootstrapBinding = NonNullable<PluginWorkloadSdkBootstrapRequest['codexBinding']>
+
+/**
+ * Field-level projection of a broker execution binding. Values are passed
+ * through unvalidated (bootstrapIdentity verifies shape and hash); only the
+ * known identity fields cross the handler boundary.
+ */
+function projectBinding(value: BootstrapBinding): BootstrapBinding {
+  return {
+    connectionKey: value.connectionKey,
+    catalogRevision: value.catalogRevision,
+    credentialRevision: value.credentialRevision,
+    model: value.model,
+    bindingHash: value.bindingHash,
+  }
+}
 
 export type PluginWorkloadSdkBootstrapHandler = (
   request: PluginWorkloadSdkBootstrapRequest
@@ -88,7 +106,12 @@ export class PluginWorkloadSdkBootstrapServer {
           ...(raw?.contractVersion === 2 || raw?.contractVersion === 3
             ? { contractVersion: raw.contractVersion }
             : {}),
-          ...(raw?.codexBinding ? { codexBinding: raw.codexBinding } : {}),
+          ...(raw?.codexBinding ? { codexBinding: projectBinding(raw.codexBinding) } : {}),
+          // Grok writers emit `subscriptionBinding` only; dropping it here
+          // would make every HTTP bootstrap resolve to binding_missing.
+          ...(raw?.subscriptionBinding
+            ? { subscriptionBinding: projectBinding(raw.subscriptionBinding) }
+            : {}),
         }
         try {
           const result = await this.opts.configure(request)
@@ -146,7 +169,7 @@ export class PluginWorkloadSdkBootstrapServer {
       server.once('error', reject)
       this.server = server
     })
-    console.log(`[PluginWorkloadSdk] SDK-only bootstrap server started on port ${this.opts.port}`)
+    logger.info({ port: this.opts.port }, '[PluginWorkloadSdk] SDK-only bootstrap server started')
   }
 
   async stop(): Promise<void> {

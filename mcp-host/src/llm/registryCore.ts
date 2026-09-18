@@ -204,6 +204,7 @@ const RUNTIME_FIELDS: Record<LlmProvider, RuntimeProviderFields> = {
   azure: { defaultModel: 'gpt-4.1', tokenizer: 'openai' },
   // Broker: explicit model required later; no Secret slot and no default.
   'codex-subscription': { tokenizer: 'fallback', requiresImageSourceIdentity: true },
+  'grok-subscription': { tokenizer: 'fallback' },
 }
 
 // Order = dev auto-detection priority (first present key wins), inherited from

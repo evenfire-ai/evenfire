@@ -131,6 +131,105 @@ describe('streamCodexCompletion', () => {
     }
   )
 
+  it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
+    const encoder = new TextEncoder()
+    const events = [
+      'data: {"type":"response.output_text.delta","delta":"one"}\n\n',
+      'data: {"type":"response.output_text.delta","delta":"two"}\n\n',
+      'data: {"type":"response.completed","response":{"usage":{}}}\n\n',
+    ]
+    let pulls = 0
+    const fetchFn = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            const next = events[pulls]
+            pulls += 1
+            if (next === undefined) controller.close()
+            else controller.enqueue(encoder.encode(next))
+          },
+        },
+        { highWaterMark: 0 }
+      )
+      return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    })
+    let releaseDrain: (() => void) | undefined
+    const drained = new Promise<void>(resolve => {
+      releaseDrain = resolve
+    })
+    const frames: unknown[] = []
+    const pending = streamCodexCompletion({
+      executionTicket: 'ticket-drain',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-drain',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-drain',
+      },
+      redeem: async () => redeemSuccess(),
+      finalize: vi.fn(async () => ({
+        providerAttemptId: 'att-drain',
+        outcome: 'success' as const,
+        duplicate: false,
+      })),
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      onFrame: frame => {
+        frames.push(frame)
+        // First frame fills the client buffer; later frames are accepted.
+        return frames.length === 1 ? drained : undefined
+      },
+    })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    expect(frames).toEqual([{ type: 'text', text: 'one' }])
+    expect(pulls).toBe(1)
+    releaseDrain?.()
+    const result = await pending
+    expect(result.outcome).toBe('success')
+    expect(frames).toEqual([
+      { type: 'text', text: 'one' },
+      { type: 'text', text: 'two' },
+    ])
+  })
+
+  it('does not redeem when the client aborted before the attempt was dispatched', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-pre-abort',
+      outcome: 'canceled' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) =>
+      sseResponse(['data: {"type":"response.completed","response":{"usage":{}}}\n\n'])
+    )
+    const abort = new AbortController()
+    abort.abort()
+    const result = await streamCodexCompletion({
+      executionTicket: 'ticket-pre-abort',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-pre-abort',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-pre-abort',
+      },
+      signal: abort.signal,
+      redeem,
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    expect(result.outcome).toBe('canceled')
+    expect(redeem).not.toHaveBeenCalled()
+    expect(fetchFn).not.toHaveBeenCalled()
+    expect(finalize).not.toHaveBeenCalled()
+  })
+
   it('preserves real MCP optional schemas with explicit non-strict upstream tools', async () => {
     const request = {
       ...REQUEST,

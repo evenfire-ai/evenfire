@@ -2,8 +2,7 @@ import { randomUUID } from 'node:crypto'
 import {
   type CodexCompletionRequest,
   LIMITS,
-  hashCodexCompletionRequest,
-  parseCodexCompletionRequest,
+  hashCanonicalCodexRequest,
 } from '@clerum/llm-provider-attempt-contract'
 import { LlmErrorCode } from '../core/errors'
 import {
@@ -155,6 +154,22 @@ function assertTerminalCodexOutcome(result: {
       'proxy stream ended without a terminal outcome'
     )
   }
+  // Only `success` may become a completion. Partial text from an unknown
+  // terminal state or a cancellation is interrupted output: surfacing it as a
+  // finished answer would let callers ack it as complete and count it as a
+  // healthy call. The request was already dispatched, so keep it fenced.
+  if (result.outcome === 'unknown') {
+    throw new CodexProxyError(
+      'outcome_unknown',
+      'proxy stream ended without a successful terminal outcome'
+    )
+  }
+  if (result.outcome === 'canceled') {
+    throw new CodexProxyError(
+      'canceled',
+      'proxy stream was canceled before a successful terminal outcome'
+    )
+  }
 }
 
 export class CodexSubscriptionProvider implements SingleTurnProvider {
@@ -261,10 +276,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       content: result.text,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason:
-        result.outcome === 'canceled' || result.outcome === 'unknown'
-          ? FinishReason.Unknown
-          : FinishReason.Stop,
+      finish_reason: FinishReason.Stop,
       providerAttemptId: result.providerAttemptId,
       providerAttemptIndex: result.providerAttemptIndex,
     }
@@ -295,12 +307,7 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
           : null,
       usage: usage.usage,
       usage_reported: usage.usage_reported,
-      finish_reason:
-        result.toolCalls.length > 0
-          ? FinishReason.ToolUse
-          : result.outcome === 'canceled' || result.outcome === 'unknown'
-            ? FinishReason.Unknown
-            : FinishReason.Stop,
+      finish_reason: result.toolCalls.length > 0 ? FinishReason.ToolUse : FinishReason.Stop,
     }
   }
 
@@ -317,20 +324,20 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (options?.signal?.aborted) {
       throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
-    const request = this.buildRequest(messages, tools, options)
-    // Validate the projection before anything is authorized or hashed: the
-    // ticket, the proxy and control-api must all bind the same canonical
-    // request, and an unusable visual payload must fail here as a known,
-    // non-retryable error instead of being dropped on the way out.
-    const parsed = parseCodexCompletionRequest(request)
-    if (!parsed.ok) {
+    // Hash and send the validated wire projection — exactly what control-api
+    // authorize and the proxy re-derive. Hashing the locally built object let
+    // shapes the parser normalizes away (an empty `generation` from a
+    // tool-name tool_choice, empty tools/hints) fail authorize with a
+    // requestHash mismatch. An invalid request never leaves the process.
+    const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
+    if (!canonical.ok) {
       throw new CodexAuthorizeError(
         CODEX_REQUEST_INVALID,
-        `codex completion request rejected: ${parsed.message}`
+        `codex completion request rejected: ${canonical.message}`
       )
     }
-    const wireRequest = parsed.value
-    const requestHash = hashCodexCompletionRequest(wireRequest)
+    const wireRequest = canonical.value.request
+    const requestHash = canonical.value.requestHash
     const context = this.deps.attemptContext({ model: this.model })
     if (
       !Number.isInteger(context.policyRevision) ||

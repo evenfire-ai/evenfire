@@ -1,4 +1,10 @@
 import {
+  LIMITS as GROK_LIMITS,
+  computeGrokPolicyHash,
+  hashGrokCompletionRequestV1,
+  parseGrokCompletionRequestV1,
+} from '@clerum/grok-provider-attempt-contract'
+import {
   LIMITS,
   buildCodexProxyEnvelope,
   computeCodexPolicyHash,
@@ -20,8 +26,15 @@ import {
   CODEX_UNASSIGNED_CONNECTION_KEY,
   getSafeCodexSubscriptionConnection,
   isCodexUnassignedConnectionKey,
-  readHostCodexConnectionRef,
 } from './codexSubscriptionConnection.js'
+import { issueRegisteredGrokExecutionTicket } from './grokProviderAttemptTicket.js'
+import { getGrokCatalogModelState } from './grokSubscriptionCatalog.js'
+import {
+  GROK_RESERVED_DEPLOYMENT_DEFAULT_KEY,
+  GROK_UNASSIGNED_CONNECTION_KEY,
+  getSafeGrokSubscriptionConnection,
+  isGrokUnassignedConnectionKey,
+} from './grokSubscriptionConnection.js'
 import {
   getMaxLlmProviderAttemptGeneration,
   insertLlmProviderAttempt,
@@ -33,10 +46,17 @@ import {
   pluginWorkloadSdkSpendOutcomeExists,
   promoteReservedOauthBrokerProviderAttempt,
 } from './pluginWorkloadSdkDb.js'
+import {
+  attestLiveBrokerTarget,
+  attestRequestedBrokerProvider,
+  readSubscriptionConnectionRef,
+} from './subscriptionGrantIdentity.js'
 
 const log = rootLogger.child({ module: 'llm-provider-attempt-authorizer' })
 const CODEX_EXECUTE_SCOPE = 'llm:codex:execute'
+const GROK_EXECUTE_SCOPE = 'llm:grok:execute'
 const PROVIDER = 'codex-subscription' as const
+const GROK_PROVIDER = 'grok-subscription' as const
 
 const AUTHORIZE_BODY_KEYS = new Set([
   'request',
@@ -95,7 +115,15 @@ export type LlmProviderAttemptAuthorizerDeps = {
   withTransaction: typeof withTransaction
   getConnection: typeof getSafeCodexSubscriptionConnection
   getModelState: typeof getCodexCatalogModelState
-  resolveConnectionKey: (hostRef: string) => Promise<string>
+  /**
+   * Live oauth-broker targets on the Host/recipe. Required: a missing
+   * assignment must not fall back to `request.provider` (that made D6 a no-op).
+   */
+  resolveAssignment: (hostRef: string) => Promise<{
+    liveBrokerProviders: string[]
+    liveConnectionRef: string
+    annotations?: Record<string, string>
+  }>
   evaluateBudget: typeof evaluateBudgetCheck
   getActiveReservation: typeof getActiveReservation
   getMaxGeneration: typeof getMaxLlmProviderAttemptGeneration
@@ -109,7 +137,10 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
   withTransaction,
   getConnection: getSafeCodexSubscriptionConnection,
   getModelState: getCodexCatalogModelState,
-  resolveConnectionKey: async () => CODEX_UNASSIGNED_CONNECTION_KEY,
+  resolveAssignment: async () => ({
+    liveBrokerProviders: [],
+    liveConnectionRef: CODEX_UNASSIGNED_CONNECTION_KEY,
+  }),
   evaluateBudget: evaluateBudgetCheck,
   getActiveReservation,
   getMaxGeneration: getMaxLlmProviderAttemptGeneration,
@@ -118,6 +149,33 @@ const defaultDeps = (): LlmProviderAttemptAuthorizerDeps => ({
 })
 
 export { computeCodexPolicyHash }
+
+// body > request > messages[] > message > toolCalls[] > call > arguments: the
+// deepest free-form tree the contracts accept sits six containers below the
+// body root, and may itself nest maxNestingDepth containers.
+const MAX_AUTHORIZE_BODY_DEPTH = Math.max(LIMITS.maxNestingDepth, GROK_LIMITS.maxNestingDepth) + 6
+
+/**
+ * Reject an over-deep body before anything serializes it. Iterative, so an
+ * attacker-controlled nesting depth cannot overflow the stack here; without it
+ * JSON.stringify throws a RangeError that surfaces as a 500.
+ */
+function assertBodyNestingWithinLimit(body: Record<string, unknown>): void {
+  const stack: Array<[unknown, number]> = [[body, 1]]
+  while (stack.length > 0) {
+    const [node, depth] = stack.pop()!
+    if (depth > MAX_AUTHORIZE_BODY_DEPTH) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'invalid_request',
+        'request body exceeds the maximum nesting depth'
+      )
+    }
+    const children = Array.isArray(node) ? node : Object.values(node as Record<string, unknown>)
+    for (const child of children) {
+      if (child !== null && typeof child === 'object') stack.push([child, depth + 1])
+    }
+  }
+}
 
 function firstUnknownKey(body: Record<string, unknown>): string | null {
   for (const key of Object.keys(body)) {
@@ -179,12 +237,375 @@ function assertClaimBinding(body: Record<string, unknown>, claims: McpHostAccess
   }
 }
 
+function peekRequestedProvider(body: Record<string, unknown>): string {
+  if (!isPlainObject(body.request)) return ''
+  return typeof body.request.provider === 'string' ? body.request.provider : ''
+}
+
+async function authorizeGrokProviderAttempt(
+  claims: McpHostAccessClaims,
+  body: Record<string, unknown>,
+  resolvedDeps: LlmProviderAttemptAuthorizerDeps
+): Promise<AuthorizeAttemptSuccess> {
+  if (!config.grokSubscriptionEnabled) {
+    throw new LlmProviderAttemptAuthorizeError('disabled', 'Grok subscription is disabled')
+  }
+  if (!claims.workflowControlScopes.includes(GROK_EXECUTE_SCOPE)) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'insufficient_scope',
+      'mcp-host JWT lacks the llm:grok:execute scope'
+    )
+  }
+  assertBodyNestingWithinLimit(body)
+  const serialized = JSON.stringify(body)
+  if (Buffer.byteLength(serialized, 'utf8') > GROK_LIMITS.maxRequestBodyBytes) {
+    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
+  }
+  const unknown = firstUnknownKey(body)
+  if (unknown) {
+    throw new LlmProviderAttemptAuthorizeError('unknown_field', `unknown field '${unknown}'`)
+  }
+  const caller = resolveCaller(claims)
+  assertClaimBinding(body, claims)
+  const parsed = parseGrokCompletionRequestV1(body.request)
+  if (!parsed.ok) {
+    throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
+  }
+  const request = parsed.value
+  const invocationId = typeof body.invocationId === 'string' ? body.invocationId.trim() : ''
+  const attemptGeneration =
+    typeof body.attemptGeneration === 'number' ? body.attemptGeneration : NaN
+  const providerAttemptIndex =
+    typeof body.providerAttemptIndex === 'number' ? body.providerAttemptIndex : 1
+  const policyRevision = typeof body.policyRevision === 'number' ? body.policyRevision : NaN
+  const policyHash = typeof body.policyHash === 'string' ? body.policyHash : ''
+  if (!invocationId || !Number.isInteger(attemptGeneration) || attemptGeneration < 1) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'invalid_request',
+      'invocationId and attemptGeneration are required'
+    )
+  }
+  if (!Number.isInteger(providerAttemptIndex) || providerAttemptIndex < 1) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'invalid_request',
+      'providerAttemptIndex must be a positive integer'
+    )
+  }
+  if (
+    !Number.isInteger(policyRevision) ||
+    policyRevision < 1 ||
+    !/^[a-f0-9]{64}$/.test(policyHash)
+  ) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'invalid_request',
+      'policyRevision and policyHash are required'
+    )
+  }
+  const requestHash = hashGrokCompletionRequestV1(request)
+  if (typeof body.requestHash === 'string' && body.requestHash !== requestHash) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'invalid_request',
+      'requestHash does not match the canonical request'
+    )
+  }
+  const assignment = await resolvedDeps.resolveAssignment(caller.hostRef)
+  const liveTarget = attestLiveBrokerTarget({
+    requestedProvider: GROK_PROVIDER,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+  })
+  if (!liveTarget.ok) {
+    throw new LlmProviderAttemptAuthorizeError(liveTarget.code, liveTarget.message)
+  }
+  let resolvedConnectionRef = assignment.liveConnectionRef
+  if (assignment.annotations) {
+    const read = readSubscriptionConnectionRef({
+      provider: GROK_PROVIDER,
+      annotations: assignment.annotations,
+    })
+    if (!read.ok) {
+      throw new LlmProviderAttemptAuthorizeError(read.code, read.message)
+    }
+    resolvedConnectionRef = read.connectionKey
+  }
+  const attested = attestRequestedBrokerProvider({
+    requestedProvider: GROK_PROVIDER,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+    liveConnectionRef: resolvedConnectionRef,
+  })
+  if (!attested.ok) {
+    throw new LlmProviderAttemptAuthorizeError(attested.code, attested.message)
+  }
+  const connectionKey = attested.connectionKey
+  if (
+    isGrokUnassignedConnectionKey(connectionKey) ||
+    connectionKey === GROK_UNASSIGNED_CONNECTION_KEY ||
+    connectionKey === GROK_RESERVED_DEPLOYMENT_DEFAULT_KEY
+  ) {
+    throw new LlmProviderAttemptAuthorizeError(
+      'unassigned_connection',
+      'Host has no Grok subscription assigned'
+    )
+  }
+  return resolvedDeps.withTransaction(async tx => {
+    const db: DbClient = tx
+    const connection = await getSafeGrokSubscriptionConnection(db, connectionKey)
+    if (
+      !connection ||
+      connection.revokedAt ||
+      connection.status === 'revoked' ||
+      connection.status === 'reauth_required' ||
+      connection.catalogStatus === 'auth-rejected'
+    ) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'no_grant',
+        'Grok subscription grant is missing, revoked, or requires re-authentication'
+      )
+    }
+    if (
+      connection.status !== 'connected' ||
+      connection.catalogStatus === 'unavailable' ||
+      connection.catalogStatus === 'never_synced'
+    ) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'connection_unavailable',
+        'Grok subscription catalog is not ready'
+      )
+    }
+    const modelState = await getGrokCatalogModelState(db, connection.id, request.model)
+    if (!modelState || !modelState.enabled || modelState.stale) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'model_not_allowed',
+        'model is disabled, stale, or absent from the Grok catalog'
+      )
+    }
+    const expectedPolicyHash = computeGrokPolicyHash({
+      model: request.model,
+      catalogRevision: connection.catalogRevision,
+      credentialRevision: connection.credentialRevision,
+      connectionKey: connection.connectionKey,
+    })
+    if (policyRevision !== connection.catalogRevision || policyHash !== expectedPolicyHash) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'no_grant',
+        'policy revision or hash does not match the current Grok catalog'
+      )
+    }
+    const maxGeneration = await resolvedDeps.getMaxGeneration(db, invocationId)
+    if (attemptGeneration < maxGeneration) {
+      throw new LlmProviderAttemptAuthorizeError(
+        'stale_generation',
+        'attemptGeneration is older than the recorded invocation'
+      )
+    }
+    const pluginWorkloadSdkProviderAttemptId =
+      typeof body.pluginWorkloadSdkProviderAttemptId === 'string'
+        ? body.pluginWorkloadSdkProviderAttemptId.trim()
+        : ''
+    let sdkLinkRecipe: { namespace: string; name: string } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      if (!UUID_RE.test(pluginWorkloadSdkProviderAttemptId)) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'invalid_request',
+          'pluginWorkloadSdkProviderAttemptId must be a UUID'
+        )
+      }
+      if (caller.callerKind === 'host') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'host Grok chat cannot bind a Plugin Workload SDK provider attempt'
+        )
+      }
+      if (!caller.recipeNamespace || !caller.recipeName) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      sdkLinkRecipe = { namespace: caller.recipeNamespace, name: caller.recipeName }
+    }
+    if (sdkLinkRecipe) {
+      await lockPluginWorkloadSdkRecipe(db, sdkLinkRecipe.namespace, sdkLinkRecipe.name)
+    }
+    const presentedReservationId =
+      typeof body.budgetReservationId === 'string' ? body.budgetReservationId.trim() : ''
+    let budgetReservationId = presentedReservationId || 'unbudgeted'
+    if (presentedReservationId) {
+      const active = await resolvedDeps.getActiveReservation(db, {
+        reservationId: presentedReservationId,
+        hostRef: caller.hostRef,
+      })
+      if (!active) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'budget_denied',
+          'budget reservation is missing or expired'
+        )
+      }
+    } else {
+      const budget = await resolvedDeps.evaluateBudget(
+        {
+          host_ref: caller.hostRef,
+          context_ref: null,
+          team_id: null,
+          user_id: null,
+          provider: GROK_PROVIDER,
+          model: request.model,
+          llm_secret_name: null,
+          source_kind: 'channel',
+          recipe_name: caller.recipeName,
+          cron_job_id: null,
+          task_ref: `${invocationId}:${attemptGeneration}:${providerAttemptIndex}`,
+        },
+        db,
+        { connect: async () => tx as never },
+        { requiredUnit: 'tokens', transactionClient: tx }
+      )
+      if (!budget.allowed) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'budget_denied',
+          'token budget denied this attempt'
+        )
+      }
+      budgetReservationId = budget.reservationIds?.[0] ?? 'unbudgeted'
+    }
+    const presentedTargetRef = typeof body.targetRef === 'string' ? body.targetRef.trim() : ''
+    let reservedSdkAttemptToPromote: {
+      id: string
+      invocationId: string
+      recipeNamespace: string
+      recipeName: string
+      attemptGeneration: number
+      attemptIndex: number
+      model: string
+      targetRef: string
+    } | null = null
+    if (pluginWorkloadSdkProviderAttemptId) {
+      const sdkAttempt = await getPluginWorkloadSdkProviderAttemptForUpdate(
+        pluginWorkloadSdkProviderAttemptId,
+        db
+      )
+      const spendExists = sdkAttempt
+        ? await pluginWorkloadSdkSpendOutcomeExists(sdkAttempt.id, db)
+        : false
+      if (
+        !sdkAttempt ||
+        spendExists ||
+        sdkAttempt.invocationId !== invocationId ||
+        sdkAttempt.attemptGeneration !== attemptGeneration ||
+        sdkAttempt.attemptIndex !== providerAttemptIndex ||
+        sdkAttempt.recipeNamespace !== caller.recipeNamespace ||
+        sdkAttempt.recipeName !== caller.recipeName ||
+        sdkAttempt.provider !== GROK_PROVIDER ||
+        sdkAttempt.model !== request.model ||
+        !sdkAttempt.targetRef.trim() ||
+        (presentedTargetRef !== '' && presentedTargetRef !== sdkAttempt.targetRef) ||
+        !['reserved', 'in_progress'].includes(sdkAttempt.status)
+      ) {
+        throw new LlmProviderAttemptAuthorizeError(
+          'no_grant',
+          'pluginWorkloadSdkProviderAttemptId does not match the reserved SDK attempt'
+        )
+      }
+      if (sdkAttempt.status === 'reserved') {
+        reservedSdkAttemptToPromote = {
+          id: sdkAttempt.id,
+          invocationId: sdkAttempt.invocationId,
+          recipeNamespace: sdkAttempt.recipeNamespace,
+          recipeName: sdkAttempt.recipeName,
+          attemptGeneration: sdkAttempt.attemptGeneration,
+          attemptIndex: sdkAttempt.attemptIndex,
+          model: sdkAttempt.model,
+          targetRef: sdkAttempt.targetRef,
+        }
+      }
+    }
+    try {
+      const attempt = await resolvedDeps.insertAttempt(db, {
+        callerKind: caller.callerKind,
+        hostRef: caller.hostRef,
+        recipeNamespace: caller.recipeNamespace,
+        recipeName: caller.recipeName,
+        invocationId,
+        attemptGeneration,
+        providerAttemptIndex,
+        provider: GROK_PROVIDER,
+        model: request.model,
+        requestHash,
+        policyRevision,
+        policyHash,
+        budgetReservationId,
+        connectionRevision: connection.credentialRevision,
+        connectionId: connection.id,
+        ...(pluginWorkloadSdkProviderAttemptId ? { pluginWorkloadSdkProviderAttemptId } : {}),
+      })
+      if (reservedSdkAttemptToPromote) {
+        const promoted = await promoteReservedOauthBrokerProviderAttempt(
+          { ...reservedSdkAttemptToPromote, provider: GROK_PROVIDER },
+          db
+        )
+        if (!promoted) {
+          throw new LlmProviderAttemptAuthorizeError(
+            'no_grant',
+            'pluginWorkloadSdkProviderAttemptId is no longer reserved for Grok authorize'
+          )
+        }
+      }
+      const issued = await issueRegisteredGrokExecutionTicket(db, {
+        sub: claims.sub,
+        hostRef: caller.hostRef,
+        recipeNamespace: caller.recipeNamespace ?? undefined,
+        recipeName: caller.recipeName ?? undefined,
+        invocationId,
+        attemptGeneration,
+        providerAttemptId: attempt.id,
+        providerAttemptIndex,
+        model: request.model,
+        requestHash,
+        policyRevision,
+        policyHash,
+        budgetReservationId,
+        connectionRevision: connection.credentialRevision,
+        connectionId: connection.id,
+      })
+      log.info(
+        {
+          event: 'grok_attempt_authorized',
+          providerAttemptId: attempt.id,
+          hostRef: caller.hostRef,
+          model: request.model,
+        },
+        'authorized Grok provider attempt'
+      )
+      return {
+        providerAttemptId: attempt.id,
+        requestHash,
+        executionTicket: issued.executionTicket,
+        expiresAt: issued.expiresAt.toISOString(),
+      }
+    } catch (err) {
+      const code = (err as { code?: string }).code
+      if (code === '23505') {
+        throw new LlmProviderAttemptAuthorizeError(
+          'idempotency_conflict',
+          'an attempt with this invocation binding already exists'
+        )
+      }
+      throw err
+    }
+  })
+}
+
 export async function authorizeLlmProviderAttempt(
   claims: McpHostAccessClaims,
   body: unknown,
   deps: LlmProviderAttemptAuthorizerDeps | Partial<LlmProviderAttemptAuthorizerDeps> = defaultDeps()
 ): Promise<AuthorizeAttemptSuccess> {
   const resolvedDeps: LlmProviderAttemptAuthorizerDeps = { ...defaultDeps(), ...deps }
+  if (!isPlainObject(body)) {
+    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'body must be an object')
+  }
+  if (peekRequestedProvider(body) === GROK_PROVIDER) {
+    return authorizeGrokProviderAttempt(claims, body, resolvedDeps)
+  }
   if (!resolvedDeps.enabled) {
     throw new LlmProviderAttemptAuthorizeError('disabled', 'Codex subscription is disabled')
   }
@@ -194,9 +615,7 @@ export async function authorizeLlmProviderAttempt(
       'mcp-host JWT lacks the llm:codex:execute scope'
     )
   }
-  if (!isPlainObject(body)) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', 'body must be an object')
-  }
+  assertBodyNestingWithinLimit(body)
   const serialized = JSON.stringify(body)
   if (Buffer.byteLength(serialized, 'utf8') > requestBodyLimitBytes(body.request)) {
     throw new LlmProviderAttemptAuthorizeError('invalid_request', 'request body exceeds the limit')
@@ -265,9 +684,34 @@ export async function authorizeLlmProviderAttempt(
     )
   }
 
-  const connectionKey = readHostCodexConnectionRef(
-    await resolvedDeps.resolveConnectionKey(caller.hostRef)
-  )
+  const assignment = await resolvedDeps.resolveAssignment(caller.hostRef)
+  const liveTarget = attestLiveBrokerTarget({
+    requestedProvider: request.provider,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+  })
+  if (!liveTarget.ok) {
+    throw new LlmProviderAttemptAuthorizeError(liveTarget.code, liveTarget.message)
+  }
+  let resolvedConnectionRef = assignment.liveConnectionRef
+  if (assignment.annotations) {
+    const read = readSubscriptionConnectionRef({
+      provider: request.provider,
+      annotations: assignment.annotations,
+    })
+    if (!read.ok) {
+      throw new LlmProviderAttemptAuthorizeError(read.code, read.message)
+    }
+    resolvedConnectionRef = read.connectionKey
+  }
+  const attested = attestRequestedBrokerProvider({
+    requestedProvider: request.provider,
+    liveBrokerProviders: assignment.liveBrokerProviders,
+    liveConnectionRef: resolvedConnectionRef,
+  })
+  if (!attested.ok) {
+    throw new LlmProviderAttemptAuthorizeError(attested.code, attested.message)
+  }
+  const connectionKey = attested.connectionKey
   if (isCodexUnassignedConnectionKey(connectionKey)) {
     throw new LlmProviderAttemptAuthorizeError(
       'unassigned_connection',
@@ -490,7 +934,7 @@ export async function authorizeLlmProviderAttempt(
       })
       if (reservedSdkAttemptToPromote) {
         const promoted = await promoteReservedOauthBrokerProviderAttempt(
-          reservedSdkAttemptToPromote,
+          { ...reservedSdkAttemptToPromote, provider: PROVIDER },
           db
         )
         if (!promoted) {

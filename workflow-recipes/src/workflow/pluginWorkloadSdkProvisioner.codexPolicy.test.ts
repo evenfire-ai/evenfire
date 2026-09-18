@@ -1,33 +1,25 @@
 import { describe, expect, it, vi } from 'vitest'
-import { computeCodexPolicyHash } from '@clerum/llm-provider-attempt-contract'
 import type { WorkflowRecipeSpec } from '../types'
 import type { CodexRecipeVerdict } from './codexRecipeVerdict'
 import {
   PluginWorkloadSdkProvisioner,
   type PluginWorkloadSdkProvisionerDeps,
 } from './pluginWorkloadSdkProvisioner'
-import { buildMcpHostPod, pluginWorkloadSdkRuntimeContractHash } from './podFactory'
-import type { WorkflowRuntimePlan } from './runtimePlan'
+import {
+  EAGER_SDK_RUNTIME,
+  EAGER_SDK_SANDBOX_NS,
+  EAGER_SDK_TEST_IMAGE,
+  eagerSdkRuntimeContractHash,
+  eagerSdkTestConfig,
+  ineligibleGrokProjection,
+} from './pluginWorkloadSdkProvisioner.testFixtures'
 import type { PluginWorkloadSdkCodexBindingProof } from './sdkOnlyCodexBinding'
-import type { WorkflowConfig } from './types'
+import { mintSdkOnlyCodexBindingProof } from './sdkOnlyCodexBinding'
+import { mintSdkOnlyGrokBindingProof } from './sdkOnlyGrokBinding'
 
-const SANDBOX_NS = 'sandbox-recipes'
-const IMAGE = 'registry.example/clerum/mcp-host-slim:sha-current'
 const RECIPE = 'codex-sdk'
 const MODEL = 'gpt-5.3-codex'
-
-const RUNTIME = {} as unknown as WorkflowRuntimePlan
-
-const TEST_CONFIG = {
-  coordinatorImage: 'registry.example/coordinator:current',
-  mcpHostImage: IMAGE,
-  wrcEndpoint: 'http://workflow-recipes.example',
-  sandboxNamespace: SANDBOX_NS,
-  mcpServerNamespace: 'mcp-server',
-  imagePullPolicy: 'IfNotPresent',
-  maxWorkflowSteps: 10,
-  pluginWorkloadSdkEnabled: true,
-} as unknown as WorkflowConfig
+const TEST_CONFIG = eagerSdkTestConfig()
 
 const CODEX_SPEC = {
   agent: { provider: 'codex-subscription', model: MODEL },
@@ -37,19 +29,17 @@ const CODEX_SPEC = {
 function codexBinding(
   overrides: Partial<Omit<PluginWorkloadSdkCodexBindingProof, 'bindingHash'>> = {}
 ): PluginWorkloadSdkCodexBindingProof {
-  const fields = {
+  return mintSdkOnlyCodexBindingProof({
     connectionKey: 'team-plus',
     catalogRevision: 4,
     credentialRevision: 2,
     model: MODEL,
     ...overrides,
-  }
-  return { ...fields, bindingHash: computeCodexPolicyHash(fields) }
+  })
 }
 
 const MINTED = codexBinding()
 
-/** Build the one verdict the provisioner reads, from a case's intent. */
 function verdictFor(opts: {
   codexBinding?: PluginWorkloadSdkCodexBindingProof | null
   codexBindingUndecidable?: boolean
@@ -74,6 +64,9 @@ function verdictFor(opts: {
     },
     hostBinding: binding,
     hostBindingReason: binding ? 'eligible' : 'unassigned',
+    grokProjection: ineligibleGrokProjection(),
+    grokBinding: null,
+    grokBindingReason: 'static_only',
   }
 }
 
@@ -99,29 +92,13 @@ function readyBootstrapBody(binding: PluginWorkloadSdkCodexBindingProof | null) 
   }
 }
 
-function desiredRuntimeContractHash(): string {
-  return pluginWorkloadSdkRuntimeContractHash(
-    buildMcpHostPod(
-      RECIPE,
-      CODEX_SPEC.agent,
-      TEST_CONFIG,
-      RECIPE,
-      SANDBOX_NS,
-      undefined,
-      undefined,
-      undefined,
-      {
-        mountWorkflowOutput: false,
-        pluginWorkloadSdkCapabilities: ['promptBridge'],
-        pluginWorkloadSdkRuntimeMode: 'sdk-only',
-      }
-    )
-  )
-}
-
 function makeHarness(configureResult: unknown) {
   let podUid = 'pod-uid-1'
-  const runtimeContractHash = desiredRuntimeContractHash()
+  const runtimeContractHash = eagerSdkRuntimeContractHash({
+    recipeName: RECIPE,
+    spec: CODEX_SPEC,
+    config: TEST_CONFIG,
+  })
   const readNamespacedPod = vi.fn().mockImplementation(async () => ({
     metadata: {
       uid: podUid,
@@ -129,7 +106,7 @@ function makeHarness(configureResult: unknown) {
         'clerum.io/plugin-workload-sdk-runtime-contract-hash': runtimeContractHash,
       },
     },
-    spec: { containers: [{ name: 'mcp-host', image: IMAGE }] },
+    spec: { containers: [{ name: 'mcp-host', image: EAGER_SDK_TEST_IMAGE }] },
     status: {
       phase: 'Running',
       conditions: [{ type: 'Ready', status: 'True' }],
@@ -154,10 +131,6 @@ function makeHarness(configureResult: unknown) {
   } as unknown as PluginWorkloadSdkProvisionerDeps
   const provisioner = new PluginWorkloadSdkProvisioner(deps)
 
-  // The provisioner now takes ONE verdict instead of a binding plus a
-  // derived boolean. These helpers keep each existing case's semantics: a
-  // minted binding means eligible+authoritative, and "undecidable" means the
-  // projection itself could not decide.
   const reconcile = (opts: {
     codexBinding?: PluginWorkloadSdkCodexBindingProof | null
     codexBindingUndecidable?: boolean
@@ -165,10 +138,10 @@ function makeHarness(configureResult: unknown) {
     provisioner.ensureEagerSdkMcpHost(
       RECIPE,
       'recipe-uid',
-      SANDBOX_NS,
+      EAGER_SDK_SANDBOX_NS,
       RECIPE,
       CODEX_SPEC,
-      RUNTIME,
+      EAGER_SDK_RUNTIME,
       {
         mcpHostPhase: 'Running',
         codexVerdict: verdictFor(opts),
@@ -366,5 +339,56 @@ describe('eager Codex policy gate', () => {
 
     expect(await harness.reconcile({ codexBinding: MINTED })).toBe('deploying')
     expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
+  })
+
+  // B-L14: strict binding slots. mcp-host publishes a Codex binding only as
+  // `codexBinding`; WRC must read nothing else for Codex.
+  it('rejects a Codex bootstrap that echoes its binding only as subscriptionBinding', async () => {
+    // Mutation caught: parsing Codex as `codexBinding ?? subscriptionBinding`.
+    const body = readyBootstrapBody(null)
+    const harness = makeHarness({ ...body, body: { ...body.body, subscriptionBinding: MINTED } })
+
+    expect(await harness.reconcile({ codexBinding: MINTED })).toBe('deploying')
+    expect(harness.provisioner.getBootstrapProof(RECIPE)).toBeUndefined()
+  })
+
+  it('never records a subscriptionBinding on a Codex proof', async () => {
+    // Mutation caught: parsing `subscriptionBinding` for a Codex body at all
+    // (the proof carried a second, unverified-for-this-provider slot).
+    const body = readyBootstrapBody(MINTED)
+    const harness = makeHarness({ ...body, body: { ...body.body, subscriptionBinding: MINTED } })
+
+    expect(await harness.reconcile({ codexBinding: MINTED })).toBe('ready')
+    const proof = harness.provisioner.getBootstrapProof(RECIPE)
+    expect(proof).toMatchObject({ codexBinding: MINTED })
+    expect(proof).not.toHaveProperty('subscriptionBinding')
+  })
+
+  it('does not let a cached Grok-slot binding answer ready for a Codex host', async () => {
+    // Mutation caught: the uncertain-provenance early return accepting
+    // `codexBinding || subscriptionBinding` instead of the agent's own slot.
+    const grokBinding = mintSdkOnlyGrokBindingProof({
+      connectionKey: 'team-plus',
+      catalogRevision: 4,
+      credentialRevision: 2,
+      model: MODEL,
+    })
+    const harness = makeHarness({
+      status: 202,
+      body: {
+        ...readyBootstrapBody(null).body,
+        provider: 'grok-subscription',
+        defaultProvider: 'grok-subscription',
+        subscriptionBinding: grokBinding,
+      },
+    })
+    expect(await harness.reconcile({ codexBinding: null })).toBe('awaiting_policy')
+    expect(harness.provisioner.getBootstrapProof(RECIPE)).toMatchObject({
+      subscriptionBinding: grokBinding,
+    })
+
+    harness.configure.mockClear()
+    expect(await harness.reconcile({ codexBindingUndecidable: true })).toBe('awaiting_policy')
+    expect(harness.configure).not.toHaveBeenCalled()
   })
 })

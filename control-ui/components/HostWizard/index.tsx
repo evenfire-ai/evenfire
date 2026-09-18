@@ -26,9 +26,16 @@ import {
   listCodexSubscriptionConnections,
 } from '@/lib/codexSubscription'
 import { isDisabledCapabilityError } from '@/lib/codexSubscriptionFeature'
+import {
+  type GrokSubscriptionConnectionView,
+  isAssignableGrokGrant,
+  listGrokConnectionModels,
+  listGrokSubscriptionConnections,
+} from '@/lib/grokSubscription'
 import { useLlmAllowedModels } from '@/lib/hooks/useLlmAllowedModels'
 import { getAgentNameError } from '@/lib/k8sValidation'
 import {
+  GROK_SUBSCRIPTION_PROVIDER,
   type HostAllowedModel,
   type LlmPolicy,
   type LlmProvider,
@@ -39,6 +46,7 @@ import {
   getModelOptions,
   getProviderLabel,
   getProvidersWithCompleteCredentials,
+  isOauthBrokerProvider,
   isProviderUsable,
   llmChainRequiresSecret,
   offeredCodexModelNames,
@@ -190,19 +198,20 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
   if (stepIndex === 1) {
     if (!state.modelName.trim()) return false
     if (
-      state.provider === 'codex-subscription' &&
+      isOauthBrokerProvider(state.provider) &&
       (!state.connectionRef.trim() ||
         state.connectionRef.trim() === CODEX_UNASSIGNED_CONNECTION_KEY ||
-        (state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
+        (state.provider === GROK_SUBSCRIPTION_PROVIDER
+          ? state.grokModels.length > 0 && !state.grokModels.includes(state.modelName.trim())
+          : state.codexModels.length > 0 && !state.codexModels.includes(state.modelName.trim())))
     ) {
       return false
     }
-    // Broker-only chains (Codex with no static fallback) need the grant in the
-    // shared LLM Secret picker. Any static primary/fallback still requires the
-    // exact credential slots (existing Secret or a complete new one).
+    // Broker-only chains need the grant in the shared LLM Secret picker. Any
+    // static primary/fallback still requires the exact credential slots.
     if (!llmChainRequiresSecret(state.provider, state.llmPolicy?.fallbacks)) {
       return (
-        state.provider === 'codex-subscription' &&
+        isOauthBrokerProvider(state.provider) &&
         parseCredentialSelect(state.existingSecret).kind === 'subscription'
       )
     }
@@ -219,7 +228,7 @@ function isStepValid(stepIndex: number, state: HostWizardValidationState): boole
     )
     const hasValidSecret =
       state.secretMode === 'existing'
-        ? state.provider === 'codex-subscription'
+        ? isOauthBrokerProvider(state.provider)
           ? state.existingLlmSecret.trim().length > 0
           : parseCredentialSelect(state.existingSecret).kind === 'secret'
         : toKebabCase(state.newSecretName).length > 0 &&
@@ -293,6 +302,9 @@ export function HostWizard({
   const [connectionRef, setConnectionRef] = useState(CODEX_UNASSIGNED_CONNECTION_KEY)
   const [codexModels, setCodexModels] = useState<string[]>([])
   const [codexConnections, setCodexConnections] = useState<CodexSubscriptionConnectionView[]>([])
+  const [grokModels, setGrokModels] = useState<string[]>([])
+  const [grokConnections, setGrokConnections] = useState<GrokSubscriptionConnectionView[]>([])
+  const [grokEnabled, setGrokEnabled] = useState(false)
   const [stateless, setStateless] = useState(false)
   const [users, setUsers] = useState<
     Array<{ id: string; email: string; name: string | null; displayName: string | null }>
@@ -350,32 +362,59 @@ export function HostWizard({
         meta: 'ChatGPT subscription',
         providers: [{ id: 'codex-subscription', label: 'ChatGPT Subscription' }],
       })),
+      ...grokConnections.filter(isAssignableGrokGrant).map(row => ({
+        group: 'Grok subscriptions',
+        value: credentialSelectValue('', row.connectionKey, GROK_SUBSCRIPTION_PROVIDER),
+        label: row.displayName || row.connectionKey,
+        meta: 'Grok subscription',
+        providers: [{ id: GROK_SUBSCRIPTION_PROVIDER, label: 'xAI Grok Subscription' }],
+      })),
     ],
-    [codexConnections, existingSecrets]
+    [codexConnections, grokConnections, existingSecrets]
   )
   const apiKeyOptions = useMemo(
     () => secretOptions.filter(option => option.group === 'API keys'),
     [secretOptions]
   )
   const catalogForEditor = useMemo(() => {
-    if (provider !== 'codex-subscription') return allowedCatalog
-    const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
-    if (codexModels.length === 0) return others
-    return [
-      ...others,
-      ...codexModels.map(model => ({
-        id: `codex:${model}`,
-        provider: 'codex-subscription',
-        model,
-        vendor: 'OpenAI',
-        display_name: model,
-        context_window_tokens: null,
-        enabled: true,
-        source: 'discovery' as const,
-        stale: false,
-      })),
-    ]
-  }, [allowedCatalog, provider, codexModels])
+    if (provider === 'codex-subscription') {
+      const others = allowedCatalog.filter(row => row.provider !== 'codex-subscription')
+      if (codexModels.length === 0) return others
+      return [
+        ...others,
+        ...codexModels.map(model => ({
+          id: `codex:${model}`,
+          provider: 'codex-subscription',
+          model,
+          vendor: 'OpenAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+      const others = allowedCatalog.filter(row => row.provider !== GROK_SUBSCRIPTION_PROVIDER)
+      if (grokModels.length === 0) return others
+      return [
+        ...others,
+        ...grokModels.map(model => ({
+          id: `grok:${model}`,
+          provider: GROK_SUBSCRIPTION_PROVIDER,
+          model,
+          vendor: 'xAI',
+          display_name: model,
+          context_window_tokens: null,
+          enabled: true,
+          source: 'discovery' as const,
+          stale: false,
+        })),
+      ]
+    }
+    return allowedCatalog
+  }, [allowedCatalog, provider, codexModels, grokModels])
   const providerModelOptions = useMemo(
     () => getModelOptions(catalogForEditor, provider),
     [catalogForEditor, provider]
@@ -387,12 +426,13 @@ export function HostWizard({
       const parsed = parseCredentialSelect(secretName)
       if (parsed.kind === 'subscription') {
         setConnectionRef(parsed.connectionKey)
-        setProvider('codex-subscription')
+        setProvider(parsed.provider)
         setModelName('')
         return
       }
       setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
       setCodexModels([])
+      setGrokModels([])
       const selectedSecret = existingSecrets.find(
         secret => (secret.name || secret.metadata?.name) === secretName
       )
@@ -419,6 +459,22 @@ export function HostWizard({
           }
         }
       })
+    void listGrokSubscriptionConnections()
+      .then(rows => {
+        if (!cancelled) {
+          setGrokConnections(rows)
+          setGrokEnabled(true)
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          setGrokConnections([])
+          setGrokEnabled(false)
+          if (!isDisabledCapabilityError(err)) {
+            setError(err instanceof Error ? err.message : 'Could not load Grok subscriptions')
+          }
+        }
+      })
     return () => {
       cancelled = true
     }
@@ -426,9 +482,28 @@ export function HostWizard({
   useEffect(() => {
     if (!connectionRef.trim() || connectionRef === CODEX_UNASSIGNED_CONNECTION_KEY) {
       setCodexModels([])
+      setGrokModels([])
       return
     }
     let cancelled = false
+    if (provider === GROK_SUBSCRIPTION_PROVIDER) {
+      setCodexModels([])
+      void listGrokConnectionModels(connectionRef)
+        .then(models => {
+          if (!cancelled) setGrokModels(offeredCodexModelNames(models))
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setGrokModels([])
+            setModelName('')
+            setError('Could not load Grok grant models')
+          }
+        })
+      return () => {
+        cancelled = true
+      }
+    }
+    setGrokModels([])
     void listCodexConnectionModels(connectionRef)
       .then(models => {
         if (!cancelled) setCodexModels(offeredCodexModelNames(models))
@@ -443,16 +518,18 @@ export function HostWizard({
     return () => {
       cancelled = true
     }
-  }, [connectionRef])
+  }, [connectionRef, provider])
   // Keep the selected model valid for the current provider's enabled models:
   // seed the default once the allowlist loads, and re-default if a provider
   // switch left the model out of range.
   useEffect(() => {
     if (modelsLoading) return
-    if (provider === 'codex-subscription') {
+    if (isOauthBrokerProvider(provider)) {
       const offered = constrainModelOptions(catalogForEditor, allowedModels, provider)
       if (offered.length === 0) return
-      const grant = codexConnections.find(row => row.connectionKey === connectionRef)
+      const grant = (
+        provider === GROK_SUBSCRIPTION_PROVIDER ? grokConnections : codexConnections
+      ).find(row => row.connectionKey === connectionRef)
       const next = resolveCodexGrantModel(modelName, offered, grant?.defaultModel)
       if (next !== modelName) setModelName(next)
       return
@@ -517,6 +594,7 @@ export function HostWizard({
       modelName,
       connectionRef,
       codexModels,
+      grokModels,
     }),
     [
       hostName,
@@ -530,6 +608,7 @@ export function HostWizard({
       modelName,
       connectionRef,
       codexModels,
+      grokModels,
     ]
   )
 
@@ -585,7 +664,7 @@ export function HostWizard({
     if (
       step === 1 &&
       secretMode === 'existing' &&
-      provider === 'codex-subscription' &&
+      isOauthBrokerProvider(provider) &&
       chainRequiresSecret &&
       !existingLlmSecret.trim()
     ) {
@@ -734,7 +813,7 @@ export function HostWizard({
         ? ''
         : secretMode === 'new'
           ? normalizedSecretName
-          : provider === 'codex-subscription'
+          : isOauthBrokerProvider(provider)
             ? existingLlmSecret.trim()
             : parseCredentialSelect(existingSecret).kind === 'secret'
               ? existingSecret
@@ -751,7 +830,9 @@ export function HostWizard({
         model: {
           provider,
           name: modelName,
-          ...(provider === 'codex-subscription' ? { connectionRef } : {}),
+          ...(isOauthBrokerProvider(provider)
+            ? { connectionRef: connectionRef.trim() || CODEX_UNASSIGNED_CONNECTION_KEY }
+            : {}),
         },
         // Opt-in fallback policy (spec §3-R5): only set when at least one
         // fallback is configured, so a Host without fallbacks behaves as today.
@@ -970,9 +1051,10 @@ export function HostWizard({
                     checked={secretMode === 'new'}
                     onChange={() => {
                       setSecretMode('new')
-                      if (provider === 'codex-subscription' && !llmPolicy?.fallbacks.length) {
+                      if (isOauthBrokerProvider(provider) && !llmPolicy?.fallbacks.length) {
                         setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                         setCodexModels([])
+                        setGrokModels([])
                         setExistingSecret('')
                         setExistingLlmSecret('')
                         setProvider('openai')
@@ -1000,7 +1082,7 @@ export function HostWizard({
                     options={secretOptions}
                     onChange={handleExistingSecretChange}
                   />
-                  {provider === 'codex-subscription' && chainRequiresSecret ? (
+                  {isOauthBrokerProvider(provider) && chainRequiresSecret ? (
                     <>
                       <strong>LLM secret</strong>
                       <LlmSecretSelect
@@ -1049,9 +1131,14 @@ export function HostWizard({
               onPrimaryChange={next => {
                 setProvider(next.provider)
                 setModelName(next.model)
-                if (next.provider !== 'codex-subscription') {
+                // A grant belongs to exactly one broker: any provider change
+                // (Codex → Grok, broker → static) drops the selected grant, its
+                // model catalog and the subscription pick so the next provider
+                // never reads another broker's connection key.
+                if (next.provider !== provider) {
                   setConnectionRef(CODEX_UNASSIGNED_CONNECTION_KEY)
                   setCodexModels([])
+                  setGrokModels([])
                   if (parseCredentialSelect(existingSecret).kind === 'subscription') {
                     setExistingSecret('')
                   }
@@ -1078,6 +1165,7 @@ export function HostWizard({
               secretKeys={chainRequiresSecret && secretMode === 'new' ? llmSecretKeys : []}
               fallbackProvidersInitiallyCollapsed
               disabled={busy}
+              grokEnabled={grokEnabled}
             />
           </div>
         )}

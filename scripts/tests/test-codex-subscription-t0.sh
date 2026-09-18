@@ -4,6 +4,9 @@
 # Fails when a required suite is missing, executes zero tests, reports
 # skipped/todo cases, or exits non-zero. Exit 0 alone is never enough: the
 # script parses machine-readable counts from Vitest or node:test.
+#
+# Lane separation: Grok-only suites run in test-grok-subscription-t0.sh, never
+# here. Provider-neutral suites shared by both brokers may appear in both.
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -221,6 +224,7 @@ run_group "control-api" "control-api" \
   "test/routes.adminRecipes.test.ts" \
   "test/routes.adminPluginWorkloadSdk.test.ts" \
   "test/services.recipeCodexGrantIdentity.test.ts" \
+  "test/services.recipeGrantTransition.test.ts" \
   "test/crd.llmProviderEnums.test.ts" \
   "test/hostSpecValidation.codexSubscription.test.ts" \
   "test/llmProviders.test.ts" \
@@ -228,7 +232,9 @@ run_group "control-api" "control-api" \
   "test/services.llmAllowedModelsConfigMap.test.ts" \
   "test/services.codexSubscriptionOAuth.test.ts" \
   "test/services.codexSubscriptionCatalog.test.ts" \
+  "test/services.subscriptionCatalogBounds.test.ts" \
   "test/services.llmProviderAttemptAuthorizer.test.ts" \
+  "test/services.llmProviderAttemptAuthorizer.depth.test.ts" \
   "test/services.llmProviderAttemptTicket.test.ts" \
   "test/services.llmProviderAttemptRedemption.test.ts" \
   "test/services.llmProviderAttemptFinalization.test.ts" \
@@ -241,11 +247,14 @@ run_group "control-api" "control-api" \
 
 run_group "codex-llm-proxy" "codex-llm-proxy" \
   "test/approvedToolsUpstream.test.ts" \
+  "test/catalogBounds.test.ts" \
   "test/codexTransport.conformance.test.ts" \
   "test/controlApiClient.test.ts" \
   "test/originPolicy.test.ts" \
   "test/redaction.test.ts" \
-  "test/server.security.test.ts"
+  "test/requestLimits.test.ts" \
+  "test/server.security.test.ts" \
+  "test/sseBackpressure.test.ts"
 
 run_group "mcp-host" "mcp-host" \
   "src/__tests__/bodylimits.test.ts" \
@@ -267,12 +276,14 @@ run_group "mcp-host" "mcp-host" \
   "src/llm/__tests__/claude.singleTurn.test.ts" \
   "src/llm/__tests__/codexSubscription.test.ts" \
   "src/llm/__tests__/codexLlmProxyClient.test.ts" \
+  "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/providerAttemptAuthorizer.test.ts" \
   "src/llm/hostLlmBinding.test.ts" \
   "src/config/configStore.test.ts" \
   "src/llm/failover/__tests__/engine.test.ts" \
   "src/pluginWorkloadSdk/promptBridge/llmBridge.failover.test.ts" \
   "src/pluginWorkloadSdk/bootstrapIdentity.test.ts" \
+  "src/pluginWorkloadSdk/promptBridge/controlApiClient.test.ts" \
   "src/workflow/__tests__/configureHandler.test.ts" \
   "src/workflow/__tests__/workflowServiceUsageReporting.test.ts" \
   "src/pluginWorkloadSdk/server/index.test.ts" \
@@ -292,10 +303,12 @@ run_group "workflow-runtime-core" "packages/workflow-runtime-core" \
 
 run_group "workflow-recipes" "workflow-recipes" \
   "src/workflow/codexExecutionProjection.test.ts" \
+  "src/workflow/codexRecipeVerdict.test.ts" \
   "src/workflow/workflowReconciler.codexScopeProvenance.test.ts" \
   "src/workflow/llmAllowedModelsSnapshot.test.ts" \
   "src/workflow/networkPolicyFactory.codex.test.ts" \
   "src/workflow/sdkOnlyCodexBinding.test.ts" \
+  "src/workflow/pluginWorkloadSdkProvisioner.codexPolicy.test.ts" \
   "src/reconciler/pluginWorkloadSdkValidator.test.ts" \
   "tests/unit/workflow/modelConfigHandler.test.ts" \
   "tests/unit/workflow/modelConfigHandler.pluginSdkBroker.test.ts"
@@ -308,7 +321,8 @@ run_group "control-ui" "control-ui" \
   "lib/__tests__/llmCredentialSelect.test.ts" \
   "components/__tests__/HostWizard.test.tsx" \
   "components/__tests__/HostDetailsPage.identity.test.tsx" \
-  "components/__tests__/RecipeEditor.test.tsx"
+  "components/__tests__/RecipeEditor.test.tsx" \
+  "components/__tests__/PluginWorkloadSdkPage.test.tsx"
 
 node_major=$(node --version | sed -n 's/^v\([0-9][0-9]*\).*/\1/p')
 if [[ "${node_major}" != "24" ]]; then

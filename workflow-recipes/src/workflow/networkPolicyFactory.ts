@@ -72,6 +72,7 @@ export interface NetworkPolicyConfig {
    * same eligibility projection that mints `llm:codex:execute`.
    */
   includeCodexProxyEgress?: boolean
+  includeGrokProxyEgress?: boolean
   includeCoordinatorGfs?: boolean
   includeArtifactReader?: boolean
   includeSnippetRunner?: boolean
@@ -1009,6 +1010,48 @@ export function buildWorkflowNetworkPolicies(
                       },
                       podSelector: {
                         matchLabels: { app: 'codex-llm-proxy' },
+                      },
+                    },
+                  ],
+                  ports: [{ port: 8080, protocol: 'TCP' as const }],
+                },
+              ],
+            },
+          } as k8s.V1NetworkPolicy,
+        ]
+      : []),
+    ...(config.includeGrokProxyEgress
+      ? [
+          {
+            apiVersion: 'networking.k8s.io/v1',
+            kind: 'NetworkPolicy',
+            metadata: {
+              name: `${config.recipeName}-mcp-host-to-grok-proxy`,
+              namespace: config.sandboxNamespace,
+              labels: {
+                ...commonLabels,
+                'clerum.io/policy-type': 'grok-proxy-egress',
+              },
+            },
+            spec: {
+              podSelector: {
+                matchLabels: {
+                  'clerum.io/recipe': config.recipeName,
+                  'clerum.io/component': 'workflow-mcp-host',
+                },
+              },
+              policyTypes: ['Egress'],
+              egress: [
+                {
+                  to: [
+                    {
+                      namespaceSelector: {
+                        matchLabels: {
+                          'kubernetes.io/metadata.name': config.controlPlaneNamespace,
+                        },
+                      },
+                      podSelector: {
+                        matchLabels: { app: 'grok-llm-proxy' },
                       },
                     },
                   ],

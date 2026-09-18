@@ -36,6 +36,7 @@ export declare const LIMITS: {
   readonly maxOutputTokens: 16384
   readonly maxDeadlineMs: 300000
   readonly maxIdLength: 128
+  readonly maxNestingDepth: 64
 }
 
 /**
@@ -259,6 +260,16 @@ export declare function parseCodexCompletionRequest(
 ): ContractResult<CodexCompletionRequest>
 export declare function hashCodexCompletionRequestV1(request: CodexCompletionRequestV1): string
 export declare function hashCodexCompletionRequest(request: CodexCompletionRequest): string
+/**
+ * Canonical client hash: JSON wire round-trip, parseCodexCompletionRequest
+ * (v1 or v2), then hashCodexCompletionRequest of the projection. Send
+ * `request` together with `requestHash`. Never throws; invalid input returns
+ * `{ ok: false }`.
+ */
+export declare function hashCanonicalCodexRequest(raw: unknown): ContractResult<{
+  request: CodexCompletionRequest
+  requestHash: string
+}>
 export declare function buildCodexProxyEnvelope(input: {
   executionTicket: string
   requestHash: string

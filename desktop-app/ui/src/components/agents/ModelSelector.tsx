@@ -21,11 +21,10 @@ export interface ModelSelectorProps {
 const APPLIED_BADGE_MS = 4000
 
 /** Broker-backed hosts have no static default; the operator must name a model. */
-const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 const SELECT_MODEL_LABEL = 'Select model'
 
 function isBrokerBackedProvider(provider: string): boolean {
-  return provider === CODEX_SUBSCRIPTION_PROVIDER
+  return provider === 'codex-subscription' || provider === 'grok-subscription'
 }
 
 function isOfferedForNewPick(option: HostModelOption, sessionModel: string | null): boolean {

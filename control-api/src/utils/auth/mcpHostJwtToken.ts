@@ -181,6 +181,7 @@ export const ALL_MCP_HOST_CONTROL_SCOPES = [
   // Derive-only Codex execution. HCC/WRC may request this after projecting an
   // eligible broker target. Never add it to user-declarable Host/Recipe CRD fields.
   'llm:codex:execute',
+  'llm:grok:execute',
 ] as const
 
 export type McpHostControlScope = (typeof ALL_MCP_HOST_CONTROL_SCOPES)[number]

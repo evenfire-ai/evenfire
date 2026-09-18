@@ -243,6 +243,69 @@ Deployment readiness checks after a combined apply do not enforce the ordering
 above. The infrastructure rollout barrier remains a separate release dependency;
 this document alone does not certify mixed-version deployment safety.
 
+### Codex changes shipped with the Grok broker
+
+The Grok subscription broker (see
+`docs/architecture/grok-subscription-transport-contract.md`) shares the
+contract, authorizer, proxy robustness and recipe-grant code with Codex. The V1
+wire and hash projection are unchanged. Operators should know about these Codex
+behavior changes:
+
+- **Revoke and reconnect.** Codex connection keys stay reusable after revoke:
+  `deployment-default` and named keys can be revoked and then reconnected with
+  a new OAuth flow.
+  - Revoke also cancels every pending browser and device OAuth state for that
+    key, atomically in the same statement.
+  - A flow that started before the revoke cannot persist a grant. It fails
+    with `state_cancelled`.
+  - When two first grants race on the same key, the losing active-key insert
+    maps to a stale-revision conflict instead of a 500.
+- **Attempt integrity (migration 0114).** A constraint trigger requires a
+  non-null `llm_provider_attempts.connection_id` of a Codex attempt to exist in
+  `codex_subscription_connections`. This replaces the FK that 0112 dropped.
+  Historic rows are not revalidated, and the migration is forward-only.
+- **Catalog bounds.** Catalog sync stores at most 256 discovered models, each
+  with an id of at most 128 characters.
+  - Extra entries are dropped with a count-only warning.
+  - The catalog record, row mutations and union rebuild commit in one
+    transaction.
+  - `codex-llm-proxy` admin catalog and connection-test calls have a 15 s
+    deadline and an 8 MiB streamed body cap.
+- **Request identity.** `mcp-host` hashes with `hashCanonicalCodexRequest(raw)`
+  (parse, then hash the canonical value), so empty `generation`, `tools` or
+  `transportHints` objects hash the same as on the server. Contract trees are
+  capped at a nesting depth of 64. The authorizer rejects deeper bodies with
+  `invalid_request`.
+- **Terminal outcomes.** Only `success` is a completion. `canceled`, `error`,
+  and `unknown` with partial text or tool calls are errors. The proxy maps an
+  unrecognized finalize outcome to `unknown`.
+- **Proxy robustness.**
+  - `codex-llm-proxy` fails at startup when its control-api URL or service
+    token is empty.
+  - It respects SSE write backpressure.
+  - It drops queued stream-gate waiters on abort and checks the abort signal
+    before redeeming a ticket.
+  - It requires `maxStreamDurationMs` greater than 0.
+- **Live-target attestation.** Codex authorize attests the live Host or recipe
+  target. The allowed providers come only from the spec's model, allowed
+  models and fallbacks (Hosts) or agent providers (recipes). A target that
+  reached Codex only through a grant annotation or `connectionRef` now gets
+  `host_binding_mismatch`.
+- **Recipe grant annotations.** control-api now writes both
+  `codex-connection-ref` and `subscription-connection-ref` for Codex recipes.
+  It rejects explicit disagreeing pairs with 422
+  `subscriptionAnnotationsDisagree`. Broker changes that omit the annotations
+  return 422 `providerChangeRequiresGrant`.
+- **Rollout.** Roll out control-api first, and wait until every pod runs the
+  new image. An older control-api rejects the entire workflow-control token
+  issue when HCC or WRC request the unknown `llm:grok:execute` scope.
+- **Rollback.** Turn the Grok flags off and wait for HCC and WRC to drop
+  `llm:grok:execute` before rolling back control-api. While an older
+  control-api serves, a reassigned Codex recipe grant updates only
+  `codex-connection-ref`. The new WRC then reads the disagreeing pair as
+  `unassigned`. After rolling forward again, re-assign those Codex recipe
+  grants with explicit annotations.
+
 ## Errors
 
 Stable codes: `insufficient_scope`, `no_grant`, `model_not_allowed`,

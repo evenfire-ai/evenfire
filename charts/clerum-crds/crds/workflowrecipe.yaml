@@ -88,6 +88,10 @@ spec:
                 # R10: run steps cannot also declare a step agent
                 - rule: "!has(self.steps) || self.steps.all(s, !(has(s.run) && has(s.agent)))"
                   message: "step cannot define both run and agent"
+                # D13: at most one oauth-broker id across agent and steps[].agent.
+                # kubectl apply bypasses control-api; this is the cluster gate.
+                - rule: "!(((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'codex-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'codex-subscription'))) && ((has(self.agent) && has(self.agent.provider) && self.agent.provider == 'grok-subscription') || (has(self.steps) && self.steps.exists(s, has(s.agent) && has(s.agent.provider) && s.agent.provider == 'grok-subscription'))))"
+                  message: "a WorkflowRecipe may declare at most one oauth-broker provider"
                 # R11: snippet MCP tool allowlists must be explicit; no wildcard in v1
                 - rule: "!has(self.steps) || self.steps.all(s, !has(s.run) || !has(s.run.capabilities) || !has(s.run.capabilities.mcp) || !has(s.run.capabilities.mcp.allowedTools) || !has(s.run.capabilities.mcp.allowedTools.include) || s.run.capabilities.mcp.allowedTools.include.all(t, !t.contains('*')))"
                   message: "snippet mcp allowedTools.include must not contain wildcards"
@@ -273,7 +277,7 @@ spec:
                     provider/model bootstrap binding for a stepless
                     spec.pluginWorkloadSdk.promptBridge runtime.
                   x-kubernetes-validations:
-                    - rule: "!has(self.provider) || self.provider != 'codex-subscription' || !has(self.secretRef)"
+                    - rule: "!has(self.provider) || (self.provider != 'codex-subscription' && self.provider != 'grok-subscription') || !has(self.secretRef)"
                       message: spec.agent.secretRef is not allowed for oauth-broker providers
                   properties:
                     model:
@@ -287,7 +291,7 @@ spec:
                       # transport is mono-credential and cannot deliver Bedrock's key
                       # pair nor azure's required non-secret AZURE_OPENAI_ENDPOINT —
                       # fail at admission, not mid-workflow (see workflowService).
-                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
+                      enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription, grok-subscription]
                       description: LLM provider.
                     secretRef:
                       type: object
@@ -571,7 +575,7 @@ spec:
                             # bedrock AND azure intentionally absent (mono-credential
                             # WRC transport; see the comment on the first llm provider
                             # enum above).
-                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription]
+                            enum: [openai, claude, zai, bailian, vertex, openrouter, gemini, deepseek, groq, together, fireworks, mistral, xai, cerebras, deepinfra, perplexity, moonshot, nebius, novita, minimax, codex-subscription, grok-subscription]
                           soul:
                             type: string
                             description: Per-step SOUL content override.

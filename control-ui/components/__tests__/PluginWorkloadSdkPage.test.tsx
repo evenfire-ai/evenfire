@@ -40,6 +40,32 @@ vi.mock('@lib/hooks/useLlmAllowedModels', () => ({
   useLlmAllowedModels: () => ({ models: [], loading: false, error: '', reload: vi.fn() }),
 }))
 
+const grokCapability = vi.hoisted(() => ({
+  load: vi.fn().mockResolvedValue({ enabled: false }),
+}))
+
+vi.mock('@lib/grokSubscriptionFeature', () => ({
+  loadGrokSubscriptionCapability: (...args: unknown[]) => grokCapability.load(...args),
+}))
+
+vi.mock('@lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('@lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockResolvedValue([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        catalogStatus: 'ready',
+      },
+    ]),
+    listGrokConnectionModels: vi
+      .fn()
+      .mockResolvedValue([{ model: 'grok-4.6', enabled: true, stale: false }]),
+  }
+})
+
 vi.mock('@lib/api', async importOriginal => {
   const actual = await importOriginal<typeof import('@lib/api')>()
   return {
@@ -104,6 +130,7 @@ function makeGrant(overrides: Partial<PluginWorkloadSdkGrant>): PluginWorkloadSd
 }
 
 beforeEach(() => {
+  grokCapability.load.mockResolvedValue({ enabled: false })
   vi.mocked(getAdminUsers).mockResolvedValue({ items: [manualUser] })
   vi.mocked(getPluginWorkloadSdkLegacyInventory).mockResolvedValue({
     totalPromptBridgeGrants: 0,
@@ -183,5 +210,63 @@ describe('Plugin Workload SDK operator page', () => {
 
     expect(await screen.findByText('4/min')).toBeInTheDocument()
     expect(screen.getByText('platform defaults')).toBeInTheDocument()
+  })
+
+  it('hides grok-subscription until the Grok capability probe succeeds', async () => {
+    render(<PluginWorkloadSdkPage />)
+    const newGrant = await screen.findByRole('button', { name: 'New grant' })
+    await waitFor(() => expect(newGrant).toBeEnabled())
+    fireEvent.click(newGrant)
+    const dialog = await screen.findByRole('dialog', { name: 'New SDK grant' })
+    const provider = await waitFor(() =>
+      within(dialog).getByRole('combobox', { name: /target provider/i })
+    )
+    // Liveness: the probe ran and resolved disabled, and the picker rendered
+    // its other providers, so the absence below is not a pre-probe snapshot.
+    await waitFor(() => expect(grokCapability.load).toHaveBeenCalled())
+    await act(async () => {
+      await grokCapability.load.mock.results.at(-1)?.value
+    })
+    expect(
+      within(provider).getByRole('option', { name: /OpenAI Codex Subscription/i })
+    ).toBeInTheDocument()
+    expect(within(provider).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
+    expect(within(dialog).queryByText(/Could not load Grok subscriptions/)).toBeNull()
+  })
+
+  it('surfaces a non-disabled Grok capability probe error and keeps Grok hidden', async () => {
+    grokCapability.load.mockRejectedValue(
+      Object.assign(new Error('Grok capability probe failed'), { status: 500 })
+    )
+    render(<PluginWorkloadSdkPage />)
+    const newGrant = await screen.findByRole('button', { name: 'New grant' })
+    await waitFor(() => expect(newGrant).toBeEnabled())
+    fireEvent.click(newGrant)
+    const dialog = await screen.findByRole('dialog', { name: 'New SDK grant' })
+    expect(await within(dialog).findByText('Grok capability probe failed')).toBeInTheDocument()
+    const provider = within(dialog).getByRole('combobox', { name: /target provider/i })
+    expect(within(provider).queryByRole('option', { name: /xAI Grok Subscription/i })).toBeNull()
+  })
+
+  it('offers Grok grants in the SDK picker when the Grok flag is on', async () => {
+    grokCapability.load.mockResolvedValue({ enabled: true })
+    render(<PluginWorkloadSdkPage />)
+    const newGrant = await screen.findByRole('button', { name: 'New grant' })
+    await waitFor(() => expect(newGrant).toBeEnabled())
+    fireEvent.click(newGrant)
+    const dialog = await screen.findByRole('dialog', { name: 'New SDK grant' })
+    const provider = await waitFor(() =>
+      within(dialog).getByRole('combobox', { name: /target provider/i })
+    )
+    await waitFor(() => {
+      expect(
+        within(provider).getByRole('option', { name: /xAI Grok Subscription/i })
+      ).toBeInTheDocument()
+    })
+    fireEvent.change(provider, { target: { value: 'grok-subscription' } })
+    expect(
+      await within(dialog).findByRole('combobox', { name: /grok subscription/i })
+    ).toBeInTheDocument()
+    expect(await within(dialog).findByRole('option', { name: /Team Grok/ })).toBeInTheDocument()
   })
 })

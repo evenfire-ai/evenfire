@@ -9,6 +9,9 @@ import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from './codexLlmProx
 import { readCodexPlatformJwt, refreshCodexPlatformJwt } from './codexPlatformJwt'
 import { readLiveCodexPolicyBinding, resolveCodexAttemptPolicy } from './codexPolicyBinding'
 import type { CodexAttemptContext } from './codexSubscription'
+import { GrokLlmProxyClient, resolveGrokProxyRuntimeUrl } from './grokLlmProxyClient'
+import { readLiveGrokPolicyBinding, resolveGrokAttemptPolicy } from './grokPolicyBinding'
+import type { GrokAttemptContext } from './grokSubscription'
 import { OpenAIProvider } from './openai'
 import { ProviderAttemptAuthorizer, resolveCodexAuthorizeUrl } from './providerAttemptAuthorizer'
 import { makeProvider } from './registry'
@@ -22,6 +25,38 @@ export type { ClassifiedError, SingleTurnProvider } from './types'
 
 const DEFAULT_CODEX_AUTHORIZE_GATEWAY =
   'http://nginx-workflow-approval-gateway.control-plane.svc.cluster.local:8092'
+
+function createGrokRuntimeDeps(captured?: GrokAttemptContext) {
+  const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
+  return {
+    authorizer: new ProviderAttemptAuthorizer({
+      authorizeUrl: resolveCodexAuthorizeUrl(gateway),
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
+    }),
+    proxy: new GrokLlmProxyClient({
+      runtimeUrl: resolveGrokProxyRuntimeUrl(config.grokProxyRuntimeBaseUrl),
+      readPlatformJwt: readCodexPlatformJwt,
+      refreshOnUnauthorized: refreshCodexPlatformJwt,
+    }),
+    attemptContext: ({ model }: { model: string }): GrokAttemptContext => {
+      if (captured) return captured
+      const resolved = resolveGrokAttemptPolicy({
+        model,
+        envRevision: config.grokPolicyRevision,
+        envHash: config.grokPolicyHash,
+        binding: readLiveGrokPolicyBinding(),
+      })
+      if (!resolved) {
+        return { policyRevision: 0, policyHash: '' }
+      }
+      return {
+        ...resolved,
+        hostRef: config.hostName,
+      }
+    },
+  }
+}
 
 function createCodexRuntimeDeps(model: string | undefined, captured?: CodexAttemptContext) {
   const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
@@ -58,6 +93,7 @@ function createCodexRuntimeDeps(model: string | undefined, captured?: CodexAttem
 
 export type CreateLlmProviderOptions = {
   capturedCodexAttemptContext?: CodexAttemptContext
+  capturedGrokAttemptContext?: GrokAttemptContext
 }
 
 /**
@@ -101,7 +137,9 @@ export function createLLMProvider(
       modelName,
       provider === 'codex-subscription'
         ? { codex: createCodexRuntimeDeps(modelName, options?.capturedCodexAttemptContext) }
-        : undefined
+        : provider === 'grok-subscription'
+          ? { grok: createGrokRuntimeDeps(options?.capturedGrokAttemptContext) }
+          : undefined
     )
   } catch (err) {
     logger.error({}, 'Failed to construct LLM provider')

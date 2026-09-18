@@ -36,6 +36,29 @@ function requiredPem(name: string, raw: string | undefined): string {
   return value
 }
 
+// Fail at startup instead of at the first redeem. Messages name the variable
+// only; the raw value (URL or service token) is never echoed.
+function requiredHttpUrl(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  let parsed: URL
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${name} must be an absolute http(s) URL`)
+  }
+  return value
+}
+
+function requiredNonEmpty(name: string, raw: string | undefined): string {
+  const value = raw?.trim() ?? ''
+  if (!value) throw new Error(`${name} must be set`)
+  return value
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyConfig {
   const imageInputModels = (env.CODEX_IMAGE_INPUT_MODELS ?? '')
     .split(',')
@@ -86,8 +109,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),
     executionEnabled: env.CODEX_LLM_PROXY_EXECUTION_ENABLED === 'true',
     imageInputModels,
-    controlApiBaseUrl: env.CODEX_LLM_PROXY_CONTROL_API_URL?.trim() || '',
+    controlApiBaseUrl: requiredHttpUrl(
+      'CODEX_LLM_PROXY_CONTROL_API_URL',
+      env.CODEX_LLM_PROXY_CONTROL_API_URL
+    ),
     controlApiServiceName: env.CODEX_LLM_PROXY_CONTROL_API_SERVICE?.trim() || 'codex-llm-proxy',
-    controlApiServiceToken: env.CODEX_LLM_PROXY_CONTROL_API_TOKEN?.trim() || '',
+    controlApiServiceToken: requiredNonEmpty('CODEX_LLM_PROXY_CONTROL_API_TOKEN', env.CODEX_LLM_PROXY_CONTROL_API_TOKEN),
   }
 }

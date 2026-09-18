@@ -156,17 +156,29 @@ function body(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function deps(
-  overrides: Partial<LlmProviderAttemptAuthorizerDeps> = {}
-): LlmProviderAttemptAuthorizerDeps {
+// `resolveConnectionKey` is a test-only convenience that feeds the default
+// `resolveAssignment`; the authorizer itself only consumes `resolveAssignment`.
+function deps({
+  resolveConnectionKey: resolveConnectionKeyOverride,
+  ...overrides
+}: Partial<LlmProviderAttemptAuthorizerDeps> & {
+  resolveConnectionKey?: (hostRef: string) => Promise<string>
+} = {}): LlmProviderAttemptAuthorizerDeps {
   const db = { query: vi.fn() }
+  const resolveConnectionKey =
+    resolveConnectionKeyOverride ?? vi.fn().mockResolvedValue('deployment-default')
+  const resolveAssignment =
+    overrides.resolveAssignment ??
+    (async (hostRef: string) => ({
+      liveBrokerProviders: ['codex-subscription'],
+      liveConnectionRef: await resolveConnectionKey(hostRef),
+    }))
   return {
     enabled: true,
     db,
     withTransaction: async work => work(db as never),
     getConnection: vi.fn().mockResolvedValue(connection()),
     getModelState: vi.fn().mockResolvedValue({ enabled: true, stale: false }),
-    resolveConnectionKey: vi.fn().mockResolvedValue('deployment-default'),
     evaluateBudget: vi.fn().mockResolvedValue({ allowed: true, reservationIds: ['res-1'] }),
     getActiveReservation: vi.fn().mockResolvedValue({ id: 'res-1' }),
     getMaxGeneration: vi.fn().mockResolvedValue(0),
@@ -180,6 +192,7 @@ function deps(
       claims: { jti: 'jti-ticket' },
     }),
     ...overrides,
+    resolveAssignment,
   }
 }
 
@@ -748,7 +761,13 @@ describe('authorizeLlmProviderAttempt', () => {
         body({ pluginWorkloadSdkProviderAttemptId: reservedSdkAttempt().id }),
         current
       )
-    ).rejects.toMatchObject({ code: 'no_grant' })
+    ).rejects.toMatchObject({
+      code: 'no_grant',
+      // A host caller has no recipe namespace, so a later SDK-link check would
+      // also reject with no_grant. Only the host guard produces this message.
+      message: 'host Codex chat cannot bind a Plugin Workload SDK provider attempt',
+    })
+    expect(lockPluginWorkloadSdkRecipe).not.toHaveBeenCalled()
     expect(getPluginWorkloadSdkProviderAttemptForUpdate).not.toHaveBeenCalled()
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
@@ -874,15 +893,40 @@ describe('authorizeLlmProviderAttempt', () => {
     ).rejects.toMatchObject({ code: 'invalid_request' })
   })
 
-  it('rejects an unassigned Host connectionRef as unassigned_connection', async () => {
+  it('allows Codex spend when the live Host primary is static and Codex is a fallback', async () => {
+    const result = await authorizeLlmProviderAttempt(claims(), body(), {
+      ...current,
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'team-plus',
+      }),
+    })
+    expect(result.executionTicket).toBe('ticket.jwt')
+    expect(current.getConnection).toHaveBeenCalledWith(expect.anything(), 'team-plus')
+  })
+
+  it('denies a Codex body when the live Host has no oauth-broker target', async () => {
     await expect(
       authorizeLlmProviderAttempt(claims(), body(), {
         ...current,
-        resolveConnectionKey: async () => 'unassigned',
+        resolveAssignment: async () => ({
+          liveBrokerProviders: [],
+          liveConnectionRef: 'team-plus',
+        }),
       })
-    ).rejects.toMatchObject({ code: 'unassigned_connection' })
+    ).rejects.toMatchObject({ code: 'host_binding_mismatch' })
     expect(current.getConnection).not.toHaveBeenCalled()
-    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unassigned Host connectionRef as unassigned_connection', async () => {
+    const unassigned = deps({
+      resolveConnectionKey: async () => 'unassigned',
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), body(), unassigned)).rejects.toMatchObject({
+      code: 'unassigned_connection',
+    })
+    expect(unassigned.getConnection).not.toHaveBeenCalled()
+    expect(unassigned.insertAttempt).not.toHaveBeenCalled()
   })
 
   it('fails closed for every Host on a revoked grant and leaves another grant usable', async () => {
@@ -933,6 +977,34 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-a')
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-b')
     expect(resolveConnectionKey).toHaveBeenCalledWith('agent-c')
+  })
+
+  it('attests recipe grant annotations and fails closed when alias and canonical disagree', async () => {
+    const disagree = deps({
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'unassigned',
+        annotations: {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'other-key',
+        },
+      }),
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), body(), disagree)).rejects.toMatchObject({
+      code: 'host_binding_mismatch',
+    })
+    expect(disagree.getConnection).not.toHaveBeenCalled()
+
+    const aliasOnly = deps({
+      resolveAssignment: async () => ({
+        liveBrokerProviders: ['codex-subscription'],
+        liveConnectionRef: 'unassigned',
+        annotations: { 'clerum.io/codex-connection-ref': 'deployment-default' },
+      }),
+    })
+    const result = await authorizeLlmProviderAttempt(claims(), body(), aliasOnly)
+    expect(result.executionTicket).toBe('ticket.jwt')
+    expect(aliasOnly.getConnection).toHaveBeenCalledWith(expect.anything(), 'deployment-default')
   })
 
   it('evaluates budget with a null user_id even when claims.sub is present', async () => {
