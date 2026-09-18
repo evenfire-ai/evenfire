@@ -276,7 +276,19 @@ describe('K8sGfsApi PodDisruptionBudget no-op gate (T4)', () => {
       equal.events.push('GET')
       return {
         ...desired,
-        metadata: { ...desired.metadata, resourceVersion: '1' },
+        status: {
+          currentHealthy: 1,
+          desiredHealthy: 1,
+          disruptionsAllowed: 0,
+          expectedPods: 1,
+        },
+        metadata: {
+          ...desired.metadata,
+          resourceVersion: '1',
+          uid: 'pdb-uid',
+          creationTimestamp: new Date('2026-01-01T00:00:00Z'),
+          managedFields: [{ manager: 'kube-apiserver', operation: 'Update' }],
+        },
       }
     })
     await equal.api.applyPodDisruptionBudget(desired, namespace)

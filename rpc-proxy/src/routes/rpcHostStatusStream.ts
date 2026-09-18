@@ -69,10 +69,8 @@ export function resetHostStatusStreamRuntimeForTests(): void {
 export function createRpcHostStatusStreamRouter(): Router {
   const router = Router()
 
-  // Explicit one-segment hostRef (same match set as Express 4 :hostRef).
-  // Wildcard 400 is isWildcardOrInvalidHostRef; tests reset module counters.
   router.get(
-    '/rpc/hosts/:hostRef([^/]+)/status/stream',
+    '/rpc/hosts/:hostRef/status/stream',
     requireRpcAuth,
     requireScope('host:status:read'),
     async (req: AuthedRequest, res, next) => {

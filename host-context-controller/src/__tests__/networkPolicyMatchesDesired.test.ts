@@ -238,7 +238,7 @@ describe('networkPolicyMatchesDesired', () => {
     expect(networkPolicyMatchesDesired(emptyIngress, live)).toBe(true)
   })
 
-  it('T2: a real ingress rule does not match an omitted ingress field', () => {
+  it('T2: a non-empty ingress slice does not match an omitted ingress field', () => {
     const selector = { matchLabels: { app: 'np' } }
     const live: k8s.V1NetworkPolicy = {
       apiVersion: 'networking.k8s.io/v1',
@@ -251,11 +251,35 @@ describe('networkPolicyMatchesDesired', () => {
       spec: {
         podSelector: selector,
         policyTypes: ['Ingress'],
-        // client-node property; ObjectSerializer maps `_from` to wire `from`.
-        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+        // Witness is occupancy: a present ingress array is not omitempty-equivalent
+        // to an omitted field. Comparison is JSON of cloned objects, not the
+        // client-node ObjectSerializer, so the wire key is `from`.
+        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
       },
     }
     expect(networkPolicyMatchesDesired(withRule, live)).toBe(false)
+  })
+
+  it('T2: distinct ingress from rules do not match', () => {
+    const selector = { matchLabels: { app: 'np' } }
+    const peer: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: { name: 'np', namespace: 'ns', labels: { app: 'np' } },
+      spec: {
+        podSelector: selector,
+        policyTypes: ['Ingress'],
+        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+      },
+    }
+    const other: k8s.V1NetworkPolicy = {
+      ...peer,
+      spec: {
+        ...peer.spec!,
+        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'other' } } }] }],
+      },
+    }
+    expect(networkPolicyMatchesDesired(peer, other)).toBe(false)
   })
 
   it('T2: empty egress with derived policyTypes matches an omitted egress field', () => {
