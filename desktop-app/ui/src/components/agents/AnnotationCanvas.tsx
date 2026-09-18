@@ -11,6 +11,24 @@ type AnnotationCanvasProps = {
   onClose: () => void
 }
 
+/**
+ * Apply the annotated replacement. A throwing `onSave` must revoke the blob
+ * URL created for that rejected preview so it never leaks.
+ */
+export function commitAnnotatedPreview(
+  onSave: (updated: ComposerImageAttachment) => void,
+  updated: ComposerImageAttachment,
+  createdPreviewUrl: string,
+  serializedDataUrl: string
+): void {
+  try {
+    onSave(updated)
+  } catch (error) {
+    if (createdPreviewUrl !== serializedDataUrl) URL.revokeObjectURL(createdPreviewUrl)
+    throw error
+  }
+}
+
 function resolveDefaultAnnotationColor() {
   if (typeof window === 'undefined') return COLOR_INPUT_FALLBACK
   const tokenColor = window
@@ -155,19 +173,18 @@ export function AnnotationCanvas({ attachment, onSave, onClose }: AnnotationCanv
         typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function'
           ? URL.createObjectURL(blob)
           : dataUrl
-      try {
-        onSave({
+      commitAnnotatedPreview(
+        onSave,
+        {
           ...attachment,
           mimeType: nextMimeType,
           dataBase64: dataUrl.slice(base64Index + 'base64,'.length),
           sizeBytes: blob.size,
           previewDataUrl: nextPreviewUrl,
-        })
-      } catch (error) {
-        // The rejected replacement never becomes the attachment's preview.
-        if (nextPreviewUrl !== dataUrl) URL.revokeObjectURL(nextPreviewUrl)
-        throw error
-      }
+        },
+        nextPreviewUrl,
+        dataUrl
+      )
       setPreviewIsAnnotating(false)
     } catch (error) {
       setAnnotationError(error instanceof Error ? error.message : String(error))

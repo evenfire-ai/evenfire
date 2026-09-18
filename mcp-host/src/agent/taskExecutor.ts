@@ -1475,15 +1475,7 @@ export class TaskExecutor {
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
-    loopConfig.imageSourceIdentity =
-      this.deps.llmProvider.requiresImageSourceIdentity === true ||
-      [
-        this.deps.llmProvider.getProviderType(),
-        ...(this.deps.failover?.policy.fallbacks.map(entry => entry.provider) ?? []),
-      ].some(
-        provider =>
-          isLlmProvider(provider) && descriptorFor(provider).requiresImageSourceIdentity === true
-      )
+    loopConfig.imageSourceIdentity = this.providerChainRequiresImageSourceIdentity()
     loopConfig.onAttachments = attachments =>
       mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
@@ -2139,6 +2131,24 @@ export class TaskExecutor {
     return attachments
   }
 
+  /**
+   * Codex V2 hashes each image source. Bind identity only when this chain
+   * (primary or a configured fallback) requires it so a non-Codex wire stays
+   * on the #654 shape.
+   */
+  private providerChainRequiresImageSourceIdentity(): boolean {
+    return (
+      this.deps.llmProvider.requiresImageSourceIdentity === true ||
+      [
+        this.deps.llmProvider.getProviderType(),
+        ...(this.deps.failover?.policy.fallbacks.map(entry => entry.provider) ?? []),
+      ].some(
+        provider =>
+          isLlmProvider(provider) && descriptorFor(provider).requiresImageSourceIdentity === true
+      )
+    )
+  }
+
   private buildSourceMessageContentParts(messageContent: string): MessageContentPart[] {
     const providerType = this.deps.llmProvider.getProviderType()
     // getProviderType() always returns a registered LlmProvider, so in practice
@@ -2158,6 +2168,7 @@ export class TaskExecutor {
     // Neither value is a placeholder, and neither is rewritten here: a value
     // the shared contract does not accept fails its projection check instead.
     const messageId = this.task.sourceMessage?.messageId?.trim() || this.task.id
+    const bindSource = this.providerChainRequiresImageSourceIdentity()
     const imageParts = sourceAttachments
       .filter(
         att =>
@@ -2168,7 +2179,9 @@ export class TaskExecutor {
           type: 'image',
           mimeType: att.mimeType as 'image/jpeg' | 'image/png',
           data: att.dataBase64,
-          source: { kind: 'attachment', attachmentId: att.id, messageId },
+          ...(bindSource
+            ? { source: { kind: 'attachment' as const, attachmentId: att.id, messageId } }
+            : {}),
         })
       )
     if (!imageParts.length) {

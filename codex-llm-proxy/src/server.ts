@@ -21,6 +21,7 @@ import {
   type OriginPolicyOptions,
   defaultAddressLookup,
 } from './originPolicy.js'
+import { SCHEMA_VERSION_V2 } from '@clerum/llm-provider-attempt-contract'
 import { RequestLimitError, streamGate, visualStreamGate } from './requestLimits.js'
 
 type GatedRequest = Request & { codexStreamRelease?: () => void }
@@ -132,9 +133,13 @@ export function createProxyApps(
     if (verifyPlatformJwt(bearer(req), config)) {
       void (async () => {
         let release: (() => void) | undefined
+        const parseAbort = new AbortController()
+        const abortParse = (): void => parseAbort.abort()
+        req.once('aborted', abortParse)
         try {
-          release = await visualStreamGate.acquire()
+          release = await visualStreamGate.acquire(parseAbort.signal)
         } catch (err) {
+          req.off('aborted', abortParse)
           if (err instanceof RequestLimitError) {
             reject(res, 503, err.code)
             return
@@ -142,6 +147,7 @@ export function createProxyApps(
           next()
           return
         }
+        req.off('aborted', abortParse)
         req.codexStreamRelease = release
         visualJson(req, res, err => {
           if (err) {
@@ -229,9 +235,19 @@ export function createProxyApps(
       // to req 'close' aborts the ChatGPT hop on every call (3–12ms canceled).
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
+      const visualRequest =
+        (parsed.data.request as { schemaVersion?: unknown }).schemaVersion === SCHEMA_VERSION_V2
       try {
-        release = gated.codexStreamRelease
-        gated.codexStreamRelease = undefined
+        // Visual parse used the tight 2-wide gate so a 24 MiB body fits the
+        // 256Mi pod. V1 must not keep that slot through the ChatGPT stream —
+        // release it and take the ordinary 8-wide stream gate. V2 keeps the
+        // visual release until the stream ends.
+        if (visualRequest) {
+          release = gated.codexStreamRelease
+          gated.codexStreamRelease = undefined
+        } else {
+          releaseAdmission()
+        }
         if (!release) {
           release = await streamGate.acquire(abort.signal)
         }

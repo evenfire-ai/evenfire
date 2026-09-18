@@ -607,6 +607,23 @@ describe('authorizeLlmProviderAttempt', () => {
     expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
+  it('maps a contract parse limit failure to payload_too_large', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            messages: Array.from({ length: 129 }, () => ({ role: 'user' as const, content: 'x' })),
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
   it('keeps the authorize wrapper on the 1 MiB non-image budget when the nested request is V2', async () => {
     await expect(
       authorizeLlmProviderAttempt(

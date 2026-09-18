@@ -636,7 +636,10 @@ export async function authorizeLlmProviderAttempt(
 
   const parsed = parseCodexCompletionRequest(body.request)
   if (!parsed.ok) {
-    throw new LlmProviderAttemptAuthorizeError('invalid_request', parsed.message)
+    throw new LlmProviderAttemptAuthorizeError(
+      parsed.code === 'limit' ? 'payload_too_large' : 'invalid_request',
+      parsed.message
+    )
   }
   const request = parsed.value
   if (request.provider !== PROVIDER) {

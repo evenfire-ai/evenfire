@@ -21,8 +21,7 @@ import {
 import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
-  COMPOSER_MAX_IMAGE_BYTES,
-  COMPOSER_MAX_IMAGE_DIMENSION,
+  composerImageBudget,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -77,23 +76,29 @@ function bytesFromBase64(data: string): Uint8Array | null {
 function composerImageDimensionRejection(
   name: string,
   mimeType: ComposerImageAttachment['mimeType'],
-  dataBase64: string
+  dataBase64: string,
+  maxDimension: number | null
 ): string | null {
+  if (maxDimension == null) return null
   const bytes = bytesFromBase64(dataBase64)
   const dimensions = bytes ? readImageHeaderDimensions(mimeType, bytes) : null
   if (!dimensions) return null
-  if (
-    dimensions.width > COMPOSER_MAX_IMAGE_DIMENSION ||
-    dimensions.height > COMPOSER_MAX_IMAGE_DIMENSION
-  ) {
-    return `${name || 'Image'} is too large. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
+  if (dimensions.width > maxDimension || dimensions.height > maxDimension) {
+    return `${name || 'Image'} is too large. Max resolution is ${maxDimension} px.`
   }
   return null
 }
 
-/** Per-image ceiling only. Aggregate bytes are enforced on the chat hop. */
-function composerImageExceedsPerImageBudget(sizeBytes: number): boolean {
-  return sizeBytes > COMPOSER_MAX_IMAGE_BYTES
+function composerImageExceedsPerImageBudget(sizeBytes: number, maxImageBytes: number): boolean {
+  return sizeBytes > maxImageBytes
+}
+
+function composerPerImageLimitMessage(
+  name: string,
+  maxImageBytes: number,
+  sizeUnit: 'MB' | 'MiB'
+): string {
+  return `${name || 'Image'} is too large. Max size is ${formatComposerMebibytes(maxImageBytes)} ${sizeUnit}.`
 }
 
 function getComposerReferenceIcon(attachment: ComposerReferenceAttachment) {
@@ -171,6 +176,10 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // user can still switch to a capable model with the images kept.
   const hostModelSelection = useHostModels(selectedAgent ?? '', activeChatId ?? '')
   const imageAttachmentBlockMessage = hostModelSelection.imageBlockMessage
+  // Size ceilings follow the host provider: Codex keeps #650 (16 MiB / 2048 /
+  // hop-owned aggregate). Every other image-capable host keeps #669 (3 MiB +
+  // 8 MB combined). Capability still comes from the host projection, not this.
+  const imageBudget = composerImageBudget(hostModelSelection.data?.provider)
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
@@ -515,13 +524,17 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           } not added.`
         )
       }
+      // Non-Codex images travel inline in one 10 MB body (#669). Codex leaves
+      // the aggregate to the hop (#650).
+      let totalBase64Bytes = composerImageAttachments.reduce(
+        (total, attachment) => total + attachment.dataBase64.length,
+        0
+      )
 
       for (const [index, { file, mimeType }] of selected.entries()) {
-        if (composerImageExceedsPerImageBudget(file.size)) {
+        if (composerImageExceedsPerImageBudget(file.size, imageBudget.maxImageBytes)) {
           validationErrors.push(
-            `${file.name || 'Image'} is too large. Max size is ${formatComposerMebibytes(
-              COMPOSER_MAX_IMAGE_BYTES
-            )} MiB.`
+            composerPerImageLimitMessage(file.name, imageBudget.maxImageBytes, imageBudget.sizeUnit)
           )
           continue
         }
@@ -544,13 +557,27 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           const dimensionError = composerImageDimensionRejection(
             file.name || 'Image',
             mimeType,
-            dataBase64
+            dataBase64,
+            imageBudget.maxDimension
           )
           if (dimensionError) {
             validationErrors.push(dimensionError)
             revokePreviewUrl(previewUrl)
             continue
           }
+          if (
+            imageBudget.maxTotalBase64Bytes != null &&
+            totalBase64Bytes + dataBase64.length > imageBudget.maxTotalBase64Bytes
+          ) {
+            validationErrors.push(
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${formatComposerMebibytes(
+                imageBudget.maxTotalBase64Bytes
+              )} ${imageBudget.sizeUnit} in total. Send the attached images first or remove one.`
+            )
+            revokePreviewUrl(previewUrl)
+            continue
+          }
+          totalBase64Bytes += dataBase64.length
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -575,6 +602,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     [
       buildAttachmentName,
       composerImageAttachments,
+      imageBudget,
       inferComposerImageMimeType,
       onAddComposerImageAttachments,
       readFileAsDataUrl,
@@ -601,24 +629,28 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const dimensionError = composerImageDimensionRejection(
         updated.name || 'Image',
         updated.mimeType,
-        updated.dataBase64
+        updated.dataBase64,
+        imageBudget.maxDimension
       )
-      if (!composerImageExceedsPerImageBudget(updated.sizeBytes) && !dimensionError) {
+      if (
+        !composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes) &&
+        !dimensionError
+      ) {
         onUpdateComposerImageAttachment(updated)
         return
       }
-      if (composerImageExceedsPerImageBudget(updated.sizeBytes)) {
+      if (composerImageExceedsPerImageBudget(updated.sizeBytes, imageBudget.maxImageBytes)) {
         throw new Error(
           `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
-            COMPOSER_MAX_IMAGE_BYTES
-          )} MiB per image.`
+            imageBudget.maxImageBytes
+          )} ${imageBudget.sizeUnit} per image.`
         )
       }
       throw new Error(
-        `${updated.name || 'Image'} was kept unchanged. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
+        `${updated.name || 'Image'} was kept unchanged. Max resolution is ${imageBudget.maxDimension} px.`
       )
     },
-    [onUpdateComposerImageAttachment]
+    [imageBudget, onUpdateComposerImageAttachment]
   )
 
   const handleComposerPaste = useCallback(

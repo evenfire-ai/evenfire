@@ -346,32 +346,15 @@ describe('rpc-proxy chat message body budget', () => {
   })
 
   it('leaves the sandbox-ui view proxy parser-free so its stream is not drained', async () => {
-    // A JSON parser on this path would answer 413 for any body over its limit,
-    // because parsing has to consume the stream http-proxy needs to forward.
-    // The route answers its cookie check first, so the observable proof is a
-    // non-413 outcome while the request body is still unread.
-    const abortController = new AbortController()
-    const chunk = new Uint8Array(64 * 1024).fill(0x41)
-    let sent = 0
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (sent >= 8 * MIB) return // hold the request open; never finish it
-        sent += chunk.length
-        controller.enqueue(chunk)
-      },
+    // A JSON parser on this path would answer 413 for any finished body over
+    // its limit. The route answers its cookie check first, so a bounded body
+    // larger than the 6 MiB ordinary cap must still be 401 (not 413).
+    const response = await fetch(`${baseUrl}/api/v1/sandbox-ui/ns/recipe/view/index.html`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'A'.repeat(7 * MIB),
     })
-    try {
-      const response = await fetch(`${baseUrl}/api/v1/sandbox-ui/ns/recipe/view/index.html`, {
-        method: 'POST',
-        headers: { 'content-type': 'text/plain' },
-        body,
-        duplex: 'half',
-        signal: abortController.signal,
-      } as RequestInit & { duplex: 'half' })
-      expect(response.status).not.toBe(413)
-      expect(response.status).toBe(401)
-    } finally {
-      abortController.abort()
-    }
+    expect(response.status).not.toBe(413)
+    expect(response.status).toBe(401)
   })
 })

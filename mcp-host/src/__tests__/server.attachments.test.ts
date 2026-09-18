@@ -4,7 +4,7 @@ import { createRequire } from 'node:module'
 import type { Attachment } from '../core/types'
 import type { RPCServer } from '../server'
 
-const { declaredHeaderPngOfSize } = createRequire(import.meta.url)(
+const { declaredHeaderPngOfSize } = createRequire(__filename)(
   '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
 ) as {
   declaredHeaderPngOfSize: (targetBytes: number) => Buffer

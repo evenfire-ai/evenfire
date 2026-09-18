@@ -24,6 +24,7 @@ import {
 } from '../../../llm/codexSubscription'
 import { FailoverEngine } from '../../../llm/failover/engine'
 import type { LlmPolicy } from '../../../llm/failover/types'
+import type { ImageInputResolver } from '../../../llm/imageInput'
 import { CodexAuthorizeError } from '../../../llm/providerAttemptAuthorizer'
 import { LlmErrorCode } from '../../errors'
 import { stripHistoricalMedia } from '../../extensions/prePrune'
@@ -41,6 +42,36 @@ import {
 } from '../../types'
 import { maybeWrapFailover } from '../failoverLlmPort'
 import { LlmPortAdapter } from '../llmPortAdapter'
+
+const ALLOW_IMAGES: ImageInputResolver = () => ({
+  capability: {
+    state: 'supported',
+    evidence: {
+      source: 'curated',
+      reference: 'https://example.test/image-input',
+      checkedAt: '2026-01-01T00:00:00Z',
+    },
+  },
+})
+
+/** #654 withholds tool images without affirmative evidence; these suites opt in. */
+function adapterFor(
+  provider: SingleTurnProvider,
+  model: string,
+  providerName: string
+): LlmPortAdapter {
+  return new LlmPortAdapter(
+    provider,
+    model,
+    providerName,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    ALLOW_IMAGES
+  )
+}
 
 const SYSTEM_PARTS: SystemPromptParts = {
   stable: 'stable tier',
@@ -132,11 +163,15 @@ type ProviderCall = { parts?: SystemPromptParts; messages: ChatMessage[] }
  * cache-aware methods so the adapter routes to them; `imageSourceIdentity`
  * models a transport that binds every image source (Codex V2).
  */
-function recordingProvider(options: { cache: boolean; imageSourceIdentity?: boolean }) {
+function recordingProvider(options: {
+  cache: boolean
+  imageSourceIdentity?: boolean
+  providerType?: string
+}) {
   const complete: ProviderCall[] = []
   const completeWithTools: ProviderCall[] = []
   const base = {
-    getProviderType: () => 'openai' as const,
+    getProviderType: () => (options.providerType ?? 'openai') as 'openai',
     classifyError: () => ({
       code: LlmErrorCode.ApiCallFailed,
       retryable: true,
@@ -201,16 +236,25 @@ const DISPATCH_VARIANTS: DispatchVariant[] = [
   { label: 'completeWithTools via the concat fallback', tools: true, cache: false },
 ]
 
+function dispatchPair(variant: DispatchVariant): { providerType: string; model: string } {
+  // #654: only dispatch on a path the transport matrix actually keeps.
+  if (variant.cache) return { providerType: 'claude', model: 'claude-sonnet-4-5' }
+  if (variant.tools) return { providerType: 'openai', model: 'gpt-4o' }
+  return { providerType: 'vertex', model: 'gemini-2.5-pro' }
+}
+
 async function runVariant(
   variant: DispatchVariant,
   imageSourceIdentity: boolean,
   messages: ChatMessage[]
 ): Promise<ProviderCall> {
+  const pair = dispatchPair(variant)
   const { provider, complete, completeWithTools } = recordingProvider({
     cache: variant.cache,
     imageSourceIdentity,
+    providerType: pair.providerType,
   })
-  const adapter = new LlmPortAdapter(provider, 'gpt-4o', 'openai')
+  const adapter = adapterFor(provider, pair.model, pair.providerType)
 
   if (variant.tools) {
     await adapter.completeWithTools({ messages, tools: TOOLS, systemPromptParts: SYSTEM_PARTS })
@@ -319,8 +363,8 @@ describe('image source identity compatibility (#650)', () => {
     ])
     expect(visual[0].contentParts?.[1]).not.toHaveProperty('sourceIdentityOnly')
 
-    const { provider, complete } = recordingProvider({ cache: true })
-    await new LlmPortAdapter(provider, 'gpt-4o', 'openai').complete({
+    const { provider, complete } = recordingProvider({ cache: true, providerType: 'claude' })
+    await adapterFor(provider, 'claude-sonnet-4-5', 'claude').complete({
       messages,
       systemPromptParts: SYSTEM_PARTS,
     })
@@ -340,13 +384,14 @@ describe('image source identity compatibility (#650)', () => {
       filtered.contentParts?.filter(part => part.type === 'text').map(part => part.text)
     ).toEqual([filtered.content])
 
-    const binding = recordingProvider({ cache: true, imageSourceIdentity: true })
-    await new LlmPortAdapter(binding.provider, 'codex-subscription', 'codex-subscription').complete(
-      {
-        messages,
-        systemPromptParts: SYSTEM_PARTS,
-      }
-    )
+    const binding = recordingProvider({
+      cache: false,
+      imageSourceIdentity: true,
+      providerType: 'codex-subscription',
+    })
+    await adapterFor(binding.provider, 'codex-subscription', 'codex-subscription').complete({
+      messages,
+    })
     expect(imagePartsOf(binding.complete[0].messages).map(image => image.source)).toEqual([
       { kind: 'tool', attachmentId: 'att-a', toolCallId: 'tc_one' },
       { kind: 'tool', attachmentId: 'att-b', toolCallId: 'tc_two' },
@@ -358,18 +403,20 @@ describe('image source identity compatibility (#650)', () => {
     const snapshot = structuredClone(messages)
     const request: CompletionRequest = { messages, systemPromptParts: SYSTEM_PARTS }
 
-    const legacy = recordingProvider({ cache: true })
-    await new LlmPortAdapter(legacy.provider, 'gpt-4o', 'openai').complete(request)
+    const legacy = recordingProvider({ cache: true, providerType: 'claude' })
+    await adapterFor(legacy.provider, 'claude-sonnet-4-5', 'claude').complete(request)
 
     // The filtering produced a provider-specific view, not a mutation.
     expect(legacy.complete[0].messages).not.toBe(messages)
     expect(messages).toEqual(snapshot)
     expect(imagePartsOf(legacy.complete[0].messages)).toHaveLength(1)
 
-    const binding = recordingProvider({ cache: true, imageSourceIdentity: true })
-    await new LlmPortAdapter(binding.provider, 'codex-subscription', 'codex-subscription').complete(
-      request
-    )
+    const binding = recordingProvider({
+      cache: false,
+      imageSourceIdentity: true,
+      providerType: 'codex-subscription',
+    })
+    await adapterFor(binding.provider, 'codex-subscription', 'codex-subscription').complete(request)
     expect(imagePartsOf(binding.complete[0].messages)).toEqual(imagePartsOf(snapshot))
   })
 
@@ -377,11 +424,11 @@ describe('image source identity compatibility (#650)', () => {
     const { messages } = repeatedFrameMessages()
 
     const legacy = recordingProvider({ cache: false })
-    await new LlmPortAdapter(legacy.provider, 'gpt-4o', 'openai').complete({ messages })
+    await adapterFor(legacy.provider, 'gemini-2.5-pro', 'vertex').complete({ messages })
     expect(imagePartsOf(legacy.complete[0].messages)).toHaveLength(1)
 
     const legacyTools = recordingProvider({ cache: false })
-    await new LlmPortAdapter(legacyTools.provider, 'gpt-4o', 'openai').completeWithTools({
+    await adapterFor(legacyTools.provider, 'gpt-4o', 'openai').completeWithTools({
       messages,
       tools: TOOLS,
     })
@@ -406,8 +453,8 @@ describe('image source identity compatibility (#650)', () => {
     })
     expect(JSON.stringify(messages)).not.toContain('sourceIdentityOnly')
 
-    const { provider, complete } = recordingProvider({ cache: true })
-    await new LlmPortAdapter(provider, 'gpt-4o', 'openai').complete({ messages })
+    const { provider, complete } = recordingProvider({ cache: false, providerType: 'vertex' })
+    await adapterFor(provider, 'gemini-2.5-pro', 'vertex').complete({ messages })
 
     // Nothing to translate, so the adapter hands the canonical view straight on.
     expect(complete[0].messages).toEqual(messages)
@@ -493,8 +540,8 @@ describe('mixed-chain pruning recovery (#650)', () => {
     expect(imagePartsOf(stripped)[0].sourceIdentityOnly).toBe(true)
     const snapshot = structuredClone(stripped)
 
-    const { provider, complete } = recordingProvider({ cache: true })
-    await new LlmPortAdapter(provider, 'gpt-4o', 'openai').complete({
+    const { provider, complete } = recordingProvider({ cache: true, providerType: 'claude' })
+    await adapterFor(provider, 'claude-sonnet-4-5', 'claude').complete({
       messages: stripped,
       systemPromptParts: SYSTEM_PARTS,
     })
@@ -544,8 +591,8 @@ describe('mixed-chain pruning recovery (#650)', () => {
     expect(imagePartsOf(stripped).map(image => image.sourceIdentityOnly)).toEqual([true, true])
     const snapshot = structuredClone(stripped)
 
-    const { provider, complete } = recordingProvider({ cache: true })
-    await new LlmPortAdapter(provider, 'gpt-4o', 'openai').complete({
+    const { provider, complete } = recordingProvider({ cache: true, providerType: 'claude' })
+    await adapterFor(provider, 'claude-sonnet-4-5', 'claude').complete({
       messages: stripped,
       systemPromptParts: SYSTEM_PARTS,
     })
@@ -597,7 +644,7 @@ describe('Codex V2 transport wiring (#650)', () => {
     expect(imagePartsOf(messages)[1].sourceIdentityOnly).toBe(true)
     expect(JSON.stringify(messages)).toContain('sourceIdentityOnly')
 
-    await new LlmPortAdapter(provider, 'gpt-5.3-codex', 'codex-subscription').completeWithTools({
+    await adapterFor(provider, 'gpt-5.3-codex', 'codex-subscription').completeWithTools({
       messages,
       tools: TOOLS,
     })
@@ -645,11 +692,11 @@ describe('Codex V2 transport wiring (#650)', () => {
     const { messages } = repeatedFrameMessages()
     const snapshot = structuredClone(messages)
     const wrapped = maybeWrapFailover({
-      primaryPort: new LlmPortAdapter(primary, 'gpt-5.3-codex', 'codex-subscription'),
+      primaryPort: adapterFor(primary, 'gpt-5.3-codex', 'codex-subscription'),
       primaryPair: { provider: 'codex-subscription', model: 'gpt-5.3-codex' },
       engine,
       policy,
-      buildFallbackPort: () => new LlmPortAdapter(fallback.provider, 'gpt-5.4', 'openai'),
+      buildFallbackPort: () => adapterFor(fallback.provider, 'gpt-5.4', 'openai'),
     })
 
     await wrapped.completeWithTools({ messages, tools: TOOLS })

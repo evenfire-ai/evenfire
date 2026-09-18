@@ -18,7 +18,7 @@
  *   claude              no        yes                yes        user, tool
  *   vertex              yes       yes                n/a        user
  *   bedrock             yes       yes                n/a        user
- *   codex-subscription  no        no                 n/a        none
+ *   codex-subscription  yes       yes                n/a        user
  *
  * `complete` is the tool-less, cache-less path (`completeSingleTurn`): OpenAI,
  * OpenAI-compatible and Azure rebuild `role/content` and drop `contentParts`,
@@ -139,9 +139,11 @@ const TRANSPORT_SUPPORT: Readonly<
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
+  // #650: Codex V2 carries ordered image parts on the tool-less and
+  // tool-bearing paths. Cache variants are not implemented on this transport.
   codex: {
-    complete: false,
-    completeWithTools: false,
+    complete: true,
+    completeWithTools: true,
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
@@ -158,7 +160,7 @@ const IMAGE_ROLES_BY_FAMILY: Readonly<Record<ImageWireFamily, readonly MessageRo
   claude: ['user', 'tool'],
   vertex: ['user'],
   bedrock: ['user'],
-  codex: [],
+  codex: ['user'],
   unregistered: [],
 }
 

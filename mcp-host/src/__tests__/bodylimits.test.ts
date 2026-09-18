@@ -19,7 +19,7 @@ import type { AddressInfo } from 'net'
 import { createRequire } from 'node:module'
 import type { IncomingMessage } from '../server/types'
 
-const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(import.meta.url)(
+const { declaredHeaderPngOfSize, jpegOfSize } = createRequire(__filename)(
   '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
 ) as {
   declaredHeaderPngOfSize: (targetBytes: number) => Buffer

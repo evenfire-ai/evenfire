@@ -5,9 +5,11 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import {
+  CODEX_COMPOSER_MAX_IMAGE_BYTES,
+  CODEX_COMPOSER_MAX_IMAGE_DIMENSION,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
-  COMPOSER_MAX_IMAGE_DIMENSION,
+  COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
 } from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import {
@@ -151,6 +153,14 @@ afterEach(() => {
     canAttachImages: false,
     imageBlockMessage: null,
     imageInput: { state: 'unknown', reason: 'model_unknown' },
+    data: {
+      provider: 'claude',
+      hostDefault: 'claude-haiku-4-5',
+      sessionModel: null,
+      degraded: false,
+      models: [{ name: 'claude-haiku-4-5', displayName: 'Haiku 4.5' }],
+    },
+    effectiveModel: 'claude-haiku-4-5',
   })
   for (const spy of Object.values(actionsMock)) spy.mockReset()
   delete (window as Partial<typeof window>).clerum
@@ -530,30 +540,7 @@ describe('ComposerPanel with an image-capable model', () => {
     })
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
-    expect(screen.getByRole('alert').textContent).toBe('huge.png is too large. Max size is 16 MiB.')
-    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
-  })
-
-  it('accepts a 12MiB image above the usual 10MiB target', async () => {
-    const { container } = render(<ComposerPanel inline />)
-    fireEvent.change(pickerInput(container), {
-      target: { files: [imageFileWithReportedSize('large.png', 'image/png', 12 * 1024 * 1024)] },
-    })
-    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
-    expect(expectSinglePreparedImage().sizeBytes).toBe(12 * 1024 * 1024)
-    expect(screen.queryByRole('alert')).toBeNull()
-  })
-
-  it('refuses a 2049 px image before send and names the pixel bound', async () => {
-    const { container } = render(<ComposerPanel inline />)
-    fireEvent.change(pickerInput(container), {
-      target: { files: [pngIhdrFile('over-res.png', COMPOSER_MAX_IMAGE_DIMENSION + 1, 128)] },
-    })
-    await waitFor(() =>
-      expect(screen.getByRole('alert').textContent).toContain(
-        `over-res.png is too large. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
-      )
-    )
+    expect(screen.getByRole('alert').textContent).toBe('huge.png is too large. Max size is 3 MB.')
     expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
@@ -578,24 +565,52 @@ describe('ComposerPanel with an image-capable model', () => {
     )
   })
 
-  it('attaches 10MiB + 7MiB in the composer; the hop owns the aggregate', async () => {
+  it('refuses an image that would push the message past the combined image budget', async () => {
     const { container } = render(<ComposerPanel inline />)
-    fireEvent.change(pickerInput(container), {
-      target: {
-        files: [
-          imageFileWithReportedSize('fits.png', 'image/png', 10 * 1024 * 1024),
-          imageFileWithReportedSize('over-total.png', 'image/png', 7 * 1024 * 1024),
-        ],
-      },
+    const rawBytes = Math.floor(COMPOSER_MAX_IMAGE_BYTES * 0.8)
+    const base64Bytes = Math.ceil(rawBytes / 3) * 4
+    expect(base64Bytes * 2).toBeLessThanOrEqual(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    expect(base64Bytes * 3).toBeGreaterThan(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    const files = ['first.png', 'second.png', 'third.png'].map((name, index) => {
+      const bytes = new Uint8Array(rawBytes)
+      bytes.set(PNG_BYTES)
+      bytes[PNG_BYTES.length] = index
+      return imageFile(name, 'image/png', bytes)
     })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
     await waitFor(() =>
       expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
     )
-    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual([
-      'fits.png',
-      'over-total.png',
-    ])
-    expect(screen.queryByRole('alert')).toBeNull()
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['first.png', 'second.png'])
+    expect(screen.getByRole('alert').textContent).toBe(
+      'third.png does not fit in this message: the images in one message are limited to 8 MB in total. Send the attached images first or remove one.'
+    )
+  })
+
+  it('counts images already in the composer toward the combined budget', async () => {
+    composerState.composerImageAttachments = [
+      {
+        id: 'already-attached',
+        name: 'already.png',
+        mimeType: 'image/png',
+        dataBase64: 'A'.repeat(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES - 8),
+        sizeBytes: 1,
+        previewDataUrl: 'data:image/png;base64,AAAA',
+      },
+    ]
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: { files: [imageFile('small.png', 'image/png')] },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toMatch(/^small\.png does not fit/)
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 
   it('does not let a dropped non-image take one of the free image slots', async () => {
@@ -629,6 +644,76 @@ describe('ComposerPanel with an image-capable model', () => {
     expect(batch?.map(attachment => attachment.name)).toEqual(['a.png', 'b.png'])
     // The only message is the PDF refusal: no image was counted as skipped.
     expect(screen.getByRole('alert').textContent).toBe('doc.pdf is not supported. Use PNG or JPEG.')
+  })
+})
+
+describe('ComposerPanel Codex image budgets', () => {
+  beforeEach(() => {
+    composerModelState.data = {
+      provider: 'codex-subscription',
+      hostDefault: 'gpt-5.6-luna',
+      sessionModel: 'gpt-5.6-luna',
+      degraded: false,
+      models: [{ name: 'gpt-5.6-luna', displayName: 'Luna' }],
+    }
+    composerModelState.effectiveModel = 'gpt-5.6-luna'
+  })
+
+  it('explains a Codex oversize image at 16 MiB', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [
+          imageFileWithReportedSize('huge.png', 'image/png', CODEX_COMPOSER_MAX_IMAGE_BYTES + 1),
+        ],
+      },
+    })
+    await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
+    expect(screen.getByRole('alert').textContent).toBe('huge.png is too large. Max size is 16 MiB.')
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('accepts a 12MiB image above the usual 10MiB target', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: { files: [imageFileWithReportedSize('large.png', 'image/png', 12 * 1024 * 1024)] },
+    })
+    await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
+    expect(expectSinglePreparedImage().sizeBytes).toBe(12 * 1024 * 1024)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('refuses a 2049 px image before send and names the pixel bound', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: { files: [pngIhdrFile('over-res.png', CODEX_COMPOSER_MAX_IMAGE_DIMENSION + 1, 128)] },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        `over-res.png is too large. Max resolution is ${CODEX_COMPOSER_MAX_IMAGE_DIMENSION} px.`
+      )
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('attaches 10MiB + 7MiB in the composer; the hop owns the aggregate', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [
+          imageFileWithReportedSize('fits.png', 'image/png', 10 * 1024 * 1024),
+          imageFileWithReportedSize('over-total.png', 'image/png', 7 * 1024 * 1024),
+        ],
+      },
+    })
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    expect(addedBatches()[0]?.map(attachment => attachment.name)).toEqual([
+      'fits.png',
+      'over-total.png',
+    ])
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })
 

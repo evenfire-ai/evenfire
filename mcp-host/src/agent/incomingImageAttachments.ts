@@ -10,9 +10,10 @@ import type { TaskError } from '../queue/types'
  * Images accepted in one incoming message. Kept separate from
  * `CLERUM_ATTACHMENT_MAX_COUNT`, which caps the attachments a response returns.
  * Must match COMPOSER_MAX_IMAGE_ATTACHMENTS in desktop-app/ui/src/constants/attachments.ts.
- * The hop envelope is 24 MiB (rpc-proxy `chatJsonBody` + this host's chat
- * parser) with a 16 MiB credited image budget. This count is the fail-loud
- * admission cap, separate from the hop credit.
+ * Per-image bytes stay on the channel `attachmentMaxBytes` (issue #654 / PR
+ * #669) — this module must not clamp general inbound traffic to the Codex
+ * `VISUAL_LIMITS`. The Codex chat hop is a separate 24 MiB parser with a
+ * 16 MiB credited image budget. This count is the fail-loud admission cap.
  */
 export const INCOMING_IMAGE_MAX_COUNT = 20
 

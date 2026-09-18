@@ -1023,7 +1023,9 @@ describe('TaskExecutor', () => {
         type: 'image',
         mimeType: 'image/jpeg',
         data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-        source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
+        ...(providerType === 'codex-subscription'
+          ? { source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' } }
+          : {}),
       } satisfies MessageContentPart)
     }
   )
@@ -1048,6 +1050,28 @@ describe('TaskExecutor', () => {
       type: 'image',
       mimeType: 'image/png',
       data: 'cG5n',
+    } satisfies MessageContentPart)
+  })
+
+  it('binds image source when a Codex fallback is configured on an OpenAI primary', async () => {
+    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
+    const policy: LlmPolicy = {
+      fallbacks: [{ provider: 'codex-subscription', model: 'fallback-model' }],
+      triggerOn: ['provider_unavailable'],
+      cooldownSeconds: 30,
+    }
+    const deps = createDeps({
+      failover: { policy, engine: new FailoverEngine(policy), buildProvider: () => null },
+    })
+    const task = createTask('Analyze this image')
+    task.sourceMessage!.attachments = [createImageAttachment()]
+    await new TaskExecutor(task, deps).run()
+    const parts = getLastUserMessageFromLoopCall().contentParts ?? []
+    expect(vi.mocked(runToolUseLoop).mock.calls[0][0].imageSourceIdentity).toBe(true)
+    expect(parts[1]).toEqual({
+      type: 'image',
+      mimeType: 'image/jpeg',
+      data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
       source: { kind: 'attachment', attachmentId: 'att-1', messageId: 'msg-1' },
     } satisfies MessageContentPart)
   })
@@ -1104,9 +1128,6 @@ describe('TaskExecutor', () => {
       type: 'image',
       mimeType: 'image/jpeg',
       data: 'ZmFrZS1pbWFnZS1iYXNlNjQ=',
-      // A real identity, not a placeholder: internal sources have no delivery
-      // id, so the task that queued the message identifies it.
-      source: { kind: 'attachment', attachmentId: 'att-1', messageId: task.id },
     } satisfies MessageContentPart)
   })
 
