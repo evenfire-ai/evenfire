@@ -74,17 +74,21 @@ ways:
   reference the public `https://` doc page, and set `checkedAt` to the date the
   doc was **read** — never the deploy date, so re-running the migration cannot
   rejuvenate evidence.
-- **Let the operator curate it** from `/llm-models` (the same field on the POST
-  and PUT bodies). A row with no metadata reads as `unknown`: text keeps working,
-  images are refused with the model named.
+- **Let the operator curate it.** The catalog sync fills the column from
+  models.dev first; the operator overrides only where the vendor documentation
+  disagrees, through the admin API — `POST /admin/llm-models` or
+  `PUT /admin/llm-models/:id` with the `image_input` field. The Control UI
+  `/llm-models` page has no editor for this field. A row with no metadata reads
+  as `unknown`: text keeps working, images are refused with the model named.
 
-The seed is one idempotent statement, and `image_input IS NULL` is what lets
-operator-curated evidence win over it:
+The seed is one idempotent statement. Curated evidence replaces discovery
+evidence; once curated evidence is in place a re-run changes nothing:
 
 ```sql
 UPDATE llm_allowed_models
    SET image_input = $1::jsonb
- WHERE provider = $2 AND model = $3 AND image_input IS NULL
+ WHERE provider = $2 AND model = $3
+   AND (image_input IS NULL OR image_input->'evidence'->>'source' = 'discovery')
 ```
 
 Shape (validated by `@clerum/llm-providers` `parseImageInputCapability`;
@@ -104,8 +108,33 @@ Shape (validated by `@clerum/llm-providers` `parseImageInputCapability`;
 A `supported`/`unsupported` claim REQUIRES `evidence`; a `discovery`-sourced
 claim also requires `validUntil`. `null` clears (and normalizes to `unknown`),
 and renaming a row's provider/model clears it automatically. The catalog sync
-only ever writes `unknown` provenance — see `discoveryImageInput` in
-`control-api/src/services/llmCatalogSync.ts`.
+derives `supported` / `unsupported` from models.dev `modalities.input` (`image`
+present / absent) and records `unknown` when the entry has no usable
+`modalities`; `attachment` is not consulted. Discovery evidence never overwrites
+curated evidence and never overwrites newer discovery evidence — see
+`discoveryImageInput` in `control-api/src/services/llmCatalogSync.ts`.
+
+What operators still curate:
+
+1. ids models.dev does not list — 19 of the 44 pairs the allowlist seeds today,
+   such as Azure deployment names;
+2. models where the vendor documentation disagrees with models.dev (curated
+   evidence wins and is never overwritten);
+3. nothing on installations that run the cron — but without it and without a
+   sync inside the TTL the evidence expires, and running a sync restores it.
+
+#### Transport registration (mcp-host)
+
+Evidence is necessary, not sufficient. `mcp-host/src/llm/imageInput.ts` maps
+every provider id to a wire family (`EXPLICIT_DRIVER_FAMILY`,
+`imageWireFamilyFor`), and `TRANSPORT_SUPPORT` declares, per family and per
+dispatch method, whether the serializer carries image parts. A provider whose
+family is not registered (or registered `false`) resolves to
+`transport_unsupported` even with curated `supported` evidence. Path A providers
+get the `openai-compatible` family automatically when their descriptor carries a
+`baseURL`; without one they resolve to `unregistered`. Path B drivers must add an
+`EXPLICIT_DRIVER_FAMILY` entry and an `imageInputTransport.test.ts` case for each
+method they implement.
 
 ### 6. control-ui — `control-ui/lib/llm.ts`
 
@@ -142,7 +171,9 @@ Everything in Path A, **plus**:
 Add an explicit `case '<id>':` that builds the provider. Load any SDK **lazily**
 with a synchronous `require()` inside the arm (mcp-host is CommonJS) so the SDK is
 only parsed when the provider is actually used, and a broken dependency can't take
-down startup. Never route a driver provider through the `baseURL` arm.
+down startup. Never route a driver provider through the `baseURL` arm. Register
+the driver's image wire family (step 5, Transport registration) or images are
+refused for it.
 
 ### Credentials & non-secret env
 
@@ -230,9 +261,9 @@ Surfaces to update:
 **Data / assets** (not type-checked, but required for the provider to work end-to-end):
 
 - [ ] `control-api/src/db.ts` — allowlist seed migration (append-only, idempotent)
-- [ ] `control-api/src/db.ts` — curated `image_input` evidence for the ids whose
-      vision support the provider's own docs state (exact ids, `checkedAt` = the
-      date the doc was read; omit it to leave the row `unknown`)
+- [ ] `control-api/src/db.ts` — curated `image_input` evidence only for ids that
+      models.dev does not list, or where the vendor document contradicts
+      models.dev (exact ids, `checkedAt` = the date the doc was read)
 - [ ] `control-api/src/data/modelsDevSnapshot.ts` — vendored offline snapshot block, **derived from live models.dev** (the offline catalog-sync fallback; keys must match `PROVIDER_KEY_MAP`)
 - [ ] `control-api/src/data/modelsDevSnapshot.ts` — bump
       `VENDORED_MODELS_DEV_SNAPSHOT_CAPTURED_AT` to the regeneration commit's
