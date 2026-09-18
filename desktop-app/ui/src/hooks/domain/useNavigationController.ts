@@ -59,15 +59,31 @@ export function useNavigationController() {
   // Ensure a chat tab is active (navItem → chat this commit) without agent
   // logic: keep the active chat tab, else focus the last chat tab, else seed a
   // blank one. Agent selection is layered on by `handleSelectChatAgent`.
-  const focusChatSection = useCallback(() => {
+  //
+  // This precedence is the SINGLE source of "which chat did the nav focus":
+  // it RETURNS the focused conversation's identity (`agentRef`/`chatId`) when a
+  // real chat is focused, or `null` when it keeps/seeds a blank chat. The caller
+  // (`useAppController.handleNavSelect`) loads exactly that value instead of
+  // re-deriving the same rule in its own layer, so the loaded chat can never
+  // drift from the focused one (D4).
+  const focusChatSection = useCallback((): { agentRef: string; chatId: string } | null => {
     setAppsPickerActive(false)
-    setWorkspaceTabs(current => {
-      const active = activeWorkspaceTab(current)
-      if (active?.kind === 'chat') return current
-      const lastChat = [...current.tabs].reverse().find(tab => tab.kind === 'chat')
-      if (lastChat) return { ...current, activeTabId: lastChat.id }
-      return newChatTab(current, nextWorkspaceTabId(), null)
-    })
+    const current = workspaceTabsRef.current
+    const active = activeWorkspaceTab(current)
+    const target =
+      active?.kind === 'chat'
+        ? active
+        : [...current.tabs].reverse().find(tab => tab.kind === 'chat')
+    if (target) {
+      setWorkspaceTabs(state =>
+        state.activeTabId === target.id ? state : { ...state, activeTabId: target.id }
+      )
+      return target.chat?.agentRef && target.chat.chatId
+        ? { agentRef: target.chat.agentRef, chatId: target.chat.chatId }
+        : null
+    }
+    setWorkspaceTabs(state => newChatTab(state, nextWorkspaceTabId(), null))
+    return null
   }, [nextWorkspaceTabId])
 
   /**
@@ -111,29 +127,32 @@ export function useNavigationController() {
   // Base section navigation: every legacy `handleNavSelect(route)` call-site
   // routes here and becomes an open/focus tab action (the single writer). For
   // `chat`/`agents` it also clears `selectedAgent` exactly as before.
+  // Returns the chat `focusChatSection` focused (for the chat route) so the
+  // coordinator can load exactly that conversation; `null` for every other route
+  // and for a blank/seeded chat.
   const handleNavSelect = useCallback(
-    (item: NavItem) => {
+    (item: NavItem): { agentRef: string; chatId: string } | null => {
       if (item === DESKTOP_ROUTES.chat) {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
-        focusChatSection()
-        return
+        return focusChatSection()
       }
       if (item === DESKTOP_ROUTES.apps) {
         showAppsPicker()
-        return
+        return null
       }
       if (item === DESKTOP_ROUTES.files) {
         openFilesSection()
-        return
+        return null
       }
       const section = settingsSectionForRoute(item)
-      if (!section) return
+      if (!section) return null
       if (section === 'agents') {
         setSelectedAgent(null)
         setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.connectors)
       }
       openSettingsSection(section)
+      return null
     },
     [focusChatSection, openFilesSection, openSettingsSection, showAppsPicker]
   )

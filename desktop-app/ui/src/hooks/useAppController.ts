@@ -985,8 +985,23 @@ export function useAppController() {
   // ─── Cross-domain: handleNavSelect (extended) ───
   const handleNavSelect = useCallback(
     (item: NavItem) => {
-      nav.handleNavSelect(item)
+      const focusedChat = nav.handleNavSelect(item)
       if (item === DESKTOP_ROUTES.chat) {
+        // `nav.handleNavSelect` owns the "which chat did this focus" precedence
+        // (active chat → last chat tab → blank) and RETURNS it. Load exactly that:
+        // an existing conversation is re-activated in place (dedupes by chatId —
+        // no new tab), so clicking "chats" resumes the open conversation instead of
+        // appending a fresh blank chat on every click. Only when the nav focused a
+        // blank/absent chat (`null`) do we pre-select the latest agent. No second
+        // copy of the precedence lives here — that seam duplication (D4) would let
+        // the loaded chat drift from the focused one if the rule ever changed.
+        if (focusedChat) {
+          handleSelectChatAgent(focusedChat.agentRef, {
+            chatId: focusedChat.chatId,
+            selectLatest: false,
+          })
+          return
+        }
         const latestAgent = pickLatestAgent(agentsData.agentNames, activity.agentLastActiveByAgent)
         if (latestAgent) {
           handleSelectChatAgent(latestAgent, { selectLatest: false })

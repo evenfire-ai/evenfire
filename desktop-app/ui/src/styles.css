@@ -13388,14 +13388,13 @@ pre {
 }
 
 /* Chat-drawer toggle (mini-spec 04a §C): a ghost control between the search and
-   the bell, styled like the titlebar bell. `margin-left: auto` collapses the
-   free space to its left so the toggle and the utilities cluster (which also
-   carries margin-left:auto) sit together at the right, the toggle immediately
-   left of the bell with the top-bar gap. */
-.top-bar .chat-drawer-toggle {
-  margin-left: auto;
-}
-
+   the bell, styled like the titlebar bell. In the title bar the whole cluster
+   is packed to the right by `.window-titlebar__actions .top-bar`'s
+   `justify-content: flex-end` (search/toggle/bell are all `flex: 0 0 auto` with
+   `margin-left: 0`), so the toggle sits in flow between the search and the bell
+   with the top-bar gap — it must NOT carry a `margin-left: auto`, which would
+   absorb the row's free space and shove the search pill to the far left, on top
+   of the app's leading actions. */
 .window-titlebar__actions .chat-drawer-toggle {
   width: 30px;
   height: 30px;
@@ -13403,6 +13402,10 @@ pre {
   border-color: transparent;
   background: transparent;
   box-shadow: none;
+  /* The root title bar is the only `-webkit-app-region: drag` band; every
+     clickable control carves itself out as `no-drag` (see .window-titlebar__leading)
+     or the OS swallows its clicks for window dragging. */
+  -webkit-app-region: no-drag;
 }
 
 .window-titlebar__actions .chat-drawer-toggle svg {
@@ -16529,6 +16532,12 @@ pre {
 }
 /* Keyboard-first chat view tabs */
 .chat-view-tabs {
+  /* The strip is now a global sibling ABOVE the per-kind seam (mini-spec 03 §3),
+     no longer nested in `.chat-view-workspace` — which is where this token is
+     otherwise declared. Declare it here too so the strip's own baseline shelf
+     (`::after`) and the inactive-tab borders keep resolving on every route. */
+  --chat-view-selected-border: rgba(var(--accent-rgb), 0.25);
+
   flex: 0 0 auto;
   display: flex;
   min-width: 0;

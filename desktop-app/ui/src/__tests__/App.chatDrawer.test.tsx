@@ -1256,6 +1256,49 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(drawer!.hasAttribute('inert')).toBe(false)
   })
 
+  // T5 invariant — on a DOM/files tab (no embed to measure) the drawer must dock
+  // BELOW the global tab strip, so its right tabs are never hidden behind the
+  // drawer. App measures the strip's bottom edge and publishes it as the rail's
+  // `--rail-top`; without the fix the rail fell back to the static 64px CSS
+  // fallback (which lands mid-strip) and covered the strip's right tabs.
+  it('docks the DOM-tab drawer below the measured tab strip, not the 64px fallback (T5)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: 'chat-1',
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    const { container } = render(<App />)
+    expect(appHeaderHarness.props?.drawerAvailable).toBe(true)
+
+    // jsdom lays nothing out (getBoundingClientRect is all-zero), so give the
+    // global tab strip a measurable bottom edge. The rail must anchor to THIS,
+    // below the strip, never the static 64px fallback.
+    const strip = container.querySelector('.chat-view-tabs') as HTMLElement
+    expect(strip).not.toBeNull()
+    strip.getBoundingClientRect = () =>
+      ({
+        bottom: 128,
+        top: 40,
+        height: 88,
+        width: 0,
+        left: 0,
+        right: 0,
+        x: 0,
+        y: 40,
+        toJSON: () => ({}),
+      }) as DOMRect
+
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+
+    const rail = document.querySelector('.right-rail-shell') as HTMLElement
+    expect(rail).not.toBeNull()
+    expect(rail.getAttribute('data-occupant')).toBe('chat-drawer')
+    // Anchored to the strip's measured bottom (128px), not the mid-strip 64px
+    // fallback that would hide the strip's right tabs behind the drawer.
+    expect(rail.style.getPropertyValue('--rail-top')).toBe('128px')
+  })
+
   // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it
   // open and never lets the chat reconcile steal focus onto a chat tab.
   it('keeps the drawer intact across non-chat tab switches without stealing focus (R5/DEC-2)', () => {

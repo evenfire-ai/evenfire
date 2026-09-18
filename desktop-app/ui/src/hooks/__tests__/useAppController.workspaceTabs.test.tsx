@@ -61,6 +61,50 @@ describe('useAppController — universal tab store ports', () => {
     expect(active?.chat?.agentRef).toBe('agent-x')
   })
 
+  // (a2) Navigating back to chat RESUMES the existing conversation instead of
+  // appending a fresh blank chat on every click. Regression for the "each click
+  // on the chats nav opens a NEW chat" bug: the parent unconditionally ran
+  // `handleSelectChatAgent(latestAgent, { selectLatest: false })`, which appended
+  // a blank chat tab whenever the focused chat was a real conversation.
+  it('resumes the existing conversation (no new chat tab) when navigating back to chat', async () => {
+    installAppControllerClerum({ agentNames: ['agent-x'] })
+    const app = renderAppController()
+    unmount = app.unmount
+
+    await waitFor(() => expect(app.result.current.isAuthenticated).toBe(true))
+    await waitFor(() => expect(app.result.current.initialExperienceLoading).toBe(false))
+
+    // Open a real conversation, then leave the chat route for a DOM tab.
+    act(() => {
+      app.result.current.handleSelectChatAgent('agent-x', { chatId: 'chat-1', selectLatest: false })
+    })
+    await waitFor(() => expect(app.result.current.activeChatId).toBe('chat-1'))
+    const chatTabsBefore = app.result.current.workspaceTabs.tabs.filter(
+      tab => tab.kind === 'chat'
+    ).length
+
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.files)
+    })
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.files)
+
+    // Click "chats": must re-activate chat-1, not spawn a new blank chat.
+    act(() => {
+      app.result.current.handleNavSelect(DESKTOP_ROUTES.chat)
+    })
+
+    expect(app.result.current.navItem).toBe(DESKTOP_ROUTES.chat)
+    expect(app.result.current.activeChatId).toBe('chat-1')
+    const active = activeWorkspaceTab(app.result.current.workspaceTabs)
+    expect(active?.kind).toBe('chat')
+    expect(active?.chat?.chatId).toBe('chat-1')
+    // No extra chat tab was appended.
+    const chatTabsAfter = app.result.current.workspaceTabs.tabs.filter(
+      tab => tab.kind === 'chat'
+    ).length
+    expect(chatTabsAfter).toBe(chatTabsBefore)
+  })
+
   // (b) A pending chat selection survives a tab/route change: selecting a chat
   // with keepNavItem while on the apps route records the pending selection, and
   // the agent-selection effect replays it (the chat actually loads) without

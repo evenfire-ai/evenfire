@@ -281,6 +281,10 @@ export function App() {
   // drawer follows the app content down when the sandbox-ui header wraps (narrow
   // window). 0 means "not measured yet" -> the CSS fallback (64px) applies.
   const [chatDrawerEmbedTop, setChatDrawerEmbedTop] = React.useState<number | null>(null)
+  // Measured bottom of the global tab strip, published as the rail top on DOM
+  // tabs so the fixed chat drawer starts BELOW the strip (app tabs use the
+  // embed-slot top instead). 0/null means "not measured yet" -> the CSS fallback.
+  const [chatDrawerContentTop, setChatDrawerContentTop] = React.useState<number | null>(null)
   const [chatSwitcherFocusRequestId, setChatSwitcherFocusRequestId] = React.useState(0)
   const [availableSandboxUiApps, setAvailableSandboxUiApps] = React.useState<ActiveSandboxUiApp[]>(
     []
@@ -699,10 +703,12 @@ export function App() {
   // flicker, and never the "inert forever" trap where a DOM tab waits for a
   // bounds ack that never arrives.
   const drawerReady = drawerHasEmbed ? chatDrawerReady : chatDrawerVisible
-  // The rail follows the embed's measured header top only on app tabs; DOM tabs
-  // pass null so the shell uses its static CSS fallback (§A2 — never consume an
-  // embed measurement that will not arrive on a DOM tab).
-  const drawerRailTop = drawerHasEmbed ? chatDrawerEmbedTop : null
+  // The rail starts below the header on both tab kinds: app tabs follow the
+  // embed's measured header top; DOM tabs follow the measured bottom of the
+  // global tab strip (both sit below the strip). The static 64px CSS fallback
+  // predates the global strip and now lands mid-strip, so a DOM tab that fell
+  // back to it would hide the strip's right tabs behind the drawer.
+  const drawerRailTop = drawerHasEmbed ? chatDrawerEmbedTop : chatDrawerContentTop
   // The notification tray's drawer form occupies the same fixed right-rail rect
   // as the chat drawer, so it only takes drawer form when the chat drawer is NOT
   // visible; while the chat drawer is up it reverts to its popover/overlay form
@@ -964,6 +970,31 @@ export function App() {
   React.useEffect(() => {
     setChatDrawerReady(false)
   }, [activeSandboxUiApp?.appRef, chatDrawerVisible])
+
+  // On a DOM tab the drawer has no embed slot to anchor to; measure the global
+  // tab strip's bottom edge (via layout effect so the rail is placed before the
+  // first paint, no flash) and publish it as the rail top so the drawer docks
+  // BELOW the strip — matching app tabs, where the embed-slot top already does.
+  // Cleared for app tabs / a hidden drawer, which fall back to the embed top.
+  React.useLayoutEffect(() => {
+    if (!chatDrawerVisible || drawerHasEmbed) {
+      setChatDrawerContentTop(null)
+      return
+    }
+    const strip = contentPanelRef.current?.querySelector('.chat-view-tabs')
+    if (!strip) {
+      setChatDrawerContentTop(null)
+      return
+    }
+    const measure = () => {
+      setChatDrawerContentTop(Math.round(strip.getBoundingClientRect().bottom))
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(strip)
+    return () => observer.disconnect()
+  }, [chatDrawerVisible, drawerHasEmbed])
 
   // Once the drawer becomes visible AND ready after a `chat.switcher` on a closed
   // drawer, the switcher is mounted and no longer `inert` — bump its focus request
