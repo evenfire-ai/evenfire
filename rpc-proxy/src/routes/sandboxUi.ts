@@ -684,7 +684,7 @@ export function createSandboxUiSessionRouter(): Router {
     // shadow headers. http-proxy fires onProxyReq once with the
     // ClientRequest. Each request gets a filtered listener, and cleanup removes
     // it after the response closes. `on` is intentional: shared proxy events
-    // can be interleaved across concurrent requests, so a one-shot listener
+    // can be interleaved across concurrent requests, so a once-only listener
     // could be consumed by another request before this request's event arrives.
     const onProxyReq = (
       proxyReq: ClientRequest,
