@@ -15,6 +15,7 @@ import { chatTransportSupportsImageInput, imageInputDenialMessage } from '../llm
 import type { IncomingMessage, MessageResponse, SetModelResult } from '../server/types'
 import { serializeSessionKey } from '../session/types.js'
 import { validateIncomingImageAttachments } from './incomingImageAttachments'
+import type { SessionModelSelectionOptions } from './sessionModelSelection'
 
 /** The model a task would actually run on, as `resolveTaskModel` reports it. */
 interface AdmissionResolvedModel {
@@ -50,7 +51,8 @@ export interface IncomingAdmissionDeps {
     hostRef: string,
     chatId: string | undefined,
     model: string,
-    expectedRevision?: number
+    expectedRevision?: number,
+    options?: SessionModelSelectionOptions
   ) => Promise<SetModelResult>
   dispatch: (
     message: IncomingMessage,
@@ -166,6 +168,61 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
 
     const dispatchMessage = () => deps.dispatch(normalizedMessage, options)
 
+    /** Decide whether the model a task resolved to can read this message's
+     *  images. The refusal is the exact response the Desktop receives, so the
+     *  pre-write check and the per-task check cannot drift apart. */
+    const admitImageModel = (
+      resolved: AdmissionResolvedModel | null | undefined
+    ):
+      | { ok: true; pair: { provider: string; model: string } }
+      | { ok: false; response: MessageResponse } => {
+      if (!resolved) {
+        logRefusal({
+          provider: deps.hostProvider() ?? 'unknown',
+          model: null,
+          code: LlmErrorCode.ImageInputUnknown,
+          reason: 'no_model',
+        })
+        return {
+          ok: false,
+          response: {
+            success: false,
+            error: {
+              code: LlmErrorCode.ImageInputUnknown,
+              message: 'The image model is unavailable. Select a verified image-capable model.',
+              retryable: false,
+              provider: 'unknown',
+            },
+          },
+        }
+      }
+      const pair = { provider: resolved.provider.getProviderType(), model: resolved.model }
+      const facts = deps.resolveImageInput(pair.provider, pair.model)
+      const decision = resolveImageInputCapability(facts?.capability, {
+        transportSupported: chatTransportSupportsImageInput(pair.provider),
+      })
+      if (decision.state !== 'supported') {
+        const code =
+          decision.state === 'unknown'
+            ? LlmErrorCode.ImageInputUnknown
+            : LlmErrorCode.ImageInputUnsupported
+        logRefusal({ provider: pair.provider, model: pair.model, code, reason: decision.reason })
+        return {
+          ok: false,
+          response: {
+            success: false,
+            error: {
+              code,
+              message: imageInputDenialMessage(decision, pair),
+              retryable: false,
+              provider: pair.provider,
+            },
+          },
+        }
+      }
+      return { ok: true, pair }
+    }
+
     const runHandler = (): MessageResponse | Promise<MessageResponse> => {
       if (!hasAttachments) return dispatchMessage()
       return (async () => {
@@ -176,48 +233,13 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
           threadId: normalizedMessage.threadId,
         })
         const conversation = await deps.getConversationByKey(key, normalizedMessage.sender)
-        const resolved = deps.resolveTaskModel(
-          acceptedVisualSelection ?? conversation?.modelSelections
+        // Checked again here even after the pre-write check below: this is the
+        // pair the task will actually run on, on every path into the handler.
+        const admission = admitImageModel(
+          deps.resolveTaskModel(acceptedVisualSelection ?? conversation?.modelSelections)
         )
-        if (!resolved) {
-          logRefusal({
-            provider: deps.hostProvider() ?? 'unknown',
-            model: null,
-            code: LlmErrorCode.ImageInputUnknown,
-            reason: 'no_model',
-          })
-          return {
-            success: false,
-            error: {
-              code: LlmErrorCode.ImageInputUnknown,
-              message: 'The image model is unavailable. Select a verified image-capable model.',
-              retryable: false,
-              provider: 'unknown',
-            },
-          }
-        }
-        const pair = { provider: resolved.provider.getProviderType(), model: resolved.model }
-        const facts = deps.resolveImageInput(pair.provider, pair.model)
-        const decision = resolveImageInputCapability(facts?.capability, {
-          transportSupported: chatTransportSupportsImageInput(pair.provider),
-        })
-        if (decision.state !== 'supported') {
-          const code =
-            decision.state === 'unknown'
-              ? LlmErrorCode.ImageInputUnknown
-              : LlmErrorCode.ImageInputUnsupported
-          logRefusal({ provider: pair.provider, model: pair.model, code, reason: decision.reason })
-          return {
-            success: false,
-            error: {
-              code,
-              message: imageInputDenialMessage(decision, pair),
-              retryable: false,
-              provider: pair.provider,
-            },
-          }
-        }
-        normalizedMessage.imageModel = pair
+        if (!admission.ok) return admission.response
+        normalizedMessage.imageModel = admission.pair
         return dispatchMessage()
       })()
     }
@@ -231,6 +253,25 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
     // the user's turn (fail-closed only on the selection, inside the helper).
     const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
     if (piggybackModel && normalizedMessage.channelType === 'rpc') {
+      // An image the requested model cannot read is refused BEFORE the
+      // selection is written: persisting it (and bumping the revision) for a
+      // turn that is then refused would leave the session on a model the user
+      // never got an answer from. Only the pair the selection resolves to is
+      // checked here; when resolution does not honour the requested model
+      // (not in the catalog, or a boot fallback serves another pair) the write
+      // gate and the per-task check below keep their existing verdicts.
+      const hostProvider = deps.hostProvider()
+      if (hasAttachments && hostProvider) {
+        const requested = deps.resolveTaskModel({ [hostProvider]: piggybackModel })
+        if (
+          !requested ||
+          (requested.provider.getProviderType() === hostProvider &&
+            requested.model === piggybackModel)
+        ) {
+          const admission = admitImageModel(requested)
+          if (!admission.ok) return admission.response
+        }
+      }
       return (async () => {
         // Hoisted out of the try so the ack below can report the revision the
         // write produced. The send IS the write; its result travels back here.
@@ -241,7 +282,11 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
             normalizedMessage.channelId,
             normalizedMessage.threadId,
             piggybackModel,
-            hasAttachments ? message.modelSelectionRevision : undefined
+            hasAttachments ? message.modelSelectionRevision : undefined,
+            // An image send carries the model the client displays, not a user
+            // pick: asking for the effective model must not pin it. Text-only
+            // piggybacks and `POST /v1/runtime/model` keep writing.
+            hasAttachments ? { skipWriteWhenEffective: true } : undefined
           )
           if (!applied.ok) {
             if (hasAttachments) {

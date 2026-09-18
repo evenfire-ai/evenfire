@@ -205,7 +205,8 @@ describe('#654 incoming admission gate', () => {
       'agent-1',
       'chat-1',
       'glm-5.3-flash',
-      3
+      3,
+      { skipWriteWhenEffective: true }
     )
     expect(spies.dispatch).toHaveBeenCalledTimes(0)
   })

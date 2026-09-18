@@ -78,13 +78,31 @@ export interface MessageResponse {
   model?: string
   taskId?: string
   /**
-   * Issue #654 — the persisted model-selection revision after this message
-   * applied a piggybacked `model`, or the winning revision on a CAS conflict.
+   * Issue #654 — the session's model-selection revision after the Host accepted
+   * a piggybacked `model`, or the winning revision on a CAS conflict.
    *
    * The send IS the write, so its result must travel back on the same response:
    * `POST /v1/runtime/model` is unreachable on a suspended Host, which is why
-   * the selection rides the message in the first place. Absent on a successful
-   * ack after a piggyback means the Host IGNORED the selection.
+   * the selection rides the message in the first place.
+   *
+   * Present when:
+   *  - the piggybacked `model` was written: the new revision (the previous
+   *    one + 1). A text-only message always writes, even the Host default;
+   *  - an IMAGE message's `model` already WAS the effective model (the explicit
+   *    selection, or the Host default when there is none): nothing is written
+   *    and this is the unchanged current revision. The image carries the model
+   *    the client displays, which is not a user pick, so it must not pin it;
+   *  - an image message's `modelSelectionRevision` was stale: the winning
+   *    revision, with `LLM_MODEL_SELECTION_CONFLICT`.
+   *
+   * Absent when the message carried no `model`, when the `modelSelectionRevision`
+   * itself was invalid, when an image message was refused because the requested
+   * model cannot read images (`LLM_IMAGE_INPUT_*`; the selection is NOT written,
+   * so the revision the client holds is still current), or when the selection
+   * was rejected. (During a boot fallback the task runs on another pair; if THAT
+   * pair refuses the image, the requested selection was already written and the
+   * refusal carries its new revision.) Absent on a successful ack after a piggyback means the Host
+   * IGNORED the selection.
    */
   modelSelectionRevision?: number
   usage?: {

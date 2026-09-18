@@ -44,7 +44,6 @@ describe('visual input validation', () => {
     [{ ...image, dataBase64: '' }],
     [{ ...image, dataBase64: 'YQ=' }],
     [{ ...image, dataBase64: 'YR==' }],
-    [{ ...image, dataBase64: 'a'.repeat(20) }],
     [image, image, image],
     [image, { ...image, encoding: 'url' }],
   ])('rejects the whole message for invalid input %#', raw => {
@@ -55,6 +54,59 @@ describe('visual input validation', () => {
     })
     expect(result).not.toHaveProperty('attachments')
   })
+  describe('size limit (maxBytes = 10)', () => {
+    // A well-formed PNG of exactly `size` bytes, so a rejection can only come
+    // from the size checks: the shape, re-encoding and signature checks pass.
+    const pngOfSize = (size: number) =>
+      Buffer.concat([PNG_SIGNATURE, Buffer.alloc(size - PNG_SIGNATURE.length)]).toString('base64')
+    // The pre-decode bound on the base64 length for maxBytes = 10.
+    const encodedBound = Math.ceil(limits.maxBytes / 3) * 4
+    const SIZE_MESSAGE = 'An image exceeds the attachment size limit.'
+
+    it('accepts a PNG of exactly maxBytes (control)', () => {
+      const dataBase64 = pngOfSize(10)
+      expect(validateIncomingImageAttachments([{ ...image, dataBase64 }], limits)).toEqual({
+        ok: true,
+        attachments: [{ ...image, dataBase64 }],
+      })
+    })
+
+    it.each([11, 12])(
+      'rejects a %i-byte PNG on its decoded size (its base64 fits the pre-decode bound)',
+      size => {
+        const dataBase64 = pngOfSize(size)
+        // Precondition: only the decoded-size check can reject this input.
+        expect(dataBase64.length).toBeLessThanOrEqual(encodedBound)
+        const result = validateIncomingImageAttachments([{ ...image, dataBase64 }], limits)
+        expect(result).toEqual({
+          ok: false,
+          error: {
+            code: 'LLM_INVALID_ATTACHMENT',
+            message: SIZE_MESSAGE,
+            retryable: false,
+            provider: 'unknown',
+          },
+        })
+      }
+    )
+
+    it('rejects a 13-byte PNG whose base64 already exceeds the pre-decode bound', () => {
+      const dataBase64 = pngOfSize(13)
+      expect(dataBase64.length).toBeGreaterThan(encodedBound)
+      const result = validateIncomingImageAttachments([{ ...image, dataBase64 }], limits)
+      expect(result.ok === false && result.error.message).toBe(SIZE_MESSAGE)
+    })
+
+    it('rejects oversized input before decoding it', () => {
+      // Too long for the bound AND not canonical base64 (length is not a
+      // multiple of 4). Only the pre-decode length check can answer with the
+      // size message; without it the shape check answers "invalid base64".
+      const dataBase64 = 'A'.repeat(encodedBound + 5)
+      const result = validateIncomingImageAttachments([{ ...image, dataBase64 }], limits)
+      expect(result.ok === false && result.error.message).toBe(SIZE_MESSAGE)
+    })
+  })
+
   it('does not trust caller-supplied attachment metadata', () => {
     expect(
       validateIncomingImageAttachments(

@@ -20,6 +20,11 @@
  * a legacy call without it still bumps the revision so a straggler is detectable.
  * A resolution here therefore means "the selection is on disk", not "the op was
  * queued" — which is what the caller's ACK asserts.
+ *
+ * With `skipWriteWhenEffective` (message admission only), a request for the
+ * session's current effective model (explicit selection, or the Host default
+ * when there is none) is admitted WITHOUT a write: it returns the current
+ * revision, after the same allowlist and revision checks.
  */
 import type { AllowlistView } from '../config/allowlistCheck'
 import { isModelAllowed } from '../config/modelResolution'
@@ -43,13 +48,23 @@ export interface SessionModelSelectionDeps {
   convManager: ConversationManager
 }
 
+export interface SessionModelSelectionOptions {
+  /** Admit a request for the session's current effective model WITHOUT
+   *  writing it. Only the message-admission piggyback sets this: an image send
+   *  carries the model the client displays, which is not a user pick. An
+   *  explicit pick (`POST /v1/runtime/model`) leaves it unset, so choosing the
+   *  Host default pins it and the chat stays on it if the default changes. */
+  skipWriteWhenEffective?: boolean
+}
+
 export async function applySessionModelSelection(
   deps: SessionModelSelectionDeps,
   userSub: string,
   hostRef: string,
   chatId: string | undefined,
   model: string,
-  expectedRevision?: number
+  expectedRevision?: number,
+  options: SessionModelSelectionOptions = {}
 ): Promise<SetModelResult> {
   const { modelCfg, allowlistView, convManager } = deps
   const provider = modelCfg?.provider ?? 'unknown'
@@ -101,6 +116,57 @@ export async function applySessionModelSelection(
     threadId: chatId,
     source: 'rpc',
   })
+  // With `skipWriteWhenEffective`, asking for the model the session ALREADY
+  // runs on is not a change, so it is not written. The effective model is the
+  // explicit selection for this provider when there is one, otherwise the Host
+  // default. Without this, every image send (which carries `model` = the model
+  // the client displays, usually the Host default) would pin the default as an
+  // explicit selection and bump the revision, so a later Host default change
+  // would no longer reach the session. The revision gate still applies: a stale `expectedRevision` is a
+  // conflict here exactly as it is in the store. The reported revision is the
+  // one on this process's conversation mirror; if another writer moved the
+  // durable row past it, the caller's next real write conflicts and carries
+  // the winner.
+  const currentRevision = conversation.modelSelectionRevision ?? 0
+  const effectiveModel = conversation.modelSelections?.[provider] ?? modelCfg.name
+  if (options.skipWriteWhenEffective === true && model === effectiveModel) {
+    if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
+      logger.info(
+        {
+          event: 'set_model_conflict',
+          userId: userSub,
+          chatId,
+          provider,
+          modelSelectionRevision: currentRevision,
+        },
+        'set_model_conflict'
+      )
+      return {
+        ok: false as const,
+        reason: 'model_selection_conflict' as const,
+        provider,
+        model,
+        modelSelectionRevision: currentRevision,
+      }
+    }
+    logger.info(
+      {
+        event: 'set_model_unchanged',
+        userId: userSub,
+        chatId,
+        provider,
+        model,
+        modelSelectionRevision: currentRevision,
+      },
+      'set_model_unchanged'
+    )
+    return {
+      ok: true as const,
+      provider,
+      model,
+      modelSelectionRevision: currentRevision,
+    }
+  }
   // #654 — the durable CAS write is AWAITED here: this promise resolving is what
   // lets the route (and the piggybacked `message.model` path) ACK a selection.
   // A losing CAS leaves the row and the in-RAM map on the winner's value and is

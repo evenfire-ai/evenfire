@@ -21,7 +21,10 @@ import type { PendingCronResult } from './agent/cronDispatch'
 import { createIncomingAdmission } from './agent/incomingAdmission'
 import { IncomingDelivery } from './agent/incomingDelivery'
 import { INCOMING_IMAGE_MAX_COUNT } from './agent/incomingImageAttachments'
-import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
+import {
+  type SessionModelSelectionOptions,
+  applySessionModelSelection as applySessionModelSelectionCore,
+} from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
 // Structured JSON logging — must be first import
@@ -1911,7 +1914,8 @@ function applySessionModelSelection(
   hostRef: string,
   chatId: string | undefined,
   model: string,
-  expectedRevision?: number
+  expectedRevision?: number,
+  options?: SessionModelSelectionOptions
 ): Promise<SetModelResult> {
   return applySessionModelSelectionCore(
     {
@@ -1926,7 +1930,8 @@ function applySessionModelSelection(
     hostRef,
     chatId,
     model,
-    expectedRevision
+    expectedRevision,
+    options
   )
 }
 
