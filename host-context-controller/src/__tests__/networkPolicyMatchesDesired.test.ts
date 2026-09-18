@@ -252,9 +252,10 @@ describe('networkPolicyMatchesDesired', () => {
         podSelector: selector,
         policyTypes: ['Ingress'],
         // Witness is occupancy: a present ingress array is not omitempty-equivalent
-        // to an omitted field. Comparison is JSON of cloned objects, not the
-        // client-node ObjectSerializer, so the wire key is `from`.
-        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+        // to an omitted field. The client-node type names this field `_from`
+        // (reserved word). The matcher JSON-compares clones and does not run
+        // ObjectSerializer, so the key stays `_from`.
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
       },
     }
     expect(networkPolicyMatchesDesired(withRule, live)).toBe(false)
@@ -269,14 +270,14 @@ describe('networkPolicyMatchesDesired', () => {
       spec: {
         podSelector: selector,
         policyTypes: ['Ingress'],
-        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'peer' } } }] }],
       },
     }
     const other: k8s.V1NetworkPolicy = {
       ...peer,
       spec: {
         ...peer.spec!,
-        ingress: [{ from: [{ podSelector: { matchLabels: { app: 'other' } } }] }],
+        ingress: [{ _from: [{ podSelector: { matchLabels: { app: 'other' } } }] }],
       },
     }
     expect(networkPolicyMatchesDesired(peer, other)).toBe(false)
