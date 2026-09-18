@@ -298,7 +298,12 @@ export function openPreviewTab(
   const existing = state.tabs.find(
     tab => tab.kind === 'preview' && tab.preview?.gfsUri === input.gfsUri
   )
-  const title = input.title?.trim()
+  // A preview tab's title is a GFS file name — externally-controlled input in the
+  // same threat class as a plugin's document.title (control chars, bidi overrides,
+  // zero-width, unbounded length), so it goes through the shared tab-title
+  // sanitizer at this single store border; every render site inherits the cleaned
+  // value. Empty-after-sanitize falls back to 'Preview' below.
+  const title = input.title ? sanitizeAppTabTitle(input.title) : ''
   if (existing) {
     return {
       tabs:

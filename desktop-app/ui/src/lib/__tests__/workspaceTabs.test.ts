@@ -402,6 +402,24 @@ describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)',
     })
   })
 
+  it('sanitizes an externally-controlled file name at the preview store border', () => {
+    let state = createEmptyWorkspaceTabsState()
+    // A GFS file name carrying a bidi override + zero-width must not reach the tab
+    // chrome raw — same threat class as a plugin document.title.
+    state = openPreviewTab(state, previewInput('p-evil', 'gfs://main/evil', `re‮port​.png`))
+    const created = state.tabs.find(t => t.id === 'p-evil')
+    expect(created?.title).toBe('report.png')
+
+    // A name that reduces to empty after sanitizing falls back to 'Preview',
+    // never a blank tab label.
+    state = openPreviewTab(state, previewInput('p-blank', 'gfs://main/blank', `‮​`))
+    expect(state.tabs.find(t => t.id === 'p-blank')?.title).toBe('Preview')
+
+    // The same cleaning applies when a re-open aligns the title of an existing tab.
+    state = openPreviewTab(state, previewInput('p-evil2', 'gfs://main/evil', `cl​ean.png`))
+    expect(state.tabs.find(t => t.preview?.gfsUri === 'gfs://main/evil')?.title).toBe('clean.png')
+  })
+
   it('omits mimeType from the payload when absent (markdown has none)', () => {
     let state = createEmptyWorkspaceTabsState()
     state = openPreviewTab(state, {
