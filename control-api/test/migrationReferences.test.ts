@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, extname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CONTROL_API_MIGRATIONS } from '../src/db.js'
@@ -7,9 +7,12 @@ import { CONTROL_API_MIGRATIONS } from '../src/db.js'
 // Operator-facing errors, comments and runbooks cite control-api migrations.
 // Migrations have been renumbered before (5e6c990f8), which silently turned
 // bare numbers like "migration 0068" into references to unrelated schema
-// changes. These checks pin every version-shaped token to a registered
-// version, and forbid bare numbers in gfs-controller, which cites control-api
-// migrations across a service boundary.
+// changes. In every scanned root, these checks pin each version-shaped token
+// to a registered version and forbid citing a migration by bare number.
+//
+// Not covered: whether a registered version is the right one for the text
+// around it (citing 0071_… where 0072_… belongs passes), and bare numbers not
+// introduced by the word "migration(s)" (for example "the 0114 trigger").
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const REGISTERED = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
@@ -27,9 +30,9 @@ const VERSION_TOKEN = new RegExp(String.raw`(?<![0-9A-Za-z_])${NUMBER}_[a-z][a-z
 // is a stale reference.
 const LEGACY_VERSIONS_ARRAY = /legacyVersions:\s*\[[^\]]*\]/g
 // "migration(s)" followed by a list of versions, across line breaks and
-// separators such as ":", "`", "(", ",", "/", "and", "or".
+// separators such as ":", "`", "(", ",", "/", "–", "and", "or".
 const MIGRATION_LIST = new RegExp(
-  String.raw`\bmigrations?\b((?:[\s:\`#(),/-]+|\b(?:and|or)\b|${NUMBER}(?:_[a-z][a-z0-9_]*)?(?![0-9A-Za-z_]))+)`,
+  String.raw`\bmigrations?\b((?:[\s:\`#(),/\-–]+|\b(?:and|or)\b|${NUMBER}(?:_[a-z][a-z0-9_]*)?(?![0-9A-Za-z_]))+)`,
   'gi'
 )
 const BARE_NUMBER = new RegExp(String.raw`(?<![0-9A-Za-z_])${NUMBER}(?![0-9A-Za-z_])`, 'g')
@@ -81,7 +84,11 @@ function scan(
   root: string,
   find: (text: string) => Array<{ index: number; token: string }>
 ): { files: number; references: MigrationReference[] } {
-  const files = listSourceFiles(join(REPO_ROOT, root))
+  const directory = join(REPO_ROOT, root)
+  if (!existsSync(directory)) {
+    throw new Error(`scanned root ${root} does not exist; update SCANNED_ROOTS`)
+  }
+  const files = listSourceFiles(directory)
   const references = files.flatMap(file => {
     const text = readFileSync(file, 'utf8')
     return find(text).map(({ index, token }) => ({
@@ -106,8 +113,19 @@ describe('control-api migration references', () => {
         'migration\n   0068',
         'migrations 0095_first, 0096 and 00a4',
         'migrations 0095_first/0096',
+        'migrations 0109–0114',
+        'Migration 0055 replaces',
       ].map(sample => bareNumbers(sample).map(bare => bare.token))
-    ).toEqual([['0068'], ['0068'], ['0068'], ['0068'], ['0096', '00a4'], ['0096']])
+    ).toEqual([
+      ['0068'],
+      ['0068'],
+      ['0068'],
+      ['0068'],
+      ['0096', '00a4'],
+      ['0096'],
+      ['0109', '0114'],
+      ['0055'],
+    ])
     expect(
       bareNumbers('migration 0071_gfs_immutable_blob_generations not applied, or 0074_x')
     ).toEqual([])
@@ -136,12 +154,12 @@ describe('control-api migration references', () => {
     ).toEqual([])
   })
 
-  it('gfs-controller never cites a control-api migration by bare number', () => {
-    const { references } = scan('gfs-controller/src', bareNumbers)
-    const { references: named } = scan('gfs-controller/src', versionTokens)
+  it.each(SCANNED_ROOTS)('%s never cites a control-api migration by bare number', root => {
+    const { references } = scan(root, bareNumbers)
+    const { references: named } = scan(root, versionTokens)
 
-    // Liveness witness: gfs-controller cites named migrations, so the files
-    // this check reads are the ones that carry migration citations.
+    // Liveness witness: each root cites named migrations, so the files this
+    // check reads are the ones that carry migration citations.
     expect(named.length).toBeGreaterThan(0)
     expect(describeReferences(references)).toEqual([])
   })
