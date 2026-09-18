@@ -2037,4 +2037,38 @@ describe('App deep-link orchestration', () => {
     expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
     expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
   })
+
+  // R3-M1 (the missing half of R1-H1): the deactivation continuation must validate
+  // that the route it read belongs to the OUTGOING tab's app before persisting it.
+  // On an app→app switch the incoming `open()` can reach main before this read
+  // resolves, so `getLocation` can surface the INCOMING app's location within a
+  // single activation generation — the generation gate does not catch that. Without
+  // the appRef guard, App B's route lands on App A's tab.
+  it('does not persist the incoming app route onto the outgoing tab (R3-M1, T3)', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    // Two genuinely distinct apps so the read can carry the WRONG app's location.
+    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
+    render(<App />)
+    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live
+    const outgoingId = appTabs()[0]?.id
+
+    // The deactivation read returns the INCOMING app's location (B), not A's.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app-b', routePath: '/b/route' })
+
+    await launchAppFromSidebar('ns/app-b') // deactivates A (reads B's location), activates B
+    await waitFor(() => expect(appTabs()).toHaveLength(2))
+    // Let A's deactivation continuation run to completion.
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Observable result: A keeps its own identity and is NOT saved with B's route.
+    // The read's appRef ('ns/app-b') did not match A's ('ns/app'), so the persist
+    // fell back to undefined. (At the pre-guard head A.savedRoutePath === '/b/route'.)
+    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
+    expect(appA?.app?.appRef).toBe('ns/app')
+    expect(appA?.app?.savedRoutePath).not.toBe('/b/route')
+    expect(appA?.app?.savedRoutePath).toBeUndefined()
+  })
 })

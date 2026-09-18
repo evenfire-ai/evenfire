@@ -1142,11 +1142,23 @@ export function App() {
     // strictly before `open()` tears it down. i.e. the read is captured before
     // the incoming open, not merely "usually first".
     const gen = sandboxUiActivationGenRef.current
+    // The app the outgoing tab hosts. Its appRef is immutable for the tab's
+    // lifetime, so capturing it now (before the read) is safe.
+    const outgoingAppRef = workspaceTabsRef.current.tabs.find(
+      tab => tab.id === outgoingTabId && tab.kind === 'app'
+    )?.app?.appRef
     void (async () => {
       let routePath: string | undefined
       try {
         const location = await window.clerum.sandboxUi.getLocation()
-        routePath = location?.routePath
+        // Persist the route ONLY when the read belongs to the outgoing tab's own
+        // app. On an app→app switch the incoming `open()` can reach main before
+        // this `getLocation()` resolves, so the read may surface the INCOMING
+        // app's location; persisting it would save app B's route onto tab A. When
+        // the appRef doesn't match, fall back to undefined (default route) rather
+        // than clobber A with a foreign route. The generation gate below covers
+        // the racing-reopen case; this covers a mismatched read within one gen.
+        routePath = location && location.appRef === outgoingAppRef ? location.routePath : undefined
       } catch {
         routePath = undefined
       }
@@ -1312,10 +1324,16 @@ export function App() {
     sandboxUiActivationGenRef.current += 1
     const gen = sandboxUiActivationGenRef.current
     if (outgoingTabId !== null) {
+      // Persist the route ONLY when the read belongs to the outgoing tab's own
+      // app (same guard as the deactivation effect): a mismatched read must not
+      // save another app's route onto this tab. appRef is immutable for the tab.
+      const outgoingAppRef = workspaceTabsRef.current.tabs.find(
+        tab => tab.id === outgoingTabId && tab.kind === 'app'
+      )?.app?.appRef
       let routePath: string | undefined
       try {
         const location = await window.clerum.sandboxUi.getLocation()
-        routePath = location?.routePath
+        routePath = location && location.appRef === outgoingAppRef ? location.routePath : undefined
       } catch {
         routePath = undefined
       }
