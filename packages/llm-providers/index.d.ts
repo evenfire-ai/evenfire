@@ -4,7 +4,6 @@
  * DATA-ONLY leaf; runtime-only descriptor fields stay local to mcp-host.
  */
 
-/** Canonical provider ids, in dev auto-detection priority order. */
 export type ImageInputState = 'supported' | 'unsupported' | 'unknown'
 export interface ImageInputEvidence {
   source: 'curated' | 'discovery'
@@ -36,6 +35,7 @@ export declare function resolveImageInputCapability(
   options: { transportSupported: boolean; now?: number }
 ): ImageInputDecision
 
+/** Canonical provider ids, in dev auto-detection priority order. */
 export declare const PROVIDER_IDS: readonly [
   'openai',
   'claude',

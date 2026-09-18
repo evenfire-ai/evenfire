@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { HostModelOption } from '@hooks/useChatStore'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useHostModels } from '@hooks/useHostModels'
@@ -114,6 +114,15 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
       data ? data.models.filter(option => isOfferedForNewPick(option, data.sessionModel)) : [],
     [data]
   )
+  // `title` alone is not announced by screen readers, so the image hint is also
+  // exposed through aria-describedby.
+  const imageHintId = useId()
+  const imageHint =
+    imageInput.state === 'supported'
+      ? undefined
+      : imageInput.state === 'unsupported'
+        ? 'This model cannot receive images.'
+        : 'Image input is not verified for this model yet.'
 
   const handleSelect = useCallback(
     async (model: string) => {
@@ -190,13 +199,8 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
         aria-label={`Model — ${effectiveLabel}`}
         data-testid="selected-chat-model"
         data-model-id={effectiveModel}
-        title={
-          imageInput.state === 'supported'
-            ? undefined
-            : imageInput.state === 'unsupported'
-              ? 'This model cannot receive images.'
-              : 'Image input is not verified for this model yet.'
-        }
+        title={imageHint}
+        aria-describedby={imageHint ? imageHintId : undefined}
         onClick={() => {
           clearError()
           if (!open) void refresh()
@@ -214,6 +218,11 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
           <path d={caretPath} />
         </svg>
       </Pill>
+      {imageHint && (
+        <span id={imageHintId} className="visually-hidden">
+          {imageHint}
+        </span>
+      )}
 
       {(applied || pending) && (
         <span className="model-selector-applied" role="status" aria-live="polite">

@@ -272,7 +272,7 @@ export async function handleCompactionRoute(
       }
     }
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error during compaction:')
+    logger.error({ err: error }, '[Server] Error during compaction')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -291,7 +291,7 @@ export async function handleStatusRoute(
     const status = await handlers.statusHandler()
     json(res, 200, status)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error getting status:')
+    logger.error({ err: error }, '[Server] Error getting status')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -353,7 +353,7 @@ export async function handleMessageRoute(
 
     logger.info(
       { channelType: message.channelType, sender: message.sender },
-      '[Server] Received message from /'
+      '[Server] Received message'
     )
 
     if (!handlers.messageHandler) {
@@ -371,7 +371,7 @@ export async function handleMessageRoute(
     const response = await handlers.messageHandler(message, isAsync ? { async: true } : undefined)
     json(res, 200, response)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error processing message:')
+    logger.error({ err: error }, '[Server] Error processing message')
     if (isSessionOwnershipError(error)) {
       json(res, 403, { success: false, error: 'session access denied' })
       return
@@ -404,7 +404,7 @@ export async function handleActivityRoute(
     const snapshot = await handlers.activitySnapshotHandler(limit, sinceEventId)
     json(res, 200, snapshot)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error getting activity snapshot:')
+    logger.error({ err: error }, '[Server] Error getting activity snapshot')
     json(res, 500, { error: 'Activity unavailable' })
   }
 }
@@ -536,7 +536,7 @@ export async function handleApprovalRoute(
   } catch (error) {
     logger.error(
       { detail: approved ? 'approval' : 'denial', err: error },
-      '[Server] Error handling :'
+      '[Server] Error handling approval decision'
     )
     json(res, 500, {
       success: false,
@@ -627,7 +627,7 @@ export async function handleProviderMessageAuthorizationRoute(
     })
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error authorizing provider message:')
+    logger.error({ err: error }, '[Server] Error authorizing provider message')
     json(res, 500, { authorized: false, error: 'Provider authorization unavailable' })
   }
 }
@@ -682,7 +682,7 @@ export async function handleProviderWorkflowApprovalDecisionRoute(
     })
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error handling provider workflow approval decision:')
+    logger.error({ err: error }, '[Server] Error handling provider workflow approval decision')
     json(res, 500, {
       success: false,
       error: 'Provider workflow approval decision unavailable',
@@ -740,7 +740,7 @@ export async function handleProviderWorkflowApprovalResolveRoute(
     }
     json(res, 502, { error: result.error })
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error resolving provider workflow approval:')
+    logger.error({ err: error }, '[Server] Error resolving provider workflow approval')
     json(res, 500, {
       error: 'Provider workflow approval resolve unavailable',
     })
@@ -840,7 +840,7 @@ export async function handleProviderWorkflowResultRequestRoute(
     )
     json(res, result.success ? 200 : 403, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error handling provider workflow result request:')
+    logger.error({ err: error }, '[Server] Error handling provider workflow result request')
     json(res, 500, {
       success: false,
       error: 'Provider workflow result request unavailable',
@@ -932,7 +932,7 @@ export async function handleWorkflowApprovalNotificationClaimRoute(
     }
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error claiming workflow approval notifications:')
+    logger.error({ err: error }, '[Server] Error claiming workflow approval notifications')
     json(res, 500, { deliveries: [], error: 'Workflow approval notifications unavailable' })
   }
 }
@@ -985,7 +985,7 @@ export async function handleWorkflowApprovalNotificationTerminalRoute(
     }
     res.status(204).end()
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error updating workflow approval notification:')
+    logger.error({ err: error }, '[Server] Error updating workflow approval notification')
     json(res, 500, { error: 'Workflow approval notification update unavailable' })
   }
 }
@@ -1039,7 +1039,7 @@ export async function handleWorkflowApprovalMediumEnrollmentRoute(
     })
     json(res, result.ok ? 200 : 409, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error confirming workflow approval medium enrollment:')
+    logger.error({ err: error }, '[Server] Error confirming workflow approval medium enrollment')
     json(res, 500, { ok: false, error: 'Workflow approval medium enrollment unavailable' })
   }
 }
@@ -1096,7 +1096,7 @@ export async function handleTelegramWorkflowApprovalVerificationRoute(
   } catch (error) {
     logger.error(
       { err: error },
-      '[Server] Error confirming Telegram workflow approval verification:'
+      '[Server] Error confirming Telegram workflow approval verification'
     )
     json(res, 500, { ok: false, error: 'Telegram workflow approval verification unavailable' })
   }
@@ -1121,7 +1121,7 @@ export async function handleTaskResultRoute(
     }
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error getting task result:')
+    logger.error({ err: error }, '[Server] Error getting task result')
     json(res, 500, {
       success: false,
       error: error instanceof Error ? error.message : 'Unknown error',
@@ -1200,7 +1200,7 @@ export async function handleSessionsListRoute(
     const result = await handlers.sessionsListHandler(caller.userId, { agent, limit, cursor })
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error listing sessions:')
+    logger.error({ err: error }, '[Server] Error listing sessions')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -1257,7 +1257,7 @@ export async function handleSessionSearchRoute(
     })
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error searching sessions:')
+    logger.error({ err: error }, '[Server] Error searching sessions')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -1332,7 +1332,7 @@ export async function handleSessionMessagesRoute(
     }
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error fetching session messages:')
+    logger.error({ err: error }, '[Server] Error fetching session messages')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -1370,7 +1370,7 @@ export async function handleContextBreakdownRoute(
     }
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error fetching context breakdown:')
+    logger.error({ err: error }, '[Server] Error fetching context breakdown')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -1405,7 +1405,7 @@ export async function handleModelsListRoute(
     )
     json(res, 200, result)
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error listing models:')
+    logger.error({ err: error }, '[Server] Error listing models')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }
@@ -1474,7 +1474,7 @@ export async function handleSetModelRoute(
         : { modelSelectionRevision: result.modelSelectionRevision }),
     })
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error setting model:')
+    logger.error({ err: error }, '[Server] Error setting model')
     if (isSessionOwnershipError(error)) {
       json(res, 403, { error: 'session access denied' })
       return
@@ -1527,7 +1527,7 @@ export async function handleSetTitleRoute(
     }
     json(res, 200, { ok: true, title: result.title })
   } catch (error) {
-    logger.error({ err: error }, '[Server] Error setting session title:')
+    logger.error({ err: error }, '[Server] Error setting session title')
     json(res, 500, { error: error instanceof Error ? error.message : 'Unknown error' })
   }
 }

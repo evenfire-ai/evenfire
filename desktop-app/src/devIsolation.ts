@@ -1,8 +1,9 @@
 /**
  * Desktop dev-isolation contract.
  *
- * Three PRs have to be able to run the desktop app side by side on one machine.
- * Today they cannot, because three pieces of state are machine-wide:
+ * Several checkouts must be able to run the desktop app side by side on one
+ * machine. Without this module they cannot, because three pieces of state are
+ * machine-wide:
  *
  *   - the OS protocol handler. `registerCustomProtocols()` makes the *running*
  *     bundle the default handler for `evenfire:`/`clerum:`, so whoever launches

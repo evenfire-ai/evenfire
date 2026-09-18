@@ -1,6 +1,6 @@
 /**
  * Memory-only retention of a send whose outcome is not a terminal acknowledgement
- * (issue #654 §4.4 "Retención transaccional del envío").
+ * (issue #654 §4.4 "Transactional send retention").
  *
  * The composer clears its draft and attachments as soon as a send is accepted
  * for delivery, so a POST that throws, a synchronous `error` envelope, or an

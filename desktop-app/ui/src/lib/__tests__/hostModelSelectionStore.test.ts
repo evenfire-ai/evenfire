@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
 import type { HostModelsResult, SetHostModelResult } from '../../../../src/types'
-import { setPendingModelIntent } from '../hostModelIntentStore'
+import {
+  getPendingModelIntent,
+  getPreChatModelIntent,
+  setPendingModelIntent,
+  setPreChatModelIntent,
+} from '../hostModelIntentStore'
 import {
   type HostModelSelectionTransport,
   getHostModelSelectionSnapshot,
@@ -528,5 +533,27 @@ describe('hostModelSelectionStore — subscriptions', () => {
     await loadHostModels(transport, AGENT, CHAT)
     expect(getHostModelSelectionSnapshot(AGENT, CHAT)).not.toBe(before)
     expect(getHostModelSelectionSnapshot(AGENT, CHAT).effectiveModel).toBe('glm-5.3')
+  })
+})
+
+describe('hostModelSelectionStore — reset', () => {
+  it('one reset clears the selection entries and the pending intents', async () => {
+    const { transport } = makeTransport()
+    await loadHostModels(transport, AGENT, CHAT)
+    setPendingModelIntent(AGENT, CHAT, 'glm-5.3-flash')
+    setPreChatModelIntent(AGENT, 'glm-5.3-flash')
+    // Witnesses: all three pieces of state exist before the reset.
+    expect(readHostModelSelection(AGENT, CHAT).effectiveModel).toBe('glm-5.3-flash')
+    expect(getPendingModelIntent(AGENT, CHAT)).toBe('glm-5.3-flash')
+    expect(getPreChatModelIntent(AGENT)).toBe('glm-5.3-flash')
+
+    resetHostModelSelectionStore()
+
+    expect(getPendingModelIntent(AGENT, CHAT)).toBeUndefined()
+    expect(getPreChatModelIntent(AGENT)).toBeUndefined()
+    expect(readHostModelSelection(AGENT, CHAT)).toMatchObject({
+      intentModel: null,
+      effectiveModel: '',
+    })
   })
 })

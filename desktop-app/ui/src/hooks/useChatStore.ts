@@ -6,21 +6,6 @@ import type {
   SessionsListQuery,
   SessionsListResult,
 } from '../../../src/types'
-/**
- * Per-chat PENDING model selections (R2 "Option A"). When a user changes the
- * model while the agent host is SUSPENDED (`replicas=0`), the `POST /model`
- * write can't reach the runtime, so the choice can't be persisted server-side.
- * Rather than silently drop it, the selection is held here — keyed by the same
- * `(agentRef, chatId)` pair sessions are keyed by — and PIGGYBACKED onto the
- * next message send, which wakes the host and applies the model to that task.
- *
- * This is a module-level singleton (not React state): it is written by
- * `useHostModels.selectModel` and drained by the send path in
- * `useAgentChatController`, two independent consumers that never share a render
- * tree, and neither needs to re-render when it changes (the optimistic UI is
- * owned by `useHostModels`' own state). Keeping it out of React state avoids a
- * context/provider just to shuttle one imperative value between them.
- */
 import {
   clearPendingModelIntent,
   clearPreChatModelIntent,
@@ -49,16 +34,6 @@ export type {
   SetHostModelResult,
 } from '../../../src/types'
 
-/**
- * PRE-CHAT model selections (R2 new-chat composer). On the new-chat composer the
- * user can pick a model BEFORE any chat exists, so there is no `chatId` to key a
- * pending entry by (and no server round-trip is possible — there is no session to
- * `POST /model` for). The pick is held here keyed by agent alone, kept purely
- * local so it creates NO stray/empty chat. On the first send the controller
- * migrates it into `pendingModelByChat` under the freshly-created `chatId` and
- * piggybacks it onto the outgoing message. Same module-singleton rationale as
- * `pendingModelByChat`.
- */
 const SESSION_CATALOG_TTL_MS = 5_000
 
 type CachedRequest<T> = {
@@ -232,7 +207,7 @@ export function useChatStore() {
   }, [])
 
   // --- Pending (unpersisted) model selections — R2 "Option A" (see the
-  // `pendingModelByChat` note above). Only UNPERSISTED selections are tracked:
+  // header of `lib/hostModelIntentStore.ts`). Only UNPERSISTED selections are tracked:
   // a selection accepted by the runtime survives host suspension in the session
   // store and needs no piggybacking.
   const setPendingModel = useCallback((agentRef: string, chatId: string, model: string) => {

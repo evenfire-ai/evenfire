@@ -533,6 +533,10 @@ describe('ComposerPanel with a pending image after a model switch', () => {
     const notice = screen.getByTestId('composer-image-capability-notice')
     expect(notice.getAttribute('role')).toBe('alert')
     expect(notice.textContent).toBe(capabilityMessage(switchedAway))
+    // The disabled send button points assistive technology at the reason.
+    const describedBy = screen.getByTestId('send-button').getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)).toBe(notice)
 
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
     expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(true)
@@ -546,6 +550,7 @@ describe('ComposerPanel with a pending image after a model switch', () => {
   it('sends the pending image with Enter while the model can receive images', () => {
     render(<ComposerPanel inline />)
     expect(screen.queryByTestId('composer-image-capability-notice')).toBeNull()
+    expect(screen.getByTestId('send-button').hasAttribute('aria-describedby')).toBe(false)
     const textarea = screen.getByTestId('chat-input') as HTMLTextAreaElement
 
     expect((screen.getByTestId('send-button') as HTMLButtonElement).disabled).toBe(false)

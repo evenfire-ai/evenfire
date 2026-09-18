@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useAgentChatActionsContext } from '@contexts/AgentChatActionsContext'
 import { useChatComposerStateContext } from '@contexts/ChatComposerStateContext'
 import { useMcpRuntimeContext } from '@contexts/McpRuntimeContext'
@@ -292,6 +292,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   // exactly as they are, and the notice below explains the block.
   const imagesBlockedForSend =
     composerImageAttachments.length > 0 && hostModelSelection.visualSendBlocked
+  // Per-instance id: the main panel and the chat drawer can both be mounted.
+  const imageNoticeId = useId()
   const handleSend = useCallback(() => {
     if (imagesBlockedForSend) return
     void onSend(draft)
@@ -895,6 +897,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
                   composerReferenceAttachments.length === 0)
               }
               aria-label={agentSending ? 'Sending message' : 'Send message'}
+              aria-describedby={imagesBlockedForSend ? imageNoticeId : undefined}
               label={agentSending ? 'Sending message' : 'Send message'}
               size="sm"
               title={agentSending ? 'Sending...' : 'Send message'}
@@ -917,6 +920,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
           <p
             className="composer-attachment-error"
             role="alert"
+            id={imagesBlockedForSend ? imageNoticeId : undefined}
             data-testid={imagesBlockedForSend ? 'composer-image-capability-notice' : undefined}
           >
             {imagesBlockedForSend

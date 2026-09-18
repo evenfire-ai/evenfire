@@ -11,7 +11,7 @@
  *      "what does the catalog say for (provider, model)?".
  *
  * Transport baseline (observed LOCAL serialization, not a model-capability
- * proof and not an account authorization; plan §4.1):
+ * proof and not an account authorization):
  *
  *   family              complete  completeWithTools  …AndCache  image roles
  *   openai-compatible   no        yes                n/a        user
@@ -181,10 +181,13 @@ export function transportSupportsImageInput(
 /**
  * Projection for the host `/models` wire: can the CHAT operation carry images?
  *
- * The chat loop always dispatches `completeWithTools` — with an empty tool
- * array when no tools are registered — and the adapter selects the cache-aware
- * variant when the provider implements it. Capability is therefore the union of
- * the two tool-bearing methods, never the tool-less `plain` path.
+ * The reasoning port dispatches `completeWithTools` (`core/reasoning/port.ts`)
+ * — with an empty tool array when no tools are registered — and the adapter
+ * selects the cache-aware variant when the provider implements it. The context
+ * manager's summarisation dispatches `complete`
+ * (`core/extensions/contextManager.ts`), which the adapter checks per attempt
+ * with the real method. This helper answers the admission-time question for the
+ * chat turn only, so it takes the union of the two tool-bearing methods.
  */
 export function chatTransportSupportsImageInput(providerType: string): boolean {
   return (

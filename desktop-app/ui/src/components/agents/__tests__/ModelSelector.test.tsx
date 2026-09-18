@@ -128,6 +128,29 @@ describe('ModelSelector', () => {
     expect(refresh).toHaveBeenCalledTimes(1)
   })
 
+  it('announces the image hint through aria-describedby for a model that cannot receive images', () => {
+    setHook({
+      data: baseData(),
+      imageInput: { state: 'unsupported', reason: 'model_unsupported' },
+    })
+    renderSelector()
+    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    const describedBy = chip.getAttribute('aria-describedby')
+    expect(describedBy).toBeTruthy()
+    expect(document.getElementById(describedBy as string)?.textContent).toBe(
+      'This model cannot receive images.'
+    )
+  })
+
+  it('has no image hint for a model that can receive images', () => {
+    setHook({ data: baseData(), imageInput: { state: 'supported', reason: 'supported' } })
+    renderSelector()
+    // Witness: the chip rendered.
+    const chip = screen.getByRole('button', { name: /Model — Haiku 4.5/ })
+    expect(chip.hasAttribute('aria-describedby')).toBe(false)
+    expect(chip.hasAttribute('title')).toBe(false)
+  })
+
   it('shows the effective model (sessionModel over hostDefault)', () => {
     setHook({ data: baseData() })
     renderSelector()

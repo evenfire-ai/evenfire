@@ -20,6 +20,15 @@
  *   - Image capability is always resolved for the EFFECTIVE model from the host
  *     projection. Loading, refetching or conflicted state reads as `unknown`,
  *     which blocks images and never text.
+ *
+ * Module singletons on purpose: this store is read by `ModelSelector`,
+ * `useHostModels` and the send path in `useAgentChatController`, which never
+ * share a render tree; the pending intents it layers over the server read live
+ * in `hostModelIntentStore` (written here and through `useChatStore`). Both are
+ * cleared by the single `resetHostModelSelectionStore()`, which `useChatStore`
+ * calls when the remote cache scope changes (logout, user or team switch).
+ * `retainedSendStore` is a per-controller factory instead, because retained
+ * bytes must die with the controller identity.
  */
 import {
   type ImageInputDecision,
@@ -618,7 +627,7 @@ async function runSelectionWrites(
       // Host unavailable (suspended / transport / 5xx): keep the optimistic UI
       // and the pending intent so the next send carries it and wakes the host.
       console.warn(
-        '[useHostModels] set failed; host likely suspended — keeping optimistic selection, will piggyback on next send:',
+        '[hostModelSelectionStore] set failed; host likely suspended — keeping optimistic selection, will piggyback on next send:',
         error
       )
       return finish(true)
