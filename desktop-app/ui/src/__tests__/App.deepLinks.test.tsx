@@ -11,6 +11,7 @@ import {
   openChatTab,
   openFilesTab,
   openSettingsTab,
+  setAppTabSavedRoutePath,
 } from '@lib/workspaceTabs'
 import { mapKindToRoute, settingsSectionForRoute } from '@lib/workspaceTabsRoute'
 import { App } from '@/App'
@@ -2145,5 +2146,84 @@ describe('App deep-link orchestration', () => {
     expect(appA?.app?.appRef).toBe('ns/app')
     expect(appA?.app?.savedRoutePath).not.toBe('/b/route')
     expect(appA?.app?.savedRoutePath).toBeUndefined()
+  })
+
+  // R4-M1 (regression of R3-M1's fix 8a9c45f5d): the appRef guard fell back to
+  // `undefined` on a foreign read, and setAppTabSavedRoutePath treats `undefined`
+  // as an authoritative CLEAR — so a foreign/stale read did not merely "skip
+  // saving B", it ERASED A's own previously-saved route. §3 Option A: a foreign
+  // or failed read must PRESERVE (never call the setter). Both seam sites.
+  it('preserves the outgoing tab route when the deactivation read surfaces a foreign app (R4-M1, §3, T3)', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
+    render(<App />)
+    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A live & active
+    const outgoingId = appTabs()[0]!.id
+
+    // Seed A's OWN saved route through the real store producer.
+    act(() => {
+      currentController.setWorkspaceTabs(state =>
+        setAppTabSavedRoutePath(state, outgoingId, '/a/own')
+      )
+    })
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/a/own')
+
+    // app→app switch whose deactivation read resolves the INCOMING app's location
+    // within one activation generation (deferred so it lands after B is active).
+    getSandboxUiLocation.mockClear()
+    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
+    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
+    await launchAppFromSidebar('ns/app-b') // deactivates A, reads (deferred)
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      pendingLocation.resolve({ appRef: 'ns/app-b', routePath: '/b/route' })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Liveness witness (M4): A's deactivation read genuinely ran.
+    expect(getSandboxUiLocation).toHaveBeenCalledTimes(1)
+    // Observable: A keeps its OWN route — the foreign read must not clear it.
+    // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
+    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
+    expect(appA?.app?.savedRoutePath).toBe('/a/own')
+  })
+
+  it('preserves the outgoing tab route when the handoff read surfaces a foreign app (R4-M1, §3, T3)', async () => {
+    const ensureTeamContext = vi.fn(async (): Promise<boolean> => true)
+    currentController = makeController({
+      initialExperienceLoading: false,
+      handleEnsureTeamContext: ensureTeamContext,
+    })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    await launchAppFromSidebar('ns/app') // A live & active
+    const outgoingId = appTabs()[0]!.id
+
+    act(() => {
+      currentController.setWorkspaceTabs(state =>
+        setAppTabSavedRoutePath(state, outgoingId, '/a/own')
+      )
+    })
+    expect(appTabs()[0]?.app?.savedRoutePath).toBe('/a/own')
+
+    // A cross-team deep link drives closeActiveSandboxUiEmbedForHandoff; its read
+    // of the outgoing embed surfaces a FOREIGN app's location.
+    getSandboxUiLocation.mockResolvedValue({ appRef: 'ns/app-b', routePath: '/b/route' })
+    await waitFor(() => expect(emitDeepLink).not.toBeNull())
+    act(() => {
+      emitDeepLink?.({ id: 1, appRef: 'ns/missing', teamId: 'team-b' })
+    })
+    await confirmPendingAppLink()
+    await waitFor(() => expect(getSandboxUiLocation).toHaveBeenCalled())
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Observable: the handoff must not erase A's own route on a foreign read.
+    // (Pre-fix, the mismatch fell back to undefined → setter CLEARED '/a/own'.)
+    const appA = currentController.workspaceTabs.tabs.find(tab => tab.id === outgoingId)
+    expect(appA?.app?.savedRoutePath).toBe('/a/own')
   })
 })

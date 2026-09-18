@@ -124,6 +124,30 @@ const TRANSIENT_TEAM_CONTEXT_ERROR_CODES = new Set([
 const SANDBOX_UI_DEEP_LINK_MANUAL_TEAM_CHANGE_MESSAGE =
   'App link paused because you switched teams. Retry to open it from the current team, or dismiss it.'
 
+// §3 (mini-spec 08): what a `getLocation()` read means for the OUTGOING app
+// tab's saved route. `set`/`clear` come only from the tab's OWN app; `preserve`
+// (foreign read within one activation generation, or a failed read) leaves the
+// stored route untouched — the caller must NOT invoke the setter, because
+// passing `undefined` to it would erase A's previously-saved route.
+type OutgoingRouteDecision =
+  | { action: 'set'; routePath: string }
+  | { action: 'clear' }
+  | { action: 'preserve' }
+
+async function readOutgoingRouteDecision(
+  outgoingAppRef: string | undefined
+): Promise<OutgoingRouteDecision> {
+  try {
+    const location = await window.clerum.sandboxUi.getLocation()
+    if (!location || location.appRef !== outgoingAppRef) return { action: 'preserve' }
+    return location.routePath
+      ? { action: 'set', routePath: location.routePath }
+      : { action: 'clear' }
+  } catch {
+    return { action: 'preserve' }
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || 'Unknown error')
 }
@@ -1148,28 +1172,26 @@ export function App() {
       tab => tab.id === outgoingTabId && tab.kind === 'app'
     )?.app?.appRef
     void (async () => {
-      let routePath: string | undefined
-      try {
-        const location = await window.clerum.sandboxUi.getLocation()
-        // Persist the route ONLY when the read belongs to the outgoing tab's own
-        // app. On an app→app switch the incoming `open()` can reach main before
-        // this `getLocation()` resolves, so the read may surface the INCOMING
-        // app's location; persisting it would save app B's route onto tab A. When
-        // the appRef doesn't match, fall back to undefined (default route) rather
-        // than clobber A with a foreign route. The generation gate below covers
-        // the racing-reopen case; this covers a mismatched read within one gen.
-        routePath = location && location.appRef === outgoingAppRef ? location.routePath : undefined
-      } catch {
-        routePath = undefined
-      }
+      // §3 (mini-spec 08): only the outgoing tab's OWN app decides its saved
+      // route. On an app→app switch the incoming `open()` can reach main before
+      // this `getLocation()` resolves, so the read may surface the INCOMING app's
+      // location; a foreign or failed read must PRESERVE tab A's route (leave the
+      // store untouched), NOT clear it — passing `undefined` to the setter would
+      // erase A's previously-saved route. Persist only when the read is A's own:
+      // its routePath (set), or clear when A is back on its default path.
+      const decision = await readOutgoingRouteDecision(outgoingAppRef)
       // A newer activation took over while the read was in flight (the same app
       // reopened, or another app/surface became active): the read value belongs
       // to a view that is no longer the active one, so abort BOTH the persist
       // (it would clobber the live tab's route with a stale one) and the close
       // (it would tear down the embed the user is now looking at).
       if (gen !== sandboxUiActivationGenRef.current) return
-      // No-op when the outgoing tab was closed (§3: closing a tab does not save).
-      setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
+      // A foreign/unknown read owns no route on this tab — leave it as it was.
+      if (decision.action !== 'preserve') {
+        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
+        // No-op when the outgoing tab was closed (§3: closing a tab does not save).
+        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
+      }
       if (replacedByAnotherApp) return
       try {
         await window.clerum.sandboxUi.close()
@@ -1324,21 +1346,20 @@ export function App() {
     sandboxUiActivationGenRef.current += 1
     const gen = sandboxUiActivationGenRef.current
     if (outgoingTabId !== null) {
-      // Persist the route ONLY when the read belongs to the outgoing tab's own
-      // app (same guard as the deactivation effect): a mismatched read must not
-      // save another app's route onto this tab. appRef is immutable for the tab.
+      // §3 (mini-spec 08), identical to the deactivation effect: only the
+      // outgoing tab's OWN app may set/clear its saved route. A foreign or failed
+      // read PRESERVES it (the setter is not called) rather than clobbering it
+      // with another app's route or erasing it with `undefined`. appRef is
+      // immutable for the tab, so capturing it before the read is safe.
       const outgoingAppRef = workspaceTabsRef.current.tabs.find(
         tab => tab.id === outgoingTabId && tab.kind === 'app'
       )?.app?.appRef
-      let routePath: string | undefined
-      try {
-        const location = await window.clerum.sandboxUi.getLocation()
-        routePath = location && location.appRef === outgoingAppRef ? location.routePath : undefined
-      } catch {
-        routePath = undefined
-      }
+      const decision = await readOutgoingRouteDecision(outgoingAppRef)
       if (gen !== sandboxUiActivationGenRef.current) return
-      setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
+      if (decision.action !== 'preserve') {
+        const nextRoutePath = decision.action === 'set' ? decision.routePath : undefined
+        setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, nextRoutePath))
+      }
     }
     if (gen !== sandboxUiActivationGenRef.current) return
     await window.clerum.sandboxUi.close()
