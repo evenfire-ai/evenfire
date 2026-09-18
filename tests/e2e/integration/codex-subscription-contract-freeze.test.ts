@@ -154,7 +154,8 @@ describe('codex-subscription contract freeze', () => {
     }
 
     expect(limits).not.toHaveProperty('maxTools')
-    expect(limits?.maxToolCalls).toBe(32)
+    expect(limits?.maxToolCalls).toBe(64)
+    expect(limits?.maxMessages).toBe(256)
     expect(limits?.maxRequestBodyBytes).toBe(1048576)
 
     const errors = contract.errorTaxonomy
@@ -163,6 +164,7 @@ describe('codex-subscription contract freeze', () => {
       expect(typeof code).toBe('string')
       expect(String(code)).toMatch(/^[a-z][a-z0-9_]+$/)
     }
+    expect(errors).toContain('tool_call_limit_exceeded')
 
     const terms = contract.termsAndTestAccount as Record<string, unknown> | undefined
     expect(terms && typeof terms === 'object').toBe(true)
