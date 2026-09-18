@@ -12,6 +12,7 @@
 import { type Page, expect, test } from '@playwright/test'
 import {
   type Scenario,
+  type UpstreamEvidence,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -99,6 +100,30 @@ async function newAgentResponses(page: Page) {
     .map(id => `:not([data-chat-message-id=${JSON.stringify(id)}])`)
     .join('')
   return responses.and(page.locator(`[data-chat-message-id]${exclusions}`))
+}
+
+async function openAgentChat(desktop: Page, scenario: Scenario) {
+  await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
+  await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
+  await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
+  await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
+  await expect(desktop.getByTestId('nav-chat')).toBeVisible()
+  await desktop.getByTestId('nav-chat').click()
+  await desktop.getByTestId('nav-new-chat').click()
+  await expect(desktop.getByRole('heading', { name: 'New chat with', exact: true })).toBeVisible()
+  await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
+  await desktop.getByRole('menuitem', { name: scenario.agentDisplayName, exact: true }).click()
+  await expect(
+    desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
+  ).toContainText(scenario.agentDisplayName)
+  await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
+  const modelOption = desktop.getByRole('menuitemradio').filter({ hasText: scenario.modelLabel })
+  await expect(modelOption).toHaveCount(1)
+  await modelOption.click()
+  await expect(
+    desktop.getByRole('button', { name: `Model — ${scenario.modelLabel}`, exact: true })
+  ).toBeVisible()
+  await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
 }
 
 async function receiptApproval(page: Page, scenario: Scenario, previousCalls: number) {
@@ -219,33 +244,7 @@ for (const scenario of cases) {
     try {
       const desktop = await app.firstWindow()
       await test.step('Sign in visibly to Desktop and start a chat with the same agent', async () => {
-        await expect(desktop.getByLabel('Email', { exact: true })).toBeVisible()
-        await desktop.getByLabel('Email', { exact: true }).fill(required('TEST_USER_EMAIL'))
-        await desktop.getByLabel('Password', { exact: true }).fill(required('TEST_USER_PASSWORD'))
-        await desktop.getByRole('button', { name: 'Sign in', exact: true }).click()
-        await expect(desktop.getByTestId('nav-chat')).toBeVisible()
-        await desktop.getByTestId('nav-chat').click()
-        await desktop.getByTestId('nav-new-chat').click()
-        await expect(
-          desktop.getByRole('heading', { name: 'New chat with', exact: true })
-        ).toBeVisible()
-        await desktop.getByRole('button', { name: 'Switch chat agent', exact: true }).click()
-        await desktop
-          .getByRole('menuitem', { name: scenario.agentDisplayName, exact: true })
-          .click()
-        await expect(
-          desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
-        ).toContainText(scenario.agentDisplayName)
-        await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
-        const modelOption = desktop
-          .getByRole('menuitemradio')
-          .filter({ hasText: scenario.modelLabel })
-        await expect(modelOption).toHaveCount(1)
-        await modelOption.click()
-        await expect(
-          desktop.getByRole('button', { name: `Model — ${scenario.modelLabel}`, exact: true })
-        ).toBeVisible()
-        await expect(desktop.getByTestId('agent-response')).toHaveCount(0)
+        await openAgentChat(desktop, scenario)
       })
       await test.step('Find only the verification receipt tool and return its real business ID', async () => {
         const upstreamBefore =
@@ -518,6 +517,130 @@ for (const scenario of cases) {
       if (cleanupFailures.length) {
         testInfo.annotations.push({ type: 'cleanup', description: cleanupFailures.join('; ') })
         if (corpusOutcome === 'passed') throw new Error(cleanupFailures.join('; '))
+      }
+    }
+  })
+}
+
+// Only the deterministic upstream can answer with more function calls than the
+// contract allows, or with exactly that many, so these cases are registered in
+// deterministic mode only. They run after the approved-tools journeys and reuse
+// the first prepared agent, whose subscription model binding those journeys
+// persisted.
+if (mode === 'deterministic') {
+  test('tool call limit: Desktop shows Too Many Tool Calls without retry or connector call', async () => {
+    const scenario = cases[0]!
+    const before = await readEvidence(scenario)
+    // Witness for the negative connector assertion below: the receipt journey
+    // of this run executed the connector through the same fixture.
+    expect(before.calls.map(call => call.tool)).toEqual([
+      'workitem_read_receipt',
+      'workitem_read_receipt',
+    ])
+    const upstreamBefore = await readUpstreamEvidence(scenario)
+    const app = await launchDesktopApp()
+    let journeyPassed = false
+    try {
+      const desktop = await app.firstWindow()
+      await test.step('Sign in visibly to Desktop and start a chat with the prepared agent', async () => {
+        await openAgentChat(desktop, scenario)
+      })
+      const responses = await newAgentResponses(desktop)
+      await test.step('Send the tool call limit probe and wait for the completed turn', async () => {
+        await send(desktop, 'tool call limit probe')
+        await expect(responses).toHaveCount(1, { timeout: 120_000 })
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+      })
+      await test.step('The assistant message is in the error state', async () => {
+        await expect(responses).toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
+      })
+      await test.step('The error names the tool-call limit, not an overloaded model', async () => {
+        // The label div appends the provider that raised the error.
+        await expect(responses.locator('.error-bubble-label')).toHaveText(
+          'Too Many Tool Calls · CODEX-SUBSCRIPTION'
+        )
+        await expect(responses.getByText('Model Overloaded')).toHaveCount(0)
+      })
+      await test.step('One upstream completion, no retry, no connector call', async () => {
+        const upstreamAfter = await readUpstreamEvidence(scenario)
+        expect(upstreamAfter.limitProbe.turns - upstreamBefore.limitProbe.turns).toBe(1)
+        expect(upstreamAfter.limitProbe.completions - upstreamBefore.limitProbe.completions).toBe(1)
+        expect(upstreamAfter.limitProbe.unexpectedRetries).toBe(0)
+        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
+        expect(requests.map(request => request.stage)).toEqual(['limit_probe'])
+        expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+      })
+      journeyPassed = true
+    } finally {
+      try {
+        await app.close()
+      } catch {
+        if (journeyPassed) throw new Error('Desktop cleanup failed')
+        // Preserve the original assertion failure when cleanup also fails.
+      }
+    }
+  })
+
+  test('tool call limit boundary: Desktop completes a turn of exactly 256 tool calls', async () => {
+    const scenario = cases[0]!
+    const before = await readEvidence(scenario)
+    const upstreamBefore = await readUpstreamEvidence(scenario)
+    const app = await launchDesktopApp()
+    let journeyPassed = false
+    try {
+      const desktop = await app.firstWindow()
+      await test.step('Sign in visibly to Desktop and start a chat with the prepared agent', async () => {
+        await openAgentChat(desktop, scenario)
+      })
+      const responses = await newAgentResponses(desktop)
+      await test.step('Send the boundary turn and wait for the final answer', async () => {
+        await send(desktop, 'tool call limit boundary')
+        await expect(responses).toHaveCount(1, { timeout: 240_000 })
+        await expect(responses).toContainText(
+          'Tool call limit boundary complete: 256 tool results received.',
+          { timeout: 240_000 }
+        )
+        await expect(desktop.getByTestId('send-button')).toHaveAttribute(
+          'aria-label',
+          'Send message'
+        )
+      })
+      await test.step('The answer is not an error and names no tool-call limit', async () => {
+        await expect(responses).not.toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
+        await expect(responses.getByText(/Too Many Tool Calls/)).toHaveCount(0)
+      })
+      await test.step('All 256 results reached the model once, with no retry', async () => {
+        const upstreamAfter = await readUpstreamEvidence(scenario)
+        const delta = (field: keyof UpstreamEvidence['limitBoundary']) =>
+          upstreamAfter.limitBoundary[field] - upstreamBefore.limitBoundary[field]
+        expect(delta('turns')).toBe(1)
+        expect(delta('completions')).toBe(2)
+        expect(delta('toolResults')).toBe(256)
+        expect(delta('finalResponses')).toBe(1)
+        expect(upstreamAfter.limitBoundary.unexpectedRetries).toBe(0)
+        expect(upstreamAfter.rejected).toBe(upstreamBefore.rejected)
+        const requests = upstreamAfter.requests.slice(upstreamBefore.requests.length)
+        expect(requests.map(request => request.stage)).toEqual([
+          'limit_boundary',
+          'limit_boundary_final',
+        ])
+        // The continuation carried 256 calls and 256 results, so its input is
+        // far larger than the request that started the turn.
+        expect(requests[1]!.inputBytes).toBeGreaterThan(requests[0]!.inputBytes)
+        // Only discovery searches ran; the connector was never called.
+        expect((await readEvidence(scenario)).calls).toEqual(before.calls)
+      })
+      journeyPassed = true
+    } finally {
+      try {
+        await app.close()
+      } catch {
+        if (journeyPassed) throw new Error('Desktop cleanup failed')
+        // Preserve the original assertion failure when cleanup also fails.
       }
     }
   })

@@ -179,7 +179,7 @@ export class SecretsLlmSubscriptionsPage {
           new URL(response.url()).pathname
         ) && response.request().method() === 'POST'
     )
-    await this.page.getByRole('button', { name: 'Create', exact: true }).click()
+    await this.page.getByRole('button', { name: 'Create and set up', exact: true }).click()
     const response = await created
     const body = (await response.json()) as {
       id?: unknown
