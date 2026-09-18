@@ -5,7 +5,8 @@ const log = hccLogger.child({ module: 'reporter-http-failure' })
 
 /**
  * control-api answers these (status, code) pairs deterministically: resending
- * the same event gets the same answer. Every other failure (403 binding not yet
+ * the same event gets the same answer. `invalid_tracing_input` comes only from
+ * request shape validation, so it is as final as `unsafe_tracing_input`. Every other failure (403 binding not yet
  * visible, 5xx, a 4xx without a code, a body that is not JSON) stays retryable.
  */
 const TERMINAL_RESPONSES: ReadonlyArray<{
@@ -15,6 +16,7 @@ const TERMINAL_RESPONSES: ReadonlyArray<{
 }> = [
   { status: 409, code: 'tracing_idempotency_conflict', result: 'conflict' },
   { status: 400, code: 'unsafe_tracing_input', result: 'rejected' },
+  { status: 400, code: 'invalid_tracing_input', result: 'rejected' },
 ]
 
 function unreadableBodyReason(error: unknown): 'not_json' | 'aborted' | 'read_failed' {

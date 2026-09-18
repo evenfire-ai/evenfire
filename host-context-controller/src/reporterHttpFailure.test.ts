@@ -35,6 +35,7 @@ describe('throwForFailedSubmit', () => {
   it.each([
     [409, 'tracing_idempotency_conflict', 'conflict'],
     [400, 'unsafe_tracing_input', 'rejected'],
+    [400, 'invalid_tracing_input', 'rejected'],
   ] as const)('treats %i %s as terminal %s', async (status, code, result) => {
     const error = await failure(status, async () => ({ code, error: 'ignored' }))
 
@@ -45,6 +46,7 @@ describe('throwForFailedSubmit', () => {
   it.each([
     [400, 'tracing_idempotency_conflict'],
     [409, 'unsafe_tracing_input'],
+    [409, 'invalid_tracing_input'],
     [403, 'tracing_idempotency_conflict'],
   ] as const)(
     'keeps %i with %s retryable: the status is part of the pair',

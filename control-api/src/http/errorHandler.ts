@@ -19,6 +19,7 @@ export const FORWARDABLE_INTEGRATION_CODES = new Set([
 export const FORWARDABLE_CLIENT_ERROR_CODES = new Set([
   'tracing_idempotency_conflict',
   'unsafe_tracing_input',
+  'invalid_tracing_input',
 ])
 
 /**

@@ -295,13 +295,9 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
 
   it.each([
     ['a 403 binding not yet visible', failedResponse(403, { error: 'Forbidden' })],
-    [
-      'a 403 whose code is not terminal',
-      failedResponse(403, { code: 'tracing_binding_unavailable' }),
-    ],
     ['a 409 without a body', failedResponse(409)],
     ['a 409 without a code', failedResponse(409, { error: 'Conflict' })],
-    ['a 400 with another code', failedResponse(400, { code: 'invalid_tracing_input' })],
+    ['a 400 without a code', failedResponse(400, { error: 'Bad Request' })],
   ])('keeps retrying %s', async (_label, response) => {
     const fetchFn = vi.fn().mockResolvedValue(response) as unknown as typeof fetch
     const reporter = reporterWith(fetchFn)

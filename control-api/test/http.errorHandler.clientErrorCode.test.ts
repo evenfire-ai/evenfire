@@ -6,6 +6,7 @@ import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
 } from '../src/services/tracing/append.js'
+import { GovernedReadInvalidQueryError } from '../src/services/tracing/governedEventReadService.js'
 import {
   InvalidTracingInputError,
   TracingBindingUnavailableError,
@@ -31,6 +32,7 @@ describe('clerumErrorHandler — machine-readable code on allowlisted 4xx', () =
       'tracing_idempotency_conflict',
     ],
     [new UnsafeTracingInputError('payload.gfs_subject'), 400, 'unsafe_tracing_input'],
+    [new InvalidTracingInputError('events[0].kind is not supported'), 400, 'invalid_tracing_input'],
   ])('forwards %s with its code', async (err, status, code) => {
     const res = await request(appThrowing(err)).post('/boom')
 
@@ -41,7 +43,7 @@ describe('clerumErrorHandler — machine-readable code on allowlisted 4xx', () =
 
   it.each([
     [new TracingBindingUnavailableError('operation', 0), 403],
-    [new InvalidTracingInputError('events[0].kind is not supported'), 400],
+    [new GovernedReadInvalidQueryError('cursor is not valid'), 400],
     [{ code: 409 }, 409],
   ])('keeps the body without code for a non-allowlisted 4xx (%s)', async (err, status) => {
     const res = await request(appThrowing(err)).post('/boom')

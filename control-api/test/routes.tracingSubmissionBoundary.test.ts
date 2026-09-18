@@ -11,7 +11,10 @@ import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
 } from '../src/services/tracing/append.js'
-import { TracingBindingUnavailableError } from '../src/services/tracing/routeSubmissionService.js'
+import {
+  InvalidTracingInputError,
+  TracingBindingUnavailableError,
+} from '../src/services/tracing/routeSubmissionService.js'
 import { issueMcpHostAccessJwt } from '../src/utils/auth/mcpHostJwtToken.js'
 
 function signInternalControl(issuer: 'hcc' | 'wrc'): string {
@@ -318,6 +321,14 @@ describe('internal tracing submission routers — rejection code on the wire', (
       new UnsafeTracingInputError('input.payload.gfs_subject', 'not_permitted'),
       400,
       'unsafe_tracing_input',
+    ],
+    [
+      '/internal/tracing/infrastructure-telemetry-events',
+      createInternalInfrastructureTelemetryEventsRouter,
+      { telemetryType: 'reconcile_outcome', sourceEventId: 'reconcile-1' },
+      new InvalidTracingInputError('events[0].hostLookupReference.uid must be a string'),
+      400,
+      'invalid_tracing_input',
     ],
   ] as const)('%s answers %#: status and code', async (path, router, event, err, status, code) => {
     const { app, service } = rejectingApp(router, err)
