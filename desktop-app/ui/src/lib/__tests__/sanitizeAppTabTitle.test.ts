@@ -63,6 +63,15 @@ describe('sanitizeAppTabTitle (mini-spec 08 §2)', () => {
     expect(sanitizeAppTabTitle(`a${cp(0x1d173)}b`)).toBe(`a${cp(0x1d173)}b`) // musical (astral)
   })
 
+  it('preserves the ZWJ/ZWNJ shaping joiners (legitimate Unicode, not a hazard)', () => {
+    // ZWJ (U+200D) fuses an emoji sequence into one glyph; stripping it splits
+    // 👩‍💻 into 👩💻. ZWNJ (U+200C) controls shaping/ligatures in Persian and
+    // Indic scripts. The denylist leaves the U+200C-U+200D gap open for both.
+    const zwjEmoji = `Build ${cp(0x1f469)}${cp(0x200d)}${cp(0x1f4bb)}`
+    expect(sanitizeAppTabTitle(zwjEmoji)).toBe(zwjEmoji)
+    expect(sanitizeAppTabTitle(`a${cp(0x200c)}b`)).toBe(`a${cp(0x200c)}b`)
+  })
+
   it('truncates to MAX_TAB_TITLE_LEN with a trailing ellipsis', () => {
     const out = sanitizeAppTabTitle('x'.repeat(MAX_TAB_TITLE_LEN + 50))
     expect(out.length).toBe(MAX_TAB_TITLE_LEN)

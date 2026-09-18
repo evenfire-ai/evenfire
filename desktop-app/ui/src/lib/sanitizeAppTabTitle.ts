@@ -30,6 +30,13 @@ import { MAX_TAB_TITLE_LEN } from '../constants/workspaceTabs'
  * corrupts non-Latin text; the denylist targets only the actual layout/order/
  * invisibility hazards and leaves every legitimate script formatter alone.
  *
+ * The two zero-width SHAPING joiners are likewise preserved: ZWNJ (U+200C) and
+ * ZWJ (U+200D). ZWJ fuses an emoji sequence into one glyph (stripping it splits
+ * a "woman technologist" into a separate woman + laptop); ZWNJ controls
+ * ligatures/shaping in Persian and Indic scripts. The denylist leaves the gap
+ * U+200C-U+200D open between the ZWSP entry (U+200B) and the bidi marks (U+200E-
+ * U+200F) for exactly this reason.
+ *
  * The denylist is declared as numeric code-point ranges and compiled with
  * `new RegExp`, NOT written as embedded literal bytes or `\u` escapes. A
  * security denylist built from invisible characters can be mutated with no
@@ -48,7 +55,7 @@ const UNSAFE_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x000e, 0x001f], // C0 controls (excludes CR)
   [0x007f, 0x009f], // DEL + C1 controls
   [0x061c, 0x061c], // ARABIC LETTER MARK (bidi)
-  [0x200b, 0x200d], // ZWSP, ZWNJ, ZWJ (zero-width)
+  [0x200b, 0x200b], // ZWSP (U+200C ZWNJ / U+200D ZWJ deliberately preserved)
   [0x200e, 0x200f], // LRM, RLM (bidi marks)
   [0x202a, 0x202e], // LRE, RLE, PDF, LRO, RLO (bidi embeddings/overrides)
   [0x2060, 0x2064], // WORD JOINER + invisible math operators

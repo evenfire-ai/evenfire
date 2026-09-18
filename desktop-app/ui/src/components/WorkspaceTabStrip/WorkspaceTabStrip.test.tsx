@@ -296,6 +296,29 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
     expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe('EVIL report')
     expect(screen.getByRole('button', { name: 'Close EVIL report' })).toBeTruthy()
   })
+
+  it('keeps a legitimate ZWJ emoji sequence joined in the rendered label', () => {
+    // The 👩‍💻 sequence (👩 + ZWJ + 💻) must survive the border and render as one
+    // glyph, not split into 👩💻 — the shaping joiner is legitimate, not a hazard.
+    const withEmoji = `Build ${cp(0x1f469)}${cp(0x200d)}${cp(0x1f4bb)}`
+    const state = setAppTabTitle(
+      openAppTab(createEmptyWorkspaceTabsState(), { id: 'app-1', appRef: 'ns/app', title: 'App' }),
+      'app-1',
+      withEmoji
+    )
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId="app-1"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe(withEmoji)
+    expect(screen.getByRole('button', { name: `Close ${withEmoji}` })).toBeTruthy()
+  })
 })
 
 describe('WorkspaceTabStrip — reorder (drag & keyboard)', () => {
