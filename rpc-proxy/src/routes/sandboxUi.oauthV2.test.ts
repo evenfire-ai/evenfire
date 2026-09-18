@@ -295,6 +295,53 @@ describe('Sandbox OAuth v2 authority', () => {
     )
   })
 
+  it('closes the Sandbox HTTP lease when the client aborts before the response finishes', async () => {
+    const claims = viewDelegation()
+    const leaseState = { live: true }
+    lease.startActiveViewLease.mockReturnValue({
+      close: () => {
+        leaseState.live = false
+      },
+    })
+    auth.verifyUserDelegationV2.mockReturnValue(claims)
+    authority.authorizeActionV2.mockResolvedValue({
+      claims,
+      bound: {},
+      checkpoint: { status: 'allowed' },
+      trustedEdgeContext: {},
+      trustedEdgeHeader: 'trusted-v2-context',
+    })
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          appRef: 'sandbox-recipes/r1',
+          service: { name: 'web', namespace: 'sandbox-ui', port: 8080 },
+          ready: true,
+          defaultPath: '/',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      )
+    )
+    let proxiedResponse: express.Response | undefined
+    proxy.web.mockImplementationOnce((_req, res) => {
+      proxiedResponse = res
+      return res
+    })
+
+    const pending = request(app())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/index.html')
+      .set('Authorization', 'Bearer v2.token')
+      .then(response => response)
+    await vi.waitFor(() => expect(lease.startActiveViewLease).toHaveBeenCalledOnce())
+    expect(proxiedResponse).toBeDefined()
+
+    proxiedResponse!.emit('close')
+
+    expect(leaseState.live).toBe(false)
+    proxiedResponse!.end()
+    await expect(pending).resolves.toMatchObject({ status: 200 })
+  })
+
   it('destroys an active v2 Sandbox response when its mounted lease denies', async () => {
     const claims = viewDelegation()
     auth.verifyUserDelegationV2.mockReturnValue(claims)
