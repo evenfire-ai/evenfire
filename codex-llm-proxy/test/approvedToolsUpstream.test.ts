@@ -410,7 +410,7 @@ describe('approved-tools tool-call limit probe', () => {
     expect(simulator.evidence().requests).toMatchObject([{ stage: 'limit_probe' }])
   })
 
-  it('rejects a second completion of the same probe turn as unexpected_retry', async () => {
+  it('rejects a retry and a continuation of an answered probe turn as unexpected_retry', async () => {
     const simulator = createApprovedToolsUpstream()
     const first = await request(simulator, [probe])
     expect(first.response.status).toBe(200)

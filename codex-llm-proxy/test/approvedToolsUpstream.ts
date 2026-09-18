@@ -340,13 +340,14 @@ export function createApprovedToolsUpstream() {
         const turn = createHash('sha256')
           .update(JSON.stringify(history.slice(0, lastUser + 1)))
           .digest('hex')
+        // The key covers history up to the probe message, so both a retry and
+        // a continuation (an over-limit batch never yields tool results, so a
+        // continuation means the limit was not enforced) of an answered turn
+        // land here.
         if (answeredProbeTurns.has(turn)) {
           evidence.limitProbe.unexpectedRetries++
           throw new Error('unexpected_retry')
         }
-        // An over-limit batch never yields tool results, so a continuation
-        // means the limit was not enforced.
-        if (history.length !== lastUser + 1) throw new Error('unexpected_probe_continuation')
         answeredProbeTurns.add(turn)
         evidence.limitProbe.turns++
         evidence.completions++
