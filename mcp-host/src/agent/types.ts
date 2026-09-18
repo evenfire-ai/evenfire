@@ -21,6 +21,13 @@ export interface ExecutorFailoverSupport {
   /**
    * Build a fresh provider instance for a fallback entry from the LIVE
    * ConfigStore keys; `null` when the entry's provider/credentials are absent.
+   *
+   * #654 — the caller passes the EFFECTIVE entry: `model` is already resolved
+   * to the model this attempt will serve (the session model for a same-provider
+   * fallback, the entry's own model otherwise). Implementations must build the
+   * provider with `entry.model` and must not substitute another model, so the
+   * SDK request, the token counter, the usage event and the image-input guard
+   * all name the same pair.
    */
   buildProvider: (entry: FallbackEntry) => SingleTurnProvider | null
 }

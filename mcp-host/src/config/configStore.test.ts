@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { register } from 'prom-client'
 import { ALL_PROVIDERS, descriptorFor } from '../llm/registryCore'
+import { logger } from '../logger'
 import {
   CATALOG_REVISION_ANNOTATION,
   CONNECTION_REVISION_ANNOTATION,
@@ -519,6 +520,55 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     store = null
   })
 
+  it('observes a capability-only update and keeps malformed evidence as unknown without losing the model', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    // No imageInput at all is an uncurated row, not corrupt data: not logged.
+    const initial = { openai: JSON.stringify([{ model: 'gpt-5.4' }]) }
+    const built = build({
+      provider: 'openai',
+      allowlistConfigMapName: ALLOWLIST_CM,
+      configMaps: { [ALLOWLIST_CM]: initial },
+    })
+    store = built.store
+    const changed = vi.fn()
+    store.onChange(changed)
+    await store.start()
+    changed.mockClear()
+    const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
+    const imageInput = {
+      state: 'supported',
+      evidence: {
+        source: 'curated',
+        reference: 'evidence:visual-contract',
+        checkedAt: '2026-01-01T00:00:00Z',
+      },
+    }
+    handle!.emit('MODIFIED', {
+      metadata: { name: ALLOWLIST_CM },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4', imageInput }]) },
+    })
+    // Witness: both the absent and the valid capability were parsed and kept.
+    expect(store.allowedModels().get('openai')?.[0].imageInput).toEqual(imageInput)
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ allowlistChanged: true }))
+    expect(errorSpy).toHaveBeenCalledTimes(0)
+    changed.mockClear()
+    const unsupportedClaim = { state: 'supported' }
+    handle!.emit('MODIFIED', {
+      metadata: { name: ALLOWLIST_CM },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4', imageInput: unsupportedClaim }]) },
+    })
+    expect(store.allowedModels().get('openai')).toEqual([
+      { model: 'gpt-5.4', imageInput: { state: 'unknown' } },
+    ])
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ allowlistChanged: true }))
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(errorSpy).toHaveBeenCalledWith(
+      { provider: 'openai', model: 'gpt-5.4' },
+      'Allowlist entry has malformed imageInput; treating it as unknown'
+    )
+    errorSpy.mockRestore()
+  })
+
   it('is disabled (no 4th watch, unavailable) when no CM name is configured', async () => {
     const built = build({
       provider: 'openai',
@@ -560,9 +610,17 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(built.watch.watch).toHaveBeenCalledTimes(4)
     expect(store.allowlistAvailable()).toBe(true)
     expect(store.allowedModels().get('openai')).toEqual([
-      { model: 'gpt-5.4', displayName: 'GPT 5.4', contextWindowTokens: 400000, vendor: 'OpenAI' },
+      {
+        imageInput: { state: 'unknown' },
+        model: 'gpt-5.4',
+        displayName: 'GPT 5.4',
+        contextWindowTokens: 400000,
+        vendor: 'OpenAI',
+      },
     ])
-    expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+    expect(store.allowedModels().get('claude')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'claude-opus-4-8' },
+    ])
     expect(store.codexPolicyBinding()).toBeNull()
   })
 
@@ -627,7 +685,9 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     store.onChange(handler)
     await store.start()
 
-    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }])
+    expect(store.allowedModels().get('openai')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.4' },
+    ])
 
     const handle = built.watch.active.get(ALLOWLIST_WATCH_KEY)
     expect(handle).toBeDefined()
@@ -636,7 +696,10 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       data: { openai: JSON.stringify([{ model: 'gpt-5.4' }, { model: 'gpt-6' }]) },
     })
 
-    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }, { model: 'gpt-6' }])
+    expect(store.allowedModels().get('openai')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.4' },
+      { imageInput: { state: 'unknown' }, model: 'gpt-6' },
+    ])
     expect(handler).toHaveBeenCalledWith({
       llmKeyChanged: false,
       envChanged: false,
@@ -720,7 +783,7 @@ describe('ConfigStore — allowlist tier (R3)', () => {
   })
 
   it('isolates a provider key with invalid JSON — other keys still parse', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
     // A distinctive raw value that must NOT surface in the log (a V8 SyntaxError
     // can embed a snippet of the offending value — see the no-log-value policy).
     const badValue = '{ not valid json SECRETish-snippet'
@@ -741,11 +804,16 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     // The CM is delivered (available), but the bad key is dropped.
     expect(store.allowlistAvailable()).toBe(true)
     expect(store.allowedModels().has('openai')).toBe(false)
-    expect(store.allowedModels().get('claude')).toEqual([{ model: 'claude-opus-4-8' }])
+    expect(store.allowedModels().get('claude')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'claude-opus-4-8' },
+    ])
 
     // The corrupt-key event logs the key at ERROR but never the raw value.
-    const logged = errorSpy.mock.calls.flat().join(' ')
-    expect(logged).toContain("allowlist key 'openai'")
+    const logged = JSON.stringify(errorSpy.mock.calls)
+    expect(errorSpy).toHaveBeenCalledWith(
+      { provider: 'openai', errName: 'SyntaxError' },
+      'Allowlist JSON parse failed'
+    )
     expect(logged).not.toContain('SECRETish-snippet')
     errorSpy.mockRestore()
   })
@@ -765,7 +833,9 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     store = built.store
     await store.start()
 
-    expect(store.allowedModels().get('openai')).toEqual([{ model: 'gpt-5.4' }])
+    expect(store.allowedModels().get('openai')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.4' },
+    ])
     // Non-array value for a key is skipped entirely.
     expect(store.allowedModels().has('zai')).toBe(false)
   })
@@ -831,7 +901,9 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     })
     store = built.store
     await store.start()
-    expect(store.allowedModels().get('codex-subscription')).toEqual([{ model: 'gpt-5.1' }])
+    expect(store.allowedModels().get('codex-subscription')).toEqual([
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.1' },
+    ])
     expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
     expect(store.codexPolicyBinding()?.models).toEqual(['gpt-5.1'])
   })
@@ -876,7 +948,13 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       credentialRevision: 2,
       connectionKey: 'team-grok',
     })
-    expect(store.allowedModels().get('grok-subscription')).toEqual([{ model: 'grok-4.6' }])
+    // The allowlist entry carries no image-input evidence, so the store stamps the
+    // fail-closed `unknown` decision on it like every other entry (#654). The point
+    // of this assertion is the intersection with the connection's `models`, which
+    // drops `grok-4.5`.
+    expect(store.allowedModels().get('grok-subscription')).toEqual([
+      { model: 'grok-4.6', imageInput: { state: 'unknown' } },
+    ])
     expect(store.codexPolicyBinding()?.catalogRevision).toBe(99)
   })
 
@@ -964,8 +1042,8 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.codexPolicyBinding()?.connectionKey).toBe('deployment-default')
     expect(store.codexPolicyBinding()?.models).toBeUndefined()
     expect(store.allowedModels().get('codex-subscription')).toEqual([
-      { model: 'gpt-5.3-codex' },
-      { model: 'gpt-5.1' },
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.3-codex' },
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.1' },
     ])
   })
 
@@ -992,8 +1070,8 @@ describe('ConfigStore — allowlist tier (R3)', () => {
     expect(store.codexPolicyBinding()?.connectionKey).toBe('personal-pro')
     expect(store.codexPolicyBinding()?.models).toBeUndefined()
     expect(store.allowedModels().get('codex-subscription')).toEqual([
-      { model: 'gpt-5.3-codex' },
-      { model: 'gpt-5.1' },
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.3-codex' },
+      { imageInput: { state: 'unknown' }, model: 'gpt-5.1' },
     ])
   })
 

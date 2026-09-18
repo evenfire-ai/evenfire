@@ -112,10 +112,10 @@ type Config = {
   usageRetentionIntervalMs: number
   budgetReservationSweepIntervalMs: number
   // LLM catalog discovery sync cron (Fase 4). Runs syncDiscoveredModels()
-  // periodically. DEFAULT OFF — the operator opts in consciously so a fresh
-  // plane never hammers models.dev on boot. When on, one tick every
-  // llmCatalogSyncIntervalMs (default 24h), cross-replica-deduped by a session
-  // advisory lock inside the cron.
+  // periodically. Code default off; the base deploy enables it
+  // (deploy/base/control-plane/configmaps.yaml). When on, one tick a few
+  // seconds after start and then one every llmCatalogSyncIntervalMs (default
+  // 24h), cross-replica-deduped by a session advisory lock inside the cron.
   llmCatalogSyncCronEnabled: boolean
   // Default OFF. Codex subscription management/admission stays dark until
   // CONTROL_API_CODEX_SUBSCRIPTION_ENABLED=true.
@@ -130,6 +130,12 @@ type Config = {
   // the grant. Override only to pin a documented registration.
   grokOAuthClientId: string
   llmCatalogSyncIntervalMs: number
+  // How long image-input evidence derived from models.dev stays valid, counted
+  // from the catalog CAPTURE time (not the wall clock). Past it the shared
+  // contract resolves the row to `unknown` with reason `evidence_expired` and
+  // images are refused loudly until the next sync. Default 30 days; refused at
+  // boot when it is below twice llmCatalogSyncIntervalMs and the cron is on.
+  llmCatalogImageEvidenceTtlMs: number
   // §4.5 sanity guard, layer 3: absolute plausibility floor. If a LIVE run's
   // TOTAL mapped model count is below this, the whole run SKIPS stale-marking
   // (a flappy/truncated external catalog must not mass-stale the allowlist);
@@ -435,6 +441,10 @@ const DEFAULT_MCP_HOST_JWT_MAX_HOST_REF_LENGTH = 63 + 1 + 253
 const REGISTRY_PULL_SECRET_RECONCILE_MIN_INTERVAL_MS = 10_000
 // A 24h-default cron should never be dialed below a minute — refuse a hot loop.
 const LLM_CATALOG_SYNC_MIN_INTERVAL_MS = 60_000
+// Image-input evidence written by a sync expires this long after the capture it
+// came from. The floor is two sync intervals: anything shorter would expire the
+// evidence before the cron could possibly renew it.
+const LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS = 2 * LLM_CATALOG_SYNC_MIN_INTERVAL_MS
 const WORKFLOW_MAX_WORKLOADS_PER_RECIPE_CEILING = 25
 const WORKFLOW_UI_EGRESS_INTERNAL_MAX_ITEMS_CEILING = 25
 const WORKFLOW_MAX_STEPS_CEILING = 100
@@ -647,6 +657,31 @@ if (memberRegistrationMode === 'hosted') {
 // REGISTRY_CONNECTION_MODE a second time).
 const registryConnectionMode: 'managed' | 'self-hosted' = parseRegistryConnectionMode()
 
+// Computed as locals because the two values are coupled: image-input evidence
+// written by a sync expires TTL after the capture it came from, so a TTL shorter
+// than the refresh cadence would expire every claim before the next tick could
+// renew it. The cross-field check below is only meaningful while the cron is the
+// thing doing the refreshing; with the cron off the operator owns the cadence
+// (documented in docs/llm-providers/README.md).
+const llmCatalogSyncIntervalMs = intervalMsFromEnv(
+  'LLM_CATALOG_SYNC_INTERVAL_MS',
+  24 * 60 * 60 * 1000,
+  LLM_CATALOG_SYNC_MIN_INTERVAL_MS
+)
+const llmCatalogImageEvidenceTtlMs = intervalMsFromEnv(
+  'LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS',
+  30 * 24 * 60 * 60 * 1000,
+  LLM_CATALOG_IMAGE_EVIDENCE_MIN_TTL_MS
+)
+if (
+  process.env.LLM_CATALOG_SYNC_CRON_ENABLED === 'true' &&
+  llmCatalogImageEvidenceTtlMs < 2 * llmCatalogSyncIntervalMs
+) {
+  throw new Error(
+    'LLM_CATALOG_IMAGE_EVIDENCE_TTL_MS must be at least twice LLM_CATALOG_SYNC_INTERVAL_MS when LLM_CATALOG_SYNC_CRON_ENABLED=true'
+  )
+}
+
 export const config: Config = {
   port: Number(process.env.CONTROL_API_PORT || 8090),
   jsonBodyLimit: process.env.CONTROL_API_JSON_BODY_LIMIT || '150mb',
@@ -823,14 +858,11 @@ export const config: Config = {
   // This is not a confidential client secret. Same shape as Codex above.
   grokOAuthClientId:
     process.env.CONTROL_API_GROK_OAUTH_CLIENT_ID || 'b1a00492-073a-47ea-816f-4c329264a828',
-  // Default 24h. Validated (not merely parsed): the value goes straight into
-  // setInterval and each tick opens a Postgres transaction + advisory lock. A
-  // 60s floor is orders of magnitude below the default and far above a hot loop.
-  llmCatalogSyncIntervalMs: intervalMsFromEnv(
-    'LLM_CATALOG_SYNC_INTERVAL_MS',
-    24 * 60 * 60 * 1000,
-    LLM_CATALOG_SYNC_MIN_INTERVAL_MS
-  ),
+  // Both computed above the literal (same env var, default and 60s floor as the
+  // inline form they replace): the TTL is validated against the interval, which
+  // needs both values in scope before the object is built.
+  llmCatalogSyncIntervalMs,
+  llmCatalogImageEvidenceTtlMs,
   modelsDevMinPlausibleLiveTotal: positiveIntegerFromEnv(
     'MODELS_DEV_MIN_PLAUSIBLE_LIVE_TOTAL',
     100

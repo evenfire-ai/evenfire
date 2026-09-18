@@ -209,7 +209,7 @@ assert_unpublished_images_are_exactly_the_known_fixtures() {
       console.log(m.IMAGES.filter(i=>!i.published).map(i=>i.name).sort().join(",")))' 2>/dev/null)"
   # Only these local E2E fixtures are unpublished. Keep the exact set explicit
   # so a production image cannot silently disappear from publication.
-  local want="codex-approved-tools-control-api-e2e,codex-approved-tools-mcp-e2e,codex-approved-tools-proxy-e2e,codex-approved-tools-workflow-e2e,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
+  local want="codex-approved-tools-control-api-e2e,codex-approved-tools-mcp-e2e,codex-approved-tools-proxy-e2e,codex-approved-tools-workflow-e2e,image-capabilities-mcp-host,workflow-custom-sdk-e2e,workflow-plugin-sdk-e2e"
   if [ "$got" = "$want" ]; then
     pass "the unpublished set is exactly the known fixtures"
   else

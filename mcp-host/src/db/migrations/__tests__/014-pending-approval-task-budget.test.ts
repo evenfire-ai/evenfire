@@ -55,6 +55,9 @@ describe('durable task budget migration and renewal', () => {
   it('atomically replaces a legacy approval, retaining old state if insertion fails', async () => {
     const db = fixture()
     try {
+      // The current dispatcher prepares statements against the current schema.
+      const currentIndex = migrations.findIndex(m => m.name === migration.name)
+      for (const later of migrations.slice(currentIndex + 1)) later.up(db)
       const deps = createDispatcher(db)
       const old = db.prepare('SELECT * FROM pending_approvals').get() as PendingApprovalRow
       const budget = { elapsedActiveMs: 0, iterationsUsed: 0, durationMs: 100, maxIterations: 3 }

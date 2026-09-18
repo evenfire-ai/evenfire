@@ -11,6 +11,8 @@
  * not yet delivered (`allowlistAvailable() === false`), only the Host-configured
  * default model is permitted — never fail-open, never brick an existing Host.
  */
+import { type ImageInputDecision, resolveImageInputCapability } from '@clerum/llm-providers'
+import { chatTransportSupportsImageInput } from '../llm/imageInput'
 import type { HostAllowedModel } from '../types'
 import type { AllowlistView } from './allowlistCheck'
 import type { AllowedModelEntry } from './configStore'
@@ -66,6 +68,7 @@ export function hostSubsetAllowlistView(
 /** One selectable model as projected to the desktop selector. */
 export interface ModelWireEntry {
   name: string
+  imageInput?: ImageInputDecision
   displayName?: string
   contextWindowTokens?: number
 }
@@ -120,10 +123,10 @@ export function projectModels(
   hostDefault: string
 ): { degraded: boolean; models: ModelWireEntry[] } {
   if (!view.allowlistAvailable()) {
-    return { degraded: true, models: [{ name: hostDefault }] }
+    return { degraded: true, models: [entryToWire({ model: hostDefault }, provider)] }
   }
   const entries = view.allowedModels().get(provider) ?? []
-  return { degraded: false, models: entries.map(entryToWire) }
+  return { degraded: false, models: entries.map(entry => entryToWire(entry, provider)) }
 }
 
 /**
@@ -139,8 +142,13 @@ export function contextWindowForModel(
   return entries.find(e => e.model === model)?.contextWindowTokens
 }
 
-function entryToWire(e: AllowedModelEntry): ModelWireEntry {
-  const wire: ModelWireEntry = { name: e.model }
+function entryToWire(e: AllowedModelEntry, provider: string): ModelWireEntry {
+  const wire: ModelWireEntry = {
+    name: e.model,
+    imageInput: resolveImageInputCapability(e.imageInput, {
+      transportSupported: chatTransportSupportsImageInput(provider),
+    }),
+  }
   if (e.displayName) wire.displayName = e.displayName
   if (e.contextWindowTokens) wire.contextWindowTokens = e.contextWindowTokens
   return wire

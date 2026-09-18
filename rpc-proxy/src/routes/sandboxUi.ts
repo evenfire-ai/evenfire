@@ -1,12 +1,14 @@
-import { Request, Response, Router } from 'express'
+import { NextFunction, Request, Response, Router } from 'express'
 import httpProxy from 'http-proxy'
 import type { ClientRequest, IncomingMessage, ServerResponse } from 'node:http'
 import { config } from '../config.js'
 import { AuthedRequest, requireRpcAuth, requireScope } from '../middleware/auth.js'
+import { jsonBody } from '../middleware/jsonBody.js'
 import { emitSessionMint, emitViewRequest } from '../observability/sandboxUiAudit.js'
 import { normalizeViewPath } from '../services/sandboxUiPath.js'
 import { listSandboxUiApps, lookupSandboxUiRegistry } from '../services/sandboxUiRegistry.js'
 import {
+  type SandboxUiSessionClaims,
   buildSandboxUiSetCookie,
   createSandboxUiSession,
   verifySandboxUiSession,
@@ -197,6 +199,29 @@ sandboxUiProxy.on('error', (err, _req, res) => {
   }
 })
 
+/**
+ * Cookie authentication for the embed-side `oauth/*` routes. Verifies the
+ * per-recipe UI session cookie against the URL's (recipeNs, recipeName) and
+ * stores the claims in `res.locals.sandboxUiClaims`. Runs before `jsonBody`
+ * so requests without a valid session are rejected before any body parsing.
+ */
+function requireSandboxUiCookieSession(req: Request, res: Response, next: NextFunction): void {
+  const { recipeNs, recipeName } = req.params
+  const cookies = parseCookies(req.headers.cookie ?? '')
+  const cookieValue = cookies[config.sandboxUiCookieName]
+  if (!cookieValue) {
+    res.status(401).json({ error: 'sandbox_ui_session_required' })
+    return
+  }
+  const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
+  if (!claims) {
+    res.status(401).json({ error: 'sandbox_ui_session_invalid' })
+    return
+  }
+  res.locals.sandboxUiClaims = claims
+  next()
+}
+
 export function createSandboxUiSessionRouter(): Router {
   const router = Router()
 
@@ -300,6 +325,7 @@ export function createSandboxUiSessionRouter(): Router {
     '/sandbox-ui/:recipeNs/:recipeName/oauth/authorize-url',
     requireRpcAuth,
     requireScope('sandbox:ui:view'),
+    jsonBody,
     async (req: AuthedRequest, res: Response) => {
       const { recipeNs, recipeName } = req.params
       const userId = req.auth!.sub
@@ -359,7 +385,7 @@ export function createSandboxUiSessionRouter(): Router {
             recipeNs,
             recipeName,
             oauthClientId,
-            userId,           // from req.auth.sub — never the body
+            userId, // from req.auth.sub — never the body
             redirectUri,
             background,
           }),
@@ -425,20 +451,11 @@ export function createSandboxUiSessionRouter(): Router {
   // the user's session is bad).
   router.post(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/token',
+    requireSandboxUiCookieSession,
+    jsonBody,
     async (req: Request, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const claims = res.locals.sandboxUiClaims as SandboxUiSessionClaims
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''
@@ -523,20 +540,11 @@ export function createSandboxUiSessionRouter(): Router {
   // a best-effort buildRevokeRequest adapter call before delete.
   router.delete(
     '/sandbox-ui/:recipeNs/:recipeName/oauth/grant',
+    requireSandboxUiCookieSession,
+    jsonBody,
     async (req: Request, res: Response) => {
       const { recipeNs, recipeName } = req.params
-
-      const cookies = parseCookies(req.headers.cookie ?? '')
-      const cookieValue = cookies[config.sandboxUiCookieName]
-      if (!cookieValue) {
-        res.status(401).json({ error: 'sandbox_ui_session_required' })
-        return
-      }
-      const claims = verifySandboxUiSession(cookieValue, recipeNs, recipeName)
-      if (!claims) {
-        res.status(401).json({ error: 'sandbox_ui_session_invalid' })
-        return
-      }
+      const claims = res.locals.sandboxUiClaims as SandboxUiSessionClaims
 
       const oauthClientId =
         typeof req.body?.oauthClientId === 'string' ? String(req.body.oauthClientId).trim() : ''

@@ -37,6 +37,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
   )
   const handleSendAgentMessage = useStableCallback(vm.handleSendAgentMessage)
   const handleRetryFailedAgentSend = useStableCallback(vm.handleRetryFailedAgentSend)
+  const handleRecoverFailedAgentSend = useStableCallback(vm.handleRecoverFailedAgentSend)
+  const handleDiscardFailedAgentSend = useStableCallback(vm.handleDiscardFailedAgentSend)
 
   return useMemo(
     () => ({
@@ -56,6 +58,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
+      handleRecoverFailedAgentSend,
+      handleDiscardFailedAgentSend,
     }),
     [
       chatEndRef,
@@ -74,6 +78,8 @@ export function useAgentChatActionsValue(vm: AppVm): AgentChatActionsContextValu
       handleRemoveComposerReferenceAttachment,
       handleSendAgentMessage,
       handleRetryFailedAgentSend,
+      handleRecoverFailedAgentSend,
+      handleDiscardFailedAgentSend,
     ]
   )
 }
