@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import {
   cleanupFixtureIdentities,
@@ -38,6 +39,18 @@ const env = {
   MINIKUBE_PROFILE: input.profile,
   CONTROL_API_REAL_PG_CONTEXT: input.context,
 }
+
+test('seed keeps bounded fixture diagnostics in catch scope', () => {
+  const source = readFileSync(new URL('./seed.mjs', import.meta.url), 'utf8')
+  const binding = source.indexOf(
+    'const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError }'
+  )
+  const tryBlock = source.indexOf('\ntry {')
+  const diagnosticUse = source.indexOf('failure: describeFixtureError(error)')
+  assert.ok(binding >= 0)
+  assert.ok(binding < tryBlock)
+  assert.ok(diagnosticUse > tryBlock)
+})
 
 function harness() {
   const state = {

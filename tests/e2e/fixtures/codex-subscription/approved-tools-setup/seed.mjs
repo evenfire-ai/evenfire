@@ -16,6 +16,8 @@ for await (const chunk of process.stdin) {
 }
 const input = JSON.parse(Buffer.concat(inputChunks, inputBytes).toString('utf8'))
 if (!['create', 'cleanup'].includes(input.action)) throw new Error('Invalid identity action')
+const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError } =
+  await import('/app/approved-tools-setup/identity-lifecycle.mjs')
 const { pool, withTransaction } = await import('/app/control-api/dist/db.js')
 try {
   const { default: bcrypt } = await import('/app/control-api/node_modules/bcryptjs/index.js')
@@ -25,8 +27,6 @@ try {
     await import('/app/control-api/dist/services/codexSubscriptionConnection.js')
   const { rebuildLiveCodexUnionAllowlist } =
     await import('/app/control-api/dist/services/codexSubscriptionCatalog.js')
-  const { createFixtureIdentities, cleanupFixtureIdentities, describeFixtureError } =
-    await import('/app/approved-tools-setup/identity-lifecycle.mjs')
   const publish = journal => process.stdout.write(JSON.stringify({ e2eIdentity: journal }) + '\n')
   const adapters = {
     env: process.env,
