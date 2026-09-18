@@ -321,7 +321,7 @@ describe('#654 LlmPortAdapter image guard', () => {
     expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
   })
 
-  it('refuses Codex transport until #650 lands, even with curated evidence', async () => {
+  it('dispatches Codex V2 chat when catalog evidence is curated', async () => {
     const provider = fakeProvider('codex-subscription')
     const adapter = new LlmPortAdapter(
       provider,
@@ -335,12 +335,11 @@ describe('#654 LlmPortAdapter image guard', () => {
       allow({ state: 'supported', evidence: CURATED_EVIDENCE })
     )
 
-    await expectDenied(
-      () => adapter.completeWithTools({ messages: [imageMessage()], tools: [] }),
-      LlmErrorCode.ImageInputUnsupported,
-      'cannot carry images'
-    )
-    expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
+    await adapter.completeWithTools({ messages: [imageMessage()], tools: [] })
+
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const [messages] = provider.completeSingleTurnWithTools.mock.calls[0]
+    expect(messages[0].contentParts?.[0].type).toBe('image')
   })
 
   it('refuses a malformed base64 image part with LLM_INVALID_ATTACHMENT before consulting the resolver', async () => {
@@ -648,7 +647,9 @@ describe('#669 LlmPortAdapter malformed tool screenshots', () => {
 
     expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
     const [dispatched] = provider.completeSingleTurnWithTools.mock.calls[0] as [ChatMessage[]]
-    expect(imageParts(dispatched)).toEqual([{ type: 'image', mimeType: 'image/png', data: 'QUJD' }])
+    expect(imageParts(dispatched)).toEqual([
+      expect.objectContaining({ type: 'image', mimeType: 'image/png', data: 'QUJD' }),
+    ])
     const carrier = dispatched[dispatched.length - 1]
     expect(carrier.imageOrigin).toBe('tool_result')
     expect(carrier.content).toContain(`[2 ${NOTICE_SUFFIX}`)

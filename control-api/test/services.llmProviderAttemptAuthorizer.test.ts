@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { LIMITS, hashCodexCompletionRequestV1 } from '@clerum/llm-provider-attempt-contract'
+import { streamCodexCompletion } from '../../codex-llm-proxy/src/codexTransport'
+import {
+  CODEX_CATALOG_ORIGIN,
+  CODEX_COMPLETIONS_ORIGIN,
+} from '../../codex-llm-proxy/src/originPolicy'
+import { CodexLlmProxyClient } from '../../mcp-host/src/llm/codexLlmProxyClient'
+import { CodexSubscriptionProvider } from '../../mcp-host/src/llm/codexSubscription'
+import { ProviderAttemptAuthorizer } from '../../mcp-host/src/llm/providerAttemptAuthorizer'
 import {
   LlmProviderAttemptAuthorizeError,
   type LlmProviderAttemptAuthorizerDeps,
@@ -7,6 +17,16 @@ import {
   computeCodexPolicyHash,
 } from '../src/services/llmProviderAttemptAuthorizer.js'
 import type { McpHostAccessClaims } from '../src/utils/auth/mcpHostJwtToken.js'
+
+const { jpegOfSize, padPngToSize } = createRequire(import.meta.url)(
+  '../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
+) as {
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
+  padPngToSize: (png: Buffer | string, targetBytes: number) => Buffer
+}
+
+// Non-operational sentinel consumed only by the injected external model fixture.
+const FIXTURE_ACCESS_VALUE = 'fixture-only'
 
 const lockPluginWorkloadSdkRecipe = vi.hoisted(() => vi.fn())
 const getPluginWorkloadSdkProviderAttemptForUpdate = vi.hoisted(() => vi.fn())
@@ -55,6 +75,30 @@ const REQUEST = {
   provider: 'codex-subscription' as const,
   model: 'gpt-5.1',
   messages: [{ role: 'user' as const, content: 'hello' }],
+}
+
+const MIB = 1024 * 1024
+
+type VisualImagePart = {
+  type: string
+  mimeType: string
+  data: string
+  source?: { kind: string; attachmentId: string; messageId?: string; toolCallId?: string }
+}
+
+function loadVisualFixtures(): Record<
+  string,
+  { messages: Array<{ contentParts: VisualImagePart[] }> }
+> {
+  return JSON.parse(
+    readFileSync(
+      new URL(
+        '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+        import.meta.url
+      ),
+      'utf8'
+    )
+  )
 }
 
 function claims(overrides: Partial<McpHostAccessClaims> = {}): McpHostAccessClaims {
@@ -153,6 +197,330 @@ function deps({
 }
 
 describe('authorizeLlmProviderAttempt', () => {
+  // In-process integration, not browser E2E or live OAuth evidence. The Host,
+  // both clients, authorizer, parsers/hash and proxy projection are real.
+  // DB/grant custody and the external model are injected seams.
+  it.each([
+    ['png', 'attachment', false],
+    ['jpeg', 'attachment', true],
+    ['png', 'tool', true],
+    ['jpeg', 'tool', false],
+    ['png', 'attachment', false, 10 * 1024 * 1024],
+    ['png', 'tool', true, 5 * 1024 * 1024],
+    ['jpeg', 'attachment', true, 5 * 1024 * 1024],
+    ['jpeg', 'tool', true, 5 * 1024 * 1024],
+  ] as const)(
+    'carries %s from %s (tools=%s) through Host authorization and proxy projection',
+    async (format, origin, withTools, imageBytes = 0) => {
+      const fixtures = loadVisualFixtures()
+      let authorized: Awaited<ReturnType<typeof authorizeLlmProviderAttempt>> | undefined
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: 'http://test-control/authorize',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          authorized = await authorizeLlmProviderAttempt(
+            claims(),
+            JSON.parse(String(init?.body)),
+            deps()
+          )
+          return Response.json(authorized)
+        },
+      })
+      let projectedBody: Record<string, unknown> | undefined
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: authorized!.providerAttemptId,
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const proxy = new CodexLlmProxyClient({
+        runtimeUrl: 'http://test-proxy/completions',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          expect(authorized).toBeDefined()
+          const envelope = JSON.parse(String(init?.body))
+          const frames: unknown[] = []
+          const result = await streamCodexCompletion({
+            ...envelope,
+            ticket: {
+              jti: 'fixture-ticket',
+              hostRef: 'research-host',
+              model: REQUEST.model,
+              requestHash: authorized!.requestHash,
+              providerAttemptId: authorized!.providerAttemptId,
+            },
+            redeem: async () => ({
+              accessToken: FIXTURE_ACCESS_VALUE,
+              chatgptAccountId: 'fixture-account',
+              attemptReceipt: 'a'.repeat(64),
+              expiryClass: 'short_lived',
+              transport: {
+                protocolVersion: 'codex-subscription-transport.v1',
+                completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+                catalogOrigin: CODEX_CATALOG_ORIGIN,
+                operation: 'completion_stream',
+                servedModel: REQUEST.model,
+                maxStreamDurationMs: 1000,
+              },
+            }),
+            finalize,
+            lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+            fetchFn: async (_upstream, requestInit) => {
+              projectedBody = JSON.parse(String(requestInit?.body))
+              const parts = (
+                projectedBody!.input as Array<{ role?: string; content: Array<{ type: string }> }>
+              ).find(item => item.role === 'user')!.content
+              expect(parts.some(part => part.type === 'input_image')).toBe(true)
+              return new Response(
+                'data: {"type":"response.output_text.delta","delta":"image received"}\n\ndata: {"type":"response.completed"}\n\n'
+              )
+            },
+            onFrame: frame => frames.push(frame),
+          })
+          frames.push({ type: 'done', ...result })
+          return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''))
+        },
+      })
+      const provider = new CodexSubscriptionProvider(REQUEST.model, {
+        authorizer,
+        proxy,
+        attemptContext: () => ({
+          policyRevision: 4,
+          policyHash: body().policyHash,
+          hostRef: 'research-host',
+        }),
+      })
+      const image = fixtures[format].messages[0].contentParts.find(
+        (part: { type: string }) => part.type === 'image'
+      )
+      if (imageBytes > 0) {
+        image.data =
+          format === 'png'
+            ? padPngToSize(image.data, imageBytes).toString('base64')
+            : jpegOfSize(imageBytes).toString('base64')
+        expect(Buffer.from(image.data, 'base64')).toHaveLength(imageBytes)
+      }
+      let messages = fixtures[format].messages
+      if (origin === 'tool') {
+        image.source = { kind: 'tool', attachmentId: 'fixture-image', toolCallId: 'fixture-call' }
+        messages = [
+          {
+            role: 'assistant',
+            content: '',
+            tool_calls: [{ id: 'fixture-call', name: 'screenshot', arguments: {} }],
+          },
+          {
+            role: 'tool',
+            content: 'Screenshot ready',
+            tool_call_id: 'fixture-call',
+            name: 'screenshot',
+          },
+          ...messages,
+        ]
+      }
+      const result = withTools
+        ? await provider.completeSingleTurnWithTools(messages, [
+            {
+              name: 'screenshot',
+              description: 'Take a screenshot',
+              parameters: { type: 'object', properties: {} },
+            },
+          ])
+        : await provider.completeSingleTurn(messages)
+      expect(
+        (projectedBody!.input as Array<{ role?: string; content: unknown[] }>).find(
+          item => item.role === 'user'
+        )!.content
+      ).toContainEqual({
+        type: 'input_image',
+        image_url: `data:${image.mimeType};base64,${image.data}`,
+        detail: 'high',
+      })
+      if (origin === 'tool') {
+        expect((projectedBody!.input as Array<{ type?: string }>).map(item => item.type)).toEqual([
+          'function_call',
+          'function_call_output',
+          undefined,
+        ])
+      }
+      expect(result.content).toBe('image received')
+      expect(finalize).toHaveBeenCalledOnce()
+    },
+    60_000
+  )
+
+  it.each([
+    {
+      name: '10MiB PNG + 5MiB JPEG',
+      images: [
+        { format: 'png' as const, bytes: 10 * MIB },
+        { format: 'jpeg' as const, bytes: 5 * MIB },
+      ],
+    },
+    {
+      name: 'three 5MiB PNGs',
+      images: [
+        { format: 'png' as const, bytes: 5 * MIB },
+        { format: 'png' as const, bytes: 5 * MIB },
+        { format: 'png' as const, bytes: 5 * MIB },
+      ],
+    },
+  ])(
+    'carries $name through Host authorization and proxy projection',
+    async ({ images }) => {
+      const fixtures = loadVisualFixtures()
+      const parts = images.map((item, index) => {
+        const template = fixtures[item.format].messages[0].contentParts.find(
+          part => part.type === 'image'
+        )
+        expect(template).toBeDefined()
+        const data =
+          item.format === 'png'
+            ? padPngToSize(template!.data, item.bytes).toString('base64')
+            : jpegOfSize(item.bytes).toString('base64')
+        expect(Buffer.from(data, 'base64')).toHaveLength(item.bytes)
+        return {
+          ...template!,
+          data,
+          source: {
+            kind: 'attachment' as const,
+            attachmentId: `att-${index}`,
+            messageId: 'msg-1',
+          },
+        }
+      })
+      let authorized: Awaited<ReturnType<typeof authorizeLlmProviderAttempt>> | undefined
+      const authorizer = new ProviderAttemptAuthorizer({
+        authorizeUrl: 'http://test-control/authorize',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          authorized = await authorizeLlmProviderAttempt(
+            claims(),
+            JSON.parse(String(init?.body)),
+            deps()
+          )
+          return Response.json(authorized)
+        },
+      })
+      let projectedBody: Record<string, unknown> | undefined
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: authorized!.providerAttemptId,
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const proxy = new CodexLlmProxyClient({
+        runtimeUrl: 'http://test-proxy/completions',
+        readPlatformJwt: () => FIXTURE_ACCESS_VALUE,
+        fetchFn: async (_url, init) => {
+          expect(authorized).toBeDefined()
+          const envelope = JSON.parse(String(init?.body))
+          const frames: unknown[] = []
+          const result = await streamCodexCompletion({
+            ...envelope,
+            ticket: {
+              jti: 'fixture-ticket',
+              hostRef: 'research-host',
+              model: REQUEST.model,
+              requestHash: authorized!.requestHash,
+              providerAttemptId: authorized!.providerAttemptId,
+            },
+            redeem: async () => ({
+              accessToken: FIXTURE_ACCESS_VALUE,
+              chatgptAccountId: 'fixture-account',
+              attemptReceipt: 'a'.repeat(64),
+              expiryClass: 'short_lived',
+              transport: {
+                protocolVersion: 'codex-subscription-transport.v1',
+                completionsOrigin: CODEX_COMPLETIONS_ORIGIN,
+                catalogOrigin: CODEX_CATALOG_ORIGIN,
+                operation: 'completion_stream',
+                servedModel: REQUEST.model,
+                maxStreamDurationMs: 1000,
+              },
+            }),
+            finalize,
+            lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+            fetchFn: async (_upstream, requestInit) => {
+              projectedBody = JSON.parse(String(requestInit?.body))
+              return new Response(
+                'data: {"type":"response.output_text.delta","delta":"image received"}\n\ndata: {"type":"response.completed"}\n\n'
+              )
+            },
+            onFrame: frame => frames.push(frame),
+          })
+          frames.push({ type: 'done', ...result })
+          return new Response(frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join(''))
+        },
+      })
+      const provider = new CodexSubscriptionProvider(REQUEST.model, {
+        authorizer,
+        proxy,
+        attemptContext: () => ({
+          policyRevision: 4,
+          policyHash: body().policyHash,
+          hostRef: 'research-host',
+        }),
+      })
+      const result = await provider.completeSingleTurn([
+        {
+          role: 'user',
+          content: 'Describe the attached image',
+          contentParts: [{ type: 'text', text: 'Describe the attached image' }, ...parts],
+        },
+      ])
+      const projectedParts = (
+        projectedBody!.input as Array<{ role?: string; content: unknown[] }>
+      ).find(item => item.role === 'user')!.content
+      for (const part of parts) {
+        expect(projectedParts).toContainEqual({
+          type: 'input_image',
+          image_url: `data:${part.mimeType};base64,${part.data}`,
+          detail: 'high',
+        })
+      }
+      expect(result.content).toBe('image received')
+      expect(finalize).toHaveBeenCalledOnce()
+    },
+    60_000
+  )
+
+  it('checks the V2 proxy envelope inside the transaction, after signing and before commit', async () => {
+    const transactionEvents: string[] = []
+    const request = {
+      ...REQUEST,
+      schemaVersion: 'codex-completion-request.v2',
+      messages: [{ role: 'user', content: '' }],
+    }
+    const payload = body({ request })
+    request.messages[0].content = 'x'.repeat(
+      LIMITS.maxRequestBodyBytes - Buffer.byteLength(JSON.stringify(payload)) - 16
+    )
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThan(LIMITS.maxRequestBodyBytes)
+    const current = deps({
+      withTransaction: async work => {
+        transactionEvents.push('begin')
+        try {
+          const result = await work({ query: vi.fn() } as never)
+          transactionEvents.push('commit')
+          return result
+        } catch (error) {
+          transactionEvents.push('rollback')
+          throw error
+        }
+      },
+      // Fault injection at the signing seam: exercise the post-signing envelope
+      // guard without exceeding the unchanged 1 MiB non-image request budget.
+      issueTicket: vi.fn().mockResolvedValue({
+        executionTicket: 't'.repeat(LIMITS.maxVisualRequestBodyBytes),
+        expiresAt: new Date('2026-09-16T23:00:00Z'),
+      }),
+    })
+    await expect(authorizeLlmProviderAttempt(claims(), payload, current)).rejects.toMatchObject({
+      code: 'payload_too_large',
+    })
+    expect(current.issueTicket).toHaveBeenCalledOnce()
+    expect(transactionEvents).toEqual(['begin', 'rollback'])
+  })
+
   let current: LlmProviderAttemptAuthorizerDeps
 
   beforeEach(() => {
@@ -223,6 +591,51 @@ describe('authorizeLlmProviderAttempt', () => {
     await expect(
       authorizeLlmProviderAttempt(claims(), body({ extra: true }), current)
     ).rejects.toMatchObject({ code: 'unknown_field' })
+  })
+
+  it('rejects a V2 authorize wrapper whose invocationId is not a bounded id', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: { ...REQUEST, schemaVersion: 'codex-completion-request.v2' },
+          invocationId: 'x'.repeat(200),
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('maps a contract parse limit failure to payload_too_large', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: {
+            ...REQUEST,
+            schemaVersion: 'codex-completion-request.v2',
+            messages: Array.from({ length: 129 }, () => ({ role: 'user' as const, content: 'x' })),
+          },
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'payload_too_large' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
+  })
+
+  it('keeps the authorize wrapper on the 1 MiB non-image budget when the nested request is V2', async () => {
+    await expect(
+      authorizeLlmProviderAttempt(
+        claims(),
+        body({
+          request: { ...REQUEST, schemaVersion: 'codex-completion-request.v2' },
+          targetRef: 't'.repeat(2 * MIB),
+        }),
+        current
+      )
+    ).rejects.toMatchObject({ code: 'invalid_request' })
+    expect(current.insertAttempt).not.toHaveBeenCalled()
   })
 
   it('rejects a non-UUID Plugin Workload SDK attempt id', async () => {

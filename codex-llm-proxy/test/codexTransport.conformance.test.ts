@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
 import {
+  hashCodexCompletionRequest,
   hashCodexCompletionRequestV1,
+  parseCodexCompletionRequest,
   parseCodexCompletionRequestV1,
 } from '@clerum/llm-provider-attempt-contract'
 import {
@@ -69,6 +72,85 @@ function sseResponse(
 }
 
 describe('streamCodexCompletion', () => {
+  it.each(['png', 'jpeg'] as const)(
+    'projects authorized %s parts without leaking provenance upstream',
+    async format => {
+      const fixtures = JSON.parse(
+        readFileSync(
+          new URL(
+            '../../packages/llm-provider-attempt-contract/fixtures/visual-requests.json',
+            import.meta.url
+          ),
+          'utf8'
+        )
+      ) as Record<
+        string,
+        {
+          messages: Array<{
+            contentParts: Array<{
+              type: string
+              text?: string
+              mimeType?: string
+              data?: string
+            }>
+          }>
+        }
+      >
+      const parsed = parseCodexCompletionRequest({ ...fixtures[format], model: REQUEST.model })
+      expect(parsed.ok).toBe(true)
+      if (!parsed.ok) throw new Error(parsed.message)
+      const request = parsed.value
+      const requestHash = hashCodexCompletionRequest(request)
+      const fetchFn = vi.fn<typeof fetch>(async () =>
+        sseResponse(['data: {"type":"response.completed"}\n\n'])
+      )
+      const redeem = vi.fn(async () => redeemSuccess())
+      const finalize = vi.fn(async () => ({
+        providerAttemptId: 'visual-attempt',
+        outcome: 'success' as const,
+        duplicate: false,
+      }))
+      const input: StreamCodexCompletionInput = {
+        executionTicket: 'visual-ticket',
+        requestHash,
+        request,
+        ticket: {
+          jti: 'visual-ticket',
+          hostRef: 'research-host',
+          model: request.model,
+          requestHash,
+          providerAttemptId: 'visual-attempt',
+        },
+        redeem,
+        finalize,
+        fetchFn,
+        lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+      }
+      await expect(streamCodexCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
+        code: 'invalid_request',
+      })
+      expect(redeem).not.toHaveBeenCalled()
+      expect(fetchFn).not.toHaveBeenCalled()
+      await streamCodexCompletion(input)
+      const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
+      const sourceParts = fixtures[format].messages[0].contentParts
+      expect(body.input[0].content).toEqual(
+        sourceParts.map(
+          (part: { type: string; text?: string; mimeType?: string; data?: string }) =>
+            part.type === 'text'
+              ? { type: 'input_text', text: part.text }
+              : {
+                  type: 'input_image',
+                  image_url: `data:${part.mimeType};base64,${part.data}`,
+                  detail: 'high',
+                }
+        )
+      )
+      expect(JSON.stringify(body)).not.toContain('attachmentId')
+      expect(finalize).toHaveBeenCalledOnce()
+    }
+  )
+
   it('does not read further upstream bytes while the frame consumer is back-pressured', async () => {
     const encoder = new TextEncoder()
     const events = [

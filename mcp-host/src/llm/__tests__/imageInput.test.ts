@@ -61,8 +61,8 @@ const EXPECTED_MATRIX: Record<string, Record<ImageTransportOperation, boolean>> 
     completeWithToolsAndCache: false,
   },
   'codex-subscription': {
-    complete: false,
-    completeWithTools: false,
+    complete: true,
+    completeWithTools: true,
     completeAndCache: false,
     completeWithToolsAndCache: false,
   },
@@ -143,13 +143,20 @@ describe('#654 transport matrix', () => {
       const authorized = chatTransportSupportsImageInput(provider)
       if (!authorized) continue
       const hasDescriptorBaseURL = Boolean(descriptorFor(provider).baseURL)
-      const isExplicitArm = ['openai', 'azure', 'claude', 'vertex', 'bedrock'].includes(provider)
+      const isExplicitArm = [
+        'openai',
+        'azure',
+        'claude',
+        'vertex',
+        'bedrock',
+        'codex-subscription',
+      ].includes(provider)
       // `provider` is interpolated into the assertion message by the expect
       // failure, so a future divergent provider that inherits coverage fails
       // here with its own id.
       expect(hasDescriptorBaseURL || isExplicitArm).toBe(true)
     }
-    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(false)
+    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(true)
   })
 
   it('projects the CHAT operation as tool-bearing, never as the tool-less plain path', () => {
@@ -158,8 +165,8 @@ describe('#654 transport matrix', () => {
     expect(chatTransportSupportsImageInput('claude')).toBe(true)
     expect(chatTransportSupportsImageInput('vertex')).toBe(true)
     expect(chatTransportSupportsImageInput('bedrock')).toBe(true)
-    // #650 not landed: Codex cannot carry images anywhere yet.
-    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(false)
+    // #650: Codex V2 carries images on the chat tool-bearing path.
+    expect(chatTransportSupportsImageInput('codex-subscription')).toBe(true)
   })
 
   it('rejects assistant/system images and honors per-family role support', () => {
@@ -168,7 +175,8 @@ describe('#654 transport matrix', () => {
     expect(roleReason('claude', 'tool')).toBe('supported')
     expect(roleReason('claude', 'assistant')).toBe('transport_unsupported')
     expect(roleReason('vertex', 'assistant')).toBe('transport_unsupported')
-    expect(roleReason('codex-subscription', 'user')).toBe('transport_unsupported')
+    expect(roleReason('codex-subscription', 'user')).toBe('supported')
+    expect(roleReason('codex-subscription', 'tool')).toBe('transport_unsupported')
   })
 })
 

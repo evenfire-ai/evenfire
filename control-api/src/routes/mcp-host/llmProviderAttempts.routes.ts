@@ -31,6 +31,7 @@ const ERROR_STATUS: Record<string, number> = {
   host_binding_mismatch: 403,
   unknown_field: 400,
   invalid_request: 400,
+  payload_too_large: 413,
   stale_generation: 409,
   idempotency_conflict: 409,
   provider_unavailable: 503,

@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
+import {
+  buildCodexProxyEnvelope,
+  hashCodexCompletionRequest,
+  parseCodexCompletionRequest,
+} from '@clerum/llm-provider-attempt-contract'
 import { CodexLlmProxyClient, resolveCodexProxyRuntimeUrl } from '../codexLlmProxyClient'
 
 function sse(frames: unknown[]): ReadableStream<Uint8Array> {
@@ -13,7 +18,77 @@ function sse(frames: unknown[]): ReadableStream<Uint8Array> {
 }
 
 describe('CodexLlmProxyClient', () => {
-  it('streams only to the server-owned runtime Service URL and ignores a caller-supplied URL', async () => {
+  it('sends the exact measured V2 envelope and refuses an independent deadline or hash', async () => {
+    const parsed = parseCodexCompletionRequest({
+      schemaVersion: 'codex-completion-request.v2',
+      requestId: 'req-visual',
+      idempotencyKey: 'idem-visual',
+      provider: 'codex-subscription',
+      model: 'gpt-5.1',
+      deadlineMs: 1000,
+      messages: [
+        {
+          role: 'user',
+          content: 'image redacted',
+          contentParts: [{ type: 'text', text: 'image redacted' }],
+        },
+      ],
+    })
+    if (!parsed.ok) throw new Error(parsed.message)
+    const input = {
+      request: parsed.value,
+      requestHash: hashCodexCompletionRequest(parsed.value),
+      executionTicket: 'fixture-ticket',
+    }
+    const measured = buildCodexProxyEnvelope(input)
+    if (!measured.ok) throw new Error(measured.message)
+    const fetchFn = vi.fn<typeof fetch>(
+      async () => new Response(sse([{ type: 'done', outcome: 'success' }]))
+    )
+    const client = new CodexLlmProxyClient({
+      runtimeUrl: 'http://proxy/completions',
+      readPlatformJwt: () => 'fixture-only',
+      fetchFn,
+    })
+    await client.stream({ ...input, deadlineMs: 1000 })
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))).toEqual(measured.value)
+    expect(measured.value).not.toHaveProperty('deadlineMs')
+    await expect(client.stream({ ...input, deadlineMs: 2000 })).rejects.toMatchObject({
+      code: 'invalid_request',
+      dispatched: false,
+    })
+    await expect(client.stream({ ...input, requestHash: 'a'.repeat(64) })).rejects.toMatchObject({
+      code: 'request_hash_mismatch',
+      dispatched: false,
+    })
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it.each(['html', 'json'])(
+    'keeps a %s 413 terminal rather than treating it as unavailable',
+    async format => {
+      const fetchFn = vi.fn(
+        async () =>
+          new Response(
+            format === 'html'
+              ? '<h1>Too large</h1>'
+              : JSON.stringify({ error: 'payload_too_large' }),
+            { status: 413 }
+          )
+      )
+      const client = new CodexLlmProxyClient({
+        runtimeUrl: 'http://proxy/internal/runtime/v1/codex/completions',
+        readPlatformJwt: () => 'test-jwt',
+        fetchFn,
+      })
+      await expect(
+        client.stream({ executionTicket: 'test-ticket', requestHash: 'a'.repeat(64), request: {} })
+      ).rejects.toMatchObject({ code: 'payload_too_large', dispatched: true })
+      expect(fetchFn).toHaveBeenCalledOnce()
+    }
+  )
+
+  it('streams to the frozen runtime Service URL and never accepts a caller URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       body: sse([
