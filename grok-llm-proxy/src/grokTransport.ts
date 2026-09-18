@@ -202,6 +202,33 @@ async function finalizeQuietly(
   }
 }
 
+/**
+ * A short, sanitized hint from a non-success upstream response. Upstream error
+ * bodies carry the reason a request was refused (for example a required client
+ * identity or an entitlement message), which the status alone does not give.
+ * Never logs credentials: anything token-shaped is dropped and the hint is
+ * capped, so a body that echoes a header or key cannot reach the log.
+ */
+export async function readUpstreamErrorHint(response: {
+  text: () => Promise<string>
+}): Promise<string> {
+  let raw: string
+  try {
+    raw = await response.text()
+  } catch {
+    return ''
+  }
+  const collapsed = raw.replace(/\s+/g, ' ').trim()
+  if (!collapsed) return ''
+  const withoutSecrets = collapsed
+    .replace(
+      /(?:Bearer|token|key|secret|authorization)[\s"':=]+[A-Za-z0-9._~+/-]{8,}/gi,
+      '[redacted]'
+    )
+    .replace(/\b[A-Za-z0-9._-]{40,}\b/g, '[redacted]')
+  return withoutSecrets.slice(0, 300)
+}
+
 async function readUpstreamStream(input: {
   request: GrokCompletionRequestV1
   accessToken: string
@@ -241,6 +268,7 @@ async function readUpstreamStream(input: {
         event: 'grok_upstream_http',
         operation: 'completion_stream',
         status: response.status,
+        upstreamHint: await readUpstreamErrorHint(response),
       },
       'Grok completions upstream returned a non-success status'
     )
