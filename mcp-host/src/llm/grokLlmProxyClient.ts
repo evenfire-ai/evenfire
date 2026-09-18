@@ -6,7 +6,7 @@ export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completion
  */
 export function grokProxyErrorMessage(code: string, status?: number): string {
   if (code === 'client_upgrade_required') {
-    return 'Grok subscription inference is unavailable: xAI requires a newer Grok client version than this Evenfire build presents. Contact support to upgrade — retrying will not help.'
+    return 'Grok subscription inference is unavailable: xAI now requires a newer Grok client version than this deployment sends. An operator can set GROK_LLM_PROXY_CLIENT_VERSION to a current Grok Build release, or contact support — retrying will not help.'
   }
   return status === undefined
     ? `proxy stream failed with ${code}`

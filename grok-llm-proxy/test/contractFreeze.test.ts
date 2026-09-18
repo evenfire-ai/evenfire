@@ -8,7 +8,10 @@ import {
   LIMITS,
   TRANSPORT_PROTOCOL_VERSION,
 } from '@clerum/grok-provider-attempt-contract'
-import { GROK_UPSTREAM_USER_AGENT } from '../src/grokUpstreamHeaders.js'
+import {
+  GROK_UPSTREAM_CLIENT_IDENTIFIER,
+  GROK_UPSTREAM_USER_AGENT,
+} from '../src/grokUpstreamHeaders.js'
 import {
   GROK_CATALOG_ORIGIN,
   GROK_COMPLETIONS_ORIGIN,
@@ -33,7 +36,7 @@ describe('grok-subscription contract freeze', () => {
       supportedOperations: string[]
       oauthScopes: string[]
       limits: Record<string, number>
-      identityHeaders: { 'user-agent': string; cliImpersonation: boolean }
+      identityHeaders: Record<string, string | boolean>
       forbiddenOrigins: string[]
     }
 
@@ -48,8 +51,17 @@ describe('grok-subscription contract freeze', () => {
     expect(fixture.limits.maxToolCalls).toBe(LIMITS.maxToolCalls)
     expect(fixture.limits.maxToolCalls).toBe(64)
     expect(fixture.limits.maxRetriesPerAttempt).toBe(1)
-    expect(fixture.identityHeaders['user-agent']).toBe(GROK_UPSTREAM_USER_AGENT)
+    // Live xAI gates subscription inference on a client version (426 probe,
+    // 2026-09-18), so we send one — but the identity stays Evenfire's and never
+    // claims to be the Grok CLI itself.
+    expect(String(fixture.identityHeaders['user-agent'])).toContain(GROK_UPSTREAM_USER_AGENT)
+    expect(fixture.identityHeaders['x-grok-client-identifier']).toBe(
+      GROK_UPSTREAM_CLIENT_IDENTIFIER
+    )
+    expect(fixture.identityHeaders['x-xai-token-auth']).toBe('xai-grok-cli')
     expect(fixture.identityHeaders.cliImpersonation).toBe(false)
+    expect(JSON.stringify(fixture.identityHeaders)).not.toContain('grok-shell')
+    expect(JSON.stringify(fixture.identityHeaders)).not.toContain('xai-grok-workspace')
     expect(fixture.oauthScopes).toEqual(
       expect.arrayContaining(['openid', 'offline_access', 'grok-cli:access', 'api:access'])
     )

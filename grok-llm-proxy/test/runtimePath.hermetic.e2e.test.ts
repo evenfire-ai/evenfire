@@ -216,7 +216,9 @@ async function handleUpstream(req: IncomingMessage, res: ServerResponse): Promis
   const url = new URL(req.url || '/', 'http://grok-test-upstream.local')
   if (
     req.headers.authorization !== `Bearer ${ACCESS_TOKEN}` ||
-    req.headers['user-agent'] !== GROK_UPSTREAM_USER_AGENT
+    !String(req.headers['user-agent'] ?? '').startsWith(GROK_UPSTREAM_USER_AGENT) ||
+    // Mirror the live gate: refuse a request that carries no client version.
+    !/^\d+\.\d+\.\d+/.test(String(req.headers['x-grok-client-version'] ?? ''))
   ) {
     counters.rejected += 1
     json(res, 401, { error: 'unauthorized' })

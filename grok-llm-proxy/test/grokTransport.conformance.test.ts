@@ -354,9 +354,17 @@ describe('streamGrokCompletion', () => {
     expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'authorization'))).toContain(
       accessTokenFor('live')
     )
-    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'user-agent')).toBe('evenfire-grok-subscription')
+    // xAI gates on a client version; we send it under an Evenfire identity.
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'user-agent'))).toMatch(
+      /^evenfire-grok-subscription grok-build\/\d+\.\d+\.\d+/
+    )
+    expect(String(headerOf(fetchFn.mock.calls[0]?.[1], 'x-grok-client-version'))).toMatch(
+      /^\d+\.\d+\.\d+/
+    )
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'x-grok-client-identifier')).toBe('evenfire')
+    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'x-xai-token-auth')).toBe('xai-grok-cli')
+    expect(String(JSON.stringify(fetchFn.mock.calls[0]?.[1]?.headers))).not.toContain('grok-shell')
     expect(headerOf(fetchFn.mock.calls[0]?.[1], 'openai-beta')).toBeUndefined()
-    expect(headerOf(fetchFn.mock.calls[0]?.[1], 'x-xai-token-auth')).toBeUndefined()
     expect(String(fetchFn.mock.calls[0]?.[1]?.body)).toContain('"store":false')
   })
 

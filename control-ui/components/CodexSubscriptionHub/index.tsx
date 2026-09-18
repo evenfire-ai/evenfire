@@ -117,7 +117,7 @@ function nextDevicePollIntervalSeconds(
 }
 
 const GROK_TOS =
-  'Connecting a Grok subscription authenticates Evenfire to xAI with the SuperGrok / Grok Build coding-plan OAuth client. Inference stays on cli-chat-proxy.grok.com and is not the metered xAI API.'
+  'Connecting a Grok subscription authenticates Evenfire to xAI with the SuperGrok / Grok Build coding-plan OAuth client. Inference stays on cli-chat-proxy.grok.com and is not the metered xAI API. Evenfire identifies itself to xAI as Evenfire and sends the Grok Build compatibility version that endpoint requires; this is not an xAI-sanctioned integration, xAI may restrict it, and runs draw on this account’s Grok quota. For a sanctioned path, use an xAI API key instead.'
 
 async function copyDeviceValue(
   value: string,

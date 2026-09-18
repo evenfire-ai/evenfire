@@ -46,7 +46,11 @@
   ],
   "oauthClientId": "b1a00492-073a-47ea-816f-4c329264a828",
   "identityHeaders": {
-    "user-agent": "evenfire-grok-subscription",
+    "user-agent": "evenfire-grok-subscription grok-build/<clientVersion>",
+    "x-grok-client-version": "<clientVersion; default 1.0.34, GROK_LLM_PROXY_CLIENT_VERSION overrides>",
+    "x-grok-client-identifier": "evenfire",
+    "x-grok-client-mode": "headless",
+    "x-xai-token-auth": "xai-grok-cli",
     "cliImpersonation": false
   },
   "limits": {

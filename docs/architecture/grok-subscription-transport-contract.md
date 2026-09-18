@@ -142,12 +142,35 @@ Proxy robustness (both proxies):
 
 Stamped in `grok-llm-proxy`, never taken from mcp-host or the hashed request:
 
-- `user-agent: evenfire-grok-subscription`
+- `user-agent: evenfire-grok-subscription grok-build/<clientVersion>`
+- `x-grok-client-version: <clientVersion>` — default `1.0.34`, overridden with
+  `GROK_LLM_PROXY_CLIENT_VERSION`; a malformed override falls back to the pinned
+  default rather than sending a value xAI would refuse
+- `x-grok-client-identifier: evenfire`
+- `x-grok-client-mode: headless`
+- `x-xai-token-auth: xai-grok-cli` — the token TYPE designator for an OAuth
+  session token, not a claim to be the CLI
 - `accept: text/event-stream` on stream
 
-CLI impersonation headers (`x-xai-token-auth`, `x-grok-client-identifier`) stay
-off until a recorded SuperGrok probe requires them. Do not send `OpenAI-Beta`
-or `service_tier`.
+**Probe record (2026-09-18, local minikube against live SuperGrok).** With only
+`user-agent: evenfire-grok-subscription` and no version, `POST /v1/responses`
+returned `426` with `{"error":"Your Grok CLI version (none) is outdated. Please
+update to version 0.1.202 or later …"}`, while `GET /v1/models` succeeded and
+synced a catalog. So xAI gates inference on a client version. Evenfire sends
+that version but keeps its own identity: never `grok-shell`,
+`xai-grok-workspace`, or any other CLI-owned identifier — the same rule the
+Codex adapter follows with `originator: evenfire`
+(`codex-llm-proxy/src/chatgptUpstreamHeaders.ts`). This is not an
+xAI-sanctioned integration; the sanctioned automation path is an xAI API key
+(the separate metered `xai` provider). Prod enablement still needs the D15
+human ToS sign-off, and the Control UI connect copy discloses it.
+
+**When xAI raises the floor**, the proxy returns `426` →
+`client_upgrade_required` (non-retryable, one clean failure, no retry storm).
+Fix it by setting `GROK_LLM_PROXY_CLIENT_VERSION` to a current published
+`@xai-official/grok` release; no code release is required.
+
+Do not send `OpenAI-Beta` or `service_tier`.
 
 `max_output_tokens` is bindable on this wire and is sent.
 
