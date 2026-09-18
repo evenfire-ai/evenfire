@@ -26,7 +26,7 @@
         "packages/image-policy/**",
         "packages/display-field/**",
         "packages/llm-provider-attempt-contract/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -79,7 +79,7 @@
         "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -95,7 +95,7 @@
         "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -111,7 +111,7 @@
         "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
@@ -127,7 +127,7 @@
         "packages/action-context-contracts/**",
         "packages/llm-provider-attempt-contract/**",
         "packages/codex-catalog-projection/**",
-        "packages/llm-providers/**"
+        "packages/llm-providers/**",
         "packages/grok-provider-attempt-contract/**"
       ],
       "published": true,
