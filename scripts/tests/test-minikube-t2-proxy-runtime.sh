@@ -63,6 +63,12 @@ if case == 'fixture-image':
 if case == 'fixture-env': container['env'] = [{'name': 'CODEX_APPROVED_TOOLS_TEST_ONLY', 'value': '1'}]
 if case == 'fixture-marker': template['metadata']['annotations'] = {'evenfire.ai/codex-tools-fixture-run': 'approved-tools-aabbccddeeff'}
 if case == 'old-fixture-pod': pod['spec']['containers'][0]['env'] = [{'name': 'CODEX_APPROVED_TOOLS_MINIKUBE_PROFILE', 'value': 'fake'}]
+# The production proxy mounts /tmp; only the fixture volume name is refused.
+if case == 'production-tmp':
+    for spec in (template['spec'], pod['spec']):
+        spec['volumes'] = [{'name': 'tmp', 'emptyDir': {}}]
+        spec['containers'][0]['volumeMounts'] = [{'name': 'tmp', 'mountPath': '/tmp'}]
+if case == 'fixture-volume': template['spec']['volumes'] = [{'name': 'approved-tools-oauth-tmp', 'emptyDir': {}}]
 if case == 'wrong-id': status['imageID'] = 'docker://' + other
 if case == 'unknown-id': status['imageID'] = 'unknown'
 if case == 'missing-id': del status['imageID']
@@ -84,14 +90,14 @@ for name, data in [('manifest', manifest), ('deployments', {'items': [deployment
     (root / (name + '.json')).write_text(json.dumps(data))
 PY
 }
-for scenario in restored ghcr; do
+for scenario in restored ghcr production-tmp; do
   make_case "$scenario"
   t2_deployment_check
   t2_proxy_runtime_check "$T2_DEPLOYMENT_JSON"
 done
 # Keep the production preflight integration under regression coverage.
 grep -Fq 't2_proxy_runtime_check "$T2_DEPLOYMENT_JSON"' "$ROOT/scripts/minikube/t2-preflight.sh"
-for scenario in fixture-image fixture-env fixture-marker old-fixture-pod wrong-id unknown-id missing-id missing-baseline missing-proxy wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-unknown; do
+for scenario in fixture-image fixture-volume fixture-env fixture-marker old-fixture-pod wrong-id unknown-id missing-id missing-baseline missing-proxy wrong-profile missing-pods missing-inventory unknown-repo-digest runtime-fixture runtime-unknown; do
   make_case "$scenario"
   case "$scenario" in runtime-fixture) runtime_environment=false ;; runtime-unknown) runtime_environment='' ;; esac
   if t2_proxy_runtime_check "$(cat "$tmp/deployments.json")" >"$tmp/result" 2>&1; then
