@@ -208,7 +208,12 @@ function GfsInlineRename({
   )
 }
 
-export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: FilesPageProps) {
+export function FilesPage({
+  pushToast,
+  pendingGfsUri,
+  onPendingGfsUriHandled,
+  onLocationChange,
+}: FilesPageProps) {
   const [createFolderName, setCreateFolderName] = useState('')
   const [createFolderOpen, setCreateFolderOpen] = useState(false)
   const [createFolderError, setCreateFolderError] = useState<string | null>(null)
@@ -605,6 +610,16 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     void handleOpenGfsLink(pendingGfsUri)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingGfsUri])
+
+  // Report the live location (leaf gfsUri + folder name) so the owning files tab
+  // persists it (mini-spec 06 §3). `current` is the top of the breadcrumb stack;
+  // `null` is the virtual root. Deps track the primitive fields so a re-render
+  // that leaves the location unchanged does not re-emit.
+  const currentGfsUri = current?.gfsUri ?? null
+  const currentName = current?.name ?? null
+  useEffect(() => {
+    onLocationChange?.(currentGfsUri, currentName)
+  }, [currentGfsUri, currentName, onLocationChange])
 
   const handleCreateFolder = async () => {
     const requestedName = createFolderName.trim()

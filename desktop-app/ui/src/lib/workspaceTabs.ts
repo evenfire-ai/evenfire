@@ -214,12 +214,22 @@ export function setAppTabTitle(
   }
 }
 
-/** Files: single instance — focus the existing tab if present (R8). */
+/**
+ * Files: multi-instance, deduped by `path` (mini-spec 06 §3, supersedes R8's
+ * single instance). Opening a `path` that already has a files tab FOCUSES it
+ * (aligning its title); otherwise a new files tab is created. An absent path is
+ * the virtual root (`null`), which collapses to a single root files tab. Dedupe
+ * is applied ONLY here (open-time): two tabs may later navigate to the same
+ * path independently, and that is left as-is (no hot re-dedupe).
+ */
 export function openFilesTab(
   state: WorkspaceTabsState,
   input: OpenFilesTabInput
 ): WorkspaceTabsState {
-  const existing = state.tabs.find(tab => tab.kind === 'files')
+  const path = input.path ?? null
+  const existing = state.tabs.find(
+    tab => tab.kind === 'files' && (tab.files?.path ?? null) === path
+  )
   const title = input.title?.trim()
   if (existing) {
     return {
@@ -230,8 +240,43 @@ export function openFilesTab(
       activeTabId: existing.id,
     }
   }
-  const tab: WorkspaceTab = { id: input.id, kind: 'files', title: title || 'Files' }
+  const tab: WorkspaceTab = {
+    id: input.id,
+    kind: 'files',
+    title: title || 'Files',
+    files: { path },
+  }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
+}
+
+/**
+ * Persist the live location of a files tab (mini-spec 06 §3), the files analogue
+ * of `setAppTabSavedRoutePath`: as the browser navigates, its leaf `gfsUri` is
+ * written back onto the tab (with the current folder name as the title; the
+ * virtual root → 'Files'). A no-op (same reference) when the tab is missing, is
+ * not a files tab, or already holds this path AND title, so a `setState` bails
+ * out. It does NOT re-dedupe — dedupe is an open-time rule only (§3).
+ *
+ * `title` is the current folder's display name (which the opaque `gfsUri` does
+ * not carry), supplied by the browser; absent / empty ⇒ 'Files'.
+ */
+export function setFilesTabPath(
+  state: WorkspaceTabsState,
+  tabId: string,
+  path: string | null,
+  title?: string
+): WorkspaceTabsState {
+  const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'files')
+  if (!target) return state
+  const nextPath = path ?? null
+  const nextTitle = title?.trim() || 'Files'
+  if ((target.files?.path ?? null) === nextPath && target.title === nextTitle) return state
+  return {
+    ...state,
+    tabs: state.tabs.map(tab =>
+      tab.id === tabId ? { ...tab, title: nextTitle, files: { path: nextPath } } : tab
+    ),
+  }
 }
 
 /** Settings: unique per `section` — focus the existing section tab (R6). */

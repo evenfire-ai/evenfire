@@ -17,9 +17,20 @@ export type SettingsTabPayload = {
 }
 
 /**
+ * A files tab's live location (mini-spec 06 §3): `path` is the leaf `gfsUri`
+ * (`gfs://<drive>/<rid>`) the browser is currently showing, or `null` for the
+ * virtual root ("Shared with me"). It is the tab's dedupe key AND its
+ * live-persisted location — the files analogue of `AppTabPayload.savedRoutePath`.
+ */
+export type FilesTabPayload = {
+  path: string | null
+}
+
+/**
  * A single tab in the universal strip. `kind` discriminates the payload:
  * `chat` carries `chat`, `app` carries `app`, `settings` carries `settings`,
- * and `files` carries no payload (single instance, R8).
+ * and `files` carries `files` (its live gfsUri; multi-instance by path, §3 —
+ * supersedes R8's single instance).
  */
 export type WorkspaceTab = {
   id: string
@@ -28,6 +39,7 @@ export type WorkspaceTab = {
   chat?: ChatTabPayload
   app?: AppTabPayload
   settings?: SettingsTabPayload
+  files?: FilesTabPayload
 }
 
 /**
@@ -57,6 +69,11 @@ export type OpenAppTabInput = {
 export type OpenFilesTabInput = {
   id: string
   title?: string
+  /**
+   * The gfsUri to open at (dedupe key). Absent / `undefined` ⇒ `null` (the
+   * virtual root — a single root files tab).
+   */
+  path?: string | null
 }
 
 export type OpenSettingsTabInput = {

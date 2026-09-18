@@ -73,6 +73,7 @@ import {
   selectWorkspaceTabAt,
   setAppTabSavedRoutePath,
   setAppTabTitle,
+  setFilesTabPath,
 } from '@lib/workspaceTabs'
 import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
@@ -798,7 +799,6 @@ export function App() {
     bytes: number
     mimeType: string
   } | null>(null)
-  const [pendingGfsUri, setPendingGfsUri] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     const off = window.clerum.pluginSdk?.onOpenGfsResource?.(resource => {
@@ -816,12 +816,42 @@ export function App() {
         return
       }
       // Folders and non-previewable files belong in the full browser, where the
-      // user gets breadcrumbs, download, and sharing.
-      setPendingGfsUri(resource.gfsUri)
-      vm.handleNavSelect(DESKTOP_ROUTES.files)
+      // user gets breadcrumbs, download, and sharing. Open (or focus) a files tab
+      // AT this gfsUri — dedupe by path focuses the tab already showing it, or
+      // spawns a new instance (mini-spec 06 §3).
+      vm.openFilesSection(resource.gfsUri)
     })
     return () => off?.()
-  }, [vm.handleNavSelect])
+  }, [vm.openFilesSection])
+
+  // Files tab render seam (mini-spec 06 §3). Only the ACTIVE files tab mounts a
+  // FilesPage; it is keyed by that tab's id so switching files tabs remounts and
+  // re-seeds from the incoming tab's persisted path. `filesSeedPath` is captured
+  // at activation (keyed by tab id via a ref) so the live location updates the
+  // page reports back don't re-arm FilesPage's open-once seed effect.
+  const activeFilesTab = vm.activeWorkspaceTab?.kind === 'files' ? vm.activeWorkspaceTab : undefined
+  const activeFilesTabId = activeFilesTab?.id ?? null
+  const activeFilesTabIdRef = React.useRef<string | null>(null)
+  activeFilesTabIdRef.current = activeFilesTabId
+  const filesSeedRef = React.useRef<{ id: string | null; path: string | null }>({
+    id: null,
+    path: null,
+  })
+  if (filesSeedRef.current.id !== activeFilesTabId) {
+    filesSeedRef.current = { id: activeFilesTabId, path: activeFilesTab?.files?.path ?? null }
+  }
+  const filesSeedPath = filesSeedRef.current.path
+  // Persist the browser's live location onto the active files tab. Stable
+  // (reads the active id from a ref), so FilesPage's effect fires only when the
+  // location actually changes; `setFilesTabPath` no-ops when nothing moved.
+  const handleFilesLocationChange = React.useCallback(
+    (gfsUri: string | null, name: string | null) => {
+      const id = activeFilesTabIdRef.current
+      if (!id) return
+      setWorkspaceTabs(state => setFilesTabPath(state, id, gfsUri, name ?? undefined))
+    },
+    [setWorkspaceTabs]
+  )
 
   const closePluginGfsPreview = React.useCallback(() => {
     setPluginGfsPreview(null)
@@ -2466,9 +2496,10 @@ export function App() {
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.files && (
                                   <FilesPage
+                                    key={activeFilesTabId ?? 'files'}
                                     pushToast={vm.pushToast}
-                                    pendingGfsUri={pendingGfsUri}
-                                    onPendingGfsUriHandled={() => setPendingGfsUri(null)}
+                                    pendingGfsUri={filesSeedPath}
+                                    onLocationChange={handleFilesLocationChange}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

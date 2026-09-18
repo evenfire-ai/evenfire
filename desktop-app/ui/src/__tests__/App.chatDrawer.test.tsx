@@ -175,6 +175,15 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     controller.appsPickerActive = false
     forceControllerRender()
   })
+  // Faithful to the real controller's openFilesSection: open/focus a files tab at
+  // `path` through the real store producer (dedupe by path lives in the store).
+  const openFilesSection = vi.fn((path: string | null = null) => {
+    clearAppsPicker()
+    setWorkspaceTabs((state: WorkspaceState) =>
+      openFilesTab(state, { id: nextWorkspaceTabId(), path })
+    )
+    forceControllerRender()
+  })
   const showAppsPicker = vi.fn(() => {
     // The picker residual is redundant when an app tab is already active.
     if (controller.appsPickerActive) return
@@ -282,6 +291,8 @@ function makeController(overrides: Partial<AppController> = {}): AppController {
     showAppsPicker,
     clearAppsPicker,
     activateWorkspaceChatTab: noop,
+    openFilesSection,
+    lastActiveChatTabId: null,
     activeChatId: null,
     chatList: [],
     latestChatSessions: [],
@@ -1042,6 +1053,84 @@ describe('App app-tab title — live document.title (mini-spec 06 §2)', () => {
     act(() => titleChangedCb?.({ appRef: 'ns/other', title: 'Wrong' }))
     expect(screen.getByRole('button', { name: 'App' })).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Wrong' })).toBeNull()
+  })
+})
+
+// Mini-spec 06 §3 — files is multi-instance, deduped by path. A plugin deep-link
+// (`pluginSdk.onOpenGfsResource`, folder / non-previewable) opens or focuses a
+// files tab AT that gfsUri; two distinct gfsUris yield two tabs, re-opening the
+// same one focuses it. Driven through the real store producer (openFilesTab);
+// asserted on the observable files-tab list (T4).
+describe('App files multi-instance — deep-link opens by path (mini-spec 06 §3)', () => {
+  let currentController: AppController
+  let openGfsResourceCb:
+    | ((resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void)
+    | null
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sidebarHarness.props = null
+    sandboxUiPageHarness.props = null
+    appHeaderHarness.props = null
+    appHeaderHarness.openNotification = null
+    openGfsResourceCb = null
+    currentController = makeController()
+    vi.mocked(useAppController).mockImplementation(() => useReactiveController(currentController))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        shortcuts: { onCommand: vi.fn(() => vi.fn()) },
+        app: { rendererReady: vi.fn().mockResolvedValue(undefined) },
+        sandboxUi: {
+          listApps: vi.fn().mockResolvedValue({ apps: [] }),
+          listPendingDeepLinks: vi.fn().mockResolvedValue({ links: [] }),
+          clearPendingDeepLinks: vi.fn().mockResolvedValue(undefined),
+          onDeepLink: vi.fn(() => vi.fn()),
+          setVisible: vi.fn().mockResolvedValue(undefined),
+          setBounds: vi.fn().mockResolvedValue(undefined),
+          focusActive: vi.fn().mockResolvedValue(true),
+          close: vi.fn().mockResolvedValue(undefined),
+        },
+        pluginSdk: {
+          onOpenGfsResource: vi.fn(
+            (
+              cb: (resource: { kind: string; name: string; gfsUri: string; bytes: number }) => void
+            ) => {
+              openGfsResourceCb = cb
+              return vi.fn()
+            }
+          ),
+        },
+      } as unknown as Window['clerum'],
+    })
+  })
+
+  afterEach(() => {
+    cleanup()
+    delete (window as { clerum?: unknown }).clerum
+  })
+
+  it('opens two files tabs for two distinct gfsUris and focuses the existing one on re-open', () => {
+    render(<App />)
+    const filesTabs = () => currentController.workspaceTabs.tabs.filter(t => t.kind === 'files')
+
+    // Two distinct deep-links -> two separate files tabs, in open order.
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'A', gfsUri: 'gfs://main/aaa', bytes: 0 })
+    )
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'B', gfsUri: 'gfs://main/bbb', bytes: 0 })
+    )
+    expect(filesTabs().map(t => t.files?.path)).toEqual(['gfs://main/aaa', 'gfs://main/bbb'])
+    expect(currentController.navItem).toBe(DESKTOP_ROUTES.files)
+
+    // Re-opening the FIRST gfsUri focuses the existing tab — no third tab.
+    const firstId = filesTabs()[0]!.id
+    act(() =>
+      openGfsResourceCb?.({ kind: 'directory', name: 'A', gfsUri: 'gfs://main/aaa', bytes: 0 })
+    )
+    expect(filesTabs()).toHaveLength(2)
+    expect(currentController.workspaceTabs.activeTabId).toBe(firstId)
   })
 })
 

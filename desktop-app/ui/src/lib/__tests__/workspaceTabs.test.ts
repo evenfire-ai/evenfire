@@ -19,6 +19,7 @@ import {
   selectWorkspaceTabAt,
   setAppTabSavedRoutePath,
   setAppTabTitle,
+  setFilesTabPath,
 } from '../workspaceTabs'
 import type { ActiveChat, SettingsSection, WorkspaceTabsState } from '../workspaceTabs.types'
 
@@ -214,6 +215,99 @@ describe('workspaceTabs — setAppTabTitle (mini-spec 06 §2)', () => {
     expect(setAppTabTitle(state, 'chat-1', 'X')).toBe(state)
     expect(setAppTabTitle(state, 'files-1', 'X')).toBe(state)
     expect(state.tabs.find(t => t.id === 'chat-1')?.title).toBe('Chat')
+  })
+})
+
+describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', () => {
+  it('opens distinct tabs for distinct paths and dedupes (focuses) the same path', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-root', path: null })
+    state = openFilesTab(state, { id: 'f-a', path: 'gfs://main/aaa' })
+    state = openFilesTab(state, { id: 'f-b', path: 'gfs://main/bbb' })
+    expect(state.tabs.filter(t => t.kind === 'files')).toHaveLength(3)
+    expect(state.activeTabId).toBe('f-b')
+
+    // Re-opening an existing path FOCUSES it — no new tab.
+    const before = state.tabs.length
+    state = openFilesTab(state, { id: 'f-a-again', path: 'gfs://main/aaa' })
+    expect(state.tabs.length).toBe(before)
+    expect(state.activeTabId).toBe('f-a')
+    // Root (absent path) dedupes to the single root tab.
+    state = openFilesTab(state, { id: 'f-root-again' })
+    expect(state.tabs.filter(t => t.kind === 'files')).toHaveLength(3)
+    expect(state.activeTabId).toBe('f-root')
+  })
+
+  it('aligns the title when focusing an existing path', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-a', path: 'gfs://main/aaa', title: 'Old' })
+    state = openFilesTab(state, { id: 'f-a2', path: 'gfs://main/aaa', title: 'Reports' })
+    expect(state.tabs.filter(t => t.kind === 'files')).toHaveLength(1)
+    expect(state.tabs.find(t => t.kind === 'files')?.title).toBe('Reports')
+  })
+
+  it('setFilesTabPath persists the live gfsUri + folder-name title', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-1', path: null })
+    state = setFilesTabPath(state, 'f-1', 'gfs://main/ccc', 'Invoices')
+    const tab = state.tabs.find(t => t.id === 'f-1')
+    expect(tab?.files?.path).toBe('gfs://main/ccc')
+    expect(tab?.title).toBe('Invoices')
+    // Back to the virtual root: path null, title 'Files'.
+    state = setFilesTabPath(state, 'f-1', null)
+    const rooted = state.tabs.find(t => t.id === 'f-1')
+    expect(rooted?.files?.path).toBeNull()
+    expect(rooted?.title).toBe('Files')
+  })
+
+  it('setFilesTabPath is a no-op (same ref) when nothing moved, or the tab is missing / not files', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-1', path: 'gfs://main/aaa', title: 'Reports' })
+    state = openAppTab(state, { id: 'app-1', appRef: 'x' })
+    // Same path + same title -> same reference.
+    expect(setFilesTabPath(state, 'f-1', 'gfs://main/aaa', 'Reports')).toBe(state)
+    // Empty title normalizes to 'Files', so if the title already differs this is
+    // NOT a no-op; here the stored title is 'Reports', so passing '' would change
+    // it — assert the missing/not-files no-ops instead.
+    expect(setFilesTabPath(state, 'gone', 'gfs://main/zzz', 'Z')).toBe(state)
+    expect(setFilesTabPath(state, 'app-1', 'gfs://main/zzz', 'Z')).toBe(state)
+  })
+
+  it('does NOT re-dedupe: two tabs may hold the same path after setFilesTabPath (open-time only)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-a', path: 'gfs://main/aaa' })
+    state = openFilesTab(state, { id: 'f-b', path: 'gfs://main/bbb' })
+    // f-b navigates to the SAME path as f-a — no hot re-dedupe collapses them.
+    state = setFilesTabPath(state, 'f-b', 'gfs://main/aaa', 'Same')
+    const filesTabs = state.tabs.filter(t => t.kind === 'files')
+    expect(filesTabs).toHaveLength(2)
+    expect(filesTabs.every(t => t.files?.path === 'gfs://main/aaa')).toBe(true)
+  })
+
+  // T2 property: dedupe by path is an equivalence on the files sub-slice.
+  it('property: one files tab per distinct path; root is a single tab', () => {
+    const pathArb = fc.option(fc.constantFrom('gfs://main/a', 'gfs://main/b', 'gfs://main/c'), {
+      nil: null,
+    })
+    fc.assert(
+      fc.property(fc.array(pathArb, { maxLength: 40 }), paths => {
+        let state = createEmptyWorkspaceTabsState()
+        paths.forEach((path, i) => {
+          state = openFilesTab(state, { id: `f-${i}`, path })
+        })
+        const filesTabs = state.tabs.filter(t => t.kind === 'files')
+        // One tab per DISTINCT path (null included) that was opened.
+        const distinctPaths = new Set(paths.map(p => p ?? null))
+        expect(filesTabs.length).toBe(paths.length === 0 ? 0 : distinctPaths.size)
+        // No two files tabs share a path (open-time dedupe).
+        const seen = new Set<string | null>()
+        for (const t of filesTabs) {
+          const p = t.files?.path ?? null
+          expect(seen.has(p)).toBe(false)
+          seen.add(p)
+        }
+      })
+    )
   })
 })
 

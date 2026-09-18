@@ -133,10 +133,16 @@ export function useNavigationController() {
     [nextWorkspaceTabId]
   )
 
-  const openFilesSection = useCallback(() => {
-    setAppsPickerActive(false)
-    setWorkspaceTabs(current => openFilesTab(current, { id: nextWorkspaceTabId() }))
-  }, [nextWorkspaceTabId])
+  // Open/focus a files tab at `path` (a gfsUri, or `null` for the virtual root).
+  // Dedupes by path in the store: the sidebar "Files" entry (root) and a plugin
+  // deep-link to a specific gfsUri both route here (mini-spec 06 §3).
+  const openFilesSection = useCallback(
+    (path: string | null = null) => {
+      setAppsPickerActive(false)
+      setWorkspaceTabs(current => openFilesTab(current, { id: nextWorkspaceTabId(), path }))
+    },
+    [nextWorkspaceTabId]
+  )
 
   // Base section navigation: every legacy `handleNavSelect(route)` call-site
   // routes here and becomes an open/focus tab action (the single writer). For
@@ -189,6 +195,7 @@ export function useNavigationController() {
     clearAppsPicker,
     activateChatTab,
     lastActiveChatTabId,
+    openFilesSection,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
     selectedAgentRoute,
