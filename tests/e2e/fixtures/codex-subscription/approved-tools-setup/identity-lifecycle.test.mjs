@@ -4,6 +4,7 @@ import {
   cleanupFixtureIdentities,
   createFixtureIdentityJournal,
   createFixtureIdentities as createRecordedFixtureIdentities,
+  describeFixtureError,
   recordFixtureConnection,
 } from './identity-lifecycle.mjs'
 
@@ -234,12 +235,31 @@ test('duplicate/query and audit failures roll back without discarding the intent
     const { state, adapters } = harness()
     if (kind === 'query') state.failQuery = sql => sql.includes('INSERT INTO teams')
     else state.auditFailure = true
-    await assert.rejects(createFixtureIdentities(input, adapters), /recover using/)
+    await assert.rejects(createFixtureIdentities(input, adapters), error => {
+      assert.match(error.message, /recover using/)
+      assert.deepEqual(error.cause, { name: 'Error' })
+      return true
+    })
     assert.equal(state.committed.length, 0)
     assert.equal(state.rollbacks, 1)
     assert.equal(state.journal.at(-1).status, 'recovery-required')
     assert.deepEqual(state.journal[0].users, state.journal.at(-1).users)
   }
+})
+
+test('failure diagnostics expose bounded class/code fields and redact messages', () => {
+  const error = Object.assign(new Error('token=secret sql=SELECT password'), {
+    code: '23505',
+    cause: new Error('nested credential=secret'),
+  })
+  assert.deepEqual(describeFixtureError(error), {
+    name: 'Error',
+    code: '23505',
+    cause: { name: 'Error' },
+  })
+  assert.deepEqual(describeFixtureError({ name: 'Error', code: 'not-safe', message: 'secret' }), {
+    name: 'Error',
+  })
 })
 
 test('lost commit acknowledgement retains exact IDs rather than retrying insertion', async () => {
