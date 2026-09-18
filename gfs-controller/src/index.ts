@@ -138,7 +138,8 @@ async function main(): Promise<void> {
     // detect a rotated password — its idle clients authenticated before the
     // rotation and the readiness cadence keeps one alive forever. The probe
     // keeps the fast pool ping AND dials a brand-new client (amortized) so a
-    // stale DSN or missing migration-0048 grants flips the pod NotReady.
+    // stale DSN or missing migration 0048_gfs_permission_store grants flips the
+    // pod NotReady.
     pingPermissionStore: createPermissionStoreProbe({
       pool,
       connectionString: config.pgConnectionString,

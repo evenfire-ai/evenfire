@@ -222,7 +222,8 @@ CONTEXT=<kube-context> deploy/scripts/provision-gfs-db.sh rotate-reader
 MINIKUBE_PROFILE=<profile> make minikube-verify-gfs
 ```
 
-The script verifies the role exists (writer migration 0048; reader migration 0071),
+The script verifies the role exists (writer migration 0048_gfs_permission_store; reader migration
+0072_gfs_reader_database_role),
 rotates the password, patches the Secret, stamps the rotation annotation, and
 rolls and waits only for the selected gfsc Deployment.
 

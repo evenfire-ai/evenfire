@@ -4410,8 +4410,9 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         DROP TRIGGER IF EXISTS infrastructure_cost_daily_components_no_truncate ON infrastructure_cost_daily_components;
         CREATE TRIGGER infrastructure_cost_daily_components_no_truncate BEFORE TRUNCATE ON infrastructure_cost_daily_components FOR EACH STATEMENT EXECUTE FUNCTION governed_trace_reject_truncate();
 
-        -- Migration 0055 replaces this bootstrap function with the final
-        -- owner-bound retention implementation and dedicated runtime roles.
+        -- Migration 0062_governed_trace_runtime_roles replaces this bootstrap
+        -- function with the final owner-bound retention implementation and
+        -- dedicated runtime roles.
         CREATE OR REPLACE FUNCTION governed_trace_prune_expired_events(
           requested_family TEXT,
           batch_limit INTEGER DEFAULT 1000

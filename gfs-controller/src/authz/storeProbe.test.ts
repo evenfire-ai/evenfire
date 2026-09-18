@@ -252,7 +252,7 @@ describe("createPermissionStoreProbe", () => {
     expect(probeClient.lastSql()).toContain("gfs_audit_record_type_fields_valid");
   });
 
-  it("rejects readiness when migration 0096 default or backfill is incomplete", async () => {
+  it("rejects readiness when migration 0096_control_admin_session_version_default default or backfill is incomplete", async () => {
     const { factory } = fakeClientFactory({ authorityAdminSessionEpochReady: false });
     const probe = createPermissionStoreProbe({
       pool: fakePool(),
@@ -344,7 +344,7 @@ describe("createPermissionStoreProbe", () => {
   );
 
   it.each(["reader", "writer"] as const)(
-    "rejects a %s when migration 0092 audit actor-correlation constraints are missing or unvalidated",
+    "rejects a %s when migration 0092_gfs_audit_actor_correlation audit actor-correlation constraints are missing or unvalidated",
     async (storageRole) => {
       const { factory } = fakeClientFactory({ auditActorCorrelationConstraintReady: false });
       const probe = createPermissionStoreProbe({
