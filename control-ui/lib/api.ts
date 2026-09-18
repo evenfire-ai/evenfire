@@ -482,6 +482,26 @@ export async function deleteGfsShare(id: string): Promise<void> {
   await gfsMutate('DELETE', `/api/v1/gfs/shares/${encodeURIComponent(id)}`)
 }
 
+export type GfsResourceByPathView = {
+  resourceId: string
+  rid: string
+  gfsUri: string
+  drive: string
+  name: string
+  kind: string
+  path: string | null
+  updatedAt: string
+}
+
+/** Resolves one drive path to its canonical resource view (GET /api/v1/gfs/by-path). */
+export async function getGfsResourceByPath(
+  drive: string,
+  path: string,
+  signal?: AbortSignal
+): Promise<GfsResourceByPathView> {
+  return (await apiGet('/api/v1/gfs/by-path', { drive, path }, { signal })) as GfsResourceByPathView
+}
+
 export type AdminLoginResponse = {
   me: { id: string; username?: string; email?: string | null; role: 'admin' }
 }

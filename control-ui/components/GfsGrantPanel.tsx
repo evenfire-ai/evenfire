@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RecordList, RecordListRow, RowActionMenu } from '@clerum/frontend-components'
 import { useConfirmDialog } from '@components/ConfirmDialog'
+import { GfsInheritedAccessDialog } from '@components/GfsInheritedAccessDialog'
 import { GfsSubjectPicker } from '@components/GfsSubjectPicker'
 import { SelectionDropdown } from '@components/SelectionDropdown'
 import type { SelectionDropdownOption } from '@components/SelectionDropdown/types'
@@ -34,8 +35,15 @@ import {
   getRecipes,
   putGfsGrant,
 } from '@lib/api'
-import type { GfsExistingAccessItem, GfsGrantPanelProps } from './GfsGrantPanel.types'
+import type {
+  GfsExistingAccessItem,
+  GfsFileAccessRow,
+  GfsGrantPanelProps,
+  GfsInheritedAccessItem,
+  GfsInheritedAccessSource,
+} from './GfsGrantPanel.types'
 import { buildGfsBulkSubjectOptions, toGfsBulkSubjectInputs } from './gfsGrantSubjectOptions'
+import { loadGfsInheritedAccess, planInheritedRoleChange } from './gfsInheritedAccess'
 
 /**
  * P4-S07 — Operator delegation panel for the Global File System. The operator
@@ -76,6 +84,12 @@ function hostOnlySubject(subject: { type: string }): boolean {
   return subject.type === 'host'
 }
 
+/** ["a", "b", "c"] → "a, b and c" — folder names for honest outcome toasts. */
+function joinFolderNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
+
 /** Stable per-subject merge key. The operator variant carries no id. */
 function subjectKey(subject: GfsSubjectInput): string {
   return `${subject.type}:${'id' in subject ? subject.id : ''}`
@@ -113,7 +127,32 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   const [existingAccessError, setExistingAccessError] = useState('')
   const existingAccessRequest = useRef(0)
   const existingAccessController = useRef<AbortController | null>(null)
+  // Inherited access is derived separately: it comes from ancestor folders,
+  // not from this resource's direct grant/share rows. Only FILE dialogs use
+  // the derivation — folder dialogs keep their direct-only behavior.
+  const [inheritedAccess, setInheritedAccess] = useState<GfsInheritedAccessItem[]>([])
+  const [inheritedAccessLoading, setInheritedAccessLoading] = useState(true)
+  // True only when the whole derivation failed (R1-M3): the access section
+  // then shows a quiet notice instead of trusting an empty derived list.
+  const [inheritedAccessFailed, setInheritedAccessFailed] = useState(false)
+  const inheritedAccessRequest = useRef(0)
+  const inheritedAccessController = useRef<AbortController | null>(null)
+  // Pending parent-folder confirmation (role change or removal) for a member
+  // whose access is inherited from ancestor folders. change-role carries the
+  // affected folders from the R1-H1 plan (downgrade: every folder above the
+  // target role; upgrade: the single strongest folder).
+  const [parentUpdate, setParentUpdate] = useState<
+    | {
+        row: GfsFileAccessRow
+        mode: 'change-role'
+        nextRole: AccessRole
+        affected: GfsInheritedAccessSource[]
+      }
+    | { row: GfsFileAccessRow; mode: 'remove' }
+    | null
+  >(null)
   const canIncludeDescendants = resource.kind === 'directory'
+  const resourceIsFile = resource.kind === 'file'
 
   const loadExistingAccess = useCallback(async () => {
     existingAccessController.current?.abort()
@@ -176,6 +215,48 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       existingAccessRequest.current += 1
     }
   }, [loadExistingAccess])
+
+  const loadInheritedAccess = useCallback(async () => {
+    inheritedAccessController.current?.abort()
+    const requestId = ++inheritedAccessRequest.current
+    setInheritedAccessFailed(false)
+    if (!resourceIsFile || !resource.path) {
+      inheritedAccessController.current = null
+      setInheritedAccess([])
+      setInheritedAccessLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    inheritedAccessController.current = controller
+    setInheritedAccessLoading(true)
+    try {
+      const items = await loadGfsInheritedAccess(resource.path, DRIVE, controller.signal)
+      if (requestId !== inheritedAccessRequest.current) return
+      setInheritedAccess(items)
+    } catch {
+      if (requestId !== inheritedAccessRequest.current) return
+      setInheritedAccess([])
+      // A TOTAL derivation failure (the walk itself blew up) is surfaced as a
+      // quiet notice; per-ancestor best-effort skipping stays silent by
+      // design. An empty derived list alone would silently read as "no one
+      // else has access" (R1-M3).
+      setInheritedAccessFailed(true)
+    } finally {
+      if (requestId === inheritedAccessRequest.current) {
+        inheritedAccessController.current = null
+        setInheritedAccessLoading(false)
+      }
+    }
+  }, [resource.path, resourceIsFile])
+
+  useEffect(() => {
+    void loadInheritedAccess()
+    return () => {
+      inheritedAccessController.current?.abort()
+      inheritedAccessController.current = null
+      inheritedAccessRequest.current += 1
+    }
+  }, [loadInheritedAccess])
 
   useEffect(() => {
     let active = true
@@ -323,7 +404,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   }
 
   const subjectLabel = useCallback(
-    (item: GfsExistingAccessItem): string => {
+    (item: { subject: GfsSubjectInput }): string => {
       if (item.subject.type === 'operator') return 'Operator'
       const option = bulkSubjectOptions.find(
         candidate =>
@@ -340,7 +421,7 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
   )
 
   const subjectKind = useCallback(
-    (item: GfsExistingAccessItem): AccessSubjectKind => {
+    (item: { subject: GfsSubjectInput }): AccessSubjectKind => {
       if (item.subject.type !== 'host') return item.subject.type
       const option = bulkSubjectOptions.find(
         candidate =>
@@ -353,17 +434,52 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
     [bulkSubjectOptions]
   )
 
-  const sortedExistingAccess = useMemo(
-    () =>
-      [...existingAccess].sort(
-        (left, right) =>
-          subjectLabel(left).localeCompare(subjectLabel(right), undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          }) || subjectKey(left.subject).localeCompare(subjectKey(right.subject))
-      ),
-    [existingAccess, subjectLabel]
+  const bySubjectLabel = useCallback(
+    (left: { subject: GfsSubjectInput }, right: { subject: GfsSubjectInput }): number =>
+      subjectLabel(left).localeCompare(subjectLabel(right), undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      }) || subjectKey(left.subject).localeCompare(subjectKey(right.subject)),
+    [subjectLabel]
   )
+
+  const sortedExistingAccess = useMemo(
+    () => [...existingAccess].sort(bySubjectLabel),
+    [bySubjectLabel, existingAccess]
+  )
+
+  // File dialogs dedupe to exactly one row per member across direct grants
+  // and inherited ancestor grants; the effective role is the strongest.
+  const sortedFileAccessRows = useMemo<GfsFileAccessRow[]>(() => {
+    if (!resourceIsFile) return []
+    const bySubjectRow = new Map<string, GfsFileAccessRow>()
+    for (const direct of existingAccess) {
+      bySubjectRow.set(subjectKey(direct.subject), {
+        subject: direct.subject,
+        permissions: [...direct.permissions],
+        direct,
+        inherited: null,
+      })
+    }
+    for (const inherited of inheritedAccess) {
+      const key = subjectKey(inherited.subject)
+      const existingRow = bySubjectRow.get(key)
+      if (existingRow) {
+        existingRow.inherited = inherited
+        existingRow.permissions = [
+          ...new Set([...existingRow.permissions, ...inherited.permissions]),
+        ]
+      } else {
+        bySubjectRow.set(key, {
+          subject: inherited.subject,
+          permissions: [...inherited.permissions],
+          direct: null,
+          inherited,
+        })
+      }
+    }
+    return [...bySubjectRow.values()].sort(bySubjectLabel)
+  }, [bySubjectLabel, existingAccess, inheritedAccess, resourceIsFile])
 
   async function revokeAccess(item: GfsExistingAccessItem) {
     const label = subjectLabel(item)
@@ -421,6 +537,150 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
       await loadExistingAccess()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Failed to update access')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Concurrent removal already did the work — treat those verdicts as success. */
+  function isAlreadyMissing(caught: unknown): boolean {
+    const accessError = caught as GfsGrantError
+    return (
+      accessError.status === 404 &&
+      (accessError.code === 'grant_not_found' || accessError.code === 'share_not_found')
+    )
+  }
+
+  /**
+   * Confirmed edit of an inherited row (R1-H1 semantics, verified against
+   * Google Drive): a removal revokes the member's rows on EVERY contributing
+   * ancestor folder; a downgrade lowers every ancestor above the target role;
+   * an upgrade raises the strongest ancestor. The file's own direct rows are
+   * aligned in every case so they cannot mask the outcome. The confirm issues
+   * several sequential calls — on the first failure it stops, refreshes both
+   * lists so the dialog shows the TRUE partial state, and the toast says
+   * exactly how far the change got. Full success is never claimed on partial
+   * completion. Cancel never reaches this path — the dropdown reverts.
+   */
+  async function confirmParentUpdate() {
+    const request = parentUpdate
+    if (!request) return
+    const row = request.row
+    const inherited = row.inherited
+    if (!inherited) {
+      setParentUpdate(null)
+      return
+    }
+    const sources = inherited.sources
+    setParentUpdate(null)
+    setBusy(true)
+    setError('')
+    const reload = async () => {
+      await Promise.all([loadExistingAccess(), loadInheritedAccess()])
+    }
+    /** Partial-failure honesty: state the true outcome, show the server error, reload. */
+    const failPartially = async (caught: unknown, summary: string) => {
+      if (!isAlreadyMissing(caught)) {
+        setError(caught instanceof Error ? caught.message : 'Failed to update access')
+      }
+      showToast(summary, { tone: 'error' })
+      await reload()
+    }
+    try {
+      if (request.mode === 'remove') {
+        let removed = 0
+        for (const source of sources) {
+          try {
+            if (source.grantId) await deleteGfsGrant(source.grantId)
+            for (const shareId of source.shareIds) await deleteGfsShare(shareId)
+            removed += 1
+          } catch (caught) {
+            if (isAlreadyMissing(caught)) {
+              removed += 1
+              continue
+            }
+            await failPartially(
+              caught,
+              `Removed from ${removed} of ${sources.length} folders — ${source.name} still grants access.`
+            )
+            return
+          }
+        }
+        if (row.direct) {
+          try {
+            if (row.direct.grantId) await deleteGfsGrant(row.direct.grantId)
+            for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
+          } catch (caught) {
+            if (!isAlreadyMissing(caught)) {
+              await failPartially(
+                caught,
+                `Removed from ${sources.length} of ${sources.length} folders — direct access on ${resource.name} could not be removed.`
+              )
+              return
+            }
+          }
+        }
+        showToast(
+          sources.length === 1
+            ? `Access removed on ${sources[0].name} and everything inside it.`
+            : `Access removed on ${sources.length} folders and everything inside them.`,
+          { tone: 'success' }
+        )
+        await reload()
+        return
+      }
+      const affected = request.affected
+      const permissions = rolePermissions(request.nextRole, hostOnlySubject(row.subject))
+      const affectedNames = affected.map(source => source.name)
+      let updated = 0
+      for (const source of affected) {
+        try {
+          await putGfsGrant({
+            drive: DRIVE,
+            resourceId: source.resourceId,
+            subject: row.subject,
+            permissions,
+            inherit: true,
+          })
+          for (const shareId of source.shareIds) await deleteGfsShare(shareId)
+          updated += 1
+        } catch (caught) {
+          if (isAlreadyMissing(caught)) {
+            updated += 1
+            continue
+          }
+          await failPartially(
+            caught,
+            `Updated ${updated} of ${affected.length} folders — ${source.name} still grants access.`
+          )
+          return
+        }
+      }
+      if (row.direct) {
+        try {
+          await putGfsGrant({
+            drive: DRIVE,
+            resourceId: resource.resourceId,
+            subject: row.subject,
+            permissions,
+            inherit: row.direct.inherit,
+          })
+          for (const shareId of row.direct.shareIds) await deleteGfsShare(shareId)
+        } catch (caught) {
+          await failPartially(
+            caught,
+            `Updated ${affected.length} of ${affected.length} folders — direct access on ${resource.name} still shows the old role.`
+          )
+          return
+        }
+      }
+      showToast(
+        affectedNames.length > 0
+          ? `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}.`
+          : `${subjectLabel(row)} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${resource.name}.`,
+        { tone: 'success' }
+      )
+      await reload()
     } finally {
       setBusy(false)
     }
@@ -505,7 +765,13 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
           <div className="cu-gfs-existing-access__header">
             <h4>People with access</h4>
           </div>
-          {existingAccessLoading ? (
+          {inheritedAccessFailed ? (
+            <p role="status" className="cu-gfs-existing-access__notice">
+              Inherited access could not be loaded. Members with access from a parent folder may be
+              missing.
+            </p>
+          ) : null}
+          {existingAccessLoading || inheritedAccessLoading ? (
             <p className="cu-gfs-existing-access__empty" role="status">
               Loading access…
             </p>
@@ -518,67 +784,184 @@ export function GfsGrantPanel({ resource }: GfsGrantPanelProps): React.JSX.Eleme
                 Retry
               </Button>
             </div>
-          ) : existingAccess.length === 0 ? (
+          ) : existingAccess.length === 0 &&
+            inheritedAccess.length === 0 &&
+            !inheritedAccessFailed ? (
             <p className="cu-gfs-existing-access__empty">No one has access yet.</p>
           ) : (
             <RecordList className="cu-gfs-existing-access__list" aria-label="Resource access">
-              {sortedExistingAccess.map(item => {
-                const label = subjectLabel(item)
-                const kind = subjectKind(item)
-                return (
-                  <RecordListRow
-                    className="cu-gfs-existing-access__item"
-                    data-testid={`gfs-access-row-${item.subject.type}`}
-                    data-access-id={item.grantId ?? item.shareIds[0]}
-                    key={`${item.subject.type}:${item.grantId ?? item.shareIds[0]}`}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
-                      data-subject-kind={kind}
-                    >
-                      <AccessSubjectIcon kind={kind} />
-                    </span>
-                    <span className="cu-gfs-existing-access__identity">
-                      <span className="cu-gfs-existing-access__subject">{label}</span>
-                    </span>
-                    <span className="cu-gfs-existing-access__meta">
-                      <SelectionDropdown
-                        ariaLabel={`Access role for ${label}`}
-                        className="cu-gfs-existing-access__role"
-                        disabled={actionPending}
-                        multiple={false}
-                        onChange={next =>
-                          void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
-                        }
-                        menuClassName="cu-gfs-existing-access__role-menu"
-                        options={ROLE_OPTIONS}
-                        placeholder="Role"
-                        portal
-                        searchable={false}
-                        showSelectedChips={false}
-                        value={[roleForPermissions(item.permissions)]}
-                      />
-                    </span>
-                    <RowActionMenu
-                      actions={[
-                        {
-                          key: 'remove',
-                          label: 'Remove access',
-                          danger: true,
-                          disabled: actionPending,
-                          onSelect: () => void revokeAccess(item),
-                        },
-                      ]}
-                      ariaLabel={`Actions for ${label}`}
-                    />
-                  </RecordListRow>
-                )
-              })}
+              {resourceIsFile
+                ? sortedFileAccessRows.map(row => {
+                    const label = subjectLabel(row)
+                    const kind = subjectKind(row)
+                    const inherited = row.inherited !== null
+                    return (
+                      <RecordListRow
+                        className="cu-gfs-existing-access__item"
+                        data-testid={`gfs-access-row-${row.subject.type}`}
+                        data-access-id={row.direct?.grantId ?? row.direct?.shareIds[0]}
+                        data-inherited={inherited ? 'true' : undefined}
+                        key={`file:${subjectKey(row.subject)}`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
+                          data-subject-kind={kind}
+                        >
+                          <AccessSubjectIcon kind={kind} />
+                        </span>
+                        <span className="cu-gfs-existing-access__identity">
+                          <span className="cu-gfs-existing-access__subject">{label}</span>
+                        </span>
+                        <span className="cu-gfs-existing-access__meta">
+                          <SelectionDropdown
+                            ariaLabel={`Access role for ${label}`}
+                            className="cu-gfs-existing-access__role"
+                            disabled={actionPending}
+                            multiple={false}
+                            onChange={next => {
+                              if (!inherited) {
+                                void updateAccessRole(
+                                  row.direct as GfsExistingAccessItem,
+                                  (next[0] ?? 'read') as AccessRole
+                                )
+                                return
+                              }
+                              const nextRole = (next[0] ?? 'read') as AccessRole
+                              // N1: the dropdown displays the MERGED
+                              // effective role (direct ⊔ inherited).
+                              // Re-selecting the already-displayed role is a
+                              // no-op — comparing it against the
+                              // inherited-only floor instead would open the
+                              // parent-update modal and escalate the parent
+                              // folder for a non-change.
+                              if (nextRole === roleForPermissions(row.permissions)) return
+                              const affected = planInheritedRoleChange(
+                                row.inherited as GfsInheritedAccessItem,
+                                nextRole === 'editor'
+                              )
+                              // Selecting the already-held role with only
+                              // inherited access changes nothing: no modal.
+                              if (affected.length === 0 && !row.direct) return
+                              setParentUpdate({
+                                row,
+                                mode: 'change-role',
+                                nextRole,
+                                affected,
+                              })
+                            }}
+                            menuClassName="cu-gfs-existing-access__role-menu"
+                            options={ROLE_OPTIONS}
+                            placeholder="Role"
+                            portal
+                            searchable={false}
+                            showSelectedChips={false}
+                            value={[roleForPermissions(row.permissions)]}
+                          />
+                        </span>
+                        <RowActionMenu
+                          actions={[
+                            {
+                              key: 'remove',
+                              label: 'Remove access',
+                              danger: true,
+                              disabled: actionPending,
+                              onSelect: () =>
+                                inherited
+                                  ? setParentUpdate({ row, mode: 'remove' })
+                                  : void revokeAccess(row.direct as GfsExistingAccessItem),
+                            },
+                          ]}
+                          ariaLabel={`Actions for ${label}`}
+                        />
+                      </RecordListRow>
+                    )
+                  })
+                : sortedExistingAccess.map(item => {
+                    const label = subjectLabel(item)
+                    const kind = subjectKind(item)
+                    return (
+                      <RecordListRow
+                        className="cu-gfs-existing-access__item"
+                        data-testid={`gfs-access-row-${item.subject.type}`}
+                        data-access-id={item.grantId ?? item.shareIds[0]}
+                        key={`${item.subject.type}:${item.grantId ?? item.shareIds[0]}`}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={`cu-gfs-existing-access__avatar cu-gfs-existing-access__avatar--${kind}`}
+                          data-subject-kind={kind}
+                        >
+                          <AccessSubjectIcon kind={kind} />
+                        </span>
+                        <span className="cu-gfs-existing-access__identity">
+                          <span className="cu-gfs-existing-access__subject">{label}</span>
+                        </span>
+                        <span className="cu-gfs-existing-access__meta">
+                          <SelectionDropdown
+                            ariaLabel={`Access role for ${label}`}
+                            className="cu-gfs-existing-access__role"
+                            disabled={actionPending}
+                            multiple={false}
+                            onChange={next =>
+                              void updateAccessRole(item, (next[0] ?? 'read') as AccessRole)
+                            }
+                            menuClassName="cu-gfs-existing-access__role-menu"
+                            options={ROLE_OPTIONS}
+                            placeholder="Role"
+                            portal
+                            searchable={false}
+                            showSelectedChips={false}
+                            value={[roleForPermissions(item.permissions)]}
+                          />
+                        </span>
+                        <RowActionMenu
+                          actions={[
+                            {
+                              key: 'remove',
+                              label: 'Remove access',
+                              danger: true,
+                              disabled: actionPending,
+                              onSelect: () => void revokeAccess(item),
+                            },
+                          ]}
+                          ariaLabel={`Actions for ${label}`}
+                        />
+                      </RecordListRow>
+                    )
+                  })}
             </RecordList>
           )}
         </section>
       ) : null}
+      <GfsInheritedAccessDialog
+        busy={busy}
+        request={
+          parentUpdate?.row.inherited
+            ? {
+                mode: parentUpdate.mode,
+                memberLabel: subjectLabel(parentUpdate.row),
+                fileName: resource.name,
+                // Removal touches every contributing folder; a role change
+                // touches only the R1-H1 plan's affected folders.
+                folders:
+                  parentUpdate.mode === 'remove'
+                    ? parentUpdate.row.inherited.sources.map(source => ({
+                        name: source.name,
+                        currentRole: roleForPermissions(source.permissions),
+                      }))
+                    : parentUpdate.affected.map(source => ({
+                        name: source.name,
+                        currentRole: roleForPermissions(source.permissions),
+                      })),
+                fileCurrentRole: roleForPermissions(parentUpdate.row.permissions),
+                nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+              }
+            : null
+        }
+        onCancel={() => setParentUpdate(null)}
+        onConfirm={() => void confirmParentUpdate()}
+      />
       {confirmDialog}
     </div>
   )

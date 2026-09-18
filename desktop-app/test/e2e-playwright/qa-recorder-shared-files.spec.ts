@@ -59,9 +59,11 @@ test('optional QA recorder: Desktop shared files browser journey', async ({}, te
       timeout: 20_000,
     })
 
-    // The "Open GFS link" affordance lives in the card header and is always
+    // The "Open EvenDrive link" affordance lives in the card header and is always
     // present — a stable proof that the browse/open affordances rendered.
-    await expect(page.getByRole('button', { name: 'Open GFS link', exact: true })).toBeVisible({
+    await expect(
+      page.getByRole('button', { name: 'Open EvenDrive link', exact: true })
+    ).toBeVisible({
       timeout: 20_000,
     })
 

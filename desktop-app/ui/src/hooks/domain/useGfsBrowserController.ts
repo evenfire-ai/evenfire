@@ -9,6 +9,7 @@ import {
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
+import { deriveGfsInheritedAccess } from '@/gfs/inheritedAccess'
 import { desktopQueryKeys } from './queryKeys'
 
 /**
@@ -347,6 +348,25 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     enabled:
       Boolean(sessionScope) && Boolean(current) && grantsListEnabled && accessState === 'active',
   })
+  // Inherited access (ancestor folders' inheriting grants/shares) is derived
+  // client-side because the grants/shares GETs list only direct rows. Only
+  // FILE dialogs consume the derivation — folder dialogs keep their
+  // direct-only behavior. A derivation failure only means no inherited rows
+  // render — the direct grants/shares surfaces keep their own error
+  // reporting. Gated to the Manage dialog like the direct listings.
+  const inheritedAccessQuery = useQuery({
+    queryKey: desktopQueryKeys.gfsInheritedAccess(
+      sessionScope ?? 'anonymous',
+      current?.resourceId ?? '',
+      DRIVE
+    ),
+    queryFn: () => deriveGfsInheritedAccess(current!.resourceId, DRIVE),
+    enabled:
+      Boolean(sessionScope) &&
+      current?.kind === 'file' &&
+      grantsListEnabled &&
+      accessState === 'active',
+  })
   const refreshShares = useCallback(async () => {
     const resourceId = current?.resourceId
     if (!resourceId) return
@@ -361,6 +381,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     await queryClient.invalidateQueries({
       exact: true,
       queryKey: desktopQueryKeys.gfsGrants(sessionScope ?? 'anonymous', resourceId, DRIVE),
+    })
+  }, [current?.resourceId, queryClient, sessionScope])
+  // Re-derives inherited access after a confirmed parent-folder edit changed
+  // the ancestor rows the walk collected.
+  const refreshInheritedAccess = useCallback(async () => {
+    const resourceId = current?.resourceId
+    if (!resourceId) return
+    await queryClient.invalidateQueries({
+      exact: true,
+      queryKey: desktopQueryKeys.gfsInheritedAccess(sessionScope ?? 'anonymous', resourceId, DRIVE),
     })
   }, [current?.resourceId, queryClient, sessionScope])
   const refreshGfs = useCallback(async () => {
@@ -603,12 +633,16 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     () => (authorityPending ? [] : (sharesQuery.data ?? [])),
     [authorityPending, sharesQuery.data]
   )
+  const inheritedAccess = useMemo(
+    () => (authorityPending || accessState === 'revoked' ? [] : (inheritedAccessQuery.data ?? [])),
+    [accessState, authorityPending, inheritedAccessQuery.data]
+  )
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
   const accessibleNotice =
     sessionScope && !canListAccessibleResources
-      ? 'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.'
+      ? 'Automatic EvenDrive discovery is not available in this desktop runtime. You can still open any EvenDrive link you have.'
       : accessibleErrorMessage && isResourceDiscoveryUnavailable(accessibleErrorMessage)
-        ? 'Automatic GFS discovery is not available from this server yet. You can still open any GFS link you have.'
+        ? 'Automatic EvenDrive discovery is not available from this server yet. You can still open any EvenDrive link you have.'
         : null
 
   const openUri = useCallback(
@@ -872,6 +906,18 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     sharesError: sharesQuery.error,
     loadingShares: sharesQuery.isFetching,
     refreshShares,
+    // Client-derived ancestor access for FILE Manage dialogs: normal-looking
+    // toggleable rows whose edits route through the parent-folder
+    // confirmation. Per-ancestor failures inside the derivation stay silent;
+    // a total failure is reported through inheritedAccessError.
+    inheritedAccess,
+    loadingInheritedAccess: inheritedAccessQuery.isFetching,
+    // A TOTAL derivation failure surfaces as this message; the Share dialog
+    // renders a quiet notice because "no inherited rows" would silently read
+    // as "no one else has access". Per-ancestor best-effort skipping stays
+    // silent by design.
+    inheritedAccessError: inheritedAccessQuery.error ? toMessage(inheritedAccessQuery.error) : null,
+    refreshInheritedAccess,
     revokeShare: (shareId: string) => revokeShareMutation.mutateAsync(shareId),
     revokingShare: revokeShareMutation.isPending,
     createShare,

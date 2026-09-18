@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { DropdownSelect, StatusBanner } from '@components/Common'
 import {
   IconAgents,
@@ -10,16 +11,24 @@ import type {
   GfsAgentSubjectOption,
   GfsDelegationSubjectOption,
   GfsGrantListItem,
+  GfsInheritedAccessItem,
   GfsShareListItem,
 } from '@/gfs/delegation.types'
 import { AccessRowMenu } from './AccessRowMenu'
-import type { GfsGrantListProps } from './types'
+import type { GfsGrantListProps, GfsMergedAccessRow } from './types'
 import type { GfsAccessRole } from './types'
 
 type AccessSubjectKind = 'agent' | 'context' | 'team' | 'user' | 'workflow'
 
+function subjectKey(subject: { type: string; id?: string }): string {
+  return `${subject.type}:${subject.id ?? ''}`
+}
+
 function subjectKind(
-  subject: GfsGrantListItem['subject'] | GfsShareListItem['subject']
+  subject:
+    | GfsGrantListItem['subject']
+    | GfsShareListItem['subject']
+    | GfsInheritedAccessItem['subject']
 ): AccessSubjectKind {
   if (subject.type === 'team') return 'team'
   if (subject.type === 'host') return subject.id?.startsWith('3rd:') ? 'workflow' : 'agent'
@@ -44,7 +53,10 @@ function AccessSubjectIcon({ kind }: { kind: AccessSubjectKind }) {
  */
 
 function subjectLabel(
-  subject: GfsGrantListItem['subject'] | GfsShareListItem['subject'],
+  subject:
+    | GfsGrantListItem['subject']
+    | GfsShareListItem['subject']
+    | GfsInheritedAccessItem['subject'],
   agents: GfsAgentSubjectOption[],
   subjects: GfsDelegationSubjectOption[]
 ): string {
@@ -78,28 +90,65 @@ const ROLE_OPTIONS = [
 export function GfsGrantList({
   items,
   shares = [],
+  inheritedItems = [],
+  mergeInherited = false,
   loading = false,
+  derivationNotice = null,
   error = null,
   shareError = null,
   agents,
   subjects,
   onRevoke,
   onChangeRole,
+  onChangeInheritedRole,
+  onRemoveInherited,
   onRevokeShare,
   revoking = false,
   revokingShare = false,
   updatingRole = false,
 }: GfsGrantListProps) {
+  // File dialogs dedupe to exactly one row per member across the direct
+  // grant, direct shares, and derived ancestor access; the merged row keeps
+  // the strongest effective role. Direct rows for a merged subject are
+  // consumed so the member never renders twice.
+  const mergedByKey = useMemo(() => {
+    const merged = new Map<string, GfsMergedAccessRow>()
+    if (!mergeInherited) return merged
+    for (const inherited of inheritedItems) {
+      const key = subjectKey(inherited.subject)
+      const grant = items.find(item => subjectKey(item.subject) === key) ?? null
+      const subjectShares = shares.filter(share => subjectKey(share.subject) === key)
+      merged.set(key, {
+        subject: inherited.subject,
+        permissions: [
+          ...new Set([
+            ...inherited.permissions,
+            ...(grant?.permissions ?? []),
+            ...subjectShares.flatMap(share => share.permissions),
+          ]),
+        ],
+        grant,
+        shares: subjectShares,
+        inherited,
+      })
+    }
+    return merged
+  }, [inheritedItems, items, mergeInherited, shares])
+
   // Grants and shares are independent server surfaces with independent
   // failure modes (R4 spec §2): one list's error suppresses only its own rows
   // and never the other list's rows or revoke actions.
   const showGrantRows = !error && items.length > 0
   const showShareRows = !shareError && shares.length > 0
-  const hasRows = showGrantRows || showShareRows
+  // Merged rows are a client-derived supplement: they render whenever the
+  // derivation produced them, including while a direct list failed quietly.
+  const showMergedRows = mergedByKey.size > 0
+  const hasRows = showGrantRows || showShareRows || showMergedRows
   const hasAnyError = Boolean(error || shareError)
 
   return (
     <>
+      {derivationNotice ? <StatusBanner tone="info" text={derivationNotice} /> : null}
       {hasAnyError ? (
         <div className="da-gfs-grant-list__errors" data-testid="gfs-access-list-error">
           {error ? (
@@ -120,6 +169,7 @@ export function GfsGrantList({
         <ul className="da-gfs-grant-list" aria-label="Resource access">
           {showGrantRows
             ? items.map(item => {
+                if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
                 return (
@@ -159,8 +209,55 @@ export function GfsGrantList({
                 )
               })
             : null}
+          {showMergedRows
+            ? [...mergedByKey.values()].map(row => {
+                const label = subjectLabel(row.subject, agents, subjects)
+                const kind = subjectKind(row.subject)
+                return (
+                  <li
+                    className="da-gfs-grant-list__row"
+                    data-inherited="true"
+                    data-testid={`gfs-access-row-inherited-${row.subject.type}`}
+                    key={`inherited:${subjectKey(row.subject)}`}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`da-gfs-grant-list__avatar da-gfs-grant-list__avatar--${kind}`}
+                      data-subject-kind={kind}
+                    >
+                      <AccessSubjectIcon kind={kind} />
+                    </span>
+                    <span className="da-gfs-grant-list__identity">
+                      <span className="da-gfs-grant-list__label">{label}</span>
+                    </span>
+                    <span className="da-gfs-grant-list__meta">
+                      {/* Normal toggleable row: any edit opens the
+                          parent-folder confirmation in the page. */}
+                      <DropdownSelect
+                        ariaLabel={`Access role for ${label}`}
+                        className="da-gfs-grant-list__role"
+                        disabled={updatingRole || !onChangeInheritedRole}
+                        onChange={value =>
+                          void onChangeInheritedRole?.(row, label, value as GfsAccessRole)
+                        }
+                        options={ROLE_OPTIONS}
+                        placeholder="Role"
+                        portal
+                        value={roleForPermissions(row.permissions)}
+                      />
+                    </span>
+                    <AccessRowMenu
+                      disabled={revoking || !onRemoveInherited}
+                      label={label}
+                      onRemove={() => void onRemoveInherited?.(row, label)}
+                    />
+                  </li>
+                )
+              })
+            : null}
           {showShareRows
             ? shares.map(item => {
+                if (mergedByKey.has(subjectKey(item.subject))) return null
                 const label = subjectLabel(item.subject, agents, subjects)
                 const kind = subjectKind(item.subject)
                 return (
@@ -197,7 +294,7 @@ export function GfsGrantList({
       ) : !hasAnyError ? (
         loading ? (
           <p className="muted">Loading access…</p>
-        ) : (
+        ) : derivationNotice ? null : (
           <p className="muted">No one has access yet.</p>
         )
       ) : null}

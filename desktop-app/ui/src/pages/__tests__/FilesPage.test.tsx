@@ -54,6 +54,9 @@ function baseController() {
     grantsError: null,
     loadingGrants: false,
     refreshGrants: vi.fn(),
+    inheritedAccess: [],
+    loadingInheritedAccess: false,
+    refreshInheritedAccess: vi.fn(),
     revokeGrant: vi.fn(),
     revoking: false,
     shares: [],
@@ -137,12 +140,12 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({
       ...baseController(),
       accessibleNotice:
-        'Automatic GFS discovery is not available in this desktop runtime. You can still open any GFS link you have.',
+        'Automatic EvenDrive discovery is not available in this desktop runtime. You can still open any EvenDrive link you have.',
     })
 
     renderFilesPage()
 
-    const notice = screen.getByText(/Automatic GFS discovery is not available/i)
+    const notice = screen.getByText(/Automatic EvenDrive discovery is not available/i)
     expect(notice.closest('.status-banner')?.className).toContain('tone-info')
     expect(screen.queryByText(/window\.clerum/i)).toBeNull()
     expect(screen.queryByText(/listAccessible is not a function/i)).toBeNull()
@@ -158,7 +161,7 @@ describe('FilesPage', () => {
     expect(
       screen.getByText('Resources shared directly with you or your teams will appear here.')
     ).toBeTruthy()
-    expect(screen.queryByText(/Automatic GFS discovery is not available/i)).toBeNull()
+    expect(screen.queryByText(/Automatic EvenDrive discovery is not available/i)).toBeNull()
     expect(screen.queryByText(/Error invoking remote method/i)).toBeNull()
   })
 
@@ -641,12 +644,12 @@ describe('FilesPage', () => {
     const uploadButton = screen.getByRole('button', { name: 'Upload file' })
     expect(toolbar?.contains(newFolderButton)).toBe(true)
     expect(toolbar?.contains(uploadButton)).toBe(true)
-    expect(screen.queryByRole('button', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    expect(screen.getByRole('dialog', { name: 'Open GFS link' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Close GFS link dialog' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Close EvenDrive link dialog' }))
 
     fireEvent.click(newFolderButton)
     const newFolderDialog = screen.getByRole('dialog', { name: 'New folder' })
@@ -741,7 +744,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const image = new File(['desktop image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Desktop notes'], 'notes.markdown', { type: 'text/markdown' })
     const video = new File(['desktop video'], 'clip.mov', { type: 'video/quicktime' })
@@ -807,7 +810,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: {
         dropEffect: 'none',
         files: [
@@ -906,7 +909,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: {
         dropEffect: 'none',
         files: [new File(['report'], 'report.txt', { type: 'text/plain' })],
@@ -948,7 +951,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const firstDrop = {
       dropEffect: 'none',
       files: [new File(['# First'], 'first.md', { type: 'text/markdown' })],
@@ -1026,7 +1029,7 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockImplementation(useChangingFolderController)
 
     renderFilesPage()
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
       files: [
@@ -1070,7 +1073,7 @@ describe('FilesPage', () => {
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
     renderFilesPage(pushToast)
-    fireEvent.drop(screen.getByRole('region', { name: 'Global File System browser' }), {
+    fireEvent.drop(screen.getByRole('region', { name: 'EvenDrive browser' }), {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
 
@@ -1106,7 +1109,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage()
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const dataTransfer = {
       dropEffect: 'none',
       files: [new File(['# Notes'], 'notes.md', { type: 'text/markdown' })],
@@ -1143,7 +1146,7 @@ describe('FilesPage', () => {
     })
 
     renderFilesPage(pushToast)
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const image = new File(['desktop image'], 'restricted.png', { type: 'image/png' })
     const dataTransfer = { dropEffect: 'none', files: [image], types: ['Files'] }
     const reason =
@@ -1659,6 +1662,764 @@ describe('FilesPage', () => {
     await waitFor(() => expect(grant).toHaveBeenCalledWith(['user:user-2'], ['read'], true))
     await waitFor(() => expect(refreshGrants).toHaveBeenCalledTimes(1))
     expect(pushToast).toHaveBeenCalledWith('Access granted to 1 subject', 'success')
+  })
+
+  // TASK-243 — inherited access on a FILE: one normal toggleable row per
+  // member; any edit confirms against the parent folder and applies there.
+  function inheritedFileController(overrides: Record<string, unknown> = {}) {
+    return {
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.txt',
+        kind: 'file' as const,
+        version: 3,
+      },
+      affordances: {
+        held: ['read', 'manage_acl'],
+        canDelegate: true,
+        grantableBits: ['read', 'share', 'write'],
+        canCreateShare: false,
+      },
+      grants: [
+        {
+          id: 'grant-1',
+          drive: 'main',
+          resourceId: 'file-1',
+          subject: { type: 'user', id: 'user-2' },
+          permissions: ['read', 'share'],
+          inherit: false,
+        },
+      ],
+      inheritedAccess: [
+        {
+          subject: { type: 'user', id: 'user-2' },
+          permissions: ['read', 'write'],
+          inheritedFrom: ['Team folder'],
+          sources: [
+            {
+              resourceId: 'folder-1',
+              name: 'Team folder',
+              permissions: ['read', 'write'],
+              grantId: 'parent-grant-1',
+              shareIds: [],
+            },
+          ],
+        },
+      ],
+      ...overrides,
+    }
+  }
+
+  function installInheritedDirectoryMocks() {
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          getPathForFile: vi.fn((file: File) => `/tmp/${file.name}`),
+          grant: vi.fn(async () => undefined),
+          affordances: vi.fn(async () => ({
+            held: ['read', 'write', 'share', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: ['read', 'share', 'write', 'delete', 'manage_acl'],
+            canCreateShare: true,
+          })),
+        },
+        agents: { listMine: vi.fn(async () => []) },
+        team: {
+          directory: vi.fn(async () => ({
+            currentTeamId: 'team-1',
+            items: [
+              {
+                team: { id: 'team-1', name: 'Core Team', role: 'admin' },
+                members: [
+                  {
+                    id: 'user-2',
+                    email: 'test2@clerum.io',
+                    name: 'Test Two',
+                    role: 'member',
+                    status: 'active',
+                  },
+                ],
+                contextIds: [],
+                agentNames: [],
+              },
+            ],
+          })),
+        },
+      },
+    })
+  }
+
+  it('shows one normal toggleable row per member with inherited access on a file', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController())
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    // Direct grant row is consumed by the deduped merged row (one per member).
+    expect(within(manageDialog).queryByTestId('gfs-access-row-grant-grant-1')).toBeNull()
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+    expect(within(row).getByText('Test Two')).toBeTruthy()
+    expect(within(row).queryByText(/Inherited from/)).toBeNull()
+    // Effective role is the strongest across direct and inherited sources.
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+  })
+
+  it('confirms an inherited role change against the parent folder and applies it there', async () => {
+    installInheritedDirectoryMocks()
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const refreshGrants = vi.fn(async () => undefined)
+    const refreshInheritedAccess = vi.fn(async () => undefined)
+    const fileGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({ refreshGrants, refreshInheritedAccess, grant: fileGrant })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Update role on parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
+    expect(within(confirmDialog).getByText('Team folder')).toBeTruthy()
+    expect(within(confirmDialog).getByText('report.txt')).toBeTruthy()
+
+    // Cancel reverts the dropdown and sends nothing.
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(parentGrant).not.toHaveBeenCalled()
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Editor')
+
+    // Confirm applies the new role to the parent folder grant first…
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+    const confirmDialogAgain = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialogAgain).getByRole('button', { name: 'Update role' }))
+    })
+
+    await waitFor(() =>
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-1',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+    )
+    // …then aligns the file's own direct grant so it cannot mask the role.
+    await waitFor(() =>
+      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+    )
+    await waitFor(() => expect(refreshGrants).toHaveBeenCalled())
+    await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
+  })
+
+  // R1-H2 — a stale direct file share must not survive a confirmed parent
+  // role change: the editor share would keep masking the confirmed downgrade
+  // while the toast claims Read-only.
+  it('revokes the file’s direct shares when a confirmed parent role change downgrades the member', async () => {
+    installInheritedDirectoryMocks()
+    const fileGrant = vi.fn(async () => undefined)
+    const revokeShare = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        grants: [],
+        shares: [
+          {
+            id: 'file-share-1',
+            drive: 'main',
+            resourceId: 'file-1',
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read', 'write'],
+            includeDescendants: false,
+          },
+        ],
+        grant: fileGrant,
+        revokeShare,
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    // The direct share row is consumed by the deduped merged row.
+    expect(within(manageDialog).queryByTestId('gfs-access-row-share-file-share-1')).toBeNull()
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+    const confirmDialog = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+    })
+
+    // The direct share is superseded by the aligned grant and revoked…
+    await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
+    // …after the replacement grant expresses the confirmed role.
+    await waitFor(() =>
+      expect(fileGrant).toHaveBeenCalledWith(['user:user-2'], ['read', 'share'], false)
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Test Two is now Read-only on Team folder and everything inside it',
+      'success'
+    )
+  })
+
+  // R1-M1 — the parent grant's bits are judged by the PARENT folder's
+  // grantable bits, never by the open file's affordances (which may be null
+  // or narrower than what the folder allows).
+  it('derives the parent grant bits from the parent folder affordances, not the file', async () => {
+    installInheritedDirectoryMocks()
+    const folderAffordances = (window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> })
+      .affordances
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const pushToast = vi.fn()
+    // The file's grantable bits came back empty (failed/narrow probe) — the
+    // legacy path built the parent bits from these and confirmed a [] grant.
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        affordances: {
+          held: ['read', 'write', 'share', 'manage_acl'],
+          canDelegate: true,
+          grantableBits: [],
+          canCreateShare: false,
+        },
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+    })
+
+    // Pre-flight judged the parent folder itself before opening the modal.
+    await waitFor(() => expect(folderAffordances).toHaveBeenCalledWith('folder-1', 'main'))
+    const confirmDialog = await screen.findByRole('alertdialog')
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+    })
+
+    await waitFor(() =>
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-1',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+    )
+    expect(pushToast).toHaveBeenCalledWith(
+      'Test Two is now Read-only on Team folder and everything inside it',
+      'success'
+    )
+  })
+
+  it('refuses a role the parent folder cannot grant, before opening the confirmation', async () => {
+    installInheritedDirectoryMocks()
+    ;(window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> }).affordances.mockResolvedValue(
+      {
+        held: ['read', 'share'],
+        canDelegate: true,
+        grantableBits: ['read', 'share'],
+        canCreateShare: false,
+      }
+    )
+    const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+    const pushToast = vi.fn()
+    // Read-only inherited floor: upgrading to Editor must be judged against
+    // the folder, which cannot grant write.
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions: ['read'],
+            inheritedFrom: ['Team folder'],
+            sources: [
+              {
+                resourceId: 'folder-1',
+                name: 'Team folder',
+                permissions: ['read'],
+                grantId: 'parent-grant-1',
+                shareIds: [],
+              },
+            ],
+          },
+        ],
+      })
+    )
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    // Editor needs write on the parent; this folder cannot grant it.
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+    })
+
+    await waitFor(() =>
+      expect(pushToast).toHaveBeenCalledWith(
+        'Your access on Team folder does not allow making Test Two an Editor.',
+        'error'
+      )
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(parentGrant).not.toHaveBeenCalled()
+    // The dropdown reverts to the server-backed role.
+    expect(
+      within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+    ).toContain('Read')
+  })
+
+  // R1-M3 — a total derivation failure must not silently read as "no one".
+  it('shows a quiet notice instead of the empty claim when the derivation fails', async () => {
+    installInheritedDirectoryMocks()
+    hookMock.useGfsBrowserController.mockReturnValue(
+      inheritedFileController({
+        grants: [],
+        inheritedAccess: [],
+        inheritedAccessError: 'Error invoking remote method: 500',
+      })
+    )
+
+    renderFilesPage()
+    await openManageDialog('report.txt')
+
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    expect(
+      await within(manageDialog).findByText(
+        'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
+      )
+    ).toBeTruthy()
+    expect(within(manageDialog).queryByText('No one has access yet.')).toBeNull()
+  })
+
+  it('removes an inherited member from the parent folder after confirmation', async () => {
+    installInheritedDirectoryMocks()
+    const revokeGrant = vi.fn(async () => undefined)
+    const pushToast = vi.fn()
+    hookMock.useGfsBrowserController.mockReturnValue(inheritedFileController({ revokeGrant }))
+
+    renderFilesPage(pushToast)
+    await openManageDialog('report.txt')
+    const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+    const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+    await act(async () => {
+      fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+    })
+
+    const confirmDialog = await screen.findByRole('alertdialog')
+    expect(
+      within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' })
+    ).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+    })
+
+    await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('parent-grant-1'))
+  })
+
+  // R1-H1 — Drive-aligned multi-ancestor semantics. Reference scenario:
+  // Marketing (Viewer) → Campaigns (Editor) → report.txt.
+  describe('R1-H1 multi-ancestor edits', () => {
+    const CAMPAIGNS = {
+      resourceId: 'folder-cmp',
+      name: 'Campaigns',
+      permissions: ['read', 'write'],
+      grantId: 'cmp-grant-1',
+      shareIds: [],
+    }
+    const MARKETING = {
+      resourceId: 'folder-mkt',
+      name: 'Marketing',
+      permissions: ['read', 'share'],
+      grantId: 'mkt-grant-1',
+      shareIds: [],
+    }
+    const EDITOR_PERMISSIONS = ['read', 'write', 'delete', 'manage_acl', 'share']
+
+    function multiSourceController(
+      sources: Array<typeof CAMPAIGNS>,
+      overrides: Record<string, unknown> = {}
+    ) {
+      const permissions = [...new Set(sources.flatMap(source => source.permissions))]
+      return inheritedFileController({
+        grants: [],
+        inheritedAccess: [
+          {
+            subject: { type: 'user', id: 'user-2' },
+            permissions,
+            inheritedFrom: sources.map(source => source.name),
+            sources,
+          },
+        ],
+        ...overrides,
+      })
+    }
+
+    async function openMultiSourceRow(
+      sources: Array<typeof CAMPAIGNS>,
+      pushToast?: (message: string, tone: Tone) => void
+    ) {
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      return row
+    }
+
+    it('removes the member from every contributing ancestor and aligns the file rows', async () => {
+      installInheritedDirectoryMocks()
+      const revokeGrant = vi.fn(async () => undefined)
+      const revokeShare = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      const directShare = {
+        id: 'file-share-1',
+        drive: 'main',
+        resourceId: 'file-1',
+        subject: { type: 'user', id: 'user-2' },
+        permissions: ['read', 'write'],
+        includeDescendants: false,
+      }
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING], {
+          revokeGrant,
+          revokeShare,
+          shares: [directShare],
+        })
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Remove from parent folder?', { selector: 'h3' }))
+      // Every affected folder is listed with its own current role.
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).getByText('Marketing')).toBeTruthy()
+      expect(within(confirmDialog).getByText('report.txt')).toBeTruthy()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+      })
+
+      // Both ancestors' grants are revoked…
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('cmp-grant-1'))
+      await waitFor(() => expect(revokeGrant).toHaveBeenCalledWith('mkt-grant-1'))
+      // …and the file's own direct share is aligned with the removal.
+      await waitFor(() => expect(revokeShare).toHaveBeenCalledWith('file-share-1'))
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Access removed on 2 folders and everything inside them',
+          'success'
+        )
+      )
+    })
+
+    it('downgrades only the ancestors above the target role', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const pushToast = vi.fn()
+      // Marketing is already at Read; Campaigns sits above the target.
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING])
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // Exactly one folder mutation: the editor source is lowered, the
+      // read-only source stays untouched.
+      await waitFor(() => expect(parentGrant).toHaveBeenCalledTimes(1))
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-cmp',
+        ['user:user-2'],
+        ['read', 'share'],
+        'main',
+        true
+      )
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Test Two is now Read-only on Campaigns and everything inside it',
+          'success'
+        )
+      )
+    })
+
+    it('raises exactly one strongest ancestor on upgrade', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const readCampaigns = { ...CAMPAIGNS, permissions: ['read', 'share'] }
+      const readMarketing = { ...MARKETING }
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([readCampaigns, readMarketing])
+      )
+
+      const row = await openMultiSourceRow([readCampaigns, readMarketing])
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      })
+
+      const confirmDialog = await screen.findByRole('alertdialog')
+      expect(within(confirmDialog).getByText('Campaigns')).toBeTruthy()
+      expect(within(confirmDialog).queryByText('Marketing')).toBeNull()
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // One raise on the nearest source is enough: effective = strongest.
+      await waitFor(() => expect(parentGrant).toHaveBeenCalledTimes(1))
+      expect(parentGrant).toHaveBeenCalledWith(
+        'folder-cmp',
+        ['user:user-2'],
+        EDITOR_PERMISSIONS,
+        'main',
+        true
+      )
+    })
+
+    // N1 — the dropdown shows the MERGED role (direct ⊔ inherited);
+    // re-selecting the already-displayed role must be a no-op, not an
+    // inherited-floor comparison that escalates the parent folder.
+    it('re-selecting the displayed merged role opens no modal and issues no writes', async () => {
+      installInheritedDirectoryMocks()
+      const folderAffordances = (window.clerum.gfs as { affordances: ReturnType<typeof vi.fn> })
+        .affordances
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const pushToast = vi.fn()
+      // Direct Editor grant on the file + inherited Read floor: the row
+      // displays Editor even though the inherited-only role is Read.
+      hookMock.useGfsBrowserController.mockReturnValue(
+        inheritedFileController({
+          grants: [
+            {
+              id: 'grant-1',
+              drive: 'main',
+              resourceId: 'file-1',
+              subject: { type: 'user', id: 'user-2' },
+              permissions: ['read', 'write', 'delete', 'manage_acl', 'share'],
+              inherit: false,
+            },
+          ],
+          inheritedAccess: [
+            {
+              subject: { type: 'user', id: 'user-2' },
+              permissions: ['read'],
+              inheritedFrom: ['Team folder'],
+              sources: [
+                {
+                  resourceId: 'folder-1',
+                  name: 'Team folder',
+                  permissions: ['read'],
+                  grantId: 'parent-grant-1',
+                  shareIds: [],
+                },
+              ],
+            },
+          ],
+        })
+      )
+
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+      // The merged row displays the strongest role across sources.
+      expect(
+        within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+      ).toContain('Editor')
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Editor' }))
+      })
+
+      // No confirmation, no pre-flight, no writes — the displayed role was
+      // re-selected.
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(folderAffordances).not.toHaveBeenCalled()
+      expect(parentGrant).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(
+          within(row).getByRole('button', { name: 'Access role for Test Two' }).textContent
+        ).toContain('Editor')
+      )
+    })
+
+    // N2 — when the file's affordances are unavailable (empty grantable
+    // bits), the file-alignment grant must be skipped, not sent empty and
+    // rejected after the parent update already succeeded.
+    it('skips the file-alignment grant when the file affordances yield no bits', async () => {
+      installInheritedDirectoryMocks()
+      const parentGrant = (window.clerum.gfs as { grant: ReturnType<typeof vi.fn> }).grant
+      const fileGrant = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      // File affordances failed: grantableBits came back empty while the
+      // merged row still shows Editor (direct grant + inherited editor).
+      hookMock.useGfsBrowserController.mockReturnValue(
+        inheritedFileController({
+          affordances: {
+            held: ['read', 'manage_acl'],
+            canDelegate: true,
+            grantableBits: [],
+            canCreateShare: false,
+          },
+          grant: fileGrant,
+        })
+      )
+
+      renderFilesPage(pushToast)
+      await openManageDialog('report.txt')
+      const manageDialog = await screen.findByRole('dialog', { name: 'Share file report.txt' })
+      const row = await within(manageDialog).findByTestId('gfs-access-row-inherited-user')
+
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Access role for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('option', { name: 'Read' }))
+      })
+      const confirmDialog = await screen.findByRole('alertdialog')
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Update role' }))
+      })
+
+      // The parent update succeeded with its pre-validated folder bits…
+      await waitFor(() =>
+        expect(parentGrant).toHaveBeenCalledWith(
+          'folder-1',
+          ['user:user-2'],
+          ['read', 'share'],
+          'main',
+          true
+        )
+      )
+      // …and no empty-bits grant was sent to the file — the parent outcome
+      // stays a clean success, not a confusing partial failure.
+      expect(fileGrant).not.toHaveBeenCalled()
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          'Test Two is now Read-only on Team folder and everything inside it',
+          'success'
+        )
+      )
+      pushToast.mock.calls.forEach(([message, tone]) => {
+        expect(tone).not.toBe('error')
+      })
+    })
+
+    it('states the true partial outcome when a folder removal fails mid-run', async () => {
+      installInheritedDirectoryMocks()
+      const revokeGrant = vi.fn(async (grantId: string) => {
+        if (grantId === 'mkt-grant-1') {
+          throw new Error('403 Forbidden: escalation_rejected')
+        }
+      })
+      const refreshGrants = vi.fn(async () => undefined)
+      const refreshInheritedAccess = vi.fn(async () => undefined)
+      const pushToast = vi.fn()
+      hookMock.useGfsBrowserController.mockReturnValue(
+        multiSourceController([CAMPAIGNS, MARKETING], {
+          revokeGrant,
+          refreshGrants,
+          refreshInheritedAccess,
+        })
+      )
+
+      const row = await openMultiSourceRow([CAMPAIGNS, MARKETING], pushToast)
+      await act(async () => {
+        fireEvent.click(within(row).getByRole('button', { name: 'Actions for Test Two' }))
+      })
+      await act(async () => {
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Remove access' }))
+      })
+      const confirmDialog = await screen.findByRole('alertdialog')
+      await act(async () => {
+        fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Remove' }))
+      })
+
+      // The nearest folder was removed; Marketing failed — the toast says
+      // exactly how far the removal got, and both lists refresh to the TRUE
+      // partial state.
+      await waitFor(() =>
+        expect(pushToast).toHaveBeenCalledWith(
+          expect.stringContaining('Removed from 1 of 2 folders — Marketing still grants access'),
+          'error'
+        )
+      )
+      expect(pushToast).not.toHaveBeenCalledWith(
+        'Access removed on 2 folders and everything inside them',
+        'success'
+      )
+      await waitFor(() => expect(refreshGrants).toHaveBeenCalled())
+      await waitFor(() => expect(refreshInheritedAccess).toHaveBeenCalled())
+    })
   })
 
   it('does not render resource options inside the share dialog', async () => {
@@ -3038,17 +3799,19 @@ describe('FilesPage', () => {
     hookMock.useGfsBrowserController.mockReturnValue({ ...baseController(), openUri })
     renderFilesPage()
 
-    expect(screen.queryByRole('button', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Open EvenDrive link' })).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    const dialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
-    fireEvent.change(within(dialog).getByLabelText('gfs URI'), {
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/resource-1' },
     })
     fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
 
     await waitFor(() => expect(openUri).toHaveBeenCalledWith('gfs://main/resource-1'))
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull())
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
+    )
   })
 
   it('opens an SVG GFS link in preview without leaving the browser on a file-only route', async () => {
@@ -3095,9 +3858,9 @@ describe('FilesPage', () => {
 
     renderFilesPage()
     fireEvent.click(screen.getByRole('button', { name: 'Options for Shared with me' }))
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Open GFS link' }))
-    const linkDialog = await screen.findByRole('dialog', { name: 'Open GFS link' })
-    fireEvent.change(within(linkDialog).getByLabelText('gfs URI'), {
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const linkDialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(linkDialog).getByLabelText('EvenDrive link'), {
       target: { value: 'gfs://main/svg-1' },
     })
     fireEvent.click(within(linkDialog).getByRole('button', { name: 'Open' }))
@@ -3108,7 +3871,7 @@ describe('FilesPage', () => {
     )
     expect(download).toHaveBeenCalledWith('gfs://main/svg-1')
     expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'image/svg+xml' }))
-    expect(screen.queryByRole('dialog', { name: 'Open GFS link' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
 
     fireEvent.click(within(preview).getByRole('button', { name: 'Close image preview' }))
     expect(screen.queryByRole('heading', { name: 'architecture.svg' })).toBeNull()
@@ -3153,6 +3916,159 @@ describe('FilesPage', () => {
     expect(goToCrumb).toHaveBeenCalledWith(0)
     fireEvent.click(within(breadcrumbs).getByRole('button', { name: 'Shared with me' }))
     expect(reset).toHaveBeenCalledOnce()
+  })
+
+  it('mounts the ⋯ menu only on the active folder beside the breadcrumb, never on crumbs or the open file', async () => {
+    const fullBits = {
+      held: ['read', 'write', 'delete', 'manage_acl'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }
+    const parentViewRowOptions = [
+      'Share',
+      'Open folder',
+      'Open EvenDrive link',
+      'Rename',
+      'Move to…',
+      'Delete',
+    ]
+    // The active folder is already open, so its menu is the row menu minus the
+    // navigation item — exactly the pre-existing beside-the-breadcrumb menu.
+    const activeFolderOptions = parentViewRowOptions.filter(option => option !== 'Open folder')
+
+    // Phase 1 — the parent view: a fully-permissioned folder row's ⋯ menu.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+      ],
+      items: [
+        {
+          resourceId: 'folder-2',
+          rid: 'folder-2',
+          gfsUri: 'gfs://main/folder-2',
+          drive: 'main',
+          parentResourceId: 'folder-1',
+          name: 'Team folder',
+          kind: 'directory' as const,
+          path: '/Product/Team folder',
+          version: 2,
+          bytes: 0,
+        },
+      ],
+      rowAffordancesByResourceId: { 'folder-2': fullBits },
+    })
+    const parentView = renderFilesPage()
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Options for Team folder' }))
+    })
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(
+      parentViewRowOptions
+    )
+    parentView.unmount()
+
+    // Phase 2 — a file is open: no crumb (folder or file) carries a menu in
+    // the breadcrumb, and the breadcrumb title row has none for the file.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'file-1',
+        gfsUri: 'gfs://main/file-1',
+        name: 'report.md',
+        kind: 'file',
+        version: 3,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        {
+          resourceId: 'file-1',
+          gfsUri: 'gfs://main/file-1',
+          name: 'report.md',
+          kind: 'file',
+          version: 3,
+        },
+      ],
+    })
+    renderFilesPage()
+
+    let breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    let titleRow = document.querySelector('.da-gfs-drive__title-row')
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
+    expect(within(titleRow!).queryByRole('button', { name: 'Options for report.md' })).toBeNull()
+    cleanup()
+
+    // Phase 3 — a folder is open: exactly one ⋯ menu, for the ACTIVE folder,
+    // sitting to the right of the breadcrumb (after the nav), while the
+    // ancestor folder crumb stays plain.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-2',
+        gfsUri: 'gfs://main/folder-2',
+        name: 'Nested',
+        kind: 'directory',
+        version: 2,
+      },
+      crumbs: [
+        {
+          resourceId: 'folder-1',
+          gfsUri: 'gfs://main/folder-1',
+          name: 'Product',
+          kind: 'directory',
+          version: 1,
+        },
+        {
+          resourceId: 'folder-2',
+          gfsUri: 'gfs://main/folder-2',
+          name: 'Nested',
+          kind: 'directory',
+          version: 2,
+        },
+      ],
+      affordances: fullBits,
+    })
+    renderFilesPage()
+
+    breadcrumbs = screen.getByRole('navigation', { name: 'File location' })
+    titleRow = document.querySelector('.da-gfs-drive__title-row')
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Product' })).toBeNull()
+    expect(within(breadcrumbs).queryByRole('button', { name: 'Options for Nested' })).toBeNull()
+
+    const activeMenuTrigger = within(titleRow!).getByRole('button', { name: 'Options for Nested' })
+    const activeMenuWrapper = activeMenuTrigger.closest('.da-gfs-resource-menu')
+    expect(activeMenuWrapper?.previousElementSibling).toBe(breadcrumbs)
+
+    await act(async () => {
+      fireEvent.click(activeMenuTrigger)
+    })
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(
+      activeFolderOptions
+    )
+
+    // "Open EvenDrive link" is present and opens the link dialog.
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    expect(screen.getByRole('dialog', { name: 'Open EvenDrive link' })).toBeTruthy()
   })
 
   it('opens nested folders and exposes open and copy actions in the resource menu', async () => {

@@ -16251,6 +16251,116 @@ pre {
   font-weight: var(--font-weight-medium);
 }
 
+/* Parent-folder confirmation for inherited access rows (Share dialog). */
+.da-gfs-parent-update-dialog {
+  width: min(460px, 94vw);
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  border: 1px solid rgba(var(--edge-rgb), 0.42);
+  border-radius: var(--radius-xl);
+  background: var(--bg-elev);
+  box-shadow: var(--shadow-hard);
+}
+
+.da-gfs-parent-update-dialog__header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-gfs-parent-update-dialog__body {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.da-gfs-parent-update-dialog__lead {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-gfs-parent-update-dialog__learn-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.da-gfs-parent-update-dialog__learn-more:focus-visible {
+  outline: 2px solid rgba(var(--focus-rgb), 0.8);
+  outline-offset: 2px;
+}
+
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.da-gfs-parent-update-dialog__folders {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.da-gfs-parent-update-dialog__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid rgba(var(--edge-rgb), 0.32);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+}
+
+.da-gfs-parent-update-dialog__name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.da-gfs-parent-update-dialog__change {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.da-gfs-parent-update-dialog__role {
+  color: var(--text-muted);
+  font-weight: var(--font-weight-medium);
+}
+
+.da-gfs-parent-update-dialog__role--next {
+  color: var(--text);
+}
+
+.da-gfs-parent-update-dialog__help {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+}
+
+.da-gfs-parent-update-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
 .da-gfs-grant-list__chips {
   display: inline-flex;
   flex-wrap: wrap;

@@ -307,15 +307,15 @@ describe('GfsBrowser', () => {
     })
   })
 
-  it('uses the paperclip header, labels the root as main, and ignores current-crumb clicks', async () => {
+  it('uses the hard-drive header, labels the root as main, and ignores current-crumb clicks', async () => {
     mockApiGet.mockResolvedValueOnce({ items: [], nextCursor: null })
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
 
-    const title = screen.getByText('Global File System').closest('.cu-panel-title')
+    const title = screen.getByText('EvenDrive').closest('.cu-panel-title')
     expect(title?.querySelector('path')).toHaveAttribute(
       'd',
-      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48'
+      'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z'
     )
 
     const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
@@ -465,7 +465,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
 
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const image = new File(['operator image'], 'diagram.png', { type: 'image/png' })
     const markdown = new File(['# Operator notes'], 'notes.md', { type: 'text/markdown' })
     const pdf = new File(['%PDF operator report'], 'report.pdf', { type: 'application/pdf' })
@@ -515,7 +515,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('report.txt')
 
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
       dataTransfer: {
         dropEffect: 'none',
@@ -874,7 +874,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
 
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     const file = new File(['resume data'], 'resume.md', {
       type: 'text/markdown',
       lastModified,
@@ -914,7 +914,7 @@ describe('GfsBrowser', () => {
     renderBrowser()
     await screen.findByText('No resources are visible in this folder.')
 
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
       dataTransfer: {
         dropEffect: 'none',
@@ -1047,7 +1047,7 @@ describe('GfsBrowser', () => {
     Object.defineProperty(oversized, 'size', { value: GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES + 1 })
     const arrayBuffer = vi.spyOn(oversized, 'arrayBuffer')
 
-    const browser = screen.getByRole('region', { name: 'Global File System browser' })
+    const browser = screen.getByRole('region', { name: 'EvenDrive browser' })
     fireEvent.drop(browser.querySelector('.cu-gfs-card')!, {
       dataTransfer: { dropEffect: 'none', files: [oversized], types: ['Files'] },
     })
@@ -1425,6 +1425,77 @@ describe('GfsBrowser', () => {
         })
       )
     )
+  })
+
+  it('shows the ⋯ menu only on the active breadcrumb folder and opens pasted EvenDrive links', async () => {
+    const orgFolder = child('org', 'directory', 1)
+    const nestedFolder = child('nested', 'directory', 3)
+    mockApiGet.mockImplementation(async (path: string) => {
+      if (path === '/api/v1/gfs/tree') {
+        return { items: [orgFolder], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resources/id-1/children') {
+        return { items: [nestedFolder], nextCursor: null }
+      }
+      if (path === '/api/v1/gfs/resolve') {
+        return {
+          resourceId: 'id-3',
+          rid: 'r3',
+          gfsUri: 'gfs://main/r3',
+          name: 'nested',
+          kind: 'directory',
+        }
+      }
+      return { items: [], nextCursor: null }
+    })
+    renderBrowser()
+
+    fireEvent.click(await screen.findByRole('button', { name: 'org' }))
+    await screen.findByText('nested')
+
+    const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+    // Only the ACTIVE folder (org) carries a menu. The synthetic drive root
+    // and non-active segments — and the nested ROW, which lives in the listing
+    // rather than the breadcrumb — do not render breadcrumb menus.
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for main' })).toBeNull()
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for nested' })).toBeNull()
+    const activeTrigger = within(breadcrumb).getByRole('button', { name: 'Actions for org' })
+    // The menu sits to the RIGHT of the active folder's name: its wrapper is
+    // the breadcrumb label button's next sibling within the segment.
+    const activeWrapper = activeTrigger.closest('.cu-gfs-resource-menu')
+    expect(activeWrapper?.previousElementSibling).toBe(
+      within(breadcrumb).getByRole('button', { name: 'org' })
+    )
+
+    // The active folder menu lists the same options as that folder's row menu
+    // in its parent view.
+    await openResourceMenu('nested')
+    const rowOptions = screen.getAllByRole('menuitem').map(item => item.textContent)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await openResourceMenu('org')
+    expect(screen.getAllByRole('menuitem').map(item => item.textContent)).toEqual(rowOptions)
+    expect(rowOptions).toEqual(['Share', 'Open EvenDrive link', 'Rename', 'Move to…', 'Delete'])
+
+    // "Open EvenDrive link" resolves the pasted URI and navigates to it; the
+    // menu then follows the newly active folder.
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Open EvenDrive link' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Open EvenDrive link' })
+    fireEvent.change(within(dialog).getByLabelText('EvenDrive link'), {
+      target: { value: 'gfs://main/r3' },
+    })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Open' }))
+
+    await waitFor(() =>
+      expect(mockApiGet).toHaveBeenCalledWith('/api/v1/gfs/resolve', { uri: 'gfs://main/r3' })
+    )
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'nested' })).toBeTruthy()
+    )
+    await waitFor(() =>
+      expect(within(breadcrumb).getByRole('button', { name: 'Actions for nested' })).toBeTruthy()
+    )
+    expect(within(breadcrumb).queryByRole('button', { name: 'Actions for org' })).toBeNull()
+    expect(screen.queryByRole('dialog', { name: 'Open EvenDrive link' })).toBeNull()
   })
 
   it('does not fall back to legacy when replacing a persisted resumable session', async () => {

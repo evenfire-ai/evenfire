@@ -106,12 +106,12 @@ describe('SidebarNav logo', () => {
     expect(container.querySelector('.sidebar-logo-copy')).toBeNull()
   })
 
-  it('renders Files as a top-level nav item labelled Files (not under Resources)', () => {
+  it('renders EvenDrive as a top-level nav item labelled EvenDrive (not under Resources)', () => {
     render(<SidebarNav {...baseProps()} />)
 
-    // Files is always visible as a primary nav destination — no menu opening needed.
+    // EvenDrive is always visible as a primary nav destination — no menu opening needed.
     const filesItem = screen.getByTestId('nav-files')
-    expect(filesItem.textContent).toContain('Files')
+    expect(filesItem.textContent).toContain('EvenDrive')
     expect(filesItem.textContent).not.toContain('Global File System')
 
     // Files is a top-level nav item, never nested inside the Settings popover.
@@ -120,17 +120,19 @@ describe('SidebarNav logo', () => {
     expect(settingsMenu?.querySelector('[data-testid="nav-files"]')).toBeNull()
   })
 
-  it('mounts the paperclip SVG used by Control UI Global File System', () => {
+  it('mounts the hard-drive SVG inside the EvenDrive nav item so the icon is visible', () => {
     const { container } = render(<SidebarNav {...baseProps()} />)
     const filesLink = container.querySelector('[data-testid="nav-files"]')
     const icon = filesLink?.querySelector('.ui-nav-item__icon svg')
     expect(icon).toBeTruthy()
     expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
-    // Keep the Desktop Files item visually aligned with Control UI's
-    // Global File System paperclip icon.
+    // Lucide hard-drive outline plus the separator line and two activity dots.
+    // (Supersedes dev's paperclip alignment: this branch deliberately moved
+    // the EvenDrive nav item to a hard-drive icon.)
     expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
-      'm21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49'
+      'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
     )
+    expect(icon?.querySelectorAll('line')).toHaveLength(3)
   })
 
   it('routes a controlled palette request through desktop collapse behavior', () => {

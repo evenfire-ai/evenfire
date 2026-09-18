@@ -34,6 +34,7 @@ import {
   IconShare,
   IconUpload,
 } from '@components/SidebarNav/icons'
+import { GFS_DRIVE_MAIN } from '@constants/gfsBrowser'
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { type GfsCrumb, useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
@@ -45,13 +46,18 @@ import { gfsVideoPreviewMimeType } from '@lib/gfsVideoPreview'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import { GfsGrantList } from '@/gfs/GfsGrantList'
 import type { GfsAccessRole } from '@/gfs/GfsGrantList'
+import type { GfsMergedAccessRow } from '@/gfs/GfsGrantList/types'
+import { GfsInheritedAccessDialog } from '@/gfs/GfsInheritedAccessDialog'
+import type { GfsInheritedAccessDialogRequest } from '@/gfs/GfsInheritedAccessDialog/types'
 import {
   type GfsAgentSubjectOption,
   GfsDelegationPanel,
   type GfsDelegationSubjectOption,
   type GfsGrantListItem,
 } from '@/gfs/delegation'
+import type { GfsInheritedAccessSource } from '@/gfs/delegation.types'
 import { GfsFilePicker } from '@/gfs/filePicker'
+import { planInheritedRoleChange } from '@/gfs/inheritedAccess'
 import { GfsMoveDialog } from '@/gfs/moveDialog'
 import type { TeamDirectoryResult } from '../../../src/types'
 import type {
@@ -65,11 +71,31 @@ function hasBit(affordances: { held?: string[] } | null, bit: string): boolean {
   return Boolean(affordances?.held?.includes(bit))
 }
 
+/** Maps a permission set onto the Share dialog's two roles (Editor > Read). */
+function roleForAccessPermissions(permissions: string[]): GfsAccessRole {
+  return permissions.some(permission => ['write', 'delete', 'manage_acl'].includes(permission))
+    ? 'editor'
+    : 'read'
+}
+/** The permission set a role stands for: hosts cap at read/write. */
+function rolePermissionRequest(subjectType: string, role: GfsAccessRole): string[] {
+  if (subjectType === 'host') return role === 'editor' ? ['read', 'write'] : ['read']
+  return role === 'editor' ? ['read', 'write', 'delete', 'manage_acl', 'share'] : ['read', 'share']
+}
+
+/** ["a", "b", "c"] → "a, b and c" — folder names for honest outcome toasts. */
+function joinFolderNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? ''
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+}
 function hasDraggedFiles(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes('Files')
 }
 
 const GFS_RESOURCE_DRAG_TYPE = 'application/x-evenfire-gfs-resource'
+
+const INHERITED_DERIVATION_NOTICE =
+  'Inherited access could not be loaded. Members with access from a parent folder may be missing.'
 
 function hasDraggedGfsResource(event: ReactDragEvent<HTMLElement>): boolean {
   return Array.from(event.dataTransfer.types || []).includes(GFS_RESOURCE_DRAG_TYPE)
@@ -223,6 +249,21 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const [manageOpen, setManageOpen] = useState(false)
   const [shareDetailsOpen, setShareDetailsOpen] = useState(false)
   const [updatingAccessRole, setUpdatingAccessRole] = useState(false)
+  // Pending parent-folder confirmation (role change or removal) for a member
+  // whose file access is inherited from ancestor folders. change-role carries
+  // the R1-H1 plan's affected folders, each with the bits the pre-flight
+  // validated on that folder itself.
+  const [parentUpdate, setParentUpdate] = useState<
+    | {
+        row: GfsMergedAccessRow
+        label: string
+        mode: 'change-role'
+        nextRole: GfsAccessRole
+        updates: Array<{ source: GfsInheritedAccessSource; bits: string[] }>
+      }
+    | { row: GfsMergedAccessRow; label: string; mode: 'remove' }
+    | null
+  >(null)
   const [filePreview, setFilePreview] = useState<GfsPreviewResource | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [droppedUploadCount, setDroppedUploadCount] = useState(0)
@@ -397,6 +438,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const canManageCurrent = !accessRevoked && hasBit(affordances, 'manage_acl')
   const currentIsFolder = current?.kind === 'directory'
   const currentIsFile = current?.kind === 'file'
+  // A total inherited-derivation failure becomes a quiet notice in the Share
+  // dialog: an empty derived list alone would silently read as "no one else
+  // has access" (R1-M3). Per-ancestor best-effort skipping stays silent.
+  const inheritedAccessNotice =
+    currentIsFile && ctrl.inheritedAccessError ? INHERITED_DERIVATION_NOTICE : null
   const currentPreviewAvailable = currentIsFile && isGfsPreviewFile(current?.name ?? '')
   const droppedUploadRestriction = useMemo(() => {
     if (!current) {
@@ -472,6 +518,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     if (!manageOpen && !openLinkOpen && !moveTarget && !renameTarget) return
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
+      // The parent-folder confirmation is the top-most dialog: Escape cancels
+      // it alone and leaves the Share dialog open.
+      if (parentUpdate) {
+        setParentUpdate(null)
+        return
+      }
       closeManage()
       setOpenLinkOpen(false)
       setMoveTarget(null)
@@ -479,7 +531,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [closeManage, manageOpen, openLinkOpen, moveTarget, renameTarget])
+  }, [closeManage, manageOpen, openLinkOpen, moveTarget, parentUpdate, renameTarget])
 
   // One atomic bulk grant for every selected subject — the server grants all or
   // none (a `subjects_invalid` rejects the whole request), so there is no
@@ -526,15 +578,9 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     label: string,
     role: GfsAccessRole
   ) => {
-    const requested =
-      item.subject.type === 'host'
-        ? role === 'editor'
-          ? ['read', 'write']
-          : ['read']
-        : role === 'editor'
-          ? ['read', 'write', 'delete', 'manage_acl', 'share']
-          : ['read', 'share']
-    const bits = requested.filter(bit => affordances?.grantableBits.includes(bit))
+    const bits = rolePermissionRequest(item.subject.type, role).filter(bit =>
+      affordances?.grantableBits.includes(bit)
+    )
     const subjectKey = item.subject.id
       ? `${item.subject.type}:${item.subject.id}`
       : item.subject.type
@@ -546,6 +592,179 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     } catch (roleError) {
       if (failClosedOnAuthorizationError(roleError)) return
       pushToast?.(describeGfsGrantError(roleError).message, 'error')
+    } finally {
+      setUpdatingAccessRole(false)
+    }
+  }
+
+  // A merged row whose access comes from parent folders: any edit (upgrade,
+  // downgrade, or removal — no exceptions) is confirmed against the affected
+  // folders before anything is sent. Cancel reverts the dropdown untouched.
+  const handleInheritedRoleChange = async (
+    row: GfsMergedAccessRow,
+    label: string,
+    role: GfsAccessRole
+  ) => {
+    const inherited = row.inherited
+    if (!inherited) return
+    const subject = inherited.subject
+    // N1: the dropdown displays the MERGED effective role (direct ⊔
+    // inherited). Re-selecting the already-displayed role is a no-op —
+    // comparing it against the inherited-only floor instead would open the
+    // parent-update modal and escalate the parent folder for a non-change.
+    if (role === roleForAccessPermissions(row.permissions)) return
+    // R1-H1 plan: downgrade lowers every folder above the target; upgrade
+    // raises the single strongest folder; same-role selection touches none.
+    const affected = planInheritedRoleChange(inherited, role === 'editor')
+    if (affected.length === 0 && !row.grant && row.shares.length === 0) return
+    // Pre-flight: every affected folder's grant is judged by THAT folder's
+    // own grantable bits, never by the open file's affordances (which may be
+    // missing or narrower). A role a folder cannot grant fails loudly here —
+    // the confirmation never opens with a promise it cannot keep.
+    const updates: Array<{ source: GfsInheritedAccessSource; bits: string[] }> = []
+    for (const source of affected) {
+      let folderAffordances: { canDelegate: boolean; grantableBits: string[] }
+      try {
+        folderAffordances = await window.clerum.gfs.affordances(source.resourceId, GFS_DRIVE_MAIN)
+      } catch (affordancesError) {
+        if (failClosedOnAuthorizationError(affordancesError)) return
+        pushToast?.(describeGfsGrantError(affordancesError).message, 'error')
+        return
+      }
+      const bits = rolePermissionRequest(subject.type, role).filter(bit =>
+        folderAffordances.grantableBits.includes(bit)
+      )
+      const expressesRole =
+        role === 'editor' ? bits.includes('read') && bits.includes('write') : bits.includes('read')
+      if (!folderAffordances.canDelegate || !expressesRole) {
+        pushToast?.(
+          `Your access on ${source.name} does not allow making ${label} ${role === 'editor' ? 'an Editor' : 'Read-only'}.`,
+          'error'
+        )
+        return
+      }
+      updates.push({ source, bits })
+    }
+    setParentUpdate({ row, label, mode: 'change-role', nextRole: role, updates })
+  }
+
+  const handleInheritedRemove = (row: GfsMergedAccessRow, label: string) => {
+    setParentUpdate({ row, label, mode: 'remove' })
+  }
+
+  const confirmParentUpdate = async () => {
+    const request = parentUpdate
+    const inherited = request?.row.inherited
+    if (!request || !inherited) {
+      setParentUpdate(null)
+      return
+    }
+    const sources = inherited.sources
+    const subject = inherited.subject
+    const subjectKey = subject.id ? `${subject.type}:${subject.id}` : subject.type
+    const label = request.label
+    setParentUpdate(null)
+    setUpdatingAccessRole(true)
+    // Partial-failure honesty (R1-H1): the confirm issues several sequential
+    // calls; the first failure stops the run, refreshes both lists so the
+    // dialog shows the TRUE partial state, and the toast says exactly how far
+    // the change got. Full success is never claimed on partial completion.
+    const failPartially = async (updateError: unknown, summary: string) => {
+      if (failClosedOnAuthorizationError(updateError)) return
+      pushToast?.(`${summary} (${describeGfsGrantError(updateError).message})`, 'error')
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+    }
+    try {
+      if (request.mode === 'remove') {
+        let removed = 0
+        for (const source of sources) {
+          try {
+            if (source.grantId) await ctrl.revokeGrant(source.grantId)
+            for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
+            removed += 1
+          } catch (updateError) {
+            await failPartially(
+              updateError,
+              `Removed from ${removed} of ${sources.length} folders — ${source.name} still grants access`
+            )
+            return
+          }
+        }
+        // The file's own direct rows are aligned with the removal.
+        if (request.row.grant || request.row.shares.length > 0) {
+          try {
+            if (request.row.grant) await ctrl.revokeGrant(request.row.grant.id)
+            for (const share of request.row.shares) await ctrl.revokeShare(share.id)
+          } catch (updateError) {
+            await failPartially(
+              updateError,
+              `Removed from ${sources.length} of ${sources.length} folders — direct access on ${current?.name ?? 'this file'} could not be removed`
+            )
+            return
+          }
+        }
+        pushToast?.(
+          sources.length === 1
+            ? `Access removed on ${sources[0].name} and everything inside it`
+            : `Access removed on ${sources.length} folders and everything inside them`,
+          'success'
+        )
+        await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
+        return
+      }
+      const updates = request.updates
+      const affectedNames = updates.map(update => update.source.name)
+      let updated = 0
+      for (const { source, bits } of updates) {
+        try {
+          // Each affected folder's grant is updated with the bits the
+          // pre-flight validated on that folder, and keeps cascading to
+          // everything inside; its superseded share rows are consolidated.
+          await window.clerum.gfs.grant(source.resourceId, [subjectKey], bits, GFS_DRIVE_MAIN, true)
+          for (const shareId of source.shareIds) await ctrl.revokeShare(shareId)
+          updated += 1
+        } catch (updateError) {
+          await failPartially(
+            updateError,
+            `Updated ${updated} of ${updates.length} folders — ${source.name} still grants access`
+          )
+          return
+        }
+      }
+      // The file's own direct rows are aligned so they cannot mask the
+      // confirmed role: the grant upsert expresses the new role and every
+      // direct file share for the member is revoked after it — a stale
+      // editor share would otherwise keep the member an Editor.
+      if (request.row.grant || request.row.shares.length > 0) {
+        try {
+          const fileBits = rolePermissionRequest(subject.type, request.nextRole).filter(bit =>
+            affordances?.grantableBits.includes(bit)
+          )
+          // N2: an empty bit set means the file's affordances are
+          // unavailable (or grant nothing) — sending it would be rejected
+          // after the parent update already succeeded, turning a successful
+          // action into a confusing partial-failure toast. Skip the
+          // alignment grant; the parent outcome stands and the still-revoked
+          // direct shares cannot mask it.
+          if (fileBits.length > 0) {
+            await ctrl.grant([subjectKey], fileBits, request.row.grant?.inherit ?? false)
+          }
+          for (const share of request.row.shares) await ctrl.revokeShare(share.id)
+        } catch (updateError) {
+          await failPartially(
+            updateError,
+            `Updated ${updates.length} of ${updates.length} folders — direct access on ${current?.name ?? 'this file'} still shows the old role`
+          )
+          return
+        }
+      }
+      pushToast?.(
+        affectedNames.length > 0
+          ? `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${joinFolderNames(affectedNames)} and everything inside ${affectedNames.length > 1 ? 'them' : 'it'}`
+          : `${label} is now ${request.nextRole === 'editor' ? 'an Editor' : 'Read-only'} on ${current?.name ?? 'this file'}`,
+        'success'
+      )
+      await Promise.all([ctrl.refreshGrants(), ctrl.refreshInheritedAccess()])
     } finally {
       setUpdatingAccessRole(false)
     }
@@ -573,10 +792,12 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
   const handleCopyLink = async (uri: string) => {
     try {
       await navigator.clipboard.writeText(uri)
-      pushToast?.('GFS link copied', 'success')
+      pushToast?.('EvenDrive link copied', 'success')
     } catch (clipboardError) {
       pushToast?.(
-        clipboardError instanceof Error ? clipboardError.message : 'Could not copy the GFS link',
+        clipboardError instanceof Error
+          ? clipboardError.message
+          : 'Could not copy the EvenDrive link',
         'error'
       )
     }
@@ -1003,6 +1224,42 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
     setRenameDraft(target.name)
   }
 
+  /** Adapt the open folder crumb for the row-action handlers so the active
+   *  folder's menu (the one beside the breadcrumb) runs on the same shape a
+   *  parent-view row does. */
+  const crumbAsResource = (crumb: GfsCrumb): GfsDriveResource => ({
+    resourceId: crumb.resourceId,
+    rid: crumb.resourceId.replace(/-/g, '').toLowerCase(),
+    gfsUri: crumb.gfsUri,
+    drive: GFS_DRIVE_MAIN,
+    parentResourceId: null,
+    name: crumb.name,
+    kind: 'directory',
+    path: null,
+    version: crumb.version,
+    bytes: crumb.bytes,
+  })
+
+  /** Single construction path for a FOLDER's ⋯ menu. The parent-view row menu
+   *  and the active folder's breadcrumb menu both build their props here, so
+   *  their option lists cannot drift apart; only the gates (permission source)
+   *  and the open-navigation action differ per surface. */
+  const folderMenuPropsFor = (
+    folder: GfsDriveResource,
+    gates: { canManage: boolean; canRename: boolean; canDelete: boolean },
+    actions: { onOpen?: () => void; onOpenChange?: (open: boolean) => void } = {}
+  ) => ({
+    resourceName: folder.name,
+    onManage: gates.canManage ? () => openManage(folder) : undefined,
+    onCopyLink: () => void handleCopyLink(folder.gfsUri),
+    onOpen: actions.onOpen,
+    onOpenGfsLink: () => setOpenLinkOpen(true),
+    onOpenChange: actions.onOpenChange,
+    onRename: gates.canRename ? () => openRenameTarget(folder) : undefined,
+    onMove: () => setMoveTarget(folder),
+    onDelete: gates.canDelete ? () => setDeleteTarget(folder) : undefined,
+  })
+
   const visibleResources = useMemo<GfsDriveResource[]>(() => {
     const resources = currentIsFolder ? items : currentIsFile ? [] : accessibleResources
     return [...resources].sort((left, right) => {
@@ -1068,7 +1325,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
       <div className="page-layout da-gfs-layout">
         <section
           className="page-card da-gfs-drive"
-          aria-label="Global File System browser"
+          aria-label="EvenDrive browser"
           aria-busy={visibleLoading || droppedUploadCount > 0}
           onDragEnter={handleGfsDragEnter}
           onDragLeave={handleGfsDragLeave}
@@ -1135,22 +1392,11 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               ) : null}
               {current && !currentIsFile && !currentIsBeingRenamed ? (
                 <GfsResourceMenu
-                  resourceName={current.name}
-                  onManage={
-                    canManageCurrent
-                      ? () => {
-                          setCreateFolderOpen(false)
-                          setRenameOpen(false)
-                          setDeleteOpen(false)
-                          setManageOpen(true)
-                        }
-                      : undefined
-                  }
-                  onCopyLink={() => void handleCopyLink(current.gfsUri)}
-                  onDelete={canDeleteCurrent ? () => setDeleteTarget(current) : undefined}
-                  onOpenGfsLink={() => setOpenLinkOpen(true)}
-                  onRename={canWriteCurrent ? () => openRenameTarget(current) : undefined}
-                  onMove={requestMoveCurrent}
+                  {...folderMenuPropsFor(crumbAsResource(current), {
+                    canManage: canManageCurrent,
+                    canRename: canWriteCurrent,
+                    canDelete: canDeleteCurrent,
+                  })}
                 />
               ) : null}
             </div>
@@ -1275,7 +1521,7 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                 <p className="muted">
                   {currentPreviewAvailable
                     ? 'Preview this file again or use the menu to manage and download it.'
-                    : 'Use the menu to manage, download, or copy this file’s GFS link.'}
+                    : 'Use the menu to manage, download, or copy this file’s EvenDrive link.'}
                 </p>
               </div>
             </div>
@@ -1436,34 +1682,53 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                             <IconEdit width={16} height={16} />
                           </IconButton>
                         ) : null}
-                        <GfsResourceMenu
-                          resourceName={resource.name}
-                          onManage={rowCanManage(resource) ? () => openManage(resource) : undefined}
-                          onCopyLink={() => void handleCopyLink(resource.gfsUri)}
-                          onDelete={
-                            rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
-                          }
-                          onOpen={
-                            resource.kind === 'directory' ? () => openResource(resource) : undefined
-                          }
-                          onOpenChange={open =>
-                            ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
-                          }
-                          onRename={
-                            rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
-                          }
-                          onMove={() => setMoveTarget(resource)}
-                          onPreview={
-                            isGfsPreviewFile(resource.name)
-                              ? () => void openFilePreview(resource)
-                              : undefined
-                          }
-                          onDownload={
-                            resource.kind === 'file'
-                              ? () => void handleDownload(resource.gfsUri, resource.name)
-                              : undefined
-                          }
-                        />
+                        {resource.kind === 'directory' ? (
+                          <GfsResourceMenu
+                            {...folderMenuPropsFor(
+                              resource,
+                              {
+                                canManage: rowCanManage(resource),
+                                canRename: rowCanRename(resource),
+                                canDelete: rowCanDelete(resource),
+                              },
+                              {
+                                onOpen: () => openResource(resource),
+                                onOpenChange: open =>
+                                  ctrl.setRowAffordancesResourceId(
+                                    open ? resource.resourceId : null
+                                  ),
+                              }
+                            )}
+                          />
+                        ) : (
+                          <GfsResourceMenu
+                            resourceName={resource.name}
+                            onManage={
+                              rowCanManage(resource) ? () => openManage(resource) : undefined
+                            }
+                            onCopyLink={() => void handleCopyLink(resource.gfsUri)}
+                            onDelete={
+                              rowCanDelete(resource) ? () => setDeleteTarget(resource) : undefined
+                            }
+                            onOpenChange={open =>
+                              ctrl.setRowAffordancesResourceId(open ? resource.resourceId : null)
+                            }
+                            onRename={
+                              rowCanRename(resource) ? () => openRenameTarget(resource) : undefined
+                            }
+                            onMove={() => setMoveTarget(resource)}
+                            onPreview={
+                              isGfsPreviewFile(resource.name)
+                                ? () => void openFilePreview(resource)
+                                : undefined
+                            }
+                            onDownload={
+                              resource.kind === 'file'
+                                ? () => void handleDownload(resource.gfsUri, resource.name)
+                                : undefined
+                            }
+                          />
+                        )}
                       </span>
                     </div>
                   )
@@ -1507,13 +1772,13 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
               </span>
               <span className="da-gfs-link-dialog__heading">
                 <span className="da-gfs-eyebrow">Direct access</span>
-                <h3 id="gfs-link-dialog-title">Open GFS link</h3>
+                <h3 id="gfs-link-dialog-title">Open EvenDrive link</h3>
                 <span className="muted">
-                  Paste a GFS URI to jump directly to a shared resource.
+                  Paste an EvenDrive link to jump directly to a shared resource.
                 </span>
               </span>
               <IconButton
-                label="Close GFS link dialog"
+                label="Close EvenDrive link dialog"
                 onClick={() => setOpenLinkOpen(false)}
                 size="sm"
                 variant="ghost"
@@ -1663,10 +1928,17 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
                   </div>
                   <GfsGrantList
                     agents={agentSubjects}
+                    derivationNotice={inheritedAccessNotice}
                     error={grantsError}
+                    inheritedItems={ctrl.inheritedAccess}
                     items={ctrl.grants}
-                    loading={ctrl.loadingGrants || ctrl.loadingShares}
+                    loading={
+                      ctrl.loadingGrants || ctrl.loadingShares || ctrl.loadingInheritedAccess
+                    }
+                    mergeInherited={currentIsFile}
+                    onChangeInheritedRole={handleInheritedRoleChange}
                     onChangeRole={affordances?.canDelegate ? handleAccessRoleChange : undefined}
+                    onRemoveInherited={handleInheritedRemove}
                     onRevoke={(item, label) => void handleRevokeGrant(item.id, label)}
                     onRevokeShare={(item, label) => void handleRevokeShare(item.id, label)}
                     revoking={ctrl.revoking}
@@ -1682,6 +1954,35 @@ export function FilesPage({ pushToast, pendingGfsUri, onPendingGfsUriHandled }: 
           </section>
         </div>
       ) : null}
+
+      <GfsInheritedAccessDialog
+        busy={updatingAccessRole}
+        request={
+          parentUpdate?.row.inherited
+            ? {
+                mode: parentUpdate.mode,
+                memberLabel: parentUpdate.label,
+                fileName: current?.name ?? '',
+                // Removal touches every contributing folder; a role change
+                // touches only the R1-H1 plan's affected folders.
+                folders:
+                  parentUpdate.mode === 'remove'
+                    ? parentUpdate.row.inherited.sources.map(source => ({
+                        name: source.name,
+                        currentRole: roleForAccessPermissions(source.permissions),
+                      }))
+                    : parentUpdate.updates.map(update => ({
+                        name: update.source.name,
+                        currentRole: roleForAccessPermissions(update.source.permissions),
+                      })),
+                fileCurrentRole: roleForAccessPermissions(parentUpdate.row.permissions),
+                nextRole: parentUpdate.mode === 'change-role' ? parentUpdate.nextRole : undefined,
+              }
+            : null
+        }
+        onCancel={() => setParentUpdate(null)}
+        onConfirm={() => void confirmParentUpdate()}
+      />
 
       {createFolderOpen && currentIsFolder && canWriteCurrent ? (
         <div

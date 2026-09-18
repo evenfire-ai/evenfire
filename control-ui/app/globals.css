@@ -12480,7 +12480,11 @@ button.cu-gfs-tree__button:focus-visible,
   border: 1px solid var(--cu-border-subtle);
   border-radius: var(--cu-radius-sm);
   background: var(--cu-bg-elevated);
-  overflow: visible;
+  /* The viewport-fill card clips overflow and the app layout locks page
+     scrolling, so this frame is the file list's scroll container (same
+     contract as `.cu-table-wrap` for semantic tables). Without it, long
+     listings overflow visibly and get cut off at the card edge. */
+  overflow: auto;
 }
 
 .cu-gfs-loading {
@@ -12543,12 +12547,15 @@ button.cu-gfs-tree__button:focus-visible,
 }
 
 .cu-gfs-list__head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   padding: var(--cu-space-2) var(--cu-space-3);
   padding-inline: calc(var(--cu-space-3) + var(--cu-space-2));
   border-bottom: 1px solid var(--cu-border-subtle);
   background: var(--cu-surface-hover);
   color: var(--cu-text-muted);
-  font-size: 0.7rem;
+  font-size: var(--cu-font-size-2xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -13936,6 +13943,13 @@ button.cu-gfs-tree__button:focus-visible,
   font-size: 0.75rem;
 }
 
+/* Quiet notice when the whole inherited-access derivation failed (R1-M3). */
+.cu-gfs-existing-access__notice {
+  margin: 0;
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-xs);
+}
+
 .cu-gfs-existing-access__list {
   display: grid;
   gap: var(--cu-space-2);
@@ -14033,6 +14047,78 @@ button.cu-gfs-tree__button:focus-visible,
   color: var(--cu-text-soft);
   font-size: 0.8125rem;
   font-weight: 500;
+}
+
+/* Parent-folder confirmation for inherited access rows (Share dialog). */
+.cu-gfs-parent-update {
+  width: min(34rem, calc(100vw - (var(--cu-space-4) * 2)));
+}
+
+.cu-gfs-parent-update__learn-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--cu-link);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.cu-gfs-parent-update__learn-more:focus-visible {
+  outline: 2px solid var(--cu-focus);
+  outline-offset: 2px;
+}
+
+/* R1-H1: every affected ancestor folder plus the file, stacked. */
+.cu-gfs-parent-update__folders {
+  display: grid;
+  gap: var(--cu-space-1);
+}
+
+.cu-gfs-parent-update__folder {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cu-space-2);
+  padding: var(--cu-space-1) var(--cu-space-2);
+  border: 1px solid var(--cu-border-subtle);
+  border-radius: var(--cu-radius-sm);
+  background: var(--cu-bg-subtle);
+}
+
+.cu-gfs-parent-update__name {
+  overflow: hidden;
+  color: var(--cu-text);
+  font-size: var(--cu-font-size-md);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cu-gfs-parent-update__change {
+  display: flex;
+  align-items: center;
+  gap: var(--cu-space-1);
+  color: var(--cu-text-muted);
+  font-size: var(--cu-font-size-sm);
+}
+
+.cu-gfs-parent-update__role {
+  color: var(--cu-text-soft);
+  font-weight: 500;
+}
+
+.cu-gfs-parent-update__role--next {
+  color: var(--cu-text);
+}
+
+.cu-gfs-parent-update__help {
+  display: grid;
+  gap: var(--cu-space-2);
+  margin: 0;
+  padding-inline-start: 1.25rem;
+  color: var(--cu-text-muted);
 }
 
 .cu-gfs-existing-access__chips {

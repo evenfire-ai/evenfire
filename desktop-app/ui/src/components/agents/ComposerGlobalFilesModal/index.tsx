@@ -63,7 +63,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
             <IconContexts />
           </span>
           <span className="composer-global-files-heading">
-            <span className="composer-global-files-eyebrow">Global File System</span>
+            <span className="composer-global-files-eyebrow">EvenDrive</span>
             <h3 id="composer-global-files-title">Choose files for this message</h3>
             <span className="muted">Browse shared folders and select multiple files.</span>
           </span>
@@ -195,7 +195,7 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
               body={
                 ctrl.current
                   ? 'Choose another folder to continue browsing.'
-                  : 'Files shared with you through the Global File System will appear here.'
+                  : 'Files shared with you through EvenDrive will appear here.'
               }
             />
           )}
