@@ -289,6 +289,48 @@ describe('#654 — model selection CAS (durable revision)', () => {
       await handle.shutdown()
     }
   })
+
+  // A corrupt map is the one input the CAS cannot merge into: writing the one
+  // requested provider would silently drop every other provider the row claimed
+  // to hold. The dispatcher refuses instead, so an operator can still read the
+  // original bytes and repair them.
+  it.each([
+    ['malformed JSON', 'not json at all'],
+    ['a JSON array', '[1,2]'],
+    ['a non-string value', '{"claude":5}'],
+  ])(
+    'refuses to write over %s in model_selections and leaves the row untouched',
+    async (_label, corrupt) => {
+      const handle = makeSqliteStore()
+      try {
+        const manager = new ConversationManager(handle.store)
+        const conv = await manager.getOrCreate(SESSION_KEY)
+        await manager.setModelSelection(conv, 'claude', 'claude-haiku-4-5')
+        await handle.persistQueue.drainSessionKey(SESSION_KEY)
+        const revisionBefore = revisionOf(handle, conv.id)
+
+        // Corrupt the durable map behind the store's back, the way a partial
+        // write or a hand-edited database would.
+        handle.worker.db
+          .prepare('UPDATE sessions SET model_selections = ? WHERE id = ?')
+          .run(corrupt, conv.id)
+
+        // Witness: only the dispatcher's own parse of the stored row can raise
+        // this, so the refusal below is a decision and not an unreached branch.
+        await expect(manager.setModelSelection(conv, 'openai', 'gpt-5.4')).rejects.toThrow(
+          /Invalid persisted model selections/
+        )
+
+        const rawAfter = handle.worker.db
+          .prepare('SELECT model_selections AS ms FROM sessions WHERE id = ?')
+          .get(conv.id) as { ms: string }
+        expect(rawAfter.ms).toBe(corrupt)
+        expect(revisionOf(handle, conv.id)).toBe(revisionBefore)
+      } finally {
+        await handle.shutdown()
+      }
+    }
+  )
 })
 
 describe('R2 — reconstruct.parseModelSelections tolerance', () => {

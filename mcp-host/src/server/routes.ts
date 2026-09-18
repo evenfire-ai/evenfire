@@ -40,6 +40,12 @@ import type {
 import type { RuntimeCallerContext } from './types'
 import { decodeSessionsCursor, sessionsCursorScope } from './wireProjections'
 
+/** Narrows an untrusted body field to the CAS revision the model routes accept,
+ *  so the call site needs no cast to drop `unknown`. */
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 export type RouteHandlers = {
   messageHandler: MessageHandler | null
   statusHandler: StatusHandler | null
@@ -1437,12 +1443,7 @@ export async function handleSetModelRoute(
       return
     }
     const expectedRevision = body.expectedRevision
-    if (
-      expectedRevision !== undefined &&
-      (typeof expectedRevision !== 'number' ||
-        !Number.isSafeInteger(expectedRevision) ||
-        expectedRevision < 0)
-    ) {
+    if (expectedRevision !== undefined && !isNonNegativeSafeInteger(expectedRevision)) {
       badRequest(res, 'expectedRevision must be a non-negative integer')
       return
     }
@@ -1451,7 +1452,7 @@ export async function handleSetModelRoute(
       caller.hostRef,
       chatId,
       model,
-      expectedRevision as number | undefined
+      expectedRevision
     )
     if (!result.ok) {
       json(res, result.reason === 'model_selection_conflict' ? 409 : 403, {

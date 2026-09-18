@@ -14,14 +14,13 @@ import { createHash } from 'node:crypto'
  * Phase 6: Added approval handler wiring and approval config propagation.
  */
 import * as path from 'node:path'
-import { resolveImageInputCapability } from '@clerum/llm-providers'
 import { HostActivityHub } from './activityHub'
 import { AgentStateMachine, CronScheduler, wireCronDispatch } from './agent'
 import type { ResolvedTaskModel } from './agent'
 import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
+import { createIncomingAdmission } from './agent/incomingAdmission'
 import { IncomingDelivery } from './agent/incomingDelivery'
-import { validateIncomingImageAttachments } from './agent/incomingImageAttachments'
 import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
@@ -72,11 +71,7 @@ import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
 import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
-import {
-  type ImageInputResolver,
-  chatTransportSupportsImageInput,
-  imageInputDenialMessage,
-} from './llm/imageInput'
+import { type ImageInputResolver } from './llm/imageInput'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
 import { ALL_PROVIDERS, type LlmProvider, descriptorFor, isLlmProvider } from './llm/registryCore'
@@ -1996,199 +1991,19 @@ function handleIncomingMessage(
   )
 }
 
-function prepareIncomingMessage(
-  message: IncomingMessage,
-  options?: { async?: boolean }
-): MessageResponse | Promise<MessageResponse> {
-  const validated = validateIncomingImageAttachments(message.attachments, {
-    maxCount: config.attachmentMaxCount,
-    maxBytes: config.attachmentMaxBytes,
-  })
-  if (!validated.ok) return { success: false, error: validated.error }
-  if (
-    validated.attachments?.length &&
-    message.modelSelectionRevision !== undefined &&
-    (!Number.isSafeInteger(message.modelSelectionRevision) || message.modelSelectionRevision < 0)
-  ) {
-    return {
-      success: false,
-      error: {
-        code: 'LLM_IMAGE_INPUT_UNKNOWN',
-        message: 'The image model selection revision is invalid. Select the model again.',
-        retryable: false,
-        provider: 'unknown',
-      },
-    }
-  }
-  const normalizedMessage: IncomingMessage = {
-    ...message,
-    attachments: validated.attachments,
-    // Never accept a caller-supplied visual execution identity.
-    imageModel: undefined,
-  }
-  logger.info(
-    { channel: normalizedMessage.channelType, attachmentCount: validated.attachments?.length ?? 0 },
-    'Received message'
-  )
-  let acceptedVisualSelection: Record<string, string> | undefined
-
-  if (!messageQueue) {
-    return {
-      success: false,
-      error: {
-        code: 'LLM_API_CALL_FAILED',
-        message: 'Message queue not initialized',
-        retryable: false,
-        provider: 'unknown',
-      },
-    }
-  }
-
-  // Refuse new tasks while the Host is degraded. Operator fixes the LLM
-  // Secret and the Host returns to ready within ~1 s — no restart.
-  const degraded = computeDegradedReason()
-  if (degraded) {
-    logger.warn({ reason: degraded.reason }, '[Main] Refusing message — Host is degraded:')
-    return {
-      success: false,
-      error: {
-        code: 'LLM_KEY_MISSING',
-        message: degraded.message,
-        retryable: true,
-        provider: currentHost?.spec.model?.provider ?? 'unknown',
-      },
-    }
-  }
-
-  const dispatchMessage = () => dispatchIncomingMessage(normalizedMessage, options)
-
-  const runHandler = (): MessageResponse | Promise<MessageResponse> => {
-    if (!validated.attachments?.length) return dispatchMessage()
-    return (async () => {
-      const key = serializeSessionKey({
-        userId: normalizedMessage.sender,
-        channelType: normalizedMessage.channelType,
-        channelId: normalizedMessage.channelId || 'default',
-        threadId: normalizedMessage.threadId,
-      })
-      const conversation = await agent!
-        .getConversationManager()
-        .getSessionByKeyForUserAsync(key, normalizedMessage.sender)
-      const resolved = resolveTaskModel(acceptedVisualSelection ?? conversation?.modelSelections)
-      if (!resolved)
-        return {
-          success: false,
-          error: {
-            code: 'LLM_IMAGE_INPUT_UNKNOWN',
-            message: 'The image model is unavailable. Select a verified image-capable model.',
-            retryable: false,
-            provider: 'unknown',
-          },
-        }
-      const pair = { provider: resolved.provider.getProviderType(), model: resolved.model }
-      const facts = resolveImageInput(pair.provider, pair.model)
-      const decision = resolveImageInputCapability(facts?.capability, {
-        transportSupported: chatTransportSupportsImageInput(pair.provider),
-        policyAllowed: facts?.policyAllowed ?? true,
-      })
-      if (decision.state !== 'supported')
-        return {
-          success: false,
-          error: {
-            code:
-              decision.state === 'unknown'
-                ? 'LLM_IMAGE_INPUT_UNKNOWN'
-                : 'LLM_IMAGE_INPUT_UNSUPPORTED',
-            message: imageInputDenialMessage(decision, pair),
-            retryable: false,
-            provider: pair.provider,
-          },
-        }
-      normalizedMessage.imageModel = pair
-      return dispatchMessage()
-    })()
-  }
-
-  // R2 — piggybacked per-session model. Because a suspended Host can't serve
-  // `POST /v1/runtime/model`, the desktop rides the user's pick on the message
-  // that wakes us. Apply it to THIS session and AWAIT the write BEFORE the task
-  // is created, so the per-task resolver (`stateMachine` taskModelResolver over
-  // `conv.modelSelections`) reads the row we just wrote. Fail-OPEN on the
-  // message: a rejected/degraded selection is logged and ignored, never dropping
-  // the user's turn (fail-closed only on the selection, inside the helper).
-  const piggybackModel = typeof message.model === 'string' ? message.model.trim() : ''
-  if (piggybackModel && normalizedMessage.channelType === 'rpc') {
-    return (async () => {
-      try {
-        const applied = await applySessionModelSelection(
-          normalizedMessage.sender,
-          normalizedMessage.channelId,
-          normalizedMessage.threadId,
-          piggybackModel,
-          validated.attachments?.length ? message.modelSelectionRevision : undefined
-        )
-        if (!applied.ok) {
-          if (validated.attachments?.length)
-            return {
-              success: false,
-              error: {
-                code: 'LLM_IMAGE_INPUT_UNSUPPORTED',
-                message:
-                  applied.reason === 'model_selection_conflict'
-                    ? 'The image model selection changed before this message was accepted. Select the model again.'
-                    : 'The selected model is no longer allowed. Select a model again before sending the image.',
-                retryable: false,
-                provider: applied.provider,
-              },
-            }
-          logger.warn(
-            {
-              level: 'warn',
-              event: 'message_model_ignored',
-              userId: normalizedMessage.sender,
-              chatId: normalizedMessage.threadId ?? null,
-              provider: applied.provider,
-              model: piggybackModel,
-              reason: applied.reason,
-            },
-            'Host runtime event'
-          )
-        } else if (validated.attachments?.length) {
-          acceptedVisualSelection = { [applied.provider]: applied.model }
-        }
-      } catch (error) {
-        if (validated.attachments?.length) {
-          logger.warn({ err: error }, 'Visual model selection could not be confirmed')
-          return {
-            success: false,
-            error: {
-              code: 'LLM_IMAGE_INPUT_UNKNOWN',
-              message: 'The image model selection could not be confirmed. Select the model again.',
-              retryable: false,
-              provider: currentHost?.spec.model?.provider ?? 'unknown',
-            },
-          }
-        }
-        logger.warn(
-          {
-            level: 'warn',
-            event: 'message_model_ignored',
-            userId: normalizedMessage.sender,
-            chatId: normalizedMessage.threadId ?? null,
-            provider: currentHost?.spec.model?.provider ?? 'unknown',
-            model: piggybackModel,
-            reason: 'apply_failed',
-            err: error,
-          },
-          'Host runtime event'
-        )
-      }
-      return runHandler()
-    })()
-  }
-
-  return runHandler()
-}
+const prepareIncomingMessage = createIncomingAdmission({
+  limits: { maxCount: config.attachmentMaxCount, maxBytes: config.attachmentMaxBytes },
+  queueReady: () => Boolean(messageQueue),
+  degradedReason: computeDegradedReason,
+  hostProvider: () => currentHost?.spec.model?.provider,
+  getConversationByKey: (key, userId) =>
+    agent!.getConversationManager().getSessionByKeyForUserAsync(key, userId),
+  resolveTaskModel,
+  resolveImageInput,
+  applySessionModelSelection,
+  dispatch: dispatchIncomingMessage,
+  logger,
+})
 
 function sourceMatchesRuntimeCaller(
   source: { channelType?: string | null; channelId?: string | null; sender?: string | null },

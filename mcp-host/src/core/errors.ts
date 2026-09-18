@@ -46,6 +46,19 @@ export enum LlmErrorCode {
    * text-only requests are unaffected and are never classified with this code.
    */
   ImageInputUnknown = 'LLM_IMAGE_INPUT_UNKNOWN',
+  /**
+   * Issue #654 — a piggybacked per-session model selection lost the
+   * compare-and-swap against the persisted revision, or carried a revision the
+   * Host cannot interpret. It says nothing about image capability: the client
+   * re-reads the current selection and sends again, so it is RETRYABLE.
+   */
+  ModelSelectionConflict = 'LLM_MODEL_SELECTION_CONFLICT',
+  /**
+   * Issue #654 — a piggybacked per-session model selection names a model this
+   * Host's allowlist no longer admits. Terminal: retrying the same pick cannot
+   * succeed, the user must choose another model.
+   */
+  ModelNotAllowed = 'LLM_MODEL_NOT_ALLOWED',
 }
 
 export class LlmError extends AgentError {

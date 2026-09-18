@@ -77,6 +77,16 @@ export interface MessageResponse {
   error?: TaskError
   model?: string
   taskId?: string
+  /**
+   * Issue #654 — the persisted model-selection revision after this message
+   * applied a piggybacked `model`, or the winning revision on a CAS conflict.
+   *
+   * The send IS the write, so its result must travel back on the same response:
+   * `POST /v1/runtime/model` is unreachable on a suspended Host, which is why
+   * the selection rides the message in the first place. Absent on a successful
+   * ack after a piggyback means the Host IGNORED the selection.
+   */
+  modelSelectionRevision?: number
   usage?: {
     promptTokens: number
     completionTokens: number
