@@ -305,13 +305,12 @@ export class LlmPortAdapter implements LlmPort {
       method,
       roles,
       capability: source.capability,
-      policyAllowed: source.policyAllowed,
     })
   }
 
   /**
    * Fail closed when this attempt carries a USER image and the intersection of
-   * model evidence, selection policy, transport implementation and role is not
+   * model evidence, transport implementation and role is not
    * affirmative. Text-only requests return immediately (no resolver call).
    *
    * #654 — images the agent's own tools produced are withheld rather than

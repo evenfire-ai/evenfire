@@ -82,7 +82,6 @@ function makeAdmission(overrides: Partial<IncomingAdmissionDeps> = {}): {
     })),
     resolveImageInput: vi.fn<IncomingAdmissionDeps['resolveImageInput']>(() => ({
       capability: CURATED_SUPPORTED,
-      policyAllowed: true,
     })),
     applySessionModelSelection: vi.fn<IncomingAdmissionDeps['applySessionModelSelection']>(),
     dispatch: vi.fn<IncomingAdmissionDeps['dispatch']>(() => ({
@@ -126,7 +125,7 @@ describe('#654 incoming admission gate', () => {
 
   it('refuses an image on an unverified pair with LLM_IMAGE_INPUT_UNKNOWN and logs message_image_refused', async () => {
     const { admit, spies } = makeAdmission({
-      resolveImageInput: vi.fn(() => ({ capability: { state: 'unknown' }, policyAllowed: true })),
+      resolveImageInput: vi.fn(() => ({ capability: { state: 'unknown' } })),
     })
 
     const response = await admit(imageMessage())

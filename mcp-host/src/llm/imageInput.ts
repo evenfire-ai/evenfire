@@ -26,11 +26,7 @@
  * until then this module reports it as not image-capable so the guard fails
  * closed instead of silently dropping the image.
  */
-import {
-  type ImageInputDecision,
-  type ImageInputReason,
-  resolveImageInputCapability,
-} from '@clerum/llm-providers'
+import { type ImageInputDecision, resolveImageInputCapability } from '@clerum/llm-providers'
 import type { ChatMessage, MessageRole } from '../core/types'
 import { descriptorFor, isLlmProvider } from './registryCore'
 
@@ -166,11 +162,6 @@ const IMAGE_ROLES_BY_FAMILY: Readonly<Record<ImageWireFamily, readonly MessageRo
   unregistered: [],
 }
 
-/** True when `role` can carry an image through `providerType`'s serializer. */
-export function roleSupportsImageInput(providerType: string, role: MessageRole): boolean {
-  return IMAGE_ROLES_BY_FAMILY[imageWireFamilyFor(providerType)].includes(role)
-}
-
 /**
  * True when `operation` on `providerType` preserves the image part on the wire
  * for `role` (default `user`, the ordinary composer case).
@@ -213,13 +204,6 @@ export interface ImageInputCapabilitySource {
    * affirmative support.
    */
   capability?: unknown
-  /**
-   * Selection/allowlist admission for image input on this pair. Required so a
-   * caller cannot omit policy and receive an implicit allow: `false` is a
-   * known denial (`policy_denied`); callers that hold no policy denial pass
-   * `true` explicitly after the model already passed allowlist admission.
-   */
-  policyAllowed: boolean
 }
 
 /**
@@ -238,14 +222,13 @@ export interface ImageInputRequestFacts {
   /** Roles that actually carry at least one image part in this request. */
   roles: readonly MessageRole[]
   capability: unknown
-  policyAllowed: boolean
   now?: number
 }
 
 /**
- * Full intersection for one physical attempt: model evidence ∩ selection
- * policy ∩ transport implementation ∩ message role. Delegates the
- * evidence/policy half to the shared resolver so both sides cannot drift.
+ * Full intersection for one physical attempt: model evidence ∩ transport
+ * implementation ∩ message role. Delegates the evidence half to the shared
+ * resolver so both sides cannot drift.
  */
 export function decideImageInput(facts: ImageInputRequestFacts): ImageInputDecision {
   const transportSupported =
@@ -253,7 +236,6 @@ export function decideImageInput(facts: ImageInputRequestFacts): ImageInputDecis
     facts.roles.every(role => transportSupportsImageInput(facts.providerType, facts.method, role))
   return resolveImageInputCapability(facts.capability, {
     transportSupported,
-    policyAllowed: facts.policyAllowed,
     now: facts.now,
   })
 }
@@ -283,8 +265,6 @@ export function imageInputDenialMessage(
   const pair = `${target.provider}/${target.model}`
   const suffix = 'The rest of the message was not sent to the provider.'
   switch (decision.reason) {
-    case 'policy_denied':
-      return `Image input is not permitted for ${pair}. Remove the image or choose a permitted model. ${suffix}`
     case 'transport_unsupported':
       return `The ${target.provider} transport path used for this operation cannot carry images for ${pair}. Remove the image or retry with a model whose chat path supports images. ${suffix}`
     case 'model_unsupported':
@@ -300,9 +280,4 @@ export function imageInputDenialMessage(
     case 'supported':
       return `Image input is allowed for ${pair}.`
   }
-}
-
-/** Stable reason code for structured logs; never carries image content. */
-export function imageInputReasonCode(decision: ImageInputDecision): ImageInputReason {
-  return decision.reason
 }

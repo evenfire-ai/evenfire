@@ -22,7 +22,7 @@ const CURATED_EVIDENCE = {
 }
 
 function allow(capability: unknown): ImageInputResolver {
-  return () => ({ capability, policyAllowed: true })
+  return () => ({ capability })
 }
 
 function imageMessage(role: ChatMessage['role'] = 'user'): ChatMessage {

@@ -147,7 +147,6 @@ function entryToWire(e: AllowedModelEntry, provider: string): ModelWireEntry {
     name: e.model,
     imageInput: resolveImageInputCapability(e.imageInput, {
       transportSupported: chatTransportSupportsImageInput(provider),
-      policyAllowed: true,
     }),
   }
   if (e.displayName) wire.displayName = e.displayName

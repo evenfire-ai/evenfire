@@ -3,7 +3,7 @@
  * intersection, and the operator-facing denial text.
  */
 import { describe, expect, it } from 'vitest'
-import type { ChatMessage } from '../../core/types'
+import type { ChatMessage, MessageRole } from '../../core/types'
 import {
   type ImageTransportOperation,
   chatTransportSupportsImageInput,
@@ -11,7 +11,6 @@ import {
   imageInputDenialMessage,
   imageInputRolesFor,
   imageWireFamilyFor,
-  roleSupportsImageInput,
   transportSupportsImageInput,
 } from '../imageInput'
 import { ALL_PROVIDERS, descriptorFor, isLlmProvider } from '../registryCore'
@@ -80,6 +79,25 @@ function userImageMessage(): ChatMessage {
   }
 }
 
+const supported = {
+  state: 'supported' as const,
+  evidence: {
+    source: 'curated' as const,
+    reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+    checkedAt: '2026-09-16T00:00:00Z',
+  },
+}
+
+/** Role support, observed through the one public decision on the chat method. */
+function roleReason(providerType: string, role: MessageRole) {
+  return decideImageInput({
+    providerType,
+    method: 'completeWithTools',
+    roles: [role],
+    capability: supported,
+  }).reason
+}
+
 describe('#654 transport matrix', () => {
   it('matches the documented baseline for every provider family', () => {
     for (const [provider, expected] of Object.entries(EXPECTED_MATRIX)) {
@@ -115,7 +133,7 @@ describe('#654 transport matrix', () => {
       expect(transportSupportsImageInput('', operation)).toBe(false)
     }
     expect(chatTransportSupportsImageInput('some-future-provider')).toBe(false)
-    expect(roleSupportsImageInput('some-future-provider', 'user')).toBe(false)
+    expect(roleReason('some-future-provider', 'user')).toBe('transport_unsupported')
   })
 
   it('never authorizes a registered provider that has no real factory coverage', () => {
@@ -145,12 +163,12 @@ describe('#654 transport matrix', () => {
   })
 
   it('rejects assistant/system images and honors per-family role support', () => {
-    expect(roleSupportsImageInput('openai', 'user')).toBe(true)
-    expect(roleSupportsImageInput('openai', 'tool')).toBe(false)
-    expect(roleSupportsImageInput('claude', 'tool')).toBe(true)
-    expect(roleSupportsImageInput('claude', 'assistant')).toBe(false)
-    expect(roleSupportsImageInput('vertex', 'assistant')).toBe(false)
-    expect(roleSupportsImageInput('codex-subscription', 'user')).toBe(false)
+    expect(roleReason('openai', 'user')).toBe('supported')
+    expect(roleReason('openai', 'tool')).toBe('transport_unsupported')
+    expect(roleReason('claude', 'tool')).toBe('supported')
+    expect(roleReason('claude', 'assistant')).toBe('transport_unsupported')
+    expect(roleReason('vertex', 'assistant')).toBe('transport_unsupported')
+    expect(roleReason('codex-subscription', 'user')).toBe('transport_unsupported')
   })
 })
 
@@ -183,23 +201,13 @@ describe('#654 imageInputRolesFor', () => {
 })
 
 describe('#654 decideImageInput intersection', () => {
-  const supported = {
-    state: 'supported' as const,
-    evidence: {
-      source: 'curated' as const,
-      reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
-      checkedAt: '2026-09-16T00:00:00Z',
-    },
-  }
-
-  it('is supported only when evidence, policy, transport and role are all affirmative', () => {
+  it('is supported only when evidence, transport and role are all affirmative', () => {
     expect(
       decideImageInput({
         providerType: 'openai',
         method: 'completeWithTools',
         roles: ['user'],
         capability: supported,
-        policyAllowed: true,
       })
     ).toEqual({ state: 'supported', reason: 'supported', evidence: supported.evidence })
   })
@@ -212,7 +220,6 @@ describe('#654 decideImageInput intersection', () => {
         method: 'complete',
         roles: ['user'],
         capability: supported,
-        policyAllowed: true,
       })
     ).toEqual({
       state: 'unsupported',
@@ -228,7 +235,6 @@ describe('#654 decideImageInput intersection', () => {
         method: 'completeWithTools',
         roles: ['tool'],
         capability: supported,
-        policyAllowed: true,
       })
     ).toEqual({
       state: 'unsupported',
@@ -241,7 +247,6 @@ describe('#654 decideImageInput intersection', () => {
         method: 'completeWithToolsAndCache',
         roles: ['tool'],
         capability: supported,
-        policyAllowed: true,
       })
     ).toEqual({ state: 'supported', reason: 'supported', evidence: supported.evidence })
   })
@@ -254,22 +259,9 @@ describe('#654 decideImageInput intersection', () => {
           method: 'completeWithTools',
           roles: ['user'],
           capability,
-          policyAllowed: true,
         })
       ).toEqual({ state: 'unknown', reason: 'model_unknown' })
     }
-  })
-
-  it('reports policy denial ahead of evidence and transport', () => {
-    expect(
-      decideImageInput({
-        providerType: 'codex-subscription',
-        method: 'completeWithTools',
-        roles: ['user'],
-        capability: undefined,
-        policyAllowed: false,
-      })
-    ).toEqual({ state: 'unsupported', reason: 'policy_denied' })
   })
 
   it('evaluates freshness against an injected clock', () => {
@@ -289,7 +281,6 @@ describe('#654 decideImageInput intersection', () => {
         method: 'completeWithTools',
         roles: ['user'],
         capability: expiring,
-        policyAllowed: true,
         now: before,
       }).state
     ).toBe('supported')
@@ -299,7 +290,6 @@ describe('#654 decideImageInput intersection', () => {
         method: 'completeWithTools',
         roles: ['user'],
         capability: expiring,
-        policyAllowed: true,
         now: Date.parse('2026-10-02T00:00:00Z'),
       })
     ).toEqual({
@@ -314,7 +304,6 @@ describe('#654 decideImageInput intersection', () => {
 describe('#654 denial messages', () => {
   it('names the real pair and states that the rest of the message was not sent', () => {
     for (const reason of [
-      'policy_denied',
       'transport_unsupported',
       'model_unsupported',
       'model_unknown',

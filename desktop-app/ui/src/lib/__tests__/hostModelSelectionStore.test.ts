@@ -31,8 +31,8 @@ function baseResult(overrides: Partial<HostModelsResult> = {}): HostModelsResult
     sessionModel: null,
     degraded: false,
     models: [
-      { name: 'glm-5.3', imageInput: { state: 'unsupported', reason: 'text_only' } },
-      { name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'curated' } },
+      { name: 'glm-5.3', imageInput: { state: 'unsupported', reason: 'model_unsupported' } },
+      { name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } },
     ],
     ...overrides,
   }

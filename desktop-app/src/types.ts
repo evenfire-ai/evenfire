@@ -1136,7 +1136,6 @@ export interface HostModelsResult {
    * `expectedRevision`, so selection writes stay backwards compatible.
    */
   modelSelectionRevision?: number
-  catalogRevision?: string
 }
 
 /**

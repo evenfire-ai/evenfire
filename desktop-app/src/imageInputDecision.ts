@@ -5,7 +5,7 @@
  * `chatMessageMerge`.
  *
  * Scope: this module only VALIDATES the decision the host projected. It never
- * recomputes model, transport or policy capability, and there is deliberately no
+ * recomputes model or transport capability, and there is deliberately no
  * provider-based fallback — capability comes from the host, never from the
  * provider id, the model name, or OpenAI compatibility.
  *
@@ -51,16 +51,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function normalizeReason(rawReason: unknown, state: ImageInputState): string {
-  if (typeof rawReason === 'string') {
-    const trimmed = rawReason.trim()
-    if (trimmed) return trimmed
-  }
-  if (state === 'supported') return 'image_input_supported'
-  if (state === 'unsupported') return 'image_input_unsupported'
-  return IMAGE_INPUT_LOCAL_REASON.modelUnknown
-}
-
 /**
  * Normalizes an untrusted wire value into a decision. Missing or malformed input
  * becomes `unknown` (never `unsupported`, so the UI can tell "not verified" from
@@ -76,12 +66,11 @@ export function normalizeImageInputDecision(raw: unknown): ImageInputDecision {
     return modelUnknown()
   }
 
-  const normalizedState = state as ImageInputState
   if (typeof raw.reason !== 'string' || !/^[a-z][a-z0-9_]{0,127}$/.test(raw.reason))
     return modelUnknown()
   const decision: ImageInputDecision = {
-    state: normalizedState,
-    reason: normalizeReason(raw.reason, normalizedState),
+    state: state as ImageInputState,
+    reason: raw.reason,
   }
 
   if (raw.validUntil !== undefined) {
@@ -144,10 +133,7 @@ export function resolveImageInputDecision(
 ): ImageInputDecision {
   const decision = normalizeImageInputDecision(raw)
   if (decision.state === 'unknown') return decision
-  if (
-    decision.state === 'unsupported' &&
-    (decision.reason === 'transport_unsupported' || decision.reason === 'policy_denied')
-  )
+  if (decision.state === 'unsupported' && decision.reason === 'transport_unsupported')
     return decision
   if (!isImageInputDecisionValid(decision, nowMs)) {
     return {
@@ -202,8 +188,18 @@ export function imageInputBlockMessage(
     typeof effectiveModel === 'string' && effectiveModel.trim()
       ? effectiveModel
       : 'the selected model'
-  if (decision.state === 'unsupported') {
-    return `Image attachments are not supported by model "${label}". Switch to a model with image input support before attaching images.`
+  switch (decision.reason) {
+    case 'model_unsupported':
+      return `Image attachments are not supported by model "${label}". Switch to a model with image input support before attaching images.`
+    case 'evidence_expired':
+      return `The image-input evidence for model "${label}" has expired. Ask an operator to refresh it before attaching images.`
+    case 'evidence_not_yet_valid':
+      return `The image-input evidence for model "${label}" is dated in the future and cannot be used yet. Ask an operator to correct it.`
+    case 'transport_unsupported':
+      // The provider is fixed per Host, so switching models would not help.
+      return "Image attachments are not available for this agent's provider transport yet."
+    default:
+      // A reason the Desktop does not know is, by fail-closed design, unverified.
+      return `Image input is not verified for model "${label}" yet. Ask an operator to curate its image-input evidence, or switch to a verified model.`
   }
-  return `Image input is not verified for model "${label}" yet. Switch to a model with verified image input support before attaching images.`
 }

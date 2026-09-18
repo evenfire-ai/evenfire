@@ -45,7 +45,6 @@ const TOOL_TEXT = 'tool output'
 
 const allowResolver: ImageInputResolver = () => ({
   capability: { state: 'supported', evidence: EVIDENCE },
-  policyAllowed: true,
 })
 
 function parts(): SystemPromptParts {
@@ -283,7 +282,7 @@ describe('#654 Claude tool-role image serialization (real serializer)', () => {
       undefined,
       undefined,
       undefined,
-      () => ({ capability: { state: 'unsupported', evidence: EVIDENCE }, policyAllowed: true })
+      () => ({ capability: { state: 'unsupported', evidence: EVIDENCE } })
     )
 
     let error: unknown

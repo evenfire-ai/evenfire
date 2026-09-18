@@ -2179,8 +2179,8 @@ describe('#654 failover identity + per-attempt image guard', () => {
     }
     const imageInput = vi.fn((provider: string) =>
       provider === 'openai'
-        ? { capability: { state: 'supported', evidence: EVIDENCE }, policyAllowed: true }
-        : { capability: { state: 'unsupported', evidence: EVIDENCE }, policyAllowed: true }
+        ? { capability: { state: 'supported', evidence: EVIDENCE } }
+        : { capability: { state: 'unsupported', evidence: EVIDENCE } }
     )
     const { executor } = executorWith({
       modelName: 'gpt-5.4-mini',

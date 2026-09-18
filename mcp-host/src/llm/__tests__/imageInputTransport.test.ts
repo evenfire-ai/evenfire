@@ -27,7 +27,6 @@ const EVIDENCE = {
 
 const allowResolver: ImageInputResolver = () => ({
   capability: { state: 'supported', evidence: EVIDENCE },
-  policyAllowed: true,
 })
 
 function parts(): SystemPromptParts {
@@ -343,7 +342,6 @@ describe('#654 transport cross-suite (real serializers)', () => {
       undefined,
       () => ({
         capability: { state: 'unsupported', evidence: EVIDENCE },
-        policyAllowed: true,
       })
     )
     let error: LlmError | undefined

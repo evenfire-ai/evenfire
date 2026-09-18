@@ -25,7 +25,6 @@ interface AdmissionResolvedModel {
 /** What the live catalog knows about one (provider, model) pair. */
 interface AdmissionImageFacts {
   capability?: unknown
-  policyAllowed: boolean
 }
 
 /** Live process state the gate reads. Every member is injected so the gate is
@@ -201,7 +200,6 @@ export function createIncomingAdmission(deps: IncomingAdmissionDeps): IncomingAd
         const facts = deps.resolveImageInput(pair.provider, pair.model)
         const decision = resolveImageInputCapability(facts?.capability, {
           transportSupported: chatTransportSupportsImageInput(pair.provider),
-          policyAllowed: facts?.policyAllowed ?? true,
         })
         if (decision.state !== 'supported') {
           const code =

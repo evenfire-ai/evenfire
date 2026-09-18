@@ -650,8 +650,6 @@ export interface ModelsListResult {
   hostDefault: string
   sessionModel: string | null
   modelSelectionRevision?: number
-  /** Fingerprint of the projected capability catalog, independent of selection CAS. */
-  catalogRevision?: string
   sessionModelBlocked?: string
   degraded: boolean
   models: RuntimeModelEntry[]

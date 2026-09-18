@@ -204,7 +204,6 @@ describe('#654 image-input guard wiring', () => {
   it('threads the live resolver into the port the task loop is handed', async () => {
     const resolver = vi.fn<ImageInputResolver>(() => ({
       capability: { state: 'supported', evidence: EVIDENCE },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -248,7 +247,6 @@ describe('#654 image-input guard wiring', () => {
     // A resolver that knows nothing about the pair: `unknown`, not support.
     const resolver = vi.fn<ImageInputResolver>(() => ({
       capability: { state: 'unknown' },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -281,7 +279,6 @@ describe('#654 image-input guard wiring', () => {
           validUntil: '2026-02-01T00:00:00Z',
         },
       },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -306,7 +303,6 @@ describe('#654 image-input guard wiring', () => {
     let state: 'supported' | 'unsupported' = 'supported'
     const resolver = vi.fn<ImageInputResolver>(() => ({
       capability: { state, evidence: EVIDENCE },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -367,7 +363,6 @@ describe('#654 image-input guard wiring', () => {
   it('threads the live resolver into the manual /compact port', async () => {
     const resolver = vi.fn<ImageInputResolver>(() => ({
       capability: { state: 'supported', evidence: EVIDENCE },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -450,7 +445,6 @@ describe('#654 image-input guard wiring', () => {
     // agent's own tool, and that must not end the task.
     const resolver = vi.fn<ImageInputResolver>(() => ({
       capability: { state: 'unknown' },
-      policyAllowed: true,
     }))
     agent.setImageInputResolver(resolver)
 
@@ -543,7 +537,6 @@ describe('#654 image-input denial is a structured task error', () => {
   it('delivers LLM_IMAGE_INPUT_UNSUPPORTED to the response callback', async () => {
     agent.setImageInputResolver(() => ({
       capability: { state: 'unsupported', evidence: EVIDENCE },
-      policyAllowed: true,
     }))
 
     // The real loop turns a reasoning error into the loop's error result.

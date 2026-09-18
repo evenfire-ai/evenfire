@@ -13,7 +13,7 @@ const evidence = {
   checkedAt: '2026-09-16T00:00:00Z',
 }
 const supported = { state: 'supported', evidence }
-const options = { transportSupported: true, policyAllowed: true, now }
+const options = { transportSupported: true, now }
 
 test('legacy and malformed evidence remain unknown, without inventing support', () => {
   for (const value of [
@@ -35,17 +35,12 @@ test('legacy and malformed evidence remain unknown, without inventing support', 
   assert.deepEqual(parseImageInputCapability({ state: 'unknown' }), { state: 'unknown' })
 })
 
-test('support is the intersection of model, transport, and policy', () => {
+test('support is the intersection of model and transport', () => {
   for (const state of ['supported', 'unsupported', 'unknown']) {
     for (const transportSupported of [true, false]) {
-      for (const policyAllowed of [true, false]) {
-        const result = resolveImageInputCapability(
-          { state, evidence },
-          { now, transportSupported, policyAllowed }
-        )
-        const expected = !transportSupported || !policyAllowed ? 'unsupported' : state
-        assert.equal(result.state, expected)
-      }
+      const result = resolveImageInputCapability({ state, evidence }, { now, transportSupported })
+      const expected = transportSupported ? state : 'unsupported'
+      assert.equal(result.state, expected)
     }
   }
 })
@@ -97,10 +92,7 @@ test('hostname policy compares the DNS root dot but preserves the exact referenc
     state: 'supported',
     evidence: trailingDot.evidence,
   })
-  assert.equal(
-    resolveImageInputCapability(trailingDot, options).evidence.reference,
-    original
-  )
+  assert.equal(resolveImageInputCapability(trailingDot, options).evidence.reference, original)
 
   // The trailing dot cannot make an intranet, private, or single-label form
   // pass, and old evidence stored with such a reference stays unknown.

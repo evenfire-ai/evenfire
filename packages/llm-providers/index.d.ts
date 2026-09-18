@@ -18,7 +18,6 @@ export interface ImageInputCapability {
 }
 export type ImageInputReason =
   | 'supported'
-  | 'policy_denied'
   | 'transport_unsupported'
   | 'model_unsupported'
   | 'model_unknown'
@@ -34,7 +33,7 @@ export declare function parseImageInputCapability(value: unknown): ImageInputCap
 export declare function normalizeImageInputCapability(value: unknown): ImageInputCapability
 export declare function resolveImageInputCapability(
   value: unknown,
-  options: { transportSupported: boolean; policyAllowed: boolean; now?: number }
+  options: { transportSupported: boolean; now?: number }
 ): ImageInputDecision
 
 export declare const PROVIDER_IDS: readonly [

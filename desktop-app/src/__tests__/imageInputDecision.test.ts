@@ -118,20 +118,20 @@ describe('imageInputDecision — effective model resolution', () => {
 })
 
 describe('imageInputDecision — user copy', () => {
-  it('explains an unsupported model without implying a provider rule', () => {
-    const message = imageInputBlockMessage('glm-5.3', {
-      state: 'unsupported',
-      reason: 'text_only',
-    })
-    expect(message).toMatch(/not supported by model "glm-5\.3"/)
+  it.each([
+    ['model_unsupported', 'unsupported', /not supported by model "glm-5\.3"/],
+    ['model_unknown', 'unknown', /not verified for model "glm-5\.3"/],
+    ['evidence_expired', 'unknown', /evidence for model "glm-5\.3" has expired/],
+    ['evidence_not_yet_valid', 'unknown', /dated in the future/],
+    ['transport_unsupported', 'unsupported', /provider transport/],
+  ] as const)('explains the %s reason with its own message', (reason, state, expected) => {
+    expect(imageInputBlockMessage('glm-5.3', { state, reason })).toMatch(expected)
   })
 
-  it('distinguishes "not verified" from "not supported"', () => {
-    const message = imageInputBlockMessage('legacy-model', {
-      state: 'unknown',
-      reason: 'model_unknown',
-    })
-    expect(message).toMatch(/not verified/)
+  it('treats a reason it does not know as unverified', () => {
+    expect(
+      imageInputBlockMessage('glm-5.3', { state: 'unsupported', reason: 'text_only' })
+    ).toMatch(/not verified for model "glm-5\.3"/)
   })
 
   it('returns no message when images are allowed', () => {

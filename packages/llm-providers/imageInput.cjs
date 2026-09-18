@@ -97,8 +97,6 @@ function resolveImageInputCapability(value, options) {
     ...(capability.evidence ? { evidence: capability.evidence } : {}),
     ...(validity ? { validUntil: validity } : {}),
   }
-  if (options.policyAllowed !== true)
-    return { state: 'unsupported', reason: 'policy_denied', ...dates }
   if (options.transportSupported !== true)
     return { state: 'unsupported', reason: 'transport_unsupported', ...dates }
   // A non-finite clock cannot validate evidence, but it is not itself a reason

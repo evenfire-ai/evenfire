@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 /**
  * MCP Host - Main entry point.
  *
@@ -551,7 +550,7 @@ const resolveImageInput: ImageInputResolver = (provider, model) => {
     .get(provider)
     ?.find(candidate => candidate.model === model)
   if (!entry) return undefined
-  return { capability: entry.imageInput, policyAllowed: view.allowlistAvailable() }
+  return { capability: entry.imageInput }
 }
 
 /**
@@ -2623,7 +2622,6 @@ async function startRPCServer(): Promise<void> {
     // full global, so the desktop selector only offers what this host allows.
     const view = hostAllowlistView()
     const { degraded, models } = projectModels(view, provider, hostDefault)
-    const catalogRevision = createHash('sha256').update(JSON.stringify(models)).digest('hex')
     let sessionModel: string | null = null
     let modelSelectionRevision = 0
     let sessionModelBlocked: string | undefined
@@ -2658,7 +2656,6 @@ async function startRPCServer(): Promise<void> {
       sessionModel,
       sessionModelBlocked,
       modelSelectionRevision,
-      catalogRevision,
       degraded,
       models,
     }
