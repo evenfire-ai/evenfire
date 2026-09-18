@@ -251,7 +251,7 @@ describe.each([
 //
 // These drive the real component. jsdom has no file dialog, no DataTransfer and
 // no URL.createObjectURL, so the helpers below stand in for exactly those
-// unavailable browser primitives; the accept filter, the FileReader byte
+// unavailable browser primitives; the file-type check, the FileReader byte
 // preparation and every guard stay real.
 // ---------------------------------------------------------------------------
 
@@ -410,7 +410,9 @@ describe('ComposerPanel with an image-capable model', () => {
       expect(timesClicked()).toBe(1)
 
       const fileInput = pickerInput(container)
-      expect(fileInput.accept).toBe('image/jpeg,image/png')
+      // #678: the file dialog is not filtered; unsupported files are refused
+      // after picking, with a message.
+      expect(fileInput.hasAttribute('accept')).toBe(false)
       expect(fileInput.multiple).toBe(true)
       fireEvent.change(fileInput, { target: { files: [imageFile('photo.png', 'image/png')] } })
 
@@ -496,9 +498,65 @@ describe('ComposerPanel with an image-capable model', () => {
 
     await waitFor(() => expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalled())
     expect(screen.getByRole('alert').textContent).toBe(
-      'animation.gif is not supported. Use PNG or JPEG.'
+      "animation.gif can't be sent yet. Only PNG and JPEG images can be attached for now."
     )
     expect(expectSinglePreparedImage().name).toBe('good.png')
+  })
+
+  it('explains a picked document and attaches nothing', async () => {
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: { files: [new File(['%PDF-1.7'], 'report.pdf', { type: 'application/pdf' })] },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe(
+        "report.pdf can't be sent yet. Only PNG and JPEG images can be attached for now."
+      )
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('explains a dropped document', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const shell = container.querySelector('.composer-input-shell') as HTMLElement
+
+    fireEvent.drop(shell, {
+      dataTransfer: {
+        files: [new File(['PK'], 'notes.docx', { type: '' })],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toBe(
+        "notes.docx can't be sent yet. Only PNG and JPEG images can be attached for now."
+      )
+    )
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('does not let a document take one of the 20 image slots', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    const images = Array.from({ length: 20 }, (_, index) =>
+      imageFile(`photo-${index + 1}.png`, 'image/png', [...PNG_BYTES, index])
+    )
+
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [new File(['%PDF-1.7'], 'report.pdf', { type: 'application/pdf' }), ...images],
+      },
+    })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(images.map(file => file.name))
+    expect(screen.getByRole('alert').textContent).toBe(
+      "report.pdf can't be sent yet. Only PNG and JPEG images can be attached for now."
+    )
   })
 
   it('explains an oversize image and attaches nothing', async () => {
