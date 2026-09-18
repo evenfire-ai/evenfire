@@ -556,7 +556,10 @@ if (mode === 'deterministic') {
         await expect(responses).toHaveClass(/(^|\s)chat-bubble--error(\s|$)/)
       })
       await test.step('The error names the tool-call limit, not an overloaded model', async () => {
-        await expect(responses.getByText('Too Many Tool Calls', { exact: true })).toBeVisible()
+        // The label div appends the provider that raised the error.
+        await expect(responses.locator('.error-bubble-label')).toHaveText(
+          'Too Many Tool Calls · CODEX-SUBSCRIPTION'
+        )
         await expect(responses.getByText('Model Overloaded')).toHaveCount(0)
       })
       await test.step('One upstream completion, no retry, no connector call', async () => {

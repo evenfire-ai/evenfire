@@ -90,7 +90,7 @@ describe('ChatThread semantic renderer compatibility', () => {
 })
 
 describe('ChatThread error code labels', () => {
-  function renderErrorLabel(errorCode: string) {
+  function renderErrorLabel(errorCode: string, errorProvider?: string) {
     messages = [
       {
         id: `error-${errorCode}`,
@@ -99,6 +99,7 @@ describe('ChatThread error code labels', () => {
         timestamp: 1,
         isError: true,
         errorCode,
+        ...(errorProvider ? { errorProvider } : {}),
       },
     ]
     const { container } = render(<ChatThread />)
@@ -115,6 +116,11 @@ describe('ChatThread error code labels', () => {
     const { label, text } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED')
     expect(label).toBe('Too Many Tool Calls')
     expect(text).not.toContain('Model Overloaded')
+  })
+
+  it('appends the provider that raised the tool-call limit to the label', () => {
+    const { label } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED', 'codex-subscription')
+    expect(label).toBe('Too Many Tool Calls · CODEX-SUBSCRIPTION')
   })
 
   it('labels a context length error as "Conversation Too Long"', () => {
