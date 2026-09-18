@@ -63,8 +63,21 @@ function recordLlmHookApply(result: ResourceApplyResult): void {
   const acc = llmHookResyncPass.getStore()
   if (!acc) return
   acc.objects += 1
-  if (result === 'created' || result === 'replaced') acc.writes += 1
-  else if (result === 'up_to_date') acc.skips += 1
+  switch (result) {
+    case 'created':
+    case 'replaced':
+      acc.writes += 1
+      return
+    case 'up_to_date':
+    case 'missing':
+    case 'not_allowed':
+      acc.skips += 1
+      return
+    default: {
+      const exhaustive: never = result
+      throw new Error(`unhandled LlmHook apply result: ${String(exhaustive)}`)
+    }
+  }
 }
 
 const GROUP = 'clerum.io'

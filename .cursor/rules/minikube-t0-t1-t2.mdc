@@ -82,7 +82,8 @@ Host-side hold for Control UI / Desktop. Profile-owned random ports only
  Ready-reader leftovers (claim, stale ReplicaSets, CrashLoopBackOff pods)
  first, and the `gfs-rollout-shim` PATH prefix replaces the reader
  `rollout status` wait with a readiness poll because HCC's gfsReconciler
- strips `restartedAt` and makes generation waits time out.
+ now preserves `restartedAt`; leftover ReplicaSets can still poison a
+ generation-based wait, so the harness still judges reader readiness.
 - Evidence lives under ignored `.local-notes/infra/runs/`; never commit it.
 
 Full workflow: skill `.cursor/skills/minikube-t0-t1-t2/SKILL.md`.

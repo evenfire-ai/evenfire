@@ -51,8 +51,8 @@ class FakeApi implements GfsK8sApi {
   writerAvailabilitySequence: boolean[] = []
   failPvc = false
   statusFailuresRemaining = 0
-  applyOutcome: 'created' | 'replaced' | 'up_to_date' = 'replaced'
-  readerApplyOutcome?: 'created' | 'replaced' | 'up_to_date'
+  applyOutcome: ResourceApplyResult = 'replaced'
+  readerApplyOutcome?: ResourceApplyResult
 
   async applyPvc(pvc: k8s.V1PersistentVolumeClaim): Promise<ResourceApplyResult> {
     if (this.failPvc) throw new Error('simulated PVC apply failure')
@@ -458,6 +458,22 @@ describe('GfsReconciler resync pass log (D3)', () => {
     const fields = line?.[1] as { objects: number; skips: number }
     expect(fields.skips).toBe(fields.objects)
     expect(fields.objects).toBeGreaterThan(0)
+  })
+
+  it('D3: missing and not_allowed results count as skips', async () => {
+    for (const outcome of ['missing', 'not_allowed'] as const) {
+      const api = new FakeApi()
+      api.writerNeedsUpdate = false
+      api.applyOutcome = outcome
+      const info = vi.spyOn(hccLogger, 'info').mockImplementation(() => {})
+      await new GfsReconciler(api, config).fullReconcile([gfs])
+      const line = resyncCalls().at(-1)
+      const fields = line?.[1] as { objects: number; skips: number; writes: number }
+      expect(fields.writes).toBe(0)
+      expect(fields.skips).toBe(fields.objects)
+      expect(fields.objects).toBeGreaterThan(0)
+      info.mockRestore()
+    }
   })
 
   it('D3: a drifted reader logs writes 1', async () => {

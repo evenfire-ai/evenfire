@@ -553,8 +553,7 @@ provision_gfs_serving() {
     # Settle a Ready reader first so reconcile does not restart it and
     # race HCC's gfsReconciler during kubectl rollout status. If reconcile
     # still needs a reader rollout, the gfs-rollout-shim PATH prefix makes
-    # that wait judge readiness instead of the template generation HCC keeps
-    # rewriting.
+    # that wait judge readiness instead of a leftover ReplicaSet generation.
     if ! settle_gfs_reader_rollout; then
       log "ERROR: unable to settle the branch-owned GFS reader rollout before credential reconciliation"
       exit 1

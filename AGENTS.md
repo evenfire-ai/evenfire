@@ -192,8 +192,9 @@ security gates do not mutate GFS and no manual repair script belongs between
 plan and verdict. Harness GFS reconciles settle
 Ready-reader leftovers first (`settle-gfs-reader-rollout.sh`) and wait on
 reader readiness through the `gfs-rollout-shim` PATH prefix instead of a
-generation-based `rollout status`, because HCC's gfsReconciler strips the
-`restartedAt` annotation and makes that wait time out. The standalone preflight and
+generation-based `rollout status`, because HCC's gfsReconciler now preserves
+the `restartedAt` annotation and leftover ReplicaSets can still poison a
+generation wait. The standalone preflight and
 the final exact-head T2 check stay fail-loud on an unready deployment.
 When REUSE_DB recovery is needed, the fence covers all four database writers:
 HCC, workflow-recipes, trace-maintenance-worker, and control-api. The durable

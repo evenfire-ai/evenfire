@@ -59,8 +59,22 @@ function recordGfsApply(
   result: ResourceApplyResult | 'writer_hash_skip'
 ): void {
   stats.objects += 1
-  if (result === 'created' || result === 'replaced') stats.writes += 1
-  else if (result === 'up_to_date' || result === 'writer_hash_skip') stats.skips += 1
+  switch (result) {
+    case 'created':
+    case 'replaced':
+      stats.writes += 1
+      return
+    case 'up_to_date':
+    case 'writer_hash_skip':
+    case 'missing':
+    case 'not_allowed':
+      stats.skips += 1
+      return
+    default: {
+      const exhaustive: never = result
+      throw new Error(`unhandled GFS apply result: ${String(exhaustive)}`)
+    }
+  }
 }
 
 export interface GfsK8sApi {
