@@ -100,13 +100,27 @@ export class TracingIdempotencyConflictError extends Error {
   }
 }
 
+/**
+ * `not_permitted`: a payload key outside the metadata allowlist. It used to
+ * share the server-owned/monetary message, which misdescribed a keyed field
+ * such as `gfs_subject` as authority smuggling (#328).
+ */
+export type UnsafeTracingInputReason = 'server_owned_or_monetary' | 'not_permitted'
+
 export class UnsafeTracingInputError extends Error {
   readonly code = 'unsafe_tracing_input'
   readonly status = 400
   readonly statusCode = 400
 
-  constructor(readonly field: string) {
-    super(`tracing input contains a server-owned or monetary field: ${field}`)
+  constructor(
+    readonly field: string,
+    readonly reason: UnsafeTracingInputReason = 'server_owned_or_monetary'
+  ) {
+    super(
+      reason === 'not_permitted'
+        ? `tracing payload key is not permitted: ${field}`
+        : `tracing input contains a server-owned or monetary field: ${field}`
+    )
     this.name = 'UnsafeTracingInputError'
   }
 }
@@ -236,8 +250,10 @@ export function assertSafeEventPayload(value: unknown): void {
     throw new UnsafeTracingInputError('input.payload')
   }
   for (const [key, fieldValue] of Object.entries(value as Record<string, unknown>)) {
+    if (!SAFE_METADATA_KEYS.has(key)) {
+      throw new UnsafeTracingInputError(`input.payload.${key}`, 'not_permitted')
+    }
     if (
-      !SAFE_METADATA_KEYS.has(key) ||
       !['string', 'number'].includes(typeof fieldValue) ||
       (typeof fieldValue === 'number' && !Number.isFinite(fieldValue))
     ) {

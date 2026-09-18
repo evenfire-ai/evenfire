@@ -8,13 +8,26 @@ import {
   infrastructureTelemetryGapsTotal,
   infrastructureTelemetryRetriesTotal,
 } from './metrics'
+import { throwForFailedSubmit } from './reporterHttpFailure'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 export type HccHealthTransitionProjection = {
   sourceEventId: string
   occurredAt: string
-  hostLookupReference: { name: string; namespace: string; generation?: number }
+  hostLookupReference: HostLookupReference
   payload: { transition: string; state: string }
+}
+
+/**
+ * `uid` pins the event to one Host object. A Host deleted and recreated with
+ * the same name restarts at generation 1; without the uid its events would
+ * reuse the previous object's identities (#691).
+ */
+export type HostLookupReference = {
+  name: string
+  namespace: string
+  generation?: number
+  uid?: string
 }
 
 export type HccInfrastructureTelemetryType =
@@ -35,15 +48,11 @@ export type HccInfrastructureTelemetryPayload = {
   detail_ref?: string
   attempt?: number
   count?: number
-  gfs_subject?: string
-  gfs_outcome?: 'minted' | 'rotated' | 'reused' | 'failed'
-  gfs_old_host_uid?: string
-  gfs_new_host_uid?: string
 }
 
 type HccInfrastructureTelemetryProjectionBase = {
   occurredAt: string
-  hostLookupReference: { name: string; namespace: string; generation?: number }
+  hostLookupReference: HostLookupReference
   payload?: HccInfrastructureTelemetryPayload
 }
 
@@ -67,6 +76,7 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     projection.hostLookupReference.namespace,
     projection.hostLookupReference.name,
     projection.hostLookupReference.generation ?? 0,
+    projection.hostLookupReference.uid ?? null,
     payload.reason_code ?? null,
     payload.error_class ?? null,
     payload.phase ?? null,
@@ -78,12 +88,10 @@ export function hccReconcileOutcomeSourceId(projection: HccReconcileOutcomeProje
     payload.detail_ref ?? null,
     payload.attempt ?? null,
     payload.count ?? null,
-    payload.gfs_subject ?? null,
-    payload.gfs_outcome ?? null,
-    payload.gfs_old_host_uid ?? null,
-    payload.gfs_new_host_uid ?? null,
   ]
-  return `hcc-reconcile-outcome-v2:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`
+  // v3: the tuple gained the Host uid (#691) and lost the gfs_* fields, which
+  // control-api never accepted (#328). v2 identities are not produced again.
+  return `hcc-reconcile-outcome-v3:${createHash('sha256').update(JSON.stringify(canonical)).digest('hex')}`
 }
 
 export interface InfrastructureTelemetryReporter {
@@ -143,6 +151,7 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
       onEnqueued: projection =>
         infrastructureTelemetryEnqueuedTotal.inc({ telemetry_type: projection.telemetryType }),
       onAccepted: () => infrastructureTelemetryFlushesTotal.inc({ result: 'accepted' }),
+      onTerminal: (_projection, result) => infrastructureTelemetryFlushesTotal.inc({ result }),
       onRetry: projection =>
         infrastructureTelemetryRetriesTotal.inc({ telemetry_type: projection.telemetryType }),
       onDrop: (projection, reason) => this.recordDrop(projection.telemetryType, reason),
@@ -210,7 +219,7 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
           signal: controller.signal,
         }
       )
-      if (!response.ok) throw new Error(`telemetry submit failed with ${response.status}`)
+      await throwForFailedSubmit(response, 'telemetry')
     } finally {
       clearTimeout(timeout)
     }

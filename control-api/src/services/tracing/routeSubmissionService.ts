@@ -301,7 +301,9 @@ function normalizeInfra(
       typeof (hostLookupReference as Record<string, unknown>).name !== 'string' ||
       typeof (hostLookupReference as Record<string, unknown>).namespace !== 'string' ||
       ((hostLookupReference as Record<string, unknown>).generation !== undefined &&
-        typeof (hostLookupReference as Record<string, unknown>).generation !== 'number'))
+        typeof (hostLookupReference as Record<string, unknown>).generation !== 'number') ||
+      ((hostLookupReference as Record<string, unknown>).uid !== undefined &&
+        typeof (hostLookupReference as Record<string, unknown>).uid !== 'string'))
   ) {
     throw new InvalidTracingInputError(
       `events[${index}].hostLookupReference must be a Host lookup reference`

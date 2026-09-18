@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
-import type { AdministrativeOutcomeReporter } from '../src/administrativeOutcomeReporter'
+import {
+  type AdministrativeOutcomeReporter,
+  BoundedAdministrativeOutcomeReporter,
+} from '../src/administrativeOutcomeReporter'
 import { mintHostGfsToken } from '../src/gfsHostBinding'
 import {
   DEFAULT_FIRST_PARTY_WORKFLOW_CONTROL_SCOPES,
@@ -271,16 +274,24 @@ describe('HostReconciler', () => {
       'clerum.io/gfs-token-host-generation': '1',
       'clerum.io/runtime-token-rollout-required': 'true',
     })
-    expect(reporter.enqueue).toHaveBeenCalledWith(
-      expect.objectContaining({
-        telemetryType: 'reconcile_outcome',
-        payload: expect.objectContaining({
-          gfs_subject: 'host:1st:mcp-host/alpha-host',
-          gfs_old_host_uid: 'old-host-uid',
-          gfs_new_host_uid: 'new-host-uid',
-          gfs_outcome: 'rotated',
-        }),
-      })
+    // GFS evidence travels as the allowlisted `transition` (#328); the recreated
+    // object is identified by the uid in the lookup reference (#691).
+    const recreationOutcome = vi
+      .mocked(reporter.enqueue)
+      .mock.calls.map(([projection]) => projection)
+      .filter(projection => projection.telemetryType === 'reconcile_outcome')
+      .at(-1)
+    expect(recreationOutcome).toMatchObject({
+      hostLookupReference: {
+        name: 'alpha-host',
+        namespace: 'mcp-host',
+        generation: 1,
+        uid: 'new-host-uid',
+      },
+      payload: { transition: 'gfs_token:rotated' },
+    })
+    expect(Object.keys(recreationOutcome!.payload!).filter(key => key.startsWith('gfs_'))).toEqual(
+      []
     )
     expect(
       appsApi.replaceNamespacedDeployment.mock.calls.every(
@@ -350,7 +361,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'reconcile_outcome',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 7 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'ready',
@@ -389,6 +405,82 @@ describe('HostReconciler', () => {
     )
   })
 
+  it('sends an administrative outcome once across repeated reconcile passes (#327)', async () => {
+    const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
+    const administrativeOutcomeReporter = new BoundedAdministrativeOutcomeReporter({
+      baseUrl: 'http://control-api.test:8090',
+      signToken: () => 'signed',
+      fetchFn,
+      random: () => 0,
+    })
+    onTestFinished(() => administrativeOutcomeReporter.stop())
+    const telemetry = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({
+      administrativeOutcomeReporter,
+      infrastructureTelemetryReporter: telemetry,
+    })
+    const host = makeHost({
+      generation: 7,
+      annotations: { 'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111' },
+    })
+
+    for (let pass = 0; pass < 3; pass += 1) {
+      await reconciler.reconcile(host)
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+
+    // Liveness: every pass re-observed the outcome.
+    expect(
+      vi
+        .mocked(telemetry.enqueue)
+        .mock.calls.filter(([projection]) => projection.telemetryType === 'reconcile_outcome')
+    ).toHaveLength(3)
+    expect(fetchFn).toHaveBeenCalledOnce()
+  })
+
+  it('does not turn the previous pass status into a succeeded outcome when a pass throws (#327)', async () => {
+    const administrativeOutcomeReporter = {
+      enqueueHostOutcome: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    }
+    const telemetry = createTelemetryReporterMock()
+    const { reconciler, rbacApi } = createReconciler({
+      administrativeOutcomeReporter,
+      infrastructureTelemetryReporter: telemetry,
+    })
+    const annotations = {
+      'clerum.io/administrative-intent-id': '11111111-1111-4111-8111-111111111111',
+    }
+    await reconciler.reconcile(makeHost({ generation: 7, annotations }))
+    administrativeOutcomeReporter.enqueueHostOutcome.mockClear()
+    vi.mocked(telemetry.enqueue).mockClear()
+    // Fails before this pass writes any status, so the status read afterwards
+    // is still the previous pass's deployed/ready.
+    rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
+
+    await expect(reconciler.reconcile(makeHost({ generation: 8, annotations }))).rejects.toEqual({
+      code: 500,
+    })
+
+    // Liveness: the failed pass reported its error and its reconcile outcome
+    // while the previous pass's ready status was still in place.
+    expect(reconciler.getStatus('alpha-host')).toMatchObject({ deployed: true, ready: true })
+    const types = vi
+      .mocked(telemetry.enqueue)
+      .mock.calls.map(([projection]) => projection.telemetryType)
+    expect(types).toContain('controller_error')
+    expect(types).toContain('reconcile_outcome')
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: 'failed',
+        hostRef: expect.objectContaining({ generation: 8 }),
+      })
+    )
+    expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'succeeded' })
+    )
+  })
+
   it('emits Host-backed controller_error and failed reconcile_outcome on reconcile failure', async () => {
     const reporter = createTelemetryReporterMock()
     const { reconciler, coreApi } = createReconciler({ infrastructureTelemetryReporter: reporter })
@@ -411,7 +503,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'controller_error',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 8,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'SecretNotFound',
@@ -423,7 +520,12 @@ describe('HostReconciler', () => {
     expect(reporter.enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         telemetryType: 'reconcile_outcome',
-        hostLookupReference: { name: 'alpha-host', namespace: 'mcp-host', generation: 8 },
+        hostLookupReference: {
+          name: 'alpha-host',
+          namespace: 'mcp-host',
+          generation: 8,
+          uid: 'host-uid-1',
+        },
         payload: expect.objectContaining({
           resource_class: 'Host',
           reason_code: 'not_ready',

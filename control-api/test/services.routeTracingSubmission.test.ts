@@ -24,10 +24,18 @@ import type {
   TracingTransactionRunner,
 } from '../src/services/tracing/contracts.js'
 import {
+  InvalidTracingInputError,
   RouteTracingSubmissionService,
   TracingBindingUnavailableError,
 } from '../src/services/tracing/routeSubmissionService.js'
-import { NOW, adminBinding, agentBinding, agentInput } from './services.tracingFixtures.js'
+import {
+  NOW,
+  adminBinding,
+  agentBinding,
+  agentInput,
+  infraBinding,
+  infraPrincipal,
+} from './services.tracingFixtures.js'
 
 const workflowPrincipal: AgentRunEventSubmitterPrincipalV1 = {
   kind: 'wrc_internal_control',
@@ -366,4 +374,49 @@ describe('route tracing submission facade', () => {
       expect.any(Number)
     )
   })
+
+  it.each([
+    ['accepts', 'host-uid-1', 1],
+    ['rejects', 42, 0],
+  ] as const)(
+    '%s a Host lookup reference uid of %o (#691)',
+    async (_verdict, uid, expectedResolves) => {
+      const rejected = vi.spyOn(governedTraceRejectedTotal, 'inc')
+      const h = transactionHarness()
+      const resolve = vi.fn().mockResolvedValue(infraBinding)
+      const appendManyInTransaction = vi.fn().mockResolvedValue([appendResult('accepted')])
+      const service = new RouteTracingSubmissionService({
+        transaction: h.transaction,
+        infrastructureWorkloadBindingResolver: { resolve },
+        infrastructureTelemetryAppender: { appendManyInTransaction },
+      })
+      const submission = service.submit({
+        principal: infraPrincipal,
+        events: [
+          {
+            sourceEventId: 'reconcile-1',
+            occurredAt: NOW,
+            telemetryType: 'reconcile_outcome',
+            hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 1, uid },
+            payload: { status: 'succeeded', reason_code: 'ready' },
+          },
+        ],
+      })
+
+      if (expectedResolves === 1) {
+        await expect(submission).resolves.toEqual({ accepted: 1, replayed: 0 })
+        expect(resolve.mock.calls[0]![1].hostLookupReference).toEqual({
+          name: 'chatllm',
+          namespace: 'mcp-host',
+          generation: 1,
+          uid,
+        })
+      } else {
+        await expect(submission).rejects.toBeInstanceOf(InvalidTracingInputError)
+        // Liveness: the rejection was counted, so validation ran on this event.
+        expect(rejected).toHaveBeenCalled()
+      }
+      expect(resolve).toHaveBeenCalledTimes(expectedResolves)
+    }
+  )
 })

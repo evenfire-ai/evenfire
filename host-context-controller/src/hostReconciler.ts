@@ -19,6 +19,7 @@ import { GFS_HOST_SCOPES } from './gfsHostPolicy'
 import { makeExpectedHostGfsSubject } from './gfsHostSubject'
 import type {
   HccInfrastructureTelemetryPayload,
+  HostLookupReference,
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import {
@@ -502,12 +503,8 @@ type RuntimeTokenProvision = {
   scopeHash: string
 }
 
-type GfsTokenLifecycleEvidence = {
-  gfs_subject: string
-  gfs_outcome: 'minted' | 'rotated' | 'reused' | 'failed'
-  gfs_old_host_uid?: string
-  gfs_new_host_uid?: string
-}
+// Reported as the reconcile_outcome transition `gfs_token:<outcome>` (#328).
+type GfsTokenLifecycleOutcome = 'minted' | 'rotated' | 'reused' | 'failed'
 
 type DeploymentMutationState = {
   lifecycle: EffectiveHostLifecycle
@@ -558,7 +555,7 @@ export class HostReconciler {
   ) => CommunicationChannelCRD[]
   private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
   private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
-  private readonly gfsTokenLifecycleEvidence = new Map<string, GfsTokenLifecycleEvidence>()
+  private readonly gfsTokenLifecycleEvidence = new Map<string, GfsTokenLifecycleOutcome>()
   // B2: whether the CC cache initial-list has completed. Defaults to false
   // (safe: preserves existing Deployment replicas until wired by McpServerWatcher).
   private ccCacheSyncedFn: () => boolean = () => false
@@ -652,11 +649,7 @@ export class HostReconciler {
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
           sourceEventId: `hcc-health-transition:${this.newTelemetryOccurrenceId()}`,
           occurredAt,
-          hostLookupReference: {
-            name: host.name,
-            namespace: host.namespace,
-            ...(host.generation !== undefined ? { generation: host.generation } : {}),
-          },
+          hostLookupReference: this.hostLookupReference(host),
           payload: { transition: `lifecycle:${lifecycle.state}`, state: lifecycle.state },
         })
       },
@@ -1850,11 +1843,7 @@ export class HostReconciler {
             resourceName: name,
             refreshExpInHours,
           })
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: expectedGfsSubject,
-            gfs_outcome: 'reused',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'reused')
           const selectedRevision =
             rolloutPending || HostReconciler.shouldRollForRuntimeSecret(deployment, false)
               ? existingRevision
@@ -1934,11 +1923,7 @@ export class HostReconciler {
           await observeCreate('Secret', () =>
             this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
           )
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: expectedGfsSubject,
-            gfs_outcome: 'minted',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'minted')
           log.info('created mcp-host-runtime-token Secret', {
             host: host.name,
             namespace: host.namespace,
@@ -1960,13 +1945,7 @@ export class HostReconciler {
           namespace: host.namespace,
           body: replaceBody,
         })
-        const oldHostUid = existing.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
-        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-          gfs_subject: expectedGfsSubject,
-          gfs_outcome: 'rotated',
-          ...(oldHostUid ? { gfs_old_host_uid: oldHostUid } : {}),
-          ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-        })
+        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'rotated')
         log.info('rotated mcp-host-runtime-token Secret', {
           host: host.name,
           namespace: host.namespace,
@@ -1982,13 +1961,8 @@ export class HostReconciler {
         }
       } catch (err) {
         lastErr = err
-        const subject = makeExpectedHostGfsSubject(host.namespace, host.name)
-        if (subject) {
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: subject,
-            gfs_outcome: 'failed',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+        if (makeExpectedHostGfsSubject(host.namespace, host.name)) {
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'failed')
         }
         if (err instanceof Error && err.name === 'GfsHostTokenValidationError') break
         const delayMs = 1000 * Math.pow(2, attempt - 1)
@@ -2154,15 +2128,12 @@ export class HostReconciler {
     }
   }
 
-  private hostLookupReference(host: HostCRD): {
-    name: string
-    namespace: string
-    generation?: number
-  } {
+  private hostLookupReference(host: HostCRD): HostLookupReference {
     return {
       name: host.name,
       namespace: host.namespace,
       ...(host.generation !== undefined ? { generation: host.generation } : {}),
+      ...(host.uid !== undefined ? { uid: host.uid } : {}),
     }
   }
 
@@ -2204,17 +2175,29 @@ export class HostReconciler {
     this.enqueueAdministrativeOutcome(host, 'failed', reasonCode)
   }
 
-  private enqueueReconcileOutcome(host: HostCRD): void {
+  /**
+   * `administrative` is false on the failed-pass path: the status read here
+   * is then the previous pass's, and must not become a `succeeded` outcome.
+   */
+  private enqueueReconcileOutcome(
+    host: HostCRD,
+    { administrative }: { administrative: boolean }
+  ): void {
     const status = this.getStatus(host.name)
     const succeeded = status.deployed && status.ready
+    const gfsOutcome = this.gfsTokenLifecycleEvidence.get(
+      HostReconciler.gfsLifecycleEvidenceKey(host)
+    )
     this.enqueueHostTelemetry(host, 'reconcile_outcome', succeeded ? 'ready' : 'not_ready', {
       status: succeeded ? 'succeeded' : 'failed',
       phase: status.deployed ? 'deployed' : 'not_deployed',
       state: status.ready ? 'ready' : 'not_ready',
-      ...(this.gfsTokenLifecycleEvidence.get(HostReconciler.gfsLifecycleEvidenceKey(host)) ?? {}),
+      // control-api allowlists `transition`, not gfs_* keys (#328).
+      ...(gfsOutcome ? { transition: `gfs_token:${gfsOutcome}` } : {}),
     })
     this.gfsTokenLifecycleEvidence.delete(HostReconciler.gfsLifecycleEvidenceKey(host))
-    if (succeeded) this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
+    if (administrative && succeeded)
+      this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
   }
 
   private enqueueAdministrativeOutcome(
@@ -4425,7 +4408,7 @@ export class HostReconciler {
       hostReconcileInFlight.inc({ lane: source })
       try {
         await this.reconcileCore(admittedHost, revalidate)
-        this.enqueueReconcileOutcome(admittedHost)
+        this.enqueueReconcileOutcome(admittedHost, { administrative: true })
         this.observeReconcileLatency(source, 'success', dispatchedAt, admittedAt)
       } catch (error) {
         if (isBenignSupersessionError(error)) {
@@ -4439,7 +4422,7 @@ export class HostReconciler {
           throw error
         }
         this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
-        this.enqueueReconcileOutcome(admittedHost)
+        this.enqueueReconcileOutcome(admittedHost, { administrative: false })
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
       } finally {
