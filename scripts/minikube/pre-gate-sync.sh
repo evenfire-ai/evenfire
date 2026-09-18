@@ -772,7 +772,7 @@ if [[ "${cluster_changed}" == "true" ]]; then
     restore_control_api
     # The base manifest no longer declares connection-string (provisioning-owned
     # key), so deploy-all cannot clobber it. Provisioning must still run AFTER
-    # control-api migrations (0048 creates the least-privilege gfs_controller
+    # control-api migrations (0048_gfs_permission_store creates the least-privilege gfs_controller
     # role) for fresh profiles and to converge any stale credential before the
     # rest of the gate observes service readiness.
     provision_gfs_serving

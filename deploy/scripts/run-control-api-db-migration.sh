@@ -535,7 +535,7 @@ build_job_manifest() {
       },
       "spec" => {
         # Retry a transient migration abort instead of failing the whole deploy.
-        # Migration 0090 takes an EXCLUSIVE lock on agent_run_events with a bounded
+        # Migration 0090_plugin_workload_sdk_runtime_contract_reconciliation takes an EXCLUSIVE lock on agent_run_events with a bounded
         # lock_timeout; if a concurrent writer (e.g. the trace-retention prune
         # DELETE) holds its lock past that timeout the Job exits 1. The migration
         # body is idempotent, so re-running is safe; restartPolicy Never makes each
