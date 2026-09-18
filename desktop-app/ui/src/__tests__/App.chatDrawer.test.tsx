@@ -1385,6 +1385,40 @@ describe('App chat drawer — universal availability (mini-spec 04a)', () => {
     expect(rail.style.getPropertyValue('--rail-top')).toBe('128px')
   })
 
+  // §1 (mini-spec 06): toggling the drawer over a non-chat tab must not spawn a
+  // fresh "New chat" tab each time. The reconcile runs with the app/files tab
+  // kept active, so the blank chat is never the active tab — without the reuse
+  // fix every toggle appends another blank. Assert the observable strip's blank
+  // chat count (T4), not an intermediate effect.
+  it('never stacks blank chat tabs when the drawer is toggled over a non-chat tab (§1)', () => {
+    currentController = makeController({
+      selectedAgent: 'alpha',
+      activeChatId: null,
+      navItem: DESKTOP_ROUTES.files,
+      chatList: CHAT_LIST,
+    } as Partial<AppController>)
+    render(<App />)
+
+    const blankChatCount = () =>
+      currentController.workspaceTabs.tabs.filter(
+        t => t.kind === 'chat' && (t.chat?.chatId ?? null) === null
+      ).length
+
+    // Boot seeds exactly one blank chat tab; opening files adds none.
+    expect(blankChatCount()).toBe(1)
+
+    // Toggle open + closed three times over the files tab, then leave it open.
+    for (let i = 0; i < 3; i += 1) {
+      act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+      act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    }
+    act(() => appHeaderHarness.props?.onToggleChatDrawer?.())
+    expect(appHeaderHarness.props?.chatDrawerOpen).toBe(true)
+
+    // Still exactly one blank chat tab — the toggles never stacked new ones.
+    expect(blankChatCount()).toBe(1)
+  })
+
   // R5 + DEC-2: the drawer is global; switching between non-chat kinds keeps it
   // open and never lets the chat reconcile steal focus onto a chat tab.
   it('keeps the drawer intact across non-chat tab switches without stealing focus (R5/DEC-2)', () => {

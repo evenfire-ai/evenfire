@@ -563,6 +563,44 @@ describe('workspaceTabs — reconcile (chat sub-slice, §3)', () => {
     )
   })
 
+  // §1 (mini-spec 06): the drawer-toggle duplication. In drawer mode App wraps
+  // reconcile so the app/files tab STAYS active (activating a chat tab would tear
+  // the embed down). Model that seam by resetting `activeTabId` to the non-chat
+  // tab after each reconcile: a chatId:null reconcile must then reuse the single
+  // blank chat tab, never append a new one per toggle. Assert the observable tab
+  // list (T4). Against the parent this appends one blank per event and blows the
+  // cap.
+  it('the drawer seam never stacks blank chat tabs across repeated blank reconciles (§1)', () => {
+    fc.assert(
+      fc.property(
+        fc.boolean(),
+        fc.array(fc.constantFrom('alpha', 'beta', 'gamma'), { minLength: 1, maxLength: 30 }),
+        (startWithBlank, agents) => {
+          let state = createEmptyWorkspaceTabsState()
+          if (startWithBlank) state = newChatTab(state, 'boot-blank', 'alpha')
+          state = openFilesTab(state, { id: 'files' }) // files becomes the active tab
+          const countBlanks = (s: WorkspaceTabsState) =>
+            s.tabs.filter(t => t.kind === 'chat' && (t.chat?.chatId ?? null) === null).length
+          // Invariant: at most one blank, and a new one only if none existed.
+          const cap = Math.max(1, countBlanks(state))
+          let counter = 0
+          for (const agent of agents) {
+            state = reconcileWorkspaceChatTab(
+              state,
+              { agentRef: agent, chatId: null },
+              `g-${counter++}`
+            )
+            // The drawer seam keeps the non-chat tab active.
+            state = { ...state, activeTabId: 'files' }
+            expect(countBlanks(state)).toBeLessThanOrEqual(cap)
+          }
+          // The non-chat tab is never dropped by blank chat reconciliation.
+          expect(state.tabs.some(t => t.id === 'files' && t.kind === 'files')).toBe(true)
+        }
+      )
+    )
+  })
+
   it('reconcile leaves non-chat tabs untouched and re-homes focus to the chat tab', () => {
     let state = createEmptyWorkspaceTabsState()
     state = openAppTab(state, { id: 'app-1', appRef: 'x' })

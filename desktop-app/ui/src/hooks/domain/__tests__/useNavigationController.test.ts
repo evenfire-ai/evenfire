@@ -2,6 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../../constants/navigation'
+import { closeWorkspaceTab, openChatTab } from '../../../lib/workspaceTabs'
 import { useNavigationController } from '../useNavigationController'
 
 describe('useNavigationController — agent-centric navigation (Fase 2)', () => {
@@ -24,6 +25,39 @@ describe('useNavigationController — agent-centric navigation (Fase 2)', () => 
     act(() => result.current.setSelectedAgentRoute(AGENT_WORKSPACE_ROUTES.members))
     act(() => result.current.handleNavSelect(DESKTOP_ROUTES.agents))
     expect(result.current.selectedAgentRoute).toBe('mcp-servers')
+  })
+
+  it('tracks the last active chat tab and keeps it across nav to a non-chat tab (§1)', () => {
+    const { result } = renderHook(() => useNavigationController())
+    // Boot seeds an active blank chat tab -> it is the last active chat tab.
+    expect(result.current.lastActiveChatTabId).toBe('chat-tab-1')
+
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(result.current.activeTab?.kind).toBe('files')
+    // Navigating to files does NOT forget the chat to return to.
+    expect(result.current.lastActiveChatTabId).toBe('chat-tab-1')
+  })
+
+  it('updates to the newly active chat and forgets it only when that tab closes (§1)', () => {
+    const { result } = renderHook(() => useNavigationController())
+    // Go to files first so the persisted chat opens as its OWN tab (no collapse
+    // into the boot blank), then activate it.
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+    act(() =>
+      result.current.setWorkspaceTabs(state =>
+        openChatTab(state, { id: 'persisted', agentRef: 'alpha', chatId: 'c1' })
+      )
+    )
+    expect(result.current.lastActiveChatTabId).toBe('persisted')
+
+    // Back to files: still remembered.
+    act(() => result.current.handleNavSelect(DESKTOP_ROUTES.files))
+    expect(result.current.activeTab?.kind).toBe('files')
+    expect(result.current.lastActiveChatTabId).toBe('persisted')
+
+    // Closing the remembered (non-active) chat tab forgets it.
+    act(() => result.current.setWorkspaceTabs(state => closeWorkspaceTab(state, 'persisted')))
+    expect(result.current.lastActiveChatTabId).toBeNull()
   })
 
   it('no longer exposes the removed context/teams handlers or state', () => {

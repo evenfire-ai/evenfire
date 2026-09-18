@@ -524,10 +524,28 @@ export function App() {
     // tab). The reconcile effect adds the chat tab to the switcher.
     const origin = sandboxUiConversationOriginRef.current
     const hasActiveChat = Boolean(vm.selectedAgent && vm.activeChatId)
+    // §1: with no active chat and no launch origin (the drawer opened over a
+    // files/settings tab), restore the LAST active chat tab instead of seeding a
+    // blank — pointing the controller at its persisted (agentRef, chatId). Only a
+    // persisted chat is restored; a blank last-tab falls through to the blank
+    // seed below (which the reconcile then reuses, never duplicates).
+    const lastChatTab =
+      !hasActiveChat && !origin && vm.lastActiveChatTabId
+        ? workspaceTabsRef.current.tabs.find(
+            tab => tab.id === vm.lastActiveChatTabId && tab.kind === 'chat'
+          )
+        : undefined
     if (origin && !hasActiveChat) {
       vm.handleSelectChatAgent(origin.agentName, {
         chatId: origin.chatId,
         title: origin.title,
+        selectLatest: false,
+        keepNavItem: true,
+      })
+    } else if (lastChatTab?.chat?.agentRef && lastChatTab.chat.chatId) {
+      vm.handleSelectChatAgent(lastChatTab.chat.agentRef, {
+        chatId: lastChatTab.chat.chatId,
+        title: lastChatTab.title,
         selectLatest: false,
         keepNavItem: true,
       })
@@ -540,7 +558,7 @@ export function App() {
       })
     }
     setComposerFocusRequestId(value => value + 1)
-  }, [vm.activeChatId, vm.handleSelectChatAgent, vm.selectedAgent])
+  }, [vm.activeChatId, vm.handleSelectChatAgent, vm.lastActiveChatTabId, vm.selectedAgent])
 
   const closeChatDrawer = React.useCallback(() => {
     setChatDrawerOpen(false)

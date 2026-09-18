@@ -1349,6 +1349,7 @@ export function useAppController() {
     showAppsPicker: nav.showAppsPicker,
     clearAppsPicker: nav.clearAppsPicker,
     activateWorkspaceChatTab: nav.activateChatTab,
+    lastActiveChatTabId: nav.lastActiveChatTabId,
     handleOpenAgentWorkspace,
     handleSelectChatAgent,
     handleEnsureTeamContext: ensureTeamContext,

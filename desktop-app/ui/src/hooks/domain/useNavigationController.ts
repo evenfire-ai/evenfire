@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
 import {
   activeWorkspaceTab,
@@ -46,6 +46,20 @@ export function useNavigationController() {
 
   const activeTab = useMemo(() => activeWorkspaceTab(workspaceTabs), [workspaceTabs])
   const navItem: NavItem = appsPickerActive ? DESKTOP_ROUTES.apps : mapKindToRoute(activeTab)
+
+  // The last chat tab that was active — the "chat to return to" when the drawer
+  // is reopened over a non-chat tab (mini-spec 06 §1). It is NOT cleared by
+  // navigating to files/app/settings (that is the whole point: the drawer
+  // restores it); it is forgotten only when that tab is closed. Derived from the
+  // single store, so every writer (nav, reveal, reconcile) updates it uniformly.
+  const [lastActiveChatTabId, setLastActiveChatTabId] = useState<string | null>(null)
+  useEffect(() => {
+    setLastActiveChatTabId(prev => {
+      if (activeTab?.kind === 'chat') return activeTab.id
+      if (prev !== null && !workspaceTabs.tabs.some(tab => tab.id === prev)) return null
+      return prev
+    })
+  }, [activeTab, workspaceTabs])
 
   const clearAppsPicker = useCallback(() => setAppsPickerActive(false), [])
 
@@ -174,6 +188,7 @@ export function useNavigationController() {
     showAppsPicker,
     clearAppsPicker,
     activateChatTab,
+    lastActiveChatTabId,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
     selectedAgentRoute,

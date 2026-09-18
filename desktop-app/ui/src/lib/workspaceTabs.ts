@@ -345,6 +345,27 @@ export function reconcileWorkspaceChatTab(
             activeTabId: current.id,
           }
     }
+    // The active tab is NOT a blank chat (a non-chat tab, or a persisted chat).
+    // Reuse an existing blank chat tab instead of spawning another (mini-spec 06
+    // §1): in drawer mode the effect keeps the app/files tab active, so the
+    // blank is never the active tab and, without this, every reconcile would
+    // `appendBlankChatTab` and stack "New chat" tabs. Only append when there is
+    // no blank chat tab at all — the invariant is "+1 blank at most, and only if
+    // none existed". Focus the reused blank (as append activates the new one);
+    // the drawer seam then keeps its non-chat tab active.
+    const existingBlank = state.tabs.find(isBlankChatTab)
+    if (existingBlank) {
+      return existingBlank.chat?.agentRef === active.agentRef
+        ? { ...state, activeTabId: existingBlank.id }
+        : {
+            tabs: state.tabs.map(tab =>
+              tab.id === existingBlank.id
+                ? { ...tab, chat: { agentRef: active.agentRef, chatId: null } }
+                : tab
+            ),
+            activeTabId: existingBlank.id,
+          }
+    }
     return appendBlankChatTab(state, newTabId, active.agentRef)
   }
 
