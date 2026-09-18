@@ -4877,9 +4877,7 @@ export class AppService {
         if (!active || !surface) return
         void active.openGfsResourceFromNavigation(surface.webContentsId, uri)
       },
-      onTitleChanged: title => {
-        args.onTitleChanged?.(title)
-      },
+      onTitleChanged: args.onTitleChanged,
       onOauthAuthorize: (oauthClientId, background) => {
         void this.requestSandboxUiOauthAuthorize(
           recipeNs,
