@@ -1757,23 +1757,34 @@ describe('App deep-link orchestration', () => {
     phase: 'active',
   }
 
+  // A genuinely distinct app: a different appRef, so cross-app lifecycle
+  // isolation tests exercise App A → App B rather than a second tab of App A.
+  const READY_APP_B = {
+    appRef: 'ns/app-b',
+    title: 'Linked App B',
+    defaultPath: '/',
+    ready: true,
+    phase: 'active',
+  }
+
   const appTabs = () => currentController.workspaceTabs.tabs.filter(tab => tab.kind === 'app')
 
   // Launch an app straight through the sidebar (`onOpenSandboxUiApp`), the same
-  // path the real app-picker uses — no deep-link confirm ceremony.
-  async function launchAppFromSidebar(): Promise<void> {
+  // path the real app-picker uses — no deep-link confirm ceremony. Defaults to
+  // `ns/app`; pass a distinct appRef to launch another app the sidebar offers.
+  async function launchAppFromSidebar(appRef = 'ns/app'): Promise<void> {
     await waitFor(() =>
-      expect(sidebarHarness.props?.availableSandboxUiApps?.some(a => a.appRef === 'ns/app')).toBe(
+      expect(sidebarHarness.props?.availableSandboxUiApps?.some(a => a.appRef === appRef)).toBe(
         true
       )
     )
-    const app = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === 'ns/app')
-    if (!app) throw new Error('ns/app was not available to the sidebar')
+    const app = sidebarHarness.props?.availableSandboxUiApps?.find(a => a.appRef === appRef)
+    if (!app) throw new Error(`${appRef} was not available to the sidebar`)
     await act(async () => {
       sidebarHarness.props?.onOpenSandboxUiApp?.(app)
       await Promise.resolve()
     })
-    await waitFor(() => expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app'))
+    await waitFor(() => expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe(appRef))
   }
 
   async function selectTab(index: 0 | 1 | 2): Promise<void> {
@@ -1991,30 +2002,39 @@ describe('App deep-link orchestration', () => {
 
   it('does not close a different app opened before the stale getLocation resolves (R1-H1, T3)', async () => {
     currentController = makeController({ initialExperienceLoading: false })
-    listApps.mockResolvedValue({ apps: [READY_APP] })
+    // Two genuinely distinct apps: A's stale continuation must not tear down B.
+    listApps.mockResolvedValue({ apps: [READY_APP, READY_APP_B] })
     render(<App />)
-    await launchAppFromSidebar() // tabs: [chat, A]; A is live
+    await launchAppFromSidebar('ns/app') // tabs: [chat, A]; A is live
 
     closeSandboxUi.mockClear()
 
     const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
     getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
 
-    // Deactivate A → seeded chat tab (read in flight).
+    // Deactivate A → seeded chat tab (A's read in flight).
     await selectTab(0)
-    // Open a DIFFERENT app tab (B) before the old read resolves; B becomes live.
-    await launchAppFromSidebar()
+    // Open a DIFFERENT app (B, distinct appRef) before A's read resolves; B is live.
+    await launchAppFromSidebar('ns/app-b')
     await waitFor(() => expect(appTabs()).toHaveLength(2))
 
+    // The stale read resolves with A's route, while B owns the active view.
     await act(async () => {
       pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/route' })
       await Promise.resolve()
       await Promise.resolve()
     })
 
-    // Observable result: B's embed survives (no close) and B's route is intact.
+    // Observable result: B stays the live view and its embed survives (no close).
     // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
+    expect(sandboxUiPageHarness.props?.shortcutApp?.appRef).toBe('ns/app-b')
     expect(closeSandboxUi).not.toHaveBeenCalled()
+    expect(appTabs()[1]?.app?.appRef).toBe('ns/app-b')
+    // Cross-app persist isolation: the stale read carried A's appRef, so the pre-fix
+    // continuation would clobber A's own route with '/stale/route'. The gate aborts
+    // that persist once B owns the active view, so A's route stays untouched.
+    expect(appTabs()[0]?.app?.appRef).toBe('ns/app')
+    expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
     expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
   })
 })
