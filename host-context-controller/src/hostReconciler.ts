@@ -4428,10 +4428,11 @@ export class HostReconciler {
           // or an administrative 'failed' outcome. Callers already treat the
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
           // only log the error), so the rethrow is preserved.
-          // Evidence is written only inside reconcileCore and consumed by the
-          // outcome below; this is the one exit that emits no outcome. Keyed by
-          // namespace/name, a leftover would be reported by the next pass, or
-          // by a recreated Host with the same name.
+          // This exit emits no outcome, so drop the GFS evidence this pass
+          // recorded. Keyed by namespace/name, a leftover would be reported by
+          // the next pass, or by a recreated Host with the same name. The
+          // stateless suspension path also calls reconcileCore without emitting
+          // an outcome and does not clear the entry (#696).
           this.gfsTokenLifecycleEvidence.delete(
             HostReconciler.gfsLifecycleEvidenceKey(admittedHost)
           )
