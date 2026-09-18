@@ -1,3 +1,4 @@
+import { isImageAttachmentMime } from '../../llm/imageInput'
 import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
@@ -72,7 +73,7 @@ export function appendToolResults(
     if (trustedAttachments.length) {
       for (const att of trustedAttachments) {
         if (att.kind !== 'image') continue
-        if (att.mimeType !== 'image/jpeg' && att.mimeType !== 'image/png') continue
+        if (!isImageAttachmentMime(att.mimeType)) continue
         pendingImages.push({
           type: 'image',
           mimeType: att.mimeType,

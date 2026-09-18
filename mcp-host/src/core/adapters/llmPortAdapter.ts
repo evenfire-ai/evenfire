@@ -7,6 +7,8 @@ import {
   decideImageInput,
   imageInputDenialMessage,
   imageInputRolesFor,
+  isCanonicalBase64Shape,
+  isImageAttachmentMime,
 } from '../../llm/imageInput'
 import {
   clerumPromptCacheInputTokens,
@@ -319,12 +321,9 @@ export class LlmPortAdapter implements LlmPort {
             !part ||
             (part.type !== 'text' && part.type !== 'image') ||
             (part.type === 'image' &&
-              (!['image/png', 'image/jpeg'].includes(part.mimeType) ||
+              (!isImageAttachmentMime(part.mimeType) ||
                 typeof part.data !== 'string' ||
-                !part.data ||
-                !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-                  part.data
-                )))
+                !isCanonicalBase64Shape(part.data)))
         )
       ) {
         throw new LlmError(

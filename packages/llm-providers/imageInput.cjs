@@ -101,9 +101,12 @@ function resolveImageInputCapability(value, options) {
     return { state: 'unsupported', reason: 'policy_denied', ...dates }
   if (options.transportSupported !== true)
     return { state: 'unsupported', reason: 'transport_unsupported', ...dates }
+  // A non-finite clock cannot validate evidence, but it is not itself a reason
+  // to claim evidence exists: without evidence the truthful answer is
+  // `model_unknown`, reached below.
   if (
-    !Number.isFinite(now) ||
-    (capability.evidence && Date.parse(capability.evidence.checkedAt) > now)
+    capability.evidence &&
+    (!Number.isFinite(now) || Date.parse(capability.evidence.checkedAt) > now)
   ) {
     return { state: 'unknown', reason: 'evidence_not_yet_valid', ...dates }
   }

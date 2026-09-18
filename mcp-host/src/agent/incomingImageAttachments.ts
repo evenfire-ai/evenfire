@@ -1,9 +1,29 @@
 import type { Attachment } from '../core/types'
+import {
+  type ImageAttachmentMimeType,
+  isCanonicalBase64Shape,
+  isImageAttachmentMime,
+} from '../llm/imageInput'
 import type { TaskError } from '../queue/types'
 
 export type IncomingImageValidation =
   | { ok: true; attachments: Attachment[] | undefined }
   | { ok: false; error: TaskError }
+
+/**
+ * First bytes every accepted encoding must start with. The declared media type
+ * decides how the provider serializes the image, so a declaration the bytes
+ * contradict is rejected here rather than forwarded upstream (CWE-345).
+ */
+const MIME_SIGNATURES: Readonly<Record<ImageAttachmentMimeType, Buffer>> = {
+  'image/png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+  'image/jpeg': Buffer.from([0xff, 0xd8, 0xff]),
+}
+
+function bytesMatchDeclaredMime(bytes: Buffer, mimeType: ImageAttachmentMimeType): boolean {
+  const signature = MIME_SIGNATURES[mimeType]
+  return bytes.length >= signature.length && bytes.subarray(0, signature.length).equals(signature)
+}
 
 /** Reject the whole visual input rather than silently sending only its text. */
 export function validateIncomingImageAttachments(
@@ -26,7 +46,7 @@ export function validateIncomingImageAttachments(
       typeof item !== 'object' ||
       Array.isArray(item) ||
       item.kind !== 'image' ||
-      !['image/jpeg', 'image/png'].includes(item.mimeType) ||
+      !isImageAttachmentMime(item.mimeType) ||
       item.encoding !== 'base64' ||
       typeof item.dataBase64 !== 'string' ||
       typeof item.id !== 'string' ||
@@ -39,16 +59,15 @@ export function validateIncomingImageAttachments(
     // binary buffer. Canonical base64 avoids ambiguous/partially decoded input.
     if (data.length > Math.ceil(limits.maxBytes / 3) * 4)
       return reject('An image exceeds the attachment size limit.')
-    if (
-      !data.length ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)
-    ) {
+    if (!isCanonicalBase64Shape(data)) {
       return reject('An image has invalid base64 data. Attach the original file again.')
     }
     const bytes = Buffer.from(data, 'base64')
     if (bytes.length > limits.maxBytes) return reject('An image exceeds the attachment size limit.')
     if (bytes.toString('base64') !== data)
       return reject('An image has invalid base64 data. Attach the original file again.')
+    if (!bytesMatchDeclaredMime(bytes, item.mimeType))
+      return reject('An image does not match its declared type. Attach the original file again.')
     attachments.push({
       id: item.id,
       kind: 'image',

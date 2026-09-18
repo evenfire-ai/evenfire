@@ -61,6 +61,17 @@ test('expiry is evaluated at dispatch, including the exact boundary and future e
     resolveImageInputCapability(supported, { ...options, now: 0 }).reason,
     'evidence_not_yet_valid'
   )
+  // An unreadable clock is not itself evidence. Without evidence the truthful
+  // reason is `model_unknown`; with evidence the same clock still cannot
+  // validate it, which is the liveness witness that the branch stays reachable.
+  assert.equal(
+    resolveImageInputCapability({ state: 'unknown' }, { ...options, now: Number.NaN }).reason,
+    'model_unknown'
+  )
+  assert.equal(
+    resolveImageInputCapability(supported, { ...options, now: Number.NaN }).reason,
+    'evidence_not_yet_valid'
+  )
 })
 
 test('discovery cannot claim known support without a validity contract', () => {

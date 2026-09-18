@@ -335,4 +335,108 @@ describe('#654 LlmPortAdapter image guard', () => {
     )
     expect(provider.completeSingleTurnWithTools).not.toHaveBeenCalled()
   })
+
+  it('refuses a malformed base64 image part with LLM_INVALID_ATTACHMENT before consulting the resolver', async () => {
+    const provider = fakeProvider('openai')
+    const resolver = vi.fn(allow({ state: 'supported', evidence: CURATED_EVIDENCE }))
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      resolver
+    )
+
+    await expectDenied(
+      () =>
+        adapter.completeWithTools({
+          messages: [
+            {
+              role: 'user',
+              content: 'look',
+              contentParts: [{ type: 'image', mimeType: 'image/png', data: 'not base64!' }],
+            },
+          ],
+          tools: [],
+        }),
+      LlmErrorCode.InvalidAttachment,
+      'unsupported image format or encoding'
+    )
+    // The shape check is the first gate: neither the catalog nor the SDK is
+    // reached, so a malformed part can never become a provider round-trip.
+    expect(resolver).toHaveBeenCalledTimes(0)
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(0)
+  })
+
+  it('refuses a non PNG/JPEG mime with LLM_INVALID_ATTACHMENT', async () => {
+    const provider = fakeProvider('openai')
+    const resolver = vi.fn(allow({ state: 'supported', evidence: CURATED_EVIDENCE }))
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      resolver
+    )
+
+    await expectDenied(
+      () =>
+        adapter.completeWithTools({
+          messages: [
+            {
+              role: 'user',
+              content: 'look',
+              contentParts: [{ type: 'image', mimeType: 'image/gif' as never, data: 'QUJD' }],
+            },
+          ],
+          tools: [],
+        }),
+      LlmErrorCode.InvalidAttachment,
+      'unsupported image format or encoding'
+    )
+    expect(resolver).toHaveBeenCalledTimes(0)
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(0)
+  })
+
+  it('dispatches a 5 MiB canonical image part without RangeError', async () => {
+    const provider = fakeProvider('openai')
+    const adapter = new LlmPortAdapter(
+      provider,
+      'gpt-5.4-mini',
+      'openai',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      allow({ state: 'supported', evidence: CURATED_EVIDENCE })
+    )
+    // Tool screenshots are not bounded by the admission limit, so the adapter
+    // sees sizes the grouped-quantifier regex could not scan.
+    const data = Buffer.alloc(5 * 1024 * 1024).toString('base64')
+    expect(data.length).toBeGreaterThan(4_470_000)
+
+    await adapter.completeWithTools({
+      messages: [
+        {
+          role: 'user',
+          content: 'look',
+          contentParts: [{ type: 'image', mimeType: 'image/png', data }],
+        },
+      ],
+      tools: [],
+    })
+
+    expect(provider.completeSingleTurnWithTools).toHaveBeenCalledTimes(1)
+    const [messages] = provider.completeSingleTurnWithTools.mock.calls[0]
+    expect(messages[0].contentParts[0].data).toBe(data)
+  })
 })

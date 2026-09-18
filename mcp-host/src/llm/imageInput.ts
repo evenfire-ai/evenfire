@@ -35,8 +35,40 @@ import type { ChatMessage, MessageRole } from '../core/types'
 import { descriptorFor, isLlmProvider } from './registryCore'
 
 /**
- * The transport operation a request is about to use, named after the
- * `SingleTurnProvider` method it dispatches to.
+ * The only image media types the Host accepts on the wire. Both the admission
+ * boundary and the adapter guard read this list, so a new type is enabled in
+ * one place instead of two inline literals drifting apart.
+ */
+export const IMAGE_ATTACHMENT_MIME_TYPES = ['image/jpeg', 'image/png'] as const
+
+export type ImageAttachmentMimeType = (typeof IMAGE_ATTACHMENT_MIME_TYPES)[number]
+
+export function isImageAttachmentMime(value: unknown): value is ImageAttachmentMimeType {
+  return (
+    typeof value === 'string' && (IMAGE_ATTACHMENT_MIME_TYPES as readonly string[]).includes(value)
+  )
+}
+
+/**
+ * Canonical-base64 shape check that stays linear in V8.
+ *
+ * The grouped-quantifier form `(?:[A-Za-z0-9+/]{4})*` allocates one backtrack
+ * frame per group and throws `RangeError: Maximum call stack size exceeded`
+ * above ~4.47M characters — roughly a 3.2 MiB image, well inside the sizes this
+ * Host accepts. `gfs-controller/src/api/serve.ts` already carries the same fix.
+ * Length-mod-4 plus an unanchored character class decides the same shapes
+ * without backtracking; the decode round-trip at the admission boundary remains
+ * the authority on non-canonical padding bits.
+ */
+export function isCanonicalBase64Shape(data: string): boolean {
+  return data.length > 0 && data.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(data)
+}
+
+/**
+ * The transport operation a request is about to use, named after the adapter
+ * dispatch path (`complete`, `completeWithTools` and their `…AndCache`
+ * variants), which maps 1:1 onto the `SingleTurnProvider` `completeSingleTurn*`
+ * methods.
  */
 export type ImageTransportOperation =
   | 'complete'
