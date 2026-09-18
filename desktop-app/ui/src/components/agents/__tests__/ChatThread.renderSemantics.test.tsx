@@ -89,6 +89,47 @@ describe('ChatThread semantic renderer compatibility', () => {
   })
 })
 
+describe('ChatThread error code labels', () => {
+  function renderErrorLabel(errorCode: string) {
+    messages = [
+      {
+        id: `error-${errorCode}`,
+        role: 'assistant',
+        content: 'The agent stopped.',
+        timestamp: 1,
+        isError: true,
+        errorCode,
+      },
+    ]
+    const { container } = render(<ChatThread />)
+    const response = screen.getByTestId('agent-response')
+    // Liveness witness: the message rendered as an error bubble.
+    expect(response.classList.contains('chat-bubble--error')).toBe(true)
+    return {
+      label: container.querySelector('.error-bubble-label')?.textContent,
+      text: response.textContent,
+    }
+  }
+
+  it('labels a tool-call limit as "Too Many Tool Calls", not "Model Overloaded"', () => {
+    const { label, text } = renderErrorLabel('LLM_TOOL_CALL_LIMIT_EXCEEDED')
+    expect(label).toBe('Too Many Tool Calls')
+    expect(text).not.toContain('Model Overloaded')
+  })
+
+  it('labels a context length error as "Conversation Too Long"', () => {
+    expect(renderErrorLabel('LLM_CONTEXT_LENGTH_EXCEEDED').label).toBe('Conversation Too Long')
+  })
+
+  it('still labels an overload as "Model Overloaded"', () => {
+    expect(renderErrorLabel('LLM_MODEL_OVERLOADED').label).toBe('Model Overloaded')
+  })
+
+  it('keeps the generic "Error" label for an unknown code', () => {
+    expect(renderErrorLabel('LLM_SOMETHING_UNMAPPED').label).toBe('Error')
+  })
+})
+
 it('keeps generated files visible and downloadable on an interrupted error message', () => {
   messages = [
     {
