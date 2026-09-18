@@ -11,13 +11,21 @@ export const PR1_MIGRATION_VERSIONS = Object.freeze([
   '010e_legacy_password_security_epoch_backfill',
 ] as const)
 
-const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set([
+export const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
   '0107_llm_provider_attempts_sdk_link',
   '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-])
+  '0109_grok_subscription_connections',
+  '0110_grok_subscription_oauth_states',
+  '0111_grok_catalog_models',
+  '0112_llm_provider_attempts_grok_broker',
+  '0113_grok_subscription_terminal_connection_key',
+  '0114_llm_provider_attempts_connection_integrity',
+] as const)
+
+const NON_PR1_POST_0106_MIGRATION_VERSIONS = new Set(DEV_POST_0106_MIGRATION_VERSIONS)
 
 const CLASSIFIED_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  ...NON_PR1_POST_0106_MIGRATION_VERSIONS,
+  ...DEV_POST_0106_MIGRATION_VERSIONS,
   ...PR1_MIGRATION_VERSIONS,
 ] as const)
 

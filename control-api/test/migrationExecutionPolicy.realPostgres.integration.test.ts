@@ -5,6 +5,7 @@ import { once } from 'node:events'
 import { Pool, type PoolClient } from 'pg'
 import { type DbClient, initDb } from '../src/db.js'
 import {
+  DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
@@ -33,11 +34,6 @@ const FRESH_TABLE_INDEXES = Object.freeze([
   'invitation_delivery_commands_authorized_idx',
   'invitation_delivery_commands_invitation_idx',
 ])
-
-const DEV_POST_0106_MIGRATION_VERSIONS = Object.freeze([
-  '0107_llm_provider_attempts_sdk_link',
-  '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
-] as const)
 
 function databaseUrl(baseUrl: string, database: string): string {
   const value = new URL(baseUrl)
