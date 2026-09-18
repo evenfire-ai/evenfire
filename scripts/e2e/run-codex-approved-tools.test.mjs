@@ -45,13 +45,30 @@ test('the tool-call limit case is mandatory only in deterministic mode', () => {
   assert.equal(expectedTitles('real').length, 6)
   assert.ok(expectedTitles('deterministic').includes(toolCallLimitTitle))
   assert.ok(!expectedTitles('real').includes(toolCallLimitTitle))
-  assert.throws(() => expectedTitles('mock'))
+  assert.throws(
+    () => expectedTitles('mock'),
+    /Select deterministic or real upstream mode explicitly/
+  )
 })
 test('rejects a deterministic report without the tool-call limit case', () => {
-  assert.throws(() => validateReport(greenReport('real'), 'deterministic'))
+  assert.throws(
+    () => validateReport(greenReport('real'), 'deterministic'),
+    /Incomplete, failed, flaky or skipped approved-tools report/
+  )
+})
+test('rejects a full-size deterministic report whose limit case is renamed', () => {
+  const report = greenReport('deterministic')
+  const limitSpec = report.suites[0].specs.find(spec => spec.title === toolCallLimitTitle)
+  limitSpec.title = 'an unrelated green case'
+  assert.throws(() => validateReport(report, 'deterministic'), {
+    message: `Required case missing or duplicated: ${toolCallLimitTitle}`,
+  })
 })
 test('rejects a real report that carries the deterministic-only case', () => {
-  assert.throws(() => validateReport(greenReport('deterministic'), 'real'))
+  assert.throws(
+    () => validateReport(greenReport('deterministic'), 'real'),
+    /Incomplete, failed, flaky or skipped approved-tools report/
+  )
 })
 const corruptions = {
   'missing case': report => report.suites[0].specs.pop(),
