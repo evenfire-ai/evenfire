@@ -29,12 +29,12 @@ import type { RefObject } from 'react'
  *  starts to overflow. Also the minimum the resize drag can reach. */
 export const CHAT_DRAWER_MIN_WIDTH = 340
 /** Default session width. Matches the top of the LIVE CSS pre-mount fallback
- *  `--chat-drawer-width: clamp(340px, 32vw, 420px)` (styles.css) that sizes the
+ *  `--chat-drawer-width: clamp(340px, 32vw, 525px)` (styles.css) that sizes the
  *  drawer before this hook measures — keep the two in sync. That clamp is still
  *  in use (the pre-mount / closed-state width), not dead code to delete. */
-export const CHAT_DRAWER_DEFAULT_WIDTH = 420
+export const CHAT_DRAWER_DEFAULT_WIDTH = 525
 /** Generous absolute ceiling for the drag. */
-export const CHAT_DRAWER_MAX_ABSOLUTE = 820
+export const CHAT_DRAWER_MAX_ABSOLUTE = 1000
 /** Width step for arrow-key resize (WAI-ARIA window-splitter pattern). */
 const CHAT_DRAWER_KEY_STEP = 24
 /** Legible floor reserved for the app embed's column while docked. The drawer's
