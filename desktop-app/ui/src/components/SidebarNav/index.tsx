@@ -13,7 +13,6 @@ import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDes
 import type { NavItem } from '@/uiTypes'
 import {
   IconAgents,
-  IconAttachFile,
   IconChat,
   IconChevronRight,
   IconConnectors,

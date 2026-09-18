@@ -127,6 +127,8 @@ describe('SidebarNav logo', () => {
     expect(icon).toBeTruthy()
     expect(icon?.getAttribute('viewBox')).toBe('0 0 24 24')
     // Lucide hard-drive outline plus the separator line and two activity dots.
+    // (Supersedes dev's paperclip alignment: this branch deliberately moved
+    // the EvenDrive nav item to a hard-drive icon.)
     expect(icon?.querySelector('path')?.getAttribute('d')).toContain(
       'M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89'
     )

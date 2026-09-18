@@ -267,6 +267,32 @@ export function IconChat(props: IconProps) {
   )
 }
 
+// "Open chat in full screen" — maximize (corner arrows) glyph. Ejects the
+// drawer's conversation into the full-screen chat tab.
+export function IconMaximize(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <path d="M8 3H5a2 2 0 0 0-2 2v3" />
+      <path d="M21 8V5a2 2 0 0 0-2-2h-3" />
+      <path d="M3 16v3a2 2 0 0 0 2 2h3" />
+      <path d="M16 21h3a2 2 0 0 0 2-2v-3" />
+    </svg>
+  )
+}
+
+// "Collapse chat drawer" — panel-right-close glyph. The drawer's own toggle;
+// it is only visible while the drawer is open, so it always collapses it (the
+// reopen affordance lives on the sandbox-ui embed's title bar).
+export function IconPanelRightClose(props: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M15 3v18" />
+      <path d="m8 9 3 3-3 3" />
+    </svg>
+  )
+}
+
 export function IconMoreHorizontal(props: IconProps) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" {...BASE_STROKE_PROPS} {...props}>
