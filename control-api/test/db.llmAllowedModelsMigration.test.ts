@@ -156,7 +156,7 @@ describe('0056_llm_allowed_models migration', () => {
     )
   })
 
-  it('0109 adds the nullable image_input capability column idempotently (#654)', async () => {
+  it('0115 adds the nullable image_input capability column idempotently (#654)', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const sqls = clientQuery.mock.calls.map(([sql]) => String(sql))
@@ -184,7 +184,7 @@ describe('0056_llm_allowed_models migration', () => {
     expect(alter!).not.toMatch(/DROP COLUMN/)
   })
 
-  it('0109 is purely additive: it adds the column and writes no image_input data', async () => {
+  it('0115 is purely additive: it adds the column and writes no image_input data', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const calls = clientQuery.mock.calls.map(([sql, params]) => ({
@@ -193,7 +193,7 @@ describe('0056_llm_allowed_models migration', () => {
     }))
 
     // Liveness witness FIRST: the migration this test is about actually ran.
-    // Without it, deleting 0109 outright would satisfy both negatives below.
+    // Without it, deleting 0115 outright would satisfy both negatives below.
     expect(calls.find(c => /ADD COLUMN IF NOT EXISTS image_input JSONB/.test(c.sql))).toBeDefined()
 
     // Evidence is derived by the catalog sync from models.dev, never seeded by a

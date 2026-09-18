@@ -37,6 +37,12 @@
  * a discovered model only reaches runtime once an operator enables it via the
  * normal PUT path.
  *
+ * Known race: an admin write to `image_input` that commits while the sync's
+ * UPDATE runs can make that row report no change, because `prev` reads the
+ * statement snapshot while the locked target row is re-checked at its newest
+ * version. The ConfigMap then catches up on the next change or boot reconcile
+ * (#687).
+ *
  * Each run appends a summary row to `llm_catalog_sync_runs` (the UI's "last
  * synced"). No per-model audit rows — that would flood `llm_allowed_models_audit`
  * (which records operator actions) with 1000+ rows per run.

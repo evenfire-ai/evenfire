@@ -212,7 +212,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
       }
     )
 
-    await syncDiscoveredModels(
+    const result = await syncDiscoveredModels(
       {
         materializer: db.materializer,
         loadCatalog: loadStub(catalog, 'live', CAPTURED_AT),
@@ -269,8 +269,11 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     expect(
       db.calls.some(call => /t\.source = 'manual'/.test(call.sql) && call.params[0] === manual.id)
     ).toBe(true)
-    // Three enabled rows changed evidence (two discovery + the manual one) → the
-    // ConfigMap is republished once, after COMMIT.
+    // Two enabled rows changed evidence (claude-opus-4-6 on the discovery branch
+    // and the manual claude-fable-5-1); the other enabled rows are curated or
+    // newer → the ConfigMap is republished once, after COMMIT.
+    expect(result.enabledImageInputChanged).toBe(2)
+    expect(result.materialized).toBe(true)
     expect(db.materializer.materialize).toHaveBeenCalledTimes(1)
   })
 })
