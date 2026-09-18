@@ -63,20 +63,13 @@ export type CodexSubscriptionDeps = {
   authorizer: ProviderAttemptAuthorizer
   proxy: CodexLlmProxyClient
   attemptContext: (input: { model: string }) => CodexAttemptContext
-  /**
-   * Visual rollout gate (#650). Defaults to FALSE: a request that actually
-   * carries image parts is rejected with `image_input_unsupported` until the
-   * operator clears this model for image input in the registry/config wiring.
-   */
-  imageInputEnabled?: boolean
 }
 
 /**
- * Pre-authorize rejections. Both are known, non-retryable codes: the request
+ * Pre-authorize rejections. These are known, non-retryable codes: the request
  * itself cannot succeed, so neither may trigger a retry or a provider fallback.
  */
 const CODEX_REQUEST_INVALID = 'invalid_request'
-const CODEX_IMAGE_INPUT_UNSUPPORTED = 'image_input_unsupported'
 const CODEX_IMAGE_SOURCE_INVALID = 'image_source_invalid'
 
 /** One image part as the Codex V2 contract serializes it. */
@@ -416,12 +409,6 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       throw new CodexAuthorizeError(
         CODEX_REQUEST_INVALID,
         `content parts are only supported on user messages (role=${message.role})`
-      )
-    }
-    if (parts.some(part => part.type === 'image') && this.deps.imageInputEnabled !== true) {
-      throw new CodexAuthorizeError(
-        CODEX_IMAGE_INPUT_UNSUPPORTED,
-        'Image input is not enabled for this Codex model; remove the attachments or enable image input for the codex-subscription provider'
       )
     }
     const contentParts: NonNullable<ProjectedMessage['contentParts']> = parts.map(part =>

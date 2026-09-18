@@ -62,7 +62,6 @@
     "ticket_invalid",
     "ticket_replayed",
     "request_hash_mismatch",
-    "image_input_unsupported",
     "image_source_invalid",
     "payload_too_large"
   ],
@@ -79,8 +78,8 @@
   },
   "requestSchemas": ["codex-completion-request.v1", "codex-completion-request.v2"],
   "visualInput": {
-    "activation": "CODEX_IMAGE_INPUT_MODELS",
-    "enabledByDefault": false,
+    "activation": "default",
+    "enabledByDefault": true,
     "upstreamVerified": false,
     "validation": "container-framing-and-dimensions",
     "limits": {

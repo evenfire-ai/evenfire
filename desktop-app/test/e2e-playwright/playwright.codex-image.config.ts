@@ -18,9 +18,6 @@ for (const name of [
 ]) {
   if (!process.env[name]?.trim()) throw new Error(`Codex image lane requires explicit ${name}`)
 }
-if (!['enabled', 'disabled'].includes(process.env.E2E_CODEX_IMAGE_MODE ?? '')) {
-  throw new Error('Codex image lane requires E2E_CODEX_IMAGE_MODE=enabled or disabled')
-}
 
 export default defineConfig({
   ...base,

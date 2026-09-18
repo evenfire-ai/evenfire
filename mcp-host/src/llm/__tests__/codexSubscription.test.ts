@@ -510,10 +510,7 @@ describe('CodexSubscriptionProvider', () => {
 
   it.each(METHODS)('sends a real PNG as a V2 part through %s', async method => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
 
     await invoke(provider, method, userWithImage())
 
@@ -542,12 +539,9 @@ describe('CodexSubscriptionProvider', () => {
     expect(wired.stream.mock.calls[0][0].request).toEqual(authorized.request)
   })
 
-  it('accepts a JPEG part when image input is enabled', async () => {
+  it('accepts a JPEG part on the default Codex visual path', async () => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
 
     await provider.completeSingleTurn(userWithImage(JPEG_2X2_BASE64, 'image/jpeg'))
 
@@ -557,26 +551,19 @@ describe('CodexSubscriptionProvider', () => {
     )
   })
 
-  it.each(METHODS)(
-    'refuses to authorize an image through %s while image input is dark',
-    async method => {
-      const wired = deps()
-      // `imageInputEnabled` is absent: the documented default is false.
-      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
+  it.each(METHODS)('authorizes an image through %s without a capability gate', async method => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
 
-      await expect(invoke(provider, method, userWithImage())).rejects.toMatchObject({
-        name: 'CodexAuthorizeError',
-        code: 'image_input_unsupported',
-      })
-      expect(wired.authorize).not.toHaveBeenCalled()
-      expect(wired.stream).not.toHaveBeenCalled()
-    }
-  )
+    await invoke(provider, method, userWithImage())
+    expect(wired.authorize).toHaveBeenCalledOnce()
+    expect(wired.stream).toHaveBeenCalledOnce()
+  })
 
-  it('classifies an unsupported visual request as terminal with no fallback', () => {
+  it('classifies a missing image source as terminal with no fallback', () => {
     const provider = new CodexSubscriptionProvider('gpt-5.6-luna', deps() as never)
     const classified = provider.classifyError(
-      new CodexAuthorizeError('image_input_unsupported', 'image input is not enabled')
+      new CodexAuthorizeError('image_source_invalid', 'image part has no usable provenance source')
     )
     expect(classified.code).toBe(LlmErrorCode.ApiCallFailed)
     expect(classified.retryable).toBe(false)
@@ -586,10 +573,7 @@ describe('CodexSubscriptionProvider', () => {
 
   it.each(METHODS)('rejects an image part without provenance through %s', async method => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     const messages = userWithImage()
     messages[0].contentParts = [
       { type: 'text', text: 'what is on screen?' },
@@ -606,10 +590,7 @@ describe('CodexSubscriptionProvider', () => {
 
   it('rejects parts on a non-user message instead of dropping them', async () => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
 
     await expect(
       provider.completeSingleTurn([
@@ -646,10 +627,7 @@ describe('CodexSubscriptionProvider', () => {
 
   it('restates content from the parts when the caller left them out of sync', async () => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     const messages = userWithImage()
     // A stale `content` must never reach the wire as a contradiction of its own
     // parts: V2 rejects the request outright, so the projection rebuilds it.
@@ -664,10 +642,7 @@ describe('CodexSubscriptionProvider', () => {
     'rejects a signature-only image stub through %s before authorize',
     async method => {
       const wired = deps()
-      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-        ...wired,
-        imageInputEnabled: true,
-      } as never)
+      const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
 
       await expect(
         invoke(provider, method, userWithImage('iVBORw0KGgo=', 'image/png'))
@@ -679,10 +654,7 @@ describe('CodexSubscriptionProvider', () => {
 
   it('rejects an over-limit image batch through the shared contract, not a local copy', async () => {
     const wired = deps()
-    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', {
-      ...wired,
-      imageInputEnabled: true,
-    } as never)
+    const provider = new CodexSubscriptionProvider('gpt-5.6-luna', wired as never)
     const messages = userWithImage()
     messages[0].contentParts = [
       { type: 'text', text: 'what is on screen?' },

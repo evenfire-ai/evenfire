@@ -249,6 +249,17 @@ const MIB = 1024 * 1024
  * size drives the real code path without allocating and base64-encoding 10MiB
  * blobs per case.
  */
+function pngIhdrFile(name: string, width: number, height: number): File {
+  const bytes = new Uint8Array(8 + 8 + 13)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  const view = new DataView(bytes.buffer)
+  view.setUint32(8, 13)
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+  view.setUint32(16, width)
+  view.setUint32(20, height)
+  return new File([bytes], name, { type: 'image/png' })
+}
+
 function imageFile(name: string, sizeBytes: number, type = 'image/png'): File {
   const file = new File([new Uint8Array([0x41])], name, { type })
   Object.defineProperty(file, 'size', { configurable: true, value: sizeBytes })
@@ -364,6 +375,18 @@ describe('ComposerPanel image budget', () => {
     pickFiles(container, [imageFile('five.png', 5 * MIB)])
     await waitFor(() => expect(attachedImages()).toHaveLength(1))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('refuses a 2049 px image before send and names the pixel bound', async () => {
+    const { container } = render(<ComposerPanel inline={false} />)
+    pickFiles(container, [pngIhdrFile('over-res.png', 2049, 128)])
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toContain(
+        'over-res.png is too large. Max resolution is 2048 px.'
+      )
+    )
+    expect(composerActions.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+    expect(attachedImages()).toHaveLength(0)
   })
 
   it('explains files beyond the 3-image cap instead of dropping them silently', async () => {

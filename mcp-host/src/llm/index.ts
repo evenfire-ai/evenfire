@@ -58,10 +58,9 @@ function createGrokRuntimeDeps(captured?: GrokAttemptContext) {
   }
 }
 
-function createCodexRuntimeDeps(model: string | undefined, captured?: CodexAttemptContext) {
+function createCodexRuntimeDeps(captured?: CodexAttemptContext) {
   const gateway = (config.mcpHostGatewayUrl ?? '').trim() || DEFAULT_CODEX_AUTHORIZE_GATEWAY
   return {
-    imageInputEnabled: Boolean(model && config.codexImageInputModels.includes(model)),
     authorizer: new ProviderAttemptAuthorizer({
       authorizeUrl: resolveCodexAuthorizeUrl(gateway),
       readPlatformJwt: readCodexPlatformJwt,
@@ -136,7 +135,7 @@ export function createLLMProvider(
       credentials,
       modelName,
       provider === 'codex-subscription'
-        ? { codex: createCodexRuntimeDeps(modelName, options?.capturedCodexAttemptContext) }
+        ? { codex: createCodexRuntimeDeps(options?.capturedCodexAttemptContext) }
         : provider === 'grok-subscription'
           ? { grok: createGrokRuntimeDeps(options?.capturedGrokAttemptContext) }
           : undefined

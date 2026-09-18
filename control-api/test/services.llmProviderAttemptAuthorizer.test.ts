@@ -241,7 +241,6 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
-            imageInputEnabled: true,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -284,7 +283,6 @@ describe('authorizeLlmProviderAttempt', () => {
       const provider = new CodexSubscriptionProvider(REQUEST.model, {
         authorizer,
         proxy,
-        imageInputEnabled: true,
         attemptContext: () => ({
           policyRevision: 4,
           policyHash: body().policyHash,
@@ -418,7 +416,6 @@ describe('authorizeLlmProviderAttempt', () => {
           const frames: unknown[] = []
           const result = await streamCodexCompletion({
             ...envelope,
-            imageInputEnabled: true,
             ticket: {
               jti: 'fixture-ticket',
               hostRef: 'research-host',
@@ -457,7 +454,6 @@ describe('authorizeLlmProviderAttempt', () => {
       const provider = new CodexSubscriptionProvider(REQUEST.model, {
         authorizer,
         proxy,
-        imageInputEnabled: true,
         attemptContext: () => ({
           policyRevision: 4,
           policyHash: body().policyHash,

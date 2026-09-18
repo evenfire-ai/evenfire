@@ -114,12 +114,12 @@ describe('codex-subscription contract freeze', () => {
       localContract.SCHEMA_VERSION_V2,
     ])
     expect(fixture.visualInput.limits).toEqual(localContract.VISUAL_LIMITS)
-    expect(fixture.visualInput.enabledByDefault).toBe(false)
+    expect(fixture.visualInput.enabledByDefault).toBe(true)
     expect(fixture.visualInput.upstreamVerified).toBe(false)
-    expect(fixture.visualInput.activation).toBe('CODEX_IMAGE_INPUT_MODELS')
+    expect(fixture.visualInput.activation).toBe('default')
     const architecture = readFileSync(architectureDocPath, 'utf8')
     expect(architecture).toContain('codex-completion-request.v2')
-    expect(architecture).toContain('CODEX_IMAGE_INPUT_MODELS')
+    expect(architecture).not.toContain('CODEX_IMAGE_INPUT_MODELS')
     const proxyDeploy = readFileSync(
       join(repoRoot, 'deploy/base/control-plane/codex-llm-proxy.yaml'),
       'utf8'
@@ -130,12 +130,12 @@ describe('codex-subscription contract freeze', () => {
     expect(proxyDeploy).toContain(
       `CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: "${localContract.LIMITS.maxVisualRequestBodyBytes}"`
     )
-    expect(proxyDeploy).not.toMatch(/CODEX_IMAGE_INPUT_MODELS:/)
+    expect(proxyDeploy).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
     const hostConfig = readFileSync(join(repoRoot, 'mcp-host/src/config.ts'), 'utf8')
     const proxyConfig = readFileSync(join(repoRoot, 'codex-llm-proxy/src/config.ts'), 'utf8')
-    expect(hostConfig).toMatch(/CODEX_IMAGE_INPUT_MODELS[\s\S]{0,120}split\(','\)/)
-    expect(proxyConfig).toMatch(/CODEX_IMAGE_INPUT_MODELS[\s\S]{0,120}split\(','\)/)
-    expect(architecture).toContain('Set the same list on both services')
+    expect(hostConfig).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
+    expect(proxyConfig).not.toMatch(/CODEX_IMAGE_INPUT_MODELS/)
+    expect(architecture).toContain('on by default for every `codex-subscription` model')
   })
 
   it('requires the sanitized fixture and both freeze documents', () => {

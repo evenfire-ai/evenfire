@@ -11,21 +11,34 @@ const fixtures = createRequire(__filename)(
 }
 
 /** A neutral image with an answer absent from the filename and user prompt. */
-export function challengeImage(format: 'png' | 'jpeg'): { code: string; bytes: Buffer } {
+export function challengeImageAt(
+  format: 'png' | 'jpeg',
+  width: number,
+  height: number
+): { code: string; bytes: Buffer; width: number; height: number } {
   // Reuse the Host renderer installed for T0; do not add another dependency.
   const { createCanvas } = require('@napi-rs/canvas')
   const code = randomBytes(8).toString('hex').toUpperCase()
-  const canvas = createCanvas(800, 120)
+  const canvas = createCanvas(width, height)
   const context = canvas.getContext('2d')
   context.fillStyle = 'white'
-  context.fillRect(0, 0, 800, 120)
+  context.fillRect(0, 0, width, height)
   context.fillStyle = 'black'
-  context.font = '48px monospace'
-  context.fillText(code, 24, 78)
+  const fontSize = Math.max(24, Math.min(Math.floor(height * 0.4), Math.floor(width / 12)))
+  context.font = `${fontSize}px monospace`
+  context.textBaseline = 'middle'
+  context.fillText(code, Math.max(16, Math.floor(width * 0.04)), Math.floor(height / 2))
   return {
     code,
     bytes: format === 'png' ? canvas.toBuffer('image/png') : canvas.toBuffer('image/jpeg'),
+    width,
+    height,
   }
+}
+
+export function challengeImage(format: 'png' | 'jpeg'): { code: string; bytes: Buffer } {
+  const image = challengeImageAt(format, 800, 120)
+  return { code: image.code, bytes: image.bytes }
 }
 
 /** Same pixel challenge, grown to an exact decoded size the contract still accepts. */

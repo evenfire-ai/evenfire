@@ -40,8 +40,10 @@ ceiling is 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
 PNG may exceed 10 MiB; the HTTP envelope stays 24 MiB so that encoded body
 still fits. Dimensions above 2048 px are rejected here because the frozen
 ChatGPT endpoint 400s them; that is a model/pixel limit, not a byte limit.
-Which models accept images is owned by issue #654 / PR #669 (models.dev).
-These byte numbers are conservative Evenfire limits, not upstream facts.
+For `codex-subscription`, visual input is on by default for every catalog model.
+Which non-Codex providers accept images is owned by issue #654 / PR #669
+(models.dev). These byte numbers are conservative Evenfire limits, not
+upstream facts.
 The shared pure validator checks canonical base64, MIME/container framing and
 header dimensions; it does not decode pixels or prove image decodability.
 The fixtures contain independently decoded 2x2 PNG/JPEG images.
@@ -56,7 +58,7 @@ signing but before commit. Exceeding the bound rolls back the new attempt,
 ticket and new reservation; it does not call the receipt finalizer before redeem.
 The Host uses the same envelope builder. V2 has no outer deadline: its deadline
 is `request.deadlineMs`, part of the authorized hash. A proxy configured below
-the shared visual envelope budget refuses visual activation at startup.
+the shared visual envelope budget refuses to start.
 
 Desktop enforces the 16 MiB individual and 16 MiB combined hard attachment
 budgets (usual target remains 5 / 9 MiB).
@@ -76,21 +78,19 @@ an inline data URL. The shape is grounded in the official Codex client
 [ContentItem and ImageReference definitions](https://github.com/openai/codex/blob/fc2ea82e7eff22c618a56db29c68a6b1967cba7d/codex-rs/protocol/src/models.rs#L878).
 This source evidence is not a successful call to Evenfire's frozen endpoint.
 
-`CODEX_IMAGE_INPUT_MODELS` is an explicit, comma-separated model rollout gate in
-both Host and proxy. It defaults to empty. Set the same list on both services:
-enabling it on Host alone still parses the proxy at 1 MiB, and enabling it on
-the proxy alone still returns `image_input_unsupported` from Host. Set it only
-for the models whose interoperability has been independently verified, after
-every authorizer/proxy replica accepts V2. This gate is not a replacement for
-catalog authorization.
-Until enabled, visual input returns `image_input_unsupported`; it is not silently
-removed and does not trigger automatic fallback. Ordinary eligible failures
-retain the existing configured fallback policy. Limit errors, including HTTP
-413 without a JSON body, remain non-retryable.
+Visual input is on by default for every `codex-subscription` model. Catalog
+authorization still decides which model a Host may call; this transport does
+not keep a second model-vision allowlist. To stop all Codex traffic, use the
+existing kill switches (`MCP_HOST_CODEX_SUBSCRIPTION_ENABLED` and
+`CODEX_LLM_PROXY_EXECUTION_ENABLED`). Missing image provenance returns
+`image_source_invalid`. Limit errors, including HTTP 413 without a JSON body,
+remain non-retryable. Images are never silently stripped and do not trigger
+automatic fallback.
 
 Deploy accepting consumers before visual senders. An old consumer must reject
 V2 explicitly; do not translate V2 to text to work around that rejection. On
-rollback disable visual activation first, drain attempts, then restore consumers.
+rollback set `CODEX_LLM_PROXY_EXECUTION_ENABLED=false`, drain attempts, then
+restore consumers.
 Do not roll back to a sender that silently discards images without a front guard.
 Committed abandoned attempts retain their audit identity. Existing ticket and
 budget TTLs, rather than the receipt finalizer, bound their execution and pending

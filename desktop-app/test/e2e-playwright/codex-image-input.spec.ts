@@ -6,14 +6,13 @@
  * existing stored-session reset needs explicit opt-in before fixtures run.
  */
 import { randomUUID } from 'node:crypto'
-import { challengeImage, paddedChallengeImage } from './codexImageChallenge.js'
+import { challengeImage, challengeImageAt, paddedChallengeImage } from './codexImageChallenge.js'
 import { expect, test } from './fixtures.js'
 
 const hostRef = process.env.E2E_HOST_REF ?? ''
 const hostLabel = process.env.E2E_CODEX_HOST_LABEL ?? ''
 const modelId = process.env.E2E_CODEX_IMAGE_MODEL ?? ''
 const modelLabel = process.env.E2E_CODEX_IMAGE_MODEL_LABEL ?? ''
-const mode = process.env.E2E_CODEX_IMAGE_MODE ?? ''
 const MIB = 1024 * 1024
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
@@ -39,7 +38,6 @@ test.beforeAll(() => {
   expect(hostLabel, 'Name its visible Agents-list label explicitly').not.toBe('')
   expect(modelId, 'Name the actual Codex model explicitly').not.toBe('')
   expect(modelLabel, 'Name its visible model-picker label explicitly').not.toBe('')
-  expect(['enabled', 'disabled'], 'Select a provisioned capability lane explicitly').toContain(mode)
 })
 
 async function startOwnedChat(page: import('@playwright/test').Page): Promise<void> {
@@ -125,22 +123,11 @@ async function sendVisualTurn(
     ).toBeVisible()
   }
   const answer = page.getByTestId('agent-response')
-  if (mode === 'enabled') {
-    for (const code of input.codes) {
-      await expect(answer).toContainText(new RegExp(`\\b${code}\\b`, 'i'), { timeout: 180_000 })
-    }
-    await expect(answer).not.toHaveClass(/chat-bubble--error/)
-    await expect(thread.getByTestId('progress-stepper')).toHaveCount(0)
-  } else {
-    await expect(answer.locator('.error-bubble-message')).toContainText(
-      'Image input is not enabled for this Codex model',
-      { timeout: 180_000 }
-    )
-    await expect(answer).toHaveClass(/chat-bubble--error/)
-    for (const code of input.codes) {
-      await expect(answer).not.toContainText(new RegExp(`\\b${code}\\b`, 'i'))
-    }
+  for (const code of input.codes) {
+    await expect(answer).toContainText(new RegExp(`\\b${code}\\b`, 'i'), { timeout: 180_000 })
   }
+  await expect(answer).not.toHaveClass(/chat-bubble--error/)
+  await expect(thread.getByTestId('progress-stepper')).toHaveCount(0)
   await expect(answer).toHaveCount(1)
   await expect(send).toHaveAttribute('aria-label', 'Send message')
   await expect(thread.locator('.chat-message--in-flight')).toHaveCount(0)
@@ -159,9 +146,7 @@ function visualPrompt(count: number): string {
 }
 
 for (const format of ['png', 'jpeg'] as const) {
-  test(`${format} visual input follows the explicitly provisioned capability lane`, async ({
-    appPage,
-  }) => {
+  test(`${format} visual input reaches the owned Codex Host and model`, async ({ appPage }) => {
     test.setTimeout(240_000)
     // The random answer exists only in pixels, never the filename or prompt.
     // A generic response or discarded image cannot satisfy this 64-bit challenge.
@@ -186,7 +171,53 @@ for (const format of ['png', 'jpeg'] as const) {
   })
 }
 
-test('5 MiB JPEG follows the same capability lane as a small image', async ({ appPage }) => {
+test('2048 px JPEG follows the Codex long-side pixel bound', async ({ appPage }) => {
+  test.setTimeout(360_000)
+  const image = challengeImageAt('jpeg', 2048, 256)
+  const filename = `visual-${randomUUID()}.jpeg`
+  await startOwnedChat(appPage)
+  await uploadThroughChooser(appPage, [
+    { name: filename, mimeType: 'image/jpeg', buffer: image.bytes },
+  ])
+  await assertPreview(appPage, filename)
+  await sendVisualTurn(appPage, {
+    prompt: visualPrompt(1),
+    filenames: [filename],
+    codes: [image.code],
+  })
+})
+
+test('2048 by 2048 JPEG stays at the Codex pixel ceiling', async ({ appPage }) => {
+  test.setTimeout(360_000)
+  const image = challengeImageAt('jpeg', 2048, 2048)
+  const filename = `visual-${randomUUID()}.jpeg`
+  await startOwnedChat(appPage)
+  await uploadThroughChooser(appPage, [
+    { name: filename, mimeType: 'image/jpeg', buffer: image.bytes },
+  ])
+  await assertPreview(appPage, filename)
+  await sendVisualTurn(appPage, {
+    prompt: visualPrompt(1),
+    filenames: [filename],
+    codes: [image.code],
+  })
+})
+
+test('refuses a 2049 px image before send', async ({ appPage }) => {
+  const image = challengeImageAt('png', 2049, 128)
+  const filename = `over-res-${randomUUID()}.png`
+  await startOwnedChat(appPage)
+  await uploadThroughChooser(appPage, [
+    { name: filename, mimeType: 'image/png', buffer: image.bytes },
+  ])
+  await expect(appPage.getByRole('alert')).toContainText(
+    `${filename} is too large. Max resolution is 2048 px.`
+  )
+  await expect(appPage.getByRole('button', { name: filename, exact: true })).toHaveCount(0)
+  await expect(appPage.getByTestId('agent-response')).toHaveCount(0)
+})
+
+test('5 MiB JPEG follows the same visual path as a small image', async ({ appPage }) => {
   test.setTimeout(360_000)
   const image = paddedChallengeImage('jpeg', 5 * MIB)
   const filename = `visual-${randomUUID()}.jpeg`

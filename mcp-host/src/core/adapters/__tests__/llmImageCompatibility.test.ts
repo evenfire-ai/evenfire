@@ -590,7 +590,6 @@ describe('Codex V2 transport wiring (#650)', () => {
         policyHash: 'b'.repeat(64),
         hostRef: 'chatllm',
       }),
-      imageInputEnabled: true,
     } as unknown as CodexSubscriptionDeps)
 
     const { messages } = repeatedFrameMessages()
@@ -634,7 +633,6 @@ describe('Codex V2 transport wiring (#650)', () => {
         policyHash: 'b'.repeat(64),
         hostRef: 'chatllm',
       }),
-      imageInputEnabled: true,
     } as unknown as CodexSubscriptionDeps)
     const fallback = recordingProvider({ cache: false })
     const policy: LlmPolicy = {

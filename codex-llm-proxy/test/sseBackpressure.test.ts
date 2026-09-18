@@ -96,7 +96,6 @@ function config(): CodexLlmProxyConfig {
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
-    imageInputModels: [],
     controlApiBaseUrl: 'http://control-api.invalid/api/v1',
     controlApiServiceName: 'codex-llm-proxy',
     controlApiServiceToken: 'unused',

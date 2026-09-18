@@ -121,16 +121,15 @@ export function createProxyApps(
   const visualJson = express.json({ limit: config.maxVisualBodyBytes })
   // Selecting the transport budget needs the platform identity, so this runs as a
   // route handler after the rate limiter: an unauthenticated caller cannot force
-  // token verification or body parsing ahead of the limit. Only the image-capable
-  // completion endpoint with an already valid platform identity may use the larger
-  // budget. V1 is still bounded by its contract parser, and admin or
-  // unauthenticated requests keep the ordinary cap.
+  // token verification or body parsing ahead of the limit. A valid platform
+  // identity may use the visual envelope; V1 is still re-bounded after parse.
+  // Admin or unauthenticated requests keep the ordinary cap.
   const selectTransportBudget = (req: GatedRequest, res: Response, next: NextFunction): void => {
     // Visual parse keeps a 24 MiB buffer. Admit that parse inside the visual
     // gate so two concurrent bodies stay inside the 256Mi pod. Identity is
     // read from the Authorization header; an anonymous caller cannot force
     // the larger parser.
-    if (config.imageInputModels.length > 0 && verifyPlatformJwt(bearer(req), config)) {
+    if (verifyPlatformJwt(bearer(req), config)) {
       void (async () => {
         let release: (() => void) | undefined
         try {
@@ -241,7 +240,6 @@ export function createProxyApps(
         res.setHeader('cache-control', 'no-cache')
         const started = Date.now()
         const result = await streamCodexCompletion({
-          imageInputEnabled: config.imageInputModels.includes(ticket.model),
           executionTicket: parsed.data.executionTicket,
           requestHash: parsed.data.requestHash,
           request: parsed.data.request,

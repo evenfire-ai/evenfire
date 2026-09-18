@@ -32,17 +32,16 @@ or readiness. Leave the default enabled for initial bootstrap. Verify the
 Host's provider/model/connection binding before and after the update.
 
 Provider tests must cover both completion methods, direct/tool origins, prompt
-context, redacted text parts, repeated bytes from distinct tool calls and the
-default-disabled model gate. Proxy conformance inspects the final upstream body,
+context, redacted text parts and repeated bytes from distinct tool calls.
+Proxy conformance inspects the final upstream body,
 asserts provenance does not become model input, and retains tools/cancel/SSE
 checks. Authorizer tests require a pre-commit exact-envelope check; its PostgreSQL
 case must prove rollback against a real transaction. A mocked transaction result
 does not satisfy that PostgreSQL gate.
 
-Set `CODEX_IMAGE_INPUT_MODELS` consistently on the owned Host/proxy only after
-consumer rollout and a separately authorized neutral-image interoperability check.
-The default empty list rejects visual input clearly. No test fixture or passing
-conformance suite certifies that the real endpoint or selected model sees images.
+Visual input is on by default for every `codex-subscription` model. No test
+fixture or passing conformance suite certifies that the real endpoint or
+selected model sees images.
 
 Keep browser/Electron evidence separate: visible login and Host selection, upload
 through Add context / Upload Files, preview, send, correlated task completion and
@@ -60,12 +59,11 @@ uploads through the visible composer, including a 5 MiB JPEG, a 12 MiB PNG
 16 MiB, over 16 MiB total, a fourth image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
 challenge rendered only into image pixels. Large cases pad that same image so
 the answer stays in pixels while the decoded size matches the hop budget. The
-filename and prompt do not carry the answer. An enabled run requires that
+filename and prompt do not carry the answer. A passing run requires that
 answer (hexadecimal case is ignored), a non-error response, no tool steps
 substituting OCR/loading for direct image input, and no fallback badge.
 The selector's stable data attributes verify the actual selected Host, provider
-and model. The disabled mode instead requires the explicit capability error.
-Composer budget refusals never send.
+and model. Composer budget and resolution refusals never send.
 
 This is a real upstream lane, not a mock. Before running it, obtain separate
 authorization for runtime, upstream access and the existing login fixture's
@@ -77,10 +75,7 @@ stored-session reset. Provision the owned Host and consumers first. Set:
 - `E2E_HOST_REF` to the actual owned Host and `E2E_CODEX_HOST_LABEL` to its
   exact visible label in the Agents list; there is no shared-host default.
 - `E2E_CODEX_IMAGE_MODEL` and `E2E_CODEX_IMAGE_MODEL_LABEL` to its model ID and
-  visible picker label.
-- `E2E_CODEX_IMAGE_MODE=enabled` or `disabled`, matching the provisioned
-  capability gate. Run both modes against their appropriate configuration;
-  the test does not change deployments or grants.
+  visible picker label. The test does not change deployments or grants.
 
 Install Host dependencies as well as Desktop dependencies: the neutral challenge
 uses the existing Host canvas dependency. Node 24 and `verify:electron` remain
@@ -93,7 +88,7 @@ node node_modules/@playwright/test/cli.js test \
 ```
 
 The normal Desktop project excludes this spec. Its dedicated config rejects
-missing authority, Host/model identity or mode before global setup; it cannot
+missing authority or Host/model identity before global setup; it cannot
 return a successful all-skipped run. The model ID must be the canonical ID
 returned by the runtime, not an alias. Static audit/typecheck and local challenge-image
 decoding do not count as browser or real-upstream execution. Typed tool-result

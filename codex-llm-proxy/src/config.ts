@@ -11,7 +11,6 @@ export type CodexLlmProxyConfig = {
   jwtIssuer: string
   jwtPublicKey: string
   executionEnabled: boolean
-  imageInputModels: string[]
   controlApiBaseUrl: string
   controlApiServiceName: string
   controlApiServiceToken: string
@@ -60,10 +59,6 @@ function requiredNonEmpty(name: string, raw: string | undefined): string {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyConfig {
-  const imageInputModels = (env.CODEX_IMAGE_INPUT_MODELS ?? '')
-    .split(',')
-    .map(model => model.trim())
-    .filter(Boolean)
   const maxBodyBytes = requiredPositiveInt(
     'CODEX_LLM_PROXY_MAX_BODY_BYTES',
     env.CODEX_LLM_PROXY_MAX_BODY_BYTES,
@@ -74,7 +69,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     env.CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES,
     LIMITS.maxVisualRequestBodyBytes
   )
-  if (imageInputModels.length > 0 && maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
+  if (maxVisualBodyBytes < LIMITS.maxVisualRequestBodyBytes) {
     throw new Error('Visual Codex requests require the full shared envelope byte budget')
   }
   return {
@@ -108,7 +103,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CodexLlmProxyC
     jwtIssuer: env.CODEX_LLM_PROXY_JWT_ISSUER?.trim() || 'control-api',
     jwtPublicKey: requiredPem('CODEX_LLM_PROXY_JWT_PUBLIC_KEY', env.CODEX_LLM_PROXY_JWT_PUBLIC_KEY),
     executionEnabled: env.CODEX_LLM_PROXY_EXECUTION_ENABLED === 'true',
-    imageInputModels,
     controlApiBaseUrl: requiredHttpUrl(
       'CODEX_LLM_PROXY_CONTROL_API_URL',
       env.CODEX_LLM_PROXY_CONTROL_API_URL

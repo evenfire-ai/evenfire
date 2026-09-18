@@ -30,7 +30,6 @@ function config(overrides: Partial<CodexLlmProxyConfig> = {}): CodexLlmProxyConf
     jwtIssuer: 'control-api',
     jwtPublicKey: publicKey,
     executionEnabled: true,
-    imageInputModels: [],
     controlApiBaseUrl: '',
     controlApiServiceName: 'codex-llm-proxy',
     controlApiServiceToken: '',
@@ -159,7 +158,7 @@ describe('codex-llm-proxy security surface', () => {
 
   it('reserves the larger transport budget for authenticated visual requests', async () => {
     const { runtimeApp, adminApp } = createProxyApps(
-      config({ maxBodyBytes: 1_048_576, imageInputModels: ['gpt-5.1'] })
+      config({ maxBodyBytes: 1_048_576 })
     )
     // Deliberately invalid ticket: this test checks parser admission and the
     // unchanged ticket gate, without redeeming or contacting any model.
@@ -201,7 +200,7 @@ describe('codex-llm-proxy security surface', () => {
 
   it('rate limits the completion endpoint before body parsing and authorization', async () => {
     const { runtimeApp } = createProxyApps(
-      config({ maxBodyBytes: 1024, imageInputModels: ['gpt-5.1'] })
+      config({ maxBodyBytes: 1024 })
     )
     const completion = () => request(runtimeApp).post('/internal/runtime/v1/codex/completions')
     const oversized = {
@@ -357,27 +356,20 @@ describe('codex-llm-proxy security surface', () => {
     ).toThrow(/bounded positive integer/)
   })
 
-  it('keeps visual rollout disabled by default and refuses an incompatible envelope budget', () => {
+  it('refuses a visual envelope budget below the shared contract', () => {
     const required = {
       CODEX_LLM_PROXY_JWT_PUBLIC_KEY: publicKey,
       CODEX_LLM_PROXY_CONTROL_API_URL:
         'http://control-api-rpc-gateway.control-plane.svc.cluster.local:8090/api/v1',
       CODEX_LLM_PROXY_CONTROL_API_TOKEN: 'dev-codex-llm-proxy-token',
     }
-    expect(loadConfig(required).imageInputModels).toEqual([])
     expect(() =>
       loadConfig({
         ...required,
-        CODEX_IMAGE_INPUT_MODELS: 'gpt-5.1',
         CODEX_LLM_PROXY_MAX_VISUAL_BODY_BYTES: '1024',
       })
     ).toThrow(/shared envelope byte budget/)
-    expect(
-      loadConfig({
-        ...required,
-        CODEX_IMAGE_INPUT_MODELS: ' gpt-5.1, gpt-5.3-codex ',
-      }).imageInputModels
-    ).toEqual(['gpt-5.1', 'gpt-5.3-codex'])
+    expect(loadConfig(required).maxVisualBodyBytes).toBe(24 * 1024 * 1024)
   })
 })
 

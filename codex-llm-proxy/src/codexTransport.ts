@@ -49,8 +49,6 @@ export class CodexTransportError extends Error {
 }
 
 export type StreamCodexCompletionInput = {
-  /** Explicit rollout gate: local format support is not upstream certification. */
-  imageInputEnabled?: boolean
   executionTicket: string
   requestHash: string
   request: unknown
@@ -105,16 +103,6 @@ export async function streamCodexCompletion(
   }
   if (request.model !== input.ticket.model) {
     throw new CodexTransportError('model_not_allowed', 'request model does not match the ticket')
-  }
-  if (
-    request.schemaVersion === 'codex-completion-request.v2' &&
-    request.messages.some(message => message.contentParts?.some(part => part.type === 'image')) &&
-    input.imageInputEnabled !== true
-  ) {
-    throw new CodexTransportError(
-      'image_input_unsupported',
-      'Image input is not enabled for this Codex model'
-    )
   }
   // A client that disconnected before dispatch must not consume the ticket:
   // nothing was redeemed, so there is no attempt receipt to finalize.

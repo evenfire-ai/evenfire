@@ -22,6 +22,7 @@ import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
+  COMPOSER_MAX_IMAGE_DIMENSION,
   COMPOSER_MAX_TOTAL_IMAGE_BYTES,
   ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
 } from '@constants/attachments'
@@ -29,6 +30,7 @@ import { useContextsDataController } from '@hooks/domain/useContextsDataControll
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
 import { useClickOutside } from '@hooks/useClickOutside'
 import { useComposerDraft } from '@hooks/useComposerDraft'
+import { readImageHeaderDimensions } from '@lib/imageHeaderDimensions'
 import type { WorkflowRecipeListResult } from '../../../../src/types'
 import type { ComposerImageAttachment, ComposerReferenceAttachment } from '../../uiTypes'
 import { AnnotationCanvas } from './AnnotationCanvas'
@@ -58,6 +60,36 @@ function getComposerImageTooltip(attachment: ComposerImageAttachment): string {
 
 function formatComposerMebibytes(bytes: number): number {
   return Math.round(bytes / (1024 * 1024))
+}
+
+function bytesFromBase64(data: string): Uint8Array | null {
+  try {
+    const binary = atob(data)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    return bytes
+  } catch {
+    return null
+  }
+}
+
+function composerImageDimensionRejection(
+  name: string,
+  mimeType: ComposerImageAttachment['mimeType'],
+  dataBase64: string
+): string | null {
+  const bytes = bytesFromBase64(dataBase64)
+  const dimensions = bytes ? readImageHeaderDimensions(mimeType, bytes) : null
+  if (!dimensions) return null
+  if (
+    dimensions.width > COMPOSER_MAX_IMAGE_DIMENSION ||
+    dimensions.height > COMPOSER_MAX_IMAGE_DIMENSION
+  ) {
+    return `${name || 'Image'} is too large. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
+  }
+  return null
 }
 
 type ComposerImageBudgetRejection = 'image-too-large' | 'total-too-large' | null
@@ -505,6 +537,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
+          const dimensionError = composerImageDimensionRejection(
+            file.name || 'Image',
+            mimeType,
+            dataBase64
+          )
+          if (dimensionError) {
+            validationErrors.push(dimensionError)
+            revokePreviewUrl(previewUrl)
+            continue
+          }
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -560,18 +602,31 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         0
       )
       const rejection = composerImageBudgetRejection(updated.sizeBytes, otherImagesBytes)
-      if (!rejection) {
+      const dimensionError = composerImageDimensionRejection(
+        updated.name || 'Image',
+        updated.mimeType,
+        updated.dataBase64
+      )
+      if (!rejection && !dimensionError) {
         onUpdateComposerImageAttachment(updated)
         return
       }
+      if (rejection === 'image-too-large') {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
+            COMPOSER_MAX_IMAGE_BYTES
+          )} MiB per image.`
+        )
+      }
+      if (rejection === 'total-too-large') {
+        throw new Error(
+          `${updated.name || 'Image'} was kept unchanged. Attachments can total at most ${formatComposerMebibytes(
+            COMPOSER_MAX_TOTAL_IMAGE_BYTES
+          )} MiB per message.`
+        )
+      }
       throw new Error(
-        rejection === 'image-too-large'
-          ? `${updated.name || 'Image'} was kept unchanged. Max size is ${formatComposerMebibytes(
-              COMPOSER_MAX_IMAGE_BYTES
-            )} MiB per image.`
-          : `${updated.name || 'Image'} was kept unchanged. Attachments can total at most ${formatComposerMebibytes(
-              COMPOSER_MAX_TOTAL_IMAGE_BYTES
-            )} MiB per message.`
+        `${updated.name || 'Image'} was kept unchanged. Max resolution is ${COMPOSER_MAX_IMAGE_DIMENSION} px.`
       )
     },
     [composerImageAttachments, onUpdateComposerImageAttachment]

@@ -126,16 +126,12 @@ describe('streamCodexCompletion', () => {
         fetchFn,
         lookup: async () => [{ address: '1.2.3.4', family: 4 }],
       }
-      await expect(streamCodexCompletion(input)).rejects.toMatchObject({
-        code: 'image_input_unsupported',
+      await expect(streamCodexCompletion({ ...input, deadlineMs: 1000 })).rejects.toMatchObject({
+        code: 'invalid_request',
       })
       expect(redeem).not.toHaveBeenCalled()
       expect(fetchFn).not.toHaveBeenCalled()
-      await expect(
-        streamCodexCompletion({ ...input, imageInputEnabled: true, deadlineMs: 1000 })
-      ).rejects.toMatchObject({ code: 'invalid_request' })
-      expect(redeem).not.toHaveBeenCalled()
-      await streamCodexCompletion({ ...input, imageInputEnabled: true })
+      await streamCodexCompletion(input)
       const body = JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body))
       const sourceParts = fixtures[format].messages[0].contentParts
       expect(body.input[0].content).toEqual(
