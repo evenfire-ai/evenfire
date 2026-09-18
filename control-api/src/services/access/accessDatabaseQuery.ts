@@ -17,6 +17,12 @@ type PostgresCancellationTarget = Pick<DbClient, 'query'> &
     connectionParameters?: PostgresConnectionParameters
   }>
 
+type StatementTimeoutProvenance = Readonly<{
+  timeoutMs: number
+}>
+
+const statementTimeoutProvenance = new WeakMap<object, StatementTimeoutProvenance>()
+
 function boundedPort(value: unknown): number | undefined {
   const port = Number(value)
   return Number.isSafeInteger(port) && port > 0 && port <= 65_535 ? port : undefined
@@ -47,14 +53,30 @@ async function cancelPostgresBackend(db: PostgresCancellationTarget): Promise<vo
   }
 }
 
-function isStatementTimeout(error: unknown): boolean {
+function hasStatementTimeoutCode(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
-  const value = error as { code?: unknown; message?: unknown }
-  return (
-    value.code === '57014' &&
-    typeof value.message === 'string' &&
-    value.message.toLowerCase().includes('statement timeout')
-  )
+  return (error as { code?: unknown }).code === '57014'
+}
+
+function rememberStatementTimeout(db: object, timeoutMs: number): void {
+  statementTimeoutProvenance.set(db, { timeoutMs })
+}
+
+function forgetStatementTimeout(db: object): void {
+  statementTimeoutProvenance.delete(db)
+}
+
+function statementTimeoutStarted(db: object): StatementTimeoutProvenance | undefined {
+  return statementTimeoutProvenance.get(db)
+}
+
+function isOwnedStatementTimeout(
+  error: unknown,
+  provenance: StatementTimeoutProvenance | undefined,
+  startedAt: number
+): boolean {
+  if (!provenance || !hasStatementTimeoutCode(error)) return false
+  return performance.now() - startedAt >= provenance.timeoutMs
 }
 
 /**
@@ -67,7 +89,11 @@ export async function runAccessDatabaseQuery(
   budget: AccessExecutionBudget,
   text: string,
   values: unknown[] = [],
-  options: { chargeRows?: boolean; chargeProducer?: boolean } = {}
+  options: {
+    chargeRows?: boolean
+    chargeProducer?: boolean
+    statementTimeoutMs?: number
+  } = {}
 ) {
   const run =
     options.chargeProducer === false
@@ -76,6 +102,9 @@ export async function runAccessDatabaseQuery(
   return run(async signal => {
     budget.assertActive()
     budget.charge({ kind: 'databaseStatements' })
+    const queryStartedAt = performance.now()
+    const provenance =
+      typeof db === 'object' && db !== null ? statementTimeoutStarted(db) : undefined
     let cancellation: Promise<void> | undefined
     const onAbort = () => {
       cancellation ??= cancelPostgresBackend(db as PostgresCancellationTarget).catch(
@@ -85,6 +114,9 @@ export async function runAccessDatabaseQuery(
     signal.addEventListener('abort', onAbort, { once: true })
     try {
       const result = await db.query(text, values)
+      if (options.statementTimeoutMs !== undefined && typeof db === 'object' && db !== null) {
+        rememberStatementTimeout(db, options.statementTimeoutMs)
+      }
       budget.assertActive()
       if (options.chargeRows !== false && result.rows.length > 0) {
         budget.charge({ kind: 'dbRowsReturned', amount: result.rows.length })
@@ -92,7 +124,7 @@ export async function runAccessDatabaseQuery(
       return result
     } catch (error) {
       if (signal.aborted) budget.assertActive()
-      if (isStatementTimeout(error)) {
+      if (isOwnedStatementTimeout(error, provenance, queryStartedAt)) {
         throw new AccessBudgetExceededError('deadline', true)
       }
       throw error
@@ -180,6 +212,7 @@ export async function withAccessDatabaseTransaction<T>(
     })
     transactionStarted = true
     if (options.mode !== 'caller_configured') {
+      const statementTimeoutMs = budget.statementTimeoutMs()
       if (options.mode === 'read_only') {
         await runAccessDatabaseQuery(client, budget, 'SET TRANSACTION READ ONLY', [], {
           chargeRows: false,
@@ -190,8 +223,8 @@ export async function withAccessDatabaseTransaction<T>(
         client,
         budget,
         `SELECT set_config('statement_timeout', $1, true)`,
-        [`${budget.statementTimeoutMs()}ms`],
-        { chargeRows: false, chargeProducer: false }
+        [`${statementTimeoutMs}ms`],
+        { chargeRows: false, chargeProducer: false, statementTimeoutMs }
       )
     }
     const result = await work(
@@ -219,6 +252,7 @@ export async function withAccessDatabaseTransaction<T>(
     }
     throw error
   } finally {
+    forgetStatementTimeout(client)
     client.release(releaseError)
   }
 }
