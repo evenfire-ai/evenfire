@@ -14,9 +14,10 @@ const TICKET_TYP = 'codex-execution-ticket'
 
 const LIMITS = Object.freeze({
   maxRequestBodyBytes: 1048576,
-  maxMessages: 128,
+  maxMessages: 256,
   // Bound calls in each assistant message independently of advertised definitions.
-  maxToolCalls: 32,
+  // 64 matches the Grok contract; a turn of N calls adds N+1 messages, so N stays <= maxMessages/4.
+  maxToolCalls: 64,
   maxOutputTokens: 16384,
   maxDeadlineMs: 300000,
   maxIdLength: 128,
