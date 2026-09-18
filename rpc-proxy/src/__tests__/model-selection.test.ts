@@ -45,6 +45,8 @@ function makeApp() {
   return app
 }
 
+const originalFetch = globalThis.fetch
+
 describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   beforeEach(() => {
     authTokenMock.verifyRpcToken.mockReturnValue(READ_CLAIMS)
@@ -52,7 +54,9 @@ describe('GET /rpc/hosts/:hostRef/models — passthrough to mcp-host', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards to mcp-host and returns the upstream body verbatim', async () => {
@@ -154,7 +158,9 @@ describe('POST /rpc/hosts/:hostRef/model — set per-session model', () => {
   })
 
   afterEach(() => {
-    vi.restoreAllMocks()
+    authTokenMock.verifyRpcToken.mockReset()
+    serviceMock.resolveHostConnectionForUser.mockReset()
+    globalThis.fetch = originalFetch
   })
 
   it('forwards the body to mcp-host and returns the upstream response', async () => {
