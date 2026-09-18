@@ -937,7 +937,13 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       credentialRevision: 2,
       connectionKey: 'team-grok',
     })
-    expect(store.allowedModels().get('grok-subscription')).toEqual([{ model: 'grok-4.6' }])
+    // The allowlist entry carries no image-input evidence, so the store stamps the
+    // fail-closed `unknown` decision on it like every other entry (#654). The point
+    // of this assertion is the intersection with the connection's `models`, which
+    // drops `grok-4.5`.
+    expect(store.allowedModels().get('grok-subscription')).toEqual([
+      { model: 'grok-4.6', imageInput: { state: 'unknown' } },
+    ])
     expect(store.codexPolicyBinding()?.catalogRevision).toBe(99)
   })
 
