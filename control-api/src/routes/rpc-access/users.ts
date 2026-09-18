@@ -234,7 +234,12 @@ export function createRpcAccessUsersRouter(
       maxPerMinute: config.hostArtifactReadRlPerMin,
       getBucketKey: req => {
         const subject = (req as ArtifactReadRequest).rpcAuth?.sub
-        return subject ? `host-artifact-pre-admission:${subject}` : null
+        // Auth middleware should always populate the subject before this
+        // limiter. Keep malformed composition attributable to a counted
+        // sentinel instead of silently bypassing the durable budget.
+        return subject
+          ? `host-artifact-pre-admission:${subject}`
+          : 'host-artifact-pre-admission:unauthenticated'
       },
     }),
     async (req: ArtifactReadRequest, res, next) => {
@@ -257,7 +262,9 @@ export function createRpcAccessUsersRouter(
         const artifactRead = req as ArtifactReadRequest
         const subject = artifactRead.rpcAuth?.sub
         const hostRef = artifactRead.artifactReadConnection?.hostRef
-        return subject && hostRef ? `host-artifact-read:${subject}:${hostRef}` : null
+        return subject && hostRef
+          ? `host-artifact-read:${subject}:${hostRef}`
+          : 'host-artifact-read:unresolved'
       },
     }),
     (req: ArtifactReadRequest, res) => {
