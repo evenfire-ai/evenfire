@@ -82,7 +82,7 @@ export async function applyGfsUploadSessionSchema(db: DbClient): Promise<void> {
   `)
 }
 
-/** Additive follow-up for installations that already applied migration 0091. */
+/** Additive follow-up for installations that already applied migration 0097_gfs_upload_sessions. */
 export async function applyGfsUploadCleanupSchema(db: DbClient): Promise<void> {
   await db.query(
     `ALTER TABLE IF EXISTS gfs_upload_sessions ADD COLUMN IF NOT EXISTS cleanup_at TIMESTAMPTZ NULL`
