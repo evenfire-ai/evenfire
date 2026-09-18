@@ -528,7 +528,13 @@ describe('hostModelSelectionStore — CAS conflict', () => {
     expect(conflictedView.effectiveModel).toBe('glm-5.3')
     expect(conflictedView.intentModel).toBeNull()
     expect(conflictedView.visualSendBlocked).toBe(true)
+    // Witness: the forced re-read is in flight, and it did not wipe the conflict
+    // message the user needs to see while it runs.
     expect(getHostModels).toHaveBeenCalledTimes(2)
+    expect(conflictedView.loading).toBe(true)
+    expect(conflictedView.error).toBe(
+      'This chat’s model was changed elsewhere — re-checking the current selection.'
+    )
     // Never trust the rejected snapshot's capability while the conflict stands.
     expect(conflictedView.imageInput.state).toBe('unknown')
 
@@ -536,8 +542,104 @@ describe('hostModelSelectionStore — CAS conflict', () => {
     expect(await pendingSelect).toBe(false)
     expect(readHostModelSelection(AGENT, CHAT).conflicted).toBe(false)
     expect(readHostModelSelection(AGENT, CHAT).confirmedRevision).toBe(9)
+    // The re-check landed: the message now says the pick was not applied, and it
+    // stays until the user picks again.
+    expect(readHostModelSelection(AGENT, CHAT).error).toBe(
+      'This chat’s model was changed elsewhere — your model choice was not applied.'
+    )
     // No newer pick was queued, so the conflict is terminal: exactly one write.
     expect(conflictingWrite).toHaveBeenCalledTimes(1)
+  })
+
+  describe('a pick made during the re-read that follows a conflict', () => {
+    // The desktop holds m-a at revision 4; another client already moved the
+    // session to m-x at revision 5. The pick of m-b conflicts, and the next pick
+    // lands while the forced re-read is in flight, superseding that read.
+    function conflictDuringReread() {
+      const refetch = deferred<HostModelsResult>()
+      const setHostModel = vi
+        .fn<HostModelSelectionTransport['setHostModel']>()
+        .mockRejectedValueOnce(new Error('Set host model conflicted (model_selection_conflict)'))
+        .mockImplementation(async (_agentRef, _chatId, model) => ({
+          effective: 'next-task',
+          provider: 'zai',
+          model,
+          modelSelectionRevision: 6,
+        }))
+      const getHostModels = vi
+        .fn<HostModelSelectionTransport['getHostModels']>()
+        .mockResolvedValueOnce(baseResult({ sessionModel: 'm-a', modelSelectionRevision: 4 }))
+        .mockImplementation(() => refetch.promise)
+      const { transport } = makeTransport({ getHostModels, setHostModel })
+      return { transport, refetch, setHostModel, getHostModels }
+    }
+
+    async function pickDuringReread(model: string) {
+      const scenario = conflictDuringReread()
+      const { transport, refetch, setHostModel, getHostModels } = scenario
+      await loadHostModels(transport, AGENT, CHAT)
+      const first = selectHostModel(transport, AGENT, CHAT, 'm-b')
+      await vi.waitFor(() => {
+        expect(readHostModelSelection(AGENT, CHAT).conflicted).toBe(true)
+      })
+      // Witness: the conflicting write ran on revision 4 and the re-read is in
+      // flight when the next pick lands.
+      expect(setHostModel).toHaveBeenNthCalledWith(1, AGENT, CHAT, 'm-b', 4)
+      expect(getHostModels).toHaveBeenCalledTimes(2)
+      expect(readHostModelSelection(AGENT, CHAT).loading).toBe(true)
+
+      expect(await selectHostModel(transport, AGENT, CHAT, model)).toBe(true)
+      refetch.resolve(baseResult({ sessionModel: 'm-x', modelSelectionRevision: 5 }))
+      return { first: await first, setHostModel }
+    }
+
+    it('sends a new model on the revision the superseded re-read reported', async () => {
+      const { first, setHostModel } = await pickDuringReread('m-c')
+
+      expect(setHostModel).toHaveBeenCalledTimes(2)
+      expect(setHostModel).toHaveBeenLastCalledWith(AGENT, CHAT, 'm-c', 5)
+      expect(first).toBe(true)
+      expect(readHostModelSelection(AGENT, CHAT)).toMatchObject({
+        effectiveModel: 'm-c',
+        intentModel: null,
+        pending: false,
+        conflicted: false,
+        confirmedRevision: 6,
+        error: null,
+      })
+    })
+
+    it('sends the pre-conflict model when the server holds another one', async () => {
+      const { first, setHostModel } = await pickDuringReread('m-a')
+
+      // m-a equals the model this client held before the conflict, but the
+      // server holds m-x, so the pick must still be written.
+      expect(setHostModel).toHaveBeenCalledTimes(2)
+      expect(setHostModel).toHaveBeenLastCalledWith(AGENT, CHAT, 'm-a', 5)
+      expect(first).toBe(true)
+      expect(readHostModelSelection(AGENT, CHAT)).toMatchObject({
+        effectiveModel: 'm-a',
+        intentModel: null,
+        conflicted: false,
+        confirmedRevision: 6,
+      })
+    })
+
+    it('settles without a write when the server already holds the pick', async () => {
+      const { first, setHostModel } = await pickDuringReread('m-x')
+
+      // Witness: the conflicting write happened; the pick of m-x needs no second one.
+      expect(setHostModel).toHaveBeenCalledTimes(1)
+      expect(first).toBe(true)
+      expect(readHostModelSelection(AGENT, CHAT)).toMatchObject({
+        effectiveModel: 'm-x',
+        intentModel: null,
+        pending: false,
+        conflicted: false,
+        confirmedRevision: 5,
+        error: null,
+      })
+    })
   })
 })
 

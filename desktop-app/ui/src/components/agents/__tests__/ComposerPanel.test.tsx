@@ -586,6 +586,39 @@ describe('ComposerPanel with an image-capable model', () => {
     )
     expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
+
+  it('does not let a dropped non-image take one of the free image slots', async () => {
+    // 18 of the 20 slots are taken; the drop carries a PDF ahead of two PNGs.
+    composerState.composerImageAttachments = Array.from({ length: 18 }, (_, index) => ({
+      id: `attached-${index + 1}`,
+      name: `attached-${index + 1}.png`,
+      mimeType: 'image/png' as const,
+      dataBase64: 'iVBORw0KGgo=',
+      sizeBytes: 8,
+      previewDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+    }))
+    const { container } = render(<ComposerPanel inline />)
+    const shell = container.querySelector('.composer-input-shell') as HTMLElement
+
+    fireEvent.drop(shell, {
+      dataTransfer: {
+        files: [
+          imageFile('doc.pdf', 'application/pdf'),
+          imageFile('a.png', 'image/png', [...PNG_BYTES, 1]),
+          imageFile('b.png', 'image/png', [...PNG_BYTES, 2]),
+        ],
+        types: ['Files'],
+      },
+    })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['a.png', 'b.png'])
+    // The only message is the PDF refusal: no image was counted as skipped.
+    expect(screen.getByRole('alert').textContent).toBe('doc.pdf is not supported. Use PNG or JPEG.')
+  })
 })
 
 describe('ComposerPanel with a pending image after a model switch', () => {

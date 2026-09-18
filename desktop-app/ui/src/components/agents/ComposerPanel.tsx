@@ -436,6 +436,27 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const candidates = Array.from(files || [])
       if (!candidates.length) return
 
+      // Drop and paste can carry any file. Unsupported files are refused here,
+      // before the free image slots are counted, so they never take an image's
+      // place or inflate the skipped count.
+      const validationErrors: string[] = []
+      const imageCandidates: Array<{
+        file: File
+        mimeType: ComposerImageAttachment['mimeType']
+      }> = []
+      for (const file of candidates) {
+        const mimeType = inferComposerImageMimeType(file)
+        if (mimeType && COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
+          imageCandidates.push({ file, mimeType })
+        } else {
+          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
+        }
+      }
+      if (!imageCandidates.length) {
+        setComposerAttachmentError(validationErrors[0] ?? null)
+        return
+      }
+
       const availableSlots = COMPOSER_MAX_IMAGE_ATTACHMENTS - composerImageAttachments.length
       if (availableSlots <= 0) {
         setComposerAttachmentError(
@@ -445,10 +466,9 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       }
 
       const accepted: ComposerImageAttachment[] = []
-      const validationErrors: string[] = []
-      const selected = candidates.slice(0, availableSlots)
-      if (candidates.length > availableSlots) {
-        const skipped = candidates.length - availableSlots
+      const selected = imageCandidates.slice(0, availableSlots)
+      if (imageCandidates.length > availableSlots) {
+        const skipped = imageCandidates.length - availableSlots
         validationErrors.push(
           `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message; ${skipped} ${
             skipped === 1 ? 'image was' : 'images were'
@@ -462,12 +482,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
         0
       )
 
-      for (const [index, file] of selected.entries()) {
-        const mimeType = inferComposerImageMimeType(file)
-        if (!mimeType || !COMPOSER_ACCEPT_IMAGE_MIME_TYPES.includes(mimeType)) {
-          validationErrors.push(`${file.name || 'Image'} is not supported. Use PNG or JPEG.`)
-          continue
-        }
+      for (const [index, { file, mimeType }] of selected.entries()) {
         if (file.size > COMPOSER_MAX_IMAGE_BYTES) {
           validationErrors.push(
             `${file.name || 'Image'} is too large. Max size is ${Math.round(

@@ -567,10 +567,15 @@ export type HostMessageResponse = {
   response?: string
   error?: TaskError | string
   /**
-   * #654 — the model-selection revision the Host holds after this send. Present
-   * on a success only when a piggybacked `model` was actually persisted (its
-   * ABSENCE after a piggyback means the Host ignored the selection), and on an
+   * #654 — the model-selection revision the Host holds after this send.
+   * Present on a success when the request carried a `model`: the current
+   * revision, bumped only when that model differed from the session's effective
+   * model and was written (a send on the model the session already runs on,
+   * such as the Host default, reports it unchanged). Present on an
    * `LLM_MODEL_SELECTION_CONFLICT` failure as the winning revision to retry on.
+   * Absent on an image send refused for its model (`LLM_IMAGE_INPUT_*`), which
+   * writes nothing. Its ABSENCE on a success after a piggyback means the Host
+   * ignored the selection.
    */
   modelSelectionRevision?: number
   approval?: {

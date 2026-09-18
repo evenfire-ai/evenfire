@@ -10,6 +10,7 @@ import {
 } from '@lib/composerDraftStore'
 import {
   loadHostModels,
+  readHostModelSelection,
   resetHostModelSelectionStore,
   selectHostModel,
 } from '@lib/hostModelSelectionStore'
@@ -37,6 +38,7 @@ const catalog: HostModelsResult = {
   models: [
     { name: 'glm-5.3-flash', imageInput: { state: 'supported', reason: 'supported' } },
     { name: 'glm-5.3', imageInput: { state: 'unsupported', reason: 'model_unsupported' } },
+    { name: 'glm-5.3-vision', imageInput: { state: 'supported', reason: 'supported' } },
   ],
 }
 const modelTransport = {
@@ -201,13 +203,19 @@ describe('#654 visual send and recovery', () => {
   // arms the next send with a revision the server has already superseded, and
   // loses a race it had won.
   it('sends the second image with the revision acknowledged by the first send', async () => {
+    // The first image rides on a model the session does not run on yet, so the
+    // Host writes the selection and acknowledges the revision that write
+    // produced (0 → 1).
     bridge.rpc.invokeHostMessage.mockResolvedValue({
       success: true,
       taskId: 'visual-task-1',
-      modelSelectionRevision: 3,
+      modelSelectionRevision: 1,
     })
     bridge.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })
     const { result } = await mountedVisualController()
+    await act(async () => {
+      await selectHostModel(modelTransport, 'agent-x', null, 'glm-5.3-vision')
+    })
 
     await act(async () => {
       await result.current.handleSendAgentMessage('first image')
@@ -235,13 +243,71 @@ describe('#654 visual send and recovery', () => {
     expect(bridge.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
     // Witness: the first send carried the revision READ from the catalog…
     expect(bridge.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
-      model: 'glm-5.3-flash',
+      model: 'glm-5.3-vision',
       modelSelectionRevision: 0,
     })
     // …and the second carries the one the first send's ack produced.
     expect(bridge.rpc.invokeHostMessage.mock.calls[1]?.[1]).toMatchObject({
-      model: 'glm-5.3-flash',
-      modelSelectionRevision: 3,
+      model: 'glm-5.3-vision',
+      modelSelectionRevision: 1,
+    })
+  })
+
+  // #654 M3 — an image send on the model the session already runs on (here the
+  // Host default, with no explicit selection) is admitted without a write, so
+  // its ack carries the CURRENT revision, unchanged. Adopting it must leave the
+  // selection settled and the next image send armed with that same revision.
+  it('keeps the selection settled when the ack reports an unchanged revision', async () => {
+    bridge.rpc.invokeHostMessage.mockResolvedValue({
+      success: true,
+      taskId: 'visual-task-1',
+      modelSelectionRevision: 0,
+    })
+    bridge.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })
+    const { result } = await mountedVisualController()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('first image')
+    })
+    const chatId = result.current.activeChatId!
+    await waitFor(() => expect(bridge.hasProgressHandler('visual-task-1')).toBe(true))
+    // The ack was adopted for the chat it created: same model, same revision,
+    // nothing pending, nothing conflicted, and images still allowed.
+    expect(readHostModelSelection('agent-x', chatId)).toMatchObject({
+      effectiveModel: 'glm-5.3-flash',
+      confirmedRevision: 0,
+      intentModel: null,
+      pending: false,
+      conflicted: false,
+      selectionUnsettled: false,
+    })
+    await act(async () => {
+      bridge.emitTaskProgress('visual-task-1', {
+        type: 'terminal',
+        data: { taskId: 'visual-task-1', status: 'completed' },
+      })
+    })
+    await waitFor(() => expect(bridge.rpc.getTaskResult).toHaveBeenCalled())
+
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', chatId)
+    })
+    expect(readHostModelSelection('agent-x', chatId).canAttachImages).toBe(true)
+    act(() => result.current.handleAddComposerImageAttachments([image]))
+    await act(async () => {
+      await result.current.handleSendAgentMessage('second image')
+    })
+
+    // Witness: both image sends were dispatched; each still carries the model
+    // and the revision the CAS needs, and the second reuses the unchanged one.
+    expect(bridge.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+    for (const call of bridge.rpc.invokeHostMessage.mock.calls) {
+      expect(call[1]).toMatchObject({ model: 'glm-5.3-flash', modelSelectionRevision: 0 })
+    }
+    expect(readHostModelSelection('agent-x', chatId)).toMatchObject({
+      effectiveModel: 'glm-5.3-flash',
+      confirmedRevision: 0,
+      conflicted: false,
     })
   })
 

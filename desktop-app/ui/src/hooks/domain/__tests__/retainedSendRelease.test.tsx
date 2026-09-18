@@ -187,3 +187,95 @@ describe('retained send release on terminal outcomes (#654 M6)', () => {
     expect(heldSnapshot()).toMatchObject({ taskId: 'task-keep' })
   })
 })
+
+describe('older failures of a chat (#654 M2)', () => {
+  /** Sends one message whose POST throws, leaving a retained failure. */
+  async function sendFailing(result: ReturnType<typeof renderController>['result'], text: string) {
+    clerum.rpc.invokeHostMessage.mockRejectedValueOnce(new Error('network down'))
+    await act(async () => {
+      await result.current.handleSendAgentMessage(text)
+    })
+    expect(result.current.failedAgentSend?.content).toBe(text)
+  }
+
+  /** Failed snapshots still held by the controller's store. */
+  function heldFailures(): RetainedSendSnapshot[] {
+    expect(captured.stores).toHaveLength(1)
+    const [store] = captured.stores
+    return captured.retained
+      .map(retained =>
+        store!.getRetainedSendSnapshot(retained.agentRef, retained.chatId, retained.userMessageId)
+      )
+      .filter((snapshot): snapshot is RetainedSendSnapshot => Boolean(snapshot?.failure))
+  }
+
+  it('hides an older failure once a later synchronous send succeeds', async () => {
+    const { result, spies } = renderController()
+    await settleMount()
+    await sendFailing(result, 'first try')
+
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ response: 'direct answer' })
+    await act(async () => {
+      await result.current.handleSendAgentMessage('second try')
+    })
+
+    // Witness: the second send reached the synchronous success branch.
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+    expect(spies.pushToast).toHaveBeenCalledWith('Message sent to agent-x.', 'success')
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(heldFailures()).toEqual([])
+  })
+
+  it('hides an older failure once a later task replies, not before', async () => {
+    clerum.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'all done' })
+    const { result } = renderController()
+    await settleMount()
+    await sendFailing(result, 'first try')
+
+    clerum.rpc.invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-later' })
+    const send = act(async () => {
+      await result.current.handleSendAgentMessage('second try')
+    })
+    await waitFor(() => expect(clerum.hasProgressHandler('task-later')).toBe(true))
+    await send
+    // The later send has not reached a terminal yet, so it supersedes nothing.
+    expect(result.current.failedAgentSend?.content).toBe('first try')
+
+    await act(async () => {
+      clerum.emitTaskProgress('task-later', {
+        type: 'terminal',
+        data: { taskId: 'task-later', status: 'completed' },
+      })
+    })
+
+    // Witness: the reply branch ran and persisted the durable reply.
+    await waitFor(() =>
+      expect(clerum.chat.appendMessages).toHaveBeenCalledWith(
+        'agent-x',
+        expect.any(String),
+        expect.arrayContaining([
+          expect.objectContaining({ role: 'assistant', content: 'all done' }),
+        ])
+      )
+    )
+    await waitFor(() => expect(result.current.failedAgentSend).toBeNull())
+    expect(heldFailures()).toEqual([])
+  })
+
+  it('does not resurface an older failure after the newest one is discarded', async () => {
+    const { result } = renderController()
+    await settleMount()
+    await sendFailing(result, 'first try')
+    await sendFailing(result, 'second try')
+    // Witness: both failures are held, and the newest one is the visible one.
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual(['first try', 'second try'])
+    expect(result.current.failedAgentSend?.content).toBe('second try')
+
+    act(() => {
+      result.current.handleDiscardFailedAgentSend()
+    })
+
+    expect(result.current.failedAgentSend).toBeNull()
+    expect(heldFailures()).toEqual([])
+  })
+})

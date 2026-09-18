@@ -490,6 +490,9 @@ export function useAgentChatController({
     attachTaskIdToRetainedSend,
     releaseRetainedSend,
     releaseRetainedSendsForTask,
+    releaseRetainedFailuresForChat,
+    releaseSucceededRetainedSend,
+    releaseSucceededRetainedSendsForTask,
     markRetainedSendReason,
     failRetainedSend,
   } = retainedSends
@@ -2164,8 +2167,9 @@ export function useAgentChatController({
             // The reconcile branch materialized a durable reply. Repaint the
             // stepper green and flip the FSM to idle. #654 M6 — the durable reply
             // exists, so this is as terminal as the `reply` branch below: release
-            // the retained payload instead of leaving it to accumulate.
-            releaseRetainedSendsForTask(state.taskId)
+            // the retained payload instead of leaving it to accumulate, together
+            // with the older failures of this chat that the reply supersedes.
+            releaseSucceededRetainedSendsForTask(state.taskId)
             dropActivity()
             paintProgressDone()
             setIdle()
@@ -2235,8 +2239,9 @@ export function useAgentChatController({
       if (result?.kind === 'reply') {
         // Terminal success: the durable reply exists, so the retained send
         // payload for this task can be released (idempotent — duplicate SSE/poll
-        // terminals only release once).
-        releaseRetainedSendsForTask(state.taskId)
+        // terminals only release once). The success also supersedes the older
+        // failures of this chat, which would otherwise resurface under the reply.
+        releaseSucceededRetainedSendsForTask(state.taskId)
         if (result.content && result.content !== 'Message failed') {
           const toolSteps = toMessageToolSteps(state.steps)
           await appendAssistantMessage(agentRef, chatId, {
@@ -2730,7 +2735,9 @@ export function useAgentChatController({
         // #654 H1 — the send IS the write. Its ack carries the revision that
         // write produced, and adopting it is what arms the NEXT conditional
         // write correctly; without it the client keeps the revision it read
-        // before sending and loses a race it already won.
+        // before sending and loses a race it already won. A send on the model
+        // the session already runs on writes nothing and acks the current,
+        // unchanged revision, which confirms the same state.
         const ackRevision = responseRecord.modelSelectionRevision
         if (ackOk && requestModel && typeof ackRevision === 'number') {
           confirmHostModelSelectionFromSend(
@@ -2831,7 +2838,9 @@ export function useAgentChatController({
             }))
             pushToast(`Message to ${sendAgent} failed: ${failureMessage || 'error'}`, 'error')
           } else {
-            releaseRetainedSend(sendAgent, sendChatId ?? null, userMessageId)
+            // Terminal success: release this payload and the older failures of
+            // the chat it supersedes.
+            releaseSucceededRetainedSend(sendAgent, sendChatId ?? null, userMessageId)
             updateMessageActivity(sendAgent, userMessageId, previous => ({
               ...previous,
               status: previous.events.length ? 'completed' : 'no_activity',
@@ -3044,10 +3053,17 @@ export function useAgentChatController({
         visibleFailure.chatId ?? null,
         visibleFailure.userMessageId
       )
+      // The visible failure is the newest one of this chat; the older failures
+      // behind it would otherwise resurface one by one after each discard.
+      releaseRetainedFailuresForChat(
+        visibleFailure.agentRef,
+        visibleFailure.chatId ?? null,
+        visibleFailure.timestamp
+      )
     }
     setFailedAgentSend(null)
     setAgentError(null)
-  }, [visibleFailure, releaseRetainedSend])
+  }, [visibleFailure, releaseRetainedSend, releaseRetainedFailuresForChat])
 
   const handleRecoverFailedAgentSend = useCallback(() => {
     if (

@@ -25,17 +25,29 @@ function createChatMeta(chatId: string) {
   return { id: chatId, title: 'New Chat', createdAt: now, updatedAt: now, messageCount: 0 }
 }
 
+const HOST_DEFAULT_MODEL = 'claude-opus-4-8'
+
 function installClerumHarness() {
   let taskIndex = 0
   const chats: Array<ReturnType<typeof createChatMeta>> = []
   const messagesByChat = new Map<string, unknown[]>()
   const progressHandlers = new Map<string, ProgressHandler>()
   let sessionModel: string | null = null
+  let modelSelectionRevision = 0
 
-  const invokeHostMessage = vi.fn(async (_agentRef: string, _payload: { model?: string }) => {
+  // Models the Host contract (#654 M3): a piggybacked `model` is written, and
+  // the revision bumped, only when it differs from the session's effective
+  // model (the explicit selection, else the Host default). Whenever a model
+  // rode along, the ack reports the current revision.
+  const invokeHostMessage = vi.fn(async (_agentRef: string, payload: { model?: string }) => {
     taskIndex += 1
-    sessionModel = _payload.model ?? sessionModel
-    return { taskId: `task-${taskIndex}`, status: 'pending' }
+    const ack = { taskId: `task-${taskIndex}`, status: 'pending' }
+    if (payload.model === undefined) return ack
+    if (payload.model !== (sessionModel ?? HOST_DEFAULT_MODEL)) {
+      sessionModel = payload.model
+      modelSelectionRevision += 1
+    }
+    return { ...ack, modelSelectionRevision }
   })
 
   Object.defineProperty(window, 'clerum', {
@@ -71,11 +83,11 @@ function installClerumHarness() {
       rpc: {
         getHostModels: vi.fn(async () => ({
           provider: 'anthropic',
-          hostDefault: 'claude-opus-4-8',
+          hostDefault: HOST_DEFAULT_MODEL,
           sessionModel,
           degraded: false,
-          models: [{ name: 'claude-opus-4-8' }],
-          modelSelectionRevision: taskIndex,
+          models: [{ name: HOST_DEFAULT_MODEL }],
+          modelSelectionRevision,
         })),
         listSessions: vi.fn(async () => ({ items: [] })),
         loadSessionMessages: vi.fn(async () => ({ agent: 'trader', chatId: '', turns: [] })),
@@ -231,6 +243,10 @@ describe('useAgentChatController — R2 "Option A" pending-model piggyback', () 
   // message and left the chip promising a model the session never had.
   it('drops the pending choice when the host acknowledges the send without a revision', async () => {
     const { invokeHostMessage } = installClerumHarness()
+    // A Host that ignored the piggybacked model (one that predates it) acks the
+    // send with no revision; the current Host always reports one when a model
+    // rode along, so this ack is modelled explicitly.
+    invokeHostMessage.mockResolvedValueOnce({ taskId: 'task-1', status: 'pending' })
     const getHostModels = vi.spyOn(window.clerum.rpc, 'getHostModels').mockResolvedValue({
       provider: 'anthropic',
       hostDefault: 'claude-opus-4-8',

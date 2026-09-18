@@ -51,6 +51,14 @@ import {
 const MODEL_NOT_ALLOWED_TOKEN = 'model_not_allowed'
 /** Token embedded in a rejection message when the CAS precondition fails. */
 const MODEL_SELECTION_CONFLICT_TOKEN = 'model_selection_conflict'
+/** Inline error while the list fetch failed; a new load attempt replaces it. */
+const LOAD_FAILED_ERROR = 'The model list could not be loaded. Retry.'
+/** Inline error from a CAS conflict until the authoritative re-read lands. */
+const CONFLICT_RECHECKING_ERROR =
+  'This chat’s model was changed elsewhere — re-checking the current selection.'
+/** Inline error once that re-read landed: the rejected pick stays unapplied. */
+const CONFLICT_SETTLED_ERROR =
+  'This chat’s model was changed elsewhere — your model choice was not applied.'
 /** Broker-backed hosts have no static default; the operator must name a model. */
 const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 const GROK_SUBSCRIPTION_PROVIDER = 'grok-subscription'
@@ -409,7 +417,7 @@ export function noteHostModelSelectionConflict(
     entry.confirmedRevision = revision
   }
   entry.conflicted = true
-  entry.error = 'This chat’s model was changed elsewhere — re-checking the current selection.'
+  entry.error = CONFLICT_RECHECKING_ERROR
   if (model) clearIntentIfStill(entry, model)
   notify(entry)
   void loadHostModels(transport, agentRef, chatId, { force: true })
@@ -421,40 +429,67 @@ export async function loadHostModels(
   chatId: string | null,
   options: { force?: boolean } = {}
 ): Promise<void> {
-  if (!agentRef) return
-  const entry = getEntry(agentRef, chatId)
-  if (entry.fetchInFlight && !options.force) return
-  if (entry.data !== undefined && !options.force) return
+  await readHostModels(transport, agentRef, chatId, options)
+}
 
+/**
+ * Loads the model list and selection for a key. Resolves the session model the
+ * read reported when that read is at least as new as the held CAS base (`null`
+ * means the session has no explicit selection), and `undefined` when no such
+ * evidence came back (skipped, failed, host without a model endpoint, or a read
+ * older than the held revision). The conflict retry compares against it.
+ */
+async function readHostModels(
+  transport: HostModelSelectionTransport,
+  agentRef: string,
+  chatId: string | null,
+  options: { force?: boolean }
+): Promise<string | null | undefined> {
+  if (!agentRef) return undefined
+  const entry = getEntry(agentRef, chatId)
+  if (entry.fetchInFlight && !options.force) return undefined
+  if (entry.data !== undefined && !options.force) return undefined
+
+  const ownerScope = entry.scopeGeneration
   const fetchSeq = ++entry.seq
   entry.lastFetchSeq = fetchSeq
   entry.fetchInFlight = true
   entry.loading = true
   entry.loadFailed = false
-  if (options.force) entry.error = null
+  // A new attempt replaces the previous load failure. Any other error (a CAS
+  // conflict, an allowlist rejection) stays visible: this read is not an answer
+  // to it, and a forced reload is exactly how a conflict is re-checked.
+  if (entry.error === LOAD_FAILED_ERROR) entry.error = null
   notify(entry)
 
   try {
     const result = await transport.getHostModels(agentRef, chatId ?? '')
-    if (entry.lastFetchSeq !== fetchSeq) return
-    const olderRevision =
+    if (entry.scopeGeneration !== ownerScope) return undefined
+    const revision =
       result &&
-      typeof result.modelSelectionRevision === 'number' &&
-      entry.confirmedRevision !== null &&
-      result.modelSelectionRevision < entry.confirmedRevision
-    const superseded = entry.seq !== fetchSeq || Boolean(olderRevision)
+      Number.isSafeInteger(result.modelSelectionRevision) &&
+      result.modelSelectionRevision! >= 0
+        ? result.modelSelectionRevision!
+        : null
+    const olderRevision =
+      revision !== null && entry.confirmedRevision !== null && revision < entry.confirmedRevision
+    // Revisions are monotone on the Host, so a read at or past the held CAS base
+    // is current evidence of the revision even when a newer intent or load
+    // superseded it. Withholding it armed the next conditional write with a
+    // revision the Host had already moved past: a pick made during the reload
+    // that follows a conflict then conflicted again and was dropped.
+    if (revision !== null && !olderRevision) entry.confirmedRevision = revision
+    const readModel = result && !olderRevision ? (result.sessionModel ?? null) : undefined
+    if (entry.lastFetchSeq !== fetchSeq) return readModel
+    const superseded = entry.seq !== fetchSeq || olderRevision
     entry.data = result
     entry.staleRead = superseded
     if (!superseded) {
       entry.lastConfirmedModel = result?.sessionModel ?? null
-      if (
-        result &&
-        Number.isSafeInteger(result.modelSelectionRevision) &&
-        result.modelSelectionRevision! >= 0
-      ) {
-        entry.confirmedRevision = result.modelSelectionRevision!
-      }
       entry.conflicted = false
+      // The re-check this message announced has landed; the rejected pick
+      // stays unapplied until the user picks again.
+      if (entry.error === CONFLICT_RECHECKING_ERROR) entry.error = CONFLICT_SETTLED_ERROR
       const pending = intentFor(entry)
       if (pending && result?.sessionModel === pending && !entry.saving) {
         if (chatId) clearPendingModelIntent(agentRef, chatId)
@@ -463,16 +498,18 @@ export async function loadHostModels(
     }
     // A superseded read must not erase a known CAS base and turn the next
     // write into an unconditional legacy update.
+    return readModel
   } catch (error) {
-    if (entry.lastFetchSeq !== fetchSeq) return
+    if (entry.lastFetchSeq !== fetchSeq) return undefined
     console.warn('[hostModelSelectionStore] host models fetch failed:', error)
     if (entry.seq === fetchSeq) {
       // `data` is left as it was: a previous good read stays usable, and
       // `undefined` stays `undefined` so the view reports `error`, never
       // `unavailable` (which is the host's own answer, not ours).
       entry.loadFailed = true
-      entry.error = 'The model list could not be loaded. Retry.'
+      entry.error = LOAD_FAILED_ERROR
     }
+    return undefined
   } finally {
     if (entry.lastFetchSeq === fetchSeq) {
       entry.fetchInFlight = false
@@ -606,23 +643,37 @@ async function runSelectionWrites(
           clearPendingModelIntent(entry.agentRef, chatId)
         }
         entry.conflicted = true
-        entry.error = 'This chat’s model was changed elsewhere — re-checking the current selection.'
+        entry.error = CONFLICT_RECHECKING_ERROR
         notify(entry)
         // `entry.saving` stays true across the await so no second writer starts
         // (`selectHostModel` queues instead); the read adopts the winning
         // revision, which is the CAS base the retry below needs.
-        await loadHostModels(transport, entry.agentRef, chatId, { force: true })
+        const serverModel = await readHostModels(transport, entry.agentRef, chatId, {
+          force: true,
+        })
         if (entry.scopeGeneration !== ownerScope) return false
         const queuedAfterConflict = entry.queuedModel
-        if (queuedAfterConflict && queuedAfterConflict !== entry.lastConfirmedModel) {
+        if (!queuedAfterConflict) return finish(false)
+        entry.queuedModel = null
+        // Compare the newer pick with what the SERVER holds now, never with
+        // `lastConfirmedModel`: that pick superseded the re-read, so
+        // `lastConfirmedModel` is still the pre-conflict model, and a pick of
+        // that model was skipped although the server holds another one.
+        if (serverModel === undefined || queuedAfterConflict !== serverModel) {
           // A newer pick arrived while the older write lost the race. Dropping it
           // here is what made the user's last choice vanish silently.
-          entry.queuedModel = null
           currentModel = queuedAfterConflict
           currentSeq = entry.seq
           continue
         }
-        return finish(false)
+        // The server already holds the newest pick, proven by a read at or past
+        // the held revision: nothing to write, and the conflict is resolved.
+        entry.lastConfirmedModel = serverModel
+        entry.staleRead = true
+        entry.conflicted = false
+        entry.error = null
+        if (intentFor(entry) === serverModel) clearPendingModelIntent(entry.agentRef, chatId)
+        return finish(true)
       }
 
       const queued = entry.queuedModel

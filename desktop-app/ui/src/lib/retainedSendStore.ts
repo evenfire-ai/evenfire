@@ -8,10 +8,13 @@
  * images that can no longer be re-attached by hand).
  *
  * A snapshot is keyed by the send identity `(agentRef, chatId, userMessageId)`
- * and released only on an explicit terminal outcome: a successful reply, a
- * user-initiated discard, or a newer send for the same chat that supersedes it.
- * Receiving a `taskId` is NOT a terminal acknowledgement — a started task can
- * still fail — so it never releases the snapshot by itself.
+ * and released only on an explicit terminal outcome: its own successful reply
+ * or cancel, a user-initiated discard (which also drops the older failures of
+ * that chat), or a newer send for the same chat that reaches a successful
+ * terminal, which supersedes every failure recorded before it. A snapshot still
+ * awaiting its own terminal is never released by another send. Receiving a
+ * `taskId` is NOT a terminal acknowledgement — a started task can still fail —
+ * so it never releases the snapshot by itself.
  *
  * Nothing here is persisted: recovery lives for the Desktop process lifetime
  * only, until the durable-history contract (#652) exists.
@@ -114,6 +117,53 @@ export function createRetainedSendStore(changed: () => void) {
   }
 
   /**
+   * Releases the failed snapshots of one chat recorded at or before
+   * `upToTimestamp`. Snapshots without a failure are still awaiting their own
+   * terminal and stay held: that send can still fail, and then its snapshot is
+   * the only copy of the payload.
+   */
+  function releaseRetainedFailuresForChat(
+    agentRef: string,
+    chatId: string | null,
+    upToTimestamp: number
+  ): void {
+    let released = false
+    for (const [key, snapshot] of snapshots) {
+      if (snapshot.agentRef !== agentRef || snapshot.chatId !== chatId) continue
+      if (!snapshot.failure || snapshot.timestamp > upToTimestamp) continue
+      snapshots.delete(key)
+      released = true
+    }
+    if (released) changed()
+  }
+
+  /**
+   * A synchronous send reached a successful terminal: release it and every
+   * older failure of its chat, which the success supersedes. Without the second
+   * part the newest older failure resurfaced under the successful reply.
+   */
+  function releaseSucceededRetainedSend(
+    agentRef: string,
+    chatId: string | null,
+    userMessageId: string
+  ): void {
+    const succeeded = snapshots.get(keyFor(agentRef, chatId, userMessageId))
+    if (succeeded) {
+      releaseRetainedFailuresForChat(succeeded.agentRef, succeeded.chatId, succeeded.timestamp)
+    }
+    releaseRetainedSend(agentRef, chatId, userMessageId)
+  }
+
+  /** Task-based counterpart of `releaseSucceededRetainedSend`. */
+  function releaseSucceededRetainedSendsForTask(taskId: string): void {
+    const succeeded = [...snapshots.values()].filter(snapshot => snapshot.taskId === taskId)
+    for (const snapshot of succeeded) {
+      releaseRetainedFailuresForChat(snapshot.agentRef, snapshot.chatId, snapshot.timestamp)
+    }
+    releaseRetainedSendsForTask(taskId)
+  }
+
+  /**
    * Records why a snapshot is still held once the async outcome is known. Keeps
    * the payload and identity untouched; only the recovery code changes.
    */
@@ -157,6 +207,9 @@ export function createRetainedSendStore(changed: () => void) {
     attachTaskIdToRetainedSend,
     releaseRetainedSend,
     releaseRetainedSendsForTask,
+    releaseRetainedFailuresForChat,
+    releaseSucceededRetainedSend,
+    releaseSucceededRetainedSendsForTask,
     markRetainedSendReason,
     failRetainedSend,
     resetRetainedSendStore,
