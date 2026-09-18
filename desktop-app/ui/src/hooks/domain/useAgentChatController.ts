@@ -3274,7 +3274,10 @@ export function useAgentChatController({
     composerImageAttachments,
     composerReferenceAttachments,
     agentSending,
-    agentError: visibleRetainedFailure?.message ?? agentError,
+    // A fresh send-time error (a blocked image send, a new POST failure) wins;
+    // the retained failure's message covers the banner only when nothing newer
+    // has been reported.
+    agentError: agentError ?? visibleRetainedFailure?.message ?? null,
     failedAgentSend: visibleFailure,
     chatEndRef,
     scrollChatToBottom,

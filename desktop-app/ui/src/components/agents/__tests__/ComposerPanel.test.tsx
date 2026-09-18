@@ -249,10 +249,11 @@ describe.each([
 // ---------------------------------------------------------------------------
 // Issue #654: composer image attachments through real DOM events.
 //
-// These drive the real component. jsdom has no file dialog, no DataTransfer and
-// no URL.createObjectURL, so the helpers below stand in for exactly those
-// unavailable browser primitives; the accept filter, the FileReader byte
-// preparation and every guard stay real.
+// These drive the real component. jsdom has no file dialog and no DataTransfer,
+// so the helpers below stand in for exactly those unavailable browser
+// primitives; the accept filter, the FileReader byte preparation and every guard
+// stay real. The jsdom environment does provide URL.createObjectURL, so chip
+// previews are real `blob:` object URLs.
 // ---------------------------------------------------------------------------
 
 /** PNG signature bytes, so "the file's bytes reached the controller" is literal. */

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { type Mock, afterEach, describe, expect, it, vi } from 'vitest'
+import fc from 'fast-check'
 import type { HostModelsResult, SetHostModelResult } from '../../../../src/types'
 import {
   getPendingModelIntent,
@@ -9,8 +10,10 @@ import {
 } from '../hostModelIntentStore'
 import {
   type HostModelSelectionTransport,
+  confirmHostModelSelectionFromSend,
   getHostModelSelectionSnapshot,
   loadHostModels,
+  noteHostModelSelectionConflict,
   readHostModelSelection,
   resetHostModelSelectionStore,
   selectHostModel,
@@ -697,6 +700,157 @@ describe('hostModelSelectionStore — allowlist rejection', () => {
     const view = readHostModelSelection(AGENT, CHAT)
     expect(view.intentModel).toBeNull()
     expect(view.error).toMatch(/no longer allowed/)
+  })
+})
+
+describe('hostModelSelectionStore — revision monotonicity', () => {
+  it('keeps the newer ack revision when an older write reply lands late', async () => {
+    const write = deferred<SetHostModelResult>()
+    const { transport, setHostModel } = makeTransport({
+      getHostModels: async () => baseResult({ sessionModel: 'glm-5.3', modelSelectionRevision: 4 }),
+      setHostModel: vi.fn(() => write.promise),
+    })
+    await loadHostModels(transport, AGENT, CHAT)
+    expect(readHostModelSelection(AGENT, CHAT).confirmedRevision).toBe(4)
+
+    const selecting = selectHostModel(transport, AGENT, CHAT, 'glm-5.3-flash')
+    await vi.waitFor(() => expect(setHostModel).toHaveBeenCalledTimes(1))
+    expect(setHostModel).toHaveBeenLastCalledWith(AGENT, CHAT, 'glm-5.3-flash', 4)
+
+    // A send ack lands while the write is in flight and raises the CAS base.
+    confirmHostModelSelectionFromSend(AGENT, CHAT, 'glm-5.3', 7)
+    expect(readHostModelSelection(AGENT, CHAT).confirmedRevision).toBe(7)
+
+    write.resolve({
+      effective: 'next-task',
+      provider: 'zai',
+      model: 'glm-5.3-flash',
+      modelSelectionRevision: 5,
+    })
+    // Witness: the write path ran to completion and processed the reply.
+    expect(await selecting).toBe(true)
+    expect(readHostModelSelection(AGENT, CHAT)).toMatchObject({
+      confirmedRevision: 7,
+      selectionUnsettled: false,
+    })
+  })
+
+  type RevisionEvent =
+    | { kind: 'ack'; model: string; revision: number }
+    | { kind: 'read'; model: string; revision: number }
+    | { kind: 'conflict'; model: string; revision: number }
+    | { kind: 'write-start'; model: string }
+    | { kind: 'write-reply'; revision: number }
+
+  const modelArb = fc.constantFrom('glm-5.3', 'glm-5.3-flash')
+  const revisionArb = fc.integer({ min: 0, max: 12 })
+  const eventArb: fc.Arbitrary<RevisionEvent> = fc.oneof(
+    fc.record({ kind: fc.constant('ack' as const), model: modelArb, revision: revisionArb }),
+    fc.record({ kind: fc.constant('read' as const), model: modelArb, revision: revisionArb }),
+    fc.record({ kind: fc.constant('conflict' as const), model: modelArb, revision: revisionArb }),
+    fc.record({ kind: fc.constant('write-start' as const), model: modelArb }),
+    fc.record({ kind: fc.constant('write-reply' as const), revision: revisionArb })
+  )
+
+  /** Lets the store's awaited transport replies and follow-up reads settle. */
+  const settle = () => new Promise<void>(resolve => setTimeout(resolve, 0))
+
+  it('never lowers confirmedRevision and is idempotent under replayed ack/read/conflict events', async () => {
+    const witness = { staleWriteReplies: 0, replays: 0, adoptions: 0 }
+
+    await fc.assert(
+      fc.asyncProperty(fc.array(eventArb, { minLength: 1, maxLength: 16 }), async events => {
+        resetHostModelSelectionStore()
+        let readRevision = 0
+        let readModel: string | null = null
+        const pendingWrites: Array<{
+          model: string
+          resolve: (value: SetHostModelResult) => void
+        }> = []
+        const { transport } = makeTransport({
+          getHostModels: async () =>
+            baseResult({ sessionModel: readModel, modelSelectionRevision: readRevision }),
+          setHostModel: (_agentRef, _chatId, model) => {
+            const write = deferred<SetHostModelResult>()
+            pendingWrites.push({ model, resolve: write.resolve })
+            return write.promise
+          },
+        })
+
+        const apply = async (event: RevisionEvent): Promise<void> => {
+          switch (event.kind) {
+            case 'ack':
+              confirmHostModelSelectionFromSend(AGENT, CHAT, event.model, event.revision)
+              return
+            case 'read':
+              readRevision = event.revision
+              readModel = event.model
+              await loadHostModels(transport, AGENT, CHAT, { force: true })
+              return
+            case 'conflict':
+              // The Host reports the winning revision and the re-read observes it.
+              readRevision = event.revision
+              readModel = event.model
+              noteHostModelSelectionConflict(transport, AGENT, CHAT, event.model, event.revision)
+              await settle()
+              return
+            case 'write-start':
+              void selectHostModel(transport, AGENT, CHAT, event.model)
+              await settle()
+              return
+            case 'write-reply': {
+              const head = pendingWrites.shift()
+              if (!head) return
+              const held = readHostModelSelection(AGENT, CHAT).confirmedRevision
+              if (held !== null && event.revision < held) witness.staleWriteReplies += 1
+              head.resolve({
+                effective: 'next-task',
+                provider: 'zai',
+                model: head.model,
+                modelSelectionRevision: event.revision,
+              })
+              await settle()
+              return
+            }
+          }
+        }
+
+        let previous: number | null = null
+        const expectNotLowered = () => {
+          const current = readHostModelSelection(AGENT, CHAT).confirmedRevision
+          if (previous !== null) {
+            expect(current).not.toBeNull()
+            expect(current as number).toBeGreaterThanOrEqual(previous)
+          }
+          if (current !== previous) witness.adoptions += 1
+          previous = current
+        }
+
+        for (const event of events) {
+          await apply(event)
+          expectNotLowered()
+          if (event.kind === 'ack' || event.kind === 'read' || event.kind === 'conflict') {
+            const once = readHostModelSelection(AGENT, CHAT)
+            await apply(event)
+            witness.replays += 1
+            expect(readHostModelSelection(AGENT, CHAT)).toEqual(once)
+            expectNotLowered()
+          }
+        }
+        // Drain writes still in flight (including queued picks they pick up).
+        while (pendingWrites.length > 0) {
+          await apply({ kind: 'write-reply', revision: 0 })
+          expectNotLowered()
+        }
+      }),
+      { numRuns: 300 }
+    )
+
+    // Witnesses: the adversarial interleaving (a write reply older than the held
+    // revision) was generated, replays ran, and revisions were actually adopted.
+    expect(witness.staleWriteReplies).toBeGreaterThan(0)
+    expect(witness.replays).toBeGreaterThan(0)
+    expect(witness.adoptions).toBeGreaterThan(0)
   })
 })
 

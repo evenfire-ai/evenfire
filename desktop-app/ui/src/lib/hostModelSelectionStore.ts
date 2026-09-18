@@ -344,6 +344,23 @@ function clearIntentIfStill(entry: Entry, model: string): boolean {
 }
 
 /**
+ * Adopts a Host-reported revision as the CAS base only when it is a valid
+ * revision at or past the one already held. Host revisions are monotone, so an
+ * older one is a reply that raced a newer ack or read, and adopting it would arm
+ * the next conditional write with a revision the Host has moved past.
+ */
+function adoptRevisionIfNotOlder(entry: Entry, revision: number | undefined): void {
+  if (
+    typeof revision === 'number' &&
+    Number.isSafeInteger(revision) &&
+    revision >= 0 &&
+    (entry.confirmedRevision === null || revision >= entry.confirmedRevision)
+  ) {
+    entry.confirmedRevision = revision
+  }
+}
+
+/**
  * #654 H1 — a message ack confirmed the model it carried, so adopt the revision
  * that write produced as the CAS base. Without this the client keeps the
  * revision it read before sending, and its next conditional write loses a race
@@ -408,14 +425,7 @@ export function noteHostModelSelectionConflict(
   // Materialized for the same reason as the ack path: the conflict can be the
   // answer to message 1 of a chat this send just created.
   const entry = getEntry(agentRef, chatId)
-  if (
-    typeof revision === 'number' &&
-    Number.isSafeInteger(revision) &&
-    revision >= 0 &&
-    (entry.confirmedRevision === null || revision >= entry.confirmedRevision)
-  ) {
-    entry.confirmedRevision = revision
-  }
+  adoptRevisionIfNotOlder(entry, revision)
   entry.conflicted = true
   entry.error = CONFLICT_RECHECKING_ERROR
   if (model) clearIntentIfStill(entry, model)
@@ -589,9 +599,9 @@ async function runSelectionWrites(
         expectedRevision
       )
       if (entry.scopeGeneration !== ownerScope) return false
-      if (typeof result?.modelSelectionRevision === 'number') {
-        entry.confirmedRevision = result.modelSelectionRevision
-      }
+      // A send ack can land while this write is in flight and raise the CAS base
+      // past the revision this write produced; the late reply must not lower it.
+      adoptRevisionIfNotOlder(entry, result?.modelSelectionRevision)
       entry.conflicted = false
       const serverModel =
         typeof result?.model === 'string' && result.model ? result.model : currentModel

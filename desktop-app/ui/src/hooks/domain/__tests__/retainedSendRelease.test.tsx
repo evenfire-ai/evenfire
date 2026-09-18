@@ -9,7 +9,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, waitFor } from '@testing-library/react'
+import { readHostModelSelection, resetHostModelSelectionStore } from '@lib/hostModelSelectionStore'
 import type { RetainedSendSnapshot } from '@lib/retainedSendStore'
+import type { ComposerImageAttachment } from '../../../uiTypes'
 import { renderController } from './__fixtures__/controllerHarness'
 import { type MockClerum, installMockClerum, uninstallMockClerum } from './__fixtures__/mockClerum'
 
@@ -57,8 +59,18 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks()
   vi.useRealTimers()
+  resetHostModelSelectionStore()
   uninstallMockClerum()
 })
+
+const image: ComposerImageAttachment = {
+  id: 'input-image',
+  name: 'input.png',
+  mimeType: 'image/png',
+  dataBase64: 'YWJj',
+  sizeBytes: 3,
+  previewDataUrl: 'data:image/png;base64,YWJj',
+}
 
 async function settleMount() {
   await waitFor(() => expect(clerum.chat.getIndex).toHaveBeenCalled())
@@ -277,5 +289,32 @@ describe('older failures of a chat (#654 M2)', () => {
 
     expect(result.current.failedAgentSend).toBeNull()
     expect(heldFailures()).toEqual([])
+  })
+
+  it('shows a fresh send-time error over an older retained failure', async () => {
+    const { result } = renderController()
+    await settleMount()
+    await sendFailing(result, 'first try')
+
+    // With no fresh error, the banner falls back to the retained failure.
+    act(() => result.current.clearComposerSendError())
+    expect(result.current.agentError).toBe('network down')
+
+    // An image send is blocked before any POST: the model selection for this
+    // chat was never loaded, so the send-time guard reports a fresh error.
+    const chatId = result.current.activeChatId
+    const blocker = readHostModelSelection('agent-x', chatId).imageBlockMessage
+    expect(blocker).toEqual(expect.any(String))
+    act(() => result.current.handleAddComposerImageAttachments([image]))
+    await act(async () => {
+      await result.current.handleSendAgentMessage('with an image')
+    })
+
+    // Witness: the older failure is still retained and visible as the Resend
+    // target, and the blocked send never reached the Host.
+    expect(heldFailures().map(snapshot => snapshot.content)).toEqual(['first try'])
+    expect(result.current.failedAgentSend?.content).toBe('first try')
+    expect(clerum.rpc.invokeHostMessage).toHaveBeenCalledTimes(1)
+    expect(result.current.agentError).toBe(blocker)
   })
 })

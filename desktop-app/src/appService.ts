@@ -3322,6 +3322,10 @@ export class AppService {
     if (!targetHostRef) {
       throw new Error('hostRef is required')
     }
+    // A malformed request is rejected before any token is issued for it.
+    if (request.attachments != null && !Array.isArray(request.attachments)) {
+      throw new Error('Image attachments must be a list.')
+    }
     const effectiveHostRefs = hostRefs && hostRefs.length > 0 ? hostRefs : [targetHostRef]
     const rpc = await this.issueRpcTokenForHostRefs(
       HOST_WAKEABLE_OPERATION_SCOPES,
@@ -3330,9 +3334,6 @@ export class AppService {
     const outgoingAttachmentCount = Array.isArray(request.attachments)
       ? request.attachments.length
       : 0
-    if (request.attachments != null && !Array.isArray(request.attachments)) {
-      throw new Error('Image attachments must be a list.')
-    }
     if (outgoingAttachmentCount > 0) {
       console.info(
         `[AppService] invokeHostMessage host=${targetHostRef} attachments=${outgoingAttachmentCount}`

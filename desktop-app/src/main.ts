@@ -368,11 +368,13 @@ if (!gotSingleInstanceLock) {
 } else {
   app.on('second-instance', (_event, argv) => {
     // An isolated instance never routes deep links: a URL delivered here belongs
-    // to the session that owns the OS handler, not to this one.
-    if (!devIsolationPolicy.acceptDeepLinks) return
-    const protocolUrls = collectInitialProtocolUrls(argv)
-    protocolUrls.evenfireUrls.forEach(evenfireDeepLinkRouter.handle)
-    protocolUrls.clerumUrls.forEach(handleClerumUrl)
+    // to the session that owns the OS handler, not to this one. A relaunch still
+    // brings this instance's window forward.
+    if (devIsolationPolicy.acceptDeepLinks) {
+      const protocolUrls = collectInitialProtocolUrls(argv)
+      protocolUrls.evenfireUrls.forEach(evenfireDeepLinkRouter.handle)
+      protocolUrls.clerumUrls.forEach(handleClerumUrl)
+    }
     requestMainWindow()
   })
 }

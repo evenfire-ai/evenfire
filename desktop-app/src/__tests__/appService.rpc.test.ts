@@ -79,6 +79,42 @@ describe('AppService.invokeHostMessage', () => {
     expect(service.rpcClient.invokeHostMessage.mock.calls[0][3]).toEqual({ async: true })
   })
 
+  it('rejects malformed attachments before issuing an RPC token', async () => {
+    const service = new AppService() as any
+    service.sessionToken = 'session-token'
+    service.me = {
+      id: '00000000-0000-4000-8000-000000000001',
+      email: 'test@clerum.io',
+      name: 'Test User',
+      picture: null,
+      teamId: '00000000-0000-4000-8000-0000000000aa',
+      teamName: 'Test Team',
+      role: 'member',
+    }
+    service.rpcTokenManager = {
+      getOrIssue: vi.fn().mockResolvedValue({ token: 'rpc-token' }),
+      clear: vi.fn(),
+    }
+    service.rpcClient = {
+      invokeHostMessage: vi.fn().mockResolvedValue({ success: true, response: 'ok' }),
+    }
+    const issueToken = vi.spyOn(service, 'issueRpcTokenForHostRefs')
+
+    await expect(
+      service.invokeHostMessage('chatllm', { content: 'hello', attachments: {} }, ['chatllm'])
+    ).rejects.toThrow('Image attachments must be a list.')
+    expect(issueToken).not.toHaveBeenCalled()
+    expect(service.rpcTokenManager.getOrIssue).not.toHaveBeenCalled()
+    expect(service.rpcClient.invokeHostMessage).not.toHaveBeenCalled()
+
+    // Positive control: the same call with a well-formed list issues the token
+    // and reaches the Host, so the checks above are not vacuous.
+    await service.invokeHostMessage('chatllm', { content: 'hello', attachments: [] }, ['chatllm'])
+    expect(issueToken).toHaveBeenCalledTimes(1)
+    expect(service.rpcTokenManager.getOrIssue).toHaveBeenCalled()
+    expect(service.rpcClient.invokeHostMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('switches to a matching directory team before issuing RPC tokens for teamless sessions', async () => {
     const service = new AppService() as any
     service.desktopGfsUploadStatePath = vi
