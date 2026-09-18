@@ -1,0 +1,5 @@
+name: evenfire/codeql-queries
+version: 0.0.1
+dependencies:
+  codeql/javascript-all: 2.9.0
+  codeql/javascript-queries: 2.4.3

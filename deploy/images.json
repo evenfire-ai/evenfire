@@ -39,7 +39,8 @@
         "packages/workflow-recipe-capability-policy/**",
         "packages/display-field/**",
         "packages/frontend-components/**",
-        "packages/gfs-interaction-policy/**"
+        "packages/gfs-interaction-policy/**",
+        "scripts/qa-recorder/**"
       ],
       "published": true,
       "deployed_to_minikube": true

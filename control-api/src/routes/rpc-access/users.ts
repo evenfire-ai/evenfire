@@ -1,9 +1,11 @@
 import express, { Router } from 'express'
-import type { Request } from 'express'
+import type { Request, Response } from 'express'
 import { config } from '../../config.js'
 import { pool } from '../../db.js'
 import { K8sGateway } from '../../k8s.js'
+import { rateLimitMiddleware } from '../../middleware/rateLimitMiddleware.js'
 import {
+  requireRpcTokenHostMatch,
   requireRpcTokenUserMatch,
   requireValidRpcAccessToken,
   requireValidRpcAccessTokenAny,
@@ -14,6 +16,7 @@ import {
   resolveInvocableMcpServersForContexts,
 } from '../../services/access/mcpInvocable.js'
 import {
+  type AuthorizedRpcHostAccess,
   type RpcHostAccessDenialReason,
   type RpcHostAccessDirectory,
   authorizeRpcHostAccess,
@@ -47,6 +50,9 @@ const HOST_ACCESS_SCOPES = [
 ] as const
 
 type RpcAuthedRequest = Request & { rpcAuth?: RpcAccessClaims }
+type ArtifactReadRequest = RpcAuthedRequest & {
+  artifactReadConnection?: AuthorizedRpcHostAccess
+}
 
 function logHostAccessDenial(
   req: RpcAuthedRequest,
@@ -56,6 +62,29 @@ function logHostAccessDenial(
     { event: 'rpc_host_access_denied', reason },
     'rpc host access denied by control-plane authority'
   )
+}
+
+async function resolveAuthorizedHostConnection(
+  req: RpcAuthedRequest,
+  res: Response,
+  gateway: K8sGateway,
+  directory: RpcHostAccessDirectory | undefined
+): Promise<AuthorizedRpcHostAccess | null> {
+  const userId = String(req.params.userId || '').trim()
+  const hostRef = String(req.params.hostRef || '').trim()
+  const claims = req.rpcAuth
+  if (!claims) {
+    logHostAccessDenial(req, 'claims_missing')
+    res.status(403).json({ error: 'Forbidden' })
+    return null
+  }
+  const authorization = await authorizeRpcHostAccess(gateway, claims, userId, hostRef, directory)
+  if (!authorization.authorized) {
+    logHostAccessDenial(req, authorization.reason)
+    res.status(403).json({ error: 'Forbidden' })
+    return null
+  }
+  return authorization.connection
 }
 
 async function bindDirectRunWithinBudget(
@@ -183,30 +212,63 @@ export function createRpcAccessUsersRouter(
     requireValidRpcAccessTokenAny([...HOST_ACCESS_SCOPES]),
     async (req: RpcAuthedRequest, res, next) => {
       try {
-        const userId = String(req.params.userId || '').trim()
-        const hostRef = String(req.params.hostRef || '').trim()
-        const claims = req.rpcAuth
-        if (!claims) {
-          logHostAccessDenial(req, 'claims_missing')
-          res.status(403).json({ error: 'Forbidden' })
-          return
-        }
-        const authorization = await authorizeRpcHostAccess(
-          gateway,
-          claims,
-          userId,
-          hostRef,
-          directory
-        )
-        if (!authorization.authorized) {
-          logHostAccessDenial(req, authorization.reason)
-          res.status(403).json({ error: 'Forbidden' })
-          return
-        }
-        res.status(200).json(authorization.connection)
+        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
+        if (connection) res.status(200).json(connection)
       } catch (error) {
         next(error)
       }
+    }
+  )
+
+  // The subject-wide durable PG bucket protects the expensive live Host
+  // authorization below. Claim-match middleware runs first so malformed,
+  // mismatched, or unsigned Host selectors do not consume admission and
+  // caller-controlled Host refs cannot expand bucket cardinality.
+  router.get(
+    `${hostAccessPath}/artifact-read`,
+    requireValidRpcAccessTokenAny(['host:task:read']),
+    requireRpcTokenUserMatch(),
+    requireRpcTokenHostMatch(),
+    rateLimitMiddleware({
+      bucketType: 'host_artifact_pre_admission',
+      maxPerMinute: config.hostArtifactReadRlPerMin,
+      getBucketKey: req => {
+        const subject = (req as ArtifactReadRequest).rpcAuth?.sub
+        // Auth middleware should always populate the subject before this
+        // limiter. Keep malformed composition attributable to a counted
+        // sentinel instead of silently bypassing the durable budget.
+        return subject
+          ? `host-artifact-pre-admission:${subject}`
+          : 'host-artifact-pre-admission:unauthenticated'
+      },
+    }),
+    async (req: ArtifactReadRequest, res, next) => {
+      try {
+        const connection = await resolveAuthorizedHostConnection(req, res, gateway, directory)
+        if (!connection) return
+        req.artifactReadConnection = connection
+        next()
+      } catch (error) {
+        next(error)
+      }
+    },
+    // Preserve R29-H1: after live authorization establishes the canonical
+    // Host, consume its independent subject+Host budget before returning the
+    // artifact connection. Host wake capacity remains separate.
+    rateLimitMiddleware({
+      bucketType: 'host_artifact_read',
+      maxPerMinute: config.hostArtifactReadRlPerMin,
+      getBucketKey: req => {
+        const artifactRead = req as ArtifactReadRequest
+        const subject = artifactRead.rpcAuth?.sub
+        const hostRef = artifactRead.artifactReadConnection?.hostRef
+        return subject && hostRef
+          ? `host-artifact-read:${subject}:${hostRef}`
+          : 'host-artifact-read:unresolved'
+      },
+    }),
+    (req: ArtifactReadRequest, res) => {
+      res.status(200).json(req.artifactReadConnection)
     }
   )
 

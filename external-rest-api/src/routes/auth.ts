@@ -1,16 +1,20 @@
 import { Request, Response, Router } from 'express'
-import { OAuth2Client } from 'google-auth-library'
-import { config } from '../config.js'
 import { ControlApiError } from '../controlApiClient.js'
 import { createRateLimiter } from '../middleware/rateLimit.js'
 import {
   loginWithGoogle,
   loginWithPassword,
+  logoutUserSession,
+  renewUserSession,
   requestPasswordReset,
 } from '../services/authService.js'
-import { clearProfileSessionCookie, setProfileSessionCookie } from '../sessionCookie.js'
+import {
+  PROFILE_SESSION_COOKIE,
+  clearProfileSessionCookie,
+  readCookie,
+  setProfileSessionCookie,
+} from '../sessionCookie.js'
 
-const googleClient = new OAuth2Client(config.googleClientId)
 const passwordResetRateLimit = createRateLimiter({
   windowMs: 60_000,
   maxRequests: 5,
@@ -24,12 +28,6 @@ const passwordResetRateLimit = createRateLimiter({
 
 function isControlApiStatus(error: unknown, status: number): error is ControlApiError {
   return error instanceof ControlApiError && error.status === status
-}
-
-type GooglePayload = {
-  email: string
-  name?: string
-  picture?: string
 }
 
 type LoginResponse = {
@@ -48,28 +46,16 @@ function shouldExposeBearerToken(req: { header: (name: string) => string | undef
   return !origin && !fetchSite
 }
 
+function requestedSessionContract(req: Request): 'v2' | undefined {
+  return req.header('x-evenfire-session-contract') === 'v2' ? 'v2' : undefined
+}
+
 function sendLoginResponse(req: Request, res: Response, result: LoginResponse): void {
   setProfileSessionCookie(req, res, result.token)
   const body = shouldExposeBearerToken(req)
     ? { token: result.token, me: result.me }
     : { me: result.me }
   res.status(200).json(body)
-}
-
-async function verifyGoogleToken(idToken: string): Promise<GooglePayload> {
-  const ticket = await googleClient.verifyIdToken({
-    idToken,
-    audience: config.googleClientId,
-  })
-  const payload = ticket.getPayload()
-  if (!payload?.email) {
-    throw new Error('Google token has no email')
-  }
-  return {
-    email: payload.email.toLowerCase(),
-    name: payload.name,
-    picture: payload.picture,
-  }
 }
 
 export function createAuthRouter(): Router {
@@ -83,8 +69,13 @@ export function createAuthRouter(): Router {
         return
       }
 
-      await verifyGoogleToken(idToken)
-      const result = await loginWithGoogle({ idToken })
+      const result = await loginWithGoogle(
+        {
+          idToken,
+          ...(requestedSessionContract(req) ? { sessionContract: 'v2' as const } : {}),
+        },
+        req.ip
+      )
       sendLoginResponse(req, res, result)
     } catch (error) {
       if (isControlApiStatus(error, 404)) {
@@ -110,7 +101,7 @@ export function createAuthRouter(): Router {
         return
       }
 
-      const result = await loginWithPassword(email, password)
+      const result = await loginWithPassword(email, password, requestedSessionContract(req), req.ip)
       sendLoginResponse(req, res, result)
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
@@ -142,9 +133,49 @@ export function createAuthRouter(): Router {
     }
   })
 
-  router.post('/auth/logout', (req, res) => {
-    clearProfileSessionCookie(req, res)
-    res.status(200).json({ ok: true })
+  router.post('/auth/session/renew', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (!token || token.length > 4096) {
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      const renewed = await renewUserSession(token, req.ip)
+      setProfileSessionCookie(req, res, renewed.token)
+      const body = shouldExposeBearerToken(req)
+        ? { token: renewed.token, expiresInSeconds: renewed.expiresInSeconds }
+        : { expiresInSeconds: renewed.expiresInSeconds }
+      res.status(200).json(body)
+    } catch (error) {
+      if (isControlApiStatus(error, 401)) {
+        clearProfileSessionCookie(req, res)
+        res.status(401).json({ error: 'Unauthorized' })
+        return
+      }
+      next(error)
+    }
+  })
+
+  router.post('/auth/logout', async (req, res, next) => {
+    try {
+      const bearer = String(req.header('authorization') || '')
+        .replace(/^bearer\s+/i, '')
+        .trim()
+      const token = bearer || readCookie(req, PROFILE_SESSION_COOKIE)
+      if (token) await logoutUserSession(token, req.ip)
+      clearProfileSessionCookie(req, res)
+      res.status(200).json({ ok: true })
+    } catch (error) {
+      if (isControlApiStatus(error, 401)) {
+        clearProfileSessionCookie(req, res)
+        res.status(200).json({ ok: true })
+        return
+      }
+      next(error)
+    }
   })
 
   return router

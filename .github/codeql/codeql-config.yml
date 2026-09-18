@@ -1,0 +1,12 @@
+name: Evenfire CodeQL configuration
+
+# Run the stock security-and-quality suite exactly once, replacing only the
+# missing-rate-limiting query with Evenfire's canonical middleware model.
+disable-default-queries: true
+queries:
+  - uses: ./.github/codeql/queries/evenfire-security-and-quality.qls
+
+# Query-test fixtures intentionally contain vulnerable examples. Keep them in
+# the checkout for `codeql test run`, but out of the production JS/TS database.
+paths-ignore:
+  - .github/codeql/queries/test/**

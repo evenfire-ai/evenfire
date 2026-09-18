@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { onlineIndexAwareQuery } from './helpers/onlineIndexCatalogMock.js'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -13,7 +14,10 @@ describe('0101 oauth_grants owner generalization migration', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
-    mockConnect.mockResolvedValue({ query: clientQuery, release: clientRelease })
+    mockConnect.mockResolvedValue({
+      query: onlineIndexAwareQuery(clientQuery),
+      release: clientRelease,
+    })
     clientQuery.mockResolvedValue({ rows: [], rowCount: 0 })
   })
 
@@ -31,8 +35,10 @@ describe('0101 oauth_grants owner generalization migration', () => {
     expect(versions.indexOf('0107_llm_provider_attempts_sdk_link')).toBeLessThan(
       versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')
     )
+    expect(versions.indexOf('0108_llm_provider_attempts_sdk_link_on_delete_set_null')).toBeLessThan(
+      versions.indexOf('0109_user_access_foundation')
+    )
     expect(versions).toContain('0099_gfs_upload_finalizing_recovery')
-    expect(versions).toContain('0100_seed_minimax_allowed_model')
   })
 
   it('carries its prior names as legacyVersions so a deploy that already ran it is not re-executed', async () => {
