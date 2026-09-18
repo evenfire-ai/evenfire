@@ -178,8 +178,10 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
       }
     }
     if (code === 'tool_call_limit_exceeded') {
-      // The same request would produce the same over-limit response, so it is
-      // neither retryable nor a reason to fail over to another provider.
+      // Not retryable: `retryable: true` would make this error
+      // failover-eligible and enable the workflow fallback after tool
+      // results, re-running the turn on another provider. The limit is a
+      // contract rejection of the model output, not a provider outage.
       return {
         code: LlmErrorCode.ToolCallLimitExceeded,
         retryable: false,
@@ -277,11 +279,6 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
     if (options?.signal?.aborted) {
       throw new CodexProxyError('canceled', 'aborted before authorize', false)
     }
-    // Hash and send the validated wire projection — exactly what control-api
-    // authorize and the proxy re-derive. Hashing the locally built object let
-    // shapes the parser normalizes away (an empty `generation` from a
-    // tool-name tool_choice, empty tools/hints) fail authorize with a
-    // requestHash mismatch. An invalid request never leaves the process.
     // An over-long history is reported as a context-length failure instead of
     // a generic invalid request; it is thrown before authorize and dispatch.
     if (messages.length > LIMITS.maxMessages) {
@@ -290,6 +287,11 @@ export class CodexSubscriptionProvider implements SingleTurnProvider {
         `messages exceed ${LIMITS.maxMessages}`
       )
     }
+    // Hash and send the validated wire projection — exactly what control-api
+    // authorize and the proxy re-derive. Hashing the locally built object let
+    // shapes the parser normalizes away (an empty `generation` from a
+    // tool-name tool_choice, empty tools/hints) fail authorize with a
+    // requestHash mismatch. An invalid request never leaves the process.
     const canonical = hashCanonicalCodexRequest(this.buildRequest(messages, tools, options))
     if (!canonical.ok) {
       throw new CodexAuthorizeError('invalid_request', canonical.message)
