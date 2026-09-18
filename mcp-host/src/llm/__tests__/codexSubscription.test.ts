@@ -6,7 +6,8 @@ import {
   createToolDescribeTool,
   createToolSearchTool,
 } from '../../capabilities/toolCatalogTools'
-import { LlmErrorCode } from '../../core/errors'
+import { LlmPortAdapter } from '../../core/adapters/llmPortAdapter'
+import { LlmError, LlmErrorCode } from '../../core/errors'
 import { DeferrableToolController } from '../../core/orchestration/deferrableToolController'
 import { DefaultLoopController } from '../../core/orchestration/loopConfig'
 import { CodexProxyError } from '../codexLlmProxyClient'
@@ -69,25 +70,92 @@ describe('CodexSubscriptionProvider', () => {
       ).rejects.toThrow(/successful terminal outcome/)
     }
   )
-  it('rejects an oversized successful proxy batch before returning any executable tools', async () => {
-    const wired = deps({
+  function successfulBatch(count: number) {
+    return deps({
       stream: vi.fn().mockResolvedValue({
         text: '',
         outcome: 'success',
-        toolCalls: Array.from({ length: 33 }, (_, index) => ({
+        toolCalls: Array.from({ length: count }, (_, index) => ({
           id: `call-${index}`,
           name: 'echo',
           arguments: {},
         })),
       }),
     })
+  }
+
+  it('returns a successful proxy batch of exactly 64 tool calls', async () => {
+    const wired = successfulBatch(64)
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const result = await provider.completeSingleTurnWithTools(
+      [{ role: 'user', content: 'hi' }],
+      [{ name: 'echo', description: 'echo', parameters: {} }]
+    )
+    expect(result.tool_calls).toHaveLength(64)
+  })
+
+  it('rejects a 65-call proxy batch with tool_call_limit_exceeded before returning any executable tools', async () => {
+    const wired = successfulBatch(65)
     const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
     await expect(
       provider.completeSingleTurnWithTools(
         [{ role: 'user', content: 'hi' }],
         [{ name: 'echo', description: 'echo', parameters: {} }]
       )
-    ).rejects.toThrow(/tool calls exceed 32/)
+    ).rejects.toMatchObject({
+      name: 'CodexProxyError',
+      code: 'tool_call_limit_exceeded',
+      message: 'tool calls exceed 64',
+    })
+    // Liveness witness: the batch really came back from the proxy.
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('surfaces a 65-call stream through the port adapter as a non-retryable LlmError', async () => {
+    const wired = successfulBatch(65)
+    const adapter = new LlmPortAdapter(
+      new CodexSubscriptionProvider('gpt-5.3-codex', wired as never),
+      'gpt-5.3-codex',
+      'codex-subscription'
+    )
+    const failure = await adapter
+      .completeWithTools({
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ name: 'echo', description: 'echo', parameters: {} }],
+      })
+      .catch((err: unknown) => err)
+
+    expect(wired.stream).toHaveBeenCalledTimes(1)
+    expect(failure).toBeInstanceOf(LlmError)
+    expect(failure).toMatchObject({
+      code: 'LLM_TOOL_CALL_LIMIT_EXCEEDED',
+      retryable: false,
+      providerCode: 'tool_call_limit_exceeded',
+    })
+  })
+
+  it('rejects more than 256 messages before authorize or dispatch', async () => {
+    const wired = deps()
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', wired as never)
+    const history = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        role: 'user' as const,
+        content: `message ${index}`,
+      }))
+
+    const rejected = provider.completeSingleTurn(history(257))
+    await expect(rejected).rejects.toBeInstanceOf(CodexAuthorizeError)
+    await expect(rejected).rejects.toMatchObject({
+      code: 'request_limit_exceeded',
+      message: 'messages exceed 256',
+    })
+    expect(wired.authorize).not.toHaveBeenCalled()
+    expect(wired.stream).not.toHaveBeenCalled()
+
+    // Liveness witness: at the limit the same provider authorizes and streams.
+    await provider.completeSingleTurn(history(256))
+    expect(wired.authorize).toHaveBeenCalledTimes(1)
+    expect(wired.stream).toHaveBeenCalledTimes(1)
   })
   it('requires an explicit model plus authorizer and proxy dependencies', () => {
     process.env.MCP_HOST_CODEX_SUBSCRIPTION_ENABLED = 'true'
@@ -412,6 +480,41 @@ describe('CodexSubscriptionProvider', () => {
     expect(limited.code).toBe(LlmErrorCode.RateLimited)
     expect(limited.retryable).toBe(true)
     expect(classifyFailoverClass(limited.code, limited.retryable)).toBe('rate_limited')
+  })
+
+  it('classifies request limits as non-retryable, non-failover errors', () => {
+    const provider = new CodexSubscriptionProvider('gpt-5.3-codex', deps() as never)
+
+    const toolLimit = provider.classifyError(
+      new CodexProxyError('tool_call_limit_exceeded', 'tool calls exceed 64')
+    )
+    expect(toolLimit).toEqual({
+      code: LlmErrorCode.ToolCallLimitExceeded,
+      retryable: false,
+      message: 'tool calls exceed 64',
+      providerCode: 'tool_call_limit_exceeded',
+      providerDispatched: true,
+    })
+    expect(classifyFailoverClass(toolLimit.code, toolLimit.retryable)).toBeNull()
+
+    const history = provider.classifyError(
+      new CodexAuthorizeError('request_limit_exceeded', 'messages exceed 256')
+    )
+    expect(history).toEqual({
+      code: LlmErrorCode.ContextLengthExceeded,
+      retryable: false,
+      message: 'messages exceed 256',
+      providerCode: 'request_limit_exceeded',
+      providerDispatched: false,
+    })
+    expect(classifyFailoverClass(history.code, history.retryable)).toBeNull()
+
+    // Witness: the new branches leave the outage mapping untouched.
+    const unavailable = provider.classifyError(
+      new CodexProxyError('provider_unavailable', 'upstream 5xx')
+    )
+    expect(unavailable.code).toBe(LlmErrorCode.ModelOverloaded)
+    expect(unavailable.retryable).toBe(true)
   })
 
   it('records whether a classified Codex failure had already left the process', () => {
