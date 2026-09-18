@@ -262,9 +262,97 @@ describe('D34 PR1 migration runner', () => {
       ...PR1_MIGRATION_VERSIONS,
       ...PR2_MIGRATION_VERSIONS,
     ])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(21)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(21)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(22)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(22)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
+  })
+
+  it('runs after-schema online indexes outside the migration transaction before recording', async () => {
+    const events: string[] = []
+    const indexStates = new Map<string, Record<string, unknown>>()
+    let inTransaction = false
+    const db = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        if (sql === 'BEGIN') inTransaction = true
+        if (sql === 'COMMIT' || sql === 'ROLLBACK') inTransaction = false
+        if (sql.includes('FROM pg_class index_rel')) {
+          const state = indexStates.get(String(values?.[0]))
+          return { rows: state ? [state] : [], rowCount: state ? 1 : 0 }
+        }
+        if (sql.startsWith('CREATE INDEX CONCURRENTLY')) {
+          const entry = PR1_ONLINE_INDEX_PLAN.find(index => sql === index.createSql)
+          if (entry) {
+            events.push(`create:${inTransaction}`)
+            indexStates.set(entry.name, {
+              table_name: entry.table,
+              indisunique: Boolean(entry.unique),
+              indisvalid: true,
+              definition: sql,
+            })
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      }),
+    }
+    const pendingVersion = '0115_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ].map(version => ({
+      version,
+      apply: vi.fn(async () => {
+        if (version === pendingVersion) events.push('apply')
+      }),
+    }))
+
+    await applyPendingPr1Migrations({
+      db,
+      migrations,
+      appliedVersions,
+      recordMigration: async (_db, version) => {
+        if (version === pendingVersion) events.push('record')
+      },
+    })
+
+    expect(events).toEqual(['apply', 'create:false', 'record'])
+  })
+
+  it('does not record an after-schema migration when its online index fails', async () => {
+    const query = vi.fn(async (sql: string, values?: unknown[]) => {
+      if (sql.includes('FROM pg_class index_rel')) return { rows: [], rowCount: 0 }
+      if (sql.startsWith('CREATE INDEX CONCURRENTLY')) throw new Error('online index failed')
+      return { rows: [], rowCount: 0 }
+    })
+    const pendingVersion = '0115_workflow_authority_bindings'
+    const appliedVersions = new Set<string>([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS.filter(version => version !== pendingVersion),
+    ])
+    const migrations = [
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ].map(version => ({ version, apply: vi.fn(async () => undefined) }))
+    const recordMigration = vi.fn(async () => undefined)
+
+    await expect(
+      applyPendingPr1Migrations({
+        db: { query },
+        migrations,
+        appliedVersions,
+        recordMigration,
+      })
+    ).rejects.toThrow('online index failed')
+
+    expect(recordMigration).not.toHaveBeenCalled()
+    expect(appliedVersions).not.toContain(pendingVersion)
   })
 
   it('stops after a failed version and rolls back only that version', async () => {

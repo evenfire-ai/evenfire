@@ -108,6 +108,14 @@ export async function applyPendingPr1Migrations({
       await preparePr1Migration(db, version)
     }
 
+    if (isPr1Migration && !acceptedLegacyVersion && hasPostSchemaIndexes) {
+      await runBoundedTransaction(db, async () => migration.apply(db))
+      await preparePr1Migration(db, version, 'after-schema')
+      await runBoundedTransaction(db, async () => recordMigration(db, version))
+      appliedVersions.add(version)
+      continue
+    }
+
     await runBoundedTransaction(db, async () => {
       if (!acceptedLegacyVersion) await migration.apply(db)
       await recordMigration(db, version)
