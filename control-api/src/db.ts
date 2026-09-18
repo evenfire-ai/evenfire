@@ -6038,26 +6038,6 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     apply: applyGrokSubscriptionConnectionSchema,
   },
   {
-    version: '0110_grok_subscription_oauth_states',
-    apply: applyGrokSubscriptionOAuthStateSchema,
-  },
-  {
-    version: '0111_grok_catalog_models',
-    apply: applyGrokCatalogModelsSchema,
-  },
-  {
-    version: '0112_llm_provider_attempts_grok_broker',
-    apply: applyLlmProviderAttemptsGrokBrokerSchema,
-  },
-  {
-    version: '0113_grok_subscription_terminal_connection_key',
-    apply: applyGrokSubscriptionTerminalConnectionKeySchema,
-  },
-  {
-    version: '0114_llm_provider_attempts_connection_integrity',
-    apply: applyLlmProviderAttemptConnectionIntegritySchema,
-  },
-  {
     version: '0109_user_access_foundation',
     legacyVersions: ['0107_user_access_foundation', '0101_user_access_foundation'],
     apply: applyUserAccessFoundationSchema,
@@ -6094,6 +6074,26 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
       '0106_legacy_password_security_epoch_backfill',
     ],
     apply: backfillLegacyPasswordSecurityEpochs,
+  },
+  {
+    version: '0110_grok_subscription_oauth_states',
+    apply: applyGrokSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '0111_grok_catalog_models',
+    apply: applyGrokCatalogModelsSchema,
+  },
+  {
+    version: '0112_llm_provider_attempts_grok_broker',
+    apply: applyLlmProviderAttemptsGrokBrokerSchema,
+  },
+  {
+    version: '0113_grok_subscription_terminal_connection_key',
+    apply: applyGrokSubscriptionTerminalConnectionKeySchema,
+  },
+  {
+    version: '0114_llm_provider_attempts_connection_integrity',
+    apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
 ]
 
