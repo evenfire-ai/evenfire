@@ -11,6 +11,7 @@ import { DESKTOP_ROUTES, SIDEBAR_SESSION_PREVIEW_LIMIT } from '@constants/naviga
 import { useClickOutside } from '@hooks/useClickOutside'
 import { formatDesktopAppVersionTooltip, useDesktopAppInfo } from '@hooks/useDesktopAppInfo'
 import type { NavItem } from '@/uiTypes'
+import { FileExplorerTree } from './FileExplorerTree'
 import {
   IconAgents,
   IconAttachFile,
@@ -43,6 +44,9 @@ export function SidebarNav({
   onOpenSandboxUiApp,
   onSettingsMenuOpenChange,
   onSelect,
+  onOpenFilesSection,
+  onOpenPreviewSection,
+  pushToast,
   toggleRequestId = 0,
 }: SidebarNavProps) {
   const { busy, me, handleLogout: onLogout } = useAuthContext()
@@ -57,6 +61,9 @@ export function SidebarNav({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [chatSessionsOpen, setChatSessionsOpen] = useState(true)
   const [appsOpen, setAppsOpen] = useState(true)
+  // Collapsed by default: opening it triggers the "Shared with me" discovery
+  // fetch, so it stays inert until the user reaches for the file tree.
+  const [filesExplorerOpen, setFilesExplorerOpen] = useState(false)
   const [sessionMenuId, setSessionMenuId] = useState<string | null>(null)
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null)
   const [sessionRenameValue, setSessionRenameValue] = useState('')
@@ -546,7 +553,9 @@ export function SidebarNav({
             ))}
 
             <div
-              className={`nav-link${navItem === DESKTOP_ROUTES.files ? ' active' : ''}`}
+              className={`nav-link nav-link--with-toggle${
+                navItem === DESKTOP_ROUTES.files ? ' active' : ''
+              }`}
               title={collapsed ? 'Files' : undefined}
               data-tooltip="Files"
             >
@@ -564,7 +573,30 @@ export function SidebarNav({
               >
                 Files
               </NavItemControl>
+              <IconButton
+                className="nav-link-session-toggle"
+                label={filesExplorerOpen ? 'Collapse file explorer' : 'Expand file explorer'}
+                aria-expanded={filesExplorerOpen}
+                data-testid="nav-files-explorer-toggle"
+                onClick={event => {
+                  event.stopPropagation()
+                  setFilesExplorerOpen(open => !open)
+                }}
+                variant="ghost"
+              >
+                <IconChevronRight className={filesExplorerOpen ? 'expanded' : ''} />
+              </IconButton>
             </div>
+
+            {!collapsed && filesExplorerOpen && (
+              <div className="nav-file-explorer">
+                <FileExplorerTree
+                  onOpenFolder={onOpenFilesSection}
+                  onOpenPreview={onOpenPreviewSection}
+                  pushToast={pushToast}
+                />
+              </div>
+            )}
           </nav>
 
           <div className="sidebar-footer">

@@ -34,6 +34,7 @@ import {
 import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import { type GfsCrumb, useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { isEventFromNestedInteractive } from '@lib/clickableRowProps'
+import { saveGfsFileToDisk } from '@lib/gfsDownload'
 import { assertGfsFileUploadSize } from '@lib/gfsFileUpload'
 import { describeGfsGrantError } from '@lib/gfsGrantErrors'
 import { isGfsPreviewFile, resolveGfsPreview } from '@lib/gfsPreview'
@@ -510,13 +511,7 @@ export function FilesPage({
 
   const handleDownload = async (uri: string, name: string) => {
     try {
-      const { bytes } = await window.clerum.gfs.download(uri)
-      const url = URL.createObjectURL(new Blob([bytes]))
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = name
-      anchor.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+      await saveGfsFileToDisk(uri, name)
       pushToast?.(`Downloaded ${name}`, 'success')
     } catch (downloadError) {
       if (failClosedOnAuthorizationError(downloadError)) return

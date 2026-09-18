@@ -2436,6 +2436,9 @@ export function App() {
                               onOpenSandboxUiApp={handleOpenSandboxUiApp}
                               onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                               onSelect={handleSidebarNavSelect}
+                              onOpenFilesSection={vm.openFilesSection}
+                              onOpenPreviewSection={vm.openPreviewSection}
+                              pushToast={vm.pushToast}
                               toggleRequestId={sidebarToggleRequestId}
                             />
                             <section className="workspace-layout">

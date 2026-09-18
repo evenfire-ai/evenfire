@@ -45,6 +45,9 @@ function baseProps(overrides: Partial<SidebarNavProps> = {}): SidebarNavProps {
     onNewChat: vi.fn(),
     onOpenSandboxUiApp: vi.fn(),
     onSelect: vi.fn(),
+    onOpenFilesSection: vi.fn(),
+    onOpenPreviewSection: vi.fn(),
+    pushToast: vi.fn(),
     ...overrides,
   }
 }
