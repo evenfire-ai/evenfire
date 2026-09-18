@@ -74,6 +74,20 @@ Inner `pre-gate-sync` may use `--skip-port-forwards`; never pass that
 globally into `make minikube-t2`. `branch-profile-pf-health` starts PFs then
 STOPS them on EXIT — do not use it as the lasting hold.
 
+`pre-gate-sync` can roll every deployment (a full image build runs
+`minikube-restart-all`). A `kubectl port-forward svc/...` stays bound to the
+pod it resolved at start, so after an in-run sync the host hold points at
+terminated pods and the Health/Playwright journeys fail against it. Run
+`make minikube-t2` from a host terminal with
+`T2_PORT_FORWARD_COMMAND='MINIKUBE_PROFILE=<owned-profile> make -f .local-notes/minikube-profiles/branch.mk branch-profile-pf'`.
+T2 runs that command from its own working directory, so in a worktree without
+a local `.local-notes/` pass the absolute path of the main checkout's
+`branch.mk`. T2 runs it once, after NP-08 and before Health, only when
+`pre-gate-sync` ran in this invocation, and records `PortForwards=PASS`,
+`SKIPPED` (already synced), `NOT_RUN` (no registered hold and no command) or
+`FAIL` (`PORT_FORWARD_CONFLICT`: the command failed, or a registered hold
+exists and no command renews it). T2 never adopts or kills the hold itself.
+
 ## State transitions
 
 ### Bootstrap
@@ -352,7 +366,9 @@ non-T2 scope guard.
   UI/Desktop Playwright remains opt-in via `T2_PLAYWRIGHT_COMMAND`. Both are
   recorded as separate evidence statuses (`NOT_RUN` when optional;
   `T2_REQUIRE_PLAYWRIGHT=true` refuses a missing journey). Product E2E scripts
-  such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2.
+  such as `scripts/e2e/e2e-hcc-rollout-readiness.sh` are not T2. When
+  `pre-gate-sync` ran, `T2_PORT_FORWARD_COMMAND` renews the host hold
+  before those journeys (see Branch-profile UI port-forwards).
 
 CI, static tests, T1, T2, Playwright, and product E2E scripts are separate
 evidence lanes. A green CI job or unit suite is not proof of T2 runtime

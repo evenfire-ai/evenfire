@@ -134,6 +134,7 @@ T2_HEALTHCHECK_TIMEOUT_SECONDS=10
 T2_HEALTHCHECK_KILL_GRACE_SECONDS=1
 T2_HEALTHCHECK_REQUIRED=false
 T2_REQUIRE_PLAYWRIGHT=true
+T2_PORT_FORWARD_STATUS=SKIPPED
 t2_evidence_write() { :; }
 # Stable process metadata makes start-time verification hermetic even when
 # native sandboxed ps intentionally hides host process details.
