@@ -8,7 +8,7 @@ describe('workflow authority bindings migration', () => {
   it('adds normalized immutable provenance and workflow links without rewriting legacy rows', async () => {
     const { CONTROL_API_MIGRATIONS } = await import('../src/db.js')
     const migration = CONTROL_API_MIGRATIONS.find(
-      candidate => candidate.version === '010f_workflow_authority_bindings'
+      candidate => candidate.version === '0115_workflow_authority_bindings'
     )
     expect(migration).toBeDefined()
 

@@ -8,7 +8,7 @@ export type OnlineIndexDefinition = Readonly<{
   migrationVersion:
     | '0109_user_access_foundation'
     | '010b_catalog_utf8_ordering'
-    | '010f_workflow_authority_bindings'
+    | '0115_workflow_authority_bindings'
   phase?: 'before-schema' | 'after-schema'
   name: string
   table: string
@@ -210,7 +210,7 @@ export const PR1_ONLINE_INDEX_PLAN: readonly OnlineIndexDefinition[] = Object.fr
       (environment_id, target_type, relationship_type, catalog_utf8_bytes(target_id))`,
   },
   {
-    migrationVersion: '010f_workflow_authority_bindings',
+    migrationVersion: '0115_workflow_authority_bindings',
     phase: 'after-schema',
     name: 'workflow_runs_initiating_authority_binding',
     table: 'workflow_runs',
