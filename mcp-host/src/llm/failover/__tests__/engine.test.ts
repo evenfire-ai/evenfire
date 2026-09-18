@@ -222,7 +222,7 @@ describe('FailoverEngine', () => {
       const stream = vi.fn().mockResolvedValue({
         text: '',
         outcome: 'success',
-        toolCalls: Array.from({ length: 65 }, (_, index) => ({
+        toolCalls: Array.from({ length: 257 }, (_, index) => ({
           id: `call-${index}`,
           name: 'echo',
           arguments: {},
