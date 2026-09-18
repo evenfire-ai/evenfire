@@ -38,7 +38,7 @@ import {
   toGrokPolicyBinding,
   toPolicyBinding,
 } from '@clerum/codex-catalog-projection'
-import { type ImageInputCapability, normalizeImageInputCapability } from '@clerum/llm-providers'
+import { type ImageInputCapability, parseImageInputCapability } from '@clerum/llm-providers'
 import type { GrokPolicyBinding } from '../llm/grokPolicyBinding'
 import { assignedConnectionRef } from '../llm/hostLlmBinding'
 import {
@@ -639,7 +639,20 @@ export class ConfigStore {
           continue
         }
         const entry: AllowedModelEntry = { model: rec.model }
-        entry.imageInput = normalizeImageInputCapability(rec.imageInput)
+        // An absent imageInput is a row nobody curated; a present one that does
+        // not parse is corrupt data. Both fail closed to `unknown`, but only the
+        // second is logged — without the value, which is ConfigMap content.
+        const parsedImageInput =
+          rec.imageInput === undefined
+            ? { state: 'unknown' as const }
+            : parseImageInputCapability(rec.imageInput)
+        if (parsedImageInput === null) {
+          logger.error(
+            { provider, model: rec.model },
+            'Allowlist entry has malformed imageInput; treating it as unknown'
+          )
+        }
+        entry.imageInput = parsedImageInput ?? { state: 'unknown' }
         if (typeof rec.displayName === 'string') entry.displayName = rec.displayName
         // Optional, operator-declared: accept only a positive integer; drop
         // NaN/Infinity/negatives silently (it is metadata, not part of the

@@ -521,6 +521,8 @@ describe('ConfigStore — allowlist tier (R3)', () => {
   })
 
   it('observes a capability-only update and keeps malformed evidence as unknown without losing the model', async () => {
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {})
+    // No imageInput at all is an uncurated row, not corrupt data: not logged.
     const initial = { openai: JSON.stringify([{ model: 'gpt-5.4' }]) }
     const built = build({
       provider: 'openai',
@@ -545,17 +547,26 @@ describe('ConfigStore — allowlist tier (R3)', () => {
       metadata: { name: ALLOWLIST_CM },
       data: { openai: JSON.stringify([{ model: 'gpt-5.4', imageInput }]) },
     })
+    // Witness: both the absent and the valid capability were parsed and kept.
     expect(store.allowedModels().get('openai')?.[0].imageInput).toEqual(imageInput)
     expect(changed).toHaveBeenCalledWith(expect.objectContaining({ allowlistChanged: true }))
+    expect(errorSpy).toHaveBeenCalledTimes(0)
     changed.mockClear()
+    const unsupportedClaim = { state: 'supported' }
     handle!.emit('MODIFIED', {
       metadata: { name: ALLOWLIST_CM },
-      data: { openai: JSON.stringify([{ model: 'gpt-5.4', imageInput: { state: 'supported' } }]) },
+      data: { openai: JSON.stringify([{ model: 'gpt-5.4', imageInput: unsupportedClaim }]) },
     })
     expect(store.allowedModels().get('openai')).toEqual([
       { model: 'gpt-5.4', imageInput: { state: 'unknown' } },
     ])
     expect(changed).toHaveBeenCalledWith(expect.objectContaining({ allowlistChanged: true }))
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(errorSpy).toHaveBeenCalledWith(
+      { provider: 'openai', model: 'gpt-5.4' },
+      'Allowlist entry has malformed imageInput; treating it as unknown'
+    )
+    errorSpy.mockRestore()
   })
 
   it('is disabled (no 4th watch, unavailable) when no CM name is configured', async () => {
