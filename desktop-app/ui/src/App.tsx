@@ -365,6 +365,14 @@ export function App() {
   // state after an UNsolicited close — crash/quit/GC — so a later tab switch
   // does not persist or re-close a dead embed).
   const liveSandboxUiTabIdRef = React.useRef<string | null>(null)
+  // Monotonic generation bumped on EVERY transition of the active embed (the
+  // deactivation effect and the deep-link handoff are the only emitters). Each
+  // read-then-close continuation captures this at dispatch; anything reopened or
+  // switched-to while its `getLocation()` IPC is in flight bumps the generation,
+  // so the stale continuation can tell it no longer owns the active view and
+  // must abort — it must neither close the newer embed nor persist the newer
+  // tab's route with a value read from a view that is already gone.
+  const sandboxUiActivationGenRef = React.useRef(0)
   workspaceTabsRef.current = workspaceTabs
 
   const leaveSandboxForChat = React.useCallback(() => {
@@ -1134,6 +1142,10 @@ export function App() {
     const outgoingTabId = liveSandboxUiTabIdRef.current
     if (outgoingTabId === activeSandboxUiTabId) return
     liveSandboxUiTabIdRef.current = activeSandboxUiTabId
+    // This is the single point where the active embed transitions; bump the
+    // generation so any older in-flight continuation knows it no longer owns
+    // the active view.
+    sandboxUiActivationGenRef.current += 1
     if (outgoingTabId === null) return
     const replacedByAnotherApp = activeSandboxUiTabId !== null
     if (!replacedByAnotherApp) {
@@ -1159,6 +1171,7 @@ export function App() {
     // so `getLocation` reaches main (and reads the still-live outgoing view)
     // strictly before `open()` tears it down. i.e. the read is captured before
     // the incoming open, not merely "usually first".
+    const gen = sandboxUiActivationGenRef.current
     void (async () => {
       let routePath: string | undefined
       try {
@@ -1167,6 +1180,12 @@ export function App() {
       } catch {
         routePath = undefined
       }
+      // A newer activation took over while the read was in flight (the same app
+      // reopened, or another app/surface became active): the read value belongs
+      // to a view that is no longer the active one, so abort BOTH the persist
+      // (it would clobber the live tab's route with a stale one) and the close
+      // (it would tear down the embed the user is now looking at).
+      if (gen !== sandboxUiActivationGenRef.current) return
       // No-op when the outgoing tab was closed (§3: closing a tab does not save).
       setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
       if (replacedByAnotherApp) return
@@ -1315,6 +1334,13 @@ export function App() {
     // BEFORE `close()` destroys the webContents. `handleSandboxUiClosed` clears
     // the ref, so snapshot the outgoing tab id first.
     const outgoingTabId = liveSandboxUiTabIdRef.current
+    // The handoff itself transitions the active embed; bump the generation (so an
+    // older in-flight deactivation continuation aborts) and own the new one by
+    // capturing AFTER the bump. If a newer activation supersedes this handoff
+    // while the read below is in flight, gen no longer matches and both the
+    // persist and the close are aborted.
+    sandboxUiActivationGenRef.current += 1
+    const gen = sandboxUiActivationGenRef.current
     if (outgoingTabId !== null) {
       let routePath: string | undefined
       try {
@@ -1323,8 +1349,10 @@ export function App() {
       } catch {
         routePath = undefined
       }
+      if (gen !== sandboxUiActivationGenRef.current) return
       setWorkspaceTabs(state => setAppTabSavedRoutePath(state, outgoingTabId, routePath))
     }
+    if (gen !== sandboxUiActivationGenRef.current) return
     await window.clerum.sandboxUi.close()
     handleSandboxUiClosed()
   }, [activeSandboxUiApp, handleSandboxUiClosed, setWorkspaceTabs])

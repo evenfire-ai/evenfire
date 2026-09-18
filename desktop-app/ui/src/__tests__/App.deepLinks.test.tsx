@@ -1959,4 +1959,84 @@ describe('App deep-link orchestration', () => {
     expect(getSandboxUiLocation).toHaveBeenCalled()
     expect(closeSandboxUi).toHaveBeenCalled()
   })
+
+  // R1-H1 (mini-spec 07): the deactivation continuation reads the outgoing
+  // route over IPC and then closes the singleton embed. If the user reactivates
+  // the SAME app tab before that read resolves, the stale continuation must not
+  // tear down the just-reopened embed nor overwrite the live tab's route with
+  // the value it read from the view that is already gone. The read is deferred
+  // here so the reactivation lands while it is in flight. The resolved value uses
+  // the same `{ appRef, routePath }` contract shape the rest of the suite uses
+  // (pinned by sandboxUiDriver.test.ts); the gate aborts before routePath is read
+  // on the raced path, so its exact value does not matter to this test.
+  function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>(res => {
+      resolve = res
+    })
+    return { promise, resolve }
+  }
+
+  it('does not close or overwrite an app tab reactivated before the stale getLocation resolves (R1-H1, T3)', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    await launchAppFromSidebar() // tabs: [chat, A]; A is live
+
+    closeSandboxUi.mockClear()
+
+    // Defer the deactivation read so App A can be reactivated while it is still
+    // in flight. Only the deactivation continuation calls getLocation here
+    // (reactivation early-returns before any read), so one deferred call is exact.
+    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
+    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
+
+    // Deactivate A → seeded chat tab: dispatches the read-then-close continuation.
+    await selectTab(0)
+    // Reactivate A before the old read resolves: a newer activation now owns the
+    // active view and the embed is re-mounted for A.
+    await selectTab(1)
+
+    // The stale read finally resolves with A's earlier route.
+    await act(async () => {
+      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/route' })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Observable result: the reopened embed was NOT torn down, and the live tab's
+    // route was NOT clobbered by the stale value. (At the pre-fix head the stale
+    // continuation closes the reopened embed and persists '/stale/route' onto A.)
+    expect(closeSandboxUi).not.toHaveBeenCalled()
+    expect(appTabs()[0]?.app?.savedRoutePath).not.toBe('/stale/route')
+  })
+
+  it('does not close a different app opened before the stale getLocation resolves (R1-H1, T3)', async () => {
+    currentController = makeController({ initialExperienceLoading: false })
+    listApps.mockResolvedValue({ apps: [READY_APP] })
+    render(<App />)
+    await launchAppFromSidebar() // tabs: [chat, A]; A is live
+
+    closeSandboxUi.mockClear()
+
+    const pendingLocation = createDeferred<{ appRef: string; routePath?: string }>()
+    getSandboxUiLocation.mockReturnValueOnce(pendingLocation.promise)
+
+    // Deactivate A → seeded chat tab (read in flight).
+    await selectTab(0)
+    // Open a DIFFERENT app tab (B) before the old read resolves; B becomes live.
+    await launchAppFromSidebar()
+    await waitFor(() => expect(appTabs()).toHaveLength(2))
+
+    await act(async () => {
+      pendingLocation.resolve({ appRef: 'ns/app', routePath: '/stale/route' })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Observable result: B's embed survives (no close) and B's route is intact.
+    // (At the pre-fix head the stale continuation closes the newly-opened B embed.)
+    expect(closeSandboxUi).not.toHaveBeenCalled()
+    expect(appTabs()[1]?.app?.savedRoutePath).toBeUndefined()
+  })
 })
