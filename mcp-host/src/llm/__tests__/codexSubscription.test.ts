@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  VISUAL_LIMITS,
   hashCodexCompletionRequest,
   parseCodexCompletionRequest,
 } from '@clerum/llm-provider-attempt-contract'
@@ -658,7 +659,7 @@ describe('CodexSubscriptionProvider', () => {
     const messages = userWithImage()
     messages[0].contentParts = [
       { type: 'text', text: 'what is on screen?' },
-      ...Array.from({ length: 4 }, (_, index) => ({
+      ...Array.from({ length: VISUAL_LIMITS.maxImages + 1 }, (_, index) => ({
         type: 'image' as const,
         mimeType: 'image/png' as const,
         data: PNG_2X2_BASE64,
@@ -673,6 +674,7 @@ describe('CodexSubscriptionProvider', () => {
     await expect(provider.completeSingleTurn(messages)).rejects.toMatchObject({
       name: 'CodexAuthorizeError',
       code: 'invalid_request',
+      message: expect.stringMatching(new RegExp(`${VISUAL_LIMITS.maxImages} images`)),
     })
     expect(wired.authorize).not.toHaveBeenCalled()
   })

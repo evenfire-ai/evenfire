@@ -2,12 +2,36 @@ import { randomBytes } from 'node:crypto'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 
-const require = createRequire(path.resolve(__dirname, '../../../mcp-host/package.json'))
+const hostRequire = createRequire(path.resolve(__dirname, '../../../mcp-host/package.json'))
 const fixtures = createRequire(__filename)(
   '../../../packages/llm-provider-attempt-contract/testImageFixtures.cjs'
 ) as {
+  declaredHeaderPng: (width: number, height: number) => Buffer
+  jpegOfSize: (targetBytes: number, width?: number, height?: number) => Buffer
   padJpegToSize: (jpeg: Buffer | string, targetBytes: number) => Buffer
   padPngToSize: (png: Buffer | string, targetBytes: number) => Buffer
+}
+
+function loadHostCreateCanvas():
+  | ((
+      width: number,
+      height: number
+    ) => {
+      getContext: (type: '2d') => {
+        fillStyle: string
+        fillRect: (x: number, y: number, width: number, height: number) => void
+        font: string
+        textBaseline: string
+        fillText: (text: string, x: number, y: number) => void
+      }
+      toBuffer: (mime: 'image/png' | 'image/jpeg') => Buffer
+    })
+  | null {
+  try {
+    return hostRequire('@napi-rs/canvas').createCanvas
+  } catch {
+    return null
+  }
 }
 
 /** A neutral image with an answer absent from the filename and user prompt. */
@@ -16,9 +40,23 @@ export function challengeImageAt(
   width: number,
   height: number
 ): { code: string; bytes: Buffer; width: number; height: number } {
-  // Reuse the Host renderer installed for T0; do not add another dependency.
-  const { createCanvas } = require('@napi-rs/canvas')
   const code = randomBytes(8).toString('hex').toUpperCase()
+  // Prefer the Host renderer when mcp-host is installed (T0 / Playwright OCR).
+  // Desktop CI does not install that package; fall back to contract-framed
+  // containers so unit tests still prove size and pixel bounds.
+  const createCanvas = loadHostCreateCanvas()
+  if (!createCanvas) {
+    if (process.env.E2E_CODEX_IMAGE_INPUT === '1') {
+      throw new Error(
+        'Codex image E2E requires mcp-host/@napi-rs/canvas so the hex is painted in pixels'
+      )
+    }
+    const bytes =
+      format === 'png'
+        ? fixtures.declaredHeaderPng(width, height)
+        : fixtures.jpegOfSize(256, width, height)
+    return { code, bytes, width, height }
+  }
   const canvas = createCanvas(width, height)
   const context = canvas.getContext('2d')
   context.fillStyle = 'white'
