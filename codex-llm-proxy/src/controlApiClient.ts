@@ -84,10 +84,7 @@ export class ControlApiClient {
     }
     return {
       providerAttemptId: String(body.providerAttemptId ?? input.receipt.providerAttemptId),
-      outcome:
-        body.outcome === 'canceled' || body.outcome === 'error' || body.outcome === 'unknown'
-          ? body.outcome
-          : 'success',
+      outcome: parseFinalizeOutcome(body.outcome),
       duplicate: body.duplicate === true,
     }
   }
@@ -129,6 +126,18 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
     throw new ControlApiClientError('provider_unavailable', 'redeem response is invalid')
   }
   const transport = body.transport
+  // Absent keeps the historical 300s default. A present value must be a
+  // finite positive number: zero/negative would reach AbortSignal.timeout as a
+  // RangeError, and a non-number is a control-api contract violation.
+  const maxStreamDurationMs =
+    transport.maxStreamDurationMs === undefined ? 300_000 : transport.maxStreamDurationMs
+  if (
+    typeof maxStreamDurationMs !== 'number' ||
+    !Number.isFinite(maxStreamDurationMs) ||
+    maxStreamDurationMs <= 0
+  ) {
+    throw new ControlApiClientError('provider_unavailable', 'redeem maxStreamDurationMs is invalid')
+  }
   if (
     transport.protocolVersion !== CODEX_TRANSPORT_PROTOCOL ||
     transport.completionsOrigin !== CODEX_COMPLETIONS_ORIGIN ||
@@ -154,14 +163,18 @@ function parseRedeem(body: unknown): RedeemAttemptSuccess {
           ? transport.operation
           : 'completion_stream',
       servedModel: transport.servedModel,
-      maxStreamDurationMs:
-        typeof transport.maxStreamDurationMs === 'number' && Number.isFinite(transport.maxStreamDurationMs)
-          ? transport.maxStreamDurationMs
-          : 300_000,
+      maxStreamDurationMs,
     },
     expiryClass: body.expiryClass === 'upstream_managed' ? 'upstream_managed' : 'short_lived',
     attemptReceipt: body.attemptReceipt,
   }
+}
+
+/** Unrecognized finalize outcomes are ambiguous; never report them as success. */
+function parseFinalizeOutcome(raw: unknown): FinalizeAttemptSuccess['outcome'] {
+  return raw === 'success' || raw === 'canceled' || raw === 'error' || raw === 'unknown'
+    ? raw
+    : 'unknown'
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -82,4 +82,5 @@ export type HostWizardValidationState = {
   modelName: string
   connectionRef: string
   codexModels: string[]
+  grokModels: string[]
 }

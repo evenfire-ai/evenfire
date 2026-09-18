@@ -67,6 +67,7 @@ import { FailoverEngine } from './llm/failover/engine'
 import { llmFallbackTotal } from './llm/failover/metrics'
 import { parseLlmPolicy } from './llm/failover/policy'
 import type { FailoverSwitchEvent, FallbackEntry, LlmPolicy } from './llm/failover/types'
+import { setGrokPolicyBindingReader } from './llm/grokPolicyBinding'
 import { hostPrimaryLlmBindingChanged } from './llm/hostLlmBinding'
 import { PromptCache } from './llm/promptCache'
 import { clerumPromptCacheInvalidationsTotal } from './llm/promptCacheMetrics'
@@ -109,6 +110,7 @@ import {
 } from './pluginWorkloadSdk/bootstrapIdentity'
 import { PluginWorkloadSdkBootstrapServer } from './pluginWorkloadSdk/bootstrapServer'
 import { sdkOnlyBindingAsPolicy } from './pluginWorkloadSdk/sdkOnlyCodexBinding'
+import { sdkOnlyGrokBindingAsPolicy } from './pluginWorkloadSdk/sdkOnlyGrokBinding'
 import { maybeCreatePluginWorkloadSdkServer } from './pluginWorkloadSdk/server'
 import type { PluginWorkloadSdkServer } from './pluginWorkloadSdk/server/sdkServer'
 import { sanitizeError } from './progress/intentExtraction'
@@ -188,6 +190,7 @@ let currentKeys: ApiKeys = {}
 let currentProvider: SingleTurnProvider | null = null
 let configStore: ConfigStore | null = null
 setCodexPolicyBindingReader(() => configStore?.codexPolicyBinding() ?? null)
+setGrokPolicyBindingReader(() => configStore?.grokPolicyBinding() ?? null)
 // R5 — provider-fallback. `currentPolicy` is the normalized `spec.llmPolicy`
 // (null = no failover); `failoverEngine` holds the Host-wide sticky state
 // (cooldown + served pair) and is (re)built only when the policy changes.
@@ -3221,6 +3224,7 @@ async function startPluginWorkloadSdkOnlyMode(): Promise<void> {
 
   console.log(`[Main] Starting in SDK-ONLY MODE (recipe: ${config.workflowRecipeName})`)
   setCodexPolicyBindingReader(() => sdkOnlyBindingAsPolicy())
+  setGrokPolicyBindingReader(() => sdkOnlyGrokBindingAsPolicy())
 
   if (!runtimeAuth) runtimeAuth = createMcpHostRuntimeAuth()
   if (!runtimeAuth) {

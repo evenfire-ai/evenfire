@@ -143,6 +143,30 @@ describe('00a2/00a3 LLM provider-attempt ledger', () => {
     expect(storeSource).not.toMatch(/GRANT .* TO .*proxy/i)
   })
 
+  it('registers 0114 connection integrity after 0113 as a provider-aware constraint trigger', () => {
+    const v0113 = dbSource.indexOf("version: '0113_grok_subscription_terminal_connection_key'")
+    const v0114 = dbSource.indexOf("version: '0114_llm_provider_attempts_connection_integrity'")
+    expect(v0113).toBeGreaterThan(-1)
+    expect(v0114).toBeGreaterThan(v0113)
+    expect(dbSource).toContain('apply: applyLlmProviderAttemptConnectionIntegritySchema')
+    const body = storeSource.slice(
+      storeSource.indexOf('export async function applyLlmProviderAttemptConnectionIntegritySchema')
+    )
+    expect(body).toContain(
+      'CREATE OR REPLACE FUNCTION llm_provider_attempts_assert_connection_exists()'
+    )
+    expect(body).toContain(
+      'DROP TRIGGER IF EXISTS llm_provider_attempts_connection_integrity ON llm_provider_attempts'
+    )
+    expect(body).toContain('CREATE CONSTRAINT TRIGGER llm_provider_attempts_connection_integrity')
+    expect(body).toContain(
+      'AFTER INSERT OR UPDATE OF provider, connection_id ON llm_provider_attempts'
+    )
+    expect(body).toContain('public.codex_subscription_connections WHERE id = NEW.connection_id')
+    expect(body).toContain('public.grok_subscription_connections WHERE id = NEW.connection_id')
+    expect(body).not.toMatch(/VALIDATE CONSTRAINT|ALTER TABLE llm_provider_attempts/)
+  })
+
   it('classifies the new relations as upsert in the runtime access contract', () => {
     const profile = runtimeAccessProfile()
     expect(profile.get('llm_provider_attempts')).toBe('upsert')

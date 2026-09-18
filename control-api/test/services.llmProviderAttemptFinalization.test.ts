@@ -63,6 +63,19 @@ describe('finalizeLlmProviderAttempt', () => {
     markFinalized.mockReset()
   })
 
+  it('rejects a Grok attempt on the Codex finalize path', async () => {
+    loadAttempt.mockResolvedValueOnce({ ...attemptRow, provider: 'grok-subscription' })
+    const tx = { query: vi.fn() }
+    await expect(
+      finalizeLlmProviderAttempt(
+        { attemptReceipt: attemptReceipt(), receipt: successReceipt },
+        runTx(tx) as never
+      )
+    ).rejects.toMatchObject({ code: 'ticket_invalid' })
+    expect(markFinalized).not.toHaveBeenCalled()
+    expect(ingest).not.toHaveBeenCalled()
+  })
+
   it('rejects a malformed receipt without inventing usage', async () => {
     await expect(
       finalizeLlmProviderAttempt({

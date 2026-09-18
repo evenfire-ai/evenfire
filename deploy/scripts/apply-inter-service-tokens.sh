@@ -185,6 +185,8 @@ TOKEN_WA_READER="$(resolve_token CONTROL_API_INTERNAL_TOKEN_WA_READER \
   channels workflow-approval-request-reader-credentials control-api-token)"
 TOKEN_CODEX_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_CODEX_LLM_PROXY \
   control-plane codex-llm-proxy-secrets CODEX_LLM_PROXY_CONTROL_API_TOKEN)"
+TOKEN_GROK_LLM_PROXY="$(resolve_token CONTROL_API_INTERNAL_TOKEN_GROK_LLM_PROXY \
+  control-plane grok-llm-proxy-secrets GROK_LLM_PROXY_CONTROL_API_TOKEN)"
 READER_HANDOFF_TOKEN_VALUE="$(resolve_token CHANNEL_READER_HANDOFF_TOKEN \
   channels workflow-approval-request-reader-credentials channel-reader-handoff-token)"
 INTERNAL_CONTROL_WRC_HMAC="$(resolve_token INTERNAL_CONTROL_JWT_WRC_HMAC_SECRET \
@@ -199,6 +201,7 @@ for pair in \
   "WEBHOOK_PROXY:$TOKEN_WEBHOOK_PROXY" \
   "WA_READER:$TOKEN_WA_READER" \
   "CODEX_LLM_PROXY:$TOKEN_CODEX_LLM_PROXY" \
+  "GROK_LLM_PROXY:$TOKEN_GROK_LLM_PROXY" \
   "CHANNEL_READER_HANDOFF:$READER_HANDOFF_TOKEN_VALUE" \
   "INTERNAL_CONTROL_WRC_HMAC:$INTERNAL_CONTROL_WRC_HMAC" \
   "INTERNAL_CONTROL_HCC_HMAC:$INTERNAL_CONTROL_HCC_HMAC" \
@@ -208,8 +211,11 @@ for pair in \
   [ -n "$val" ] || die "token $name resolved to empty — refusing to patch"
 done
 
-SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY}"
-INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY}"
+if [ "$TOKEN_CODEX_LLM_PROXY" = "$TOKEN_GROK_LLM_PROXY" ]; then
+  die "codex-llm-proxy and grok-llm-proxy tokens must be distinct"
+fi
+SERVICE_TOKENS_MAP="external-rest-api=${TOKEN_EXT_REST},rpc-proxy=${TOKEN_RPC},webhook-proxy=${TOKEN_WEBHOOK_PROXY},workflow-approval-reader=${TOKEN_WA_READER},codex-llm-proxy=${TOKEN_CODEX_LLM_PROXY},grok-llm-proxy=${TOKEN_GROK_LLM_PROXY}"
+INTERNAL_TOKENS_LIST="${TOKEN_EXT_REST},${TOKEN_RPC},${TOKEN_WEBHOOK_PROXY},${TOKEN_WA_READER},${TOKEN_CODEX_LLM_PROXY},${TOKEN_GROK_LLM_PROXY}"
 
 # --- 1. control-api-internal-tokens (control-plane) ---
 log "Patching Secret control-api-internal-tokens (control-plane)"
@@ -304,6 +310,13 @@ CODEX_LLM_PROXY_PATCH="$(jq -cn --arg t "$TOKEN_CODEX_LLM_PROXY" \
   '{stringData: {CODEX_LLM_PROXY_CONTROL_API_TOKEN: $t}}')"
 kctl -n control-plane patch secret codex-llm-proxy-secrets --type=merge -p "$CODEX_LLM_PROXY_PATCH"
 
+# --- 4e. grok-llm-proxy-secrets (control-plane) ---
+log "Patching Secret grok-llm-proxy-secrets (control-plane)"
+ensure_secret control-plane grok-llm-proxy-secrets
+GROK_LLM_PROXY_PATCH="$(jq -cn --arg t "$TOKEN_GROK_LLM_PROXY" \
+  '{stringData: {GROK_LLM_PROXY_CONTROL_API_TOKEN: $t}}')"
+kctl -n control-plane patch secret grok-llm-proxy-secrets --type=merge -p "$GROK_LLM_PROXY_PATCH"
+
 # --- 4c. workflow-approval-request-reader-credentials (channels) ---
 # Figure D cross-bot fix (PR1): the reader uses this token to authenticate its
 # consulta call to control-api
@@ -330,6 +343,7 @@ kctl -n channels patch secret workflow-approval-request-reader-credentials --typ
 # FORCE_CONSUMER_RESTART=true.
 for pair in "control-plane:control-api" \
             "control-plane:codex-llm-proxy" \
+            "control-plane:grok-llm-proxy" \
             "control-plane:workflow-recipes" \
             "control-plane:host-context-controller" \
             "profiles:external-rest-api" \

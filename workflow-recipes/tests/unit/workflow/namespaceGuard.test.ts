@@ -24,7 +24,11 @@ function getSourceFiles(dir: string): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isDirectory()) {
       files.push(...getSourceFiles(path.join(dir, entry.name)))
-    } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+    } else if (
+      entry.name.endsWith('.ts') &&
+      !entry.name.endsWith('.test.ts') &&
+      !entry.name.endsWith('.testFixtures.ts')
+    ) {
       files.push(path.join(dir, entry.name))
     }
   }

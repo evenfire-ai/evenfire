@@ -1,15 +1,31 @@
 import React from 'react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from '@testing-library/react'
+import {
+  cleanup,
+  fireEvent,
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import * as api from '../../lib/api'
 import type { WorkflowRecipeResource } from '../../lib/api'
 import { listCodexSubscriptionConnections } from '../../lib/codexSubscription'
+import { listGrokSubscriptionConnections } from '../../lib/grokSubscription'
 import { validateRecipe } from '../../lib/recipeValidator'
 import { RecipeEditor } from '../RecipeEditor'
 import { ToastProvider } from '../Toast'
 
 // vi.mock is hoisted before imports, factory runs lazily
+vi.mock('../../lib/grokSubscription', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../lib/grokSubscription')>()
+  return {
+    ...actual,
+    listGrokSubscriptionConnections: vi.fn().mockRejectedValue({ status: 404 }),
+  }
+})
+
 vi.mock('../../lib/codexSubscription', async importOriginal => {
   const actual = await importOriginal<typeof import('../../lib/codexSubscription')>()
   return {
@@ -888,7 +904,10 @@ describe('RecipeEditor — deploy flow', () => {
     const validationPayload = vi.mocked(api.validateRecipeServer).mock.calls[0][0]
     expect(validationPayload.metadata).toEqual({
       name: 'namespace-ignored',
-      annotations: { 'clerum.io/codex-connection-ref': '' },
+      annotations: {
+        'clerum.io/codex-connection-ref': '',
+        'clerum.io/subscription-connection-ref': '',
+      },
     })
     expect(validationPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
@@ -898,7 +917,10 @@ describe('RecipeEditor — deploy flow', () => {
     const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0]
     expect(createPayload.metadata).toEqual({
       name: 'namespace-ignored',
-      annotations: { 'clerum.io/codex-connection-ref': '' },
+      annotations: {
+        'clerum.io/codex-connection-ref': '',
+        'clerum.io/subscription-connection-ref': '',
+      },
     })
     expect(createPayload.spec.workloads[0]).toEqual(
       expect.objectContaining({ id: 'api', type: 'deployment' })
@@ -1759,8 +1781,65 @@ describe('RecipeEditor — grants in editor', () => {
     expect(createPayload.spec.agent?.secretRef).toBeUndefined()
     expect(createPayload.metadata?.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
     expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('deploys a step-only Grok recipe with the canonical grant annotation', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValueOnce([
+      {
+        connectionKey: 'team-grok',
+        displayName: 'Team Grok',
+        status: 'connected',
+        catalogStatus: 'ready',
+        credentialRevision: 1,
+        catalogRevision: 1,
+        accountFingerprint: 'fp',
+        catalogSyncedAt: '2026-08-01T00:00:00.000Z',
+        lastRefreshAt: null,
+        lastAuthAt: '2026-08-01T00:00:00.000Z',
+        refreshLockHeld: false,
+      },
+    ])
+    render(<RecipeEditor onSaved={vi.fn()} onCancel={vi.fn()} />)
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: {
+        value: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'step-grok' },
+            spec: {
+              agent: { provider: 'openai', model: 'gpt-5.1' },
+              triggers: { onDemand: { allowedActors: ['user'] } },
+              steps: [
+                {
+                  id: 'draft',
+                  instruction: 'Write',
+                  timeoutSeconds: 600,
+                  agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+                },
+              ],
+            },
+          },
+          null,
+          2
+        ),
+      },
+    })
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Grok grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/ }))
+    fireEvent.click(await screen.findByText('Deploy plugin'))
+    await waitFor(() => expect(api.createRecipe).toHaveBeenCalled())
+    const createPayload = vi.mocked(api.createRecipe).mock.calls[0][0] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(createPayload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': 'team-grok',
+    })
   })
 
   it('blocks a Codex recipe that has not chosen a ChatGPT grant', async () => {
@@ -1806,5 +1885,402 @@ describe('RecipeEditor — grants in editor', () => {
       expect(screen.getByText(/must not declare an LLM secretRef/i)).toBeInTheDocument()
     })
     expect(api.createRecipe).not.toHaveBeenCalled()
+  })
+})
+
+describe('RecipeEditor — provider-bound subscription grant', () => {
+  const grokRow = (connectionKey: string, displayName: string) => ({
+    connectionKey,
+    displayName,
+    status: 'connected' as const,
+    catalogStatus: 'ready' as const,
+    credentialRevision: 1,
+    catalogRevision: 1,
+    accountFingerprint: 'fp',
+    catalogSyncedAt: '2026-08-01T00:00:00.000Z',
+    lastRefreshAt: null,
+    lastAuthAt: '2026-08-01T00:00:00.000Z',
+    refreshLockHeld: false,
+  })
+
+  function brokerSpec(provider: 'codex-subscription' | 'grok-subscription') {
+    return {
+      agent: { provider, model: provider === 'grok-subscription' ? 'grok-4.6' : 'gpt-5.1' },
+      triggers: { onDemand: { allowedActors: ['user'] } },
+      steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+    }
+  }
+
+  function brokerRecipe(
+    provider: 'codex-subscription' | 'grok-subscription',
+    annotations: Record<string, string>
+  ): WorkflowRecipeResource {
+    return {
+      apiVersion: 'clerum.io/v1alpha1',
+      kind: 'WorkflowRecipe',
+      metadata: { name: 'broker-recipe', namespace: 'sandbox-recipes', annotations },
+      spec: brokerSpec(provider),
+    } as WorkflowRecipeResource
+  }
+
+  function replaceManifestProvider(provider: 'codex-subscription' | 'grok-subscription') {
+    fireEvent.change(screen.getByRole('textbox'), {
+      target: {
+        value: JSON.stringify(
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: { name: 'broker-recipe' },
+            spec: brokerSpec(provider),
+          },
+          null,
+          2
+        ),
+      },
+    })
+  }
+
+  async function clickSave() {
+    fireEvent.click(await screen.findByRole('button', { name: /Deploy plugin|Save|Update plugin/ }))
+  }
+
+  it('flags a Grok recipe whose stored Codex alias is non-empty and blocks save', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('grok-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    const panel = await screen.findByTestId('grok-recipe-grant')
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(/annotations disagree/i)
+    await clickSave()
+    await waitFor(() => {
+      expect(screen.getAllByText(/annotations disagree/i).length).toBeGreaterThan(1)
+    })
+    expect(api.validateRecipeServer).not.toHaveBeenCalled()
+    expect(api.updateRecipe).not.toHaveBeenCalled()
+  })
+
+  it('flags a Codex recipe whose alias and canonical annotations disagree and blocks save', async () => {
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-other',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    const panel = await screen.findByTestId('codex-recipe-grant')
+    expect(await within(panel).findByRole('alert')).toHaveTextContent(/annotations disagree/i)
+    await clickSave()
+    await waitFor(() => {
+      expect(screen.getAllByText(/annotations disagree/i).length).toBeGreaterThan(1)
+    })
+    expect(api.validateRecipeServer).not.toHaveBeenCalled()
+    expect(api.updateRecipe).not.toHaveBeenCalled()
+  })
+
+  it('keeps a consistent Codex recipe grant and saves the Codex shape', async () => {
+    const onSaved = vi.fn()
+    render(
+      <RecipeEditor
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    const panel = await screen.findByTestId('codex-recipe-grant')
+    expect(within(panel).queryByRole('alert')).not.toBeInTheDocument()
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(payload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
+    })
+    expect(onSaved).toHaveBeenCalled()
+  })
+
+  it('an explicit Grok grant choice replaces conflicting annotations with the Grok shape', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('grok-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Grok grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/ }))
+    const panel = screen.getByTestId('grok-recipe-grant')
+    await waitFor(() => expect(within(panel).queryByRole('alert')).not.toBeInTheDocument())
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(payload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': 'team-grok',
+    })
+  })
+
+  it('resets the grant when the manifest switches Codex to Grok, even for a same-named Grok key', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-plus', 'Same Key Grok'),
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    replaceManifestProvider('grok-subscription')
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('grok-recipe-grant')
+    await clickSave()
+    await waitFor(() => {
+      expect(screen.getByText(/must choose an existing Grok grant/i)).toBeInTheDocument()
+    })
+    expect(api.validateRecipeServer).not.toHaveBeenCalled()
+    expect(api.updateRecipe).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Grok grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/ }))
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(payload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': 'team-grok',
+    })
+  })
+
+  it('does not carry the Codex key into the Grok picker as an unavailable option', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    replaceManifestProvider('grok-subscription')
+    reviewAndProceedToDeploy()
+    fireEvent.click(await screen.findByRole('button', { name: 'Grok grant' }))
+    expect(await screen.findByRole('option', { name: /Team Grok/ })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: /team-plus/ })).not.toBeInTheDocument()
+  })
+
+  it('resets the grant when the manifest switches Grok to Codex and saves only an explicit Codex choice', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-plus', 'Grok Plus'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('grok-subscription', {
+          'clerum.io/codex-connection-ref': '',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    replaceManifestProvider('codex-subscription')
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('codex-recipe-grant')
+    await clickSave()
+    await waitFor(() => {
+      expect(screen.getByText(/must choose an existing ChatGPT grant/i)).toBeInTheDocument()
+    })
+    expect(api.updateRecipe).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'ChatGPT grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Plus/ }))
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(payload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
+    })
+  })
+
+  it('restores the stored grant when the manifest returns to the stored provider', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    replaceManifestProvider('grok-subscription')
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('grok-recipe-grant')
+    // An explicit Grok choice must not leak back into the Codex grant.
+    fireEvent.click(screen.getByRole('button', { name: 'Grok grant' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Team Grok/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    replaceManifestProvider('codex-subscription')
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('codex-recipe-grant')
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    expect(payload.metadata?.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
+    })
+  })
+
+  it('maps a server grant rule from validate to an actionable provider message', async () => {
+    vi.mocked(listGrokSubscriptionConnections).mockResolvedValue([
+      grokRow('team-grok', 'Team Grok'),
+    ])
+    vi.mocked(api.validateRecipeServer).mockResolvedValueOnce({
+      valid: false,
+      errors: [
+        {
+          field: 'metadata.annotations.clerum.io/subscription-connection-ref',
+          rule: 'grokRecipeGrantInvalid',
+          message: 'raw-server-grok-invalid',
+        },
+      ],
+    })
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('grok-subscription', {
+          'clerum.io/codex-connection-ref': '',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('grok-recipe-grant')
+    await clickSave()
+    expect(await screen.findByText(/not a valid Grok grant/i)).toBeInTheDocument()
+    expect(screen.queryByText('raw-server-grok-invalid')).not.toBeInTheDocument()
+    expect(api.updateRecipe).not.toHaveBeenCalled()
+  })
+
+  it('surfaces a PUT grant 422 as a policy message instead of raw JSON', async () => {
+    const onSaved = vi.fn()
+    vi.mocked(api.updateRecipe).mockRejectedValueOnce(
+      Object.assign(new Error('422 Unprocessable Entity - {"errors":[]}'), {
+        status: 422,
+        body: {
+          errors: [
+            {
+              field: 'metadata.annotations.clerum.io/codex-connection-ref',
+              rule: 'providerChangeRequiresGrant',
+              message: 'raw-provider-change',
+            },
+          ],
+        },
+      })
+    )
+    render(
+      <RecipeEditor
+        onSaved={onSaved}
+        onCancel={vi.fn()}
+        initial={brokerRecipe('codex-subscription', {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        })}
+      />
+    )
+    reviewAndProceedToDeploy()
+    await screen.findByTestId('codex-recipe-grant')
+    await clickSave()
+    expect(
+      await screen.findByText(/Choose a grant for the new provider before saving/i)
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/422 Unprocessable Entity/)).not.toBeInTheDocument()
+    expect(screen.queryByText('raw-provider-change')).not.toBeInTheDocument()
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('sends empty grant annotations for a static recipe so no SDK identity is set from the editor', async () => {
+    render(
+      <RecipeEditor
+        onSaved={vi.fn()}
+        onCancel={vi.fn()}
+        initial={
+          {
+            apiVersion: 'clerum.io/v1alpha1',
+            kind: 'WorkflowRecipe',
+            metadata: {
+              name: 'my-recipe',
+              namespace: 'sandbox-recipes',
+              annotations: {
+                'clerum.io/codex-connection-ref': 'sdk-owned',
+                'clerum.io/subscription-connection-ref': 'sdk-owned',
+              },
+            },
+            spec: { workloads: [{ id: 'api', type: 'deployment', image: 'my-api:latest' }] },
+          } as WorkflowRecipeResource
+        }
+      />
+    )
+    reviewAndProceedToDeploy()
+    await clickSave()
+    await waitFor(() => expect(api.updateRecipe).toHaveBeenCalled())
+    const payload = vi.mocked(api.updateRecipe).mock.calls[0][1] as {
+      metadata?: { annotations?: Record<string, string> }
+    }
+    // Empty or omitted are both valid for a static recipe; a non-empty value
+    // would be the editor trying to write an SDK-owned grant identity.
+    const annotations = payload.metadata?.annotations ?? {}
+    expect(annotations['clerum.io/codex-connection-ref'] ?? '').toBe('')
+    expect(annotations['clerum.io/subscription-connection-ref'] ?? '').toBe('')
   })
 })

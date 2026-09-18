@@ -28,12 +28,13 @@ describe('provider registry — auto-detection order (§5.9)', () => {
     ])
   })
 
-  it('registers all 22 static providers plus the Codex broker', () => {
+  it('registers all 22 static providers plus the Codex and Grok brokers', () => {
     expect(
       ALL_PROVIDERS.filter(p => descriptorFor(p).authMode === 'static-credentials')
     ).toHaveLength(22)
     expect(ALL_PROVIDERS).toContain('codex-subscription')
-    expect(ALL_PROVIDERS).toHaveLength(23)
+    expect(ALL_PROVIDERS).toContain('grok-subscription')
+    expect(ALL_PROVIDERS).toHaveLength(24)
     for (const p of [
       'openrouter',
       'gemini',

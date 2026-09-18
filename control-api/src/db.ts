@@ -20,7 +20,15 @@ import {
   applyGfsUploadSessionSchema,
 } from './services/gfsUploadSchema.js'
 import {
+  applyGrokCatalogModelsSchema,
+  applyGrokSubscriptionConnectionSchema,
+  applyGrokSubscriptionOAuthStateSchema,
+  applyGrokSubscriptionTerminalConnectionKeySchema,
+  applyLlmProviderAttemptsGrokBrokerSchema,
+} from './services/grokSubscriptionSchema.js'
+import {
   applyLlmProviderAttemptConnectionIdSchema,
+  applyLlmProviderAttemptConnectionIntegritySchema,
   applyLlmProviderAttemptSchema,
   applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
   applyLlmProviderAttemptSdkLinkSchema,
@@ -6013,6 +6021,30 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
   {
     version: '0108_llm_provider_attempts_sdk_link_on_delete_set_null',
     apply: applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema,
+  },
+  {
+    version: '0109_grok_subscription_connections',
+    apply: applyGrokSubscriptionConnectionSchema,
+  },
+  {
+    version: '0110_grok_subscription_oauth_states',
+    apply: applyGrokSubscriptionOAuthStateSchema,
+  },
+  {
+    version: '0111_grok_catalog_models',
+    apply: applyGrokCatalogModelsSchema,
+  },
+  {
+    version: '0112_llm_provider_attempts_grok_broker',
+    apply: applyLlmProviderAttemptsGrokBrokerSchema,
+  },
+  {
+    version: '0113_grok_subscription_terminal_connection_key',
+    apply: applyGrokSubscriptionTerminalConnectionKeySchema,
+  },
+  {
+    version: '0114_llm_provider_attempts_connection_integrity',
+    apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
 ]
 

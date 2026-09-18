@@ -13,7 +13,7 @@ function sse(frames: unknown[]): ReadableStream<Uint8Array> {
 }
 
 describe('CodexLlmProxyClient', () => {
-  it('streams to the frozen runtime Service URL and never accepts a caller URL', async () => {
+  it('streams only to the server-owned runtime Service URL and ignores a caller-supplied URL', async () => {
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       body: sse([
@@ -33,14 +33,31 @@ describe('CodexLlmProxyClient', () => {
       executionTicket: 'ticket-123456',
       requestHash: 'a'.repeat(64),
       request: { model: 'gpt-5.3-codex' },
-    })
+      // Not part of the input type: a caller must not be able to redirect the hop.
+      url: 'https://attacker.example/backend-api/codex/responses',
+      runtimeUrl: 'https://attacker.example/internal/runtime/v1/codex/completions',
+    } as never)
+    expect(fetchFn).toHaveBeenCalledTimes(1)
     expect(fetchFn.mock.calls[0][0]).toBe(
       'http://codex-llm-proxy.control-plane.svc.cluster.local:8080/internal/runtime/v1/codex/completions'
     )
+    const sent = JSON.parse(fetchFn.mock.calls[0][1].body)
+    expect(Object.keys(sent).sort()).toEqual(['executionTicket', 'request', 'requestHash'])
+    expect(JSON.stringify(sent)).not.toContain('attacker.example')
     expect(result.text).toBe('hello')
     expect(result.toolCalls).toEqual([
       { type: 'tool_call', id: 'c1', name: 'echo', arguments: { x: 1 } },
     ])
+  })
+
+  it('refuses a runtime URL that is not absolute', () => {
+    expect(
+      () =>
+        new CodexLlmProxyClient({
+          runtimeUrl: '/internal/runtime/v1/codex/completions',
+          readPlatformJwt: () => 'platform-jwt',
+        })
+    ).toThrow(/absolute server-owned URL/)
   })
 
   it('fails closed when aborted before the proxy hop', async () => {

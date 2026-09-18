@@ -1,6 +1,13 @@
 import type { DbClient } from '../db.js'
+import { rootLogger } from '../observability/logger.js'
+
+const log = rootLogger.child({ module: 'llm-provider-attempt-store' })
 
 export const LLM_PROVIDER_ATTEMPT_PROVIDER = 'codex-subscription' as const
+export const GROK_PROVIDER_ATTEMPT_PROVIDER = 'grok-subscription' as const
+export type LlmProviderAttemptProvider =
+  | typeof LLM_PROVIDER_ATTEMPT_PROVIDER
+  | typeof GROK_PROVIDER_ATTEMPT_PROVIDER
 
 export type LlmProviderAttemptStatus = 'authorized' | 'redeemed' | 'finalized'
 export type LlmProviderAttemptTicketStatus = 'issued' | 'redeemed' | 'finalized'
@@ -23,11 +30,12 @@ export type LlmProviderAttemptInsert = {
   connectionId?: string | null
   correlationId?: string | null
   pluginWorkloadSdkProviderAttemptId?: string | null
+  provider?: LlmProviderAttemptProvider
 }
 
-export type LlmProviderAttemptRow = LlmProviderAttemptInsert & {
+export type LlmProviderAttemptRow = Omit<LlmProviderAttemptInsert, 'provider'> & {
   id: string
-  provider: typeof LLM_PROVIDER_ATTEMPT_PROVIDER
+  provider: LlmProviderAttemptProvider
   status: LlmProviderAttemptStatus
   outcome: LlmProviderAttemptOutcome | null
   usageInputTokens?: number | null
@@ -201,6 +209,106 @@ export async function applyLlmProviderAttemptSdkLinkOnDeleteSetNullSchema(
   `)
 }
 
+/**
+ * 0114 — restore `llm_provider_attempts.connection_id` integrity.
+ *
+ * 0103 added `connection_id REFERENCES codex_subscription_connections(id)`;
+ * 0112 dropped that FK so Grok attempts could reference
+ * `grok_subscription_connections` and did not replace it. A plain FK cannot
+ * point at one of two tables by provider, so a CONSTRAINT TRIGGER enforces the
+ * same invariant on every INSERT and on UPDATEs that touch `provider` or
+ * `connection_id`: a non-null connection_id must exist in the provider's own
+ * connection table (codex-subscription -> codex_subscription_connections,
+ * grok-subscription -> grok_subscription_connections). A Codex attempt may
+ * still carry NULL (pre-0103 rows, old pods); Grok NULL is already rejected by
+ * the 0112 CHECK. Unknown providers with a connection id fail closed.
+ *
+ * Connection rows are never deleted (revocation tombstones them; DELETE is
+ * revoked from control_api_runtime), so an existence check at write time is
+ * equivalent to the dropped FK for runtime writers.
+ *
+ * NOT VALID semantics: triggers never re-check existing rows, so historic
+ * dangling rows cannot fail this migration and stay readable/finalizable
+ * (status/outcome updates do not fire the trigger). The count of such rows is
+ * logged (count only). Idempotent (CREATE OR REPLACE + DROP
+ * TRIGGER IF EXISTS) and old-pod compatible: pods only ever write connection
+ * ids they just read from the provider's table.
+ */
+export async function applyLlmProviderAttemptConnectionIntegritySchema(
+  db: DbClient
+): Promise<void> {
+  await db.query(`
+    CREATE OR REPLACE FUNCTION llm_provider_attempts_assert_connection_exists()
+    RETURNS TRIGGER
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE
+      connection_exists BOOLEAN;
+    BEGIN
+      IF NEW.connection_id IS NULL THEN
+        RETURN NULL;
+      END IF;
+      IF NEW.provider = 'codex-subscription' THEN
+        SELECT EXISTS (
+          SELECT 1 FROM public.codex_subscription_connections WHERE id = NEW.connection_id
+        ) INTO connection_exists;
+      ELSIF NEW.provider = 'grok-subscription' THEN
+        SELECT EXISTS (
+          SELECT 1 FROM public.grok_subscription_connections WHERE id = NEW.connection_id
+        ) INTO connection_exists;
+      ELSE
+        connection_exists := false;
+      END IF;
+      IF NOT connection_exists THEN
+        RAISE EXCEPTION USING
+          ERRCODE = 'foreign_key_violation',
+          CONSTRAINT = 'llm_provider_attempts_connection_integrity',
+          MESSAGE = format(
+            'llm_provider_attempts.connection_id is not a %s connection',
+            NEW.provider
+          );
+      END IF;
+      RETURN NULL;
+    END;
+    $$;
+
+    REVOKE ALL ON FUNCTION llm_provider_attempts_assert_connection_exists() FROM PUBLIC;
+
+    DROP TRIGGER IF EXISTS llm_provider_attempts_connection_integrity ON llm_provider_attempts;
+
+    CREATE CONSTRAINT TRIGGER llm_provider_attempts_connection_integrity
+      AFTER INSERT OR UPDATE OF provider, connection_id ON llm_provider_attempts
+      FOR EACH ROW
+      EXECUTE FUNCTION llm_provider_attempts_assert_connection_exists();
+  `)
+  const danglingAttempts = await countDanglingLlmProviderAttemptConnections(db)
+  if (danglingAttempts > 0) {
+    log.warn(
+      { event: 'llm_provider_attempts_dangling_connection_ids', danglingAttempts },
+      'historic provider attempts reference a missing connection; new writes are enforced'
+    )
+  }
+}
+
+/** Attempts whose non-null connection_id is missing from the provider's connection table. */
+export async function countDanglingLlmProviderAttemptConnections(db: DbClient): Promise<number> {
+  const result = await db.query(`
+    SELECT COUNT(*)::int AS dangling
+      FROM llm_provider_attempts a
+     WHERE a.connection_id IS NOT NULL
+       AND NOT (
+         (a.provider = 'codex-subscription' AND EXISTS (
+           SELECT 1 FROM codex_subscription_connections c WHERE c.id = a.connection_id
+         ))
+         OR (a.provider = 'grok-subscription' AND EXISTS (
+           SELECT 1 FROM grok_subscription_connections g WHERE g.id = a.connection_id
+         ))
+       )
+  `)
+  return Number((result.rows[0] as { dangling?: number } | undefined)?.dangling ?? 0)
+}
+
 export async function applyLlmProviderAttemptTicketSchema(db: DbClient): Promise<void> {
   await db.query(`
     CREATE TABLE IF NOT EXISTS llm_provider_attempt_tickets (
@@ -233,8 +341,8 @@ export async function insertLlmProviderAttempt(
        policy_revision, policy_hash, budget_reservation_id, connection_revision,
        connection_id, plugin_workload_sdk_provider_attempt_id, status, correlation_id
      ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7, 'codex-subscription', $8, $9, $10, $11, $12, $13,
-       $14, $15, 'authorized', $16
+       $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+       $15, $16, 'authorized', $17
      )
      RETURNING id, caller_kind, host_ref, recipe_namespace, recipe_name, invocation_id,
                attempt_generation, provider_attempt_index, provider, model, request_hash,
@@ -249,6 +357,7 @@ export async function insertLlmProviderAttempt(
       input.invocationId,
       input.attemptGeneration,
       input.providerAttemptIndex,
+      input.provider ?? LLM_PROVIDER_ATTEMPT_PROVIDER,
       input.model,
       input.requestHash,
       input.policyRevision,
@@ -274,7 +383,10 @@ function mapLlmProviderAttemptRow(row: Record<string, unknown>): LlmProviderAtte
     invocationId: String(row.invocation_id),
     attemptGeneration: Number(row.attempt_generation),
     providerAttemptIndex: Number(row.provider_attempt_index),
-    provider: LLM_PROVIDER_ATTEMPT_PROVIDER,
+    provider:
+      row.provider === GROK_PROVIDER_ATTEMPT_PROVIDER
+        ? GROK_PROVIDER_ATTEMPT_PROVIDER
+        : LLM_PROVIDER_ATTEMPT_PROVIDER,
     model: String(row.model),
     requestHash: String(row.request_hash),
     policyRevision: Number(row.policy_revision),
@@ -349,6 +461,30 @@ export async function loadLlmProviderAttemptBySdkAttemptId(
   return row ? mapLlmProviderAttemptRow(row) : null
 }
 
+function mapTicketRow(row: Record<string, unknown>): LlmProviderAttemptTicketRow {
+  return {
+    jti: String(row.jti),
+    providerAttemptId: String(row.provider_attempt_id),
+    status: row.status as LlmProviderAttemptTicketStatus,
+    expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(String(row.expires_at)),
+    receiptHash: (row.receipt_hash as string | null) ?? null,
+  }
+}
+
+export async function peekLlmProviderAttemptTicket(
+  db: DbClient,
+  jti: string
+): Promise<LlmProviderAttemptTicketRow | null> {
+  const result = await db.query(
+    `SELECT jti::text, provider_attempt_id::text, status, expires_at, receipt_hash
+       FROM llm_provider_attempt_tickets
+      WHERE jti = $1`,
+    [jti]
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  return row ? mapTicketRow(row) : null
+}
+
 export async function lockLlmProviderAttemptTicket(
   db: DbClient,
   jti: string
@@ -361,14 +497,7 @@ export async function lockLlmProviderAttemptTicket(
     [jti]
   )
   const row = result.rows[0] as Record<string, unknown> | undefined
-  if (!row) return null
-  return {
-    jti: String(row.jti),
-    providerAttemptId: String(row.provider_attempt_id),
-    status: row.status as LlmProviderAttemptTicketStatus,
-    expiresAt: row.expires_at instanceof Date ? row.expires_at : new Date(String(row.expires_at)),
-    receiptHash: (row.receipt_hash as string | null) ?? null,
-  }
+  return row ? mapTicketRow(row) : null
 }
 
 export async function markLlmProviderAttemptTicketRedeemed(
