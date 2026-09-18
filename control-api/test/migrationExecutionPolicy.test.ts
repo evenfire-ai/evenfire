@@ -5,6 +5,7 @@ import { MIGRATION_EXECUTION_POLICY } from '../src/migrations/migrationExecution
 import {
   DEV_POST_0106_MIGRATION_VERSIONS,
   PR1_MIGRATION_VERSIONS,
+  PR2_MIGRATION_VERSIONS,
   applyPendingPr1Migrations,
 } from '../src/migrations/migrationRunner.js'
 import {
@@ -46,14 +47,17 @@ describe('D34 migration execution policy', () => {
   })
 
   it('classifies exactly 25 existing-table indexes and no fresh-table index', () => {
-    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(25)
-    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(25)
+    expect(PR1_ONLINE_INDEX_PLAN).toHaveLength(26)
+    expect(new Set(PR1_ONLINE_INDEX_PLAN.map(index => index.name))).toHaveLength(26)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0109'))
     ).toHaveLength(18)
     expect(
       PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('010b'))
     ).toHaveLength(7)
+    expect(
+      PR1_ONLINE_INDEX_PLAN.filter(index => index.migrationVersion.startsWith('0115'))
+    ).toHaveLength(1)
     expect(
       PR1_ONLINE_INDEX_PLAN.some(index => index.name.startsWith('external_user_sessions_'))
     ).toBe(false)
@@ -102,7 +106,9 @@ describe('D34 migration execution policy', () => {
       )
     )
     const classified = [
-      ...PR1_ONLINE_INDEX_PLAN.map(index => index.name),
+      ...PR1_ONLINE_INDEX_PLAN.filter(
+        index => index.migrationVersion !== '0115_workflow_authority_bindings'
+      ).map(index => index.name),
       ...FRESH_TABLE_INDEXES,
     ].sort()
 
@@ -117,6 +123,7 @@ describe('D34 migration execution policy', () => {
         .replace(/\s*([(),])\s*/g, '$1')
         .trim()
     for (const index of PR1_ONLINE_INDEX_PLAN) {
+      if (index.migrationVersion === '0115_workflow_authority_bindings') continue
       expect(canonical(index.createSql), index.name).toBe(
         canonical(historicalDefinitions.get(index.name) ?? '')
       )
@@ -235,6 +242,10 @@ describe('D34 PR1 migration runner', () => {
         version,
         apply: vi.fn(async () => undefined),
       })),
+      ...PR2_MIGRATION_VERSIONS.map(version => ({
+        version,
+        apply: vi.fn(async () => undefined),
+      })),
     ]
 
     await applyPendingPr1Migrations({
@@ -246,9 +257,13 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(15)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(15)
+    expect(applied).toEqual([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ])
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(21)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(21)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
@@ -291,6 +306,7 @@ describe('D34 PR1 migration runner', () => {
         migrations: [
           ...DEV_POST_0106_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           ...PR1_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
+          ...PR2_MIGRATION_VERSIONS.map(version => ({ version, apply: vi.fn() })),
           { version: '010d_unclassified', apply: vi.fn() },
         ],
         appliedVersions: new Set(),
@@ -338,6 +354,12 @@ describe('D34 PR1 migration runner', () => {
             applyOrder.push(version)
           }),
         })),
+        ...PR2_MIGRATION_VERSIONS.map(version => ({
+          version,
+          apply: vi.fn(async () => {
+            applyOrder.push(version)
+          }),
+        })),
       ],
       appliedVersions: new Set(),
       recordMigration: async (_db, version) => {
@@ -345,7 +367,11 @@ describe('D34 PR1 migration runner', () => {
       },
     })
 
-    expect(applyOrder).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
+    expect(applyOrder).toEqual([
+      ...DEV_POST_0106_MIGRATION_VERSIONS,
+      ...PR1_MIGRATION_VERSIONS,
+      ...PR2_MIGRATION_VERSIONS,
+    ])
     expect(recorded).toEqual(applyOrder)
   })
 })
