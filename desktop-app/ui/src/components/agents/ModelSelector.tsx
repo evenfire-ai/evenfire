@@ -46,9 +46,11 @@ function modelLabel(name: string, options: HostModelOption[]): string {
  * ("applies to your next message" — R2.5).
  *
  * Visibility / degraded rules:
- *   - Hidden entirely until the model list loads, and when the host predates the
- *     endpoint or the fetch failed (`data` null/undefined) — no noisy error
- *     (R2.6).
+ *   - Hidden entirely until the model list loads and when the host predates the
+ *     endpoint (`data` null/undefined) — no noisy error (R2.6).
+ *   - A FAILED fetch (`state === 'error'`, #654 M7) is different: nothing is
+ *     known, so the chip stays visible as a retry affordance rather than
+ *     silently leaving the composer without a capability verdict.
  *   - `degraded` (allowlist ConfigMap unavailable, R3.5): the chip is disabled
  *     and shows only the host default with an explanatory tooltip.
  *   - `sessionModelBlocked` (R2.2): a warning notice tells the user their prior
@@ -67,6 +69,8 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
     pending,
     conflicted,
     imageInput,
+    state,
+    loadError,
   } = useHostModels(agentRef, chatId)
   const [open, setOpen] = useState(false)
   const [applied, setApplied] = useState(false)
@@ -128,8 +132,30 @@ export function ModelSelector({ agentRef, chatId, placement = 'down' }: ModelSel
   const caretPointsUp = placement === 'up' ? !open : open
   const caretPath = caretPointsUp ? 'm4.5 10 3.5-3.5L11.5 10' : 'm4.5 6 3.5 3.5L11.5 6'
 
+  // #654 M7 — a failed fetch is not "this host has no models". Offer a retry
+  // instead of hiding, so the user is not left with a silently capability-less
+  // composer and no way to recover.
+  if (!data && state === 'error') {
+    return (
+      <div className={rootClassName}>
+        <Pill
+          tone="warning"
+          size="sm"
+          interactive
+          className="model-selector-chip"
+          aria-label="Models unavailable — retry loading the model list"
+          title={loadError ?? 'The model list could not be loaded. Retry.'}
+          onClick={() => void refresh()}
+        >
+          <span className="model-selector-chip-glyph" aria-hidden="true" />
+          <span className="model-selector-chip-label">Models unavailable</span>
+        </Pill>
+      </div>
+    )
+  }
+
   // Hidden until we have a model list to show (undefined = loading first fetch,
-  // null = unsupported host / failed fetch). No flashing empty chip.
+  // null = the host predates the model endpoint). No flashing empty chip.
   if (!data) return null
 
   // Degraded: the allowlist is unavailable, so only the host default is usable.

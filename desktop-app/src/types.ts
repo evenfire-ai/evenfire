@@ -566,6 +566,13 @@ export type HostMessageResponse = {
   status?: 'completed' | 'waiting_approval' | 'pending' | 'cancelled' | 'failed' | 'processing'
   response?: string
   error?: TaskError | string
+  /**
+   * #654 — the model-selection revision the Host holds after this send. Present
+   * on a success only when a piggybacked `model` was actually persisted (its
+   * ABSENCE after a piggyback means the Host ignored the selection), and on an
+   * `LLM_MODEL_SELECTION_CONFLICT` failure as the winning revision to retry on.
+   */
+  modelSelectionRevision?: number
   approval?: {
     taskId: string
     requestId: string

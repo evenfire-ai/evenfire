@@ -45,7 +45,12 @@ const MODEL_SELECTION_CONFLICT_TOKEN = 'model_selection_conflict'
 /** Broker-backed hosts have no static default; the operator must name a model. */
 const CODEX_SUBSCRIPTION_PROVIDER = 'codex-subscription'
 
-export type HostModelSelectionState = 'unloaded' | 'loading' | 'ready' | 'unavailable'
+/**
+ * `unavailable` means the host answered and has no model endpoint (it predates
+ * it); `error` means the fetch itself failed and we know nothing. Collapsing the
+ * two would report a transport failure as evidence about the host.
+ */
+export type HostModelSelectionState = 'unloaded' | 'loading' | 'ready' | 'unavailable' | 'error'
 
 export interface HostModelSelectionView {
   scopeGeneration: number
@@ -71,6 +76,9 @@ export interface HostModelSelectionView {
   canAttachImages: boolean
   /** User copy explaining why images are blocked; null when allowed. */
   imageBlockMessage: string | null
+  /** Set only while the model list could not be fetched AND none was ever read,
+   *  so the UI can offer a retry instead of reporting a capability verdict. */
+  loadError: string | null
   /** Images must not be sent yet, even if the model is capable (unsettled/loading). */
   visualSendBlocked: boolean
 }
@@ -94,6 +102,9 @@ interface Entry {
   saving: boolean
   error: string | null
   conflicted: boolean
+  /** True when the last list fetch threw. Distinct from `data === null`, which
+   *  is the host's own answer "I have no model endpoint". */
+  loadFailed: boolean
   confirmedRevision: number | null
   /** Newest selection known to be on the server (accepted write or fresh read). */
   lastConfirmedModel: string | null
@@ -137,6 +148,7 @@ function getEntry(agentRef: string, chatId: string | null): Entry {
       saving: false,
       error: null,
       conflicted: false,
+      loadFailed: false,
       confirmedRevision: null,
       lastConfirmedModel: null,
       staleRead: false,
@@ -183,11 +195,14 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
   const state: HostModelSelectionState =
     data === undefined && entry.loading
       ? 'loading'
-      : data === undefined
-        ? 'unloaded'
-        : data === null
-          ? 'unavailable'
-          : 'ready'
+      : data === undefined && entry.loadFailed
+        ? 'error'
+        : data === undefined
+          ? 'unloaded'
+          : data === null
+            ? 'unavailable'
+            : 'ready'
+  const loadError = state === 'error' ? entry.error : null
 
   // Image capability is only trusted from a settled read: while a fetch is in
   // flight or a CAS conflict is unresolved the snapshot may be stale, so images
@@ -201,11 +216,15 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
   const visualSendBlocked = !canAttachImages
   const imageBlockMessage = canAttachImages
     ? null
-    : entry.saving
-      ? 'Applying the model change — wait for it to settle before sending images.'
-      : entry.conflicted
-        ? 'This chat’s model changed elsewhere — re-checking the current selection before images can be sent.'
-        : imageInputBlockMessage(effectiveModel, imageInput)
+    : // A failed fetch is not a verdict about the model: say the list could not
+      // be loaded rather than claiming the model has no image evidence.
+      state === 'error'
+      ? 'The model list could not be loaded, so image capability cannot be checked. Retry the model list.'
+      : entry.saving
+        ? 'Applying the model change — wait for it to settle before sending images.'
+        : entry.conflicted
+          ? 'This chat’s model changed elsewhere — re-checking the current selection before images can be sent.'
+          : imageInputBlockMessage(effectiveModel, imageInput)
 
   return {
     scopeGeneration: entry.scopeGeneration,
@@ -223,6 +242,7 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
     imageInput,
     canAttachImages,
     imageBlockMessage,
+    loadError,
     visualSendBlocked,
   }
 }
@@ -287,6 +307,94 @@ export function clearHostModelSelectionError(agentRef: string, chatId: string | 
   notify(entry)
 }
 
+/** Drops the pending intent for `model` when nothing is in flight to satisfy it. */
+function clearIntentIfStill(entry: Entry, model: string): boolean {
+  if (entry.saving || intentFor(entry) !== model) return false
+  if (entry.chatId) clearPendingModelIntent(entry.agentRef, entry.chatId)
+  else clearPreChatModelIntent(entry.agentRef)
+  return true
+}
+
+/**
+ * #654 H1 — a message ack confirmed the model it carried, so adopt the revision
+ * that write produced as the CAS base. Without this the client keeps the
+ * revision it read before sending, and its next conditional write loses a race
+ * it has already won.
+ */
+export function confirmHostModelSelectionFromSend(
+  agentRef: string,
+  chatId: string | null,
+  model: string,
+  revision: number
+): void {
+  if (!agentRef || !model) return
+  if (!Number.isSafeInteger(revision) || revision < 0) return
+  // The key is materialized, not looked up: message 1 of a chat CREATES that
+  // chat, so its key has no entry yet when the ack lands. Dropping the revision
+  // there would rearm the next send with the pre-send read — the exact loss this
+  // function exists to prevent.
+  const entry = getEntry(agentRef, chatId)
+  // An ack older than what we already hold says nothing new; the read path's own
+  // ordering guard covers the rest.
+  if (entry.confirmedRevision !== null && revision < entry.confirmedRevision) return
+  entry.confirmedRevision = revision
+  entry.lastConfirmedModel = model
+  entry.conflicted = false
+  // The held projection predates this write, so it must not resurrect the model
+  // it observed; the next settled read takes over.
+  entry.staleRead = true
+  clearIntentIfStill(entry, model)
+  notify(entry)
+}
+
+/**
+ * #654 L8 — the send succeeded but carried no revision after a piggyback, which
+ * is the Host's way of saying it ignored the model. Drop the intent so the UI
+ * stops resending a pick the Host will keep refusing.
+ */
+export function dropIgnoredHostModelIntent(
+  agentRef: string,
+  chatId: string | null,
+  model: string
+): void {
+  if (!agentRef || !model) return
+  // The intent itself lives in the chat store, outside this entry, so a missing
+  // entry would leave it to be resent forever; materialize the key to clear it.
+  const entry = getEntry(agentRef, chatId)
+  if (clearIntentIfStill(entry, model)) notify(entry)
+}
+
+/**
+ * #654 M3 — the send was refused with a CAS conflict. Adopt the winning revision
+ * the Host reported (so the retry is armed correctly without a separate read)
+ * and re-read the authoritative selection.
+ */
+export function noteHostModelSelectionConflict(
+  transport: HostModelSelectionTransport,
+  agentRef: string,
+  chatId: string | null,
+  model: string,
+  revision: number | undefined
+): void {
+  if (!agentRef) return
+  // Materialized for the same reason as the ack path: the conflict can be the
+  // answer to message 1 of a chat this send just created.
+  const entry = getEntry(agentRef, chatId)
+  if (
+    typeof revision === 'number' &&
+    Number.isSafeInteger(revision) &&
+    revision >= 0 &&
+    (entry.confirmedRevision === null || revision >= entry.confirmedRevision)
+  ) {
+    entry.confirmedRevision = revision
+  }
+  entry.conflicted = true
+  entry.error = 'This chat’s model was changed elsewhere — re-checking the current selection.'
+  if (model) clearIntentIfStill(entry, model)
+  notify(entry)
+  void loadHostModels(transport, agentRef, chatId, { force: true })
+}
+
 export async function loadHostModels(
   transport: HostModelSelectionTransport,
   agentRef: string,
@@ -302,6 +410,7 @@ export async function loadHostModels(
   entry.lastFetchSeq = fetchSeq
   entry.fetchInFlight = true
   entry.loading = true
+  entry.loadFailed = false
   if (options.force) entry.error = null
   notify(entry)
 
@@ -336,8 +445,14 @@ export async function loadHostModels(
     // write into an unconditional legacy update.
   } catch (error) {
     if (entry.lastFetchSeq !== fetchSeq) return
-    console.warn('[useHostModels] fetch failed (ignored):', error)
-    if (entry.seq === fetchSeq) entry.data = null
+    console.warn('[hostModelSelectionStore] host models fetch failed:', error)
+    if (entry.seq === fetchSeq) {
+      // `data` is left as it was: a previous good read stays usable, and
+      // `undefined` stays `undefined` so the view reports `error`, never
+      // `unavailable` (which is the host's own answer, not ours).
+      entry.loadFailed = true
+      entry.error = 'The model list could not be loaded. Retry.'
+    }
   } finally {
     if (entry.lastFetchSeq === fetchSeq) {
       entry.fetchInFlight = false
@@ -428,8 +543,10 @@ async function runSelectionWrites(
       // resurrect the previous session model; the next successful read refreshes
       // `staleRead` and takes over again.
       entry.staleRead = true
-      // Compare-and-clear: drop the intent only when it is still the one we wrote.
-      if (intentFor(entry) === currentModel && currentSeq === entry.seq) {
+      // Compare-and-clear against what the SERVER now holds, not against what we
+      // sent: an A→B→A sequence leaves a newer intent for A that the accepted A
+      // write already satisfies, and keeping it would strand the UI as pending.
+      if (intentFor(entry) === serverModel) {
         clearPendingModelIntent(entry.agentRef, chatId)
       }
       const queued = entry.queuedModel
@@ -470,11 +587,22 @@ async function runSelectionWrites(
         }
         entry.conflicted = true
         entry.error = 'This chat’s model was changed elsewhere — re-checking the current selection.'
-        entry.saving = false
-        entry.queuedModel = null
         notify(entry)
-        void loadHostModels(transport, entry.agentRef, chatId, { force: true })
-        return false
+        // `entry.saving` stays true across the await so no second writer starts
+        // (`selectHostModel` queues instead); the read adopts the winning
+        // revision, which is the CAS base the retry below needs.
+        await loadHostModels(transport, entry.agentRef, chatId, { force: true })
+        if (entry.scopeGeneration !== ownerScope) return false
+        const queuedAfterConflict = entry.queuedModel
+        if (queuedAfterConflict && queuedAfterConflict !== entry.lastConfirmedModel) {
+          // A newer pick arrived while the older write lost the race. Dropping it
+          // here is what made the user's last choice vanish silently.
+          entry.queuedModel = null
+          currentModel = queuedAfterConflict
+          currentSeq = entry.seq
+          continue
+        }
+        return finish(false)
       }
 
       const queued = entry.queuedModel
@@ -511,6 +639,7 @@ export function resetHostModelSelectionStore(): void {
     entry.saving = false
     entry.error = null
     entry.conflicted = false
+    entry.loadFailed = false
     entry.confirmedRevision = null
     entry.lastConfirmedModel = null
     entry.staleRead = false

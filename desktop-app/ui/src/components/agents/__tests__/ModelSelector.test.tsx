@@ -13,7 +13,7 @@ type HookState = {
   loading: boolean
   saving: boolean
   error: string | null
-  state: 'unloaded' | 'loading' | 'ready' | 'unavailable'
+  state: 'unloaded' | 'loading' | 'ready' | 'unavailable' | 'error'
   effectiveModel: string
   intentModel: string | null
   pending: boolean
@@ -27,6 +27,7 @@ type HookState = {
   }
   canAttachImages: boolean
   imageBlockMessage: string | null
+  loadError: string | null
   visualSendBlocked: boolean
   selectModel: (model: string) => Promise<boolean>
   clearError: () => void
@@ -50,6 +51,7 @@ function makeHookState(overrides: Partial<HookState> = {}): HookState {
     imageInput: { state: 'unknown', reason: 'model_unknown' },
     canAttachImages: false,
     imageBlockMessage: null,
+    loadError: null,
     visualSendBlocked: false,
     selectModel: vi.fn(async (_model: string) => true),
     clearError: vi.fn(),
@@ -103,6 +105,27 @@ describe('ModelSelector', () => {
     setHook({ data: null })
     const { container } = renderSelector()
     expect(container.firstChild).toBeNull()
+  })
+
+  // #654 M7 — a failed fetch is not the host saying "I have no models". Hiding
+  // the chip there left the user with a capability-less composer and no way to
+  // recover; the chip stays as the retry affordance.
+  it('shows a retry chip when the model list failed to load', () => {
+    const refresh = vi.fn(async () => undefined)
+    setHook({
+      data: undefined,
+      state: 'error',
+      error: 'The model list could not be loaded. Retry.',
+      loadError: 'The model list could not be loaded. Retry.',
+      refresh,
+    })
+    renderSelector()
+
+    const chip = screen.getByRole('button', { name: /Models unavailable/ })
+    expect(chip.getAttribute('title')).toMatch(/could not be loaded/)
+
+    fireEvent.click(chip)
+    expect(refresh).toHaveBeenCalledTimes(1)
   })
 
   it('shows the effective model (sessionModel over hostDefault)', () => {

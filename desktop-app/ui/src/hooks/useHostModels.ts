@@ -52,9 +52,7 @@ export function useHostModels(agentRef: string, chatId: string): UseHostModelsRe
 
   const transport = useMemo<HostModelSelectionTransport>(
     () => ({
-      // The shared selection store owns deduplication. A refresh must not
-      // reuse a second layer's fulfilled catalog response after a CAS conflict.
-      getHostModels: (hostRef: string, id: string) => getHostModels(hostRef, id, { force: true }),
+      getHostModels: (hostRef: string, id: string) => getHostModels(hostRef, id),
       setHostModel: (hostRef: string, id: string, model: string, expectedRevision?: number) =>
         setHostModel(hostRef, id, model, expectedRevision),
     }),

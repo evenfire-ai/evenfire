@@ -1,7 +1,6 @@
 import { useCallback } from 'react'
 import type {
   ChatMessage,
-  HostModelsResult,
   ReplaceChatMessagesOptions,
   SessionMessagesQuery,
   SessionsListQuery,
@@ -61,7 +60,6 @@ export type {
  * `pendingModelByChat`.
  */
 const SESSION_CATALOG_TTL_MS = 5_000
-const HOST_MODELS_TTL_MS = 30_000
 
 type CachedRequest<T> = {
   expiresAt: number
@@ -69,14 +67,8 @@ type CachedRequest<T> = {
 }
 
 const sessionCatalogRequests = new Map<string, CachedRequest<SessionsListResult>>()
-const hostModelRequests = new Map<string, CachedRequest<HostModelsResult | null>>()
 let sessionCatalogSource: typeof window.clerum.rpc.listSessions | null = null
-let hostModelsSource: typeof window.clerum.rpc.getHostModels | null = null
 let remoteCacheScope = 'unknown'
-
-function hostModelKey(hostRef: string, chatId: string): string {
-  return `${remoteCacheScope}:${hostRef}:${chatId}`
-}
 
 function pruneExpiredSessionCatalogRequests(now = Date.now()): void {
   for (const [key, cached] of sessionCatalogRequests) {
@@ -203,38 +195,18 @@ export function useChatStore() {
       window.clerum.rpc.getContextBreakdown(hostRef, agent, chatId),
     []
   )
+  // #654 M12 — no cache layer here. `hostModelSelectionStore` owns request
+  // deduplication AND revision ordering; a second TTL cache in front of it could
+  // only serve a response fetched before a write, which is exactly the stale
+  // revision the CAS must not be armed with. Both call sites already bypassed
+  // it with `force: true`, so the layer had no reader left.
   const getHostModels = useCallback(
-    (hostRef: string, chatId: string, options: { force?: boolean } = {}) => {
-      const source = window.clerum.rpc.getHostModels
-      if (hostModelsSource !== source) {
-        hostModelRequests.clear()
-        hostModelsSource = source
-      }
-      const key = hostModelKey(hostRef, chatId)
-      const cached = hostModelRequests.get(key)
-      if (!options.force && cached && cached.expiresAt > Date.now()) return cached.promise
-
-      const promise = source(hostRef, chatId).catch(error => {
-        hostModelRequests.delete(key)
-        throw error
-      })
-      hostModelRequests.set(key, { expiresAt: Date.now() + HOST_MODELS_TTL_MS, promise })
-      return promise
-    },
+    (hostRef: string, chatId: string) => window.clerum.rpc.getHostModels(hostRef, chatId),
     []
   )
   const setHostModel = useCallback(
-    async (hostRef: string, chatId: string, model: string, expectedRevision?: number) => {
-      const result = await window.clerum.rpc.setHostModel(
-        hostRef,
-        chatId,
-        model,
-        undefined,
-        expectedRevision
-      )
-      hostModelRequests.delete(hostModelKey(hostRef, chatId))
-      return result
-    },
+    (hostRef: string, chatId: string, model: string, expectedRevision?: number) =>
+      window.clerum.rpc.setHostModel(hostRef, chatId, model, undefined, expectedRevision),
     []
   )
   // Spec 15 Fase B — propagate an explicit user rename to the server. In this app
@@ -247,15 +219,12 @@ export function useChatStore() {
   )
   const clearCachedRemoteData = useCallback(() => {
     sessionCatalogRequests.clear()
-    hostModelRequests.clear()
     sessionCatalogSource = null
-    hostModelsSource = null
   }, [])
   const setRemoteCacheScope = useCallback((scope: string) => {
     if (remoteCacheScope === scope) return
     remoteCacheScope = scope
     sessionCatalogRequests.clear()
-    hostModelRequests.clear()
     // Pending selections are session-owned even though they are not remote
     // responses. Never carry an unpersisted model choice across logout, user,
     // or team boundaries where the same agent/chat identifiers may reappear.

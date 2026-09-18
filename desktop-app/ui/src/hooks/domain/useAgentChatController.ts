@@ -17,7 +17,13 @@ import {
   setComposerDraft,
 } from '@lib/composerDraftStore'
 import { buildComposerRequestContent } from '@lib/composerReferencesPrompt'
-import { loadHostModels, readHostModelSelection } from '@lib/hostModelSelectionStore'
+import {
+  confirmHostModelSelectionFromSend,
+  dropIgnoredHostModelIntent,
+  loadHostModels,
+  noteHostModelSelectionConflict,
+  readHostModelSelection,
+} from '@lib/hostModelSelectionStore'
 import { createRetainedSendStore } from '@lib/retainedSendStore'
 import {
   mergeAuthoritativeServerMessages,
@@ -2706,18 +2712,32 @@ export function useAgentChatController({
         chatStore.clearCachedRemoteData()
         if (sendScope !== sendScopeGeneration.current) return
         const responseRecord = response as Record<string, unknown>
+        const ackOk = !responseRecord.error && responseRecord.success !== false
+        // #654 H1 — the send IS the write. Its ack carries the revision that
+        // write produced, and adopting it is what arms the NEXT conditional
+        // write correctly; without it the client keeps the revision it read
+        // before sending and loses a race it already won.
+        const ackRevision = responseRecord.modelSelectionRevision
+        if (ackOk && requestModel && typeof ackRevision === 'number') {
+          confirmHostModelSelectionFromSend(
+            sendAgent,
+            sendChatId || null,
+            requestModel,
+            ackRevision
+          )
+        } else if (ackOk && pendingModel) {
+          // #654 L8 — a success with no revision after a piggyback is the Host
+          // saying it ignored the model. Drop the intent instead of resending it
+          // on every subsequent message.
+          dropIgnoredHostModelIntent(sendAgent, sendChatId || null, pendingModel)
+        }
         // Confirm a held intent against a fresh authoritative read. An HTTP
         // acknowledgement alone can contain a structured failure or an ignored
         // legacy model selection; it must not clear a newer intent.
-        if (
-          !responseRecord.error &&
-          responseRecord.success !== false &&
-          pendingModel &&
-          sendChatId
-        ) {
+        if (ackOk && pendingModel && sendChatId) {
           void loadHostModels(
             {
-              getHostModels: (host, chat) => chatStore.getHostModels(host, chat, { force: true }),
+              getHostModels: chatStore.getHostModels,
               setHostModel: chatStore.setHostModel,
             },
             sendAgent,
@@ -2761,6 +2781,22 @@ export function useAgentChatController({
           }
           await appendAssistantMessage(sendAgent, sendChatId, assistantMessage)
           if (isErrorResponse) {
+            // #654 M3 — a CAS conflict is not a capability verdict. Adopt the
+            // winning revision the Host reported (so an explicit retry is armed
+            // without a separate read) and re-read the authoritative selection.
+            if (errorRecord?.code === 'LLM_MODEL_SELECTION_CONFLICT') {
+              const conflictRevision = responseRecord.modelSelectionRevision
+              noteHostModelSelectionConflict(
+                {
+                  getHostModels: chatStore.getHostModels,
+                  setHostModel: chatStore.setHostModel,
+                },
+                sendAgent,
+                sendChatId || null,
+                requestModel ?? '',
+                typeof conflictRevision === 'number' ? conflictRevision : undefined
+              )
+            }
             // The input was cleared before the round-trip: retain it (memory
             // only) so the failure is recoverable, and restore the text into the
             // composer only when it is still the same chat with no newer draft.

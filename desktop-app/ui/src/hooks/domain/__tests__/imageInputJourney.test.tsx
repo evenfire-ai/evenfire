@@ -166,6 +166,55 @@ describe('#654 visual send and recovery', () => {
     expect(result.current.failedAgentSend).toBeNull()
   })
 
+  // #654 H1 — the send IS the conditional write, so its ack carries the revision
+  // that write produced. A client that keeps the revision it read before sending
+  // arms the next send with a revision the server has already superseded, and
+  // loses a race it had won.
+  it('sends the second image with the revision acknowledged by the first send', async () => {
+    bridge.rpc.invokeHostMessage.mockResolvedValue({
+      success: true,
+      taskId: 'visual-task-1',
+      modelSelectionRevision: 3,
+    })
+    bridge.rpc.getTaskResult.mockResolvedValue({ status: 'completed', response: 'ok' })
+    const { result } = await mountedVisualController()
+
+    await act(async () => {
+      await result.current.handleSendAgentMessage('first image')
+    })
+    const chatId = result.current.activeChatId!
+    await waitFor(() => expect(bridge.hasProgressHandler('visual-task-1')).toBe(true))
+    await act(async () => {
+      bridge.emitTaskProgress('visual-task-1', {
+        type: 'terminal',
+        data: { taskId: 'visual-task-1', status: 'completed' },
+      })
+    })
+    await waitFor(() => expect(bridge.rpc.getTaskResult).toHaveBeenCalled())
+
+    // The chat now exists, so its own catalog read settles — carrying the server's
+    // OWN revision 0, which is older than the ack and must not overwrite it.
+    await act(async () => {
+      await loadHostModels(modelTransport, 'agent-x', chatId)
+    })
+    act(() => result.current.handleAddComposerImageAttachments([image]))
+    await act(async () => {
+      await result.current.handleSendAgentMessage('second image')
+    })
+
+    expect(bridge.rpc.invokeHostMessage).toHaveBeenCalledTimes(2)
+    // Witness: the first send carried the revision READ from the catalog…
+    expect(bridge.rpc.invokeHostMessage.mock.calls[0]?.[1]).toMatchObject({
+      model: 'glm-5.3-flash',
+      modelSelectionRevision: 0,
+    })
+    // …and the second carries the one the first send's ack produced.
+    expect(bridge.rpc.invokeHostMessage.mock.calls[1]?.[1]).toMatchObject({
+      model: 'glm-5.3-flash',
+      modelSelectionRevision: 3,
+    })
+  })
+
   it('does not resurrect input when a POST fails after logout/reset', async () => {
     let reject!: (reason: Error) => void
     bridge.rpc.invokeHostMessage.mockReturnValue(
