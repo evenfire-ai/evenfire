@@ -38,7 +38,7 @@ async function assertUploadV2Ready(
             to_regclass('public.gfs_upload_parts')::text AS parts`
   );
   const row = tables.rows[0] as { sessions?: string | null; parts?: string | null } | undefined;
-  if (!row?.sessions || !row.parts) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires migration 0091 upload tables");
+  if (!row?.sessions || !row.parts) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires the upload tables from migration 0097_gfs_upload_sessions");
   if (storageRole === "writer") {
     const info = await stat(storageMountPath);
     if (!info.isDirectory()) throw new Error("[gfsc] GFS_UPLOAD_V2_ENABLED requires a writable GFS storage directory");
