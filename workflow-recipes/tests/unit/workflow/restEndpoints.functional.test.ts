@@ -1171,8 +1171,67 @@ describe('requestModelInjection', () => {
       { stepId: 'broker-review', provider: 'zai', model: 'glm-4.7' },
       'http://wf-my-recipe-mcp-host.sandbox-recipes.svc.cluster.local:8080',
       'wrc-configure-token',
-      { codexConnectionKey: 'unassigned' }
+      { codexConnectionKey: 'unassigned', grokConnectionKey: 'unassigned' }
     )
+  })
+
+  it("hands the broker only the requested broker's own grant key", async () => {
+    const run = async (
+      annotations: Record<string, string>,
+      agent: { provider: string; model: string }
+    ) => {
+      const modelConfigHandler = {
+        handle: vi.fn().mockResolvedValue({ status: 200, body: { configured: true } }),
+      }
+      const handlers = createWorkflowEndpointHandlers(
+        makeCustomApi({
+          getNamespacedCustomObject: vi.fn().mockResolvedValue({
+            metadata: { name: 'my-recipe', resourceVersion: '1', annotations },
+            spec: { steps: [{ id: 'broker-review', agent, instruction: 'Go.' }] },
+            status: { workflowExecution: { phase: 'running', attempt: 1 }, steps: [] },
+          }),
+        }),
+        'sandbox-recipes',
+        { signWrcConfigureToken: vi.fn().mockResolvedValue('wrc-configure-token') } as never
+      )
+      await handlers.requestModelInjection(
+        'my-recipe',
+        makeClaims({
+          sub: 'custom-coordinator',
+          scopes: ['model_injection_request', 'status_write', 'status_read'],
+        }),
+        { stepId: 'broker-review', ...agent },
+        modelConfigHandler as never
+      )
+      return modelConfigHandler.handle.mock.calls[0][3]
+    }
+
+    await expect(
+      run(
+        {
+          'clerum.io/codex-connection-ref': '',
+          'clerum.io/subscription-connection-ref': 'team-grok',
+        },
+        { provider: 'grok-subscription', model: 'grok-4.6' }
+      )
+    ).resolves.toEqual({ codexConnectionKey: 'unassigned', grokConnectionKey: 'team-grok' })
+    await expect(
+      run(
+        {
+          'clerum.io/codex-connection-ref': 'team-plus',
+          'clerum.io/subscription-connection-ref': 'team-plus',
+        },
+        { provider: 'codex-subscription', model: 'gpt-5.3-codex' }
+      )
+    ).resolves.toEqual({ codexConnectionKey: 'team-plus', grokConnectionKey: 'unassigned' })
+    // Grant keys are per-provider names: a canonical-only Codex grant named
+    // like a Grok grant must not assign that Grok grant (and vice versa).
+    await expect(
+      run(
+        { 'clerum.io/subscription-connection-ref': 'team' },
+        { provider: 'codex-subscription', model: 'gpt-5.3-codex' }
+      )
+    ).resolves.toEqual({ codexConnectionKey: 'team', grokConnectionKey: 'unassigned' })
   })
 
   it('keeps the privileged configure-model route unavailable to custom coordinators', async () => {

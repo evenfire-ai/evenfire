@@ -1,4 +1,4 @@
-import { isRunnableLlmModelId } from '@clerum/llm-providers'
+import { PROVIDER_AUTH_MODE, isLlmProviderId, isRunnableLlmModelId } from '@clerum/llm-providers'
 import type { PluginWorkloadSdkCapability } from '../config'
 import { isLlmProvider } from '../llm/registryCore'
 import type { LlmProvider } from '../llm/registryCore'
@@ -8,6 +8,7 @@ import type {
   PluginWorkloadSdkClientNotificationsBootstrapProof,
 } from './promptBridge/controlApiClient'
 import { readVerifiedSdkOnlyCodexBinding, replaceSdkOnlyCodexBinding } from './sdkOnlyCodexBinding'
+import { readVerifiedSdkOnlyGrokBinding, replaceSdkOnlyGrokBinding } from './sdkOnlyGrokBinding'
 
 export interface PluginWorkloadSdkBootstrapIdentityDeps {
   /**
@@ -22,6 +23,10 @@ export interface PluginWorkloadSdkBootstrapIdentityDeps {
 }
 
 export type PluginWorkloadSdkBootstrapCapabilityFamily = 'promptBridge' | 'clientNotifications'
+
+function isOauthBrokerProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+}
 
 /**
  * Resolve the one bootstrap proof WRC is allowed to request from the
@@ -89,10 +94,18 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   }
   // Always integrity-check a supplied binding before the provider protocol
   // branch. Request-controlled provider/version must not skip this check.
-  const verifiedBinding = readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
-  if (req.provider === 'codex-subscription') {
+  // Each provider reads only its own slot: WRC writes Grok proofs to
+  // `subscriptionBinding` and Codex proofs to `codexBinding`, so a proof in the
+  // other slot is never a fallback for a missing one.
+  const grok = req.provider === 'grok-subscription'
+  const verifiedBinding = grok
+    ? readVerifiedSdkOnlyGrokBinding(req.subscriptionBinding, model)
+    : readVerifiedSdkOnlyCodexBinding(req.codexBinding, model)
+  const missingReason = grok ? 'execution_binding_missing' : 'codex_execution_binding_missing'
+  if (isOauthBrokerProvider(req.provider)) {
     if (!verifiedBinding) {
       replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
       return {
         configured: true,
         ready: true,
@@ -102,13 +115,23 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
         contractVersion: 3,
         policyReady: false,
         policyState: 'binding_missing',
-        policyReason: 'codex_execution_binding_missing',
-        message: 'SDK-only Codex bootstrap requires a live v3 execution binding',
+        policyReason: missingReason,
+        ...(grok ? { bindingReady: false } : {}),
+        message: grok
+          ? 'SDK-only Grok bootstrap requires a live v3 execution binding'
+          : 'SDK-only Codex bootstrap requires a live v3 execution binding',
       }
     }
-    replaceSdkOnlyCodexBinding(verifiedBinding)
+    if (grok) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(verifiedBinding)
+    } else {
+      replaceSdkOnlyGrokBinding(null)
+      replaceSdkOnlyCodexBinding(verifiedBinding)
+    }
   } else {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
   }
   // The binding must be installed BEFORE this call — `deps.verify` reads the
   // live global to build its capabilities request. That ordering means a throw
@@ -121,24 +144,35 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
   try {
     proof = deps.verify ? await deps.verify(req.provider, model) : null
   } catch (err) {
-    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
+    }
     throw err
   }
   if (deps.verify && !proof) {
-    if (req.provider === 'codex-subscription') replaceSdkOnlyCodexBinding(null)
+    if (isOauthBrokerProvider(req.provider)) {
+      replaceSdkOnlyCodexBinding(null)
+      replaceSdkOnlyGrokBinding(null)
+    }
     return {
       configured: false,
       ready: false,
-      contractVersion: req.provider === 'codex-subscription' ? 3 : 2,
+      contractVersion: isOauthBrokerProvider(req.provider) ? 3 : 2,
       message: 'Plugin Workload SDK identity bootstrap contract is not ready',
     }
   }
   if (
-    req.provider === 'codex-subscription' &&
+    isOauthBrokerProvider(req.provider) &&
     proof &&
-    (proof.codexBindingReady === false || proof.policyReason === 'codex_execution_binding_missing')
+    (proof.codexBindingReady === false ||
+      proof.bindingReady === false ||
+      proof.policyReason === 'codex_execution_binding_missing' ||
+      proof.policyReason === 'execution_binding_missing')
   ) {
     replaceSdkOnlyCodexBinding(null)
+    replaceSdkOnlyGrokBinding(null)
+    const rejectedReason = grok ? 'execution_binding_missing' : 'codex_execution_binding_missing'
     return {
       configured: true,
       ready: true,
@@ -148,13 +182,17 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
       contractVersion: 3,
       policyReady: false,
       policyState: proof.policyState,
-      policyReason: 'codex_execution_binding_missing',
-      message: 'Control API rejected the SDK-only Codex execution binding',
-      ...(verifiedBinding ? { codexBinding: verifiedBinding } : {}),
+      policyReason: rejectedReason,
+      ...(grok ? { bindingReady: false } : {}),
+      message: grok
+        ? 'Control API rejected the SDK-only Grok execution binding'
+        : 'Control API rejected the SDK-only Codex execution binding',
+      ...(verifiedBinding && grok ? { subscriptionBinding: verifiedBinding } : {}),
+      ...(verifiedBinding && !grok ? { codexBinding: verifiedBinding } : {}),
     }
   }
   deps.onConfigured?.({ provider: req.provider, defaultModel: model })
-  const contractVersion = req.provider === 'codex-subscription' ? 3 : 2
+  const contractVersion = isOauthBrokerProvider(req.provider) ? 3 : 2
   return {
     configured: true,
     ready: true,
@@ -178,7 +216,10 @@ export async function configurePluginWorkloadSdkBootstrapIdentity(
     ...(proof?.clientNotificationsPolicyReason !== undefined
       ? { clientNotificationsPolicyReason: proof.clientNotificationsPolicyReason }
       : {}),
-    ...(req.provider === 'codex-subscription' && verifiedBinding
+    ...(isOauthBrokerProvider(req.provider) && verifiedBinding && grok
+      ? { subscriptionBinding: verifiedBinding, bindingReady: true }
+      : {}),
+    ...(isOauthBrokerProvider(req.provider) && verifiedBinding && !grok
       ? { codexBinding: verifiedBinding }
       : {}),
   }

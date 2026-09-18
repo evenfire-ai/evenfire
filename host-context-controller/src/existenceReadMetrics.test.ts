@@ -88,6 +88,10 @@ const readExclusions: Record<string, readonly [number, string]> = {
     1,
     'Ownership before deletion',
   ],
+  'hostReconciler.ts::deleteMcpHostGrokProxyEgressNetworkPolicy::readNamespacedNetworkPolicy': [
+    1,
+    'Ownership before deletion',
+  ],
   'hostReconciler.ts::deleteHostNetworkPolicies::readNamespacedNetworkPolicy': [
     1,
     'Ownership before deletion',
@@ -251,7 +255,7 @@ function assertReadInventory(sources: Record<string, string>): void {
     expect(excluded[id], `Stale or changed read exclusion: ${id}`).toBe(count)
   }
   expect(Object.values(wrapped).reduce((sum, count) => sum + count, 0)).toBe(26)
-  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(43)
+  expect(Object.values(excluded).reduce((sum, count) => sum + count, 0)).toBe(44)
 }
 
 it('classifies every direct dot-property production SDK read as observed or explicitly excluded', () => {

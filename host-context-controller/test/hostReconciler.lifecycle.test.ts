@@ -8,6 +8,7 @@ import {
   type ResolvedSfsMount,
 } from '../src/hostReconciler'
 import type { InfrastructureTelemetryReporter } from '../src/infrastructureTelemetryReporter'
+import { HostContextLogger } from '../src/logger'
 import { issueMcpHostRuntimeTokens } from '../src/mcpHostRuntimeTokenIssuerClient'
 import { HostCRD, HostCrdStatus } from '../src/types'
 import {
@@ -1904,7 +1905,7 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
   it('IfNotPresent + mutable tag: policy KEPT (pod stays pullable) + advisory condition + warn', async () => {
     // The image-skew guard must never override IfNotPresent to an unpullable
     // Always for a node-local image (regression: T2 minikube ImagePullBackOff).
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const warnSpy = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => {})
     config.statelessImagePullPolicy = 'IfNotPresent' // hostImage stays 0.6.0 (mutable)
     const { reconciler, appsApi, customApi } = createReconciler()
     await reconciler.reconcile(makeStatelessHost())
@@ -1932,7 +1933,12 @@ describe('HostReconciler stateless lifecycle — guarded image pull policy (Stag
       String(args[0]).includes('serves old code on wake')
     )
     expect(advisoryLogs).toHaveLength(1)
-    expect(String(advisoryLogs[0][0])).toContain('clerum/mcp-host:0.6.0')
+    expect(advisoryLogs[0][1]).toEqual(
+      expect.objectContaining({
+        imagePullPolicy: 'IfNotPresent',
+        image: expect.stringContaining('clerum/mcp-host:0.6.0'),
+      })
+    )
 
     // A second reconcile of the same image does not repeat the advisory.
     await reconciler.reconcile(makeStatelessHost())

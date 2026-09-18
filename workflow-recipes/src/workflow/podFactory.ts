@@ -603,6 +603,17 @@ export interface McpHostPodOptions {
   pluginWorkloadSdkRuntimeMode?: 'workflow' | 'sdk-only'
   /** Secret residue copied onto the eager pod after a scope/binding remint. */
   runtimeTokenGeneration?: string
+  grokSubscriptionEnabled?: boolean
+  recipeAgentProvider?: string
+  recipeDeclaresGrok?: boolean
+}
+
+export function recipeDeclaresGrokSubscription(spec: {
+  agent?: { provider?: string }
+  steps?: Array<{ agent?: { provider?: string } }>
+}): boolean {
+  if (spec.agent?.provider === 'grok-subscription') return true
+  return (spec.steps ?? []).some(step => step?.agent?.provider === 'grok-subscription')
 }
 
 export function buildMcpHostPod(
@@ -756,6 +767,17 @@ export function buildMcpHostPod(
               name: 'CODEX_LLM_PROXY_RUNTIME_URL',
               value: 'http://codex-llm-proxy.control-plane.svc.cluster.local:8080',
             },
+            ...(options.grokSubscriptionEnabled &&
+            (options.recipeDeclaresGrok === true ||
+              options.recipeAgentProvider === 'grok-subscription')
+              ? [
+                  { name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' },
+                  {
+                    name: 'GROK_LLM_PROXY_RUNTIME_URL',
+                    value: 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080',
+                  },
+                ]
+              : []),
             // PromptBridge resolves exactly one signed target credential per
             // attempt through WRC. Notification-only hosts are provider-free
             // and deliberately receive no broker URL.
