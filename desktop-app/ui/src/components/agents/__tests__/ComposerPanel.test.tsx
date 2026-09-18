@@ -596,31 +596,28 @@ describe('ComposerPanel with an image-capable model', () => {
 
   it('refuses an image that would push the message past the combined image budget', async () => {
     const { container } = render(<ComposerPanel inline />)
-    // Each image is under the per-image cap, but two of them encode to more
-    // base64 than the request body can carry.
+    // Each image is under the per-image cap; two fit the combined budget and
+    // the third would push it past what the request body can carry.
     const rawBytes = Math.floor(COMPOSER_MAX_IMAGE_BYTES * 0.8)
-    expect(Math.ceil(rawBytes / 3) * 4 * 2).toBeGreaterThan(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
-    const first = new Uint8Array(rawBytes)
-    first.set(PNG_BYTES)
-    const second = new Uint8Array(rawBytes)
-    second.set(PNG_BYTES)
-    second[PNG_BYTES.length] = 1
-
-    fireEvent.change(pickerInput(container), {
-      target: {
-        files: [
-          imageFile('first.png', 'image/png', first),
-          imageFile('second.png', 'image/png', second),
-        ],
-      },
+    const base64Bytes = Math.ceil(rawBytes / 3) * 4
+    expect(base64Bytes * 2).toBeLessThanOrEqual(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    expect(base64Bytes * 3).toBeGreaterThan(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    const files = ['first.png', 'second.png', 'third.png'].map((name, index) => {
+      const bytes = new Uint8Array(rawBytes)
+      bytes.set(PNG_BYTES)
+      bytes[PNG_BYTES.length] = index
+      return imageFile(name, 'image/png', bytes)
     })
+
+    fireEvent.change(pickerInput(container), { target: { files } })
 
     await waitFor(() =>
       expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
     )
-    expect(expectSinglePreparedImage().name).toBe('first.png')
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(['first.png', 'second.png'])
     expect(screen.getByRole('alert').textContent).toBe(
-      'second.png does not fit in this message: the images in one message are limited to 5 MB in total. Send the attached images first or remove one.'
+      'third.png does not fit in this message: the images in one message are limited to 8 MB in total. Send the attached images first or remove one.'
     )
   })
 
