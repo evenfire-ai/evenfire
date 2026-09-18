@@ -247,8 +247,8 @@ describe('D34 PR1 migration runner', () => {
     })
 
     expect(applied).toEqual([...DEV_POST_0106_MIGRATION_VERSIONS, ...PR1_MIGRATION_VERSIONS])
-    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(15)
-    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(15)
+    expect(queries.filter(({ sql }) => sql === 'BEGIN')).toHaveLength(16)
+    expect(queries.filter(({ sql }) => sql === 'COMMIT')).toHaveLength(16)
     expect(queries.filter(({ sql }) => sql === 'ROLLBACK')).toHaveLength(0)
   })
 
