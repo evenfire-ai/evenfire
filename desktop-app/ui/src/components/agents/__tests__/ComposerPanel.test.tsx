@@ -23,6 +23,7 @@ const composerState = {
 }
 
 const draftState = { value: '', set: vi.fn() }
+const runtimeState: { activeLlmProvider: string | null } = { activeLlmProvider: null }
 
 vi.mock('@contexts/AgentChatActionsContext', () => ({
   useAgentChatActionsContext: () => ({
@@ -42,7 +43,10 @@ vi.mock('@contexts/ChatComposerStateContext', () => ({
 }))
 
 vi.mock('@contexts/McpRuntimeContext', () => ({
-  useMcpRuntimeContext: () => ({ hostRuntimeStatus: null, activeLlmProvider: null }),
+  useMcpRuntimeContext: () => ({
+    hostRuntimeStatus: null,
+    activeLlmProvider: runtimeState.activeLlmProvider,
+  }),
 }))
 
 vi.mock('@contexts/NavigationContext', () => ({
@@ -101,6 +105,7 @@ afterEach(() => {
   draftState.value = ''
   draftState.set.mockReset()
   composerState.composerFocusRequestId = 0
+  runtimeState.activeLlmProvider = null
   delete (window as Partial<typeof window>).clerum
 })
 
@@ -191,5 +196,34 @@ describe.each([
     expect(textarea.selectionStart).toBe(4)
     expect(textarea.selectionEnd).toBe(8)
     otherInput.remove()
+  })
+})
+
+describe('ComposerPanel image capability gate', () => {
+  it.each(['grok-subscription', 'codex-subscription', 'zai'] as const)(
+    'blocks image upload for %s and names the provider',
+    provider => {
+      runtimeState.activeLlmProvider = provider
+      render(<ComposerPanel inline />)
+      fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Upload Files' }))
+      const alert = screen.getByRole('alert')
+      expect(alert.textContent).toMatch(/Image attachments are not supported/)
+      expect(alert.textContent).toMatch(
+        provider === 'grok-subscription'
+          ? /xAI Grok Subscription/
+          : provider === 'codex-subscription'
+            ? /OpenAI Codex Subscription/
+            : /Z\.AI/
+      )
+    }
+  )
+
+  it('does not block image upload for openai', () => {
+    runtimeState.activeLlmProvider = 'openai'
+    render(<ComposerPanel inline />)
+    fireEvent.click(screen.getByRole('button', { name: 'Add context' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Upload Files' }))
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

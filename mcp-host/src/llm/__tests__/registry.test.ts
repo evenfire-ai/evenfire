@@ -104,8 +104,8 @@ describe('isLlmProvider — prototype-pollution guard (§1)', () => {
   })
 
   // The taskExecutor image-gate keeps a task's image attachments iff
-  // `isLlmProvider(providerType)` (taskExecutor.ts). Recognizing vertex/bedrock
-  // here is what stops the gate from silently dropping their images (R4).
+  // `llmProviderSupportsImageInput(providerType)` (taskExecutor.ts). Recognizing
+  // vertex/bedrock here is what stops the gate from silently dropping their images (R4).
   it('recognizes the own-SDK newcomers (image-gate: vertex/bedrock keep images)', () => {
     expect(isLlmProvider('vertex')).toBe(true)
     expect(isLlmProvider('bedrock')).toBe(true)

@@ -30,6 +30,7 @@ export enum LlmErrorCode {
   RateLimited = 'LLM_RATE_LIMITED',
   AuthenticationFailed = 'LLM_AUTHENTICATION_FAILED',
   ModelOverloaded = 'LLM_MODEL_OVERLOADED',
+  ImageInputUnsupported = 'LLM_IMAGE_INPUT_UNSUPPORTED',
 }
 
 export class LlmError extends AgentError {

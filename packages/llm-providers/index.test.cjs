@@ -35,3 +35,34 @@ describe('buildProviderMaps', () => {
     assert.deepEqual(desc.credentialSlots, [])
   })
 })
+
+describe('image input capability', () => {
+  it('fails closed for Z.AI and both oauth-broker subscriptions', () => {
+    assert.deepEqual(providers.LLM_IMAGE_INPUT_UNSUPPORTED_IDS, [
+      'zai',
+      'codex-subscription',
+      'grok-subscription',
+    ])
+    assert.equal(providers.llmProviderSupportsImageInput('zai'), false)
+    assert.equal(providers.llmProviderSupportsImageInput('codex-subscription'), false)
+    assert.equal(providers.llmProviderSupportsImageInput('grok-subscription'), false)
+    assert.equal(providers.llmProviderSupportsImageInput('openai'), true)
+    assert.equal(providers.llmProviderSupportsImageInput('claude'), true)
+    assert.equal(providers.llmProviderSupportsImageInput('xai'), true)
+    assert.equal(providers.llmProviderSupportsImageInput('unknown'), false)
+    assert.equal(providers.llmProviderSupportsImageInput(''), false)
+  })
+
+  it('names the active provider in the unsupported message', () => {
+    assert.match(
+      providers.imageAttachmentUnsupportedMessage('grok-subscription'),
+      /xAI Grok Subscription/
+    )
+    assert.match(
+      providers.imageAttachmentUnsupportedMessage('codex-subscription'),
+      /OpenAI Codex Subscription/
+    )
+    assert.match(providers.imageAttachmentUnsupportedMessage('zai'), /Z\.AI/)
+    assert.match(providers.imageAttachmentUnsupportedMessage('not-a-provider'), /this provider/)
+  })
+})

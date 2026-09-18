@@ -15,7 +15,7 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FAIL=0
 GROUPS_RUN=0
-EXPECTED_GROUPS=9
+EXPECTED_GROUPS=10
 REGISTERED=()
 COUNT_SUMMARY=""
 
@@ -220,6 +220,9 @@ fi
 run_group "grok-provider-attempt-contract" "packages/grok-provider-attempt-contract" \
   "index.test.cjs"
 
+run_group "llm-providers image gate" "packages/llm-providers" \
+  "index.test.cjs"
+
 # Shared projection package; its suite covers the Grok ConfigMap annotations.
 run_group "grok-catalog-projection" "packages/codex-catalog-projection" \
   "index.test.cjs"
@@ -282,6 +285,7 @@ run_group "mcp-host grok" "mcp-host" \
   "src/llm/__tests__/subscriptionRequestHash.test.ts" \
   "src/llm/__tests__/registry.test.ts" \
   "src/llm/__tests__/makeProvider.throws.test.ts" \
+  "src/agent/__tests__/taskExecutor.test.ts" \
   "src/config/configStore.test.ts" \
   "src/core/orchestration/__tests__/toolPresentationPolicy.test.ts" \
   "src/pluginWorkloadSdk/bootstrapIdentity.test.ts" \
