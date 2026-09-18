@@ -359,7 +359,7 @@ export function createSandboxUiSessionRouter(): Router {
             recipeNs,
             recipeName,
             oauthClientId,
-            userId,           // from req.auth.sub — never the body
+            userId, // from req.auth.sub — never the body
             redirectUri,
             background,
           }),
@@ -682,8 +682,10 @@ export function createSandboxUiSessionRouter(): Router {
 
     // Per-request hook to inject identity headers and strip client-supplied
     // shadow headers. http-proxy fires onProxyReq once with the
-    // ClientRequest. We layer a one-shot listener via the proxy's `proxyReq`
-    // event scoped to this request via res.on('finish') cleanup.
+    // ClientRequest. Each request gets a filtered listener, and cleanup removes
+    // it after the response closes. `on` is intentional: shared proxy events
+    // can be interleaved across concurrent requests, so a one-shot listener
+    // could be consumed by another request before this request's event arrives.
     const onProxyReq = (
       proxyReq: ClientRequest,
       innerReq: IncomingMessage,
@@ -739,8 +741,8 @@ export function createSandboxUiSessionRouter(): Router {
       }
     }
 
-    sandboxUiProxy.once('proxyReq', onProxyReq)
-    sandboxUiProxy.once('proxyRes', onProxyRes)
+    sandboxUiProxy.on('proxyReq', onProxyReq)
+    sandboxUiProxy.on('proxyRes', onProxyRes)
     // If the request ends without firing (e.g. an early proxy error), make
     // sure the listeners are detached AND the view-request emit fires
     // exactly once with the final status code.

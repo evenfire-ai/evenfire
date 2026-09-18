@@ -23,14 +23,22 @@ const httpProxyMock = vi.hoisted(() => {
     }),
     once: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
       const list = events.get(event) ?? []
-      list.push(cb)
+      const onceCb = (...args: unknown[]) => {
+        events.set(
+          event,
+          (events.get(event) ?? []).filter(candidate => candidate !== onceCb)
+        )
+        cb(...args)
+      }
+      Object.defineProperty(onceCb, '__original', { value: cb })
+      list.push(onceCb)
       events.set(event, list)
     }),
     off: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
       const list = events.get(event) ?? []
       events.set(
         event,
-        list.filter(fn => fn !== cb)
+        list.filter(fn => fn !== cb && (fn as { __original?: unknown }).__original !== cb)
       )
     }),
     emit: (event: string, ...args: unknown[]) => {
@@ -365,9 +373,11 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
   })
 
   it('includes background:true in the control-api payload when the body sets it', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
-      jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
-    )
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
+      )
 
     await request(makeApp())
       .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')
@@ -384,9 +394,11 @@ describe('POST /api/v1/sandbox-ui/:ns/:name/oauth/authorize-url', () => {
   })
 
   it('includes background:false in the control-api payload when background is omitted', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK)).mockResolvedValueOnce(
-      jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
-    )
+    fetchSpy
+      .mockResolvedValueOnce(jsonResponse(200, REGISTRY_OK))
+      .mockResolvedValueOnce(
+        jsonResponse(200, { authorizeUrl: 'https://accounts.google.com/oauth?...' })
+      )
 
     await request(makeApp())
       .post('/api/v1/sandbox-ui/sandbox-recipes/r1/oauth/authorize-url')
@@ -746,6 +758,54 @@ describe('ANY /api/v1/sandbox-ui/:ns/:name/view/*', () => {
     // authorization headers when http-proxy receives it.
     expect(reqArg.headers.cookie).toBeUndefined()
     expect(reqArg.headers.authorization).toBeUndefined()
+  })
+
+  it('keeps concurrent proxy request hooks attached to their own request', async () => {
+    const pending: Array<{
+      req: object
+      res: { status: (status: number) => { end: () => void } }
+    }> = []
+    httpProxyMock._proxy.web.mockImplementation((req: object, res) => {
+      pending.push({ req, res: res as { status: (status: number) => { end: () => void } } })
+    })
+
+    const first = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/first')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-a'))
+    const second = request(viewApp())
+      .get('/api/v1/sandbox-ui/sandbox-recipes/r1/view/second')
+      .set('Cookie', cookieHeader('sandbox-recipes', 'r1', 'user-b'))
+    const firstPromise = first.then(() => undefined)
+    const secondPromise = second.then(() => undefined)
+
+    await new Promise<void>(resolve => setTimeout(resolve, 100))
+    expect(pending).toHaveLength(2)
+
+    const makeProxyReq = () => {
+      const headers: Record<string, string> = {}
+      return {
+        getHeaderNames: () => [],
+        removeHeader: (name: string) => delete headers[name.toLowerCase()],
+        setHeader: (name: string, value: string) => {
+          headers[name.toLowerCase()] = value
+        },
+        headers,
+      }
+    }
+    const firstProxyReq = makeProxyReq()
+    const secondProxyReq = makeProxyReq()
+
+    // Deliberately deliver B before A. The hooks must filter by request identity
+    // without allowing B's event to consume A's handler.
+    httpProxyMock._proxy.emit('proxyReq', secondProxyReq, pending[1].req, {})
+    httpProxyMock._proxy.emit('proxyReq', firstProxyReq, pending[0].req, {})
+
+    expect(firstProxyReq.headers['x-clerum-user']).toBe('user-a')
+    expect(secondProxyReq.headers['x-clerum-user']).toBe('user-b')
+
+    pending[0].res.status(200).end()
+    pending[1].res.status(200).end()
+    await Promise.all([firstPromise, secondPromise])
   })
 })
 
