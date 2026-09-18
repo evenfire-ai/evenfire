@@ -90,7 +90,10 @@ describe('workspaceTabs — identity rules R6–R9', () => {
     expect(state.activeTabId).toBe('app-2')
   })
 
-  it('R8 — files is a single instance; re-open focuses the existing tab', () => {
+  // R8 (files = single instance) was superseded by §3: files are multi-instance,
+  // deduped by path. The root tab (absent path → null) still collapses to one, so
+  // re-opening the default (no path) focuses the existing root tab.
+  it('root-path dedupe — re-opening the root files tab focuses the existing one', () => {
     let state = createEmptyWorkspaceTabsState()
     state = openFilesTab(state, { id: 'files-1' })
     state = openAppTab(state, { id: 'app-1', appRef: 'x' })

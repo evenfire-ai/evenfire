@@ -599,6 +599,14 @@ export function FilesPage({
     return true
   }
 
+  // A non-null seed rebuilds the breadcrumb stack asynchronously (openUri is a
+  // network round-trip). Until it lands, `current` is still the virtual root, and
+  // reporting that transient `null` back up would clobber the owning tab's
+  // persisted path to null — losing the location if the user switches tabs
+  // mid-load (mini-spec 06 §3). Arm on a non-null seed so location reports are
+  // withheld until the seed is consumed; a null seed (root tab) never arms.
+  const seedPendingRef = useRef(false)
+
   /**
    * Open a link handed over from the app level (a plugin's `gfs://` click that
    * this page handles better than the overlay). Cleared immediately so a
@@ -606,6 +614,9 @@ export function FilesPage({
    */
   useEffect(() => {
     if (!pendingGfsUri) return
+    // Re-arm on every non-null seed so a deep-link onto an already-mounted page
+    // suppresses the pre-open location the same way the initial mount does.
+    seedPendingRef.current = true
     onPendingGfsUriHandled?.()
     void handleOpenGfsLink(pendingGfsUri)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -618,6 +629,15 @@ export function FilesPage({
   const currentGfsUri = current?.gfsUri ?? null
   const currentName = current?.name ?? null
   useEffect(() => {
+    if (seedPendingRef.current) {
+      // Seed still resolving: suppress the pre-seed root (null) that would clobber
+      // the tab's persisted path. Once the stack lands (`current` non-null), the
+      // seed is consumed — disarm here and report from now on. A failed open keeps
+      // `current` null, so this stays armed and the seeded path is preserved (the
+      // next successful navigation disarms and reports normally).
+      if (currentGfsUri === null) return
+      seedPendingRef.current = false
+    }
     onLocationChange?.(currentGfsUri, currentName)
   }, [currentGfsUri, currentName, onLocationChange])
 
