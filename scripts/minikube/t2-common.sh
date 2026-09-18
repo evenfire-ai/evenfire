@@ -805,13 +805,13 @@ t2_image_capability_fixture_check() {
   # not residue. The strict final preflight is T2_PLAN_MODE=false on a
   # bootstrapped profile.
   [ "$T2_PLAN_MODE" != true ] && [ "$T2_BOOTSTRAP_REQUIRED" != true ] || return 0
-  local acquired configuration restored
+  local acquired configuration restored verdict
   if [ ! -f "$T2_IMAGE_MANIFEST" ]; then
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
     t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is missing: $T2_IMAGE_MANIFEST"
     return 1
   fi
-  if ! acquired="$(python3 - "$T2_IMAGE_MANIFEST" 2>/dev/null <<'PY_IMAGE_FIXTURE'
+  if ! acquired="$(python3 - "$T2_IMAGE_MANIFEST" 2>&1 <<'PY_IMAGE_FIXTURE'
 import json, sys
 with open(sys.argv[1]) as source:
     images = json.load(source)["images"]
@@ -821,7 +821,8 @@ print("yes" if any(ref.removeprefix("docker.io/") == "clerum/image-capabilities-
 PY_IMAGE_FIXTURE
   )"; then
     T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
-    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is invalid or incomplete: $T2_IMAGE_MANIFEST"
+    # The last line of a Python traceback names the error without echoing data.
+    t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is invalid or incomplete: $T2_IMAGE_MANIFEST${acquired:+: ${acquired##*$'\n'}}"
     return 1
   fi
   [ "$acquired" = yes ] || return 0
@@ -829,25 +830,35 @@ PY_IMAGE_FIXTURE
     t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the mcp-host image capability configuration'
     return 1
   fi
-  if ! python3 - "$1" "$configuration" 2>/dev/null <<'PY_IMAGE_FIXTURE'
+  # The check prints a verdict so that a crash (malformed input) is reported as
+  # a crash instead of being read as residue.
+  if ! verdict="$(python3 - "$1" "$configuration" 2>&1 <<'PY_IMAGE_FIXTURE'
 import json, sys
 deployments, config = (json.loads(value) for value in sys.argv[1:])
 flag = "evenfire.ai/image-capabilities-run"
 def clean(data):
     return not any(key.startswith("IMAGE_CAPABILITIES_") or key == "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE" for key in data)
+def residue():
+    print("residue")
+    raise SystemExit(0)
 if flag in config.get("metadata", {}).get("annotations", {}) or not clean(config.get("data", {})) or config.get("data", {}).get("NODE_ENV") == "test":
-    raise SystemExit(1)
+    residue()
 for deployment in deployments["items"]:
     if flag in deployment.get("metadata", {}).get("annotations", {}):
-        raise SystemExit(1)
+        residue()
     for container in deployment["spec"]["template"]["spec"]["containers"]:
         if "image-capabilities-mcp-host" in container.get("image", ""):
-            raise SystemExit(1)
+            residue()
         for entry in container.get("env", []):
             if not clean([entry["name"]]) or "image-capabilities-mcp-host" in entry.get("value", ""):
-                raise SystemExit(1)
+                residue()
+print("clean")
 PY_IMAGE_FIXTURE
-  then
+  )"; then
+    t2_fail HOST_RUNTIME_MISMATCH "image capability residue check crashed: ${verdict##*$'\n'}"
+    return 1
+  fi
+  if [ "$verdict" != clean ]; then
     t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
     return 1
   fi

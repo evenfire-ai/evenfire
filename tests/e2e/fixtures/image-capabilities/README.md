@@ -42,11 +42,12 @@ both rendered messages with the durable Host task; they never drive the flow.
 
 The runner journals restoration before mutation. It restores the original model,
 allowlist, configuration and production image, checks resource ownership, and
-removes only its own key and catalog rows. If interrupted, pass the printed
-canonical run directory as `IMAGE_CAPABILITIES_RUN_DIR` to:
+removes only its own key and catalog rows. On SIGINT or SIGTERM it restores
+before exiting (after the current `kubectl`/`npm` call returns). If the process
+was killed or restoration failed, pass the printed canonical run directory to:
 
 ```sh
-make minikube-restore-image-capabilities
+make minikube-restore-image-capabilities IMAGE_CAPABILITIES_RUN_DIR=<run directory>
 ```
 
 After pod replacements, revalidate the registered forwards through the branch

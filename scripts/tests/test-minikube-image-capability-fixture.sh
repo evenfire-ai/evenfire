@@ -162,6 +162,17 @@ reset_case
 RUNTIME=false
 expect_fail 'runtime residue' HOST_RUNTIME_MISMATCH
 
+# Malformed input is a crash, reported as one, never read as residue.
+reset_case
+DEPLOYMENTS='{"items":'
+expect_fail 'malformed deployments' 'image capability residue check crashed: '
+expect_fail 'malformed deployments' 'JSONDecodeError'
+expect_no_traceback 'malformed deployments'
+if grep -Fq 'configuration remains installed' "$tmp/out"; then
+  printf 'FAIL: malformed deployments were reported as residue\n' >&2
+  exit 1
+fi
+
 # Planning and bootstrap never certify the live Host, so they never probe it.
 reset_case
 T2_PLAN_MODE=true
@@ -207,6 +218,7 @@ expect_no_traceback 'strict missing manifest'
 reset_case
 printf '%s' '{"images":' >"$DEFAULT_MANIFEST"
 expect_fail 'strict corrupt manifest' IMAGE_MANIFEST_MISMATCH
+expect_fail 'strict corrupt manifest' 'JSONDecodeError'
 expect_no_traceback 'strict corrupt manifest'
 
 reset_case

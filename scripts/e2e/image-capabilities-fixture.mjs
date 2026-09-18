@@ -86,6 +86,32 @@ export function sanitizeFixtureReport(output, privateValues) {
     .slice(-128 * 1024)
 }
 
+// Restores the owned runtime when the run is interrupted. `command()` uses
+// spawnSync, so a signal is handled only once the current kubectl/npm call
+// returns and `main` reaches an await; the child receives the terminal's
+// signal itself. `main` keeps running until `restore` settles, so it must be
+// the same memoized restoration `main` awaits.
+export function installSignalRestore(target, restore, write = text => process.stderr.write(text)) {
+  let running = null
+  const onSignal = signal => {
+    if (running) return
+    write(`Image capability fixture interrupted by ${signal}; restoring the owned runtime\n`)
+    running = restore().then(
+      () => target.exit(signal === 'SIGINT' ? 130 : 143),
+      error => {
+        write(`restoration failed: ${error.message}\n`)
+        target.exit(1)
+      }
+    )
+  }
+  target.on('SIGINT', onSignal)
+  target.on('SIGTERM', onSignal)
+  return () => {
+    target.off('SIGINT', onSignal)
+    target.off('SIGTERM', onSignal)
+  }
+}
+
 function command(binary, args, { input, timeout = 60_000, env = process.env } = {}) {
   const result = spawnSync(binary, args, {
     input,
@@ -300,7 +326,7 @@ async function main() {
     if (!response.ok) throw new Error(`Fixture admin operation failed (${response.status})`)
     return response.status === 204 ? null : response.json()
   }
-  const restore = async () => {
+  const restoreRuntime = async () => {
     if (state.restored) return
     // Restore the model before removing its fixture-only catalog rows.
     if (state.changes.host) {
@@ -461,8 +487,13 @@ async function main() {
     state.restored = true
     save()
   }
+  // A signal and the normal exit path share one restoration run.
+  let restoring = null
+  const restore = () => (restoring ??= restoreRuntime())
+  const uninstallSignalRestore = installSignalRestore(process, restore)
   if (action === 'restore') {
     await restore()
+    uninstallSignalRestore()
     return
   }
   let failure
@@ -750,6 +781,7 @@ async function main() {
       `${failure ? `${failure.message}; ` : ''}restoration failed: ${error.message}`
     )
   }
+  uninstallSignalRestore()
   if (failure) throw failure
   process.stdout.write(`IMAGE_CAPABILITIES_E2E_PASS evidence=${evidence}\n`)
 }

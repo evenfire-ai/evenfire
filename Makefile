@@ -300,9 +300,11 @@ minikube-run-image-capabilities: ## Run the visible image journey with an isolat
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs run
 
-minikube-restore-image-capabilities: ## Resume restoration of this profile's recorded image fixture run
+minikube-restore-image-capabilities: ## Resume restoration of a recorded image fixture run (IMAGE_CAPABILITIES_RUN_DIR=<dir printed by minikube-run-image-capabilities>)
+	@test -n "$(IMAGE_CAPABILITIES_RUN_DIR)" || { echo "IMAGE_CAPABILITIES_RUN_DIR is required: the run directory printed by 'make minikube-run-image-capabilities'"; exit 1; }
 	@T2_PROJECT_DIR="$(CURDIR)" T2_PROFILE="$(MINIKUBE_PROFILE)" T2_CONTEXT="$(MINIKUBE_PROFILE)" \
 		T2_SKIP_LOCK="$(T2_SKIP_LOCK)" T2_LOCK_TOKEN="$(T2_LOCK_TOKEN)" \
+		IMAGE_CAPABILITIES_RUN_DIR="$(IMAGE_CAPABILITIES_RUN_DIR)" \
 		bash scripts/minikube/with-t2-mutation-lock.sh -- node scripts/e2e/image-capabilities-fixture.mjs restore
 
 .PHONY: minikube-build-codex-approved-tools-fixtures minikube-build-codex-approved-tools-fixtures-body

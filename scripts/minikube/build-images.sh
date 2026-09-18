@@ -1358,11 +1358,8 @@ if [ "$SKIP_PUBLIC" = false ]; then
     "postgres:16-alpine"
     "redis:7-alpine"
     "nginx:1.30.1-alpine"
-    # MinIO publishes from its own registry; the Docker Hub path no longer
-    # serves the tag, and a failed pull aborts the full image acquisition that
-    # the pre-gate needs. The image is only used by the optional sibling
-    # registry deployment, which this distribution does not ship.
-    "quay.io/minio/minio:latest"
+    # MinIO is not pulled here: nothing in this distribution consumes the
+    # image; the optional sibling evenfire-registry deployment pulls its own.
     "axllent/mailpit:latest"
     "mongodb/mongodb-community-server:7.0-ubi8"
     "mongodb/mongodb-mcp-server:latest"

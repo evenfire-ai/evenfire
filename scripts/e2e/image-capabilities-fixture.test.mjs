@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import {
   baseImage,
   fixtureImage,
+  installSignalRestore,
   modelInputs,
   proveImages,
   requireOwnedResource,
   runAnnotation,
+  sanitizeFixtureReport,
 } from './image-capabilities-fixture.mjs'
 
 const head = 'a'.repeat(40)
@@ -77,4 +80,84 @@ test('restoration refuses recreated or foreign-owned Kubernetes resources', () =
   assert.throws(() =>
     requireOwnedResource({ metadata: { uid: 'original' } }, 'original', 'our-run')
   )
+})
+
+function signalTarget() {
+  const target = new EventEmitter()
+  target.exits = []
+  target.exit = code => target.exits.push(code)
+  return target
+}
+
+for (const [signal, code] of [
+  ['SIGTERM', 143],
+  ['SIGINT', 130],
+]) {
+  test(`a ${signal} runs restoration once and exits ${code}`, async () => {
+    const target = signalTarget()
+    const messages = []
+    let calls = 0
+    installSignalRestore(
+      target,
+      async () => {
+        calls += 1
+      },
+      text => messages.push(text)
+    )
+    target.emit(signal, signal)
+    target.emit(signal, signal)
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(calls, 1)
+    assert.deepEqual(target.exits, [code])
+    assert.match(messages.join(''), new RegExp(`interrupted by ${signal}`))
+  })
+}
+
+test('a failed restoration exits 1 and reports the message', async () => {
+  const target = signalTarget()
+  const messages = []
+  installSignalRestore(
+    target,
+    async () => {
+      throw new Error('deployment/chatllm rollback timed out')
+    },
+    text => messages.push(text)
+  )
+  target.emit('SIGTERM', 'SIGTERM')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(target.exits, [1])
+  assert.match(messages.join(''), /restoration failed: deployment\/chatllm rollback timed out/)
+})
+
+test('uninstalling removes both signal handlers', () => {
+  const target = signalTarget()
+  const uninstall = installSignalRestore(
+    target,
+    async () => {},
+    () => {}
+  )
+  assert.equal(target.listenerCount('SIGINT'), 1)
+  assert.equal(target.listenerCount('SIGTERM'), 1)
+  uninstall()
+  assert.equal(target.listenerCount('SIGINT'), 0)
+  assert.equal(target.listenerCount('SIGTERM'), 0)
+})
+
+test('the playwright log redacts the admin password, the session cookie and bearer-shaped tokens', () => {
+  const password = 'fixture-admin-password-4c1e'
+  const cookie = 'sid=9f3a7c2e1b'
+  const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhZG1pbiJ9.c2lnbmF0dXJl'
+  const output = [
+    `login with ${password}`,
+    `session ${cookie} established`,
+    `token ${jwt} issued`,
+    'Authorization: Bearer opaque-bearer-value',
+    '3 passed (41.2s)',
+  ].join('\n')
+  const report = sanitizeFixtureReport(output, [password, cookie])
+  assert.ok(!report.includes(password))
+  assert.ok(!report.includes(cookie))
+  assert.ok(!report.includes(jwt))
+  assert.ok(!report.includes('opaque-bearer-value'))
+  assert.match(report, /3 passed \(41\.2s\)/)
 })
