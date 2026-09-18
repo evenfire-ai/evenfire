@@ -281,6 +281,15 @@ async function readUpstreamStream(input: {
         'upstream rejected the Grok credential'
       )
     }
+    if (response.status === 426) {
+      // xAI's cli-chat-proxy enforces a minimum Grok CLI client version and
+      // answers 426 when the caller does not present an accepted one. Retrying
+      // cannot help: an operator has to ship a client identity xAI accepts.
+      throw new GrokTransportError(
+        'client_upgrade_required',
+        'xAI requires a newer Grok client version for subscription inference; contact support to upgrade Evenfire’s Grok client'
+      )
+    }
     if (response.status === 402 || response.status === 403) {
       throw new GrokTransportError(
         'provider_unavailable',

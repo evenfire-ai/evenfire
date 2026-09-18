@@ -309,6 +309,23 @@ describe('GrokSubscriptionProvider', () => {
     ).rejects.toMatchObject({ code: 'provider_unavailable' })
   })
 
+  // xAI refuses subscription inference when the client version it sees is below
+  // its floor (live 426, probed 2026-09-18). An operator must act, so this is
+  // not an overload and must not be retried or failed over.
+  it('classifies a client upgrade requirement as non-retryable, not an overload', () => {
+    const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
+    const classified = provider.classifyError(
+      new GrokProxyError('client_upgrade_required', 'xAI requires a newer Grok client version')
+    )
+    expect(classified).toMatchObject({
+      code: LlmErrorCode.ModelNotAvailable,
+      retryable: false,
+      providerCode: 'client_upgrade_required',
+    })
+    expect(classified.code).not.toBe(LlmErrorCode.ModelOverloaded)
+    expect(classifyFailoverClass(classified.code, classified.retryable)).toBeNull()
+  })
+
   it('classifies authorize denials as non-retryable and never dispatched', () => {
     const provider = new GrokSubscriptionProvider('grok-4.6', deps() as never)
     const scope = provider.classifyError(new CodexAuthorizeError('insufficient_scope', 'scope'))

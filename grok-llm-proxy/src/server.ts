@@ -336,6 +336,7 @@ function mapError(err: unknown): { status: number; code: string } {
       insufficient_scope: 403,
       disabled: 404,
       ticket_replayed: 409,
+      client_upgrade_required: 426,
       connection_unavailable: 503,
       provider_unavailable: 503,
     }

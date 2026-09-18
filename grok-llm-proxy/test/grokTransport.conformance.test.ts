@@ -132,6 +132,51 @@ describe('streamGrokCompletion', () => {
     ])
   })
 
+  // Live xAI (probed 2026-09-18) answers 426 with
+  // "Your Grok CLI version (none) is outdated..." when the caller presents no
+  // accepted client version. Retrying cannot fix it, so it must not look like
+  // a transient outage.
+  it('maps an upstream 426 to a non-retryable client_upgrade_required error', async () => {
+    const redeem = vi.fn(async () => redeemSuccess())
+    const finalize = vi.fn(async () => ({
+      providerAttemptId: 'att-426',
+      outcome: 'error' as const,
+      duplicate: false,
+    }))
+    const fetchFn = vi.fn(async (_url: FetchInput, _init?: RequestInit) => ({
+      ok: false,
+      status: 426,
+      body: null,
+      headers: new Headers(),
+      text: async () =>
+        '{"error":"Your Grok CLI version (none) is outdated. Please update to version 0.1.202 or later."}',
+    })) as unknown as typeof fetch
+    const pending = streamGrokCompletion({
+      executionTicket: 'ticket-426',
+      requestHash: REQUEST_HASH,
+      request: REQUEST,
+      ticket: {
+        jti: 'jti-426',
+        hostRef: 'research-host',
+        model: REQUEST.model,
+        requestHash: REQUEST_HASH,
+        providerAttemptId: 'att-426',
+      },
+      redeem,
+      finalize,
+      fetchFn,
+      lookup: async () => [{ address: '1.2.3.4', family: 4 }],
+    })
+    await expect(pending).rejects.toMatchObject({
+      code: 'client_upgrade_required',
+      message: expect.stringMatching(/newer Grok client version/i),
+    })
+    expect(redeem).toHaveBeenCalled()
+    expect(finalize).toHaveBeenCalledWith(
+      expect.objectContaining({ receipt: expect.objectContaining({ outcome: 'error' }) })
+    )
+  })
+
   it('does not redeem when the client aborted before the attempt was dispatched', async () => {
     const redeem = vi.fn(async () => redeemSuccess())
     const finalize = vi.fn(async () => ({

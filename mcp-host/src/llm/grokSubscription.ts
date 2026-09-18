@@ -173,6 +173,17 @@ export class GrokSubscriptionProvider implements SingleTurnProvider {
         ...(providerDispatched !== undefined ? { providerDispatched } : {}),
       }
     }
+    if (code === 'client_upgrade_required') {
+      // Not retryable and not an outage: xAI refused the client identity, so a
+      // human has to act (upgrade the Grok client Evenfire presents).
+      return {
+        code: LlmErrorCode.ModelNotAvailable,
+        retryable: false,
+        message: err instanceof Error ? err.message : String(err),
+        providerCode: code,
+        ...(providerDispatched !== undefined ? { providerDispatched } : {}),
+      }
+    }
     if (code === 'provider_unavailable' || code === 'connection_unavailable') {
       return {
         code: LlmErrorCode.ModelOverloaded,
