@@ -268,6 +268,54 @@ assert_declared_local_package_sources() {
   done < <(declared_local_packages "$service")
 }
 
+build_publish_matrix_rows() {
+  ruby -rjson -ryaml -e '
+    manifest = JSON.parse(File.read(ARGV[0]))
+    workflow = YAML.load_file(ARGV[1])
+    published = manifest.fetch("images").select { |image| image["published"] == true }
+    matrix = workflow.fetch("jobs").fetch("build-push").fetch("strategy").fetch("matrix")
+    matrix.fetch("include").each do |row|
+      rooted = row["rooted"] == true
+      dockerfile = row.fetch("dockerfile", "Dockerfile")
+      puts [row.fetch("image"), row.fetch("path"), dockerfile, rooted].join("\t")
+    end
+  ' "$IMAGES_MANIFEST" "$REPO_ROOT/.github/workflows/build-publish.yml"
+}
+
+manifest_published_rows() {
+  node -e '
+    const manifest = require(process.argv[1]);
+    for (const image of manifest.images.filter(candidate => candidate.published === true)) {
+      console.log([
+        image.name,
+        image.path,
+        image.dockerfile ?? "Dockerfile",
+        image.rooted === true,
+      ].join("\t"));
+    }
+  ' "$IMAGES_MANIFEST"
+}
+
+assert_manifest_matches_build_publish_matrix() {
+  local manifest_rows matrix_rows diff_output
+  if ! manifest_rows="$(manifest_published_rows | LC_ALL=C sort)"; then
+    fail "published image manifest could not be read"
+    return
+  fi
+  if ! matrix_rows="$(build_publish_matrix_rows | LC_ALL=C sort)"; then
+    fail "Build & Publish image matrix could not be read"
+    return
+  fi
+  if [[ -z "$manifest_rows" || -z "$matrix_rows" ]]; then
+    fail 'published image and Build & Publish populations must both be non-empty'
+    return
+  fi
+  if diff_output="$(diff -u <(printf '%s\n' "$manifest_rows") <(printf '%s\n' "$matrix_rows"))"; then
+    return
+  fi
+  fail "published image rows disagree with the Build & Publish matrix:\n$diff_output"
+}
+
 assert_manifest_declared_local_packages() {
   local rows_file expected_rows actual_rows row image service dockerfile
   rows_file="$(mktemp "${TMPDIR:-/tmp}/evenfire-published-images.XXXXXX")"
@@ -319,13 +367,7 @@ assert_manifest_declared_local_packages() {
     return
   fi
 
-  expected_rows="$(node -e '
-    const fs = require("node:fs");
-    const manifest = require(process.argv[1]);
-    const root = process.argv[2];
-    const count = manifest.images.filter(candidate => candidate.published === true).length;
-    process.stdout.write(String(count));
-  ' "$IMAGES_MANIFEST" "$REPO_ROOT")"
+  expected_rows="$(build_publish_matrix_rows | wc -l | tr -d '[:space:]')"
   actual_rows="$(wc -l <"$rows_file" | tr -d '[:space:]')"
   if [[ "$actual_rows" != "$expected_rows" ]]; then
     rm -f -- "$rows_file"
@@ -415,6 +457,17 @@ assert_manifest_source_mutations_rejected() {
     image.source_paths = ["host-context-controller/**"];
     fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
   '
+  expect_manifest_rejection published-image-missing-build-matrix '
+    const fs = require("node:fs");
+    const manifest = require(process.argv[1]);
+    manifest.images.push({
+      name: "synthetic-published-image",
+      path: "workflow-recipes",
+      source_paths: ["workflow-recipes/**"],
+      published: true,
+    });
+    fs.writeFileSync(process.argv[2], JSON.stringify(manifest));
+  '
 
   rm -rf -- "$fixture_dir"
 }
@@ -463,8 +516,10 @@ assert_copy_before_every_ci mcp-host/Dockerfile.slim \
   grok-provider-attempt-contract llm-provider-attempt-contract llm-providers
 
 # Derive every published Node image's local-package coverage from its service
-# manifest and deploy/images.json row. Adding a file: dependency cannot leave
-# Docker materialization or change detection green with an omitted consumer.
+# manifest and deploy/images.json row. The independent Build & Publish matrix is
+# the liveness oracle, so adding, renaming, or omitting a published consumer
+# cannot leave Docker materialization or change detection green together.
+assert_manifest_matches_build_publish_matrix
 assert_manifest_declared_local_packages
 assert_manifest_source_mutations_rejected
 assert_root_build_context rpc-proxy
