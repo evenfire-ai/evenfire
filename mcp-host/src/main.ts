@@ -20,6 +20,7 @@ import { agentToolEnvProvider } from './agent/agentToolEnv'
 import type { PendingCronResult } from './agent/cronDispatch'
 import { createIncomingAdmission } from './agent/incomingAdmission'
 import { IncomingDelivery } from './agent/incomingDelivery'
+import { INCOMING_IMAGE_MAX_COUNT } from './agent/incomingImageAttachments'
 import { applySessionModelSelection as applySessionModelSelectionCore } from './agent/sessionModelSelection'
 import { applySessionTitle as applySessionTitleCore } from './agent/sessionTitle'
 import { BudgetClient } from './budget/budgetClient'
@@ -1994,7 +1995,7 @@ function handleIncomingMessage(
 }
 
 const prepareIncomingMessage = createIncomingAdmission({
-  limits: { maxCount: config.attachmentMaxCount, maxBytes: config.attachmentMaxBytes },
+  limits: { maxCount: INCOMING_IMAGE_MAX_COUNT, maxBytes: config.attachmentMaxBytes },
   queueReady: () => Boolean(messageQueue),
   degradedReason: computeDegradedReason,
   hostProvider: () => currentHost?.spec.model?.provider,

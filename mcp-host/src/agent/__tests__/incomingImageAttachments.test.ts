@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { validateIncomingImageAttachments } from '../incomingImageAttachments'
+import {
+  INCOMING_IMAGE_MAX_COUNT,
+  validateIncomingImageAttachments,
+} from '../incomingImageAttachments'
 
 const limits = { maxCount: 2, maxBytes: 10 }
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
@@ -104,5 +107,19 @@ describe('visual input validation', () => {
     expect(result.ok === false && result.error.message).toContain(
       'does not match its declared type'
     )
+  })
+
+  it('admits 20 images per message and rejects the 21st', () => {
+    expect(INCOMING_IMAGE_MAX_COUNT).toBe(20)
+    const hostLimits = { maxCount: INCOMING_IMAGE_MAX_COUNT, maxBytes: 10 }
+    const batch = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({ ...image, id: `image-${index + 1}` }))
+
+    const admitted = validateIncomingImageAttachments(batch(20), hostLimits)
+    expect(admitted.ok && admitted.attachments?.length).toBe(20)
+
+    const rejected = validateIncomingImageAttachments(batch(21), hostLimits)
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'LLM_INVALID_ATTACHMENT' } })
+    expect(rejected.ok === false && rejected.error.message).toContain('Too many image attachments')
   })
 })

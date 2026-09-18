@@ -6,6 +6,15 @@ import {
 } from '../llm/imageInput'
 import type { TaskError } from '../queue/types'
 
+/**
+ * Images accepted in one incoming message. Kept separate from
+ * `CLERUM_ATTACHMENT_MAX_COUNT`, which caps the attachments a response returns.
+ * Must match COMPOSER_MAX_IMAGE_ATTACHMENTS in desktop-app/ui/src/constants/attachments.ts.
+ * The combined size is bounded by the 6 MB JSON body limit of rpc-proxy and
+ * the host server, which carry the images inline.
+ */
+export const INCOMING_IMAGE_MAX_COUNT = 20
+
 export type IncomingImageValidation =
   | { ok: true; attachments: Attachment[] | undefined }
   | { ok: false; error: TaskError }

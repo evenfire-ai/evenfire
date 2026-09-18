@@ -4,7 +4,11 @@ import type { ChatComposerStateContextValue } from '@contexts/ChatComposerStateC
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { COMPOSER_MAX_IMAGE_BYTES } from '@constants/attachments'
+import {
+  COMPOSER_MAX_IMAGE_ATTACHMENTS,
+  COMPOSER_MAX_IMAGE_BYTES,
+  COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
+} from '@constants/attachments'
 import type { HostModelsResult } from '@hooks/useChatStore'
 import {
   type ImageInputDecision,
@@ -508,6 +512,81 @@ describe('ComposerPanel with an image-capable model', () => {
 
     await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy())
     expect(screen.getByRole('alert').textContent).toBe('huge.png is too large. Max size is 3 MB.')
+    expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
+  })
+
+  it('attaches 20 images from one pick and says how many did not fit', async () => {
+    expect(COMPOSER_MAX_IMAGE_ATTACHMENTS).toBe(20)
+    const { container } = render(<ComposerPanel inline />)
+    const files = Array.from({ length: 22 }, (_, index) =>
+      imageFile(`photo-${index + 1}.png`, 'image/png', [...PNG_BYTES, index])
+    )
+
+    fireEvent.change(pickerInput(container), { target: { files } })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    const [batch] = addedBatches()
+    expect(batch?.map(attachment => attachment.name)).toEqual(
+      files.slice(0, 20).map(file => file.name)
+    )
+    expect(screen.getByRole('alert').textContent).toBe(
+      'You can attach up to 20 images per message; 2 images were not added.'
+    )
+  })
+
+  it('refuses an image that would push the message past the combined image budget', async () => {
+    const { container } = render(<ComposerPanel inline />)
+    // Each image is under the per-image cap, but two of them encode to more
+    // base64 than the request body can carry.
+    const rawBytes = Math.floor(COMPOSER_MAX_IMAGE_BYTES * 0.8)
+    expect(Math.ceil(rawBytes / 3) * 4 * 2).toBeGreaterThan(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES)
+    const first = new Uint8Array(rawBytes)
+    first.set(PNG_BYTES)
+    const second = new Uint8Array(rawBytes)
+    second.set(PNG_BYTES)
+    second[PNG_BYTES.length] = 1
+
+    fireEvent.change(pickerInput(container), {
+      target: {
+        files: [
+          imageFile('first.png', 'image/png', first),
+          imageFile('second.png', 'image/png', second),
+        ],
+      },
+    })
+
+    await waitFor(() =>
+      expect(actionsMock.handleAddComposerImageAttachments).toHaveBeenCalledTimes(1)
+    )
+    expect(expectSinglePreparedImage().name).toBe('first.png')
+    expect(screen.getByRole('alert').textContent).toBe(
+      'second.png does not fit in this message: the images in one message are limited to 5 MB in total. Send the attached images first or remove one.'
+    )
+  })
+
+  it('counts images already in the composer toward the combined budget', async () => {
+    composerState.composerImageAttachments = [
+      {
+        id: 'already-attached',
+        name: 'already.png',
+        mimeType: 'image/png',
+        dataBase64: 'A'.repeat(COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES - 8),
+        sizeBytes: 1,
+        previewDataUrl: 'data:image/png;base64,AAAA',
+      },
+    ]
+    const { container } = render(<ComposerPanel inline />)
+
+    fireEvent.change(pickerInput(container), {
+      target: { files: [imageFile('small.png', 'image/png')] },
+    })
+
+    // Witness: the picked file was read and judged (the alert names it).
+    await waitFor(() =>
+      expect(screen.getByRole('alert').textContent).toMatch(/^small\.png does not fit/)
+    )
     expect(actionsMock.handleAddComposerImageAttachments).not.toHaveBeenCalled()
   })
 })

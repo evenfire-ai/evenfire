@@ -22,6 +22,7 @@ import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
+  COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -446,6 +447,20 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
       const accepted: ComposerImageAttachment[] = []
       const validationErrors: string[] = []
       const selected = candidates.slice(0, availableSlots)
+      if (candidates.length > availableSlots) {
+        const skipped = candidates.length - availableSlots
+        validationErrors.push(
+          `You can attach up to ${COMPOSER_MAX_IMAGE_ATTACHMENTS} images per message; ${skipped} ${
+            skipped === 1 ? 'image was' : 'images were'
+          } not added.`
+        )
+      }
+      // The images travel inline in one request body; an image that would push
+      // the message past the combined budget is refused here, not at send time.
+      let totalBase64Bytes = composerImageAttachments.reduce(
+        (total, attachment) => total + attachment.dataBase64.length,
+        0
+      )
 
       for (const [index, file] of selected.entries()) {
         const mimeType = inferComposerImageMimeType(file)
@@ -477,6 +492,16 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
             revokePreviewUrl(previewUrl)
             continue
           }
+          if (totalBase64Bytes + dataBase64.length > COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES) {
+            validationErrors.push(
+              `${file.name || 'Image'} does not fit in this message: the images in one message are limited to ${Math.round(
+                COMPOSER_MAX_TOTAL_IMAGE_BASE64_BYTES / (1024 * 1024)
+              )} MB in total. Send the attached images first or remove one.`
+            )
+            revokePreviewUrl(previewUrl)
+            continue
+          }
+          totalBase64Bytes += dataBase64.length
           accepted.push({
             id: crypto.randomUUID(),
             name: buildAttachmentName(file, source, mimeType, index),
@@ -500,7 +525,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     },
     [
       buildAttachmentName,
-      composerImageAttachments.length,
+      composerImageAttachments,
       inferComposerImageMimeType,
       onAddComposerImageAttachments,
       readFileAsDataUrl,
