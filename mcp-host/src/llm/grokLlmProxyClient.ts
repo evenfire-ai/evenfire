@@ -1,5 +1,18 @@
 export const GROK_PROXY_COMPLETIONS_PATH = '/internal/runtime/v1/grok/completions'
 
+/**
+ * Operator-facing text for a proxy denial. Codes an operator must act on get a
+ * sentence that says what to do; everything else keeps the diagnostic shape.
+ */
+export function grokProxyErrorMessage(code: string, status?: number): string {
+  if (code === 'client_upgrade_required') {
+    return 'Grok subscription inference is unavailable: xAI requires a newer Grok client version than this Evenfire build presents. Contact support to upgrade — retrying will not help.'
+  }
+  return status === undefined
+    ? `proxy stream failed with ${code}`
+    : `proxy stream failed with ${status} (${code})`
+}
+
 export class GrokProxyError extends Error {
   /**
    * `dispatched` records whether a request had already left this process when
@@ -95,7 +108,7 @@ export class GrokLlmProxyClient {
       }
       const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
       const code = typeof payload.error === 'string' ? payload.error : 'provider_unavailable'
-      throw new GrokProxyError(code, `proxy stream failed with ${response.status} (${code})`)
+      throw new GrokProxyError(code, grokProxyErrorMessage(code, response.status))
     }
     if (!response.body) {
       throw new GrokProxyError('provider_unavailable', 'proxy stream had no body')
@@ -129,7 +142,7 @@ async function readProxySse(body: ReadableStream<Uint8Array>): Promise<GrokProxy
       if (!line) continue
       const frame = JSON.parse(line.slice(6)) as GrokProxyFrame
       if (frame.type === 'error') {
-        throw new GrokProxyError(frame.code, `proxy stream failed with ${frame.code}`)
+        throw new GrokProxyError(frame.code, grokProxyErrorMessage(frame.code))
       }
       if (frame.type === 'text') text += frame.text
       if (frame.type === 'tool_call') toolCalls.push(frame)

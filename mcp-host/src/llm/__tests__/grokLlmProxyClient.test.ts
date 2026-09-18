@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { GrokLlmProxyClient, resolveGrokProxyRuntimeUrl } from '../grokLlmProxyClient'
+import {
+  GrokLlmProxyClient,
+  grokProxyErrorMessage,
+  resolveGrokProxyRuntimeUrl,
+} from '../grokLlmProxyClient'
 
 const RUNTIME_BASE = 'http://grok-llm-proxy.control-plane.svc.cluster.local:8080'
 const RUNTIME_URL = `${RUNTIME_BASE}/internal/runtime/v1/grok/completions`
@@ -194,5 +198,20 @@ describe('GrokLlmProxyClient', () => {
       code: 'provider_unavailable',
       dispatched: true,
     })
+  })
+
+  // The operator, not a retry, has to resolve xAI's client-version floor, so
+  // the surfaced text must say what to do instead of a bare status code.
+  it('surfaces an actionable message when the proxy reports client_upgrade_required', async () => {
+    expect(grokProxyErrorMessage('client_upgrade_required', 426)).toMatch(
+      /newer Grok client version[\s\S]*Contact support/i
+    )
+    expect(grokProxyErrorMessage('client_upgrade_required', 426)).not.toMatch(
+      /proxy stream failed/i
+    )
+    expect(grokProxyErrorMessage('provider_unavailable', 503)).toBe(
+      'proxy stream failed with 503 (provider_unavailable)'
+    )
+    expect(grokProxyErrorMessage('ticket_expired')).toBe('proxy stream failed with ticket_expired')
   })
 })
