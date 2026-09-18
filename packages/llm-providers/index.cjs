@@ -287,6 +287,32 @@ function providerDescriptor(id) {
   })
 }
 
+/**
+ * Providers whose adapters do not consume image `contentParts` (oauth-broker
+ * string-content contracts) or whose product path is known not to accept
+ * image input (Z.AI coding plan). taskExecutor must fail loud instead of
+ * attaching parts the adapter will drop. Keep the desktop composer gate in
+ * sync with this list.
+ * @type {readonly string[]}
+ */
+const LLM_IMAGE_INPUT_UNSUPPORTED_IDS = Object.freeze([
+  'zai',
+  'codex-subscription',
+  'grok-subscription',
+])
+
+function llmProviderSupportsImageInput(id) {
+  return isLlmProviderId(id) && !LLM_IMAGE_INPUT_UNSUPPORTED_IDS.includes(id)
+}
+
+function imageAttachmentUnsupportedMessage(provider) {
+  const label = isLlmProviderId(provider) ? PROVIDER_DISPLAY_LABELS[provider] : 'this provider'
+  return (
+    `Image attachments are not supported for agents running on ${label} yet. ` +
+    'Switch this agent to a provider with image input support before attaching images.'
+  )
+}
+
 function requireStaticCredentialSlot(descriptor) {
   if (!descriptor || descriptor.authMode !== 'static-credentials') {
     throw new Error(
@@ -310,6 +336,9 @@ module.exports = {
   PROVIDER_AUTH_MODE,
   PROVIDER_MODEL_CATALOG_MODE,
   OAUTH_BROKER_IDS,
+  LLM_IMAGE_INPUT_UNSUPPORTED_IDS,
+  llmProviderSupportsImageInput,
+  imageAttachmentUnsupportedMessage,
   buildProviderMaps,
   isCredentialSlotOwnedByProvider,
   isLlmProviderId,

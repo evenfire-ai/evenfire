@@ -22,7 +22,8 @@ import {
   COMPOSER_ACCEPT_IMAGE_MIME_TYPES,
   COMPOSER_MAX_IMAGE_ATTACHMENTS,
   COMPOSER_MAX_IMAGE_BYTES,
-  ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE,
+  composerImageUnsupportedMessage,
+  composerProviderSupportsImageInput,
 } from '@constants/attachments'
 import { useContextsDataController } from '@hooks/domain/useContextsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -118,7 +119,8 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const composerFileInputRef = useRef<HTMLInputElement | null>(null)
   const composerMenuRef = useRef<HTMLSpanElement | null>(null)
 
-  const activeProviderDoesNotSupportImages = activeLlmProvider === 'zai'
+  const activeProviderDoesNotSupportImages = !composerProviderSupportsImageInput(activeLlmProvider)
+  const imageUnsupportedMessage = composerImageUnsupportedMessage(activeLlmProvider)
   const selectedAgentContext = selectedAgent
     ? String(agentContextByName[selectedAgent] || '').trim()
     : ''
@@ -322,13 +324,13 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
 
   const openUploadPicker = useCallback(() => {
     if (activeProviderDoesNotSupportImages) {
-      setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
+      setComposerAttachmentError(imageUnsupportedMessage)
       return
     }
     setComposerMenuOpen(false)
     setComposerSubmenu(null)
     composerFileInputRef.current?.click()
-  }, [activeProviderDoesNotSupportImages])
+  }, [activeProviderDoesNotSupportImages, imageUnsupportedMessage])
 
   const openAgentFilesModal = useCallback(() => {
     if (agentFilesLoading) {
@@ -418,7 +420,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
   const prepareComposerImageAttachments = useCallback(
     async (files: File[] | FileList, source: 'picker' | 'clipboard' = 'picker') => {
       if (activeProviderDoesNotSupportImages) {
-        setComposerAttachmentError(ZAI_IMAGE_ATTACHMENT_UNSUPPORTED_MESSAGE)
+        setComposerAttachmentError(imageUnsupportedMessage)
         return
       }
 
@@ -490,6 +492,7 @@ export function ComposerPanel({ inline = false, agentSelector }: ComposerPanelPr
     },
     [
       activeProviderDoesNotSupportImages,
+      imageUnsupportedMessage,
       buildAttachmentName,
       composerImageAttachments.length,
       inferComposerImageMimeType,

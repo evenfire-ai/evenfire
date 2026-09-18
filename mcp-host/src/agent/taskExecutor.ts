@@ -6,6 +6,10 @@
  * singleton on the AgentStateMachine.
  */
 import { randomUUID } from 'node:crypto'
+import {
+  imageAttachmentUnsupportedMessage,
+  llmProviderSupportsImageInput,
+} from '@clerum/llm-providers'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'
@@ -90,7 +94,6 @@ import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
-import { isLlmProvider } from '../llm/registryCore'
 import { logger } from '../logger'
 import type { McpManager } from '../mcp'
 import { getDisplayName, sanitizeError } from '../progress/intentExtraction.js'
@@ -2104,14 +2107,6 @@ export class TaskExecutor {
   }
 
   private buildSourceMessageContentParts(): MessageContentPart[] {
-    const providerType = this.deps.llmProvider.getProviderType()
-    // getProviderType() always returns a registered LlmProvider, so in practice
-    // this never drops images for a known provider — that's the point: a new
-    // registry provider keeps its image attachments instead of silently losing
-    // them to a stale allow-list.
-    if (!isLlmProvider(providerType)) {
-      return []
-    }
     const sourceAttachments = this.task.sourceMessage?.attachments
     if (!sourceAttachments || sourceAttachments.length === 0) {
       return []
@@ -2130,6 +2125,18 @@ export class TaskExecutor {
       )
     if (!imageParts.length) {
       return []
+    }
+    const providerType = this.deps.llmProvider.getProviderType()
+    // Adapters that cannot consume contentParts (oauth-broker string-content
+    // contracts) and product-blocked providers (Z.AI) must fail loud. Attaching
+    // parts they will drop makes the model answer as if no image was sent.
+    if (!llmProviderSupportsImageInput(providerType)) {
+      throw new LlmError(
+        imageAttachmentUnsupportedMessage(providerType),
+        providerType,
+        LlmErrorCode.ImageInputUnsupported,
+        false
+      )
     }
     const userText = this.task.sourceMessage?.content?.trim() || 'User attached image(s).'
     return [{ type: 'text', text: userText }, ...imageParts]

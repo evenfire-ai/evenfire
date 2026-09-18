@@ -23,6 +23,12 @@ Runtime-only fields (base URL, default model, tokenizer, how to build the client
 stay local to **`mcp-host/src/llm/registryCore.ts`** (`RUNTIME_FIELDS`) and
 **`mcp-host/src/llm/registry.ts`** (`makeProvider`).
 
+If the adapter cannot consume image `contentParts` (string-only oauth-broker
+wires) or the product path must not accept images, add the id to
+`LLM_IMAGE_INPUT_UNSUPPORTED_IDS`. mcp-host then fails the task with
+`LLM_IMAGE_INPUT_UNSUPPORTED` instead of dropping the image, and the desktop
+composer must block paste for the same ids.
+
 ---
 
 ## Path A — OpenAI-compatible provider (data-only)

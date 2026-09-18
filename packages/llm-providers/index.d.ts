@@ -111,6 +111,19 @@ export interface ProviderDescriptor {
 export declare const PROVIDER_AUTH_MODE: Record<LlmProviderId, ProviderAuthMode>
 export declare const PROVIDER_MODEL_CATALOG_MODE: Record<LlmProviderId, ProviderModelCatalogMode>
 export declare const OAUTH_BROKER_IDS: readonly ['codex-subscription', 'grok-subscription']
+
+/** Providers that must not receive image `contentParts` (drop or product-block). */
+export declare const LLM_IMAGE_INPUT_UNSUPPORTED_IDS: readonly [
+  'zai',
+  'codex-subscription',
+  'grok-subscription',
+]
+
+/** True when the provider adapter/product path consumes image input. */
+export declare function llmProviderSupportsImageInput(id: unknown): boolean
+
+/** User-facing message naming the active provider. */
+export declare function imageAttachmentUnsupportedMessage(provider: string): string
 export declare function buildProviderMaps(
   ids: readonly string[],
   brokerIds: readonly string[]

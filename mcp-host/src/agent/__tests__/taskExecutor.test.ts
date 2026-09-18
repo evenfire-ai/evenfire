@@ -988,7 +988,7 @@ describe('TaskExecutor', () => {
     expect(deps.onComplete).toHaveBeenCalledTimes(1)
   })
 
-  it.each(['openai', 'claude', 'zai', 'bailian'] as const)(
+  it.each(['openai', 'claude', 'bailian'] as const)(
     'injects text+image contentParts for %s provider',
     async providerType => {
       vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
@@ -1039,24 +1039,35 @@ describe('TaskExecutor', () => {
     ] satisfies MessageContentPart[])
   })
 
-  it('skips contentParts when provider is unsupported', async () => {
-    vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)
-    const deps = createDeps({
-      llmProvider: {
-        completeSingleTurn: vi.fn(),
-        completeSingleTurnWithTools: vi.fn(),
-        getProviderType: () => 'unknown',
-      } as any,
-    })
-    const task = createTask('Analyze this image')
-    task.sourceMessage!.attachments = [createImageAttachment()]
+  it.each(['grok-subscription', 'codex-subscription', 'zai', 'unknown'] as const)(
+    'fails loud when %s cannot consume image attachments',
+    async providerType => {
+      const deps = createDeps({
+        llmProvider: {
+          completeSingleTurn: vi.fn(),
+          completeSingleTurnWithTools: vi.fn(),
+          getProviderType: () => providerType,
+        } as any,
+      })
+      const task = createTask('Analyze this image')
+      task.sourceMessage!.attachments = [createImageAttachment()]
 
-    const executor = new TaskExecutor(task, deps)
-    await executor.run()
+      const executor = new TaskExecutor(task, deps)
+      await executor.run()
 
-    const userMessage = getLastUserMessageFromLoopCall()
-    expect(userMessage.contentParts).toBeUndefined()
-  })
+      expect(runToolUseLoop).not.toHaveBeenCalled()
+      expect(executor.executorState).toBe('failed')
+      expect(deps.onFail).toHaveBeenCalledWith(
+        task,
+        expect.objectContaining({
+          code: 'LLM_IMAGE_INPUT_UNSUPPORTED',
+          retryable: false,
+          provider: providerType,
+          message: expect.stringMatching(/Image attachments are not supported/),
+        })
+      )
+    }
+  )
 
   it('skips contentParts when source message has no attachments', async () => {
     vi.mocked(runToolUseLoop).mockResolvedValueOnce({ type: 'response', content: 'ok' } as any)

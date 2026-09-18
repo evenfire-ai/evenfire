@@ -21,6 +21,7 @@ describe('classifyFailoverClass', () => {
     expect(classifyFailoverClass(LlmErrorCode.ContextLengthExceeded, false)).toBeNull()
     expect(classifyFailoverClass(LlmErrorCode.ContentFiltered, false)).toBeNull()
     expect(classifyFailoverClass(LlmErrorCode.ModelNotAvailable, false)).toBeNull()
+    expect(classifyFailoverClass(LlmErrorCode.ImageInputUnsupported, false)).toBeNull()
   })
 
   it('exports all four classes as the default triggerOn set', () => {
