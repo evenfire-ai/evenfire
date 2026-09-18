@@ -186,7 +186,7 @@ describe("createPermissionStoreProbe", () => {
       clientFactory: factory,
       now: () => 0,
     });
-    await expect(probe()).rejects.toThrow(/gfs_resources.*0048/s);
+    await expect(probe()).rejects.toThrow(/gfs_resources.*migration 0048_gfs_permission_store /s);
   });
 
   it("rejects when the role lacks INSERT on gfs_audit (chronic per-request 503 mode)", async () => {
@@ -202,7 +202,7 @@ describe("createPermissionStoreProbe", () => {
     await expect(probe()).rejects.toThrow(/gfs_audit.*INSERT|INSERT on gfs_audit/s);
   });
 
-  it("rejects a pre-0068 reader schema before serving requests", async () => {
+  it("rejects a pre-0071 reader schema before serving requests", async () => {
     const { factory } = fakeClientFactory({ immutableSchemaReady: false });
     const probe = createPermissionStoreProbe({
       pool: fakePool(),
@@ -212,8 +212,27 @@ describe("createPermissionStoreProbe", () => {
       clientFactory: factory,
       now: () => 0,
     });
-    await expect(probe()).rejects.toThrow(/migration 0068/);
+    await expect(probe()).rejects.toThrow(/migration 0071_gfs_immutable_blob_generations /);
   });
+
+  it.each([
+    ["schema", { auditDecisionEvidenceSchemaReady: false }],
+    ["constraint set", { auditDecisionEvidenceConstraintsReady: false }],
+  ] satisfies Array<[string, FakeClientBehavior]>)(
+    "rejects readiness before 0073 when the audit decision-evidence %s is missing",
+    async (_part, behavior) => {
+      const { factory } = fakeClientFactory(behavior);
+      const probe = createPermissionStoreProbe({
+        pool: fakePool(),
+        connectionString: DSN,
+        intervalMs: INTERVAL,
+        storageRole: "reader",
+        clientFactory: factory,
+        now: () => 0,
+      });
+      await expect(probe()).rejects.toThrow(/migration 0073_gfs_audit_decision_evidence /);
+    }
+  );
 
   it("keeps reader readiness independent of the writer-only manifest schema", async () => {
     const probeClient = fakeClientFactory({});
@@ -243,7 +262,7 @@ describe("createPermissionStoreProbe", () => {
       clientFactory: factory,
       now: () => 0,
     });
-    await expect(probe()).rejects.toThrow(/0095\/0096/);
+    await expect(probe()).rejects.toThrow(/migrations 0095_gfs_lifecycle_authority_projection\/0096_control_admin_session_version_default /);
   });
 
   it.each([
@@ -265,7 +284,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/reader has forbidden GFS mutation privileges.*0069/s);
+      await expect(probe()).rejects.toThrow(/reader has forbidden GFS mutation privileges.*migration 0074_gfs_runtime_role_exact_contract /s);
     }
   );
 
@@ -297,7 +316,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/migration 0092/);
+      await expect(probe()).rejects.toThrow(/migration 0092_gfs_audit_actor_correlation /);
     }
   );
 
@@ -320,7 +339,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/migration 0095/);
+      await expect(probe()).rejects.toThrow(/migrations 0095_gfs_lifecycle_authority_projection\//);
     }
   );
 
@@ -336,7 +355,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/migration 0092/);
+      await expect(probe()).rejects.toThrow(/migration 0092_gfs_audit_actor_correlation /);
     }
   );
 
@@ -358,7 +377,7 @@ describe("createPermissionStoreProbe", () => {
         clientFactory: factory,
         now: () => 0,
       });
-      await expect(probe()).rejects.toThrow(/writer lacks.*0068/s);
+      await expect(probe()).rejects.toThrow(/writer lacks.*migration 0071_gfs_immutable_blob_generations /s);
     }
   );
 

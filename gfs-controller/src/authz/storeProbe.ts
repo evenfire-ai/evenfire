@@ -15,7 +15,7 @@ import { Client } from "pg";
  * 2. Amortized fresh-connection probe (at most once per `intervalMs`) — opens
  *    a brand-new client (NEVER the pool) so a rotated credential fails to
  *    authenticate, and verifies real coherence with `has_table_privilege`, so
- *    "password correct but migration 0048 grants missing" also fails loud.
+ *    "password correct but migration 0048_gfs_permission_store grants missing" also fails loud.
  *
  * FAIL CLOSED: only SUCCESS is cached. While failing, every readiness call
  * retries the fresh connection (~1 new connection per probe period during an
@@ -270,13 +270,13 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       if (row?.can_read !== true) {
         throw new Error(
           "permission store coherence check failed: role lacks SELECT on gfs_resources " +
-            "(control-api migration 0048 not applied?)"
+            "(control-api migration 0048_gfs_permission_store not applied?)"
         );
       }
       if (row?.can_audit !== true) {
         throw new Error(
           "permission store coherence check failed: role lacks INSERT on gfs_audit " +
-            "(audit-write failures would 503 every request; control-api migration 0048 not applied?)"
+            "(audit-write failures would 503 every request; control-api migration 0048_gfs_permission_store not applied?)"
         );
       }
       if (
@@ -286,7 +286,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: immutable GFS blob schema/reader privileges " +
-            "are missing (control-api migration 0068 not applied?)"
+            "are missing (control-api migration 0071_gfs_immutable_blob_generations not applied?)"
         );
       }
       if (
@@ -295,7 +295,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: GFS audit decision-evidence schema is missing " +
-            "(control-api migration 0073 not applied?)"
+            "(control-api migration 0073_gfs_audit_decision_evidence not applied?)"
         );
       }
       if (
@@ -304,7 +304,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: GFS audit actor-correlation schema is missing " +
-            "(control-api migration 0092 not applied?)"
+            "(control-api migration 0092_gfs_audit_actor_correlation not applied?)"
         );
       }
       if (
@@ -318,7 +318,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: GFS lifecycle authority projection is missing " +
-            "(control-api migration 0095/0096 not applied?)"
+            "(control-api migrations 0095_gfs_lifecycle_authority_projection/0096_control_admin_session_version_default not applied?)"
         );
       }
       if (
@@ -332,7 +332,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: reader has forbidden GFS mutation privileges " +
-            "(control-api migration 0069 grants drifted?)"
+            "(control-api migration 0074_gfs_runtime_role_exact_contract grants drifted?)"
         );
       }
       if (
@@ -347,7 +347,7 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: writer lacks GFS manifest/resource mutation " +
-            "privileges (control-api migration 0068 not applied?)"
+            "privileges (control-api migration 0071_gfs_immutable_blob_generations not applied?)"
         );
       }
       lastFreshOkAt = now(); // cache SUCCESS only — failures always retry
