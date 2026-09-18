@@ -15,7 +15,10 @@ import { Client } from "pg";
  * 2. Amortized fresh-connection probe (at most once per `intervalMs`) — opens
  *    a brand-new client (NEVER the pool) so a rotated credential fails to
  *    authenticate, and verifies real coherence with `has_table_privilege`, so
- *    "password correct but migration 0048_gfs_permission_store grants missing" also fails loud.
+ *    "password correct but role grants missing" also fails loud. The writer's
+ *    grants come from migration 0048_gfs_permission_store, the reader's from
+ *    0072_gfs_reader_database_role, and 0074_gfs_runtime_role_exact_contract
+ *    rebuilds both envelopes.
  *
  * FAIL CLOSED: only SUCCESS is cached. While failing, every readiness call
  * retries the fresh connection (~1 new connection per probe period during an
@@ -191,6 +194,13 @@ const WRITER_COHERENCE_SQL =
 export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promise<void> {
   const now = opts.now ?? Date.now;
   const connectTimeoutMs = opts.connectTimeoutMs ?? 5_000;
+  // Each role gets its base grants from its own migration; 0074 later revokes
+  // every table and column privilege and rebuilds both envelopes exactly.
+  const roleGrantsMigration =
+    opts.storageRole === "writer" ? "0048_gfs_permission_store" : "0072_gfs_reader_database_role";
+  const roleGrantsHint =
+    `control-api migration ${roleGrantsMigration} not applied, ` +
+    "or 0074_gfs_runtime_role_exact_contract grants drifted?";
   // @types/pg resolves Client.connect() to Promise<Client>; the probe contract
   // wants Promise<void> — awaited and discarded (same adaptation as the LISTEN
   // client in index.ts). connectionTimeoutMillis is belt-and-suspenders under
@@ -270,13 +280,13 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       if (row?.can_read !== true) {
         throw new Error(
           "permission store coherence check failed: role lacks SELECT on gfs_resources " +
-            "(control-api migration 0048_gfs_permission_store not applied?)"
+            `(${roleGrantsHint})`
         );
       }
       if (row?.can_audit !== true) {
         throw new Error(
           "permission store coherence check failed: role lacks INSERT on gfs_audit " +
-            "(audit-write failures would 503 every request; control-api migration 0048_gfs_permission_store not applied?)"
+            `(audit-write failures would 503 every request; ${roleGrantsHint})`
         );
       }
       if (
@@ -286,7 +296,8 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: immutable GFS blob schema/reader privileges " +
-            "are missing (control-api migration 0071_gfs_immutable_blob_generations not applied?)"
+            "are missing (control-api migration 0071_gfs_immutable_blob_generations not applied, " +
+            "or 0074_gfs_runtime_role_exact_contract grants drifted?)"
         );
       }
       if (
@@ -347,7 +358,8 @@ export function createPermissionStoreProbe(opts: StoreProbeOptions): () => Promi
       ) {
         throw new Error(
           "permission store coherence check failed: writer lacks GFS manifest/resource mutation " +
-            "privileges (control-api migration 0071_gfs_immutable_blob_generations not applied?)"
+            "privileges (control-api migration 0071_gfs_immutable_blob_generations not applied, " +
+            "or 0074_gfs_runtime_role_exact_contract grants drifted?)"
         );
       }
       lastFreshOkAt = now(); // cache SUCCESS only — failures always retry

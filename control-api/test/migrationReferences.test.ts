@@ -7,16 +7,32 @@ import { CONTROL_API_MIGRATIONS } from '../src/db.js'
 // Operator-facing errors, comments and runbooks cite control-api migrations.
 // Migrations have been renumbered before (5e6c990f8), which silently turned
 // bare numbers like "migration 0068" into references to unrelated schema
-// changes. These checks pin every named reference to a registered version.
+// changes. These checks pin every version-shaped token to a registered
+// version, and forbid bare numbers in gfs-controller, which cites control-api
+// migrations across a service boundary.
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const REGISTERED = new Set(CONTROL_API_MIGRATIONS.map(migration => migration.version))
 const SCANNED_EXTENSIONS = new Set(['.ts', '.tsx', '.mjs', '.js', '.sh', '.md', '.yaml', '.yml'])
 const SKIPPED_DIRECTORIES = new Set(['node_modules', 'dist', 'build', 'coverage', '.git'])
+// control-api/test is not scanned: it holds seed fixtures and legacy-name
+// lists that are version-shaped on purpose.
+const SCANNED_ROOTS = ['gfs-controller/src', 'control-api/src', 'deploy', 'docs', 'scripts']
 
-// Matches "migration 0071_name", "migration-0048", and slash-joined lists such
-// as "migrations 0095_first/0096_second". Each list item is one reference.
-const REFERENCE = /\bmigrations?[ -](\d{4}(?:_[a-z0-9_]+)?(?:\/\d{4}(?:_[a-z0-9_]+)?)*)/gi
+// Registered versions are four digits ("0071") or hex-style ("00a4").
+const NUMBER = String.raw`(?:\d{4}|00[a-f]\d)`
+const VERSION_TOKEN = new RegExp(String.raw`(?<![0-9A-Za-z_])${NUMBER}_[a-z][a-z0-9_]*`, 'g')
+// Superseded names that the runner still accepts as already applied. Only
+// tokens inside a legacyVersions array are exempt; the same name anywhere else
+// is a stale reference.
+const LEGACY_VERSIONS_ARRAY = /legacyVersions:\s*\[[^\]]*\]/g
+// "migration(s)" followed by a list of versions, across line breaks and
+// separators such as ":", "`", "(", ",", "/", "and", "or".
+const MIGRATION_LIST = new RegExp(
+  String.raw`\bmigrations?\b((?:[\s:\`#(),/-]+|\b(?:and|or)\b|${NUMBER}(?:_[a-z][a-z0-9_]*)?(?![0-9A-Za-z_]))+)`,
+  'gi'
+)
+const BARE_NUMBER = new RegExp(String.raw`(?<![0-9A-Za-z_])${NUMBER}(?![0-9A-Za-z_])`, 'g')
 
 interface MigrationReference {
   location: string
@@ -33,20 +49,46 @@ function listSourceFiles(directory: string): string[] {
   })
 }
 
-function collectReferences(root: string): { files: number; references: MigrationReference[] } {
+function lineOf(text: string, index: number): number {
+  return text.slice(0, index).split('\n').length
+}
+
+function legacySpans(text: string): Array<[number, number]> {
+  return [...text.matchAll(LEGACY_VERSIONS_ARRAY)].map(match => [
+    match.index,
+    match.index + match[0].length,
+  ])
+}
+
+function versionTokens(text: string): Array<{ index: number; token: string }> {
+  const spans = legacySpans(text)
+  return [...text.matchAll(VERSION_TOKEN)]
+    .filter(match => !spans.some(([start, end]) => match.index >= start && match.index < end))
+    .map(match => ({ index: match.index, token: match[0] }))
+}
+
+function bareNumbers(text: string): Array<{ index: number; token: string }> {
+  return [...text.matchAll(MIGRATION_LIST)].flatMap(list => {
+    const listStart = list.index + list[0].length - list[1].length
+    return [...list[1].matchAll(BARE_NUMBER)].map(bare => ({
+      index: listStart + bare.index,
+      token: bare[0],
+    }))
+  })
+}
+
+function scan(
+  root: string,
+  find: (text: string) => Array<{ index: number; token: string }>
+): { files: number; references: MigrationReference[] } {
   const files = listSourceFiles(join(REPO_ROOT, root))
-  const references = files.flatMap(file =>
-    readFileSync(file, 'utf8')
-      .split('\n')
-      .flatMap((line, index) =>
-        [...line.matchAll(REFERENCE)].flatMap(match =>
-          match[1].split('/').map(token => ({
-            location: `${relative(REPO_ROOT, file)}:${index + 1}`,
-            token,
-          }))
-        )
-      )
-  )
+  const references = files.flatMap(file => {
+    const text = readFileSync(file, 'utf8')
+    return find(text).map(({ index, token }) => ({
+      location: `${relative(REPO_ROOT, file)}:${lineOf(text, index)}`,
+      token,
+    }))
+  })
   return { files: files.length, references }
 }
 
@@ -55,30 +97,52 @@ function describeReferences(references: MigrationReference[]): string[] {
 }
 
 describe('control-api migration references', () => {
-  it('gfs-controller cites every control-api migration by its full registered version', () => {
-    const { files, references } = collectReferences('gfs-controller/src')
+  it('detects bare numbers in every citation shape the guard relies on', () => {
+    expect(
+      [
+        'control-api migration 0068 not applied',
+        'migration: 0068',
+        'migration `0068`',
+        'migration\n   0068',
+        'migrations 0095_first, 0096 and 00a4',
+        'migrations 0095_first/0096',
+      ].map(sample => bareNumbers(sample).map(bare => bare.token))
+    ).toEqual([['0068'], ['0068'], ['0068'], ['0068'], ['0096', '00a4'], ['0096']])
+    expect(
+      bareNumbers('migration 0071_gfs_immutable_blob_generations not applied, or 0074_x')
+    ).toEqual([])
+  })
 
-    // Liveness witness: the probe errors, readiness errors and their tests
-    // must actually be scanned, or an empty result would pass vacuously.
+  it('exempts only tokens inside a legacyVersions array', () => {
+    const text = [
+      "legacyVersions: [\n  '0055_governed_trace_runtime_roles',\n],",
+      '// replaced by migration 0055_governed_trace_runtime_roles',
+    ].join('\n')
+    expect(versionTokens(text).map(found => found.token)).toEqual([
+      '0055_governed_trace_runtime_roles',
+    ])
+    expect(versionTokens(text)[0].index).toBeGreaterThan(text.indexOf('],'))
+  })
+
+  it.each(SCANNED_ROOTS)('every version token in %s is a registered migration', root => {
+    const { files, references } = scan(root, versionTokens)
+
+    // Liveness witness: each root cites real versions today, so an empty
+    // result means the scan stopped reading files, not that they are clean.
     expect(files).toBeGreaterThan(0)
-    expect(references.length).toBeGreaterThanOrEqual(20)
+    expect(references.length).toBeGreaterThan(0)
     expect(
       describeReferences(references.filter(reference => !REGISTERED.has(reference.token)))
     ).toEqual([])
   })
 
-  it.each(['control-api/src', 'deploy', 'docs', 'scripts'])(
-    'named migration references in %s match a registered version',
-    root => {
-      const { files, references } = collectReferences(root)
-      const named = references.filter(reference => reference.token.includes('_'))
+  it('gfs-controller never cites a control-api migration by bare number', () => {
+    const { references } = scan('gfs-controller/src', bareNumbers)
+    const { references: named } = scan('gfs-controller/src', versionTokens)
 
-      // Liveness witness: the pattern must find real references in this root.
-      expect(files).toBeGreaterThan(0)
-      expect(references.length).toBeGreaterThan(0)
-      expect(
-        describeReferences(named.filter(reference => !REGISTERED.has(reference.token)))
-      ).toEqual([])
-    }
-  )
+    // Liveness witness: gfs-controller cites named migrations, so the files
+    // this check reads are the ones that carry migration citations.
+    expect(named.length).toBeGreaterThan(0)
+    expect(describeReferences(references)).toEqual([])
+  })
 })

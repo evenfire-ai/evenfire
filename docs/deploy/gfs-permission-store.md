@@ -166,8 +166,9 @@ store. The store check has two layers (`gfs-controller/src/authz/storeProbe.ts`)
   the rotation and the kubelet probe cadence keeps one alive forever. Only
   success is cached; while failing, every probe retries.
 
-Net effect: a stale DSN, a rotated role password, or missing migration-0048
-grants flips the pod NotReady within roughly a minute, visibly in
+Net effect: a stale DSN, a rotated role password, or missing role grants
+(migration 0048_gfs_permission_store for the writer,
+0072_gfs_reader_database_role for the reader) flips the pod NotReady within roughly a minute, visibly in
 `kubectl get pods -n gfs`, instead of serving chronic 503s to users.
 
 `/readyz` reasons you may see:
@@ -176,7 +177,7 @@ grants flips the pod NotReady within roughly a minute, visibly in
 | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `storage volume not mounted …`                                                  | Drive PVC missing/unmounted (not a credential issue)                                                                    |
 | `permission store unreachable: password authentication failed …`                | DSN/password drift — re-run provisioning                                                                                |
-| `permission store unreachable: … coherence check failed … gfs_resources … 0048` | Role exists but the SELECT grants/migration are missing — run control-api migrations, then provisioning                 |
+| `permission store unreachable: … coherence check failed … gfs_resources … 0048_gfs_permission_store` (writer) or `… 0072_gfs_reader_database_role` (reader) | Role exists but the SELECT grants/migration are missing — run control-api migrations, then provisioning                 |
 | `permission store unreachable: … coherence check failed … gfs_audit …`          | Audit INSERT grant missing — every request would 503 (audit-write failures propagate); run migrations + provisioning    |
 | `permission store unreachable: … timed out after Nms`                           | Black-hole partition (unreachable, not refusing) — the probe hard-bounds connect/query (default 5s) instead of dangling |
 | `permission store unreachable: connect ECONNREFUSED …`                          | PostgreSQL down/unreachable                                                                                             |
