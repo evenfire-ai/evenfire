@@ -249,6 +249,10 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           res.end()
           return
         }
+        // Nothing was written yet, so the staged SSE headers can still be
+        // replaced; res.json() keeps an existing content-type.
+        res.removeHeader('cache-control')
+        res.setHeader('content-type', 'application/json; charset=utf-8')
         res.status(mapped.status).json({ error: mapped.code })
       } finally {
         release?.()

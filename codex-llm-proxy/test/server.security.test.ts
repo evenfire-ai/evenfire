@@ -590,8 +590,10 @@ describe('codex-llm-proxy attempt telemetry', () => {
   it('(a) answers 422 and logs one attempt line when 65 calls arrive before any text', async () => {
     const { res, receipts, lines, metricsText } = await run('att-limit-http', 0, 65)
     expect(res.status).toBe(422)
-    // The SSE content-type is set before streaming starts, so parse the text.
-    expect(JSON.parse(res.text)).toEqual({ error: 'tool_call_limit_exceeded' })
+    // The staged SSE headers are replaced by a JSON response.
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.headers['cache-control']).toBeUndefined()
+    expect(res.body).toEqual({ error: 'tool_call_limit_exceeded' })
     expect(receipts).toEqual([expect.objectContaining({ outcome: 'error' })])
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
@@ -633,7 +635,8 @@ describe('codex-llm-proxy attempt telemetry', () => {
       ;(raw.messages as Record<string, unknown>[])[0]![secretField] = 'x'
     })
     expect(res.status).toBe(400)
-    expect(JSON.parse(res.text)).toEqual({ error: 'invalid_request' })
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'invalid_request' })
     // Witness: the attempt line is still emitted for the rejected request.
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({

@@ -492,9 +492,9 @@ describe('hermetic authorize → proxy → fixture upstream → finalize', () =>
     // Redemption fails before the first stream write, so the denial is a
     // plain 403 with the authorizer's stable code — never a partial stream.
     expect(res.status).toBe(403)
-    // The SSE content-type header was already staged, so supertest surfaces
-    // the JSON denial in res.text rather than res.body.
-    expect(JSON.parse(res.text)).toEqual({ error: 'no_grant' })
+    // The staged SSE headers are replaced by a JSON response.
+    expect(res.headers['content-type']).toMatch(/^application\/json/)
+    expect(res.body).toEqual({ error: 'no_grant' })
     expect(redeems).toHaveLength(1)
     expect(finalizes).toHaveLength(0)
 
@@ -571,8 +571,13 @@ describe('hermetic per-response tool-call limit', () => {
     // Liveness witness: the upstream really served the 65-call stream.
     expect(counters.streams).toBe(1)
     // One assertion so a regression reports both the status and the code.
-    expect({ status: res.status, body: JSON.parse(res.text) }).toEqual({
+    expect({
+      status: res.status,
+      contentType: res.headers['content-type'],
+      body: res.body,
+    }).toEqual({
       status: 422,
+      contentType: expect.stringMatching(/^application\/json/),
       body: { error: 'tool_call_limit_exceeded' },
     })
     expect(res.text).not.toContain('"type":"tool_call"')
