@@ -323,8 +323,8 @@ test('refuses the file that would pass the 16 MiB total and keeps the one that f
   await expect(appPage.getByTestId('agent-response')).toHaveCount(0)
 })
 
-test('explains a fourth image instead of dropping it silently', async ({ appPage }) => {
-  const files = [0, 1, 2].map(index => {
+test('explains an 11th image instead of dropping it silently', async ({ appPage }) => {
+  const files = Array.from({ length: 10 }, (_, index) => {
     const image = challengeImage(index === 1 ? 'jpeg' : 'png')
     const format = index === 1 ? 'jpeg' : 'png'
     return {
@@ -344,7 +344,7 @@ test('explains a fourth image instead of dropping it silently', async ({ appPage
     { name: extraName, mimeType: 'image/png', buffer: extra.bytes },
   ])
   await expect(appPage.getByRole('alert')).toContainText(
-    'You can attach up to 3 images per message.'
+    'You can attach up to 10 images per message.'
   )
   await expect(appPage.getByRole('button', { name: extraName, exact: true })).toHaveCount(0)
   await expect(appPage.getByTestId('agent-response')).toHaveCount(0)

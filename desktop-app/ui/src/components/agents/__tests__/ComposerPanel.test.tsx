@@ -389,16 +389,15 @@ describe('ComposerPanel image budget', () => {
     expect(attachedImages()).toHaveLength(0)
   })
 
-  it('explains files beyond the 3-image cap instead of dropping them silently', async () => {
-    composerState.composerImageAttachments = [
-      existingAttachment('a.png', MIB),
-      existingAttachment('b.png', MIB),
-    ]
+  it('explains files beyond the 10-image cap instead of dropping them silently', async () => {
+    composerState.composerImageAttachments = Array.from({ length: 9 }, (_, index) =>
+      existingAttachment(`kept-${index + 1}.png`, MIB)
+    )
     const { container } = render(<ComposerPanel inline={false} />)
-    pickFiles(container, [imageFile('c.png', MIB), imageFile('d.png', MIB)])
+    pickFiles(container, [imageFile('tenth.png', MIB), imageFile('eleventh.png', MIB)])
     await waitFor(() => expect(attachedImages()).toHaveLength(1))
     expect(screen.getByRole('alert').textContent).toContain(
-      'You can attach up to 3 images per message.'
+      'You can attach up to 10 images per message.'
     )
   })
 })

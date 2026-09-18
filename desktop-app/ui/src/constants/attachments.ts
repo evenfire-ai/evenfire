@@ -1,4 +1,4 @@
-export const COMPOSER_MAX_IMAGE_ATTACHMENTS = 3
+export const COMPOSER_MAX_IMAGE_ATTACHMENTS = 10
 /**
  * Composer hard image budget. Mirrors rpc-proxy / mcp-host hop credit: 16MiB
  * per image and 16MiB total in a 24MiB JSON body so a poorly compressed 2048

@@ -728,16 +728,12 @@ test('v2 projection preserves part order, source identity and the text projectio
 
 test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimensions and pixels', () => {
   const png = IMAGE_DATA.png
-  const three = [imagePart(png), imagePart(png), imagePart(png)]
-  assert.equal(
-    contract.parseCodexCompletionRequest(v2WithParts(three)).ok,
-    true,
-    'three images fit'
-  )
-  const four = contract.parseCodexCompletionRequest(v2WithParts([...three, imagePart(png)]))
-  assert.equal(four.ok, false)
-  assert.equal(four.code, 'limit')
-  assert.match(four.message, /3 images/)
+  const ten = Array.from({ length: contract.VISUAL_LIMITS.maxImages }, () => imagePart(png))
+  assert.equal(contract.parseCodexCompletionRequest(v2WithParts(ten)).ok, true, 'ten images fit')
+  const eleven = contract.parseCodexCompletionRequest(v2WithParts([...ten, imagePart(png)]))
+  assert.equal(eleven.ok, false)
+  assert.equal(eleven.code, 'limit')
+  assert.match(eleven.message, /10 images/)
 
   const encoded = contract.parseCodexCompletionRequest(
     v2WithParts([imagePart('A'.repeat(MAX_ENCODED_IMAGE_CHARS + 4))])
@@ -871,7 +867,7 @@ test('v2 limits: image count, encoder bound, per-image bytes, total bytes, dimen
   assert.equal(jpegAsPng.ok, false)
 })
 
-test('v2 visual budgets are request-scoped across messages: three 5 MiB images fit, four do not', () => {
+test('v2 visual budgets are request-scoped across messages: ten small images fit, eleven do not', () => {
   const png = IMAGE_DATA.png
   const userWithImages = count => ({
     role: 'user',
@@ -879,17 +875,17 @@ test('v2 visual budgets are request-scoped across messages: three 5 MiB images f
     contentParts: Array.from({ length: count }, () => imagePart(png)),
   })
 
-  // 2 + 2 images: every message is inside maxImages on its own, the request is not.
-  const twoEach = contract.parseCodexCompletionRequest(
-    v2WithMessages([userWithImages(2), userWithImages(2)])
+  // 6 + 5 images: every message is inside maxImages on its own, the request is not.
+  const splitOverCap = contract.parseCodexCompletionRequest(
+    v2WithMessages([userWithImages(6), userWithImages(5)])
   )
-  assert.equal(twoEach.ok, false)
-  assert.equal(twoEach.code, 'limit')
-  assert.match(twoEach.message, /3 images/)
+  assert.equal(splitOverCap.ok, false)
+  assert.equal(splitOverCap.code, 'limit')
+  assert.match(splitOverCap.message, /10 images/)
 
-  // Boundary: exactly maxImages spread over three messages is accepted.
+  // Boundary: exactly maxImages spread over ten messages is accepted.
   const oneEach = contract.parseCodexCompletionRequest(
-    v2WithMessages([userWithImages(1), userWithImages(1), userWithImages(1)])
+    v2WithMessages(Array.from({ length: contract.VISUAL_LIMITS.maxImages }, () => userWithImages(1)))
   )
   assert.equal(oneEach.ok, true, oneEach.message)
 
@@ -959,7 +955,7 @@ function nonImageBytes(request) {
 test('requestBodyLimitBytes: V2 declares 24 MiB; every other body keeps the 1 MiB ceiling', () => {
   assert.equal(contract.LIMITS.maxRequestBodyBytes, 1048576)
   assert.equal(contract.LIMITS.maxVisualRequestBodyBytes, 25165824)
-  assert.equal(contract.VISUAL_LIMITS.maxImages, 3)
+  assert.equal(contract.VISUAL_LIMITS.maxImages, 10)
   assert.equal(contract.VISUAL_LIMITS.typicalImageBytes, 5 * MIB)
   assert.equal(contract.VISUAL_LIMITS.typicalTotalImageBytes, 9 * MIB)
   assert.equal(contract.VISUAL_LIMITS.typicalEnvelopeBytes, 14 * MIB)

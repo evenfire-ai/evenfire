@@ -139,12 +139,12 @@ export type {
  *     (~21.3MiB base64) plus the 1MiB non-image share still fits. Every other
  *     route keeps the 6MiB default.
  *   - MAX_NON_IMAGE_BODY_BYTES bounds that same body MINUS credited image
- *     base64 (16MiB per image, at most 3 images / 16MiB total). Usual product
+ *     base64 (16MiB per image, at most 10 images / 16MiB total). Usual product
  *     target remains 5 / 9 / 14 MiB at 2048 px.
  */
 const MAX_CHAT_BODY_BYTES = 24 * 1024 * 1024
 const MAX_NON_IMAGE_BODY_BYTES = 6 * 1024 * 1024
-const MAX_CHAT_IMAGES = 3
+const MAX_CHAT_IMAGES = 10
 const MAX_IMAGE_DECODED_BYTES = 16 * 1024 * 1024
 const MAX_IMAGE_DECODED_BYTES_TOTAL = 16 * 1024 * 1024
 const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
@@ -191,7 +191,7 @@ function decodedBase64Bytes(dataBase64: string): number | null {
  * Only attachments with the exact wire shape the composer produces qualify:
  * `kind: 'image'`, `encoding: 'base64'`, a PNG/JPEG MIME type, canonical
  * base64 whose leading bytes are that image's signature, and at most 16MiB
- * decoded each within a 3-image / 16MiB total budget. A fourth qualifying
+ * decoded each within a 10-image / 16MiB total budget. An 11th qualifying
  * image is fail-loud rather than charged as text. Anything else is charged
  * to the non-image budget, so a claim cannot be smuggled through by mislabelling
  * a payload.

@@ -33,10 +33,10 @@ retain one remaining image per MIME/bytes pair and its explanatory text. They do
 not restore pixels removed by pruning. The user-facing attachment collection
 keeps its existing deduplication behavior.
 
-Local visual budgets have two layers. The usual product target is three images,
-5 MiB decoded per image, 9 MiB decoded across a request, and a 14 MiB envelope
-at 2048 pixels (the official Codex client size, with `detail: high`). The hard
-ceiling is 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
+Local visual budgets have two layers. The usual product target is 5 MiB decoded
+per image, 9 MiB decoded across a request, and a 14 MiB envelope at 2048 pixels
+(the official Codex client size, with `detail: high`). The hard ceiling is 10
+images, 16 MiB per image and 16 MiB aggregate so a poorly compressed 2048
 PNG may exceed 10 MiB; the HTTP envelope stays 24 MiB so that encoded body
 still fits. Dimensions above 2048 px are rejected here because the frozen
 ChatGPT endpoint 400s them; that is a model/pixel limit, not a byte limit.

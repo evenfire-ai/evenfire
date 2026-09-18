@@ -178,15 +178,24 @@ describe('rpc-proxy chat message body budget', () => {
     expect(response.status).toBe(401)
   })
 
-  it('rejects a fourth qualifying image instead of charging it as text', async () => {
+  it('credits ten small images instead of charging them as text', async () => {
     const body = JSON.stringify({
       content: 'look',
-      attachments: [
-        imageAttachment('a1', 64 * 1024),
-        imageAttachment('a2', 64 * 1024),
-        imageAttachment('a3', 64 * 1024),
-        imageAttachment('a4', 64 * 1024),
-      ],
+      attachments: Array.from({ length: 10 }, (_, index) =>
+        imageAttachment(`a${index + 1}`, 64 * 1024)
+      ),
+    })
+    expect(Buffer.byteLength(body)).toBeLessThan(6 * MIB)
+    const response = await post(MESSAGE_PATH, body)
+    expect(response.status).toBe(401)
+  })
+
+  it('rejects an 11th qualifying image instead of charging it as text', async () => {
+    const body = JSON.stringify({
+      content: 'look',
+      attachments: Array.from({ length: 11 }, (_, index) =>
+        imageAttachment(`a${index + 1}`, 64 * 1024)
+      ),
     })
     expect(Buffer.byteLength(body)).toBeLessThan(6 * MIB)
     const response = await post(MESSAGE_PATH, body)

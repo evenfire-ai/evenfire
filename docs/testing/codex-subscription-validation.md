@@ -56,7 +56,7 @@ than silently skipping them.
 `desktop-app/test/e2e-playwright/codex-image-input.spec.ts` covers direct PNG/JPEG
 uploads through the visible composer, including a 5 MiB JPEG, a 12 MiB PNG
 (exceptional), a 10+5 MiB pair, three 5 MiB images, and composer refusals over
-16 MiB, over 16 MiB total, a fourth image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
+16 MiB, over 16 MiB total, an 11th image, and a non-PNG/JPEG type. It creates a fresh 64-bit hexadecimal
 challenge rendered only into image pixels. Large cases pad that same image so
 the answer stays in pixels while the decoded size matches the hop budget. The
 filename and prompt do not carry the answer. A passing run requires that

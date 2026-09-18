@@ -28,7 +28,7 @@
  */
 
 const VISUAL_LIMITS = Object.freeze({
-  maxImages: 3,
+  maxImages: 10,
   typicalImageBytes: 5242880,
   typicalTotalImageBytes: 9437184,
   typicalEnvelopeBytes: 14680064,
