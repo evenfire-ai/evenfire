@@ -6057,46 +6057,13 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
         END $$;
       `)
 
-      // Curated evidence for the two exact ids covered by Z.AI's official docs,
-      // read on 2026-09-16: glm-5.3 is text-only (docs.z.ai/guides/llm/glm-5.3)
-      // and glm-5.3-flash accepts images via `image_url`
-      // (docs.z.ai/guides/vlm/glm-5.3-flash). `checkedAt` is the date the docs
-      // were read — never the migration date, so re-deploying does not
-      // rejuvenate evidence.
-      //
-      // Deliberately narrow: those exact (provider, model) pairs only, no
-      // family/name extrapolation, no invented TTL, and NO model row is created
-      // (#654 does not expand the allowlist). `image_input IS NULL` keeps
-      // operator-curated evidence (curated wins) and keeps the seed idempotent.
-      // A pair that does not exist yet is simply not updated.
-      const checkedAt = '2026-09-16T00:00:00.000Z'
-      const glm53 = {
-        state: 'unsupported',
-        evidence: {
-          source: 'curated',
-          reference: 'https://docs.z.ai/guides/llm/glm-5.3',
-          checkedAt,
-        },
-      }
-      const glm53Flash = {
-        state: 'supported',
-        evidence: {
-          source: 'curated',
-          reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
-          checkedAt,
-        },
-      }
-      await db.query(
-        `UPDATE llm_allowed_models
-            SET image_input = CASE model
-                  WHEN 'glm-5.3' THEN $1::jsonb
-                  WHEN 'glm-5.3-flash' THEN $2::jsonb
-                END
-          WHERE provider = 'zai'
-            AND model IN ('glm-5.3', 'glm-5.3-flash')
-            AND image_input IS NULL`,
-        [JSON.stringify(glm53), JSON.stringify(glm53Flash)]
-      )
+      // This migration is PURELY ADDITIVE: it adds the column and the CHECK, and
+      // writes no data. It used to hand-curate two Z.AI ids from their public
+      // docs, which was a stand-in for not knowing any model's image capability.
+      // The catalog sync now derives that from models.dev `modalities.input` for
+      // every model, including those two (#654), so the seed would only have
+      // pinned `curated` provenance the sync is required never to overwrite —
+      // freezing exactly the rows a test harness needs to be able to refresh.
     },
   },
 ]

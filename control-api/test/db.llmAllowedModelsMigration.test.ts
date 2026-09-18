@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { parseImageInputCapability } from '@clerum/llm-providers'
 
 const clientQuery = vi.fn()
 const clientRelease = vi.fn()
@@ -185,7 +184,7 @@ describe('0056_llm_allowed_models migration', () => {
     expect(alter!).not.toMatch(/DROP COLUMN/)
   })
 
-  it('0109 seeds curated Z.AI evidence for the two documented ids only', async () => {
+  it('0109 is purely additive: it adds the column and writes no image_input data', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const calls = clientQuery.mock.calls.map(([sql, params]) => ({
@@ -193,28 +192,17 @@ describe('0056_llm_allowed_models migration', () => {
       params: params as unknown[],
     }))
 
-    const seed = calls.find(c => /SET image_input = CASE model/.test(c.sql))
-    expect(seed).toBeDefined()
-    // Exact ids only — no family/name extrapolation, and no model row is created
-    // (the seed is an UPDATE, and #654 does not expand the allowlist).
-    expect(seed!.sql).toMatch(/WHERE provider = 'zai'/)
-    expect(seed!.sql).toMatch(/model IN \('glm-5\.3', 'glm-5\.3-flash'\)/)
-    expect(seed!.sql).not.toMatch(/INSERT INTO llm_allowed_models/)
-    // Operator-curated evidence wins; a re-run changes nothing.
-    expect(seed!.sql).toMatch(/image_input IS NULL/)
+    // Liveness witness FIRST: the migration this test is about actually ran.
+    // Without it, deleting 0109 outright would satisfy both negatives below.
+    expect(calls.find(c => /ADD COLUMN IF NOT EXISTS image_input JSONB/.test(c.sql))).toBeDefined()
 
-    const unsupported = JSON.parse(String(seed!.params[0]))
-    const supported = JSON.parse(String(seed!.params[1]))
-    expect(unsupported.state).toBe('unsupported')
-    expect(supported.state).toBe('supported')
-    for (const claim of [unsupported, supported]) {
-      expect(claim.evidence.source).toBe('curated')
-      expect(claim.evidence.reference).toMatch(/^https:\/\/docs\.z\.ai\//)
-      // The stamp is the date the docs were READ, not the migration date.
-      expect(claim.evidence.checkedAt).toBe('2026-09-16T00:00:00.000Z')
-      // The seeded payload must be exactly what the shared contract accepts —
-      // otherwise every reader would normalize it back to `unknown`.
-      expect(parseImageInputCapability(claim)).toEqual(claim)
-    }
+    // Evidence is derived by the catalog sync from models.dev, never seeded by a
+    // migration: a seed can only write `curated` provenance, which the sync is
+    // required never to overwrite, so it would permanently freeze the very rows
+    // that need refreshing.
+    expect(calls.filter(c => /SET image_input/.test(c.sql))).toHaveLength(0)
+    expect(
+      calls.filter(c => /UPDATE llm_allowed_models/.test(c.sql) && /image_input/.test(c.sql))
+    ).toHaveLength(0)
   })
 })
