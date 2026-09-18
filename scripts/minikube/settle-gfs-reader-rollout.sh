@@ -7,10 +7,10 @@
 # - delete CrashLoopBackOff reader pods so kubelet's up-to-5m backoff resets
 #   and the pod re-reads the restored Secret immediately;
 # - clear a leftover rollout-running claim on the reader Secret.
-# HCC's gfsReconciler owns the reader template and strips the restartedAt
-# annotation, so `kubectl rollout status` after a restart loops on
-# "Waiting for deployment spec update to be observed" until the wait
-# times out; not restarting a Ready reader is the only safe path.
+# HCC's gfsReconciler now preserves restartedAt on the reader template.
+# A leftover claim or stale ReplicaSet can still make `kubectl rollout status`
+# wait on the wrong generation; not restarting a Ready reader is the only
+# safe path.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd -P)"

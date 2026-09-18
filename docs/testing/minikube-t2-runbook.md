@@ -279,11 +279,11 @@ non-current ReplicaSet that contributes no Ready pod (its live unready pod
 would otherwise keep the stale-pod recovery pending forever), and deletes
 CrashLoopBackOff reader pods so they re-read the restored Secret without
 waiting out kubelet backoff. HCC's gfsReconciler owns the reader Deployment
-template and strips the `restartedAt` annotation `kubectl rollout restart`
-adds, so a generation-based `kubectl rollout status` chases flapping
-revisions until timeout; every harness GFS reconcile therefore runs with the
-`scripts/minikube/gfs-rollout-shim` PATH prefix, which intercepts exactly
-the reader `rollout status` wait and judges readiness instead
+template and now preserves the `restartedAt` annotation `kubectl rollout restart`
+adds. Leftover reader ReplicaSets can still make a generation-based
+`kubectl rollout status` wait the wrong revision; every harness GFS reconcile
+therefore runs with the `scripts/minikube/gfs-rollout-shim` PATH prefix, which
+intercepts exactly the reader `rollout status` wait and judges readiness instead
 (`scripts/minikube/wait-gfs-reader-ready.sh`: desired replicas Ready and no
 live non-terminating unready reader pod). A reader pod also fails closed
 when `gfs-config.jwt-public-key` is empty — the overlay re-applies the base
