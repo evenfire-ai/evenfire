@@ -69,6 +69,7 @@ const sidebarHarness = vi.hoisted(() => ({
 const sandboxUiPageHarness = vi.hoisted(() => ({
   props: null as null | {
     onEmbeddedAppMounted?: () => void
+    onEmbeddedAppBack?: () => void
     onEmbedBoundsApplied?: () => void
     onEmbedSlotTopChange?: (topPx: number) => void
     onEmbedSlotRightChange?: (rightPx: number) => void
