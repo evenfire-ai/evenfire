@@ -111,14 +111,17 @@ function refusalLogs(spies: Spies): Record<string, unknown>[] {
 }
 
 describe('#654 incoming admission gate', () => {
-  it('passes a text-only message through with imageModel cleared', async () => {
+  it('passes a text-only message through with a caller-supplied imageModel cleared', async () => {
     const { admit, spies } = makeAdmission()
 
-    const response = await admit(message())
+    // The caller claims a visual execution identity; only the gate may set one.
+    const response = await admit(message({ imageModel: { provider: 'zai', model: 'spoofed' } }))
 
     expect(response).toMatchObject({ success: true, taskId: 't-1' })
     expect(spies.dispatch).toHaveBeenCalledTimes(1)
-    expect(spies.dispatch.mock.calls[0][0]).toMatchObject({ imageModel: undefined })
+    const dispatched = spies.dispatch.mock.calls[0][0]
+    expect(dispatched.content).toBe('look at this')
+    expect(dispatched).toHaveProperty('imageModel', undefined)
     // A text turn never consults the image catalog: the guard is a no-op here.
     expect(spies.resolveImageInput).not.toHaveBeenCalled()
   })

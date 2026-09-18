@@ -232,9 +232,13 @@ function buildView(entry: Entry, nowMs: number): HostModelSelectionView {
       ? 'The model list could not be loaded, so image capability cannot be checked. Retry the model list.'
       : entry.saving
         ? 'Applying the model change — wait for it to settle before sending images.'
-        : entry.conflicted
-          ? 'This chat’s model changed elsewhere — re-checking the current selection before images can be sent.'
-          : imageInputBlockMessage(effectiveModel, imageInput)
+        : // A fetch in flight (first load, window focus, menu open, post-send
+          // refresh) is not a verdict about the model's evidence either.
+          entry.loading
+          ? 'Checking the model’s image support — images can be sent once the model list refreshes.'
+          : entry.conflicted
+            ? 'This chat’s model changed elsewhere — re-checking the current selection before images can be sent.'
+            : imageInputBlockMessage(effectiveModel, imageInput)
 
   return {
     scopeGeneration: entry.scopeGeneration,

@@ -173,6 +173,17 @@ if grep -Fq 'configuration remains installed' "$tmp/out"; then
   exit 1
 fi
 
+# stderr is merged into the verdict. An interpreter warning printed before the
+# manifest verdict must fail the strict check, not skip the cluster probe.
+reset_case
+python3() {
+  printf 'DeprecationWarning: interpreter notice\n' >&2
+  command python3 "$@"
+}
+expect_fail 'interpreter warning before the manifest verdict' 'unexpected verdict: yes'
+expect_cluster_calls 'interpreter warning before the manifest verdict' 0
+unset -f python3
+
 # Planning and bootstrap never certify the live Host, so they never probe it.
 reset_case
 T2_PLAN_MODE=true

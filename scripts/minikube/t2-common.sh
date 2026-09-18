@@ -825,7 +825,17 @@ PY_IMAGE_FIXTURE
     t2_fail IMAGE_MANIFEST_MISMATCH "image manifest is invalid or incomplete: $T2_IMAGE_MANIFEST${acquired:+: ${acquired##*$'\n'}}"
     return 1
   fi
-  [ "$acquired" = yes ] || return 0
+  # stderr is merged into the value, so anything other than an exact verdict
+  # (for example an interpreter warning before "yes") must fail, not skip.
+  case "$acquired" in
+    yes) ;;
+    no) return 0 ;;
+    *)
+      T2_NEXT_COMMAND="MINIKUBE_PROFILE=$T2_PROFILE make minikube-setup-local"
+      t2_fail IMAGE_MANIFEST_MISMATCH "image manifest check returned an unexpected verdict: ${acquired##*$'\n'}"
+      return 1
+      ;;
+  esac
   if ! configuration="$(t2_kc -n mcp-host get configmap mcp-host-config -o json)"; then
     t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the mcp-host image capability configuration'
     return 1
@@ -858,10 +868,17 @@ PY_IMAGE_FIXTURE
     t2_fail HOST_RUNTIME_MISMATCH "image capability residue check crashed: ${verdict##*$'\n'}"
     return 1
   fi
-  if [ "$verdict" != clean ]; then
-    t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
-    return 1
-  fi
+  case "$verdict" in
+    clean) ;;
+    residue)
+      t2_fail HOST_RUNTIME_MISMATCH 'image capability fixture configuration remains installed'
+      return 1
+      ;;
+    *)
+      t2_fail HOST_RUNTIME_MISMATCH "image capability residue check returned an unexpected verdict: ${verdict##*$'\n'}"
+      return 1
+      ;;
+  esac
   if ! restored="$(t2_kc -n mcp-host exec deployment/chatllm -- node -e \
     'process.stdout.write(String(process.env.NODE_ENV !== "test" && !Object.keys(process.env).some(key => key.startsWith("IMAGE_CAPABILITIES_") || key === "EVENFIRE_IMAGE_CAPABILITIES_FIXTURE") && !require("node:fs").existsSync("/tmp/image-capabilities-evidence.json")))')"; then
     t2_fail HOST_RUNTIME_MISMATCH 'unable to observe the running Host image capability environment'

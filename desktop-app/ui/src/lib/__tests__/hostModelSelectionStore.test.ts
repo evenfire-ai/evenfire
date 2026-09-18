@@ -208,6 +208,31 @@ describe('hostModelSelectionStore — list fetch failure', () => {
     expect(view.canAttachImages).toBe(false)
   })
 
+  it('says a forced refetch is checking, not that the model lacks evidence', async () => {
+    const refetch = deferred<HostModelsResult>()
+    const getHostModels = vi
+      .fn<HostModelSelectionTransport['getHostModels']>()
+      .mockResolvedValueOnce(baseResult({ sessionModel: 'glm-5.3-flash' }))
+      .mockReturnValueOnce(refetch.promise)
+    const { transport } = makeTransport({ getHostModels })
+    await loadHostModels(transport, AGENT, CHAT)
+    expect(readHostModelSelection(AGENT, CHAT).canAttachImages).toBe(true)
+
+    const pending = loadHostModels(transport, AGENT, CHAT, { force: true })
+    const during = readHostModelSelection(AGENT, CHAT)
+    expect(getHostModels).toHaveBeenCalledTimes(2)
+    expect(during.loading).toBe(true)
+    expect(during.visualSendBlocked).toBe(true)
+    expect(during.imageBlockMessage).toMatch(/^Checking the model’s image support/)
+    expect(during.imageBlockMessage).not.toMatch(/operator/)
+
+    refetch.resolve(baseResult({ sessionModel: 'glm-5.3-flash' }))
+    await pending
+    const after = readHostModelSelection(AGENT, CHAT)
+    expect(after.canAttachImages).toBe(true)
+    expect(after.imageBlockMessage).toBeNull()
+  })
+
   it('keeps a previous good read usable when a later fetch fails', async () => {
     const getHostModels = vi
       .fn()
