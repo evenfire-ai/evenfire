@@ -95,6 +95,17 @@ function makeDeps(
 }
 
 describe('PromptBridgeHandler', () => {
+  it.each([null, 42, {}, []])(
+    'rejects non-text content %j before authorization or inference',
+    async content => {
+      const { handler, authorize, complete } = makeDeps()
+      await expect(
+        handler.handle({ ...validBody, messages: [{ role: 'user', content }] }, 'api')
+      ).rejects.toMatchObject({ code: 'invalid_request' })
+      expect(authorize).not.toHaveBeenCalled()
+      expect(complete).not.toHaveBeenCalled()
+    }
+  )
   it('rejects invalid input before authorizing', async () => {
     const { handler, authorize } = makeDeps()
     await expect(

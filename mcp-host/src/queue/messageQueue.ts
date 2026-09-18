@@ -21,6 +21,7 @@ import { v4 as uuidv4 } from 'uuid'
 import type { CronJob } from '../agent/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { TransitionEvent } from '../lifecycle/types'
+import { logger } from '../logger'
 import { IncomingMessage } from '../server'
 import {
   AdmissionOutcome,
@@ -202,12 +203,19 @@ export class MessageQueue extends EventEmitter {
    * carrying a non-empty client-supplied messageId participate — tasks
    * without a sourceMessage (internal) or with an empty messageId never dedupe.
    */
-  private static deliveryKeyOf(task: Task): string | null {
-    const msg = task.sourceMessage
+  static deliveryKeyOf(msg: IncomingMessage | undefined): string | null {
     if (!msg) return null
     const messageId = msg.messageId?.trim()
     if (!messageId) return null
     return `${msg.channelType}:${msg.channelId}:${msg.sender}:${messageId}`
+  }
+
+  /** Read-only replay check before model-selection side effects. */
+  hasAdmittedDelivery(message: IncomingMessage): boolean {
+    const key = MessageQueue.deliveryKeyOf(message)
+    if (!key || !this.lifecycle) return false
+    const id = this.deliveryIndex.get(key)
+    return id !== undefined && this.lifecycle.getStatus(id) !== null
   }
 
   /**
@@ -227,13 +235,14 @@ export class MessageQueue extends EventEmitter {
    * prior state — duplicates are never silently swallowed and never re-run.
    */
   admit(task: Task): AdmissionOutcome {
-    const deliveryKey = MessageQueue.deliveryKeyOf(task)
+    const deliveryKey = MessageQueue.deliveryKeyOf(task.sourceMessage)
 
     if (this.lifecycle) {
       const priorStatus = this.lifecycle.getStatus(task.id)
       if (priorStatus !== null) {
-        console.warn(
-          `[Queue] duplicate delivery suppressed — task ${task.id} is already registered (status=${priorStatus}); admission rejected, no new execution`
+        logger.warn(
+          { taskId: task.id, priorStatus },
+          'duplicate delivery suppressed: task already registered'
         )
         return { admitted: false, reason: 'duplicate_task_id', priorTaskId: task.id, priorStatus }
       }
@@ -243,8 +252,9 @@ export class MessageQueue extends EventEmitter {
         if (priorTaskId && priorTaskId !== task.id) {
           const priorDeliveryStatus = this.lifecycle.getStatus(priorTaskId)
           if (priorDeliveryStatus !== null) {
-            console.warn(
-              `[Queue] duplicate delivery suppressed — ${deliveryKey} already admitted as task ${priorTaskId} (status=${priorDeliveryStatus}); rejected duplicate task ${task.id}, no new execution`
+            logger.warn(
+              { taskId: task.id, priorTaskId, priorStatus: priorDeliveryStatus },
+              'duplicate delivery suppressed: delivery already admitted'
             )
             // The duplicate Task object will never run — drop its instance-index
             // entry (it has no lifecycle record, so eviction would never reap it).
@@ -265,7 +275,7 @@ export class MessageQueue extends EventEmitter {
     }
 
     if (this.pendingQueue.length >= this.maxQueueSize) {
-      console.warn(`[Queue] Task ${task.id} rejected: queue full (${this.maxQueueSize})`)
+      logger.warn({ taskId: task.id, maxQueueSize: this.maxQueueSize }, 'Task rejected: queue full')
       this.emitEvent('queue:full', task)
       // C1: queue_full is NOT a no-op — the caller (messageHandler) still
       // registers this task's lifecycle record and dispatches it via
@@ -300,9 +310,7 @@ export class MessageQueue extends EventEmitter {
       this.deliveryKeyByTaskId.set(task.id, deliveryKey)
     }
 
-    console.log(
-      `[Queue] Task ${task.id} added (source: ${task.source}, priority: ${task.priority})`
-    )
+    logger.info({ taskId: task.id, source: task.source, priority: task.priority }, 'Task admitted')
     // task:added is forwarded from lifecycle transition (null→pending) via handleLifecycleTransition.
     // Emit it directly here too for callers that set up lifecycle AFTER enqueue (e.g. tests).
     if (!this.lifecycle) {
@@ -333,7 +341,7 @@ export class MessageQueue extends EventEmitter {
     task.startedAt = new Date()
     this.lifecycle?.transition(task.id, 'processing', 'dispatched')
 
-    console.log(`[Queue] Task ${task.id} dequeued for processing`)
+    logger.info({ taskId: task.id }, 'Task dequeued for processing')
     // task:started is forwarded from lifecycle transition via handleLifecycleTransition.
     if (!this.lifecycle) {
       this.emitEvent('task:started', task)
@@ -358,7 +366,7 @@ export class MessageQueue extends EventEmitter {
       response: task.result?.response,
     })
 
-    console.log(`[Queue] Task ${task.id} completed`)
+    logger.info({ taskId: task.id }, 'Task completed')
     // task:completed forwarded via handleLifecycleTransition.
     if (!this.lifecycle) {
       this.emitEvent('task:completed', task)
@@ -380,7 +388,7 @@ export class MessageQueue extends EventEmitter {
     task.completedAt = new Date()
     this.lifecycle?.transition(task.id, 'failed', `error:${error.code}`, { error })
 
-    console.log(`[Queue] Task ${task.id} failed: ${error.code}`)
+    logger.info({ taskId: task.id, code: error.code }, 'Task failed')
     // task:failed forwarded via handleLifecycleTransition.
     if (!this.lifecycle) {
       this.emitEvent('task:failed', task)

@@ -9,6 +9,7 @@ import {
   requireRpcAuth,
   requireScope,
 } from '../middleware/auth.js'
+import { jsonBody } from '../middleware/jsonBody.js'
 import { rpcInvocationContext } from '../rpcAccessContext.js'
 import {
   ControlApiConnectorsRejectedError,
@@ -351,6 +352,7 @@ export function createRpcRouter(): Router {
     '/rpc/:serverName',
     requireRpcAuth,
     requireScope('mcp:server:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -390,6 +392,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/messages',
     requireRpcAuth,
     requireScope('host:message:invoke'),
+    jsonBody,
     async (req: AuthedRequest, res) => {
       // Host runtime write path (REST-oriented):
       // - separate from read-only status stream
@@ -452,6 +455,12 @@ export function createRpcRouter(): Router {
           requestId,
           origin: 'direct_chat',
         })
+        if (body.attachments != null && !Array.isArray(body.attachments)) {
+          res
+            .status(400)
+            .json({ error: 'invalid_attachments', message: 'Image attachments must be a list.' })
+          return
+        }
         const forwardedBody: HostRuntimeMessageRequest = {
           content: body.content,
           channelType: 'rpc',
@@ -462,6 +471,9 @@ export function createRpcRouter(): Router {
           metadata: rpcInvocationContext(auth),
           threadId: desktopSessionId,
           attachments: Array.isArray(body.attachments) ? body.attachments : undefined,
+          ...(body.modelSelectionRevision === undefined
+            ? {}
+            : { modelSelectionRevision: body.modelSelectionRevision }),
           traceContext,
           // R2 "Option A": thread the optional piggybacked per-session model.
           // This body is an explicit field allow-list, so an unlisted field is
@@ -653,6 +665,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/approve',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -719,6 +732,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/approvals/deny',
     requireRpcAuth,
     requireScope('host:approval:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1055,6 +1069,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/sessions/:agent/:chatId/name',
     requireRpcAuth,
     requireScope('host:session:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!
@@ -1191,6 +1206,7 @@ export function createRpcRouter(): Router {
     '/rpc/hosts/:hostRef/model',
     requireRpcAuth,
     requireScope('host:model:write'),
+    jsonBody,
     async (req: AuthedRequest, res, next) => {
       try {
         const auth = req.auth!

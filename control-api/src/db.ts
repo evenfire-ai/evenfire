@@ -6095,6 +6095,61 @@ export const CONTROL_API_MIGRATIONS: DbMigration[] = [
     version: '0114_llm_provider_attempts_connection_integrity',
     apply: applyLlmProviderAttemptConnectionIntegritySchema,
   },
+  {
+    // Renumbered from 0109 when `dev` was merged: `dev` had already shipped
+    // `0109_grok_subscription_connections`, so this one moves to the end of the
+    // list rather than claiming a version another migration already uses.
+    version: '0115_llm_allowed_models_image_input',
+    apply: async db => {
+      // #654 — model-level image-input capability + evidence for the allowlist.
+      //
+      // ADDITIVE and NULLABLE. Every pre-existing row reads as `unknown` (no
+      // affirmative capability): the shared contract
+      // (`@clerum/llm-providers` normalizeImageInputCapability) maps absent or
+      // malformed metadata to `{ state: 'unknown' }`, so a legacy row can never
+      // become affirmative support by accident, and this migration alone changes
+      // no runtime behavior — enforcement acts only where a capability exists.
+      //
+      // The CHECK constrains the ONE field no reader may have to guess (`state`)
+      // against a non-object/scalar payload. The nested evidence is validated
+      // strictly on write by the service (shared parser) and normalized on read,
+      // so `state` here is a backstop, not the only gate.
+      //
+      // All three conjuncts are load-bearing, because a CHECK accepts NULL:
+      // `jsonb_typeof` alone would let `{}` through (`'{}'::jsonb->>'state'` is
+      // NULL, so the IN list yields NULL, not FALSE), and `? 'state'` alone
+      // would let `{"state": null}` through (`?` is true while `->>` is NULL).
+      // COALESCE is what turns that untyped NULL into a real FALSE.
+      await db.query(`
+        ALTER TABLE llm_allowed_models
+          ADD COLUMN IF NOT EXISTS image_input JSONB;
+        DO $$ BEGIN
+          ALTER TABLE llm_allowed_models
+            ADD CONSTRAINT llm_allowed_models_image_input_state_check
+            CHECK (
+              image_input IS NULL
+              OR (
+                jsonb_typeof(image_input) = 'object'
+                AND image_input ? 'state'
+                AND COALESCE(
+                  image_input->>'state' IN ('supported','unsupported','unknown'),
+                  false
+                )
+              )
+            );
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END $$;
+      `)
+
+      // This migration is PURELY ADDITIVE: it adds the column and the CHECK, and
+      // writes no data. It used to hand-curate two Z.AI ids from their public
+      // docs, which was a stand-in for not knowing any model's image capability.
+      // The catalog sync now derives that from models.dev `modalities.input` for
+      // every model, including those two (#654), so the seed would only have
+      // pinned `curated` provenance the sync is required never to overwrite —
+      // freezing exactly the rows a test harness needs to be able to refresh.
+    },
+  },
 ]
 
 async function consolidateWorkflowAllowedUsersToTriggers(db: DbClient): Promise<void> {

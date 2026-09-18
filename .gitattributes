@@ -1,0 +1,4 @@
+# Generated data. `linguist-generated` collapses the file in GitHub diffs and
+# keeps it out of the repository's language statistics: it is produced by
+# control-api/scripts/regenerate-models-dev-snapshot.mjs and never hand-edited.
+control-api/src/data/modelsDevSnapshot.ts linguist-generated=true

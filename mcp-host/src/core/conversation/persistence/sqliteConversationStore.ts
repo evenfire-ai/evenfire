@@ -16,6 +16,7 @@
 import { Counter, Gauge, Histogram } from 'prom-client'
 import type {
   LoadAllPendingApprovalsRow,
+  ModelSelectionWriteOutcome,
   PendingApprovalRow,
   PersistedSession,
   PersistedSessionMessagePage,
@@ -979,20 +980,43 @@ export class SqliteConversationStore implements ConversationStore {
   }
 
   /**
-   * R2 — persist the per-session `{ provider → model }` selection map. Enqueued
-   * (async) and keyed by sessionKey so it chains AFTER the session's own
-   * `insert_session` (a set-model on a brand-new session getOrCreates the row
-   * first, enqueuing the insert on the same FIFO chain). Full-overwrite: the
-   * ConversationManager owns the in-RAM map and re-serializes on every mutation.
+   * R2 / #654 — durable compare-and-swap of the per-session
+   * `{ provider → model }` selection map.
+   *
+   * `enqueueSync` (not `enqueueAsync`): the caller must not ACK a selection until
+   * the row carries it. The sync path also chains AFTER the session's own
+   * `insert_session` on the same per-sessionKey FIFO, so a set-model on a
+   * brand-new session cannot race the INSERT that creates its row.
+   *
+   * The worker merges one provider into the durable map under the CAS lock.
+   * A stale RAM map never overwrites selections made by another writer.
+   *
+   * Fails closed when the session id is not in the cache→key index: refusing is
+   * the only honest answer, because a write we cannot address is a write we
+   * cannot claim.
    */
-  persistModelSelections(conv: Conversation): void {
+  async applyModelSelection(
+    conv: Conversation,
+    provider: string,
+    model: string,
+    expectedRevision?: number
+  ): Promise<ModelSelectionWriteOutcome> {
     const sessionKey = this.sessionKeyById.get(conv.id)
-    if (!sessionKey) return
-    this.persistQueue.enqueueAsync(sessionKey, {
-      kind: 'update_session_model_selections',
-      sessionId: conv.id,
-      modelSelections: JSON.stringify(conv.modelSelections ?? {}),
-    })
+    if (!sessionKey) {
+      throw new Error(
+        `applyModelSelection: no sessionKey for conversation ${conv.id}; refusing a write with no durable target`
+      )
+    }
+    return this.persistQueue.enqueueSync<ModelSelectionWriteOutcome>(
+      {
+        kind: 'update_session_model_selections',
+        sessionId: conv.id,
+        provider,
+        model,
+        ...(expectedRevision === undefined ? {} : { expectedRevision }),
+      },
+      sessionKey
+    )
   }
 
   /**

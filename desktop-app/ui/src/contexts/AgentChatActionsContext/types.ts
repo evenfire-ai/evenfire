@@ -23,6 +23,8 @@ export interface AgentChatActionsContextValue {
   handleRemoveComposerReferenceAttachment: (attachmentId: string) => void
   handleSendAgentMessage: (text: string) => Promise<void>
   handleRetryFailedAgentSend: () => Promise<void>
+  handleRecoverFailedAgentSend: () => void
+  handleDiscardFailedAgentSend: () => void
 }
 
 export interface AgentChatActionsProviderProps {

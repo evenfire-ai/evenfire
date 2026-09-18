@@ -50,6 +50,10 @@ export interface IncomingMessage {
    * non-allowlisted value is ignored (fail-open on the message).
    */
   model?: string
+  /** Optional CAS base for a visual message's explicit model selection. */
+  modelSelectionRevision?: number
+  /** Server-owned immutable visual selection; incoming callers cannot set it. */
+  imageModel?: { provider: string; model: string }
 }
 
 export type RuntimeCallerKind = 'rpc-proxy' | 'channel-reader' | 'workflow-approval-request-reader'
@@ -73,6 +77,34 @@ export interface MessageResponse {
   error?: TaskError
   model?: string
   taskId?: string
+  /**
+   * Issue #654 — the session's model-selection revision after the Host accepted
+   * a piggybacked `model`, or the winning revision on a CAS conflict.
+   *
+   * The send IS the write, so its result must travel back on the same response:
+   * `POST /v1/runtime/model` is unreachable on a suspended Host, which is why
+   * the selection rides the message in the first place.
+   *
+   * Present when:
+   *  - the piggybacked `model` was written: the new revision (the previous
+   *    one + 1). A text-only message always writes, even the Host default;
+   *  - an IMAGE message's `model` already WAS the effective model (the explicit
+   *    selection, or the Host default when there is none): nothing is written
+   *    and this is the unchanged current revision. The image carries the model
+   *    the client displays, which is not a user pick, so it must not pin it;
+   *  - an image message's `modelSelectionRevision` was stale: the winning
+   *    revision, with `LLM_MODEL_SELECTION_CONFLICT`.
+   *
+   * Absent when the message carried no `model`, when the `modelSelectionRevision`
+   * itself was invalid, when an image message was refused because the requested
+   * model cannot read images (`LLM_IMAGE_INPUT_*`; the selection is NOT written,
+   * so the revision the client holds is still current), or when the selection
+   * was rejected. (During a boot fallback the task runs on another pair; if THAT
+   * pair refuses the image, the requested selection was already written and the
+   * refusal carries its new revision.) Absent on a successful ack after a piggyback means the Host
+   * IGNORED the selection.
+   */
+  modelSelectionRevision?: number
   usage?: {
     promptTokens: number
     completionTokens: number
@@ -635,6 +667,7 @@ export interface ModelsListResult {
   provider: string
   hostDefault: string
   sessionModel: string | null
+  modelSelectionRevision?: number
   sessionModelBlocked?: string
   degraded: boolean
   models: RuntimeModelEntry[]
@@ -651,14 +684,21 @@ export type ModelsListHandler = (
  * `model_not_allowed` → 403. The route owns the 400 (missing chatId/model).
  */
 export type SetModelResult =
-  | { ok: true; provider: string; model: string }
-  | { ok: false; reason: 'model_not_allowed'; provider: string; model: string }
+  | { ok: true; provider: string; model: string; modelSelectionRevision?: number }
+  | {
+      ok: false
+      reason: 'model_not_allowed' | 'model_selection_conflict'
+      provider: string
+      model: string
+      modelSelectionRevision?: number
+    }
 
 export type SetModelHandler = (
   userSub: string,
   hostRef: string,
   chatId: string,
-  model: string
+  model: string,
+  expectedRevision?: number
 ) => SetModelResult | Promise<SetModelResult>
 
 /**
