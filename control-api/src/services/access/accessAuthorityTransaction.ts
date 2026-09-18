@@ -6,6 +6,7 @@ export async function configureAccessAuthorityTransaction(
   db: Pick<DbClient, 'query'>,
   budget: AccessExecutionBudget
 ): Promise<void> {
+  const statementTimeoutMs = budget.statementTimeoutMs()
   await runAccessDatabaseQuery(
     db,
     budget,
@@ -17,7 +18,7 @@ export async function configureAccessAuthorityTransaction(
     db,
     budget,
     `SELECT set_config('statement_timeout', $1, true)`,
-    [`${budget.statementTimeoutMs()}ms`],
-    { chargeRows: false }
+    [`${statementTimeoutMs}ms`],
+    { chargeRows: false, statementTimeoutMs }
   )
 }

@@ -123,15 +123,21 @@ export class OperationalAccessIndex {
     db: DbClient,
     budget: AccessExecutionBudget,
     text: string,
-    values: unknown[] = []
+    values: unknown[] = [],
+    options: { statementTimeoutMs?: number } = {}
   ) {
-    return runAccessDatabaseQuery(db, budget, text, values)
+    return runAccessDatabaseQuery(db, budget, text, values, options)
   }
 
   private async configureTransaction(db: DbClient, budget: AccessExecutionBudget): Promise<void> {
-    await this.query(db, budget, `SELECT set_config('statement_timeout', $1, true)`, [
-      `${budget.statementTimeoutMs()}ms`,
-    ])
+    const statementTimeoutMs = budget.statementTimeoutMs()
+    await this.query(
+      db,
+      budget,
+      `SELECT set_config('statement_timeout', $1, true)`,
+      [`${statementTimeoutMs}ms`],
+      { statementTimeoutMs }
+    )
   }
 
   async beginRelist(input: {
