@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AGENT_WORKSPACE_ROUTES, DESKTOP_ROUTES } from '../../constants/navigation'
+import type { GfsPreviewResource } from '../../lib/gfsPreview'
 import {
   activeWorkspaceTab,
   createWorkspaceTabsState,
   newChatTab,
   openChatTab,
   openFilesTab,
+  openPreviewTab,
   openSettingsTab,
 } from '../../lib/workspaceTabs'
 import type { WorkspaceTabsState } from '../../lib/workspaceTabs.types'
@@ -148,6 +150,27 @@ export function useNavigationController() {
     [nextWorkspaceTabId]
   )
 
+  // Open/focus a preview tab for a previewable file (spec 18 §3.B.1). Dedupes by
+  // gfsUri in the store: opening the same file twice focuses its existing tab
+  // instead of stacking duplicates. A direct clone of `openFilesSection`.
+  const openPreviewSection = useCallback(
+    (preview: GfsPreviewResource) => {
+      setAppsPickerActive(false)
+      const id = nextWorkspaceTabId()
+      setWorkspaceTabs(current =>
+        openPreviewTab(current, {
+          id,
+          title: preview.name,
+          gfsUri: preview.gfsUri,
+          fileKind: preview.kind,
+          byteLength: preview.bytes,
+          ...('mimeType' in preview ? { mimeType: preview.mimeType } : {}),
+        })
+      )
+    },
+    [nextWorkspaceTabId]
+  )
+
   // Base section navigation: every legacy `handleNavSelect(route)` call-site
   // routes here and becomes an open/focus tab action (the single writer). For
   // `chat`/`agents` it also clears `selectedAgent` exactly as before.
@@ -200,6 +223,7 @@ export function useNavigationController() {
     activateChatTab,
     lastActiveChatTabId,
     openFilesSection,
+    openPreviewSection,
     // Agent/chat selection state (stays here through this slice; §4).
     selectedAgent,
     selectedAgentRoute,

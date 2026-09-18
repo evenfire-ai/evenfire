@@ -15440,7 +15440,8 @@ pre {
 
 .da-gfs-image-preview-dialog__header h3,
 .da-gfs-markdown-preview-dialog__header h3,
-.da-gfs-video-preview-dialog__header h3 {
+.da-gfs-video-preview-dialog__header h3,
+.da-gfs-preview-title {
   min-width: 0;
   overflow: hidden;
   margin: 0;
@@ -15450,6 +15451,21 @@ pre {
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* File preview in a workspace tab (spec 18 §3.B.3). Reuses the shared
+ * Gfs*PreviewBody inner classes; this container gives the header + body the same
+ * two-row layout the dialog frame provided, without any modal chrome. */
+.da-gfs-preview-page {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--table-frame-border);
+  border-radius: var(--table-radius);
+  background: var(--table-frame-bg);
 }
 
 .da-gfs-image-preview-dialog__body,
