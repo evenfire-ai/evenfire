@@ -12555,7 +12555,7 @@ button.cu-gfs-tree__button:focus-visible,
   border-bottom: 1px solid var(--cu-border-subtle);
   background: var(--cu-surface-hover);
   color: var(--cu-text-muted);
-  font-size: 0.7rem;
+  font-size: var(--cu-font-size-2xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
