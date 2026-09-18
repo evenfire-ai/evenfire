@@ -511,7 +511,8 @@ export function App() {
       if (agentRef) {
         vm.handleSelectChatAgent(agentRef, { selectLatest: false })
       } else {
-        setWorkspaceTabs(state => newChatTab(state, nextChatTabId(), null))
+        const id = nextChatTabId()
+        setWorkspaceTabs(state => newChatTab(state, id, null))
       }
     }
     setComposerFocusRequestId(value => value + 1)
@@ -1088,10 +1089,13 @@ export function App() {
       // relaunch). Its `kind:'app'` derives `navItem` to the Apps route this
       // commit and clears the instance-less picker residual.
       vm.clearAppsPicker()
+      // Compute the id only on the open-new branch so the sequence counter
+      // advances exactly as before: relaunch of an existing tab must not burn one.
+      const newAppTabId = existingTabId ? null : nextChatTabId()
       setWorkspaceTabs(state =>
         existingTabId
           ? selectWorkspaceTab(state, existingTabId)
-          : openAppTab(state, { id: nextChatTabId(), appRef: app.appRef, title: app.label })
+          : openAppTab(state, { id: newAppTabId!, appRef: app.appRef, title: app.label })
       )
       setSandboxUiShortcutOpenRequestId(requestId)
       if (conversationOrigin) {
@@ -1617,8 +1621,9 @@ export function App() {
       chatId: vm.activeChatId ?? null,
       title: conversation?.title,
     }
+    const id = nextChatTabId()
     setWorkspaceTabs(state => {
-      const reconciled = reconcileWorkspaceChatTab(state, active, nextChatTabId())
+      const reconciled = reconcileWorkspaceChatTab(state, active, id)
       if (reconciled === state) return state
       // Drawer mode: the active tab is the app tab. Keep the chat tab reconcile
       // created/aligned (so the switcher lists it) but DON'T let it steal the
