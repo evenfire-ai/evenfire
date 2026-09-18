@@ -405,6 +405,10 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
             model,
             source: specs[i]!.source,
             enabled: specs[i]!.enabled,
+            // Seeded stale so the flag DISCRIMINATES: the discovery branch
+            // clears it on every row it touches, so a manual row still stale
+            // after the run proves the manual statement did not write it.
+            stale: true,
             image_input: evidenceFor(specs[i]!.kind, specs[i]!.offsetMs),
           }))
           const db = makeFakeDb(seed)
@@ -441,15 +445,33 @@ describe('catalog sync — property-based reconciliation invariants (R1-M4)', ()
                 validUntil: new Date(Date.parse(CAPTURED_AT) + TTL_MS).toISOString(),
               },
             }
-            // A manual row is invisible to discovery — every column, including this
-            // one, is left exactly as the operator left it.
-            if (spec.source === 'manual') expect(after).toEqual(before)
+            // The guard is the SAME on both branches (#654), so `source` drops
+            // out of this rule entirely: what decides is the evidence already
+            // on the row, never who owns the row or whether it is enabled.
+            //
             // Curated evidence outranks discovery whatever its age.
-            else if (spec.kind === 'curated') expect(after).toEqual(before)
+            if (spec.kind === 'curated') expect(after).toEqual(before)
             // A capture newer than this run's is never regressed.
             else if (spec.kind === 'discovery-newer') expect(after).toEqual(before)
-            // Everything else takes the catalog's verdict — enabled or not.
+            // Everything else takes the catalog's verdict — manual or not,
+            // enabled or not.
             else expect(after).toEqual(derived)
+
+            // …but a manual row keeps every column an operator authored. The
+            // seed leaves these null/false, so a leak from the discovery
+            // branch (which writes all three) is observable.
+            const row = db.get(PROVIDER_ID, model)!
+            if (spec.source === 'manual') {
+              expect(row.source).toBe('manual')
+              expect(row.stale).toBe(true)
+              expect(row.display_name).toBeNull()
+              expect(row.context_window_tokens).toBeNull()
+            } else {
+              // The discriminator's other half: the discovery branch DOES clear
+              // `stale`, so `stale === true` above is a choice, not an untouched
+              // row in a run that wrote nothing.
+              expect(row.stale).toBe(false)
+            }
           }
         }
       ),

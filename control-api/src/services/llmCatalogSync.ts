@@ -16,7 +16,12 @@
  *   - PRESENT with source='discovery' → UPDATE last_seen_at=now, stale=false and
  *     NULL-FILL ctx/display only (COALESCE keeps any operator-edited non-null).
  *     `enabled` is NEVER touched.
- *   - PRESENT with source='manual' → INVISIBLE: skipped entirely, never touched.
+ *   - PRESENT with source='manual' → INVISIBLE for everything an operator
+ *     authored: `enabled`, `source`, `stale`, `last_seen_at`, `discovered_at`,
+ *     ctx and display are never written. ONLY `image_input` is filled, under
+ *     the same guard as a discovery row (NULL or not-newer discovery evidence),
+ *     because the 44 seeded pairs are all `source='manual'` and are exactly the
+ *     rows a fresh installation serves (#654).
  *   - discovery rows absent from this run → UPDATE stale=true. NEVER deleted,
  *     NEVER auto-disabled (R3.7): an enabled model that vanished stays enabled +
  *     served, only flagged stale for an operator decision.
@@ -254,7 +259,33 @@ async function reconcileProvider(
     }
 
     if (existing.source === 'manual') {
-      // INVISIBLE — never touch an operator/seed row (§2.2 / §11.2).
+      // A manual row stays invisible for everything an operator authored:
+      // `enabled`, `source`, `stale`, `last_seen_at`, `discovered_at`,
+      // `context_window_tokens`, `display_name` are all absent from the
+      // statement below. The §11.2 invariant exists to protect those.
+      //
+      // `image_input` is not among them (#654). 44 pairs are seeded as
+      // `source='manual'`, 25 of which models.dev lists; skipping them entirely
+      // would leave exactly the rows a fresh installation SERVES with no
+      // evidence at all, while rows an operator discovered later got some. The
+      // guard is the same as the discovery branch — NULL, or discovery-sourced
+      // evidence not newer than this capture — so an operator's `curated`
+      // verdict is still untouchable here.
+      const man = await client.query(
+        `UPDATE llm_allowed_models AS t
+            SET image_input = CASE
+                  WHEN t.image_input IS NULL THEN $2::jsonb
+                  WHEN t.image_input->'evidence'->>'source' = 'discovery'
+                   AND (t.image_input->'evidence'->>'checkedAt')::timestamptz <= $3::timestamptz
+                    THEN $2::jsonb
+                  ELSE t.image_input
+                END
+           FROM llm_allowed_models AS prev
+          WHERE t.id = $1 AND prev.id = t.id AND t.source = 'manual'
+      RETURNING t.enabled, (t.image_input IS DISTINCT FROM prev.image_input) AS image_input_changed`,
+        [existing.id, imageInputJson, imageEvidence.capturedAt]
+      )
+      countEnabledEvidenceChange(man.rows, counters)
       continue
     }
 

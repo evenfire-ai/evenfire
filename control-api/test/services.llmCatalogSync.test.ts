@@ -42,6 +42,12 @@ function makeConnector(
     if (/UPDATE llm_allowed_models[\s\S]*SET last_seen_at/.test(sql)) {
       return { rows: [updateReturning], rowCount: 1 }
     }
+    // The manual-row statement reports through the SAME RETURNING contract, so
+    // it answers with the same row: a test that flips `updateReturning` to an
+    // enabled row must be able to drive publication from either branch.
+    if (/UPDATE llm_allowed_models[\s\S]*t\.source = 'manual'/.test(sql)) {
+      return { rows: [updateReturning], rowCount: 1 }
+    }
     if (/UPDATE llm_allowed_models[\s\S]*SET stale = true/.test(sql)) {
       // Report a stale transition for the vanished-row test (claude provider).
       const provider = String(params[0])
@@ -221,23 +227,64 @@ describe('syncDiscoveredModels — source-guarded reconciliation', () => {
     expect(CALL_FOR(calls, /INSERT INTO llm_allowed_models/)).toHaveLength(0)
   })
 
-  it('NEVER touches a colliding source=manual row (invisible to discovery)', async () => {
+  it('touches ONLY image_input on a colliding source=manual row, through the same guard', async () => {
     const { connector, calls } = makeConnector({
       claude: [{ id: 'm1', model: 'claude-opus-4-5', source: 'manual' }],
     })
     const catalog = catalogWith({
-      'claude-opus-4-5': { id: 'claude-opus-4-5', name: 'Opus' },
+      'claude-opus-4-5': { id: 'claude-opus-4-5', name: 'Opus', modalities: { input: ['text'] } },
     })
     const res = await syncDiscoveredModels(
-      { materializer, loadCatalog: loadStub(catalog) },
+      {
+        materializer,
+        loadCatalog: loadStub(catalog, 'live', '2026-08-19T16:16:10.000Z'),
+        imageEvidenceTtlMs: 30 * 24 * 60 * 60 * 1000,
+      },
       connector
     )
 
-    // No INSERT and no last_seen UPDATE for the manual-shadowed model.
+    // The row is still invisible to everything an operator authored.
     expect(CALL_FOR(calls, /INSERT INTO llm_allowed_models/)).toHaveLength(0)
     expect(CALL_FOR(calls, /SET last_seen_at/)).toHaveLength(0)
     expect(res.added).toBe(0)
     expect(res.updated).toBe(0)
+
+    // …except `image_input`, written by exactly one statement (#654). This is
+    // the liveness witness for the four negative assertions above: without it
+    // they would also hold for a sync that never reached this row at all.
+    const manual = CALL_FOR(calls, /t\.source = 'manual'/)
+    expect(manual).toHaveLength(1)
+    const sql = manual[0]!.sql
+    expect(sql).toMatch(/SET image_input = CASE/)
+    // Same guard as the discovery branch: NULL, or discovery evidence not newer.
+    expect(sql).toMatch(/WHEN t\.image_input IS NULL THEN \$2::jsonb/)
+    expect(sql).toMatch(
+      /\(t\.image_input->'evidence'->>'checkedAt'\)::timestamptz <= \$3::timestamptz/
+    )
+    expect(sql).toMatch(
+      /RETURNING t\.enabled, \(t\.image_input IS DISTINCT FROM prev\.image_input\)/
+    )
+    // Nothing else is ASSIGNED — asserted on the assignment TARGETS, not on a
+    // substring search. `source` and `enabled` legitimately appear elsewhere in
+    // this statement (the WHERE, the RETURNING, and the guard's
+    // `evidence->>'source'`), so a substring search could not tell "never
+    // written" from "mentioned" and would fail on a correct statement.
+    const setClause = sql.slice(sql.indexOf('SET '), sql.indexOf('FROM llm_allowed_models AS prev'))
+    const assigned = [...setClause.matchAll(/(?:SET|,)\s+([a-z_]+)\s*=/g)].map(m => m[1])
+    expect(assigned).toEqual(['image_input'])
+    expect(manual[0]!.params).toEqual([
+      'm1',
+      JSON.stringify({
+        state: 'unsupported',
+        evidence: {
+          source: 'discovery',
+          reference: 'https://models.dev/api.json',
+          checkedAt: '2026-08-19T16:16:10.000Z',
+          validUntil: '2026-09-18T16:16:10.000Z',
+        },
+      }),
+      '2026-08-19T16:16:10.000Z',
+    ])
   })
 
   it('NULL-FILLs a present discovery row (COALESCE) and never overwrites enabled', async () => {

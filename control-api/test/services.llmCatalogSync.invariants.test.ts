@@ -176,6 +176,19 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         enabled: true,
         image_input: newerDiscovery,
       },
+      // MANUAL with no evidence: gets `image_input` and NOTHING else (#654).
+      // Seeded `stale: true` with null metadata so that every other column the
+      // discovery branch would have written is observable if it leaks here.
+      {
+        provider: 'claude',
+        model: 'claude-fable-5-1',
+        source: 'manual',
+        enabled: true,
+        stale: true,
+        display_name: null,
+        context_window_tokens: null,
+        image_input: null,
+      },
     ])
     const catalog = withModalities(
       trimSnapshot({
@@ -185,6 +198,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
           'claude-haiku-4-5-20251001',
           'claude-opus-4-6',
           'claude-sonnet-4-5',
+          'claude-fable-5-1',
           // Absent from the DB → this run INSERTs it (disabled discovery row).
           'claude-opus-4-7',
         ],
@@ -193,6 +207,7 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         'claude-haiku-4-5-20251001': ['text', 'image'],
         'claude-opus-4-6': ['text'],
         'claude-sonnet-4-5': ['text', 'image'],
+        'claude-fable-5-1': ['text', 'image'],
         'claude-opus-4-7': ['text', 'image'],
       }
     )
@@ -232,6 +247,17 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
     const inserted = db.get('claude', 'claude-opus-4-7')!
     expect(inserted.enabled).toBe(false)
     expect(inserted.image_input).toEqual(discovered('supported'))
+    // A manual row receives the catalog's verdict and keeps everything an
+    // operator authored. `stale`, `display_name` and `context_window_tokens`
+    // are the tells: the discovery branch writes all three, so if the manual
+    // statement ever widened, these would flip.
+    const manual = db.get('claude', 'claude-fable-5-1')!
+    expect(manual.image_input).toEqual(discovered('supported'))
+    expect(manual.source).toBe('manual')
+    expect(manual.enabled).toBe(true)
+    expect(manual.stale).toBe(true)
+    expect(manual.display_name).toBeNull()
+    expect(manual.context_window_tokens).toBeNull()
     // Witness for every "unchanged" above: the run really did visit each row.
     expect(db.connector.connect).toHaveBeenCalled()
     for (const model of ['claude-opus-4-5', 'claude-sonnet-5', 'claude-sonnet-4-5']) {
@@ -240,7 +266,11 @@ describe('catalog sync — load-bearing invariants (Fase 4)', () => {
         db.calls.some(call => /SET last_seen_at/.test(call.sql) && call.params[0] === id)
       ).toBe(true)
     }
-    // Two enabled rows changed evidence → the ConfigMap is republished once.
+    expect(
+      db.calls.some(call => /t\.source = 'manual'/.test(call.sql) && call.params[0] === manual.id)
+    ).toBe(true)
+    // Three enabled rows changed evidence (two discovery + the manual one) → the
+    // ConfigMap is republished once, after COMMIT.
     expect(db.materializer.materialize).toHaveBeenCalledTimes(1)
   })
 })

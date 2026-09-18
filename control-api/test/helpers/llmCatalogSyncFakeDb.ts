@@ -86,6 +86,23 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
     return JSON.parse(String(value)) as ImageInputCapability
   }
 
+  /**
+   * The `image_input` CASE, shared by the discovery and manual statements
+   * because the service uses the SAME guard in both: a NULL column takes the
+   * new provenance, discovery evidence not newer than this capture is
+   * refreshed, and anything else (operator-`curated`, or a newer capture) is
+   * preserved. Modelling it once means a test cannot pass because the two
+   * branches drifted here in a way the production SQL did not.
+   */
+  const replaceableEvidence = (row: FakeRow, capturedAt: string): boolean => {
+    if (row.image_input === null) return true
+    const evidence = row.image_input.evidence
+    return (
+      evidence?.source === 'discovery' &&
+      Date.parse(String(evidence.checkedAt)) <= Date.parse(capturedAt)
+    )
+  }
+
   const calls: Array<{ sql: string; params: unknown[] }> = []
 
   const query = vi.fn(async (sql: string, params: unknown[] = []) => {
@@ -150,6 +167,25 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
       return { rows: [], rowCount: 1 }
     }
 
+    // PRESENT manual row — `image_input` ONLY, through the same guard (#654).
+    // Everything an operator authored is absent from the statement, so this
+    // branch deliberately writes nothing else: if the service ever widened it,
+    // the suites asserting a manual row's other columns would still pass here,
+    // which is why the SQL-shape test asserts the statement's text too.
+    if (/UPDATE llm_allowed_models[\s\S]*t\.source = 'manual'/.test(sql)) {
+      const [id, imageInput, capturedAt] = params as [string, unknown, string]
+      const row = rows.find(r => r.id === id && r.source === 'manual')
+      if (!row) return empty
+      const before = JSON.stringify(row.image_input)
+      if (replaceableEvidence(row, capturedAt)) row.image_input = parseJsonb(imageInput)
+      return {
+        rows: [
+          { enabled: row.enabled, image_input_changed: before !== JSON.stringify(row.image_input) },
+        ],
+        rowCount: 1,
+      }
+    }
+
     // PRESENT discovery row refresh — last_seen + stale=false + NULL-fill guarded
     // to disabled rows (COALESCE), never touching `enabled`.
     if (/UPDATE llm_allowed_models[\s\S]*SET\s+last_seen_at/.test(sql)) {
@@ -173,12 +209,7 @@ export function makeFakeDb(seed: SeedRow[] = []): FakeDb {
       // discovery evidence not newer than this capture is refreshed, and anything
       // else (operator-curated, or a newer capture) is preserved.
       const before = JSON.stringify(row.image_input)
-      const evidence = row.image_input?.evidence
-      const replaceable =
-        row.image_input === null ||
-        (evidence?.source === 'discovery' &&
-          Date.parse(String(evidence.checkedAt)) <= Date.parse(capturedAt))
-      if (replaceable) row.image_input = parseJsonb(imageInput)
+      if (replaceableEvidence(row, capturedAt)) row.image_input = parseJsonb(imageInput)
       return {
         rows: [
           { enabled: row.enabled, image_input_changed: before !== JSON.stringify(row.image_input) },
