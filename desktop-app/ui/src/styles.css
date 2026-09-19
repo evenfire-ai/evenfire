@@ -1799,6 +1799,162 @@ h3 {
   line-height: var(--line-height-tight);
 }
 
+/* Sidebar file explorer (spec 18 §3.A) — the accordion panel under "Files". */
+.nav-file-explorer {
+  min-width: 0;
+  margin: 0 0 var(--space-1) 0;
+  padding-left: var(--sidebar-nav-label-indent);
+  /* Claim the sidebar's leftover height so the tree gets real room; the scroll
+     is contained to .da-file-explorer below instead of the whole nav column. */
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.da-file-explorer {
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* Chromium-only renderer: declaring scrollbar-width/scrollbar-color here would
+     disable the ::-webkit-scrollbar pill below, so the custom thumb owns it. */
+}
+
+.da-file-explorer::-webkit-scrollbar {
+  width: 8px;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb {
+  background: rgba(var(--edge-rgb), 0.4);
+  border-radius: 999px;
+  /* Padded track so the thumb reads as a thin floating pill, not a full-width bar. */
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.da-file-explorer::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--edge-rgb), 0.6);
+  background-clip: padding-box;
+}
+
+.da-file-explorer__message {
+  padding: var(--space-1) var(--space-1);
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+}
+
+.da-file-explorer__tree,
+.da-file-explorer__group {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  min-width: 0;
+}
+
+.da-file-explorer__group {
+  margin-left: var(--space-2);
+  padding-left: var(--space-1);
+  border-left: 1px solid rgba(var(--edge-rgb), 0.24);
+}
+
+.da-file-explorer__item {
+  min-width: 0;
+}
+
+.da-file-explorer__row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-0-5);
+}
+
+.da-file-explorer__toggle.ui-icon-button {
+  width: 22px;
+  min-width: 22px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.da-file-explorer__toggle.ui-icon-button:hover:enabled,
+.da-file-explorer__toggle.ui-icon-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.28);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-strong);
+}
+
+.da-file-explorer__toggle svg {
+  width: 14px;
+  height: 14px;
+  transition: transform var(--motion-fast);
+}
+
+.da-file-explorer__toggle.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.da-file-explorer__toggle-placeholder {
+  width: 22px;
+  height: 26px;
+}
+
+.da-file-explorer__label.ui-button {
+  min-width: 0;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-0-5) var(--space-1);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.da-file-explorer__label.ui-button:hover:enabled,
+.da-file-explorer__label.ui-button:focus-visible {
+  border-color: rgba(var(--accent-rgb), 0.38);
+  background: var(--list-item-hover-bg);
+  box-shadow: none;
+  color: var(--text);
+}
+
+.da-file-explorer__label.is-selected {
+  background: rgba(var(--accent-rgb), 0.12);
+  color: var(--text);
+}
+
+.da-file-explorer__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+.da-file-explorer__icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.da-file-explorer__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  line-height: var(--line-height-tight);
+}
+
+.da-file-explorer__more {
+  padding: var(--space-0-5) var(--space-1);
+}
+
 .nav-latest-sessions {
   display: grid;
   gap: 0;
@@ -15440,7 +15596,8 @@ pre {
 
 .da-gfs-image-preview-dialog__header h3,
 .da-gfs-markdown-preview-dialog__header h3,
-.da-gfs-video-preview-dialog__header h3 {
+.da-gfs-video-preview-dialog__header h3,
+.da-gfs-preview-title {
   min-width: 0;
   overflow: hidden;
   margin: 0;
@@ -15450,6 +15607,21 @@ pre {
   line-height: var(--line-height-tight);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* File preview in a workspace tab (spec 18 §3.B.3). Reuses the shared
+ * Gfs*PreviewBody inner classes; this container gives the header + body the same
+ * two-row layout the dialog frame provided, without any modal chrome. */
+.da-gfs-preview-page {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--table-frame-border);
+  border-radius: var(--table-radius);
+  background: var(--table-frame-bg);
 }
 
 .da-gfs-image-preview-dialog__body,

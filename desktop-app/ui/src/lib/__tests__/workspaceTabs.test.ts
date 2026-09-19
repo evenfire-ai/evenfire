@@ -12,6 +12,7 @@ import {
   openAppTab,
   openChatTab,
   openFilesTab,
+  openPreviewTab,
   openSettingsTab,
   reconcileWorkspaceChatTab,
   reorderWorkspaceTab,
@@ -303,6 +304,18 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
     expect(rooted?.title).toBe('Files')
   })
 
+  it('sanitizes an externally-controlled folder name at the files store border', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openFilesTab(state, { id: 'f-1', path: null })
+    // A GFS folder name carrying a bidi override + zero-width is the same threat
+    // class as a preview file name — it must not reach the tab chrome raw.
+    state = setFilesTabPath(state, 'f-1', 'gfs://main/ccc', `In‮voices​`)
+    expect(state.tabs.find(t => t.id === 'f-1')?.title).toBe('Invoices')
+    // A folder name that reduces to empty after sanitizing falls back to 'Files'.
+    state = setFilesTabPath(state, 'f-1', 'gfs://main/blank', `‮​`)
+    expect(state.tabs.find(t => t.id === 'f-1')?.title).toBe('Files')
+  })
+
   it('setFilesTabPath is a no-op (same ref) when nothing moved, or the tab is missing / not files', () => {
     let state = createEmptyWorkspaceTabsState()
     state = openFilesTab(state, { id: 'f-1', path: 'gfs://main/aaa', title: 'Reports' })
@@ -349,6 +362,159 @@ describe('workspaceTabs — files multi-instance by path (mini-spec 06 §3)', ()
           expect(seen.has(p)).toBe(false)
           seen.add(p)
         }
+      })
+    )
+  })
+})
+
+describe('workspaceTabs — preview multi-instance by gfsUri (spec 18 §3.B.1)', () => {
+  const previewInput = (id: string, gfsUri: string, title?: string) => ({
+    id,
+    gfsUri,
+    fileKind: 'image' as const,
+    mimeType: 'image/png',
+    byteLength: 3,
+    ...(title !== undefined ? { title } : {}),
+  })
+
+  it('opens distinct tabs for distinct gfsUris and dedupes (focuses) the same gfsUri', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, previewInput('p-a', 'gfs://main/aaa', 'A.png'))
+    state = openPreviewTab(state, previewInput('p-b', 'gfs://main/bbb', 'B.png'))
+    expect(state.tabs.filter(t => t.kind === 'preview')).toHaveLength(2)
+    expect(state.activeTabId).toBe('p-b')
+
+    // Re-opening an existing gfsUri FOCUSES it — no new tab (retiro del modal:
+    // double-open of the same file focuses the existing preview tab).
+    const before = state.tabs.length
+    state = openPreviewTab(state, previewInput('p-a-again', 'gfs://main/aaa', 'A.png'))
+    expect(state.tabs.length).toBe(before)
+    expect(state.activeTabId).toBe('p-a')
+    expect(state.tabs.filter(t => t.kind === 'preview')).toHaveLength(2)
+  })
+
+  it('carries the payload and title on a newly created preview tab', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'p-1',
+      gfsUri: 'gfs://main/clip',
+      fileKind: 'video',
+      mimeType: 'video/mp4',
+      byteLength: 42,
+      title: 'clip.mp4',
+    })
+    const tab = state.tabs.find(t => t.id === 'p-1')
+    expect(tab?.kind).toBe('preview')
+    expect(tab?.title).toBe('clip.mp4')
+    expect(tab?.preview).toEqual({
+      gfsUri: 'gfs://main/clip',
+      fileKind: 'video',
+      mimeType: 'video/mp4',
+      byteLength: 42,
+    })
+  })
+
+  it('sanitizes an externally-controlled file name at the preview store border', () => {
+    let state = createEmptyWorkspaceTabsState()
+    // A GFS file name carrying a bidi override + zero-width must not reach the tab
+    // chrome raw — same threat class as a plugin document.title.
+    state = openPreviewTab(state, previewInput('p-evil', 'gfs://main/evil', `re‮port​.png`))
+    const created = state.tabs.find(t => t.id === 'p-evil')
+    expect(created?.title).toBe('report.png')
+
+    // A name that reduces to empty after sanitizing falls back to 'Preview',
+    // never a blank tab label.
+    state = openPreviewTab(state, previewInput('p-blank', 'gfs://main/blank', `‮​`))
+    expect(state.tabs.find(t => t.id === 'p-blank')?.title).toBe('Preview')
+
+    // The same cleaning applies when a re-open aligns the title of an existing tab.
+    state = openPreviewTab(state, previewInput('p-evil2', 'gfs://main/evil', `cl​ean.png`))
+    expect(state.tabs.find(t => t.preview?.gfsUri === 'gfs://main/evil')?.title).toBe('clean.png')
+  })
+
+  it('omits mimeType from the payload when absent (markdown has none)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, {
+      id: 'p-md',
+      gfsUri: 'gfs://main/readme',
+      fileKind: 'markdown',
+      byteLength: 12,
+      title: 'README.md',
+    })
+    const preview = state.tabs.find(t => t.id === 'p-md')?.preview
+    expect(preview).toEqual({ gfsUri: 'gfs://main/readme', fileKind: 'markdown', byteLength: 12 })
+    expect(Object.prototype.hasOwnProperty.call(preview, 'mimeType')).toBe(false)
+  })
+
+  it('aligns the title when focusing an existing gfsUri; a same-title re-open is a no-op (same ref)', () => {
+    let state = createEmptyWorkspaceTabsState()
+    state = openPreviewTab(state, previewInput('p-a', 'gfs://main/aaa', 'Old.png'))
+    state = openPreviewTab(state, previewInput('p-a2', 'gfs://main/aaa', 'Renamed.png'))
+    expect(state.tabs.filter(t => t.kind === 'preview')).toHaveLength(1)
+    expect(state.tabs.find(t => t.kind === 'preview')?.title).toBe('Renamed.png')
+
+    // Re-open with the same (or no) title preserves the tabs reference so a
+    // setState bails out — mirrors the other open* dedupe branches.
+    const sameTabs = state.tabs
+    expect(openPreviewTab(state, previewInput('p-a3', 'gfs://main/aaa', 'Renamed.png')).tabs).toBe(
+      sameTabs
+    )
+    expect(openPreviewTab(state, previewInput('p-a4', 'gfs://main/aaa')).tabs).toBe(sameTabs)
+  })
+
+  // T2 property: dedupe by gfsUri is an equivalence on the preview sub-slice.
+  it('property: one preview tab per distinct gfsUri; no duplicate ids; insertion order preserved', () => {
+    const uriArb = fc.constantFrom('gfs://main/a', 'gfs://main/b', 'gfs://main/c', 'gfs://main/d')
+    fc.assert(
+      fc.property(fc.array(uriArb, { maxLength: 40 }), uris => {
+        let state = createEmptyWorkspaceTabsState()
+        uris.forEach((gfsUri, i) => {
+          state = openPreviewTab(state, previewInput(`p-${i}`, gfsUri))
+        })
+        const previews = state.tabs.filter(t => t.kind === 'preview')
+        // One tab per DISTINCT gfsUri opened.
+        const distinct = new Set(uris)
+        expect(previews.length).toBe(uris.length === 0 ? 0 : distinct.size)
+        // No two preview tabs share a gfsUri (open-time dedupe).
+        const seen = new Set<string>()
+        for (const t of previews) {
+          const uri = t.preview?.gfsUri ?? ''
+          expect(seen.has(uri)).toBe(false)
+          seen.add(uri)
+        }
+        // No duplicate tab ids overall.
+        const ids = state.tabs.map(t => t.id)
+        expect(new Set(ids).size).toBe(ids.length)
+        // Strip order = the first opener of each distinct gfsUri, in open order.
+        const expectedOrder: string[] = []
+        const seenUris = new Set<string>()
+        uris.forEach((gfsUri, i) => {
+          if (!seenUris.has(gfsUri)) {
+            seenUris.add(gfsUri)
+            expectedOrder.push(`p-${i}`)
+          }
+        })
+        expect(previews.map(t => t.id)).toEqual(expectedOrder)
+      })
+    )
+  })
+
+  // T2 property: idempotence — open(open(s,x),x) === open(s,x); the second open
+  // finds the existing tab, keeps it active, and preserves the tabs reference.
+  it('property: opening the same gfsUri twice is idempotent (same tabs ref)', () => {
+    const uriArb = fc.constantFrom('gfs://main/a', 'gfs://main/b', 'gfs://main/c')
+    fc.assert(
+      fc.property(fc.array(uriArb, { minLength: 1, maxLength: 20 }), fc.nat(30), (uris, pick) => {
+        let state = createEmptyWorkspaceTabsState()
+        uris.forEach((gfsUri, i) => {
+          state = openPreviewTab(state, previewInput(`p-${i}`, gfsUri))
+        })
+        const target = state.tabs[pick % state.tabs.length]!
+        const gfsUri = target.preview?.gfsUri ?? uris[0]!
+        const once = openPreviewTab(state, previewInput('again', gfsUri))
+        const twice = openPreviewTab(once, previewInput('again-2', gfsUri))
+        expect(twice.tabs).toBe(once.tabs)
+        expect(twice.activeTabId).toBe(once.activeTabId)
       })
     )
   })

@@ -80,6 +80,7 @@ import type { WorkspaceTab } from '@lib/workspaceTabs.types'
 import { AgentsPage } from '@pages/AgentsPage'
 import { AuthPage } from '@pages/AuthPage'
 import { ChatPage } from '@pages/ChatPage'
+import { FilePreviewPage } from '@pages/FilePreviewPage'
 import { FilesPage } from '@pages/FilesPage'
 import { McpServersPage } from '@pages/McpServersPage'
 import { OnboardingPage } from '@pages/OnboardingPage'
@@ -410,7 +411,7 @@ export function App() {
   // this only tears down any lingering app embed.
   const revealWorkspaceTab = React.useCallback(
     (tab: WorkspaceTab | undefined, inDrawer = chatDrawerVisibleRef.current) => {
-      if (!tab || tab.kind === 'files' || tab.kind === 'settings') {
+      if (!tab || tab.kind === 'files' || tab.kind === 'settings' || tab.kind === 'preview') {
         if (!inDrawer) leaveSandboxForChat()
         return
       }
@@ -888,6 +889,15 @@ export function App() {
     },
     [setWorkspaceTabs]
   )
+
+  // Preview tab render seam (spec 18 §3.B.1). Only the ACTIVE preview tab mounts
+  // a FilePreviewPage, keyed by that tab's id so switching preview tabs remounts
+  // with the incoming file's payload. Unlike an app tab, a preview tab is a plain
+  // DOM page — revealing it does not relaunch a native embed.
+  const activePreviewTab =
+    vm.activeWorkspaceTab?.kind === 'preview' ? vm.activeWorkspaceTab : undefined
+  const activePreviewTabId = activePreviewTab?.id ?? null
+  const activePreviewPayload = activePreviewTab?.preview ?? null
 
   const closePluginGfsPreview = React.useCallback(() => {
     setPluginGfsPreview(null)
@@ -2447,6 +2457,9 @@ export function App() {
                               onOpenSandboxUiApp={handleOpenSandboxUiApp}
                               onSettingsMenuOpenChange={setSidebarSettingsMenuOpen}
                               onSelect={handleSidebarNavSelect}
+                              onOpenFilesSection={vm.openFilesSection}
+                              onOpenPreviewSection={vm.openPreviewSection}
+                              pushToast={vm.pushToast}
                               toggleRequestId={sidebarToggleRequestId}
                             />
                             <section className="workspace-layout">
@@ -2553,6 +2566,17 @@ export function App() {
                                     pushToast={vm.pushToast}
                                     pendingGfsUri={filesSeedPath}
                                     onLocationChange={handleFilesLocationChange}
+                                    onOpenPreview={vm.openPreviewSection}
+                                  />
+                                )}
+                                {vm.navItem === DESKTOP_ROUTES.preview && activePreviewPayload && (
+                                  <FilePreviewPage
+                                    key={activePreviewTabId ?? 'preview'}
+                                    gfsUri={activePreviewPayload.gfsUri}
+                                    fileName={activePreviewTab?.title ?? 'Preview'}
+                                    fileKind={activePreviewPayload.fileKind}
+                                    mimeType={activePreviewPayload.mimeType}
+                                    byteLength={activePreviewPayload.byteLength}
                                   />
                                 )}
                                 {vm.navItem === DESKTOP_ROUTES.connectors && <McpServersPage />}

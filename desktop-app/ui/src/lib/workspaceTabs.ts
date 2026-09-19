@@ -5,6 +5,7 @@ import type {
   OpenAppTabInput,
   OpenChatTabInput,
   OpenFilesTabInput,
+  OpenPreviewTabInput,
   OpenSettingsTabInput,
   WorkspaceTab,
   WorkspaceTabsState,
@@ -262,7 +263,10 @@ export function openFilesTab(
  * out. It does NOT re-dedupe — dedupe is an open-time rule only (§3).
  *
  * `title` is the current folder's display name (which the opaque `gfsUri` does
- * not carry), supplied by the browser; absent / empty ⇒ 'Files'.
+ * not carry), supplied by the browser; absent / empty ⇒ 'Files'. It is a GFS
+ * folder name — externally-controlled input in the same threat class as a
+ * preview tab's file name — so it passes through the shared tab-title sanitizer
+ * at this store border (mirrors `openPreviewTab` / `setAppTabTitle`).
  */
 export function setFilesTabPath(
   state: WorkspaceTabsState,
@@ -273,7 +277,7 @@ export function setFilesTabPath(
   const target = state.tabs.find(tab => tab.id === tabId && tab.kind === 'files')
   if (!target) return state
   const nextPath = path ?? null
-  const nextTitle = title?.trim() || 'Files'
+  const nextTitle = (title ? sanitizeAppTabTitle(title) : '') || 'Files'
   if ((target.files?.path ?? null) === nextPath && target.title === nextTitle) return state
   return {
     ...state,
@@ -281,6 +285,49 @@ export function setFilesTabPath(
       tab.id === tabId ? { ...tab, title: nextTitle, files: { path: nextPath } } : tab
     ),
   }
+}
+
+/**
+ * Preview: multi-instance, deduped by `gfsUri` (spec 18 §3.B.1 — a direct clone
+ * of `openFilesTab`'s open-or-focus). Opening a `gfsUri` that already has a
+ * preview tab FOCUSES it (aligning its title to the current file name);
+ * otherwise a new preview tab is created and activated. Dedupe is applied ONLY
+ * here (open-time), matching every other open* action.
+ */
+export function openPreviewTab(
+  state: WorkspaceTabsState,
+  input: OpenPreviewTabInput
+): WorkspaceTabsState {
+  const existing = state.tabs.find(
+    tab => tab.kind === 'preview' && tab.preview?.gfsUri === input.gfsUri
+  )
+  // A preview tab's title is a GFS file name — externally-controlled input in the
+  // same threat class as a plugin's document.title (control chars, bidi overrides,
+  // zero-width, unbounded length), so it goes through the shared tab-title
+  // sanitizer at this single store border; every render site inherits the cleaned
+  // value. Empty-after-sanitize falls back to 'Preview' below.
+  const title = input.title ? sanitizeAppTabTitle(input.title) : ''
+  if (existing) {
+    return {
+      tabs:
+        title && existing.title !== title
+          ? state.tabs.map(tab => (tab.id === existing.id ? { ...tab, title } : tab))
+          : state.tabs,
+      activeTabId: existing.id,
+    }
+  }
+  const tab: WorkspaceTab = {
+    id: input.id,
+    kind: 'preview',
+    title: title || 'Preview',
+    preview: {
+      gfsUri: input.gfsUri,
+      fileKind: input.fileKind,
+      byteLength: input.byteLength,
+      ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
+    },
+  }
+  return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }
 
 /** Settings: unique per `section` — focus the existing section tab (R6). */
