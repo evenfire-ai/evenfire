@@ -310,6 +310,50 @@ describe('first vertical trusted binding resolvers', () => {
     ).rejects.toMatchObject({ code: HCC_HEALTH_TRANSITION_BINDING_BLOCKER, status: 403 })
   })
 
+  it('binds a reconcile outcome only to the Host object whose uid it observed (#691)', async () => {
+    // Same name, namespace and generation 1: a recreated Host differs only by uid.
+    const hostLookup = {
+      getResource: vi.fn().mockResolvedValue({
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'Host',
+        metadata: { name: 'chatllm', namespace: 'mcp-host', uid: 'new-uid', generation: 1 },
+      }),
+    }
+    const principal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-1',
+      resourceAuthority: 'hcc_managed',
+      allowedTelemetryTypes: ['reconcile_outcome'],
+    } as const
+    const resolver = new HccHealthTransitionBindingResolver(hostLookup)
+    const event = (uid?: string) => ({
+      sourceEventId: `reconcile-${uid ?? 'no-uid'}`,
+      occurredAt: NOW,
+      telemetryType: 'reconcile_outcome' as const,
+      hostLookupReference: {
+        name: 'chatllm',
+        namespace: 'mcp-host',
+        generation: 1,
+        ...(uid === undefined ? {} : { uid }),
+      },
+      payload: { status: 'succeeded', reason_code: 'ready' },
+    })
+
+    await expect(resolver.resolve(principal, event('new-uid'))).resolves.toMatchObject({
+      kubernetesUid: 'new-uid',
+      metadataGeneration: 1,
+    })
+    await expect(resolver.resolve(principal, event('old-uid'))).resolves.toBeNull()
+    // A reference without uid (HCC before this change) still binds.
+    await expect(resolver.resolve(principal, event())).resolves.toMatchObject({
+      kubernetesUid: 'new-uid',
+    })
+    // Liveness: the authoritative Host read ran for all three references.
+    expect(hostLookup.getResource).toHaveBeenCalledTimes(3)
+  })
+
   it('resolves WRC infrastructure batches from authoritative workflow rows in one query', async () => {
     const query = vi.fn().mockResolvedValue({
       rows: [
