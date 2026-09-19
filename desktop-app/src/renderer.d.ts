@@ -574,7 +574,14 @@ declare global {
           hostRef: string,
           chatId: string,
           model: string,
-          hostRefs?: string[]
+          hostRefs?: string[],
+          /**
+           * Optional CAS precondition (issue #654). Only sent when the host
+           * projected `modelSelectionRevision`; a stale value is rejected with
+           * `model_selection_conflict` instead of silently overwriting a newer
+           * selection.
+           */
+          expectedRevision?: number
         ) => Promise<SetHostModelResult>
         /**
          * Spec 15 Fase B — explicit user rename, propagated to the server. Rejects
@@ -713,6 +720,7 @@ declare global {
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -755,6 +763,7 @@ declare global {
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void

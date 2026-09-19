@@ -30,6 +30,26 @@ const ROW = {
   updated_at: new Date('2026-07-01T00:00:00Z'),
 }
 
+// Curated evidence for an exact (provider, model) pair, as an operator would
+// enter it from the provider's own documentation.
+const CURATED_SUPPORTED = {
+  state: 'supported',
+  evidence: {
+    source: 'curated',
+    reference: 'https://docs.z.ai/guides/vlm/glm-5.3-flash',
+    checkedAt: '2026-09-16T00:00:00.000Z',
+  },
+}
+
+const DISCOVERY_UNKNOWN = {
+  state: 'unknown',
+  evidence: {
+    source: 'discovery',
+    reference: 'https://models.dev/api.json',
+    checkedAt: '2026-08-19T16:16:10.000Z',
+  },
+}
+
 describe('llmAllowedModels service', () => {
   describe('createLlmAllowedModelSchema', () => {
     it('requires provider and model', () => {
@@ -95,6 +115,115 @@ describe('llmAllowedModels service', () => {
     })
   })
 
+  describe('image_input capability field (#654)', () => {
+    const withImage = (image_input: unknown) =>
+      createLlmAllowedModelSchema.safeParse({ provider: 'zai', model: 'glm-5.3', image_input })
+
+    it('accepts a curated known claim and an explicit unknown', () => {
+      expect(withImage(CURATED_SUPPORTED).success).toBe(true)
+      expect(withImage({ state: 'unknown' }).success).toBe(true)
+      expect(withImage(DISCOVERY_UNKNOWN).success).toBe(true)
+      expect(withImage(undefined).success).toBe(true)
+    })
+
+    it('rejects a known claim without evidence (invalid never becomes affirmative)', () => {
+      expect(withImage({ state: 'supported' }).success).toBe(false)
+      expect(withImage({ state: 'unsupported' }).success).toBe(false)
+      expect(withImage({ state: 'supported', evidence: {} }).success).toBe(false)
+    })
+
+    it('rejects a discovery-sourced known claim without validUntil', () => {
+      expect(
+        withImage({ state: 'supported', evidence: { ...DISCOVERY_UNKNOWN.evidence } }).success
+      ).toBe(false)
+      expect(
+        withImage({
+          state: 'supported',
+          evidence: {
+            ...DISCOVERY_UNKNOWN.evidence,
+            validUntil: '2026-12-01T00:00:00.000Z',
+          },
+        }).success
+      ).toBe(true)
+    })
+
+    it('rejects unknown keys, bad states, non-UTC dates and non-public references', () => {
+      // A payload with no `state` at all — including the `{}` an empty JSON body
+      // would produce — must never reach storage; the column CHECK is only the
+      // backstop, the writer rejects it first.
+      expect(withImage({}).success).toBe(false)
+      expect(withImage({ state: null }).success).toBe(false)
+      expect(withImage([]).success).toBe(false)
+      expect(withImage('supported').success).toBe(false)
+      expect(withImage({ state: 'bogus' }).success).toBe(false)
+      expect(withImage({ state: 'supported', extra: 1 }).success).toBe(false)
+      expect(withImage({ ...CURATED_SUPPORTED, extra: 1 }).success).toBe(false)
+      expect(
+        withImage({
+          ...CURATED_SUPPORTED,
+          evidence: { ...CURATED_SUPPORTED.evidence, checkedAt: '2026-09-16' },
+        }).success
+      ).toBe(false)
+      // A private/intranet reference must never be stored as evidence.
+      for (const reference of [
+        'http://docs.z.ai/guides/llm/glm-5.3',
+        'https://localhost/docs',
+        'https://10.0.0.1/docs',
+        'https://catalog.internal/docs',
+      ]) {
+        expect(
+          withImage({
+            ...CURATED_SUPPORTED,
+            evidence: { ...CURATED_SUPPORTED.evidence, reference },
+          }).success
+        ).toBe(false)
+      }
+      // A sanitized local evidence id is the non-URL form.
+      expect(
+        withImage({
+          ...CURATED_SUPPORTED,
+          evidence: { ...CURATED_SUPPORTED.evidence, reference: 'evidence:glm-eval-2026-09' },
+        }).success
+      ).toBe(true)
+    })
+
+    it('accepts an explicit null only on the UPDATE schema (clear)', () => {
+      expect(withImage(null).success).toBe(false)
+      expect(updateLlmAllowedModelSchema.safeParse({ image_input: null }).success).toBe(true)
+      expect(
+        updateLlmAllowedModelSchema.safeParse({ image_input: { state: 'nope' } }).success
+      ).toBe(false)
+    })
+
+    it('compares the DNS root dot for hostname policy and preserves the exact reference', () => {
+      const original = 'https://docs.z.ai./guides/vlm/glm-5.3-flash'
+      const dotted = {
+        ...CURATED_SUPPORTED,
+        evidence: { ...CURATED_SUPPORTED.evidence, reference: original },
+      }
+      const parsed = withImage(dotted)
+      // A public fully qualified hostname with the DNS root dot is still right.
+      expect(parsed.success).toBe(true)
+      if (parsed.success) {
+        expect(JSON.stringify(parsed.data)).toContain(original)
+      }
+      // The trailing dot cannot make an intranet, private, or single-label
+      // hostname pass: the policy compares the normalized hostname, and old
+      // evidence stored with such a reference must not produce a known claim.
+      for (const reference of [
+        'https://localhost./docs',
+        'https://10.0.0.1./docs',
+        'https://catalog.internal./docs',
+        'https://docs.local./docs',
+        'https://web./docs',
+      ]) {
+        expect(
+          withImage({ ...CURATED_SUPPORTED, evidence: { ...dotted.evidence, reference } }).success
+        ).toBe(false)
+      }
+    })
+  })
+
   describe('updateLlmAllowedModelSchema', () => {
     it('rejects an empty body', () => {
       expect(updateLlmAllowedModelSchema.safeParse({}).success).toBe(false)
@@ -136,6 +265,50 @@ describe('llmAllowedModels service', () => {
         )
       ).rejects.toBeInstanceOf(LlmAllowedModelConflictError)
     })
+
+    it('persists a validated capability and stores the normalized row value', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({
+          rows: [
+            { ...ROW, provider: 'zai', model: 'glm-5.3-flash', image_input: CURATED_SUPPORTED },
+          ],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      const created = await createAllowedModel(
+        createLlmAllowedModelSchema.parse({
+          provider: 'zai',
+          model: 'glm-5.3-flash',
+          image_input: CURATED_SUPPORTED,
+        }),
+        'admin-1',
+        fakeDb(query)
+      )
+      const [insertSql, insertParams] = query.mock.calls[0]
+      expect(String(insertSql)).toMatch(/image_input/)
+      // Stored as canonical JSON text for the jsonb column.
+      expect(insertParams[5]).toBe(JSON.stringify(CURATED_SUPPORTED))
+      expect(created.image_input).toEqual(CURATED_SUPPORTED)
+    })
+
+    it('stores NULL when no capability is supplied (unknown is the absence of evidence)', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      const created = await createAllowedModel(
+        createLlmAllowedModelSchema.parse({
+          provider: 'claude',
+          model: 'claude-haiku-4-5',
+          image_input: { state: 'unknown' },
+        }),
+        'admin-1',
+        fakeDb(query)
+      )
+      expect(query.mock.calls[0][1][5]).toBeNull()
+      expect(created.image_input).toEqual({ state: 'unknown' })
+    })
   })
 
   describe('updateAllowedModel', () => {
@@ -170,6 +343,76 @@ describe('llmAllowedModels service', () => {
       expect(String(sql)).toMatch(/display_name = \$1/)
       expect(String(sql)).toMatch(/updated_at = NOW\(\)/)
       expect(params).toEqual(['Haiku', 'id'])
+    })
+
+    it('invalidates evidence when the (provider, model) pair is renamed', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: CURATED_SUPPORTED }], rowCount: 1 })
+        .mockResolvedValueOnce({
+          rows: [{ ...ROW, model: 'glm-5.2', image_input: null }],
+          rowCount: 1,
+        })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      await updateAllowedModel('id', { model: 'glm-5.2' }, 'admin-2', fakeDb(query))
+      const [sql, params] = query.mock.calls[1]
+      // Old evidence belonged to the OLD model: it must not carry over.
+      expect(String(sql)).toMatch(/image_input = NULL/)
+      expect(String(sql)).not.toMatch(/image_input = \$/)
+      expect(params).toEqual(['glm-5.2', 'id'])
+    })
+
+    it('keeps new evidence supplied in the same rename operation', async () => {
+      const query = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: CURATED_SUPPORTED }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [ROW], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      const fresh = {
+        state: 'unsupported',
+        evidence: {
+          source: 'curated',
+          reference: 'https://docs.z.ai/guides/llm/glm-5.3',
+          checkedAt: '2026-09-16T00:00:00.000Z',
+        },
+      }
+      await updateAllowedModel(
+        'id',
+        updateLlmAllowedModelSchema.parse({ model: 'glm-5.3', image_input: fresh }),
+        'admin-2',
+        fakeDb(query)
+      )
+      const [sql, params] = query.mock.calls[1]
+      expect(String(sql)).toMatch(/image_input = \$2/)
+      expect(String(sql)).not.toMatch(/image_input = NULL/)
+      expect(params).toEqual(['glm-5.3', JSON.stringify(fresh), 'id'])
+    })
+
+    it('clears evidence on an explicit null and never touches it on unrelated edits', async () => {
+      const clear = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: CURATED_SUPPORTED }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: null }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      await updateAllowedModel(
+        'id',
+        updateLlmAllowedModelSchema.parse({ image_input: null }),
+        'admin-2',
+        fakeDb(clear)
+      )
+      expect(clear.mock.calls[1][1]).toEqual([null, 'id'])
+      expect(String(clear.mock.calls[1][0])).toMatch(/image_input = \$1/)
+
+      const unrelated = vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [{ ...ROW, image_input: CURATED_SUPPORTED }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [{ ...ROW, enabled: false }], rowCount: 1 })
+        .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      await updateAllowedModel('id', { enabled: false }, 'admin-2', fakeDb(unrelated))
+      // Enabling/disabling is not a capability edit: evidence is frozen, so a
+      // published row keeps the exact metadata the ConfigMap already carries.
+      const setClause = String(unrelated.mock.calls[1][0]).split('WHERE')[0]
+      expect(setClause).not.toMatch(/image_input/)
     })
   })
 
@@ -310,6 +553,34 @@ describe('llmAllowedModels service', () => {
       expect(row.last_seen_at).toBeNull()
       expect(row.stale).toBe(false)
     })
+
+    it('normalizes legacy/malformed capability metadata to unknown and echoes curated evidence', async () => {
+      const query = vi.fn().mockResolvedValue({
+        rows: [
+          { ...ROW, image_input: null },
+          { ...ROW, id: '2', image_input: { state: 'bogus' } },
+          { ...ROW, id: '3', image_input: CURATED_SUPPORTED },
+          {
+            ...ROW,
+            id: '4',
+            image_input: {
+              state: 'supported',
+              evidence: {
+                ...CURATED_SUPPORTED.evidence,
+                reference: 'https://catalog.internal./docs',
+              },
+            },
+          },
+        ],
+        rowCount: 4,
+      })
+      const rows = await listAllowedModels(fakeDb(query))
+      expect(String(query.mock.calls[0][0])).toMatch(/image_input/)
+      expect(rows[0].image_input).toEqual({ state: 'unknown' })
+      expect(rows[1].image_input).toEqual({ state: 'unknown' })
+      expect(rows[2].image_input).toEqual(CURATED_SUPPORTED)
+      expect(rows[3].image_input).toEqual({ state: 'unknown' })
+    })
   })
 
   describe('listEnabledGroupedByProvider', () => {
@@ -363,6 +634,48 @@ describe('llmAllowedModels service', () => {
       expect(String(sql)).toContain("NOT (provider = 'codex-subscription' AND stale)")
       expect(String(sql)).not.toMatch(/AND NOT stale\b/)
       expect(grouped.openai).toEqual([{ model: 'gpt-legacy' }])
+    })
+
+    it('projects stored capability metadata and omits it when absent (#654)', async () => {
+      const query = vi.fn().mockResolvedValue({
+        rows: [
+          {
+            provider: 'zai',
+            model: 'glm-5.3-flash',
+            vendor: 'Zhipu',
+            display_name: null,
+            context_window_tokens: null,
+            image_input: CURATED_SUPPORTED,
+          },
+          {
+            provider: 'zai',
+            model: 'glm-5.3',
+            vendor: 'Zhipu',
+            display_name: null,
+            context_window_tokens: null,
+            image_input: null,
+          },
+          {
+            provider: 'zai',
+            model: 'glm-legacy',
+            vendor: null,
+            display_name: null,
+            context_window_tokens: null,
+          },
+        ],
+        rowCount: 3,
+      })
+      const grouped = await listEnabledGroupedByProvider(fakeDb(query))
+      expect(String(query.mock.calls[0][0])).toMatch(/image_input/)
+      expect(grouped.zai[0]).toEqual({
+        model: 'glm-5.3-flash',
+        vendor: 'Zhipu',
+        imageInput: CURATED_SUPPORTED,
+      })
+      // Absent metadata stays absent: consumers normalize it to `unknown`, and
+      // the serialized entry keeps the pre-#654 shape for uncurated rows.
+      expect(grouped.zai[1]).toEqual({ model: 'glm-5.3', vendor: 'Zhipu' })
+      expect(grouped.zai[2]).toEqual({ model: 'glm-legacy' })
     })
   })
 })

@@ -352,7 +352,8 @@ export interface PluginWorkloadSdkInvocationRecord {
 }
 
 // Schema lives in pluginWorkloadSdkSchema.ts (type-only db dependency) so
-// db.ts can register migration 0027 without a runtime import cycle.
+// db.ts can register migration 0034_plugin_workload_sdk without a runtime
+// import cycle.
 export { applyPluginWorkloadSdkSchema } from './pluginWorkloadSdkSchema.js'
 
 // ─── Hashing helpers ─────────────────────────────────────────────────────
@@ -1549,9 +1550,10 @@ export async function pluginWorkloadSdkSpendOutcomeExists(
 }
 
 /**
- * JTI-free reserved → in_progress for Codex authorize-link. Does not write
- * credential_jti. The secret-ticket path still promotes through
- * registerPluginWorkloadSdkCredentialTicketJti.
+ * JTI-free reserved → in_progress for oauth-broker authorize-link. Does not
+ * write credential_jti. The secret-ticket path still promotes through
+ * registerPluginWorkloadSdkCredentialTicketJti. Provider is a bind parameter
+ * so Codex and Grok cannot promote each other's reserved rows.
  */
 export async function promoteReservedOauthBrokerProviderAttempt(
   input: {
@@ -1563,6 +1565,7 @@ export async function promoteReservedOauthBrokerProviderAttempt(
     attemptIndex: number
     model: string
     targetRef: string
+    provider: 'codex-subscription' | 'grok-subscription'
   },
   db: DbClient
 ): Promise<boolean> {
@@ -1575,7 +1578,7 @@ export async function promoteReservedOauthBrokerProviderAttempt(
         AND recipe_name = $4
         AND attempt_generation = $5
         AND attempt_index = $6
-        AND provider = 'codex-subscription'
+        AND provider = $9
         AND model = $7
         AND target_ref = $8
         AND status = 'reserved'
@@ -1589,6 +1592,7 @@ export async function promoteReservedOauthBrokerProviderAttempt(
       input.attemptIndex,
       input.model,
       input.targetRef,
+      input.provider,
     ]
   )
   return (result.rowCount ?? 0) === 1

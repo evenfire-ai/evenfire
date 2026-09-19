@@ -39,7 +39,7 @@ const ACCESS_SUB_TABS: { key: AccessSubTab; label: string }[] = [
   { key: 'teams', label: 'Teams' },
 ]
 
-export function HostAccessTab({ hostName }: HostAccessTabProps) {
+export function HostAccessTab({ hostName, onActionsChange }: HostAccessTabProps) {
   const router = useRouter()
   const { confirm, confirmDialog } = useConfirmDialog()
   const { showToast } = useToast()
@@ -326,6 +326,21 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
       ? 'Grant or revoke which members can use this agent.'
       : 'Grant or revoke team-level access to this agent.'
 
+  useEffect(() => {
+    if (!onActionsChange) return
+    onActionsChange(
+      <button
+        type="button"
+        className="cu-btn cu-btn--primary cu-btn--sm"
+        onClick={() => (subTab === 'members' ? setShowAddUser(true) : setShowAddTeam(true))}
+        disabled={busy}
+      >
+        {subTab === 'members' ? 'Add member' : 'Add team'}
+      </button>
+    )
+    return () => onActionsChange(null)
+  }, [busy, onActionsChange, subTab])
+
   return (
     <section className="cu-access-tab" aria-label="Access">
       {error ? (
@@ -345,25 +360,16 @@ export function HostAccessTab({ hostName }: HostAccessTabProps) {
       <div className="cu-access-section">
         <div className="cu-access-section__header">
           <p className="cu-muted cu-access-section__description">{subTabDescription}</p>
-          {subTab === 'members' ? (
+          {!onActionsChange ? (
             <button
               type="button"
               className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddUser(true)}
+              onClick={() => (subTab === 'members' ? setShowAddUser(true) : setShowAddTeam(true))}
               disabled={busy}
             >
-              Add member
+              {subTab === 'members' ? 'Add member' : 'Add team'}
             </button>
-          ) : (
-            <button
-              type="button"
-              className="cu-btn cu-btn--primary cu-btn--sm"
-              onClick={() => setShowAddTeam(true)}
-              disabled={busy}
-            >
-              Add team
-            </button>
-          )}
+          ) : null}
         </div>
 
         <TableViewport className="cu-table-wrap">

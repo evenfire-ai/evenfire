@@ -22,6 +22,7 @@ import { ClaudeProvider } from './claude'
 import { type CodexSubscriptionDeps, CodexSubscriptionProvider } from './codexSubscription'
 import { buildBedrockConverseDriver } from './drivers/bedrockConverse'
 import { buildGoogleGenerativeDriver } from './drivers/googleGenerative'
+import { type GrokSubscriptionDeps, GrokSubscriptionProvider } from './grokSubscription'
 import { OpenAIProvider } from './openai'
 import { OpenAICompatibleProvider } from './openaiCompatible'
 import { type LlmProvider, descriptorFor, primarySlot } from './registryCore'
@@ -29,6 +30,7 @@ import type { SingleTurnProvider } from './types'
 
 export type MakeProviderOptions = {
   codex?: CodexSubscriptionDeps
+  grok?: GrokSubscriptionDeps
 }
 
 export {
@@ -97,6 +99,16 @@ export function makeProvider(
         )
       }
       return new CodexSubscriptionProvider(model, options.codex)
+    case 'grok-subscription':
+      if (process.env.MCP_HOST_GROK_SUBSCRIPTION_ENABLED !== 'true') {
+        throw new Error('[LLM] makeProvider: grok-subscription is disabled')
+      }
+      if (!model?.trim() || !options?.grok) {
+        throw new Error(
+          '[LLM] makeProvider: grok-subscription requires an explicit model and runtime authorizer/proxy dependencies'
+        )
+      }
+      return new GrokSubscriptionProvider(model, options.grok)
   }
 
   // Data-driven arm: anything carrying a baseURL is OpenAI-compatible and is

@@ -34,6 +34,7 @@ DEFAULT_CLUSTER_VITEST_SUITES=(
   integration/mcp-secret-rotation-isolation.test.ts
   integration/mcp-secret-rotation-shared.test.ts
   integration/mcp-secret-rotation-remote.test.ts
+  integration/mcp-runtime-conditions.test.ts
   integration/mcp-hcc-upgrade-rollout.test.ts
   integration/mcp-server-readiness-regression.test.ts
   integration/mcp-secrets-access-guard.test.ts

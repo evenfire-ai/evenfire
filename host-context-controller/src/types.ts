@@ -440,7 +440,7 @@ export type HostWorkflowControlScope =
   | 'workflow:approval:resolve'
   | 'workflow:approval:decide'
 
-export type DerivedPlatformScope = 'llm:codex:execute'
+export type DerivedPlatformScope = 'llm:codex:execute' | 'llm:grok:execute'
 // The full effective runtime control scope set minted into an mcp-host control
 // JWT: the user-declarable workflow-control scopes PLUS every HCC-derived scope
 // — `oauth:user-token` (see {@link HostRuntimeControlScope}) and the codex

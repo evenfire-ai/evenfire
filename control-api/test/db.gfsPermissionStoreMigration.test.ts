@@ -131,7 +131,7 @@ describe('db migration 0048_gfs_permission_store', () => {
     expect(invalidation).toContain('gfs_notify_perm_invalidate')
   })
 
-  it('records the 0043 version exactly once', async () => {
+  it('records the 0048_gfs_permission_store version exactly once', async () => {
     const { initDb } = await import('../src/db.js')
     await initDb()
     const recordCalls = clientQuery.mock.calls.filter(

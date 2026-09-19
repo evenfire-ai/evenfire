@@ -39,6 +39,12 @@ async function roundTrip(approval: PendingApproval): Promise<PendingApproval> {
   // persistSuspend requires.
   await manager.startTurn(conv, 'do the thing', 'task-1')
 
+  approval.task_budget = {
+    elapsedActiveMs: 0,
+    iterationsUsed: 1,
+    durationMs: 86400000,
+    maxIterations: 1000,
+  }
   await handle.store.persistSuspend(conv, approval)
 
   const s = prepareStatements(handle.worker.db)

@@ -46,7 +46,7 @@ describeRealPostgres('GFS immutable blob migration on real PostgreSQL', () => {
     await adminPool.end()
   })
 
-  it('applies 0068 exactly once with named constraints, indexes, and writer ACL', async () => {
+  it('applies 0071_gfs_immutable_blob_generations exactly once with named constraints, indexes, and writer ACL', async () => {
     const versions = await pool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM schema_migrations
         WHERE version = '0071_gfs_immutable_blob_generations'`

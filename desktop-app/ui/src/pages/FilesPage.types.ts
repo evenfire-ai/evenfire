@@ -20,6 +20,14 @@ export interface FilesPageProps {
    */
   pendingGfsUri?: string | null
   onPendingGfsUriHandled?: () => void
+  /**
+   * Reports the browser's live location so the owning files tab can persist it
+   * (mini-spec 06 §3). Emits the current leaf `gfsUri` (the stable identity) and
+   * the current folder's display name (the tab title) whenever the location
+   * changes, including back to the virtual root (`null`, `null`). The opaque
+   * `gfsUri` carries no name, hence the second argument.
+   */
+  onLocationChange?: (gfsUri: string | null, name: string | null) => void
 }
 
 /**

@@ -7,8 +7,10 @@ import type { AdministrativeOutcomeReporter } from './administrativeOutcomeRepor
 import {
   type CodexCatalogSnapshot,
   type CodexExecutionProjection,
+  GROK_EXECUTE_SCOPE,
   assignedHostCodexConnectionRef,
   projectCodexExecution,
+  projectGrokExecution,
 } from './codexExecutionProjection'
 import { config } from './config'
 import { HOST_LABEL, MANAGED_BY_LABEL, MANAGED_BY_VALUE } from './constants'
@@ -17,6 +19,7 @@ import { GFS_HOST_SCOPES } from './gfsHostPolicy'
 import { makeExpectedHostGfsSubject } from './gfsHostSubject'
 import type {
   HccInfrastructureTelemetryPayload,
+  HostLookupReference,
   InfrastructureTelemetryReporter,
 } from './infrastructureTelemetryReporter'
 import {
@@ -33,6 +36,7 @@ import {
 import {
   ALLOWED_MODELS_CONFIGMAP_NAME,
   parseAllowedModelsSnapshot,
+  parseGrokAllowedModelsSnapshot,
   snapshotForAssignedCodexGrant,
   snapshotFromConfigMapError,
 } from './llmAllowedModelsSnapshot'
@@ -499,16 +503,15 @@ type RuntimeTokenProvision = {
   scopeHash: string
 }
 
-type GfsTokenLifecycleEvidence = {
-  gfs_subject: string
-  gfs_outcome: 'minted' | 'rotated' | 'reused' | 'failed'
-  gfs_old_host_uid?: string
-  gfs_new_host_uid?: string
-}
+// Reported as the reconcile_outcome transition `gfs_token:<outcome>` (#328).
+type GfsTokenLifecycleOutcome = 'minted' | 'rotated' | 'reused' | 'failed'
 
 type DeploymentMutationState = {
   lifecycle: EffectiveHostLifecycle
   runtimeTokenRevision: string
+  // Captured in the same synchronous step as the stable scope-hash check so
+  // the pod's Grok factory switch and the minted llm:grok:execute scope agree.
+  grokExecutionEnabled: boolean
 }
 
 export class HostReconciler {
@@ -552,7 +555,7 @@ export class HostReconciler {
   ) => CommunicationChannelCRD[]
   private readonly infrastructureTelemetryReporter?: InfrastructureTelemetryReporter
   private readonly administrativeOutcomeReporter?: AdministrativeOutcomeReporter
-  private readonly gfsTokenLifecycleEvidence = new Map<string, GfsTokenLifecycleEvidence>()
+  private readonly gfsTokenLifecycleEvidence = new Map<string, GfsTokenLifecycleOutcome>()
   // B2: whether the CC cache initial-list has completed. Defaults to false
   // (safe: preserves existing Deployment replicas until wired by McpServerWatcher).
   private ccCacheSyncedFn: () => boolean = () => false
@@ -646,11 +649,7 @@ export class HostReconciler {
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
           sourceEventId: `hcc-health-transition:${this.newTelemetryOccurrenceId()}`,
           occurredAt,
-          hostLookupReference: {
-            name: host.name,
-            namespace: host.namespace,
-            ...(host.generation !== undefined ? { generation: host.generation } : {}),
-          },
+          hostLookupReference: this.hostLookupReference(host),
           payload: { transition: `lifecycle:${lifecycle.state}`, state: lifecycle.state },
         })
       },
@@ -998,23 +997,21 @@ export class HostReconciler {
       resource = await read()
     } catch (error) {
       if (getErrorCode(error) === 404) return
-      console.error(`[HostReconciler] Failed to read ${kind} "${name}" ownership:`, error)
+      log.error('Failed to read Host resource ownership', { kind, name, err: error })
       throw error
     }
 
     if (!this.isHccOwnedHostResource(resource, hostName)) {
-      console.warn(
-        `[HostReconciler] Skipping ${kind} "${name}" delete - not HCC-owned for Host "${hostName}"`
-      )
+      log.warn('Skipping Host resource delete - not HCC-owned', { kind, name, host: hostName })
       return
     }
 
     try {
       await remove()
-      console.log(`[HostReconciler] Deleted ${kind} "${name}" in ${namespace}`)
+      log.info('Deleted Host resource', { kind, name, namespace })
     } catch (error) {
       if (getErrorCode(error) !== 404) {
-        console.error(`[HostReconciler] Failed to delete ${kind} "${name}":`, error)
+        log.error('Failed to delete Host resource', { kind, name, err: error })
         throw error
       }
     }
@@ -1246,7 +1243,8 @@ export class HostReconciler {
     host: HostCRD,
     hasChannelIngress = false,
     frontsOAuthServer = false,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): string {
     // Hash the EFFECTIVE (resolved) scopes — what actually gets minted into the
     // control token — so change-detection matches the default-fallback applied
@@ -1254,21 +1252,33 @@ export class HostReconciler {
     // carries the first-party defaults, and the two drift). Uses the SAME
     // `resolveRuntimeControlScopes` as the mint path (see
     // `resolveEffectiveControlScopesForHost`) so the hashed set and the minted
-    // set — including the derive-only `oauth:user-token` and the codex
-    // projection's derived scopes — can never diverge.
+    // set — including the derive-only `oauth:user-token` and broker
+    // projections' derived scopes — can never diverge.
     const runtimeScopes = [
       ...resolveRuntimeControlScopes(host.spec.workflowControl, {
         hasChannelIngress,
         frontsOAuthServer,
       }),
     ].sort()
-    const derived = projection?.derivedScopes ?? []
-    if (derived.length === 0) {
+    const codexDerived = projection?.derivedScopes ?? []
+    const grokDerived = grokProjection?.derivedScopes ?? []
+    if (codexDerived.length === 0 && grokDerived.length === 0) {
       return HostReconciler.shortHash(runtimeScopes)
     }
+    // Codex-only Hosts must keep the pre-Grok hash input so an HCC upgrade
+    // does not remint every existing Codex runtime token.
+    if (grokDerived.length === 0) {
+      return HostReconciler.shortHash({
+        scopes: [...runtimeScopes, ...codexDerived].sort(),
+        drift: projection?.driftHashInput,
+      })
+    }
     return HostReconciler.shortHash({
-      scopes: [...runtimeScopes, ...derived].sort(),
-      drift: projection?.driftHashInput,
+      scopes: [...runtimeScopes, ...codexDerived, ...grokDerived].sort(),
+      drift: {
+        codex: projection?.driftHashInput,
+        grok: grokProjection?.driftHashInput,
+      },
     })
   }
 
@@ -1297,7 +1307,8 @@ export class HostReconciler {
     hasChannelIngress = false,
     frontsOAuthServer = false,
     preservedHostUid?: string,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): Record<string, string> {
     const refreshTtlSec = Number.isFinite(tokens.refreshExpiresInSeconds)
       ? Math.max(0, tokens.refreshExpiresInSeconds)
@@ -1316,7 +1327,8 @@ export class HostReconciler {
         host,
         hasChannelIngress,
         frontsOAuthServer,
-        projection
+        projection,
+        grokProjection
       ),
       [RUNTIME_TOKEN_ISSUER_ANNOTATION]: RUNTIME_TOKEN_ISSUER,
       [RUNTIME_TOKEN_AUDIENCE_ANNOTATION]: RUNTIME_TOKEN_AUDIENCE,
@@ -1348,7 +1360,8 @@ export class HostReconciler {
     nowMs: number,
     hasChannelIngress = false,
     frontsOAuthServer = false,
-    projection?: CodexExecutionProjection
+    projection?: CodexExecutionProjection,
+    grokProjection?: CodexExecutionProjection
   ): { refresh: boolean; rolloutRequired: boolean; reason: string; refreshTokenExpMs?: number } {
     const labels = secret.metadata?.labels ?? {}
     if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== host.name) {
@@ -1367,7 +1380,8 @@ export class HostReconciler {
       host,
       hasChannelIngress,
       frontsOAuthServer,
-      projection
+      projection,
+      grokProjection
     )
     const hasContractMetadata =
       RUNTIME_TOKEN_HOST_BINDING_HASH_ANNOTATION in annotations ||
@@ -1588,6 +1602,18 @@ export class HostReconciler {
     return projectCodexExecution(host.spec, snapshot)
   }
 
+  private projectGrokForHost(host: HostCRD): CodexExecutionProjection & {
+    requiresGrokProxyEgress: boolean
+  } {
+    const connectionKey = assignedHostCodexConnectionRef(host.spec.model?.connectionRef)
+    const snapshot = parseGrokAllowedModelsSnapshot(this.lastCodexConfigMap, connectionKey)
+    return projectGrokExecution(host.spec, snapshot)
+  }
+
+  private hostDerivesGrokExecution(host: HostCRD): boolean {
+    return this.projectGrokForHost(host).derivedScopes.includes(GROK_EXECUTE_SCOPE)
+  }
+
   private resolveEffectiveControlScopesForHost(
     host: HostCRD,
     frontsOAuthServer: boolean,
@@ -1598,9 +1624,10 @@ export class HostReconciler {
       hasChannelIngress,
       frontsOAuthServer
     )
-    const derived = this.projectCodexForHost(host).derivedScopes.filter(
-      scope => !workflow.includes(scope as HostWorkflowControlScope)
-    )
+    const derived = [
+      ...this.projectCodexForHost(host).derivedScopes,
+      ...this.projectGrokForHost(host).derivedScopes,
+    ].filter(scope => !workflow.includes(scope as HostWorkflowControlScope))
     return [...workflow, ...derived] as EffectiveMcpHostControlScope[]
   }
 
@@ -1613,7 +1640,8 @@ export class HostReconciler {
       host,
       hasChannelIngress,
       frontsOAuthServer,
-      this.projectCodexForHost(host)
+      this.projectCodexForHost(host),
+      this.projectGrokForHost(host)
     )
   }
 
@@ -1694,11 +1722,13 @@ export class HostReconciler {
         // hash never diverge.
         const frontsOAuthServer = await this.frontsOAuthServer(host)
         const projection = this.projectCodexForHost(host)
+        const grokProjection = this.projectGrokForHost(host)
         const scopeHash = HostReconciler.runtimeTokenScopeHash(
           host,
           hasChannelIngress,
           frontsOAuthServer,
-          projection
+          projection,
+          grokProjection
         )
         let decision: {
           refresh: boolean
@@ -1712,7 +1742,8 @@ export class HostReconciler {
               nowMs,
               hasChannelIngress,
               frontsOAuthServer,
-              projection
+              projection,
+              grokProjection
             )
           : { refresh: true, rolloutRequired: false, reason: 'missing_secret' }
         if (
@@ -1812,11 +1843,7 @@ export class HostReconciler {
             resourceName: name,
             refreshExpInHours,
           })
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: expectedGfsSubject,
-            gfs_outcome: 'reused',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'reused')
           const selectedRevision =
             rolloutPending || HostReconciler.shouldRollForRuntimeSecret(deployment, false)
               ? existingRevision
@@ -1884,7 +1911,8 @@ export class HostReconciler {
               hasChannelIngress,
               frontsOAuthServer,
               existing?.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION],
-              projection
+              projection,
+              grokProjection
             ),
             [RUNTIME_TOKEN_BOOTSTRAP_STATE_ANNOTATION]: RUNTIME_TOKEN_BOOTSTRAP_STATE_FRESH,
             [RUNTIME_TOKEN_ROLLOUT_REQUIRED_ANNOTATION]: rolloutRequired ? 'true' : 'false',
@@ -1895,11 +1923,7 @@ export class HostReconciler {
           await observeCreate('Secret', () =>
             this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
           )
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: expectedGfsSubject,
-            gfs_outcome: 'minted',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'minted')
           log.info('created mcp-host-runtime-token Secret', {
             host: host.name,
             namespace: host.namespace,
@@ -1921,13 +1945,7 @@ export class HostReconciler {
           namespace: host.namespace,
           body: replaceBody,
         })
-        const oldHostUid = existing.metadata?.annotations?.[GFS_TOKEN_HOST_UID_ANNOTATION]
-        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-          gfs_subject: expectedGfsSubject,
-          gfs_outcome: 'rotated',
-          ...(oldHostUid ? { gfs_old_host_uid: oldHostUid } : {}),
-          ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-        })
+        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'rotated')
         log.info('rotated mcp-host-runtime-token Secret', {
           host: host.name,
           namespace: host.namespace,
@@ -1943,13 +1961,8 @@ export class HostReconciler {
         }
       } catch (err) {
         lastErr = err
-        const subject = makeExpectedHostGfsSubject(host.namespace, host.name)
-        if (subject) {
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), {
-            gfs_subject: subject,
-            gfs_outcome: 'failed',
-            ...(host.uid ? { gfs_new_host_uid: host.uid } : {}),
-          })
+        if (makeExpectedHostGfsSubject(host.namespace, host.name)) {
+          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'failed')
         }
         if (err instanceof Error && err.name === 'GfsHostTokenValidationError') break
         const delayMs = 1000 * Math.pow(2, attempt - 1)
@@ -1977,10 +1990,7 @@ export class HostReconciler {
     try {
       return await this.ensureMcpHostRuntimeTokenSecret(host, options)
     } catch (err) {
-      console.error(
-        `[HostReconciler] mcpHost runtime token provisioning failed for host "${host.name}":`,
-        err
-      )
+      log.error('mcpHost runtime token provisioning failed', { host: host.name, err })
       this.setStatus(host.name, {
         deployed: false,
         ready: false,
@@ -2041,18 +2051,16 @@ export class HostReconciler {
       const secret = await this.coreApi.readNamespacedSecret({ name: secretName, namespace })
       const labels = secret.metadata?.labels ?? {}
       if (labels[MANAGED_BY_LABEL] !== MANAGED_BY_VALUE || labels[HOST_LABEL] !== name) {
-        console.warn(
-          `[HostReconciler] Skipping Secret "${secretName}" delete — not HCC-owned for Host "${name}"`
-        )
+        log.warn('Skipping runtime Secret delete - not HCC-owned', {
+          name: secretName,
+          host: name,
+        })
         return
       }
       await this.coreApi.deleteNamespacedSecret({ name: secretName, namespace })
     } catch (err) {
       if (getErrorCode(err) !== 404) {
-        console.error(
-          `[HostReconciler] Failed to delete runtime token Secret "${secretName}":`,
-          err
-        )
+        log.error('Failed to delete runtime Secret', { name: secretName, err })
         throw err
       }
     }
@@ -2073,9 +2081,9 @@ export class HostReconciler {
         labels['clerum.io/component'] === 'channel-reader' &&
         labels['clerum.io/secret-purpose'] === suffix
       if (!owned) {
-        console.warn(
-          `[HostReconciler] Skipping legacy runtime auth cleanup for "${nameToDelete}" because labels do not prove HCC ownership`
-        )
+        log.warn('Skipping legacy runtime auth cleanup; labels do not prove HCC ownership', {
+          name: nameToDelete,
+        })
         return
       }
       await this.coreApi.deleteNamespacedSecret({
@@ -2084,10 +2092,7 @@ export class HostReconciler {
       })
     } catch (err) {
       if (getErrorCode(err) !== 404) {
-        console.error(
-          `[HostReconciler] Failed legacy runtime auth cleanup for "${nameToDelete}":`,
-          err
-        )
+        log.error('Failed legacy runtime auth cleanup', { name: nameToDelete, err })
         throw err
       }
     }
@@ -2123,15 +2128,12 @@ export class HostReconciler {
     }
   }
 
-  private hostLookupReference(host: HostCRD): {
-    name: string
-    namespace: string
-    generation?: number
-  } {
+  private hostLookupReference(host: HostCRD): HostLookupReference {
     return {
       name: host.name,
       namespace: host.namespace,
       ...(host.generation !== undefined ? { generation: host.generation } : {}),
+      ...(host.uid !== undefined ? { uid: host.uid } : {}),
     }
   }
 
@@ -2176,14 +2178,36 @@ export class HostReconciler {
   private enqueueReconcileOutcome(host: HostCRD): void {
     const status = this.getStatus(host.name)
     const succeeded = status.deployed && status.ready
-    this.enqueueHostTelemetry(host, 'reconcile_outcome', succeeded ? 'ready' : 'not_ready', {
+    this.enqueueReconcileTelemetry(host, succeeded ? 'ready' : 'not_ready', {
       status: succeeded ? 'succeeded' : 'failed',
       phase: status.deployed ? 'deployed' : 'not_deployed',
       state: status.ready ? 'ready' : 'not_ready',
-      ...(this.gfsTokenLifecycleEvidence.get(HostReconciler.gfsLifecycleEvidenceKey(host)) ?? {}),
     })
-    this.gfsTokenLifecycleEvidence.delete(HostReconciler.gfsLifecycleEvidenceKey(host))
     if (succeeded) this.enqueueAdministrativeOutcome(host, 'succeeded', 'reconciled')
+  }
+
+  /**
+   * A pass that threw may not have written any status yet, so the status in
+   * memory can still be the previous pass's. Report the failure itself, not
+   * that status, and never an administrative `succeeded` (#327).
+   */
+  private enqueueReconcileExceptionOutcome(host: HostCRD): void {
+    this.enqueueReconcileTelemetry(host, 'reconcile_exception', { status: 'failed' })
+  }
+
+  private enqueueReconcileTelemetry(
+    host: HostCRD,
+    reasonCode: string,
+    payload: HccInfrastructureTelemetryPayload
+  ): void {
+    const evidenceKey = HostReconciler.gfsLifecycleEvidenceKey(host)
+    const gfsOutcome = this.gfsTokenLifecycleEvidence.get(evidenceKey)
+    this.gfsTokenLifecycleEvidence.delete(evidenceKey)
+    this.enqueueHostTelemetry(host, 'reconcile_outcome', reasonCode, {
+      ...payload,
+      // control-api allowlists `transition`, not gfs_* keys (#328).
+      ...(gfsOutcome ? { transition: `gfs_token:${gfsOutcome}` } : {}),
+    })
   }
 
   private enqueueAdministrativeOutcome(
@@ -2288,8 +2312,9 @@ export class HostReconciler {
     }
     if (this.pullPolicyRejectionLogged.get(host.name) !== image) {
       this.pullPolicyRejectionLogged.set(host.name, image)
-      console.warn(
-        `[HostReconciler] Stateless Host "${host.name}" runs imagePullPolicy=${resolution.policy} with mutable image "${image}" (no @sha256: digest, tag not sha-<gitsha>): a node with a stale cached image serves old code on wake. Pin an immutable reference to eliminate the risk.`
+      log.warn(
+        'Stateless Host runs a mutable image reference (no @sha256: digest, tag not sha-<gitsha>): a node with a stale cached image serves old code on wake. Pin an immutable reference to eliminate the risk.',
+        { host: host.name, imagePullPolicy: resolution.policy, image }
       )
     }
     return resolution.policy
@@ -2309,18 +2334,24 @@ export class HostReconciler {
       const code = getErrorCode(error)
       if (code === 404) {
         const message = `Secret "${host.spec.secretRef}" not found in namespace "${host.namespace}"`
-        console.error(`[HostReconciler] ${message}. Host "${host.name}" will not be deployed.`)
+        log.error('Host Secret not found; Host will not be deployed', {
+          host: host.name,
+          detail: message,
+        })
         return { ok: false, reason: 'SecretNotFound', message }
       }
       if (code === 401 || code === 403) {
         const message =
           `Access denied reading Secret "${host.spec.secretRef}" in namespace "${host.namespace}" ` +
           `(K8s API ${code})`
-        console.error(`[HostReconciler] ${message}. Host "${host.name}" will be failed closed.`)
+        log.error('Host Secret access denied; Host will be failed closed', {
+          host: host.name,
+          detail: message,
+        })
         return { ok: false, reason: 'SecretAccessDenied', message }
       }
       const message = `Failed to validate Secret "${host.spec.secretRef}" for host "${host.name}"`
-      console.error(`[HostReconciler] ${message}:`, error)
+      log.error('Failed to validate Host Secret', { host: host.name, detail: message, err: error })
       return { ok: false, reason: 'ReadError', message }
     }
   }
@@ -2724,13 +2755,17 @@ export class HostReconciler {
             ],
           }
         )
-        console.log(
-          `[HostReconciler] Patched ${depName} credentials-revision=${revision || '(empty)'}`
-        )
+        log.info('Patched channel-reader credentials-revision', {
+          deployment: depName,
+          revision: revision || '(empty)',
+        })
       })
     } catch (err) {
       if (getErrorCode(err) === 404) return
-      console.error(`[HostReconciler] Failed to reconcile ${depName} revision:`, err)
+      log.error('Failed to reconcile channel-reader credentials-revision', {
+        deployment: depName,
+        err,
+      })
     }
   }
 
@@ -2820,7 +2855,8 @@ export class HostReconciler {
     host: HostCRD,
     mounts: ResolvedSfsMount[] = [],
     runtimeTokenRevision = '',
-    lifecycle?: EffectiveHostLifecycle
+    lifecycle?: EffectiveHostLifecycle,
+    grokExecutionEnabled = this.hostDerivesGrokExecution(host)
   ): k8s.V1Deployment {
     const labels: Record<string, string> = {
       app: host.name,
@@ -2924,6 +2960,14 @@ export class HostReconciler {
       },
       { name: 'MCP_HOST_GATEWAY_URL', value: config.mcpHostGatewayUrl },
     ]
+    // mcp-host refuses to construct the grok-subscription provider unless this
+    // switch is on. Emit it only when this Host's Grok projection mints
+    // llm:grok:execute (same gate as the scope and grok-proxy egress policy),
+    // so an eligibility flip changes the pod template and rolls the Host.
+    // Non-Grok Hosts keep a byte-identical template.
+    if (grokExecutionEnabled) {
+      env.push({ name: 'MCP_HOST_GROK_SUBSCRIPTION_ENABLED', value: 'true' })
+    }
     if (isStateless) {
       env.push(
         { name: 'CLERUM_STATELESS_LIFECYCLE', value: 'true' },
@@ -3310,10 +3354,7 @@ export class HostReconciler {
         }
       }
       // Unknown error — surface it but don't throw.
-      console.warn(
-        `[HostReconciler] Failed to read channel-reader Deployment "${depName}" for status:`,
-        err
-      )
+      log.warn('Failed to read channel-reader Deployment for status', { deployment: depName, err })
       return {
         expected,
         ready: false,
@@ -3470,7 +3511,8 @@ export class HostReconciler {
         host,
         mounts,
         state?.runtimeTokenRevision ?? runtimeTokenRevision,
-        state?.lifecycle ?? lifecycle
+        state?.lifecycle ?? lifecycle,
+        state?.grokExecutionEnabled ?? this.hostDerivesGrokExecution(host)
       )
     }
     const mutationAllowed = () => {
@@ -3667,13 +3709,11 @@ export class HostReconciler {
       // Structured audit line — operators tail this to confirm the legacy
       // pod is gone post-deploy. Mirrors the format used by
       // sweepOrphanChannelReaderResources for consistency.
-      console.log(
-        `[HostReconciler] AUDIT: legacy-sweep deleted Deployment name=${depName} ns=${ns}`
-      )
+      log.info('AUDIT: legacy-sweep deleted Deployment', { name: depName, namespace: ns })
     } catch (err) {
       const code = getErrorCode(err)
       if (code === 404) return // already gone — steady state, no log
-      console.error(`[HostReconciler] legacy-sweep failed to delete "${depName}" in "${ns}":`, err)
+      log.error('legacy-sweep failed to delete Deployment', { name: depName, namespace: ns, err })
     }
   }
 
@@ -3722,10 +3762,7 @@ export class HostReconciler {
         '[HostReconciler]'
       )
     } catch (error) {
-      console.error(
-        `[HostReconciler] Failed to ensure desktop NetworkPolicy "${policyName}":`,
-        error
-      )
+      log.error('Failed to ensure desktop NetworkPolicy', { policy: policyName, err: error })
     }
   }
 
@@ -4215,6 +4252,84 @@ export class HostReconciler {
     await this.deleteMcpHostCodexProxyEgressNetworkPolicy(host)
   }
 
+  private async ensureMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-grok-proxy`
+    const policy: k8s.V1NetworkPolicy = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'NetworkPolicy',
+      metadata: {
+        name: policyName,
+        namespace: host.namespace,
+        labels: {
+          [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          [HOST_LABEL]: host.name,
+          'clerum.io/policy-type': 'grok-proxy-egress',
+        },
+      },
+      spec: {
+        podSelector: {
+          matchLabels: {
+            [HOST_LABEL]: host.name,
+            [MANAGED_BY_LABEL]: MANAGED_BY_VALUE,
+          },
+        },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              {
+                namespaceSelector: {
+                  matchLabels: { 'kubernetes.io/metadata.name': config.controlPlaneNamespace },
+                },
+                podSelector: {
+                  matchLabels: { app: 'grok-llm-proxy' },
+                },
+              },
+            ],
+            ports: [{ port: 8080, protocol: 'TCP' }],
+          },
+        ],
+      },
+    }
+    await applyNetworkPolicy(
+      this.networkingApi,
+      policyName,
+      host.namespace,
+      policy,
+      '[HostReconciler]'
+    )
+  }
+
+  private async deleteMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const policyName = `mcp-host-${host.name}-egress-grok-proxy`
+    await this.deleteIfHccOwned(
+      'NetworkPolicy',
+      policyName,
+      host.namespace,
+      host.name,
+      () =>
+        this.networkingApi.readNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        }),
+      () =>
+        this.networkingApi.deleteNamespacedNetworkPolicy({
+          name: policyName,
+          namespace: host.namespace,
+        })
+    )
+  }
+
+  private async reconcileMcpHostGrokProxyEgressNetworkPolicy(host: HostCRD): Promise<void> {
+    const projection = this.projectGrokForHost(host)
+    if (projection.eligibility === 'uncertain') return
+    if (projection.requiresGrokProxyEgress) {
+      await this.ensureMcpHostGrokProxyEgressNetworkPolicy(host)
+      return
+    }
+    await this.deleteMcpHostGrokProxyEgressNetworkPolicy(host)
+  }
+
   /**
    * Delete per-Host NetworkPolicies created by this reconciler.
    * 404-tolerant — safe to call even if NPs were never created or already gone.
@@ -4227,6 +4342,7 @@ export class HostReconciler {
       { name: `mcp-host-${name}-ingress-rpc-proxy`, namespace },
       { name: `mcp-host-${name}-egress-gfs`, namespace },
       { name: `mcp-host-${name}-egress-codex-proxy`, namespace },
+      { name: `mcp-host-${name}-egress-grok-proxy`, namespace },
       { name: `mcp-host-${name}-egress-llm-hooks`, namespace },
       { name: `channel-reader-${name}-egress`, namespace: config.channelsNamespace },
       {
@@ -4311,12 +4427,20 @@ export class HostReconciler {
           // NOT a hard failure — do NOT emit controller_error/reconcile_exception
           // or an administrative 'failed' outcome. Callers already treat the
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
-          // only console.error), so the rethrow is preserved.
+          // only log the error), so the rethrow is preserved.
+          // This exit emits no outcome, so drop the GFS evidence this pass
+          // recorded. Keyed by namespace/name, a leftover would be reported by
+          // the next pass, or by a recreated Host with the same name. The
+          // stateless suspension path also calls reconcileCore without emitting
+          // an outcome and does not clear the entry (#696).
+          this.gfsTokenLifecycleEvidence.delete(
+            HostReconciler.gfsLifecycleEvidenceKey(admittedHost)
+          )
           this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
           throw error
         }
         this.enqueueControllerError(admittedHost, 'reconcile_exception', error)
-        this.enqueueReconcileOutcome(admittedHost)
+        this.enqueueReconcileExceptionOutcome(admittedHost)
         this.observeReconcileLatency(source, 'error', dispatchedAt, admittedAt)
         throw error
       } finally {
@@ -4391,9 +4515,9 @@ export class HostReconciler {
           deleteWorkspacePvc: false,
         })
       } else {
-        console.warn(
-          `[HostReconciler] Preserving existing runtime for "${host.name}" after transient Secret read failure`
-        )
+        log.warn('Preserving existing runtime after transient Secret read failure', {
+          host: host.name,
+        })
       }
       this.setStatus(host.name, {
         deployed: false,
@@ -4422,7 +4546,7 @@ export class HostReconciler {
       // reconciliation — the pod will still come up without the SFS mounts,
       // and a subsequent reconcile (Context update or SFS becoming Ready)
       // will inject them.
-      console.error(`[HostReconciler] Failed to resolve context mounts for "${host.name}":`, err)
+      log.error('Failed to resolve context mounts', { host: host.name, err })
     }
     revalidateHostMutationBoundary()
     // Stateless lifecycle (Stage 2): assess enable/reject and persist the
@@ -4482,13 +4606,15 @@ export class HostReconciler {
       await this.ensureMcpHostGfsEgressNetworkPolicy(host)
       revalidateHostMutationBoundary()
       await this.reconcileMcpHostCodexProxyEgressNetworkPolicy(host)
+      revalidateHostMutationBoundary()
+      await this.reconcileMcpHostGrokProxyEgressNetworkPolicy(host)
       // The mcp-host→llm-hooks egress policy is now owned by LlmHookReconciler
       // (per-host, scoped to referenced hook pods — N1/N7); host-delete cleanup
       // of `mcp-host-<host>-egress-llm-hooks` stays in deleteHostNetworkPolicies.
       revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderMcpHostIngressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure mcp-host NP for "${host.name}":`, err)
+      log.error('Failed to ensure mcp-host NP', { host: host.name, err })
       npFailures.push(`mcp-host NP: ${(err as Error).message}`)
     }
     try {
@@ -4497,7 +4623,7 @@ export class HostReconciler {
       revalidateHostMutationBoundary()
       await this.ensureRpcProxyHostEgressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure rpc-proxy host NP for "${host.name}":`, err)
+      log.error('Failed to ensure rpc-proxy host NP', { host: host.name, err })
       npFailures.push(`rpc-proxy NP: ${(err as Error).message}`)
     }
     revalidateHostMutationBoundary()
@@ -4508,7 +4634,7 @@ export class HostReconciler {
       revalidateHostMutationBoundary()
       await this.ensureWorkflowApprovalReaderHostEgressNetworkPolicy(host)
     } catch (err) {
-      console.error(`[HostReconciler] Failed to ensure channels egress NP for "${host.name}":`, err)
+      log.error('Failed to ensure channels egress NP', { host: host.name, err })
       npFailures.push(`egress NP: ${(err as Error).message}`)
     }
 
@@ -4592,6 +4718,7 @@ export class HostReconciler {
           return {
             lifecycle: effective,
             runtimeTokenRevision: runtimeTokenProvision.revision,
+            grokExecutionEnabled: this.hostDerivesGrokExecution(host),
           }
         }
         log.warn('CommunicationChannel scope contract changed before Deployment mutation', {
@@ -4769,7 +4896,7 @@ export class HostReconciler {
           })
           return
         }
-        console.error(`[HostReconciler] Fleet reconcile failed for Host "${name}":`, error)
+        log.error('Fleet reconcile failed for Host', { host: name, err: error })
         throw error
       }
     })
@@ -4807,7 +4934,7 @@ export class HostReconciler {
       const reason =
         !capturedAuthority.known || !current.known ? 'authority_unknown' : 'generation_changed'
       hostCleanupDeferredTotal.inc({ reason })
-      console.warn(`[HostReconciler] Deferring orphan cleanup: ${reason}`)
+      log.warn('Deferring orphan cleanup', { reason })
       return failures
     }
 
@@ -4827,9 +4954,10 @@ export class HostReconciler {
       if (!candidate.owner) {
         // Never delete a resource whose owning Host cannot be derived.
         hostCleanupDeferredTotal.inc({ reason: 'no_owner_label' })
-        console.warn(
-          `[HostReconciler] Deferring orphan candidate ${candidate.kind}/${candidate.name}: no derivable owning Host`
-        )
+        log.warn('Deferring orphan candidate: no derivable owning Host', {
+          kind: candidate.kind,
+          name: candidate.name,
+        })
         continue
       }
       if (cacheHasHost(candidate.owner)) continue // still present → retain
@@ -4851,9 +4979,7 @@ export class HostReconciler {
       async hostName => {
         if (!authorityValid()) {
           hostCleanupDeferredTotal.inc({ reason: 'watch_lost' })
-          console.warn(
-            `[HostReconciler] Deferring orphan cleanup for "${hostName}": watch authority lost`
-          )
+          log.warn('Deferring orphan cleanup: watch authority lost', { host: hostName })
           return
         }
         const presence = await this.readHostPresence(hostName)
@@ -4907,10 +5033,7 @@ export class HostReconciler {
             await this.deleteHostRuntimeResources(hostName, config.hostNamespace)
           })
         } catch (error) {
-          console.error(
-            `[HostReconciler] Fleet cleanup failed for orphan Host "${hostName}":`,
-            error
-          )
+          log.error('Fleet cleanup failed for orphan Host', { host: hostName, err: error })
           throw error
         }
       }
@@ -4942,7 +5065,7 @@ export class HostReconciler {
         )
       }
     } catch (error) {
-      console.error('[HostReconciler] Failed to list managed host deployments:', error)
+      log.error('Failed to list managed host deployments', { err: error })
       listFailures.push(error)
     }
 
@@ -4957,7 +5080,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderDeployment', dep.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Deployment candidate list failed:', error)
+      log.warn('channel-reader Deployment candidate list failed', { err: error })
       listFailures.push(error)
     }
     try {
@@ -4968,7 +5091,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderService', svc.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Service candidate list failed:', error)
+      log.warn('channel-reader Service candidate list failed', { err: error })
       listFailures.push(error)
     }
     try {
@@ -4985,7 +5108,7 @@ export class HostReconciler {
         pushOwner('ChannelReaderSecret', sec.metadata?.name, labels[HOST_LABEL])
       }
     } catch (error) {
-      console.warn('[HostReconciler] channel-reader Secret candidate list failed:', error)
+      log.warn('channel-reader Secret candidate list failed', { err: error })
       listFailures.push(error)
     }
 
@@ -5010,7 +5133,7 @@ export class HostReconciler {
           pushOwner(kind, item.metadata?.name, item.metadata?.labels?.[HOST_LABEL])
         }
       } catch (error) {
-        console.warn(`[HostReconciler] ${kind} candidate list failed in ${hostNs}:`, error)
+        log.warn('Owned resource candidate list failed', { kind, namespace: hostNs, err: error })
         listFailures.push(error)
       }
     }
@@ -5049,7 +5172,7 @@ export class HostReconciler {
           pushOwner('NetworkPolicy', np.metadata?.name, np.metadata?.labels?.[HOST_LABEL])
         }
       } catch (error) {
-        console.warn(`[HostReconciler] NetworkPolicy candidate list failed in ${ns}:`, error)
+        log.warn('NetworkPolicy candidate list failed', { namespace: ns, err: error })
         listFailures.push(error)
       }
     }
@@ -5075,7 +5198,7 @@ export class HostReconciler {
       return 'present'
     } catch (error) {
       if (getErrorCode(error) === 404) return 'absent'
-      console.warn(`[HostReconciler] Fresh authoritative read for orphan "${name}" failed:`, error)
+      log.warn('Fresh authoritative read for orphan Host failed', { host: name, err: error })
       return 'error'
     }
   }

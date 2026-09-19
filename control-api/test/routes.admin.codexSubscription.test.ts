@@ -140,6 +140,7 @@ describe('admin Codex subscription routes', () => {
   beforeEach(() => {
     app = makeAuthedApp()
     config.codexSubscriptionEnabled = true
+    config.grokSubscriptionEnabled = false
     config.codexOAuthClientId = originalClientId
     config.controlUiBaseUrl = originalControlUiBaseUrl
     for (const fn of Object.values(oauth)) fn.mockReset()
@@ -157,6 +158,51 @@ describe('admin Codex subscription routes', () => {
       connection: { connectionKey: 'codex-aaa', status: 'connected', catalogStatus: 'ready' },
     })
     vi.mocked(pool.query).mockReset()
+  })
+
+  it('returns 404 not_found for a static-credentials provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/openai/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    assertNoLeak(res.body)
+  })
+
+  it('returns 404 not_found for an unknown provider id', async () => {
+    const res = await request(app).get('/admin/llm/providers/not-a-provider/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+  })
+
+  it('returns 404 disabled for grok-subscription when that flag is off', async () => {
+    config.grokSubscriptionEnabled = false
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
+  })
+
+  it('does not expose Codex un-keyed aliases for grok-subscription', async () => {
+    config.grokSubscriptionEnabled = true
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connection')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    const browser = await request(app).post('/admin/llm/providers/grok-subscription/browser/start')
+    expect(browser.status).toBe(404)
+    expect(browser.body).toEqual({ error: 'not_found' })
+  })
+
+  it('lists Grok connections when the Grok flag is on', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValue({ rows: [], rowCount: 0 })
+    const res = await request(app).get('/admin/llm/providers/grok-subscription/connections')
+    expect(res.status).toBe(200)
+    expect(res.body.connections).toEqual([])
+  })
+
+  it('returns 404 disabled for the connections list when the Codex flag is off', async () => {
+    config.codexSubscriptionEnabled = false
+    const res = await request(app).get('/admin/llm/providers/codex-subscription/connections')
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'disabled' })
   })
 
   it('returns 404 while the feature flag is off', async () => {
@@ -914,6 +960,35 @@ describe('admin Codex subscription routes', () => {
       .send({ displayName: 'Tomb' })
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'no_grant' })
+  })
+
+  it('Grok metadata PATCH reports only Grok Hosts assigned to a same-named key', async () => {
+    config.grokSubscriptionEnabled = true
+    vi.mocked(pool.query).mockResolvedValueOnce({
+      rows: [safeCreatedRow('team-shared', 'Shared')],
+      rowCount: 1,
+    })
+    const gateway = makeGateway()
+    gateway.listResource.mockResolvedValue([
+      {
+        metadata: { name: 'codex-host-a' },
+        spec: {
+          model: { provider: 'codex-subscription', name: 'gpt-5.1', connectionRef: 'team-shared' },
+        },
+      },
+      {
+        metadata: { name: 'grok-host-b' },
+        spec: {
+          model: { provider: 'grok-subscription', name: 'grok-4.6', connectionRef: 'team-shared' },
+        },
+      },
+    ])
+    const res = await request(makeAuthedApp(gateway))
+      .patch('/admin/llm/providers/grok-subscription/connections/team-shared')
+      .send({ displayName: 'Shared' })
+    expect(res.status).toBe(200)
+    expect(res.body.assignedHosts).toEqual([{ name: 'grok-host-b' }])
+    assertNoLeak(res.body)
   })
 
   it('lists grant models and toggles enabled', async () => {

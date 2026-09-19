@@ -16,6 +16,7 @@ import { buildGfsReadTools, buildGfsWriteTools } from '../internalTools/gfs'
 import { createGfscClient, hasGfsRuntimeAccess } from '../internalTools/gfsClient'
 import { SingleTurnProvider, createLLMProvider } from '../llm'
 import { type LlmProvider, descriptorFor, isLlmProvider } from '../llm/registryCore'
+import { logger } from '../logger'
 import {
   configurePluginWorkloadSdkBootstrapIdentity,
   resolvePluginWorkloadSdkBootstrapCapabilityFamily,
@@ -106,6 +107,8 @@ function monoCredentialBag(provider: LlmProvider, apiKey: string): ApiKeys {
       return { azure: { 'azure-openai-api-key': apiKey } }
     case 'codex-subscription':
       return {}
+    case 'grok-subscription':
+      return {}
     default: {
       const _exhaustive: never = provider
       void _exhaustive
@@ -124,6 +127,8 @@ function credentialBagForProvider(provider: LlmProvider, apiKey: string): ApiKey
 const MAX_SOUL_BYTES = 64 * 1024 // 64KB
 const DEFAULT_TIMEOUT_SECONDS = 300
 const MAX_WORKFLOW_OUTPUT_TOKENS_CEILING = 65_536
+/** Structured-log component label (preserves the former `[WorkflowService]` prefix). */
+const LOG_COMPONENT = 'WorkflowService'
 const PROVIDER_LENGTH_ERROR =
   'provider_output_length_exceeded: provider stopped because the configured output token limit was reached; write full reports to /output artifacts'
 const PROVIDER_LENGTH_CONTINUATION_PROMPT =
@@ -131,7 +136,7 @@ const PROVIDER_LENGTH_CONTINUATION_PROMPT =
 
 /**
  * Resolve per-step timeout ceiling from CLERUM_MAX_STEP_TIMEOUT_SECONDS.
- * Invalid env values fall back to `fallback` (with console.warn). The
+ * Invalid env values fall back to `fallback` (with a structured warning). The
  * `hardCeiling` clamps egregious env typos so a misconfig cannot pin a step
  * effectively forever. Exported as a pure function for unit-testability.
  */
@@ -144,10 +149,16 @@ export function resolveMaxStepTimeoutSeconds(
   if (env === undefined || env.trim() === '') return fallback
   const n = Number(env)
   if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > hardCeiling) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[WorkflowService] Ignoring CLERUM_MAX_STEP_TIMEOUT_SECONDS="${env}" ` +
-        `(must be an integer between ${min} and ${hardCeiling}); falling back to ${fallback}.`
+    logger.warn(
+      {
+        component: LOG_COMPONENT,
+        envVar: 'CLERUM_MAX_STEP_TIMEOUT_SECONDS',
+        value: env,
+        min,
+        max: hardCeiling,
+        fallback,
+      },
+      'Ignoring invalid CLERUM_MAX_STEP_TIMEOUT_SECONDS (must be an integer within bounds); using fallback'
     )
     return fallback
   }
@@ -624,7 +635,9 @@ export class WorkflowService {
       input_tokens: usage?.input_tokens ?? 0,
       output_tokens: usage?.output_tokens ?? 0,
     }
-    if (served.provider === 'codex-subscription') return
+    if (served.provider === 'codex-subscription' || served.provider === 'grok-subscription') {
+      return
+    }
     this.usageReporter.enqueue(event)
   }
 
@@ -788,9 +801,16 @@ export class WorkflowService {
       buildFallback: (entry: ResolvedFallbackEntry) =>
         this.llmFactory(entry.provider, entry.model, entry.apiKey),
       onSwitch: event => {
-        console.warn(
-          `[WorkflowService] LLM failover: ${event.from.provider}/${event.from.model} → ` +
-            `${event.to.provider}/${event.to.model} (reason=${event.reason})`
+        logger.warn(
+          {
+            component: LOG_COMPONENT,
+            fromProvider: event.from.provider,
+            fromModel: event.from.model,
+            toProvider: event.to.provider,
+            toModel: event.to.model,
+            reason: event.reason,
+          },
+          'LLM failover'
         )
       },
     })
@@ -988,15 +1008,24 @@ export class WorkflowService {
       // Logged regardless of the verdict so a missing price row is caught before
       // the drift grows.
       if (budgetVerdict.unpriced?.length) {
-        console.warn('[WorkflowService] budget_unpriced_usage', {
-          stepId: req.stepId,
-          recipe_name: budgetRecipeName,
-          pairs: budgetVerdict.unpriced,
-        })
+        logger.warn(
+          {
+            component: LOG_COMPONENT,
+            stepId: req.stepId,
+            recipe_name: budgetRecipeName,
+            pairs: budgetVerdict.unpriced,
+          },
+          'budget_unpriced_usage'
+        )
       }
       if (!budgetVerdict.allowed) {
-        console.warn(
-          `[WorkflowService] Step "${req.stepId}" denied by budget: ${budgetVerdict.reason ?? 'budget_exceeded'}`
+        logger.warn(
+          {
+            component: LOG_COMPONENT,
+            stepId: req.stepId,
+            reason: budgetVerdict.reason ?? 'budget_exceeded',
+          },
+          'Step denied by budget'
         )
         return {
           stepId: req.stepId,
@@ -1022,8 +1051,9 @@ export class WorkflowService {
       // 0. Gate on human approval if the step requires it
       const runtimeAuth = this.getRuntimeAuth()
       if (req.requiresApproval && !runtimeAuth) {
-        console.error(
-          `[WorkflowService] Step "${req.stepId}" requires approval but runtime auth is not configured`
+        logger.error(
+          { component: LOG_COMPONENT, stepId: req.stepId },
+          'Step requires approval but runtime auth is not configured'
         )
         this.revertSoulToGlobal()
         return {
@@ -1035,7 +1065,10 @@ export class WorkflowService {
         }
       }
       if (req.requiresApproval && runtimeAuth) {
-        console.log(`[WorkflowService] Step "${req.stepId}" requires approval — gating`)
+        logger.info(
+          { component: LOG_COMPONENT, stepId: req.stepId },
+          'Step requires approval; gating'
+        )
         try {
           await gateStep(
             {
@@ -1047,11 +1080,21 @@ export class WorkflowService {
             },
             runtimeAuth
           )
-          console.log(`[WorkflowService] Step "${req.stepId}" approval granted — proceeding`)
+          logger.info(
+            { component: LOG_COMPONENT, stepId: req.stepId },
+            'Step approval granted; proceeding'
+          )
         } catch (approvalErr) {
           const approvalMsg =
             approvalErr instanceof Error ? approvalErr.message : String(approvalErr)
-          console.error(`[WorkflowService] Step "${req.stepId}" approval denied: ${approvalMsg}`)
+          logger.error(
+            {
+              component: LOG_COMPONENT,
+              stepId: req.stepId,
+              reason: sanitizeErrorMessage(approvalMsg),
+            },
+            'Step approval denied'
+          )
           this.revertSoulToGlobal()
           return {
             stepId: req.stepId,
@@ -1168,8 +1211,20 @@ export class WorkflowService {
           }
 
           const promptTokenEstimate = messages.reduce((a, m) => a + m.content.length, 0)
-          console.log(
-            `[WorkflowService] LLM call #${i + 1}/${MAX_ITERATIONS} for step "${req.stepId}" (${messages.length} msgs, ~${Math.round(promptTokenEstimate / 4)} tokens, timeout: ${timeoutMs}ms)`
+          // Field names avoid the logger's sensitive-key pattern (/token/i), which
+          // would otherwise redact these non-secret size/usage counters.
+          logger.info(
+            {
+              component: LOG_COMPONENT,
+              stepId: req.stepId,
+              iteration: i + 1,
+              maxIterations: MAX_ITERATIONS,
+              messageCount: messages.length,
+              promptChars: promptTokenEstimate,
+              promptSizeEstimate: Math.round(promptTokenEstimate / 4),
+              timeoutMs,
+            },
+            'LLM call started'
           )
           const shouldForceFinalText =
             remainingIterations <= 1 && (!requiresToolCall || toolsCalled.length > 0)
@@ -1189,8 +1244,20 @@ export class WorkflowService {
             timeoutMs,
             abortController.signal
           )
-          console.log(
-            `[WorkflowService] LLM response #${i + 1}: tool_calls=${response.tool_calls?.length ?? 0}, content_len=${response.content?.length ?? 0}, tokens=${JSON.stringify(response.usage ?? {})}`
+          logger.info(
+            {
+              component: LOG_COMPONENT,
+              stepId: req.stepId,
+              iteration: i + 1,
+              toolCallCount: response.tool_calls?.length ?? 0,
+              contentLength: response.content?.length ?? 0,
+              inputUsage: response.usage?.input_tokens,
+              outputUsage: response.usage?.output_tokens,
+              totalUsage: response.usage?.total_tokens,
+              cacheReadUsage: response.usage?.cache_read_tokens,
+              cacheWriteUsage: response.usage?.cache_write_tokens,
+            },
+            'LLM response received'
           )
 
           totalInputTokens += response.usage?.input_tokens ?? 0
@@ -1233,8 +1300,9 @@ export class WorkflowService {
           const candidateOutput = response.content ?? ''
           if (requiresToolCall && toolsCalled.length === 0) {
             if (i < MAX_ITERATIONS - 1) {
-              console.warn(
-                `[WorkflowService] Step "${req.stepId}" required a tool call but response #${i + 1} returned none; retrying with tool requirement`
+              logger.warn(
+                { component: LOG_COMPONENT, stepId: req.stepId, iteration: i + 1 },
+                'Step required a tool call but the response returned none; retrying with tool requirement'
               )
               messages.push({
                 role: 'assistant',
@@ -1248,8 +1316,9 @@ export class WorkflowService {
               })
               continue
             }
-            console.error(
-              `[WorkflowService] Step "${req.stepId}" required a tool call but the provider returned no structured tool_calls`
+            logger.error(
+              { component: LOG_COMPONENT, stepId: req.stepId },
+              'Step required a tool call but the provider returned no structured tool_calls'
             )
             this.revertSoulToGlobal()
             return {
@@ -1267,8 +1336,9 @@ export class WorkflowService {
               lengthPartialOutput = candidateOutput
               messages.push({ role: 'assistant', content: candidateOutput })
               messages.push({ role: 'user', content: PROVIDER_LENGTH_CONTINUATION_PROMPT })
-              console.warn(
-                `[WorkflowService] Step "${req.stepId}" hit provider output token limit; requesting one bounded continuation`
+              logger.warn(
+                { component: LOG_COMPONENT, stepId: req.stepId, iteration: i + 1 },
+                'Step hit provider output token limit; requesting one bounded continuation'
               )
               continue
             }
@@ -1285,8 +1355,14 @@ export class WorkflowService {
           )
 
           if (isSuspicious && i < MAX_ITERATIONS - 1) {
-            console.log(
-              `[WorkflowService] Step "${req.stepId}" response #${i + 1} looks suspicious (${candidateOutput.length} chars), requesting proper summary`
+            logger.info(
+              {
+                component: LOG_COMPONENT,
+                stepId: req.stepId,
+                iteration: i + 1,
+                outputLength: candidateOutput.length,
+              },
+              'Step response looks suspicious; requesting proper summary'
             )
             messages.push({ role: 'assistant', content: candidateOutput })
             messages.push({
@@ -1331,8 +1407,9 @@ export class WorkflowService {
               lengthPartialOutput = candidateOutput
               messages.push({ role: 'assistant', content: candidateOutput })
               messages.push({ role: 'user', content: PROVIDER_LENGTH_CONTINUATION_PROMPT })
-              console.warn(
-                `[WorkflowService] Step "${req.stepId}" hit provider output token limit; requesting one bounded continuation`
+              logger.warn(
+                { component: LOG_COMPONENT, stepId: req.stepId, iteration: i + 1 },
+                'Step hit provider output token limit; requesting one bounded continuation'
               )
               continue
             }
@@ -1381,8 +1458,14 @@ export class WorkflowService {
         finalOutput =
           `[Note: Research reached the iteration limit (${MAX_ITERATIONS} iterations, ${toolsCalled.length} tool calls: ${toolSummary}). ` +
           `The information gathered above represents partial results. A follow-up step can synthesize these findings.]`
-        console.log(
-          `[WorkflowService] Step "${req.stepId}" reached max iterations (${MAX_ITERATIONS}), returning partial results with ${toolsCalled.length} tool calls`
+        logger.info(
+          {
+            component: LOG_COMPONENT,
+            stepId: req.stepId,
+            maxIterations: MAX_ITERATIONS,
+            toolCallCount: toolsCalled.length,
+          },
+          'Step reached max iterations; returning partial results'
         )
       }
 
@@ -1404,12 +1487,18 @@ export class WorkflowService {
       const errStatus = extractHttpStatus(err)
       const cause =
         err instanceof Error && err.cause instanceof Error ? err.cause.message : undefined
-      console.error('[WorkflowService] Step caught error', {
-        stepId: req.stepId,
-        error: rawError,
-        cause,
-        stack: err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined,
-      })
+      const stackHead =
+        err instanceof Error ? err.stack?.split('\n').slice(0, 3).join(' ') : undefined
+      logger.error(
+        {
+          component: LOG_COMPONENT,
+          stepId: req.stepId,
+          error: sanitizeErrorMessage(rawError),
+          cause: cause === undefined ? undefined : sanitizeErrorMessage(cause),
+          stack: stackHead === undefined ? undefined : sanitizeErrorMessage(stackHead),
+        },
+        'Step caught error'
+      )
       // F-9 fix: surface timeout errors with canonical error code (matches abort-check at loop top)
       if (rawError === 'step-timeout') {
         return {
@@ -1437,7 +1526,17 @@ export class WorkflowService {
           : `LLM authentication failed (${errStatus}): ${providerLabel}/${modelLabel} rejected the API key. ` +
             `The key may be expired, invalid, or lack permission for model "${modelLabel}". ` +
             `Fix: verify the API key in the Kubernetes Secret is correct and active.`
-        console.error(`[WorkflowService] AUTH ERROR: ${diagnostic}`)
+        logger.error(
+          {
+            component: LOG_COMPONENT,
+            stepId: req.stepId,
+            status: errStatus,
+            provider: providerLabel,
+            model: modelLabel,
+            diagnostic: sanitizeErrorMessage(diagnostic),
+          },
+          'LLM authentication error'
+        )
         return {
           stepId: req.stepId,
           status: 'failed',

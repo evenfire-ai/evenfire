@@ -271,7 +271,227 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(201)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
+  })
+
+  it('POST /admin/recipes — dual-writes a Codex grant sent only on the canonical key', async () => {
+    const res = await api
+      .post('/admin/recipes')
+      .send({
+        metadata: {
+          name: 'codex-canonical-only',
+          annotations: { 'clerum.io/subscription-connection-ref': 'team-a' },
+        },
+        spec: {
+          agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          triggers: { onDemand: { allowedActors: ['user'] } },
+          steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+        },
+      })
+      .expect(201)
+    expect(res.body.metadata.annotations).toEqual({
+      'clerum.io/codex-connection-ref': 'team-a',
+      'clerum.io/subscription-connection-ref': 'team-a',
+    })
+  })
+
+  const ALIAS = 'clerum.io/codex-connection-ref'
+  const CANONICAL = 'clerum.io/subscription-connection-ref'
+
+  function brokerSpec(provider: 'codex-subscription' | 'grok-subscription') {
+    return {
+      agent: {
+        provider,
+        model: provider === 'grok-subscription' ? 'grok-4.6' : 'gpt-5.1',
+      },
+      triggers: { onDemand: { allowedActors: ['user'] } },
+      steps: [{ id: 'draft', instruction: 'Write', timeoutSeconds: 600 }],
+    }
+  }
+
+  const SDK_STATIC_SPEC = {
+    pluginWorkloadSdk: { promptBridge: { allowedModels: ['grok-4.6'] } },
+    workloads: [{ id: 'svc', type: 'deployment', image: 'my-image:latest' }],
+  }
+
+  async function createGrokRecipe(name: string) {
+    await api
+      .post('/admin/recipes')
+      .send({
+        metadata: { name, annotations: { [ALIAS]: '', [CANONICAL]: 'team-grok' } },
+        spec: brokerSpec('grok-subscription'),
+      })
+      .expect(201)
+  }
+
+  // Grok→Codex with the canonical-only writer shape used to validate the key
+  // and then silently persist both annotations empty. The server now treats
+  // an explicit key as the Codex choice and writes the Codex shape.
+  it('PUT /admin/recipes/:name — Grok→Codex canonical-only writes the Codex shape (no silent clear)', async () => {
+    await createGrokRecipe('grok-then-codex')
+    const res = await api
+      .put('/admin/recipes/grok-then-codex')
+      .send({
+        metadata: { annotations: { [CANONICAL]: 'team-codex' } },
+        spec: brokerSpec('codex-subscription'),
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      [ALIAS]: 'team-codex',
+      [CANONICAL]: 'team-codex',
+    })
+  })
+
+  // Omitted annotations across a broker change used to clear (Grok→Codex) or
+  // retain the old broker's key (Codex→Grok). Both now fail closed.
+  it('PUT /admin/recipes/:name — Grok→Codex without annotations is 422 providerChangeRequiresGrant', async () => {
+    await createGrokRecipe('grok-then-codex-omit')
+    const res = await api
+      .put('/admin/recipes/grok-then-codex-omit')
+      .send({ spec: brokerSpec('codex-subscription') })
+      .expect(422)
+    expect(res.body.errors[0].rule).toBe('providerChangeRequiresGrant')
+    const stored = await gateway.getResource('workflowrecipes', 'grok-then-codex-omit', SANDBOX_NS)
+    expect((stored as { metadata: { annotations: unknown } }).metadata.annotations).toEqual({
+      [ALIAS]: '',
+      [CANONICAL]: 'team-grok',
+    })
+  })
+
+  it('PUT /admin/recipes/:name — Codex→Grok without annotations is 422 providerChangeRequiresGrant', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-then-grok-omit', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-then-grok-omit')
+      .send({ spec: brokerSpec('grok-subscription') })
+      .expect(422)
+    expect(res.body.errors[0].rule).toBe('providerChangeRequiresGrant')
+  })
+
+  it('PUT /admin/recipes/:name — Codex→Grok explicit canonical writes the Grok shape', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-then-grok', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-then-grok')
+      .send({
+        metadata: { annotations: { [CANONICAL]: 'team-grok' } },
+        spec: brokerSpec('grok-subscription'),
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({ [ALIAS]: '', [CANONICAL]: 'team-grok' })
+  })
+
+  it('PUT /admin/recipes/:name — static→Codex without annotations requires a grant', async () => {
+    await api.post('/admin/recipes').send(VALID_RECIPE).expect(201)
+    const res = await api
+      .put('/admin/recipes/my-recipe')
+      .send({ spec: brokerSpec('codex-subscription') })
+      .expect(422)
+    expect(res.body.errors[0].rule).toBe('codexRecipeGrantRequired')
+  })
+
+  it.each([
+    ['POST /admin/recipes', 'post', '/admin/recipes'],
+    ['POST /admin/recipes/validate', 'post', '/admin/recipes/validate'],
+    ['PUT /admin/recipes/:name', 'put', '/admin/recipes/my-recipe'],
+  ] as const)(
+    '%s — static recipe with disagreeing annotations is 422, not 500',
+    async (_label, method, path) => {
+      if (method === 'put') await api.post('/admin/recipes').send(VALID_RECIPE).expect(201)
+      const res = await api[method](path).send({
+        metadata: { name: 'my-recipe', annotations: { [ALIAS]: 'a', [CANONICAL]: 'b' } },
+        spec: VALID_RECIPE.spec,
+      })
+      expect(res.status).toBe(422)
+      expect(res.body.errors[0].rule).toBe('subscriptionAnnotationsDisagree')
+    }
+  )
+
+  it('PUT /admin/recipes/:name — Codex→static with SDK keeps the SDK-owned identity', async () => {
+    await api
+      .post('/admin/recipes')
+      .send(codexSubscriptionRecipe('codex-then-sdk', 'team-plus'))
+      .expect(201)
+    const res = await api
+      .put('/admin/recipes/codex-then-sdk')
+      .send({
+        metadata: { annotations: { [ALIAS]: '', [CANONICAL]: '' } },
+        spec: SDK_STATIC_SPEC,
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({
+      [ALIAS]: 'team-plus',
+      [CANONICAL]: 'team-plus',
+    })
+  })
+
+  it('PUT /admin/recipes/:name — static SDK recipe keeps a Grok SDK identity when the editor sends empty annotations', async () => {
+    await api
+      .post('/admin/recipes')
+      .send({ metadata: { name: 'sdk-grok' }, spec: SDK_STATIC_SPEC })
+      .expect(201)
+    await gateway.updateResource(
+      'workflowrecipes',
+      'sdk-grok',
+      {
+        metadata: { annotations: { [ALIAS]: '', [CANONICAL]: 'team-grok' } },
+        spec: SDK_STATIC_SPEC,
+      },
+      SANDBOX_NS
+    )
+    const res = await api
+      .put('/admin/recipes/sdk-grok')
+      .send({
+        metadata: { annotations: { [ALIAS]: '', [CANONICAL]: '' } },
+        spec: SDK_STATIC_SPEC,
+      })
+      .expect(200)
+    expect(res.body.metadata.annotations).toEqual({ [ALIAS]: '', [CANONICAL]: 'team-grok' })
+  })
+
+  it('POST /admin/recipes — rejects mixed oauth-broker providers on agent and steps', async () => {
+    const res = await api.post('/admin/recipes').send({
+      metadata: { name: 'mixed-broker' },
+      spec: {
+        agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [
+          {
+            id: 'draft',
+            instruction: 'Write',
+            timeoutSeconds: 600,
+            agent: { provider: 'codex-subscription', model: 'gpt-5.1' },
+          },
+        ],
+      },
+    })
+    expect(res.status).toBe(422)
+    expect(res.body.errors[0].message).toMatch(/at most one oauth-broker/)
+  })
+
+  it('POST /admin/recipes — requires a Grok grant when only a step uses grok-subscription', async () => {
+    const res = await api.post('/admin/recipes').send({
+      metadata: { name: 'step-grok' },
+      spec: {
+        agent: { provider: 'openai', model: 'gpt-5.1' },
+        triggers: { onDemand: { allowedActors: ['user'] } },
+        steps: [
+          {
+            id: 'draft',
+            instruction: 'Write',
+            timeoutSeconds: 600,
+            agent: { provider: 'grok-subscription', model: 'grok-4.6' },
+          },
+        ],
+      },
+    })
+    expect(res.status).toBe(422)
+    expect(res.body.errors[0].rule).toBe('grokRecipeGrantRequired')
   })
 
   it('POST /admin/recipes — rejects a Codex recipe without a named grant', async () => {
@@ -304,6 +524,7 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(200)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': '',
+      'clerum.io/subscription-connection-ref': '',
     })
   })
 
@@ -324,6 +545,7 @@ describe.sequential('routes/admin/recipes', () => {
       .expect(200)
     expect(res.body.metadata.annotations).toEqual({
       'clerum.io/codex-connection-ref': 'team-plus',
+      'clerum.io/subscription-connection-ref': 'team-plus',
     })
     expect(res.body.spec.steps[0].instruction).toBe('Write v2')
   })

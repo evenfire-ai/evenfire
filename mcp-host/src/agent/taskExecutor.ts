@@ -5,9 +5,11 @@
  * Holds per-task state (task, conversation, tool count) that was previously
  * singleton on the AgentStateMachine.
  */
+import { randomUUID } from 'node:crypto'
 import { snapshotTaskTokenBaseline } from '../budget/taskBrake'
 import type { TaskTokenBaseline } from '../budget/taskBrake'
 import { config as appConfig } from '../config'
+import { bindTaskSignal, withAbort } from '../core/adapters/abortableLlmPort'
 import { maybeWrapFailover } from '../core/adapters/failoverLlmPort'
 import { maybeWrapHookedLlmPort } from '../core/adapters/hookedLlmPort'
 import { AdapterStaticContext, LlmPortAdapter } from '../core/adapters/llmPortAdapter'
@@ -41,6 +43,10 @@ import {
   runToolUseLoop,
   validateToolLinkages,
 } from '../core/orchestration/toolUseLoop'
+import {
+  collectToolAttachments,
+  mergeCollectedAttachments,
+} from '../core/orchestration/toolUseLoopMessages'
 import { buildTurnContextBlock } from '../core/orchestration/turnContext'
 import { DefaultReasoningFactory } from '../core/reasoning'
 import {
@@ -82,6 +88,7 @@ import { ApprovalExpiredError } from '../core/types'
 import type { UsageContext } from '../core/types'
 import type { TaskLifecycle } from '../lifecycle/taskLifecycle'
 import type { SingleTurnProvider } from '../llm'
+import type { ImageInputResolver } from '../llm/imageInput'
 import type { PromptCache } from '../llm/promptCache'
 import { stampStableHashGauge } from '../llm/promptCacheMetrics'
 import { isLlmProvider } from '../llm/registryCore'
@@ -107,6 +114,7 @@ import {
   looksLikeWorkflowTriggerSuccess,
   workflowAccessDeniedResponseForMessage,
 } from './providerWorkflowAccessGate'
+import { TaskExecutionBudget, TaskLimitError } from './taskExecutionBudget'
 import { TurnTimingRecorder } from './turnTiming'
 import type { AgentConfig, ExecutorFailoverSupport } from './types'
 
@@ -229,10 +237,19 @@ export interface TaskExecutorDeps {
    */
   failover?: ExecutorFailoverSupport
 
+  /**
+   * Issue #654 — live-catalog image-input capability lookup, keyed by the
+   * (provider, model) the adapter is about to send. Threaded to the primary
+   * port AND every failover adapter so the guard checks the pair that really
+   * runs. Absent → images fail closed with `LLM_IMAGE_INPUT_UNKNOWN` and
+   * text-only turns are unchanged.
+   */
+  imageInput?: ImageInputResolver
+
   // Callbacks to coordinator
   onApprovalNeeded: (requestId: string, taskId: string, approval: PendingApproval) => void
   onComplete: (task: Task) => void
-  onFail: (task: Task, error: TaskError) => void
+  onFail: (task: Task, error: TaskError, attachments?: Attachment[]) => void
 }
 
 export class TaskExecutor {
@@ -243,6 +260,9 @@ export class TaskExecutor {
   private state: ExecutorState = 'processing'
   private deps: TaskExecutorDeps
   private abortController = new AbortController()
+  private readonly executionBudget: TaskExecutionBudget
+  private legacyApprovalBudget = false
+  private readonly completedAttachments: Attachment[] = []
   private toolRegistryPromise: Promise<{
     registry: ToolRegistry
     loopController: LoopController
@@ -282,6 +302,10 @@ export class TaskExecutor {
     this.task = task
     this.taskId = task.id
     this.deps = deps
+    this.executionBudget = new TaskExecutionBudget(
+      deps.config.maxTaskDuration,
+      deps.config.maxToolCallsPerTask
+    )
     this.responseSafety = new BasicSafety(deps.secretEntriesProvider)
     // T1.5 — prefer a caller-supplied resolver (tests/mocks); else build the
     // FS-backed one from the storage; else fall back to the P.3 stub so
@@ -348,6 +372,9 @@ export class TaskExecutor {
     ) {
       throw new Error('persisted approval does not match its active conversation task')
     }
+    if (approval.task_budget !== undefined) this.executionBudget.restore(approval.task_budget)
+    else if (approval.legacy_budget === true) this.legacyApprovalBudget = true
+    else throw new Error('Pending approval has no verifiable execution budget')
     this.task.traceContext = approval.traceContext ?? this.conversation.traceContext ?? null
     this.state = 'waiting_approval'
   }
@@ -370,6 +397,7 @@ export class TaskExecutor {
 
     try {
       this.state = 'processing'
+      this.executionBudget.start(this.abortController)
       this.turnTiming = new TurnTimingRecorder(this.task.createdAt)
 
       // 1. Resolve session key, get/create conversation
@@ -453,7 +481,7 @@ export class TaskExecutor {
       // the no-cap path stays identical to before (no baseline, brake disabled).
       this.captureTaskTokenBaseline()
 
-      await this.prepareChannelWorkflowCallerContext()
+      await withAbort(() => this.prepareChannelWorkflowCallerContext(), this.abortController.signal)
       this.enqueueGovernedRunEvent('run_start', `task:${this.taskId}:start`)
       if (this.workflowAccessDeniedResponse && looksLikeWorkflowAccessRequest(userInput)) {
         this.logProviderWorkflowAccessDenied('request')
@@ -482,14 +510,45 @@ export class TaskExecutor {
         this.resolveCompletion?.()
       }
     } catch (error) {
+      if (
+        this.abortController.signal.aborted &&
+        !(this.abortController.signal.reason instanceof TaskLimitError)
+      ) {
+        if (this.conversation)
+          await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
+        this.resolveCompletion?.()
+        return
+      }
+      if (this.abortController.signal.reason instanceof TaskLimitError)
+        error = this.abortController.signal.reason
+      if (error instanceof TaskLimitError && this.conversation) {
+        this.executionBudget.pause()
+        try {
+          if (this.conversation.state === 'processing')
+            await this.deps.conversationManager.completeTurn(this.conversation, error.message)
+          else await this.deps.conversationManager.failTurn(this.conversation)
+        } catch (persistError) {
+          // A failed durable write must not prevent lifecycle failure or completion release.
+          logger.error(
+            { taskId: this.taskId, err: persistError },
+            'Failed to persist task limit interruption'
+          )
+        }
+      }
       const taskError = this.toTaskError(error)
       logger.error(
         { taskId: this.taskId, code: taskError.code, retryable: taskError.retryable, err: error },
         'Task failed'
       )
       this.state = 'failed'
-      this.deps.onFail(this.task, taskError)
+      if (error instanceof TaskLimitError && this.completedAttachments.length > 0) {
+        this.deps.onFail(this.task, taskError, [...this.completedAttachments])
+      } else {
+        this.deps.onFail(this.task, taskError)
+      }
       this.resolveCompletion?.()
+    } finally {
+      this.executionBudget.pause()
     }
   }
 
@@ -515,7 +574,27 @@ export class TaskExecutor {
         return
       }
 
+      const savedApproval = this.conversation.pending_approval
+      mergeCollectedAttachments(this.completedAttachments, savedApproval?.attachments ?? [])
+      collectToolAttachments(savedApproval?.completed_results ?? [], this.completedAttachments)
+      this.executionBudget.start(this.abortController)
       const approvalBeforeResolution = this.conversation.pending_approval
+      if (this.legacyApprovalBudget && approvalBeforeResolution) {
+        await this.handleLoopResult({
+          type: 'need_approval',
+          approval: {
+            ...approvalBeforeResolution,
+            request_id: randomUUID(),
+            replaces_request_id: approvalBeforeResolution.request_id,
+            legacy_budget: false,
+            description:
+              'Confirm continuation with a new execution budget; prior consumption was not recorded. ' +
+              approvalBeforeResolution.description,
+          },
+        })
+        this.legacyApprovalBudget = false
+        return
+      }
       await this.deps.conversationManager.approve(this.conversation, alwaysApprove)
       if (approvalBeforeResolution?.tool_call_id) {
         this.approvedToolCorrelation = {
@@ -598,7 +677,10 @@ export class TaskExecutor {
       // Execute approved tool outside loop.
       // IronClaw invariant #1: the snapshot's frozen messages must reach the
       // LLM verbatim — compaction would invalidate validateToolLinkages.
-      const loopConfig = await this.buildLoopConfig({ skipContextManager: true })
+      const loopConfig = await withAbort(
+        () => this.buildLoopConfig({ skipContextManager: true }),
+        this.abortController.signal
+      )
       const suspendedCall = {
         id: approval.tool_call_id,
         name: approval.tool_name,
@@ -629,7 +711,10 @@ export class TaskExecutor {
       }
 
       const execStart = Date.now()
+      this.executionBudget.assertTime()
       const toolResult = await executeSingleTool(suspendedCall, loopConfig)
+      collectToolAttachments([toolResult], this.completedAttachments)
+      this.executionBudget.assertTime()
 
       if (reporter) {
         reporter.reportToolComplete({
@@ -739,14 +824,60 @@ export class TaskExecutor {
         this.resolveCompletion?.()
       }
     } catch (error) {
+      if (
+        this.legacyApprovalBudget &&
+        !this.abortController.signal.aborted &&
+        !(error instanceof TaskLimitError) &&
+        this.conversation?.pending_approval?.legacy_budget === true
+      ) {
+        this.state = 'waiting_approval'
+        const pending = this.conversation.pending_approval
+        this.deps.onApprovalNeeded(pending.request_id, this.taskId, pending)
+        logger.error(
+          { taskId: this.taskId, err: error },
+          'Approval renewal failed; existing approval retained'
+        )
+        return
+      }
+      if (
+        this.abortController.signal.aborted &&
+        !(this.abortController.signal.reason instanceof TaskLimitError)
+      ) {
+        if (this.conversation)
+          await this.handleLoopResult({ type: 'cancelled', reason: 'signal_aborted' })
+        this.resolveCompletion?.()
+        return
+      }
+      if (this.abortController.signal.reason instanceof TaskLimitError)
+        error = this.abortController.signal.reason
+      if (error instanceof TaskLimitError && this.conversation) {
+        this.executionBudget.pause()
+        try {
+          if (this.conversation.state === 'processing')
+            await this.deps.conversationManager.completeTurn(this.conversation, error.message)
+          else await this.deps.conversationManager.failTurn(this.conversation)
+        } catch (persistError) {
+          // A failed durable write must not prevent lifecycle failure or completion release.
+          logger.error(
+            { taskId: this.taskId, err: persistError },
+            'Failed to persist task limit interruption'
+          )
+        }
+      }
       const taskError = this.toTaskError(error)
       logger.error(
         { taskId: this.taskId, code: taskError.code, retryable: taskError.retryable, err: error },
         'Resume failed'
       )
       this.state = 'failed'
-      this.deps.onFail(this.task, taskError)
+      if (error instanceof TaskLimitError && this.completedAttachments.length > 0) {
+        this.deps.onFail(this.task, taskError, [...this.completedAttachments])
+      } else {
+        this.deps.onFail(this.task, taskError)
+      }
       this.resolveCompletion?.()
+    } finally {
+      this.executionBudget.pause()
     }
   }
 
@@ -756,6 +887,13 @@ export class TaskExecutor {
    * Anything else → retryable ApiCallFailed with provider from the LLM.
    */
   private toTaskError(error: unknown): TaskError {
+    if (error instanceof TaskLimitError)
+      return {
+        code: error.code,
+        message: error.message,
+        retryable: false,
+        provider: this.deps.llmProvider.getProviderType(),
+      }
     if (error instanceof LlmError) {
       return {
         code: error.code,
@@ -899,7 +1037,7 @@ export class TaskExecutor {
       this.prependTurnContextBlock(messages)
     }
     const promptAssemblyStart = Date.now()
-    const loopConfig = await this.buildLoopConfig()
+    const loopConfig = await withAbort(() => this.buildLoopConfig(), this.abortController.signal)
     if (this.turnTiming) {
       // buildLoopConfig assembles the tool registry (MCP schemas) and the
       // system identity (workspace files / tiered prompt parts).
@@ -946,6 +1084,15 @@ export class TaskExecutor {
   }
 
   private async handleLoopResult(result: LoopResult): Promise<void> {
+    if (result.type === 'need_approval') {
+      mergeCollectedAttachments(this.completedAttachments, result.approval.attachments ?? [])
+      collectToolAttachments(result.approval.completed_results ?? [], this.completedAttachments)
+    } else if ('attachments' in result) {
+      mergeCollectedAttachments(this.completedAttachments, result.attachments ?? [])
+    }
+    if (this.abortController.signal.reason instanceof TaskLimitError)
+      throw this.abortController.signal.reason
+    if (result.type !== 'cancelled') this.executionBudget.assertTime()
     // T1.4 — clear anti-thrash bookkeeping at any terminal outcome. `need_approval`
     // is NOT terminal (it suspends), so the state must survive into resume.
     if (this.conversation && result.type !== 'need_approval' && this.conversation.compactionState) {
@@ -954,8 +1101,17 @@ export class TaskExecutor {
     switch (result.type) {
       case 'response':
       case 'exhaustion': {
+        if (result.type === 'exhaustion' && result.reason !== 'task_budget')
+          throw new TaskLimitError(
+            'TASK_ITERATION_LIMIT',
+            `Task stopped before completion after ${this.executionBudget.maxIterations} iterations. Continuation requires a new budget.`
+          )
         const rawContent = result.type === 'response' ? result.content : result.message
-        const guardedContent = await this.guardProviderWorkflowTriggerClaim(rawContent)
+        const guardedContent = await withAbort(
+          () => this.guardProviderWorkflowTriggerClaim(rawContent),
+          this.abortController.signal
+        )
+        this.executionBudget.assertTime()
         const sanitized = this.responseSafety.sanitizeAssistantResponse(guardedContent)
         const content = sanitized.content
         if (sanitized.was_modified) {
@@ -975,6 +1131,8 @@ export class TaskExecutor {
         // need_approval pattern below: fail the turn and rethrow so run()'s
         // catch surfaces a clean failure — the client never gets an ACK for a
         // turn that was not persisted.
+        this.executionBudget.assertTime()
+        this.executionBudget.pause()
         try {
           await this.deps.conversationManager.completeTurn(this.conversation!, content)
         } catch (err) {
@@ -993,6 +1151,7 @@ export class TaskExecutor {
       }
 
       case 'need_approval': {
+        result.approval.task_budget = this.executionBudget.pause()
         // Durable write FIRST: under sqlite/dual the suspend can reject. We
         // must not tell the client "suspended" (SSE) or register the approval
         // before the durable state lands — otherwise a rejected write leaves a
@@ -1005,9 +1164,11 @@ export class TaskExecutor {
             result.approval
           )
         } catch (err) {
-          await this.deps.conversationManager.failTurn(this.conversation!)
+          if (!result.approval.replaces_request_id)
+            await this.deps.conversationManager.failTurn(this.conversation!)
           throw err
         }
+        if (result.approval.replaces_request_id) this.legacyApprovalBudget = false
         const reporter = progressReporterRegistry.get(this.taskId)
         if (reporter) {
           // U5 — carry the reason (+ mcpServerName for connect_required)
@@ -1058,6 +1219,8 @@ export class TaskExecutor {
   }
 
   private async completeWithStaticResponse(rawContent: string): Promise<void> {
+    this.abortController.signal.throwIfAborted()
+    this.executionBudget.assertTime()
     this.ensureProgressReporter()
     const sanitized = this.responseSafety.sanitizeAssistantResponse(rawContent)
     const content = sanitized.content
@@ -1074,6 +1237,8 @@ export class TaskExecutor {
       })
     }
     // D3 — same barrier-before-ACK contract as handleLoopResult 'response'.
+    this.executionBudget.assertTime()
+    this.executionBudget.pause()
     try {
       await this.deps.conversationManager.completeTurn(this.conversation!, content)
     } catch (err) {
@@ -1125,12 +1290,14 @@ export class TaskExecutor {
       policy: support.policy,
       buildFallbackPort: index => {
         const entry = support.policy.fallbacks[index]
-        const provider = support.buildProvider(entry)
-        if (!provider) return null
         // R5.7 — a SAME-provider fallback (other key) respects the session's
         // model; a CROSS-provider fallback serves its fixed entry model
-        // (ignoring the session selection). Drives usage_events + the tokenizer.
+        // (ignoring the session selection). #654: resolve the effective model
+        // BEFORE building so the provider's SDK, the token counter, the usage
+        // event and the image guard all name the model that is really sent.
         const servedModel = entry.provider === primaryProvider ? primaryModel : entry.model
+        const provider = support.buildProvider({ ...entry, model: servedModel })
+        if (!provider) return null
         const counter = createTokenCounter(provider, servedModel, {
           offline: appConfig.tokenizerOffline,
         })
@@ -1147,7 +1314,8 @@ export class TaskExecutor {
             if (conversation.contextBreakdown && usage.input_tokens > 0) {
               conversation.contextBreakdown.totalInputTokens = usage.input_tokens
             }
-          }
+          },
+          this.deps.imageInput
         )
       },
     })
@@ -1190,7 +1358,8 @@ export class TaskExecutor {
         if (conversation.contextBreakdown && usage.input_tokens > 0) {
           conversation.contextBreakdown.totalInputTokens = usage.input_tokens
         }
-      }
+      },
+      this.deps.imageInput
     )
 
     // R5 — wrap the primary port with provider-failover when a policy is wired.
@@ -1201,7 +1370,10 @@ export class TaskExecutor {
     // LLM-lane guardrails (spec §7): wrap ABOVE failover so built-in request
     // shaping fires once per logical request, not per fallback attempt. Inert
     // (returns the port unchanged) when no built-ins are configured (§5).
-    const hookedLlmPort = maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig)
+    const hookedLlmPort = bindTaskSignal(
+      maybeWrapHookedLlmPort(effectiveLlmPort, this.deps.guardrailsConfig),
+      this.abortController.signal
+    )
 
     const metadata: Record<string, unknown> = {}
     if (this.task.sourceMessage) {
@@ -1285,11 +1457,13 @@ export class TaskExecutor {
       loopController,
       contextManager,
       progressReporter,
-      maxIterations: this.deps.config.maxToolCallsPerTask || 10,
+      maxIterations: this.executionBudget.remainingIterations,
       toolTimeout: appConfig.nativeTool.toolTimeout,
       toolProgressInterval: appConfig.nativeTool.toolProgressInterval,
     })
     loopConfig.abortSignal = this.abortController.signal
+    loopConfig.onAttachments = attachments =>
+      mergeCollectedAttachments(this.completedAttachments, attachments)
     // Guardrails (spec §6) — build the tool-lane guardrail from the Host block.
     // Undefined when no rules are configured (no-config compatibility, §5); a
     // malformed set throws here (fail-closed admission, §3/§5).
@@ -1324,6 +1498,7 @@ export class TaskExecutor {
   private buildTrackingEventEmitter(): AgentEventEmitter {
     return {
       emit: (event: AgentEvent) => {
+        if (event.type === 'loop:iteration') this.executionBudget.consumeIteration()
         if (event.type === 'tool:called') {
           const toolName = typeof event.data.toolName === 'string' ? event.data.toolName.trim() : ''
           if (toolName) this.currentTurnToolNames.add(toolName)
@@ -1938,11 +2113,7 @@ export class TaskExecutor {
 
   private collectAttachments(results: ToolResult[]): Attachment[] {
     const attachments: Attachment[] = []
-    for (const r of results) {
-      if (r.attachments) {
-        attachments.push(...r.attachments)
-      }
-    }
+    collectToolAttachments(results, attachments)
     return attachments
   }
 

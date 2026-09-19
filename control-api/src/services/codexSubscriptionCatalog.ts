@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken'
 import { config } from '../config.js'
-import type { DbClient } from '../db.js'
+import { type DbClient, withTransaction } from '../db.js'
 import { rootLogger } from '../observability/logger.js'
 import {
   CODEX_SUBSCRIPTION_CONNECTION_KEY,
@@ -13,11 +13,57 @@ import {
   readHostCodexConnectionRef,
   recordCodexCatalogOutcome,
 } from './codexSubscriptionConnection.js'
+import { boundDiscoveredCatalogModels } from './subscriptionCatalogBounds.js'
 
 const log = rootLogger.child({ module: 'codex-subscription-catalog' })
 const PROVIDER = 'codex-subscription'
 
 export type CodexCatalogOutcome = 'ready' | 'auth-rejected' | 'unavailable'
+
+/**
+ * Runs `work` inside one database transaction and commits only when it
+ * resolves.
+ */
+export type CodexTransactionRunner = <T>(work: (tx: DbClient) => Promise<T>) => Promise<T>
+
+type PoolLike = DbClient & {
+  connect: () => Promise<DbClient & { release: (err?: Error | boolean) => void }>
+  totalCount: number
+}
+
+function isPoolLike(db: DbClient): db is PoolLike {
+  const candidate = db as Partial<PoolLike>
+  return typeof candidate.connect === 'function' && typeof candidate.totalCount === 'number'
+}
+
+/**
+ * Transaction runner for the DbClient a caller passed. A pg Pool gets a
+ * dedicated session from that same pool (real-PostgreSQL callers); any other
+ * DbClient (the admin routes' `{ query }` wrapper around the Control API pool)
+ * uses the Control API pool's `withTransaction`.
+ */
+export function codexTransactionRunnerFor(db: DbClient): CodexTransactionRunner {
+  if (!isPoolLike(db)) return work => withTransaction(work)
+  return async work => {
+    const client = await db.connect()
+    let releaseError: Error | boolean | undefined
+    try {
+      await client.query('BEGIN')
+      const result = await work(client)
+      await client.query('COMMIT')
+      return result
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK')
+      } catch (rollbackError) {
+        releaseError = rollbackError instanceof Error ? rollbackError : true
+      }
+      throw err
+    } finally {
+      client.release(releaseError)
+    }
+  }
+}
 
 export type CodexDiscoveredModel = {
   model: string
@@ -321,11 +367,21 @@ export async function rebuildLiveCodexUnionAllowlist(db: DbClient): Promise<void
   )
 }
 
+/**
+ * Reconcile one connection's catalog. The provider call runs outside any
+ * transaction; the fenced readiness/revision write, the model row
+ * insert/refresh/stale and the live union rebuild commit together, so a
+ * failure in any phase leaves readiness, revision and rows untouched. The
+ * fenced UPDATE row-locks the connection first, so concurrent syncs on one
+ * revision serialize and exactly one commits an outcome. Callers publish the
+ * runtime allowlist only after this resolves (i.e. after commit).
+ */
 export async function syncCodexSubscriptionCatalog(
   db: DbClient,
   transport: CodexCatalogTransport,
   accessToken: string,
-  expected?: { credentialRevision?: number; catalogRevision?: number; connectionKey?: string }
+  expected?: { credentialRevision?: number; catalogRevision?: number; connectionKey?: string },
+  options: { withTransaction?: CodexTransactionRunner } = {}
 ): Promise<{
   outcome: CodexCatalogOutcome
   connection: CodexSubscriptionSafeConnection | null
@@ -340,25 +396,28 @@ export async function syncCodexSubscriptionCatalog(
   }
   const expectedCredentialRevision = expected?.credentialRevision ?? connection.credentialRevision
   const expectedCatalogRevision = expected?.catalogRevision ?? connection.catalogRevision
-  const result = await transport.listModels({ accessToken })
-  const existing = await loadCodexRows(db, connection.id)
-  const plan = planCodexCatalogReconcile(existing, result)
-  const recorded = await recordCodexCatalogOutcome(db, {
-    catalogStatus: plan.catalogStatus as CodexSubscriptionCatalogStatus,
-    connectionStatus: plan.connectionStatus,
-    expectedCredentialRevision,
-    expectedCatalogRevision,
-    connectionKey,
+  const result = boundCodexCatalogResult(await transport.listModels({ accessToken }))
+  const outcomePlan = planCodexCatalogReconcile([], result)
+  const runInTransaction = options.withTransaction ?? codexTransactionRunnerFor(db)
+  const committed = await runInTransaction(async tx => {
+    const recorded = await recordCodexCatalogOutcome(tx, {
+      catalogStatus: outcomePlan.catalogStatus as CodexSubscriptionCatalogStatus,
+      connectionStatus: outcomePlan.connectionStatus,
+      expectedCredentialRevision,
+      expectedCatalogRevision,
+      connectionKey,
+    })
+    if (!recorded || !outcomePlan.mutateRows) {
+      return { recorded, added: 0, refreshed: 0, staled: 0 }
+    }
+    const plan = planCodexCatalogReconcile(await loadCodexRows(tx, connection.id), result)
+    const added = await insertDiscovered(tx, connection.id, plan.inserts)
+    const refreshed = await refreshDiscovered(tx, connection.id, plan.refresh)
+    const staled = await staleMissing(tx, connection.id, plan.stale)
+    await rebuildLiveCodexUnionAllowlist(tx)
+    return { recorded, added, refreshed, staled }
   })
-  let added = 0
-  let refreshed = 0
-  let staled = 0
-  if (recorded && plan.mutateRows) {
-    added = await insertDiscovered(db, connection.id, plan.inserts)
-    refreshed = await refreshDiscovered(db, connection.id, plan.refresh)
-    staled = await staleMissing(db, connection.id, plan.stale)
-    await rebuildLiveCodexUnionAllowlist(db)
-  }
+  const { recorded, added, refreshed, staled } = committed
   if (!recorded) {
     log.warn(
       { event: 'codex_catalog_stale_writer' },
@@ -368,7 +427,7 @@ export async function syncCodexSubscriptionCatalog(
     log.info(
       {
         event: 'codex_catalog_reconciled',
-        outcome: plan.catalogStatus,
+        outcome: outcomePlan.catalogStatus,
         added,
         refreshed,
         staled,
@@ -377,12 +436,30 @@ export async function syncCodexSubscriptionCatalog(
     )
   }
   return {
-    outcome: plan.catalogStatus,
+    outcome: outcomePlan.catalogStatus,
     connection: recorded,
     added,
     refreshed,
     staled,
   }
+}
+
+function boundCodexCatalogResult(result: CodexCatalogTransportResult): CodexCatalogTransportResult {
+  if (result.outcome !== 'ready') return result
+  const bounded = boundDiscoveredCatalogModels(result.models)
+  if (bounded.droppedInvalidId > 0 || bounded.droppedOverCount > 0) {
+    log.warn(
+      {
+        event: 'codex_catalog_discovery_bounded',
+        discovered: result.models.length,
+        kept: bounded.models.length,
+        droppedInvalidId: bounded.droppedInvalidId,
+        droppedOverCount: bounded.droppedOverCount,
+      },
+      'Codex catalog discovery exceeded bounds; extra models were ignored'
+    )
+  }
+  return { outcome: 'ready', models: bounded.models }
 }
 
 export function createUnavailableCodexCatalogTransport(): CodexCatalogTransport {

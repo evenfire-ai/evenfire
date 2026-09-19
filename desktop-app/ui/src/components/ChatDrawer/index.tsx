@@ -1,5 +1,5 @@
 import { IconButton } from '@components/Common'
-import { IconClose, IconNewChat } from '@components/SidebarNav/icons'
+import { IconMaximize, IconNewChat, IconPanelRightClose } from '@components/SidebarNav/icons'
 import { CHAT_DRAWER_MAX_ABSOLUTE, CHAT_DRAWER_MIN_WIDTH } from '@hooks/useChatDrawerResize'
 import type { ChatDrawerProps } from './types'
 
@@ -17,7 +17,8 @@ import type { ChatDrawerProps } from './types'
 export function ChatDrawer({
   header,
   onNewChat,
-  onClose,
+  onExpandFullScreen,
+  onToggle,
   containerRef,
   ready,
   onResizeHandleMouseDown,
@@ -67,11 +68,21 @@ export function ChatDrawer({
             color="neutral"
             variant="ghost"
             size="sm"
-            label="Close chat drawer"
-            title="Close chat drawer"
-            onClick={onClose}
+            label="Open chat in full screen"
+            title="Open chat in full screen"
+            onClick={onExpandFullScreen}
           >
-            <IconClose />
+            <IconMaximize />
+          </IconButton>
+          <IconButton
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            label="Collapse chat drawer"
+            title="Collapse chat drawer"
+            onClick={onToggle}
+          >
+            <IconPanelRightClose />
           </IconButton>
         </div>
       </header>

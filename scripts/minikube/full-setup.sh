@@ -2181,7 +2181,7 @@ done
 
 # ----------------------------------------------------------------------
 # gfs serving provisioning (runs once pods are up, so control-api has applied
-# migration 0048 that creates the gfs_controller role). gfsc fails closed
+# migration 0048_gfs_permission_store that creates the gfs_controller role). gfsc fails closed
 # without BOTH: (a) its JWT public key in gfs-config, and (b) the gfs_controller
 # DB LOGIN + DSN in gfs-controller-db. The inline JWT sync (6g) only covers
 # mcp-host-config, so these gfs-specific steps are explicit here. Idempotent.

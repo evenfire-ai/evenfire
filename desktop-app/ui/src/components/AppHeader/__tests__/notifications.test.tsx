@@ -14,8 +14,24 @@ const notificationMocks = vi.hoisted(() => ({
   refresh: vi.fn(async () => undefined),
 }))
 
+// Rename propagation tests swap this catalog in; default null keeps the
+// identifier-fallback path (no catalog) that the legacy assertions rely on.
+type AgentsCatalogStub = null | {
+  agentNames: string[]
+  userAgentNames: string[]
+  teamAgentNames: string[]
+  agentDisplayByName: Record<string, string>
+}
+const agentsCatalogMock = vi.hoisted(() => ({
+  catalog: null as AgentsCatalogStub,
+  loading: false,
+}))
+
 vi.mock('@hooks/domain/useAgentsDataController', () => ({
-  useAgentsDataController: () => ({ accessCatalog: null }),
+  useAgentsDataController: () => ({
+    accessCatalog: agentsCatalogMock.catalog,
+    loading: agentsCatalogMock.loading,
+  }),
 }))
 
 vi.mock('@hooks/domain/useContextsDataController', () => ({
@@ -80,8 +96,76 @@ describe('AppHeader notification tray presentation', () => {
   afterEach(() => {
     cleanup()
     notificationMocks.notifications.length = 0
+    agentsCatalogMock.catalog = null
+    agentsCatalogMock.loading = false
     vi.clearAllMocks()
     vi.unstubAllGlobals()
+  })
+
+  // Rename propagation: the tray header shows the catalog display name
+  // (spec.host); pseudo-agents absent from the catalog pass through as-is.
+  it('shows the agent display name from the access catalog in the tray', () => {
+    agentsCatalogMock.catalog = {
+      agentNames: ['research-agent'],
+      userAgentNames: ['research-agent'],
+      teamAgentNames: [],
+      agentDisplayByName: { 'research-agent': 'Research agent' },
+    }
+    notificationMocks.notifications.push(
+      {
+        id: 'notification-1',
+        kind: 'assistant_reply' as const,
+        agentName: 'research-agent',
+        text: 'Your answer is ready.',
+        timestamp: Date.now(),
+        read: true,
+      },
+      {
+        id: 'notification-2',
+        kind: 'assistant_reply' as const,
+        agentName: 'Workflows',
+        text: 'Workflow finished.',
+        timestamp: Date.now(),
+        read: true,
+      }
+    )
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    expect(
+      screen.getByText('Research agent', { selector: '.notification-menu-agent' })
+    ).toBeTruthy()
+    expect(screen.getByText('Workflows', { selector: '.notification-menu-agent' })).toBeTruthy()
+    expect(
+      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
+    ).toBeNull()
+  })
+
+  // QA parity with the control-ui header fix: while the access catalog (the
+  // display-name map) is still loading, the tray agent line is a skeleton —
+  // never a flash of the raw slug.
+  it('skeletonizes the tray agent line while the access catalog loads', () => {
+    agentsCatalogMock.loading = true
+    notificationMocks.notifications.push({
+      id: 'notification-1',
+      kind: 'assistant_reply' as const,
+      agentName: 'research-agent',
+      text: 'Your answer is ready.',
+      timestamp: Date.now(),
+      read: true,
+    })
+
+    render(<AppHeader />)
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications and approvals' }))
+
+    const agentLine = screen
+      .getByTestId('notification-menu-item')
+      .querySelector('.notification-menu-agent')
+    expect(agentLine?.querySelector('.notification-menu-agent-skeleton')).not.toBeNull()
+    expect(
+      screen.queryByText('research-agent', { selector: '.notification-menu-agent' })
+    ).toBeNull()
   })
 
   it('opens a notification when its card surface is clicked', () => {

@@ -1,3 +1,4 @@
+import { isImageAttachmentMime } from '../../llm/imageInput'
 import {
   isInternalGeneratedArtifactAttachment,
   isInternalGeneratedArtifactSourceTool,
@@ -36,6 +37,31 @@ function appendCollectedAttachment(
   return true
 }
 
+/** Reuse the same provenance and deduplication rules for interrupted work. */
+export function collectToolAttachments(
+  results: ToolResult[],
+  collected: Attachment[]
+): Attachment[] {
+  const added: Attachment[] = []
+  for (const result of results) {
+    for (const attachment of result.attachments ?? []) {
+      if (
+        shouldCollectAttachment(result, attachment) &&
+        appendCollectedAttachment(collected, attachment)
+      )
+        added.push(attachment)
+    }
+  }
+  return added
+}
+
+export function mergeCollectedAttachments(
+  collected: Attachment[],
+  attachments: Attachment[]
+): void {
+  for (const attachment of attachments) appendCollectedAttachment(collected, attachment)
+}
+
 export function appendToolResults(
   messages: ChatMessage[],
   toolResults: ToolResult[],
@@ -43,12 +69,11 @@ export function appendToolResults(
 ): void {
   const pendingImages: MessageContentPart[] = []
   for (const tr of toolResults) {
-    const trustedAttachments = tr.attachments?.filter(att => shouldCollectAttachment(tr, att)) ?? []
+    const trustedAttachments = collectToolAttachments([tr], collectedAttachments)
     if (trustedAttachments.length) {
       for (const att of trustedAttachments) {
-        if (!appendCollectedAttachment(collectedAttachments, att)) continue
         if (att.kind !== 'image') continue
-        if (att.mimeType !== 'image/jpeg' && att.mimeType !== 'image/png') continue
+        if (!isImageAttachmentMime(att.mimeType)) continue
         pendingImages.push({
           type: 'image',
           mimeType: att.mimeType,
@@ -71,6 +96,10 @@ export function appendToolResults(
     messages.push({
       role: 'user',
       content: 'Here are the screenshots from the tool results above.',
+      // #654 — the parts below came from tool results, not from the user. The
+      // adapter withholds them (and says so in `content`) when the model has no
+      // affirmative image-input evidence, instead of failing the whole turn.
+      imageOrigin: 'tool_result',
       contentParts: [
         { type: 'text', text: 'Here are the screenshots from the tool results above.' },
         ...pendingImages,

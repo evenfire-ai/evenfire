@@ -53,6 +53,7 @@ function installBridge() {
 const stableCallbacks = {
   pushToast: vi.fn(),
   pushNotification: vi.fn(),
+  agentDisplayName: (agentName: string) => agentName,
   canDeliverChatResponseNotification: vi.fn(() => true),
   showDesktopNotification: vi.fn(async () => 'granted' as const),
   openAgentConversationFromNotification: vi.fn(async () => undefined),

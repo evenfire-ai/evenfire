@@ -10,6 +10,7 @@ import { PreparedStatements, prepareStatements } from '../statements'
 import { withBusyRetry } from './busyRetry'
 import type {
   LoadAllPendingApprovalsRow,
+  ModelSelectionWriteOutcome,
   PendingApprovalRow,
   PersistedSession,
   PersistedSessionMessagePage,
@@ -415,14 +416,70 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
 
     case 'update_session_model_selections':
       return withBusyRetry(() => {
-        const tx = db.transaction(() => {
+        // #654 — compare-and-swap on `model_selection_revision`.
+        //
+        // Read-then-write inside ONE IMMEDIATE transaction. The worker is a
+        // single writer, but another replica may hold the same row, and
+        // `.immediate()` takes the write lock before the read, so no other
+        // process can commit between the check and the update.
+        //
+        // A missing row throws instead of acking: reporting `applied` for a
+        // selection that never reached disk would recreate exactly the
+        // fire-and-forget lie this change removes.
+        const tx = db.transaction((): ModelSelectionWriteOutcome => {
+          const row = s.selectSessionModelSelectionRevision.get({ id: op.sessionId }) as
+            | { model_selection_revision: number; model_selections: string | null }
+            | undefined
+          if (!row) {
+            const err: Error & { code?: string } = new Error(
+              `update_session_model_selections: no session row for id=${op.sessionId}`
+            )
+            err.code = 'MODEL_SELECTION_SESSION_NOT_FOUND'
+            throw err
+          }
+          const current = row.model_selection_revision
+          if (
+            !Number.isSafeInteger(current) ||
+            current < 0 ||
+            current === Number.MAX_SAFE_INTEGER
+          ) {
+            throw new Error('Invalid persisted model selection revision')
+          }
+          let modelSelections: Record<string, string>
+          try {
+            const parsed: unknown =
+              row.model_selections === null ? {} : JSON.parse(row.model_selections)
+            if (
+              !parsed ||
+              typeof parsed !== 'object' ||
+              Array.isArray(parsed) ||
+              Object.values(parsed).some(value => typeof value !== 'string')
+            )
+              throw new Error()
+            modelSelections = { ...parsed } as Record<string, string>
+          } catch {
+            throw new Error('Invalid persisted model selections')
+          }
+          if (op.expectedRevision !== undefined && op.expectedRevision !== current) {
+            return {
+              applied: false,
+              reason: 'model_selection_conflict',
+              modelSelectionRevision: current,
+              modelSelections,
+            }
+          }
+          const next = current + 1
+          // Merge the one requested provider in the durable row, never a stale
+          // full map from another replica's RAM (including legacy writes).
+          modelSelections = { ...modelSelections, [op.provider]: op.model }
           s.updateSessionModelSelections.run({
             id: op.sessionId,
-            model_selections: op.modelSelections,
+            model_selections: JSON.stringify(modelSelections),
+            model_selection_revision: next,
           })
+          return { applied: true, modelSelectionRevision: next, modelSelections }
         })
-        tx.immediate()
-        return { ok: true }
+        return tx.immediate()
       })
 
     case 'update_session_title':
@@ -574,7 +631,34 @@ export async function dispatch(op: WorkerOp, deps: DispatcherDeps): Promise<unkn
     case 'insert_pending_approval':
       return withBusyRetry(() => {
         const tx = db.transaction((row: PendingApprovalRow) => {
-          s.insertPendingApproval.run(row)
+          let sourceMessage = row.source_message
+          if (op.replaceRequestId) {
+            const previous = db
+              .prepare('SELECT * FROM pending_approvals WHERE request_id = ?')
+              .get(op.replaceRequestId) as PendingApprovalRow | undefined
+            if (
+              !previous ||
+              previous.session_id !== row.session_id ||
+              previous.task_id !== row.task_id ||
+              previous.task_budget !== 'legacy'
+            ) {
+              throw new Error('Approval renewal binding mismatch')
+            }
+            sourceMessage = previous.source_message
+            db.prepare('DELETE FROM pending_approvals WHERE request_id = ?').run(
+              op.replaceRequestId
+            )
+          }
+          s.insertPendingApproval.run({
+            ...row,
+            source_message: sourceMessage,
+            task_budget: row.task_budget ?? null,
+          })
+          if (op.markAwaitingApproval)
+            db.prepare('UPDATE sessions SET state = ? WHERE id = ?').run(
+              'awaiting_approval',
+              row.session_id
+            )
         })
         tx.immediate(op.payload)
         return { ok: true }
