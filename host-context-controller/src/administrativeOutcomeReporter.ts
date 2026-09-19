@@ -1,6 +1,7 @@
 import { BoundedOffPathReporter } from './boundedOffPathReporter'
 import { config } from './config'
 import { administrativeOutcomeReporterTotal } from './metrics'
+import { throwForFailedSubmit } from './reporterHttpFailure'
 import { signInternalControlJwt } from './utils/internalControlSigner'
 
 export type AdministrativeHostOutcomeProjection = {
@@ -24,12 +25,14 @@ export type AdministrativeOutcomeReporterDependencies = {
   retryLimit?: number
   timeoutMs?: number
   random?: () => number
+  dedupeCapacity?: number
 }
 
 const DEFAULT_CAPACITY = 64
 const DEFAULT_RETRY_LIMIT = 2
 const DEFAULT_TIMEOUT_MS = 1_000
 const DEFAULT_STOP_TIMEOUT_MS = 1_500
+const DEFAULT_DEDUPE_CAPACITY = 1_024
 
 export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutcomeReporter {
   private readonly queue: BoundedOffPathReporter<AdministrativeHostOutcomeProjection>
@@ -37,12 +40,31 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
   private readonly baseUrl: string
   private readonly signToken: () => string
   private readonly fetchFn: typeof fetch
+  private readonly dedupeCapacity: number
+  // The reconciler re-observes the same outcome on every pass (3-4 fleet
+  // passes per 5 minutes) and its sourceEventId is deterministic, so each
+  // fact is sent once per process (#327). A key stays here while it is queued,
+  // in flight, accepted or rejected as terminal; only a drop removes it.
+  // Iteration order is least recently seen first, which is the eviction
+  // order. Past `dedupeCapacity` distinct keys per pass, the oldest are
+  // evicted and resent; control-api answers those resends as replays.
+  private readonly seen = new Set<string>()
 
   constructor(deps: AdministrativeOutcomeReporterDependencies) {
     const capacity = deps.capacity ?? DEFAULT_CAPACITY
     if (!Number.isSafeInteger(capacity) || capacity < 1) {
       throw new Error('administrative outcome reporter capacity must be a positive integer')
     }
+    const dedupeCapacity = deps.dedupeCapacity ?? DEFAULT_DEDUPE_CAPACITY
+    // Up to `capacity` keys are buffered plus one in flight. A smaller set
+    // would evict a key that is still queued, and the next pass would queue
+    // it a second time.
+    if (!Number.isSafeInteger(dedupeCapacity) || dedupeCapacity <= capacity) {
+      throw new Error(
+        'administrative outcome reporter dedupeCapacity must be an integer greater than capacity'
+      )
+    }
+    this.dedupeCapacity = dedupeCapacity
     this.timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.baseUrl = (deps.baseUrl ?? config.controlApiBaseUrl).replace(/\/$/, '')
     this.signToken = deps.signToken ?? signInternalControlJwt
@@ -55,11 +77,30 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
       submit: projection => this.submit(projection),
       onEnqueued: () => administrativeOutcomeReporterTotal.inc({ result: 'enqueued' }),
       onAccepted: () => administrativeOutcomeReporterTotal.inc({ result: 'accepted' }),
-      onDrop: (_projection, reason) => administrativeOutcomeReporterTotal.inc({ result: reason }),
+      onTerminal: (_projection, result) => administrativeOutcomeReporterTotal.inc({ result }),
+      onDrop: (projection, reason) => {
+        // A dropped outcome was never delivered; forgetting it lets the next
+        // reconcile pass enqueue it again, so no outcome is lost.
+        this.seen.delete(projection.sourceEventId)
+        administrativeOutcomeReporterTotal.inc({ result: reason })
+      },
     })
   }
 
   enqueueHostOutcome(projection: AdministrativeHostOutcomeProjection): void {
+    const { sourceEventId } = projection
+    if (this.seen.delete(sourceEventId)) {
+      // Re-inserted as most recently seen, so a key observed on every pass is
+      // not evicted behind keys observed once.
+      this.seen.add(sourceEventId)
+      administrativeOutcomeReporterTotal.inc({ result: 'deduplicated' })
+      return
+    }
+    if (this.seen.size >= this.dedupeCapacity) {
+      const oldest = this.seen.values().next().value
+      if (oldest !== undefined) this.seen.delete(oldest)
+    }
+    this.seen.add(sourceEventId)
     this.queue.enqueue({ ...projection, hostRef: { ...projection.hostRef } })
   }
 
@@ -97,9 +138,7 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
           signal: controller.signal,
         }
       )
-      if (!response.ok) {
-        throw new Error(`administrative outcome submit failed with ${response.status}`)
-      }
+      await throwForFailedSubmit(response, 'administrative outcome')
     } finally {
       clearTimeout(timeout)
     }

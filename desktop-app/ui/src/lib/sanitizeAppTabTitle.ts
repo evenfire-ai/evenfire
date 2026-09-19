@@ -10,70 +10,63 @@ import { MAX_TAB_TITLE_LEN } from '../constants/workspaceTabs'
  * the cleaned value from the store, so none re-sanitizes.
  *
  * The contract (pure, idempotent: `sanitize(sanitize(x)) === sanitize(x)`):
- * - remove the code points in `UNSAFE_RANGES` — non-whitespace C0/C1 controls,
- *   DEL, the bidi marks/overrides/embeddings/isolates, zero-width and other
- *   invisible formatters, BOM, interlinear-annotation anchors, and the astral
- *   Unicode tag characters;
+ * - remove every code point that Unicode itself defines as non-rendering — the
+ *   control category `\p{Cc}` (minus whitespace, handled below) and the
+ *   `Default_Ignorable_Code_Point` set (bidi marks/overrides/embeddings/
+ *   isolates, zero-width formatters, word joiner, BOM, Hangul fillers, the
+ *   astral tag characters, and the rest of the standard's "ignore in rendering"
+ *   set) — plus the interlinear-annotation anchors U+FFF9–U+FFFB;
  * - collapse any run of whitespace to a single space and trim;
  * - truncate to `MAX_TAB_TITLE_LEN` code points, replacing the tail with an
  *   ellipsis so the result never exceeds the bound;
  * - an input that is empty after sanitizing yields `''`: the caller keeps the
  *   previous title rather than blanking the tab.
  *
- * WHY an explicit numeric-range denylist and NOT the Unicode categories
- * `\p{Cc}\p{Cf}`: the format category `\p{Cf}` also contains legitimate,
- * script-shaping code points that real titles use and must survive — e.g. the
- * Arabic sign/number marks (U+0600-U+0605, U+06DD ARABIC END OF AYAH, a VISIBLE
- * ornament around a verse number), the Syriac abbreviation mark (U+070F), Kaithi
- * (U+110BD/U+110CD), Egyptian-hieroglyph format controls (U+13430-U+13440), and
- * musical-notation formatters (U+1D173-U+1D17A). Stripping the whole Cf category
- * corrupts non-Latin text; the denylist targets only the actual layout/order/
- * invisibility hazards and leaves every legitimate script formatter alone.
+ * WHY the `Default_Ignorable_Code_Point` PROPERTY and not an enumerated list of
+ * ranges: an enumerated denylist of invisible characters is never finished —
+ * there is always one more zero-width code point to add, and each addition is a
+ * new review round. `Default_Ignorable_Code_Point` is Unicode's own, versioned
+ * definition of exactly "code points that should be ignored in rendering" — the
+ * invisible set. It ALREADY excludes the legitimate, VISIBLE script formatters
+ * that a real title uses (e.g. U+0600–U+0605 and U+06DD ARABIC END OF AYAH,
+ * U+070F SYRIAC ABBREVIATION MARK, U+110BD/U+110CD Kaithi, U+13430–U+13440
+ * Egyptian-hieroglyph controls), so they survive with no per-code-point
+ * carve-out. The runtime resolves the property from its own Unicode version
+ * (Chromium in the renderer, Node under test); the ignorable ranges are stable
+ * by design, including the unassigned tail of the tag / plane-14 blocks.
  *
- * The two zero-width SHAPING joiners are likewise preserved: ZWNJ (U+200C) and
- * ZWJ (U+200D). ZWJ fuses an emoji sequence into one glyph (stripping it splits
- * a "woman technologist" into a separate woman + laptop); ZWNJ controls
- * ligatures/shaping in Persian and Indic scripts. The denylist leaves the gap
- * U+200C-U+200D open between the ZWSP entry (U+200B) and the bidi marks (U+200E-
- * U+200F) for exactly this reason.
+ * TWO invisible-but-SHAPING exceptions are kept, because they change the
+ * rendering of the ADJACENT glyph rather than being pure decoration:
+ * - `\p{Join_Control}` — ZWJ (U+200D) fuses an emoji sequence into one glyph
+ *   (stripping it splits a "woman technologist" 👩‍💻 into a separate 👩 + 💻);
+ *   ZWNJ (U+200C) controls ligatures/shaping in Persian and Indic scripts.
+ * - `\p{Variation_Selector}` — VS16 (U+FE0F) is what makes ❤️ render as a
+ *   coloured emoji rather than the text glyph ❤, keycaps (1️⃣) depend on it, and
+ *   the ideographic selectors (U+E0100–U+E01EF) pick CJK glyph variants in real
+ *   names. Stripping these silently corrupts a legitimate, visible title.
  *
- * The denylist is declared as numeric code-point ranges and compiled with
- * `new RegExp`, NOT written as embedded literal bytes or `\u` escapes. A
- * security denylist built from invisible characters can be mutated with no
- * visible diff by an editor or formatter pass; numeric ranges keep every
- * stripped span legible and diff-safe in review, and the compiled regex still
- * matches the exact code points. The `u` flag lets a range whose bounds are
- * built with `String.fromCodePoint` (e.g. the astral tag chars U+E0000-U+E007F)
- * match those code points singly rather than as surrogate halves.
+ * Whitespace controls U+0009–U+000D are excluded from the `\p{Cc}` removal via
+ * the `(?!\s)` guard: they must survive so the next step collapses them to a
+ * single space instead of gluing adjacent words together. (U+0085 NEL is
+ * `\p{Cc}` but not `\s`, so it is stripped, not kept.)
  *
- * U+0009-U+000D (tab, LF, VT, FF, CR) are intentionally absent from the denylist:
- * they are whitespace, survive the removal, and collapse to a single space in the
- * next step rather than gluing adjacent words together.
+ * U+FFF9–U+FFFB (interlinear annotation anchors) are the one range Unicode does
+ * NOT count as Default_Ignorable, so they are named explicitly — as `\u` escapes,
+ * never the literal invisible bytes, so an editor or formatter pass cannot mutate
+ * this security denylist with no visible diff.
+ *
+ * NOT covered — deliberately: a title built only from visible-but-blank glyphs
+ * (e.g. U+2800 BRAILLE PATTERN BLANK) renders as an empty-looking tab. No
+ * invisible-character filter can catch that (the glyph is visible, just empty),
+ * and it is not a spoofing vector here — the label is free text shown to its
+ * own owner, never compared against a trusted string. It is a UX edge, not a
+ * sanitizer gap.
  */
-const UNSAFE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x0000, 0x0008], // C0 controls (excludes tab/LF/VT/FF/CR)
-  [0x000e, 0x001f], // C0 controls (excludes CR)
-  [0x007f, 0x009f], // DEL + C1 controls
-  [0x061c, 0x061c], // ARABIC LETTER MARK (bidi)
-  [0x200b, 0x200b], // ZWSP (U+200C ZWNJ / U+200D ZWJ deliberately preserved)
-  [0x200e, 0x200f], // LRM, RLM (bidi marks)
-  [0x202a, 0x202e], // LRE, RLE, PDF, LRO, RLO (bidi embeddings/overrides)
-  [0x2060, 0x2064], // WORD JOINER + invisible math operators
-  [0x2066, 0x2069], // LRI, RLI, FSI, PDI (bidi isolates)
-  [0xfeff, 0xfeff], // BOM / ZWNBSP
-  [0xfff9, 0xfffb], // interlinear annotation anchors
-  [0xe0000, 0xe007f], // Unicode tag characters (astral; invisible fingerprinting)
-]
-
-const STRIP_UNSAFE_CHARS = new RegExp(
-  `[${UNSAFE_RANGES.map(([lo, hi]) =>
-    lo === hi ? String.fromCodePoint(lo) : `${String.fromCodePoint(lo)}-${String.fromCodePoint(hi)}`
-  ).join('')}]`,
-  'gu'
-)
+const STRIP_INVISIBLE =
+  /(?!\s)\p{Cc}|(?![\p{Join_Control}\p{Variation_Selector}])\p{Default_Ignorable_Code_Point}|[\uFFF9-\uFFFB]/gu
 
 export function sanitizeAppTabTitle(raw: string): string {
-  const collapsed = raw.replace(STRIP_UNSAFE_CHARS, '').replace(/\s+/g, ' ').trim()
+  const collapsed = raw.replace(STRIP_INVISIBLE, '').replace(/\s+/g, ' ').trim()
   // Count and slice by code point, not UTF-16 code unit, so truncation never
   // splits a surrogate pair and leaves a lone half dangling before the ellipsis.
   const points = Array.from(collapsed)
