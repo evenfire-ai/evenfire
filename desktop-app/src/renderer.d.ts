@@ -720,6 +720,7 @@ declare global {
         }) => Promise<void>
         close: () => Promise<void>
         reload: () => Promise<void>
+        getLocation: () => Promise<{ appRef: string; routePath?: string } | null>
         copyDeepLink: (teamId?: string) => Promise<{ url: string }>
         listPendingDeepLinks: () => Promise<{ links: SandboxUiDeepLinkEnvelope[] }>
         clearPendingDeepLinks: () => Promise<void>
@@ -762,6 +763,7 @@ declare global {
         onRefreshError: (
           callback: (args: { appRef: string; message: string }) => void
         ) => () => void
+        onTitleChanged: (callback: (args: { appRef: string; title: string }) => void) => () => void
       }
       pluginSdk: {
         onConsentRequested: (callback: (request: PluginConsentRequest) => void) => () => void

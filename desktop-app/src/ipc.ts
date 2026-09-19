@@ -1772,6 +1772,10 @@ export function registerIpcHandlers(service: AppService): void {
           if (parentWindow.isDestroyed()) return
           parentWindow.webContents.send('sandboxUi:refreshError', { appRef, message })
         },
+        onTitleChanged: title => {
+          if (parentWindow.isDestroyed()) return
+          parentWindow.webContents.send('sandboxUi:titleChanged', { appRef, title })
+        },
       })
     }
   )
@@ -1784,6 +1788,15 @@ export function registerIpcHandlers(service: AppService): void {
   ipcMain.handle('sandboxUi:reload', async event => {
     assertTrustedSender(event)
     await service.reloadSandboxUi()
+  })
+
+  // Read the active embed's current in-app route so the renderer can persist it
+  // on the app tab before deactivation (mini-spec 05 §1). Returns null when no
+  // embed is mounted; rejects when the current URL is outside the recipe prefix
+  // (the renderer treats a rejection as "fall back to the default route").
+  ipcMain.handle('sandboxUi:getLocation', async event => {
+    assertTrustedSender(event)
+    return service.getSandboxUiLocation()
   })
 
   ipcMain.handle('sandboxUi:copyDeepLink', async (event, payload: { teamId?: unknown }) => {

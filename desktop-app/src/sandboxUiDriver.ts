@@ -105,6 +105,13 @@ export type MountSandboxUiArgs = {
   routePath?: string
   onClosed?: () => void
   /**
+   * Fired when the embedded document's `<title>` changes (`page-title-updated`).
+   * The driver only forwards the plugin-controlled title; the renderer decides
+   * whether to surface it (its app tab title) and trims/ignores empty values.
+   * Read-only: it never grants the embed any privilege.
+   */
+  onTitleChanged?: (title: string) => void
+  /**
    * Spec §9.9 — recipe-author Connect button affordance. Fired when the
    * embed navigates to `clerum://oauth?clientId=…`. The driver's only
    * job is to forward; the AppService method this points at calls
@@ -344,6 +351,7 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
     bounds,
     routePath,
     onClosed,
+    onTitleChanged,
   } = args
 
   if (parentWindow.isDestroyed()) {
@@ -472,11 +480,19 @@ export async function mountSandboxUiView(args: MountSandboxUiArgs): Promise<void
   const onDocumentReady = (): void => {
     if (active?.view === view) active.documentReady = true
   }
+  // Forward the embed's live `document.title` so the renderer can name its app
+  // tab after it (mirrors the URL-report pattern). The title is plugin content,
+  // so it stays read-only — the renderer trims/ignores empty values.
+  const onPageTitleUpdated = (_event: Electron.Event, title: string): void => {
+    if (active?.view === view) onTitleChanged?.(title)
+  }
   view.webContents.on('did-start-navigation', onDidStartNavigation)
   view.webContents.on('did-finish-load', onDocumentReady)
+  view.webContents.on('page-title-updated', onPageTitleUpdated)
   active.cleanupDocumentLifecycle = () => {
     view.webContents.removeListener('did-start-navigation', onDidStartNavigation)
     view.webContents.removeListener('did-finish-load', onDocumentReady)
+    view.webContents.removeListener('page-title-updated', onPageTitleUpdated)
   }
 
   active.cleanupShortcutRouting = wireDesktopShortcutRouting({

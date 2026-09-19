@@ -15,7 +15,6 @@ export type DesktopCommandEligibility =
   | 'searchable-content'
   | 'composer-available'
   | 'app-mounted'
-  | 'conversation-origin'
   | 'not-busy'
 
 export type SemanticShortcutBinding = {
@@ -45,7 +44,6 @@ export type DesktopCommandRuntimeContext = {
   searchableContent: boolean
   composerAvailable: boolean
   appMounted: boolean
-  conversationOriginAvailable: boolean
   applicationBusy: boolean
 }
 
@@ -408,20 +406,6 @@ const definitions = [
     visibleInPalette: true,
     visibleInSettings: false,
   },
-  {
-    id: 'app.backToConversation',
-    label: 'Back to conversation',
-    description: 'Return to the conversation that opened the current app.',
-    group: 'Workspace',
-    order: 260,
-    defaultBinding: null,
-    sources: ['host', 'sandbox'],
-    eligibility: 'conversation-origin',
-    modalPolicy: 'block',
-    actionOwner: 'renderer',
-    visibleInPalette: true,
-    visibleInSettings: false,
-  },
 ] as const satisfies readonly DesktopCommandDefinition[]
 
 export type DesktopCommandId = (typeof definitions)[number]['id']
@@ -461,7 +445,6 @@ export function isDesktopCommandEligible(
   }
   if (command.eligibility === 'searchable-content') return context.searchableContent
   if (command.eligibility === 'app-mounted') return context.appMounted
-  if (command.eligibility === 'conversation-origin') return context.conversationOriginAvailable
   if (command.eligibility === 'not-busy') return !context.applicationBusy
   return context.composerAvailable
 }

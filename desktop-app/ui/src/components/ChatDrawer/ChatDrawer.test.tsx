@@ -41,7 +41,7 @@ function renderDrawer(props: Partial<React.ComponentProps<typeof ChatDrawer>> = 
       ready={props.ready ?? true}
       onResizeHandleMouseDown={onResizeHandleMouseDown}
       onResizeHandleKeyDown={onResizeHandleKeyDown}
-      width={props.width ?? 420}
+      width={props.width ?? 525}
       resizing={props.resizing ?? false}
     >
       <div data-testid="drawer-chat-page">chat page</div>
@@ -126,7 +126,7 @@ describe('ChatDrawer', () => {
     // Focusable, with the value semantics the separator role requires.
     expect(handle.getAttribute('tabindex')).toBe('0')
     expect(handle.getAttribute('aria-valuemin')).toBe('340')
-    expect(handle.getAttribute('aria-valuemax')).toBe('820')
+    expect(handle.getAttribute('aria-valuemax')).toBe('1000')
     expect(handle.getAttribute('aria-valuenow')).toBe('512')
     fireEvent.keyDown(handle, { key: 'ArrowLeft' })
     expect(onResizeHandleKeyDown).toHaveBeenCalledTimes(1)
