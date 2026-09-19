@@ -5,6 +5,7 @@ import { ChatListProvider } from '@contexts/ChatListContext'
 import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
+import { MAX_TAB_TITLE_LEN } from '@constants/workspaceTabs'
 import { createSessionFsmStore, projectSessionState } from '@hooks/domain/sessionFsm'
 import {
   closeWorkspaceTab,
@@ -318,6 +319,38 @@ describe('WorkspaceTabStrip — sanitized plugin title reaches the rendered chro
 
     expect(container.querySelector('.chat-view-tab__label')?.textContent).toBe(withEmoji)
     expect(screen.getByRole('button', { name: `Close ${withEmoji}` })).toBeTruthy()
+  })
+
+  it('bounds an overlong untrusted title in both the rendered label and the close aria-label', () => {
+    // The reviewer's overlong case: a very long title with a leading bidi
+    // override and trailing invisibles. The final label AND the close-button
+    // accessible name must be the truncated, stripped value — not the raw
+    // payload, not a value that overflows the tab into the close control.
+    const raw = `${cp(0x202e)}${'A'.repeat(100)}${cp(0x200b)}${cp(0xfeff)}`
+    // Derived independently of the sanitizer: the invisibles vanish, leaving 100
+    // 'A's truncated to MAX-1 plus the ellipsis.
+    const expected = `${'A'.repeat(MAX_TAB_TITLE_LEN - 1)}…`
+    const state = setAppTabTitle(
+      openAppTab(createEmptyWorkspaceTabsState(), { id: 'app-1', appRef: 'ns/app', title: 'App' }),
+      'app-1',
+      raw
+    )
+    const { container } = render(
+      <WorkspaceTabStrip
+        tabs={state.tabs}
+        activeTabId="app-1"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+        onReorder={vi.fn()}
+      />
+    )
+
+    const label = container.querySelector('.chat-view-tab__label')?.textContent ?? ''
+    expect(label).toBe(expected)
+    expect(Array.from(label).length).toBe(MAX_TAB_TITLE_LEN)
+    expect(label.endsWith('…')).toBe(true)
+    expect(label.includes(cp(0x202e))).toBe(false)
+    expect(screen.getByRole('button', { name: `Close ${expected}` })).toBeTruthy()
   })
 })
 
