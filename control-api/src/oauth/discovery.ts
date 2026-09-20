@@ -1,4 +1,10 @@
 import {
+  type PinnedFetchError,
+  type PinnedResponse,
+  type PinnedTransport,
+  pinnedFetch,
+} from '../http/pinnedFetch.js'
+import {
   type DnsResolver,
   type ValidationError,
   validateOAuthEndpointUrl,
@@ -122,7 +128,13 @@ export function deriveQuirks(
 // ─── Discovery flow ─────────────────────────────────────────────────────────
 
 export interface DiscoveryDeps {
-  fetchFn: typeof fetch
+  /**
+   * Injectable low-level transport for the IP-pinned fetch (H2). Production leaves it
+   * undefined (the `node:https` default); tests inject one to assert the socket
+   * connects to the validated IP with no real network. Replaces the old `fetchFn`
+   * seam — discovery has no production caller before C1.5, so the swap is safe.
+   */
+  transport?: PinnedTransport
   resolveDns?: DnsResolver
   logger?: Logger
 }
@@ -139,6 +151,8 @@ export type DiscoveryError =
   | { kind: 'prm_resource_mismatch'; url: string; detail: string }
   /** AS metadata `issuer` (RFC 8414 §3.3) does not match the AS base it was fetched from. */
   | { kind: 'issuer_mismatch'; detail: string }
+  /** Response arrived with a non-identity `content-encoding` (fail-closed, never mis-parse). */
+  | { kind: 'content_encoding_rejected'; url: string; encoding: string }
 
 export interface DiscoveryResult {
   prm: ProtectedResourceMetadata
@@ -176,15 +190,30 @@ function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value
+}
+
+/** Map a pinned-fetch error onto discovery's typed error union. */
+function mapPinnedError(error: PinnedFetchError, url: string): DiscoveryError {
+  switch (error.kind) {
+    case 'kernel_rejected':
+      return { kind: 'kernel_rejected', field: error.field, errors: error.errors }
+    case 'transport_failed':
+      return { kind: 'fetch_failed', url, detail: error.detail }
+    case 'content_encoding_rejected':
+      return { kind: 'content_encoding_rejected', url, encoding: error.encoding }
+  }
+}
+
 /**
- * Kernel-guard a URL and fetch it, following redirects MANUALLY (`redirect:'manual'`).
+ * IP-pinned guarded fetch, following redirects MANUALLY and re-pinning EVERY hop.
  *
- * The default `redirect:'follow'` only lets the kernel veto the FIRST hop — undici
- * then follows a `302 Location: http://169.254.169.254/…` from an untrusted AS/PRM
- * (§0) straight to IMDS/an internal host (SSRF). Here every hop — the initial URL
- * AND each `Location` (resolved against the current URL) — passes
- * `validateOAuthEndpointUrl` (§4, DNS-resolved) BEFORE it is fetched. A `Location`
- * the kernel rejects, a missing/invalid `Location`, or exceeding
+ * {@link pinnedFetch} resolves+validates+pins a single URL (spec §4, H2) and never
+ * follows a 3xx itself. Here the loop re-runs it for each hop — so the initial URL
+ * AND each `Location` (resolved against the current URL) is independently kernel-
+ * validated and pinned to a freshly-resolved IP; hop 0's IP is never reused. A
+ * `Location` the kernel rejects, a missing/invalid `Location`, or exceeding
  * {@link MAX_DISCOVERY_REDIRECTS} is a typed fail-closed error, never followed.
  */
 async function guardedFetch(
@@ -192,25 +221,19 @@ async function guardedFetch(
   field: string,
   deps: DiscoveryDeps
 ): Promise<
-  { ok: true; response: Response; finalUrl: string } | { ok: false; error: DiscoveryError }
+  { ok: true; response: PinnedResponse; finalUrl: string } | { ok: false; error: DiscoveryError }
 > {
   let currentUrl = url
   for (let hop = 0; ; hop++) {
-    const errors = await validateOAuthEndpointUrl(currentUrl, field, {
+    const fetched = await pinnedFetch(currentUrl, field, {
       resolveDns: deps.resolveDns,
+      transport: deps.transport,
+      timeoutMs: DISCOVERY_TIMEOUT_MS,
     })
-    if (errors.length > 0) {
-      return { ok: false, error: { kind: 'kernel_rejected', field, errors } }
+    if (!fetched.ok) {
+      return { ok: false, error: mapPinnedError(fetched.error, currentUrl) }
     }
-    let response: Response
-    try {
-      response = await deps.fetchFn(currentUrl, {
-        redirect: 'manual',
-        signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-      })
-    } catch (e) {
-      return { ok: false, error: { kind: 'fetch_failed', url: currentUrl, detail: errMessage(e) } }
-    }
+    const response = fetched.response
     if (!isRedirectStatus(response.status)) {
       return { ok: true, response, finalUrl: currentUrl }
     }
@@ -224,7 +247,7 @@ async function guardedFetch(
         },
       }
     }
-    const location = response.headers.get('location')
+    const location = firstHeader(response.headers.location)
     if (!location) {
       return {
         ok: false,
@@ -251,10 +274,10 @@ async function guardedFetch(
 }
 
 /**
- * Kernel-guard a URL and only then fetch it as JSON, following redirects through
- * the kernel (see {@link guardedFetch}). Structurally guarantees the spec §4
- * invariant: `validateOAuthEndpointUrl` runs BEFORE every `fetchFn`, and a URL the
- * kernel rejects is never fetched.
+ * Kernel-guard + pin a URL and only then parse it as JSON, following redirects
+ * through the pin (see {@link guardedFetch}). Structurally guarantees the spec §4
+ * invariant: validation runs BEFORE every fetch, and a URL the kernel rejects is
+ * never fetched.
  */
 async function guardedFetchJson(
   url: string,
@@ -264,7 +287,8 @@ async function guardedFetchJson(
   const fetched = await guardedFetch(url, field, deps)
   if (!fetched.ok) return fetched
   const { response, finalUrl } = fetched
-  if (!response.ok) {
+  const isOk = response.status >= 200 && response.status < 300
+  if (!isOk) {
     return {
       ok: false,
       error: {
@@ -276,7 +300,7 @@ async function guardedFetchJson(
     }
   }
   try {
-    return { ok: true, json: await response.json() }
+    return { ok: true, json: JSON.parse(response.bodyText) }
   } catch (e) {
     return { ok: false, error: { kind: 'invalid_metadata', url: finalUrl, detail: errMessage(e) } }
   }
@@ -408,30 +432,29 @@ async function resolvePrm(
 
   const candidates: string[] = []
 
-  // Best-effort probe for the challenge hint. The probe URL is kernel-guarded
-  // first; a probe failure is non-fatal — the well-known candidates follow.
-  const probeGuard = await validateOAuthEndpointUrl(mcpUrl, 'mcpUrl', {
+  // Best-effort probe for the challenge hint via the pinned fetch (kernel-guards +
+  // pins the mcpUrl before connecting). A kernel rejection is fatal (never probe an
+  // internal host); a transport/encoding failure is non-fatal — the well-known
+  // candidates follow. The pin never auto-follows a 3xx, so a redirecting MCP server
+  // simply yields no 401 hint here.
+  const probe = await pinnedFetch(mcpUrl, 'mcpUrl', {
     resolveDns: deps.resolveDns,
+    transport: deps.transport,
+    timeoutMs: DISCOVERY_TIMEOUT_MS,
   })
-  if (probeGuard.length > 0) {
-    return { ok: false, error: { kind: 'kernel_rejected', field: 'mcpUrl', errors: probeGuard } }
-  }
-  try {
-    // `redirect:'manual'`: the probe URL is kernel-guarded above, but a 3xx from an
-    // untrusted MCP server must NOT be auto-followed to an internal host. A redirect
-    // simply yields no 401 hint here — the kernel-guarded well-known candidates below
-    // are the fallback.
-    const probe = await deps.fetchFn(mcpUrl, {
-      method: 'GET',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-    })
-    if (probe.status === 401) {
-      const hint = parseResourceMetadataChallenge(probe.headers.get('www-authenticate'))
-      if (hint) candidates.push(hint)
+  if (!probe.ok) {
+    if (probe.error.kind === 'kernel_rejected') {
+      return {
+        ok: false,
+        error: { kind: 'kernel_rejected', field: 'mcpUrl', errors: probe.error.errors },
+      }
     }
-  } catch {
-    // Probe failure is expected for some servers; fall back to well-known.
+    // transport / content-encoding failure of the probe is non-fatal — fall through.
+  } else if (probe.response.status === 401) {
+    const hint = parseResourceMetadataChallenge(
+      firstHeader(probe.response.headers['www-authenticate'])
+    )
+    if (hint) candidates.push(hint)
   }
 
   for (const wk of wellKnownPrmUrls(parsed)) {

@@ -21,6 +21,7 @@
  * Provenance: scratchpad/c1-fixtures-provenance.md (sondeo en vivo 2026-09-20,
  * sección "EVIDENCIA GET").
  */
+import type { PinnedTransport } from '../../src/http/pinnedFetch.js'
 
 // ─── Notion (resource base sin path) ────────────────────────────────────────
 // PRM: GET https://mcp.notion.com/.well-known/oauth-protected-resource → 200
@@ -129,36 +130,33 @@ export const PILOTS: Record<'notion' | 'linear' | 'sentry' | 'canva', PilotFixtu
 }
 
 /**
- * Build a `fetch`-shaped mock from a pilot fixture: a 401 (with WWW-Authenticate)
- * on the MCP probe when the fixture has a hint, 200+JSON on the served well-known
- * URLs, and 404 on the URLs the real server does not serve. Mirrors the real HTTP
- * responses so the discovery code path is exercised, not a hand-invented one.
+ * Build a {@link PinnedTransport}-shaped mock from a pilot fixture: a 401 (with
+ * WWW-Authenticate) on the MCP probe when the fixture has a hint, 200+JSON on the
+ * served well-known URLs, and 404 on the URLs the real server does not serve.
+ * Mirrors the real HTTP responses so the discovery code path is exercised, not a
+ * hand-invented one. Discovery now fetches through the IP-pinned `node:https`
+ * transport (H2), so the test double is a transport, not a `fetch`.
  */
-export function makeDiscoveryFetch(pilot: PilotFixture): typeof fetch {
+export function makeDiscoveryTransport(pilot: PilotFixture): PinnedTransport {
   const jsonByUrl = new Map<string, string>([
     [pilot.prm.url, pilot.prm.json],
     [pilot.as.url, pilot.as.json],
   ])
   const notFound = new Set(pilot.prmNotFound ?? [])
-  const fn = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === 'string' ? input : input.toString()
-    // MCP probe (GET) → 401 with the challenge header when the fixture has one.
-    if (url === pilot.mcpUrl && (init?.method ?? 'GET') === 'GET') {
+  return async ({ url }) => {
+    // MCP probe → 401 with the challenge header when the fixture has one.
+    if (url === pilot.mcpUrl) {
       if (pilot.wwwAuthenticate) {
-        return new Response(null, {
-          status: 401,
-          headers: { 'www-authenticate': pilot.wwwAuthenticate },
-        })
+        return { status: 401, headers: { 'www-authenticate': pilot.wwwAuthenticate }, bodyText: '' }
       }
       // No challenge advertised — probe returns a plain 401 with no hint.
-      return new Response(null, { status: 401 })
+      return { status: 401, headers: {}, bodyText: '' }
     }
     const body = jsonByUrl.get(url)
     if (body !== undefined) {
-      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } })
+      return { status: 200, headers: { 'content-type': 'application/json' }, bodyText: body }
     }
-    if (notFound.has(url)) return new Response('not found', { status: 404 })
-    return new Response('unexpected url', { status: 404 })
+    if (notFound.has(url)) return { status: 404, headers: {}, bodyText: 'not found' }
+    return { status: 404, headers: {}, bodyText: 'unexpected url' }
   }
-  return fn as unknown as typeof fetch
 }

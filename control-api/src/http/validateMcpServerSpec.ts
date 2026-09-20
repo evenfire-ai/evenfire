@@ -461,22 +461,30 @@ export async function validateMcpServerSpecPreflight(
 }
 
 /**
- * Kernel de política sobre una URL de endpoint OAuth (spec 19 §4): scheme https +
- * host público + resolve→IP no bloqueada. Reusa isPublicDnsHostname/validatePublicCidr.
- * `resolveDns` inyectable ⇒ testeable en Vitest sin cluster. Devuelve [] si válida.
- * Seam compartido para el carril self-hosted 'generic' (S3-B2) y el remoto (spec 02);
- * hoy sin call-sites de producción — es la base del seam.
+ * Kernel core: validate an OAuth endpoint URL (spec 19 §4) AND return the resolved
+ * IPv4 addresses. scheme https + public host + resolve→non-blocked IPs, reusing
+ * isPublicDnsHostname/filterBlockedIpv4. `resolveDns` is injectable ⇒ testable in
+ * Vitest without a cluster.
+ *
+ * This is the single source of truth for the rule: both {@link validateOAuthEndpointUrl}
+ * (thin wrapper discarding the addresses) and {@link resolveValidatedOAuthEndpoint}
+ * (the pin, which CONSUMES the addresses so the socket connects to the exact IPs the
+ * validator resolved — closing the TOCTOU/DNS-rebinding window, H2) call it. The two
+ * MUST never drift, so the resolve+filter logic lives here once.
+ *
+ * `addresses` is the deduplicated set of resolved IPv4 addresses. When `errors` is
+ * empty it is guaranteed non-empty and all non-blocked (public) — the pin candidates.
  */
-export async function validateOAuthEndpointUrl(
+async function validateAndResolveOAuthEndpoint(
   rawUrl: string,
   field: string,
   options: { resolveDns?: DnsResolver } = {}
-): Promise<ValidationError[]> {
+): Promise<{ errors: ValidationError[]; addresses: string[] }> {
   let url: URL
   try {
     url = new URL(rawUrl)
   } catch {
-    return [{ field, message: 'must be a valid absolute URL' }]
+    return { errors: [{ field, message: 'must be a valid absolute URL' }], addresses: [] }
   }
 
   const errors: ValidationError[] = []
@@ -490,12 +498,13 @@ export async function validateOAuthEndpointUrl(
     // resolved. An internal/literal/malformed host is rejected without a DNS
     // lookup (never resolve to probe internal names).
     errors.push({ field, message: 'host must be a public DNS hostname' })
-    return errors
+    return { errors, addresses: [] }
   }
 
   const resolveDns = options.resolveDns ?? defaultDnsResolver
+  let addresses: string[] = []
   try {
-    const addresses = Array.from(new Set(await resolveDns(host)))
+    addresses = Array.from(new Set(await resolveDns(host)))
     if (addresses.length === 0) {
       errors.push({ field, message: `host "${host}" did not resolve to an IPv4 A record` })
     } else {
@@ -518,7 +527,42 @@ export async function validateOAuthEndpointUrl(
     })
   }
 
+  return { errors, addresses }
+}
+
+/**
+ * Kernel de política sobre una URL de endpoint OAuth (spec 19 §4): scheme https +
+ * host público + resolve→IP no bloqueada. `resolveDns` inyectable ⇒ testeable en
+ * Vitest sin cluster. Devuelve [] si válida. Seam compartido para el carril
+ * self-hosted 'generic' (S3-B2) y el remoto (spec 02).
+ */
+export async function validateOAuthEndpointUrl(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<ValidationError[]> {
+  const { errors } = await validateAndResolveOAuthEndpoint(rawUrl, field, options)
   return errors
+}
+
+/**
+ * Same rule as {@link validateOAuthEndpointUrl}, but on success RETURNS the resolved
+ * IPv4 addresses so a caller can PIN the socket to those exact IPs (spec 02 §4,
+ * H2 DNS-rebinding/TOCTOU). The addresses are the deduplicated, all-public set the
+ * validator resolved; a pinned fetch feeds them to its `lookup` so the connection
+ * cannot re-resolve to a private/metadata host between validation and connect.
+ *
+ * Fail-closed: any validation error (bad scheme, non-public host, blocked/empty
+ * resolution) yields `{ ok: false, errors }` and no addresses.
+ */
+export async function resolveValidatedOAuthEndpoint(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<{ ok: true; addresses: string[] } | { ok: false; errors: ValidationError[] }> {
+  const { errors, addresses } = await validateAndResolveOAuthEndpoint(rawUrl, field, options)
+  if (errors.length > 0) return { ok: false, errors }
+  return { ok: true, addresses }
 }
 
 export async function validateEgressBindingsPreflight(

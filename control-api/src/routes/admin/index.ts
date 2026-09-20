@@ -17,6 +17,7 @@ import { createAdminRecipeOauthRouter } from './recipeOauth.js'
 import { createAdminRecipesRouter } from './recipes.js'
 import { createAdminRegistryRouter } from './registry.js'
 import { createRegistryConnectRouter } from './registryConnect.js'
+import { createAdminRemoteMcpRouter } from './remoteMcp.js'
 import { createAdminResourcesRouter } from './resources.js'
 import { createAdminSecretsRouter } from './secrets.js'
 import { createAdminSharedFilesystemsRouter } from './sharedFilesystems.js'
@@ -36,6 +37,7 @@ export function createAdminRouter(gateway: K8sGateway): Router {
   router.use(createAdminResourcesRouter(gateway))
   router.use(createAdminRecipesRouter(gateway))
   router.use(createAdminRecipeOauthRouter(gateway))
+  router.use(createAdminRemoteMcpRouter(gateway))
   router.use(createAdminRegistryRouter(gateway))
   router.use(createRegistryConnectRouter())
   router.use(createAdminSharedFilesystemsRouter(gateway))
