@@ -172,6 +172,20 @@ export function createOAuthCallbackRouter(gateway: K8sGateway): Router {
   return router
 }
 
+/**
+ * Normalize the configured public callback base URL into a bare origin (trailing
+ * slashes stripped), or `null` when none is configured. This is the SAME origin
+ * derivation `buildPublicCallbackUrl` uses for its configured branch; the CIMD
+ * document (`oauth/cimd.ts`) reuses it so the served `client_id` / `redirect_uris`
+ * share a byte-identical origin with the callback redirect. Unlike the callback,
+ * CIMD callers must NOT fall back to the request Host (an AS would see the
+ * internal proxy Host), so this returns `null` for them to fail closed on.
+ */
+export function normalizeConfiguredOrigin(configuredBaseUrl?: string): string | null {
+  if (!configuredBaseUrl || configuredBaseUrl.length === 0) return null
+  return configuredBaseUrl.replace(/\/+$/, '')
+}
+
 export function buildPublicCallbackUrl(
   req: { protocol: string; get: (h: string) => string | undefined },
   oauthClientId: string,
@@ -188,9 +202,8 @@ export function buildPublicCallbackUrl(
   // public base URL (CONTROL_API_OAUTH_CALLBACK_BASE_URL). Fall back to the
   // request Host for local/dev where none is set.
   const origin =
-    configuredBaseUrl && configuredBaseUrl.length > 0
-      ? configuredBaseUrl.replace(/\/+$/, '')
-      : `${req.protocol}://${req.get('host') ?? 'localhost'}`
+    normalizeConfiguredOrigin(configuredBaseUrl) ??
+    `${req.protocol}://${req.get('host') ?? 'localhost'}`
   return `${origin}/api/v1/oauth-callback/${encodeURIComponent(oauthClientId)}`
 }
 

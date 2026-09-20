@@ -10,6 +10,7 @@ import {
   createTracingInFlightLimiter,
   getTracingMaxInFlight,
 } from './middleware/tracingSubmitterAuth.js'
+import { createCimdRouter } from './oauth/cimd.js'
 import { createAdminAuthRouter } from './routes/admin/auth.js'
 import { createAdminRouter } from './routes/admin/index.js'
 import { createWorkflowsAdminRouter } from './routes/admin/workflows/index.js'
@@ -194,6 +195,10 @@ export function createApp(gateway: K8sGateway) {
   // parameter, not a Clerum cookie or service token. Mounted BEFORE
   // requireInternalToken so the public can hit it.
   api.use(createOAuthCallbackRouter(gateway))
+  // CIMD (SEP-991): public GET of the platform's OAuth Client ID Metadata
+  // Document for the remote MCP-OAuth lane. Read-only, no auth — a remote AS
+  // fetches it. Mounted BEFORE requireInternalToken so it stays public.
+  api.use(createCimdRouter())
   api.use(createAuthRoutes(gateway))
   // Recipe OAuth broker — background workloads present a per-recipe broker
   // token (Bearer, aud=oauth-broker). Auth is the broker token itself, not a

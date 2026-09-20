@@ -600,3 +600,47 @@ export const KNOWN_OAUTH_PROVIDERS: ReadonlySet<OAuthProvider> = new Set(
 export function isKnownOAuthProvider(value: string): value is OAuthProvider {
   return KNOWN_OAUTH_PROVIDERS.has(value as OAuthProvider)
 }
+
+// ─── Generic public token client for the remote MCP-OAuth lane (D-10 §3) ────
+//
+// The remote lane speaks OAuth to an endpoint discovered at install (not one of
+// the 8 baked adapters), as a PUBLIC client (CIMD/DCR-public + PKCE, no secret).
+// These wrappers reuse the standard form-encoded builders and append the RFC 8707
+// `resource` parameter WITHOUT touching `standardTokenRequest`/`standardRefreshRequest`,
+// so the 8 baked adapters stay byte-identical (verified by the T1 golden). They are
+// wrappers, not new adapters: nothing is added to `OAuthProvider`/`ADAPTERS`/
+// `KNOWN_OAUTH_PROVIDERS`.
+
+/** Append the RFC 8707 `resource` param to an already form-encoded body. */
+function appendResource(request: TokenRequest, resource?: string): TokenRequest {
+  if (!resource) return request
+  return { ...request, body: `${request.body}&resource=${encodeURIComponent(resource)}` }
+}
+
+/**
+ * Build a remote token-exchange POST against a discovered `tokenEndpoint`, as a
+ * public client (omits `client_secret` when `input.clientSecret` is absent — the
+ * standard builder already drops it) and appending RFC 8707 `resource` when given.
+ */
+export function buildRemoteTokenRequest(
+  tokenEndpoint: string,
+  input: TokenExchangeInput,
+  resource?: string
+): TokenRequest {
+  return appendResource(standardTokenRequest(tokenEndpoint, input), resource)
+}
+
+/**
+ * Build a remote refresh POST against a discovered `tokenEndpoint`, public client
+ * (omits `client_secret` when absent), appending RFC 8707 `resource` when given.
+ */
+export function buildRemoteRefreshRequest(
+  tokenEndpoint: string,
+  input: RefreshTokenInput,
+  resource?: string
+): TokenRequest {
+  return appendResource(standardRefreshRequest(tokenEndpoint, input), resource)
+}
+
+/** Remote token responses are standard OAuth2 — reuse the baked parser. */
+export const parseRemoteTokenResponse = parseStandardOAuth2
