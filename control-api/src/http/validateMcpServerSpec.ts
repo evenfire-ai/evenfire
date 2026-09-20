@@ -160,6 +160,20 @@ async function defaultDnsResolver(hostname: string): Promise<string[]> {
   return answers.map(answer => answer.address)
 }
 
+/**
+ * From a set of resolved addresses, return the ones that must be treated as
+ * BLOCKED: a non-IPv4 answer (cannot be range-checked, so fail closed) or an
+ * IPv4 that overlaps a private/metadata/link-local/multicast/reserved/internal
+ * range. Shared (D4) by the egress preflight and {@link validateOAuthEndpointUrl}
+ * so both classify resolved IPs by the exact same rule.
+ */
+function filterBlockedIpv4(addresses: string[]): string[] {
+  return addresses.filter(address => {
+    if (ipv4ToInt(address) === null) return true
+    return validatePublicCidr(`${address}/32`) !== null
+  })
+}
+
 /** Parse a Kubernetes resource quantity like "4000m" or "8Gi" into a number. */
 function parseCpuMillicores(val: string): number | null {
   if (val.endsWith('m')) return parseInt(val, 10)
@@ -419,10 +433,7 @@ export async function validateMcpServerSpecPreflight(
           )
           return
         }
-        const blocked = addresses.filter(address => {
-          if (ipv4ToInt(address) === null) return true
-          return validatePublicCidr(`${address}/32`) !== null
-        })
+        const blocked = filterBlockedIpv4(addresses)
         if (blocked.length > 0) {
           fields.forEach(field =>
             errors.push({
@@ -445,6 +456,67 @@ export async function validateMcpServerSpecPreflight(
       }
     })
   )
+
+  return errors
+}
+
+/**
+ * Kernel de política sobre una URL de endpoint OAuth (spec 19 §4): scheme https +
+ * host público + resolve→IP no bloqueada. Reusa isPublicDnsHostname/validatePublicCidr.
+ * `resolveDns` inyectable ⇒ testeable en Vitest sin cluster. Devuelve [] si válida.
+ * Seam compartido para el carril self-hosted 'generic' (S3-B2) y el remoto (spec 02);
+ * hoy sin call-sites de producción — es la base del seam.
+ */
+export async function validateOAuthEndpointUrl(
+  rawUrl: string,
+  field: string,
+  options: { resolveDns?: DnsResolver } = {}
+): Promise<ValidationError[]> {
+  let url: URL
+  try {
+    url = new URL(rawUrl)
+  } catch {
+    return [{ field, message: 'must be a valid absolute URL' }]
+  }
+
+  const errors: ValidationError[] = []
+  if (url.protocol !== 'https:') {
+    errors.push({ field, message: 'must use https' })
+  }
+
+  const host = url.hostname
+  if (!isPublicDnsHostname(host)) {
+    // Same rule as the egress preflight: only syntactically-public hosts are
+    // resolved. An internal/literal/malformed host is rejected without a DNS
+    // lookup (never resolve to probe internal names).
+    errors.push({ field, message: 'host must be a public DNS hostname' })
+    return errors
+  }
+
+  const resolveDns = options.resolveDns ?? defaultDnsResolver
+  try {
+    const addresses = Array.from(new Set(await resolveDns(host)))
+    if (addresses.length === 0) {
+      errors.push({ field, message: `host "${host}" did not resolve to an IPv4 A record` })
+    } else {
+      const blocked = filterBlockedIpv4(addresses)
+      if (blocked.length > 0) {
+        errors.push({
+          field,
+          message:
+            `host "${host}" resolved to blocked IPv4 address(es): ${blocked.join(', ')}. ` +
+            'OAuth endpoints must not resolve to private, metadata, link-local, multicast, reserved, or internal ranges.',
+        })
+      }
+    }
+  } catch (error) {
+    errors.push({
+      field,
+      message: `host "${host}" could not be resolved: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    })
+  }
 
   return errors
 }

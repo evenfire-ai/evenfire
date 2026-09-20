@@ -22,7 +22,13 @@ export interface OAuthClientDecl {
   id: string
   provider: string
   clientIdRef: { name: string; key: string }
-  clientSecretRef: { name: string; key: string }
+  /**
+   * Confidential-client secret reference. Optional (E-19.2): a PUBLIC OAuth
+   * client declares no secret, so the callback reads only the client_id Secret
+   * and the token POST omits `client_secret`. When present, the confidential
+   * path is byte-identical to before.
+   */
+  clientSecretRef?: { name: string; key: string }
   scopes?: string[]
   /**
    * Path B — when true, this client may be connected as a recipe-scoped
@@ -461,20 +467,26 @@ async function exchangeAuthCode(
     return { kind: 'secret_missing', secret: `${decl.clientIdRef.name}/${decl.clientIdRef.key}` }
   }
 
-  let clientSecretSecret: Record<string, string>
-  try {
-    clientSecretSecret = await deps.secretReader.read(decl.clientSecretRef.name, secretNamespace)
-  } catch (err) {
-    if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: decl.clientSecretRef.name }
+  // Public client (E-19.2): no clientSecretRef ⇒ skip the second Secret read and
+  // exchange without a client_secret. When a ref is present the confidential
+  // path is unchanged (same read, same fail-closed on missing Secret/key).
+  let clientSecret: string | undefined
+  if (decl.clientSecretRef) {
+    let clientSecretSecret: Record<string, string>
+    try {
+      clientSecretSecret = await deps.secretReader.read(decl.clientSecretRef.name, secretNamespace)
+    } catch (err) {
+      if (err instanceof SecretNotFoundError) {
+        return { kind: 'secret_missing', secret: decl.clientSecretRef.name }
+      }
+      throw err
     }
-    throw err
-  }
-  const clientSecret = clientSecretSecret[decl.clientSecretRef.key]
-  if (!clientSecret) {
-    return {
-      kind: 'secret_missing',
-      secret: `${decl.clientSecretRef.name}/${decl.clientSecretRef.key}`,
+    clientSecret = clientSecretSecret[decl.clientSecretRef.key]
+    if (!clientSecret) {
+      return {
+        kind: 'secret_missing',
+        secret: `${decl.clientSecretRef.name}/${decl.clientSecretRef.key}`,
+      }
     }
   }
 
@@ -488,15 +500,20 @@ async function exchangeAuthCode(
   const codeVerifier = adapter.usesPkce
     ? deriveCodeVerifier(deps.stateSecret, input.state)
     : undefined
-  const tokenRequest = adapter.buildTokenRequest({
-    code: input.code,
-    clientId,
-    clientSecret,
-    redirectUri: input.redirectUri,
-    codeVerifier,
-  })
 
   try {
+    // Build INSIDE the try: a confidential-only baked adapter (notion/monday/
+    // clickup) throws when handed a public (secret-less) decl. Keeping the build
+    // inside the catch turns that into a typed `provider_response_invalid` (fail
+    // closed, no token) instead of an opaque 500 — symmetric with tokenHelper's
+    // wrapped `buildRefreshRequest`.
+    const tokenRequest = adapter.buildTokenRequest({
+      code: input.code,
+      clientId,
+      clientSecret,
+      redirectUri: input.redirectUri,
+      codeVerifier,
+    })
     const response = await deps.fetchFn(tokenRequest.url, {
       method: tokenRequest.method,
       headers: tokenRequest.headers,

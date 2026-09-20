@@ -142,6 +142,16 @@ export interface ResolvedServerOAuthSubject {
  * declaration (missing id/provider/clientIdRef/clientSecretRef) so callers fail
  * closed. Same field-reading rule as {@link resolveServerOAuth} — kept here so
  * the authorize-URL minter and the callback never drift (D4).
+ *
+ * NOTE (E-19.2, deliberate deferral): the refresh-path reader
+ * `normalizeMcpServerOwnerDecl` (routes/mcpOauth.ts) already treats an absent
+ * `clientSecretRef` as a valid public client. This mint/callback resolver stays
+ * confidential-only ON PURPOSE for now: a public mcp-server is not representable
+ * in this phase (the CRD still lists `clientSecretRef` as required and there is
+ * no `'generic'` provider), so no reachable server diverges between the two
+ * readers today. Aligning this resolver (+ making
+ * `ResolvedServerOAuthSubject.decl.clientSecretRef` optional) lands together with
+ * the CRD/`'generic'` work, where the public-client path first becomes reachable.
  */
 export function resolveServerOAuthSubject(
   server: McpServerOAuthSpecInput

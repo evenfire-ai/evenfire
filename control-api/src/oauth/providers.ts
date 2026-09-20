@@ -63,7 +63,13 @@ export interface AuthorizeUrlInput {
 export interface TokenExchangeInput {
   code: string
   clientId: string
-  clientSecret: string
+  /**
+   * Confidential-client secret. Optional (E-19.2): a public OAuth client has no
+   * secret, so the token POST omits `client_secret`. Adapters for baked
+   * confidential providers (notion/monday/clickup) fail closed when it is
+   * absent; the standard form-encoded builders simply omit the field.
+   */
+  clientSecret?: string
   redirectUri: string
   /**
    * PKCE `code_verifier`, present only for adapters with `usesPkce`. The callback
@@ -83,7 +89,8 @@ export interface TokenRequest {
 export interface RefreshTokenInput {
   refreshToken: string
   clientId: string
-  clientSecret: string
+  /** Confidential-client secret; optional for public clients (E-19.2). */
+  clientSecret?: string
 }
 
 export interface ParsedTokenResponse {
@@ -156,13 +163,18 @@ function standardTokenRequest(
   input: TokenExchangeInput,
   extraHeaders: Record<string, string> = {}
 ): TokenRequest {
+  // Insertion order is load-bearing: `urlEncode` walks `Object.entries` in
+  // insertion order, so `client_secret` MUST be inserted between `client_id` and
+  // `redirect_uri` to keep the emitted body byte-identical to the pre-E-19.2
+  // shape whenever the secret is present. A public client (no secret) omits the
+  // field entirely.
   const params: Record<string, string> = {
     grant_type: 'authorization_code',
     code: input.code,
     client_id: input.clientId,
-    client_secret: input.clientSecret,
-    redirect_uri: input.redirectUri,
   }
+  if (input.clientSecret) params.client_secret = input.clientSecret
+  params.redirect_uri = input.redirectUri
   // PKCE: appended only when the adapter set `codeVerifier`. Non-PKCE adapters
   // pass no verifier, so their emitted body stays byte-identical.
   if (input.codeVerifier) params.code_verifier = input.codeVerifier
@@ -191,13 +203,20 @@ function standardRefreshRequest(
       accept: 'application/json',
       ...extraHeaders,
     },
-    body: urlEncode({
-      grant_type: 'refresh_token',
-      refresh_token: input.refreshToken,
-      client_id: input.clientId,
-      client_secret: input.clientSecret,
-    }),
+    body: urlEncode(standardRefreshParams(input)),
   }
+}
+
+// `client_secret` is the trailing field, so a public client (no secret) simply
+// drops it and the confidential-client body is byte-identical to pre-E-19.2.
+function standardRefreshParams(input: RefreshTokenInput): Record<string, string> {
+  const params: Record<string, string> = {
+    grant_type: 'refresh_token',
+    refresh_token: input.refreshToken,
+    client_id: input.clientId,
+  }
+  if (input.clientSecret) params.client_secret = input.clientSecret
+  return params
 }
 
 function parseStandardOAuth2(body: unknown): ParsedTokenResponse {
@@ -286,6 +305,12 @@ const NOTION: OAuthProviderAdapter = {
     return `https://api.notion.com/v1/oauth/authorize?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // Notion is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path. Narrows the optional
+    // secret to `string` for the Basic template below.
+    if (!input.clientSecret) {
+      throw new Error('Notion OAuth requires a confidential client secret')
+    }
     // Notion requires HTTP Basic auth on the token POST instead of client_id /
     // client_secret in the body.
     const basic = Buffer.from(`${input.clientId}:${input.clientSecret}`).toString('base64')
@@ -405,6 +430,11 @@ const MONDAY: OAuthProviderAdapter = {
     return `https://auth.monday.com/oauth2/authorize?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // monday is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path, and narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('monday OAuth requires a confidential client secret')
+    }
     // JSON body per the OAuth 2.1 migration doc (not form-urlencoded).
     const body: Record<string, string> = {
       grant_type: 'authorization_code',
@@ -422,6 +452,10 @@ const MONDAY: OAuthProviderAdapter = {
     }
   },
   buildRefreshRequest(input) {
+    // Confidential-only (DEC-3): fail closed for a public client, narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('monday OAuth requires a confidential client secret')
+    }
     return {
       url: 'https://auth.monday.com/oauth_ms/oauth/token',
       method: 'POST',
@@ -463,6 +497,11 @@ const CLICKUP: OAuthProviderAdapter = {
     return `https://app.clickup.com/api?${urlEncode(params)}`
   },
   buildTokenRequest(input) {
+    // ClickUp is a confidential-only baked provider (DEC-3): fail closed when a
+    // public client (no secret) reaches this bespoke path, and narrow the type.
+    if (!input.clientSecret) {
+      throw new Error('ClickUp OAuth requires a confidential client secret')
+    }
     // Bespoke: no grant_type, no redirect_uri — ClickUp accepts a form-encoded
     // body of client_id + client_secret + code only.
     return {

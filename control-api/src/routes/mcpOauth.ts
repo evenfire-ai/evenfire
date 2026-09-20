@@ -58,7 +58,7 @@ import { extractBearerToken } from '../utils/extractBearerToken.js'
  * Both branches ship in v1; the `context` branch is governed/exercised by U6.
  */
 
-interface McpServerResource {
+export interface McpServerResource {
   metadata?: { name?: string; namespace?: string }
   spec?: {
     auth?: { type?: unknown }
@@ -76,20 +76,27 @@ interface McpServerResource {
  * refresh path (`getAccessToken`) already consume. Returns null when the server
  * is not an OAuth server (no `spec.oauth`), so callers fail closed.
  */
-function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuthClients | null {
+export function normalizeMcpServerOwnerDecl(
+  server: McpServerResource
+): RecipeWithOAuthClients | null {
   const oauth = server.spec?.oauth
   if (!oauth || typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
   const clientIdRef = oauth.clientIdRef
-  const clientSecretRef = oauth.clientSecretRef
-  if (
-    !clientIdRef ||
-    typeof clientIdRef.name !== 'string' ||
-    typeof clientIdRef.key !== 'string' ||
-    !clientSecretRef ||
-    typeof clientSecretRef.name !== 'string' ||
-    typeof clientSecretRef.key !== 'string'
-  ) {
+  if (!clientIdRef || typeof clientIdRef.name !== 'string' || typeof clientIdRef.key !== 'string') {
     return null
+  }
+  // clientSecretRef is optional (E-19.2, public client): ABSENT (null/undefined)
+  // ⇒ public client (decl carries `clientSecretRef: undefined`); PRESENT-but-
+  // malformed stays fail-closed (null) — a half-declared secret ref is a config
+  // error, not a public client. `!= null` (not `!== undefined`) so a JSON-null
+  // ref from the untrusted CR is treated as absent, never dereferenced.
+  const clientSecretRef = oauth.clientSecretRef
+  let normalizedSecretRef: { name: string; key: string } | undefined
+  if (clientSecretRef != null) {
+    if (typeof clientSecretRef.name !== 'string' || typeof clientSecretRef.key !== 'string') {
+      return null
+    }
+    normalizedSecretRef = { name: clientSecretRef.name, key: clientSecretRef.key }
   }
   return {
     metadata: server.metadata,
@@ -99,7 +106,7 @@ function normalizeMcpServerOwnerDecl(server: McpServerResource): RecipeWithOAuth
           id: oauth.id,
           provider: oauth.provider,
           clientIdRef: { name: clientIdRef.name, key: clientIdRef.key },
-          clientSecretRef: { name: clientSecretRef.name, key: clientSecretRef.key },
+          clientSecretRef: normalizedSecretRef,
           scopes: Array.isArray(oauth.scopes)
             ? oauth.scopes.filter((s): s is string => typeof s === 'string')
             : undefined,

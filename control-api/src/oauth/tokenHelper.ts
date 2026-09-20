@@ -103,23 +103,28 @@ export async function getAccessToken(
     return { kind: 'secret_missing', secret: `${decl.clientIdRef.name}/${decl.clientIdRef.key}` }
   }
 
-  let clientSecretSecret: Record<string, string>
-  try {
-    clientSecretSecret = await deps.secretReader.read(
-      decl.clientSecretRef.name,
-      input.recipeNamespace
-    )
-  } catch (err) {
-    if (err instanceof SecretNotFoundError) {
-      return { kind: 'secret_missing', secret: decl.clientSecretRef.name }
+  // Public client (E-19.2): no clientSecretRef ⇒ refresh without a client_secret.
+  // When a ref is present the confidential path is unchanged.
+  let clientSecret: string | undefined
+  if (decl.clientSecretRef) {
+    let clientSecretSecret: Record<string, string>
+    try {
+      clientSecretSecret = await deps.secretReader.read(
+        decl.clientSecretRef.name,
+        input.recipeNamespace
+      )
+    } catch (err) {
+      if (err instanceof SecretNotFoundError) {
+        return { kind: 'secret_missing', secret: decl.clientSecretRef.name }
+      }
+      throw err
     }
-    throw err
-  }
-  const clientSecret = clientSecretSecret[decl.clientSecretRef.key]
-  if (!clientSecret) {
-    return {
-      kind: 'secret_missing',
-      secret: `${decl.clientSecretRef.name}/${decl.clientSecretRef.key}`,
+    clientSecret = clientSecretSecret[decl.clientSecretRef.key]
+    if (!clientSecret) {
+      return {
+        kind: 'secret_missing',
+        secret: `${decl.clientSecretRef.name}/${decl.clientSecretRef.key}`,
+      }
     }
   }
 
