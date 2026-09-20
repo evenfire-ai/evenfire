@@ -388,6 +388,56 @@ describe('EditMcpServerPage — credential surface wiring', () => {
     expect(screen.queryByRole('button', { name: 'Set credentials' })).not.toBeInTheDocument()
   })
 
+  // ─── OAuth connectors: the credentials tab must NOT lie ──────────────────
+  //
+  // An OAuth server keeps its client credential in the clientSecretRef Secret,
+  // not spec.envSecret, so UpdateConnectorCredentials would fall to its
+  // "nothing to rotate here" branch. The page must render the accurate OAuth
+  // panel instead (D-B7; rotation is a follow-up).
+  function oauthServer(): McpServerResource {
+    return {
+      metadata: { name: SERVER_NAME, namespace: NAMESPACE },
+      spec: {
+        image: CONNECTOR_IMAGE,
+        contextRef: 'default',
+        auth: { type: 'oauth' },
+        oauth: {
+          id: SERVER_NAME,
+          provider: 'google',
+          grantScope: 'user',
+          scopes: ['a.read'],
+          clientIdRef: { name: `${SERVER_NAME}-oauth-client`, key: 'client_id' },
+          clientSecretRef: { name: `${SERVER_NAME}-oauth-client`, key: 'client_secret' },
+        },
+      },
+    } as unknown as McpServerResource
+  }
+
+  it('shows the accurate OAuth panel and never the false "nothing to rotate" message', async () => {
+    mockGetMcpServer.mockResolvedValue(oauthServer())
+    render(
+      <ToastProvider>
+        <EditMcpServerPage />
+      </ToastProvider>
+    )
+
+    // The OAuth panel — not UpdateConnectorCredentials — owns the credentials tab.
+    await screen.findByRole('heading', { name: 'OAuth configuration' })
+
+    // The false message must be gone entirely.
+    expect(screen.queryByText(/nothing to rotate/i)).toBeNull()
+    expect(screen.queryByRole('heading', { name: /^(Update|Set) credentials$/ })).toBeNull()
+
+    // The accurate notice names the Secret, says rotation is not available yet,
+    // and points at kubectl.
+    expect(screen.getByText(/authenticates with OAuth/i)).toBeInTheDocument()
+    expect(screen.getByText(`${SERVER_NAME}-oauth-client`)).toBeInTheDocument()
+    expect(
+      screen.getByText(/Rotating it from this screen is not available yet/i)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/kubectl/i)).toBeInTheDocument()
+  })
+
   it('honors a NEWER SecretNotFound over a stale clean resolution', async () => {
     await renderPage(
       mcpServer({
