@@ -457,6 +457,31 @@ export function createAdminSecretsRouter(gateway: K8sGateway): Router {
   )
 
   // ── MCP Server Secrets ──────────────────────────────────────────────────────
+  // List MCP Server Secrets as NAMES + KEYS only — never values (E-16.1). The
+  // OAuth install-from-UI "reference an existing Secret" mode uses this to check
+  // that the Secret and the id/secret keys exist BEFORE the operator submits, so
+  // the wizard never writes a CR whose clientIdRef/clientSecretRef dangle. The
+  // server-side install saga re-verifies existence at submit; this is the UI's
+  // pre-check. Values are structurally impossible here: listSecrets projects only
+  // metadata + key names, and this route forwards only name + keys.
+  router.get(
+    '/admin/mcp-secrets',
+    enforceNamespace(config.mcpServersNamespace),
+    asyncHandler(async (_req, res) => {
+      const rows = await gateway.listSecrets(config.mcpServersNamespace)
+      const items = rows.map(row => {
+        const record = asRecord(row)
+        const metadata = asRecord(record?.metadata)
+        const name = typeof metadata?.name === 'string' ? metadata.name : ''
+        const keys = Array.isArray(record?.keys)
+          ? (record.keys as unknown[]).filter((k): k is string => typeof k === 'string')
+          : []
+        return { name, keys }
+      })
+      res.status(200).json({ items })
+    })
+  )
+
   // Create an Opaque K8s Secret in the mcp-server namespace.
   // Used by the Control UI when the operator provides secret values inline
   // in the Create MCP Server form.
