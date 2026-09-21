@@ -153,8 +153,17 @@ export class SecretsLlmSubscriptionsPage {
     await expect(dialog.getByRole('group', { name: 'Enabled models' })).toHaveCount(0)
   }
 
+  // The dismiss button carries two labels: CodexSubscriptionHub renders
+  // `creating && editing && setupNew ? 'Finish later' : 'Cancel'`, and every
+  // caller here arrives straight from createGrant, which is that state. Its
+  // handler only runs `setCreating(false); closeEdit()`, so dismissing leaves
+  // the created grant and its enabled models untouched, exactly as the older
+  // `Cancel` label did before the setup form landed.
   async closeConnectModal() {
-    await this.page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
+    await this.page
+      .getByRole('dialog')
+      .getByRole('button', { name: 'Finish later', exact: true })
+      .click()
     await expect(this.page.getByRole('dialog')).toHaveCount(0)
   }
 
