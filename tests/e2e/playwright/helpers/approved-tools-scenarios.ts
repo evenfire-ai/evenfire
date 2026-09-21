@@ -34,7 +34,6 @@ export type Scenario = {
   subscriptionName: string
   connectionKey: string
   modelName: string
-  modelLabel: string
   fixtureUrl: string
   upstreamEvidenceUrl: string
 }
@@ -102,7 +101,6 @@ export function scenarios(): Scenario[] {
     'subscriptionName',
     'connectionKey',
     'modelName',
-    'modelLabel',
     'fixtureUrl',
   ] as const
   const rows = parsed as Scenario[]

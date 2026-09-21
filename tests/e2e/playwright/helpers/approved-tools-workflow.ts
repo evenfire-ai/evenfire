@@ -32,7 +32,6 @@ function workflowScenario(): WorkflowScenario {
     'subscriptionName',
     'connectionKey',
     'modelName',
-    'modelLabel',
     'workflowName',
     'workflowNamespace',
     'runId',
@@ -170,11 +169,16 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
         desktop.getByRole('button', { name: 'Switch chat agent', exact: true })
       ).toContainText(scenario.agentDisplayName)
       await desktop.getByRole('button', { name: 'Model — Select model', exact: true }).click()
-      const option = desktop.getByRole('menuitemradio').filter({ hasText: scenario.modelLabel })
+      // The menu labels an option with the allowlist entry's displayName and
+      // falls back to the model id when there is none (ModelSelector.tsx:276).
+      // The Codex allowlist carries no displayName, so the id is what renders.
+      // Keying on the testid (ModelSelector.tsx:269) anchors this to the same
+      // id the Control UI step bound, instead of to a label nothing defines.
+      const option = desktop.getByTestId(`model-option-${scenario.modelName}`)
       await expect(option).toHaveCount(1)
       await option.click()
       await expect(
-        desktop.getByRole('button', { name: `Model — ${scenario.modelLabel}`, exact: true })
+        desktop.getByRole('button', { name: `Model — ${scenario.modelName}`, exact: true })
       ).toBeVisible()
     })
 

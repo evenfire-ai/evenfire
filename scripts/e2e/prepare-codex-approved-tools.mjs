@@ -102,7 +102,6 @@ function scenarioMetadata(run, label, catalogSize, port, probePort) {
     subscriptionName: `Codex fixture ${label} ${run}`,
     connectionKey: `${run}-grant-${label}`,
     modelName: 'gpt-5.3-codex',
-    modelLabel: 'Codex isolated tool test',
     fixtureUrl: `http://127.0.0.1:${port}`,
     upstreamEvidenceUrl: `http://127.0.0.1:${probePort}`,
   }
