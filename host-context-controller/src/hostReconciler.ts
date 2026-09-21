@@ -1286,8 +1286,46 @@ export class HostReconciler {
     return HostReconciler.shortHash([...GFS_HOST_SCOPES].sort())
   }
 
-  private static gfsLifecycleEvidenceKey(host: Pick<HostCRD, 'namespace' | 'name'>): string {
-    return `${host.namespace}/${host.name}`
+  /**
+   * Evidence is keyed by the Host uid, not by namespace/name: a Host deleted
+   * and recreated under the same name is a different object, and a name-keyed
+   * entry left behind would be reported as the new object's rotation (#696).
+   */
+  private static gfsLifecycleEvidenceKey(
+    host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>
+  ): string | undefined {
+    if (host.uid === undefined) return undefined
+    return `${HostReconciler.gfsLifecycleEvidencePrefix(host.namespace, host.name)}${host.uid}`
+  }
+
+  private static gfsLifecycleEvidencePrefix(namespace: string, name: string): string {
+    return `${namespace}/${name}/`
+  }
+
+  /**
+   * Without a uid the objects cannot be told apart, so nothing is recorded: an
+   * entry under an incomplete key would be claimed by whichever Host answers
+   * to the name next. The real mappers copy metadata.uid from the API server,
+   * so this warns rather than papering over a snapshot that lost it.
+   */
+  private recordGfsLifecycleEvidence(host: HostCRD, outcome: GfsTokenLifecycleOutcome): void {
+    const key = HostReconciler.gfsLifecycleEvidenceKey(host)
+    if (key === undefined) {
+      log.warn('skipping gfs token lifecycle evidence: Host snapshot has no uid', {
+        host: host.name,
+        namespace: host.namespace,
+        outcome,
+      })
+      return
+    }
+    this.gfsTokenLifecycleEvidence.set(key, outcome)
+  }
+
+  private clearGfsLifecycleEvidence(namespace: string, name: string): void {
+    const prefix = HostReconciler.gfsLifecycleEvidencePrefix(namespace, name)
+    for (const key of this.gfsTokenLifecycleEvidence.keys()) {
+      if (key.startsWith(prefix)) this.gfsTokenLifecycleEvidence.delete(key)
+    }
   }
 
   private static effectiveBootstrapRefreshBeforeSec(refreshTtlSec: number): number {
@@ -1843,7 +1881,7 @@ export class HostReconciler {
             resourceName: name,
             refreshExpInHours,
           })
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'reused')
+          this.recordGfsLifecycleEvidence(host, 'reused')
           const selectedRevision =
             rolloutPending || HostReconciler.shouldRollForRuntimeSecret(deployment, false)
               ? existingRevision
@@ -1923,7 +1961,7 @@ export class HostReconciler {
           await observeCreate('Secret', () =>
             this.coreApi.createNamespacedSecret({ namespace: host.namespace, body })
           )
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'minted')
+          this.recordGfsLifecycleEvidence(host, 'minted')
           log.info('created mcp-host-runtime-token Secret', {
             host: host.name,
             namespace: host.namespace,
@@ -1945,7 +1983,7 @@ export class HostReconciler {
           namespace: host.namespace,
           body: replaceBody,
         })
-        this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'rotated')
+        this.recordGfsLifecycleEvidence(host, 'rotated')
         log.info('rotated mcp-host-runtime-token Secret', {
           host: host.name,
           namespace: host.namespace,
@@ -1962,7 +2000,7 @@ export class HostReconciler {
       } catch (err) {
         lastErr = err
         if (makeExpectedHostGfsSubject(host.namespace, host.name)) {
-          this.gfsTokenLifecycleEvidence.set(HostReconciler.gfsLifecycleEvidenceKey(host), 'failed')
+          this.recordGfsLifecycleEvidence(host, 'failed')
         }
         if (err instanceof Error && err.name === 'GfsHostTokenValidationError') break
         const delayMs = 1000 * Math.pow(2, attempt - 1)
@@ -2201,8 +2239,8 @@ export class HostReconciler {
     payload: HccInfrastructureTelemetryPayload
   ): void {
     const evidenceKey = HostReconciler.gfsLifecycleEvidenceKey(host)
-    const gfsOutcome = this.gfsTokenLifecycleEvidence.get(evidenceKey)
-    this.gfsTokenLifecycleEvidence.delete(evidenceKey)
+    const gfsOutcome = evidenceKey ? this.gfsTokenLifecycleEvidence.get(evidenceKey) : undefined
+    if (evidenceKey) this.gfsTokenLifecycleEvidence.delete(evidenceKey)
     this.enqueueHostTelemetry(host, 'reconcile_outcome', reasonCode, {
       ...payload,
       // control-api allowlists `transition`, not gfs_* keys (#328).
@@ -4429,13 +4467,10 @@ export class HostReconciler {
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
           // only log the error), so the rethrow is preserved.
           // This exit emits no outcome, so drop the GFS evidence this pass
-          // recorded. Keyed by namespace/name, a leftover would be reported by
-          // the next pass, or by a recreated Host with the same name. The
-          // stateless suspension path also calls reconcileCore without emitting
-          // an outcome and does not clear the entry (#696).
-          this.gfsTokenLifecycleEvidence.delete(
-            HostReconciler.gfsLifecycleEvidenceKey(admittedHost)
-          )
+          // recorded: a leftover would be reported by the next pass over the
+          // same object. The stateless suspension path also calls reconcileCore
+          // without emitting an outcome and does not clear the entry (#696).
+          this.clearGfsLifecycleEvidence(admittedHost.namespace, admittedHost.name)
           this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
           throw error
         }
@@ -4865,6 +4900,10 @@ export class HostReconciler {
       await this.deleteHostRuntimeResources(name, namespace)
       this.clearStatus(name)
       this.desktopHosts.delete(name)
+      // The delete path has no uid to key by, so every entry for this
+      // namespace/name goes: the object is gone and no outcome will carry its
+      // evidence (#696).
+      this.clearGfsLifecycleEvidence(namespace, name)
     })
   }
 

@@ -225,7 +225,7 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
     expect(gaps).toHaveLength(2)
   })
 
-  it('does not count a 409 idempotency conflict as an evidence gap', async () => {
+  it('counts a 409 idempotency conflict as an evidence gap (#696)', async () => {
     infrastructureTelemetryFlushesTotal.reset()
     infrastructureTelemetryGapsTotal.reset()
     const fetchFn = vi.fn(
@@ -254,7 +254,14 @@ describe('BoundedInfrastructureTelemetryReporter', () => {
     expect(fetchFn).toHaveBeenCalledOnce()
     const flushes = (await infrastructureTelemetryFlushesTotal.get()).values
     expect(flushes.find(value => value.labels.result === 'conflict')?.value).toBe(1)
-    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([])
+    // The stored row holds a different payload hash, so this observation was
+    // never stored: a gap, told apart from a rejection by `reason`.
+    expect((await infrastructureTelemetryGapsTotal.get()).values).toEqual([
+      {
+        labels: { telemetry_type: 'lifecycle_transition', reason: 'conflict' },
+        value: 1,
+      },
+    ])
   })
 
   it('isolates a blackholed submission and continues flushing later telemetry', async () => {

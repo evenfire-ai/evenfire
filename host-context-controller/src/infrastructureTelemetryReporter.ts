@@ -153,14 +153,14 @@ export class BoundedInfrastructureTelemetryReporter implements InfrastructureTel
       onAccepted: () => infrastructureTelemetryFlushesTotal.inc({ result: 'accepted' }),
       onTerminal: (projection, result) => {
         infrastructureTelemetryFlushesTotal.inc({ result })
-        // A conflict means a row already exists for the key. A rejected event
-        // is never stored, so it is a gap in the evidence.
-        if (result === 'rejected') {
-          infrastructureTelemetryGapsTotal.inc({
-            telemetry_type: projection.telemetryType,
-            reason: result,
-          })
-        }
+        // Neither terminal result stores this observation: `rejected` is
+        // refused outright, and `conflict` means a row under that key already
+        // holds a different payload hash, so ours is dropped. Both are gaps in
+        // the evidence; the `reason` label keeps them apart (#696).
+        infrastructureTelemetryGapsTotal.inc({
+          telemetry_type: projection.telemetryType,
+          reason: result,
+        })
       },
       onRetry: projection =>
         infrastructureTelemetryRetriesTotal.inc({ telemetry_type: projection.telemetryType }),

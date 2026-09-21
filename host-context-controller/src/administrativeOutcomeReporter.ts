@@ -87,6 +87,15 @@ export class BoundedAdministrativeOutcomeReporter implements AdministrativeOutco
     })
   }
 
+  /**
+   * The dedupe key is the `sourceEventId`, which carries no `reasonCode`: for a
+   * given operation, generation, Host uid and outcome the first failure wins
+   * and later ones are deduplicated. That matches the server, which hashes the
+   * `reasonCode` into the stored row — a second `failed` with another reason
+   * under the same key would come back 409 and never be stored either. The
+   * per-reason detail is not lost: `controller_error` keeps it in full, with a
+   * unique occurrence id per event (#696).
+   */
   enqueueHostOutcome(projection: AdministrativeHostOutcomeProjection): void {
     const { sourceEventId } = projection
     if (this.seen.delete(sourceEventId)) {
