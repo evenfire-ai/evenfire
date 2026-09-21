@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   BoundedOffPathReporter,
   type BoundedOffPathReporterOptions,
+  ReporterTerminalError,
 } from './boundedOffPathReporter'
 
 function createReporter(overrides: Partial<BoundedOffPathReporterOptions<string>> = {}) {
@@ -12,6 +13,7 @@ function createReporter(overrides: Partial<BoundedOffPathReporterOptions<string>
     random: () => 0,
     submit: vi.fn().mockResolvedValue(undefined),
     onAccepted: vi.fn(),
+    onTerminal: vi.fn(),
     onDrop: vi.fn(),
     ...overrides,
   })
@@ -67,6 +69,25 @@ describe('BoundedOffPathReporter', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(onDrop).toHaveBeenCalledWith('event-1', 'retry_exhausted')
+  })
+
+  it('settles a terminal rejection once, without retry or drop (#326)', async () => {
+    const submit = vi
+      .fn()
+      .mockRejectedValue(new ReporterTerminalError('conflict', 'submit rejected with 409'))
+    const onTerminal = vi.fn()
+    const onRetry = vi.fn()
+    const onDrop = vi.fn()
+    const reporter = createReporter({ retryLimit: 2, submit, onTerminal, onRetry, onDrop })
+
+    reporter.enqueue('event-1')
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    // Liveness: the submission ran and its rejection was classified.
+    expect(submit).toHaveBeenCalledOnce()
+    expect(onTerminal).toHaveBeenCalledExactlyOnceWith('event-1', 'conflict')
+    expect(onRetry).not.toHaveBeenCalled()
+    expect(onDrop).not.toHaveBeenCalled()
   })
 
   it('drains queued entries during stop and rejects later enqueue', async () => {

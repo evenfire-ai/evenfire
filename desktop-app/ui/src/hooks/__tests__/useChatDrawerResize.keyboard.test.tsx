@@ -28,25 +28,25 @@ function press(result: ReturnType<typeof setup>['result'], key: string) {
 describe('useChatDrawerResize keyboard resize', () => {
   it('widens by one step on ArrowLeft (drawer grows leftward)', () => {
     const { result } = setup()
-    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 420
+    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH) // 525
     press(result, 'ArrowLeft')
-    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH + 24) // 444
+    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH + 24) // 549
   })
 
   it('narrows by one step on ArrowRight', () => {
     const { result } = setup()
     press(result, 'ArrowRight')
-    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH - 24) // 396
+    expect(result.current.width).toBe(CHAT_DRAWER_DEFAULT_WIDTH - 24) // 501
   })
 
   it('jumps to the min on Home and the max on End (matching aria-valuemin/valuemax)', () => {
-    // The handle announces aria-valuenow = width, valuemin = 340, valuemax = 820,
+    // The handle announces aria-valuenow = width, valuemin = 340, valuemax = 1000,
     // so the separator/slider convention requires Home → valuemin, End → valuemax.
     const { result } = setup()
     press(result, 'Home')
     expect(result.current.width).toBe(CHAT_DRAWER_MIN_WIDTH) // 340
     press(result, 'End')
-    expect(result.current.width).toBe(CHAT_DRAWER_MAX_ABSOLUTE) // 820
+    expect(result.current.width).toBe(CHAT_DRAWER_MAX_ABSOLUTE) // 1000
   })
 
   it('ignores unrelated keys and does not preventDefault them', () => {

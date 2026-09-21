@@ -54,12 +54,17 @@ async function landingGeometry(
   `
 
   if (options.drawerWidth) {
-    // The drawer mounts the SAME ChatPage landing inside a fixed right rail.
+    // The drawer mounts the SAME ChatPage landing inside the fixed right-rail
+    // shell (mini-spec 04a §B): the shell owns the rail width via `--rail-width`
+    // and the drawer fills it — mirror that structure so the measured geometry
+    // matches App's real render.
     await page.setContent(`
-      <div class="chat-drawer is-ready" style="--chat-drawer-width: ${options.drawerWidth}px">
-        <div class="chat-drawer__resize-handle" role="separator"></div>
-        <header class="chat-drawer__header"><div class="chat-drawer__header-main">drawer</div></header>
-        <div class="chat-drawer__surface">${landing}</div>
+      <div class="right-rail-shell" data-occupant="chat-drawer" style="--rail-width: ${options.drawerWidth}px">
+        <div class="chat-drawer is-ready">
+          <div class="chat-drawer__resize-handle" role="separator"></div>
+          <header class="chat-drawer__header"><div class="chat-drawer__header-main">drawer</div></header>
+          <div class="chat-drawer__surface">${landing}</div>
+        </div>
       </div>
     `)
   } else {

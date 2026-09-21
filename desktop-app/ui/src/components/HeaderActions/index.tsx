@@ -4,6 +4,7 @@ import { useNotificationsContext } from '@contexts/NotificationsContext'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Button, IconButton, Pill, SelectableOption, TextInput } from '@components/Common'
+import { IconChat } from '@components/SidebarNav/icons'
 import { DESKTOP_ROUTES } from '@constants/navigation'
 import { useAgentsDataController } from '@hooks/domain/useAgentsDataController'
 import { useMcpServersDataController } from '@hooks/domain/useMcpServersDataController'
@@ -90,6 +91,9 @@ export const HeaderActions = React.memo(function HeaderActions({
   notificationTrayLeft = null,
   onNotificationTrayOpenChange,
   onShellOverlayOpenChange,
+  drawerAvailable = false,
+  chatDrawerOpen = false,
+  onToggleChatDrawer,
 }: HeaderActionsProps) {
   const { accessCatalog: agentsAccessCatalog, loading: agentsCatalogLoading } =
     useAgentsDataController()
@@ -639,6 +643,25 @@ export const HeaderActions = React.memo(function HeaderActions({
           )}
         </div>
       </div>
+
+      {/* Chat-drawer toggle (mini-spec 04a §C/R3): between the search and the
+          bell. Hidden on chat tabs (`!drawerAvailable`), where the chat IS the
+          content. Ghost style like the bell (`--titlebar` variant). */}
+      {drawerAvailable && onToggleChatDrawer ? (
+        <IconButton
+          className="chat-drawer-toggle"
+          data-testid="chat-drawer-toggle"
+          color="neutral"
+          variant="ghost"
+          aria-label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+          aria-pressed={chatDrawerOpen}
+          label={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+          title={chatDrawerOpen ? 'Close chat drawer' : 'Open chat drawer'}
+          onClick={onToggleChatDrawer}
+        >
+          <IconChat />
+        </IconButton>
+      ) : null}
 
       <div className="header-utilities">
         <div className="notification-bell-wrapper" ref={notificationsRef}>
