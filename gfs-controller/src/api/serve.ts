@@ -17,6 +17,8 @@ import type {
   UploadSessionReceipt,
 } from "../upload/uploadSession";
 import { normalizeResourceId, PathError } from "../storage/paths";
+import { QuotaError } from "../quota/bytes";
+import { RateLimiter } from "../quota/rateLimit";
 import { type CopyRouteDeps, executeCopyRoute } from "./copyRoute";
 import { ok, toResponse } from "./envelope";
 import { GfsError } from "./errors";
@@ -64,13 +66,16 @@ export function sanitizeForLog(value: string): string {
  *                                 upper bound the token itself carries → 403)
  *   4. permission STORE        → PermissionClient.authorize (source of truth,
  *                                 deny-by-default, audited, fail-closed → 503)
- *   5. read executor           → stat / list / download (existence + bytes)
+ *   5. per-subject RATE LIMIT  → RateLimiter.check, mutations only (→ 429)
+ *   6. executor                → stat / list / download / write
  *
  * Steps 3 AND 4 must BOTH allow — "neither alone authorizes" (§522). Authz runs
  * BEFORE any metadata is revealed, so an absent resource and an unauthorized one
  * are indistinguishable (both 403) — no existence leak. The `drive` is taken
  * from the token claim, never from the query, so a token can only ever reach the
- * drive it was minted for.
+ * drive it was minted for. Step 5 runs after the subject is known so the cap is
+ * keyed on the token's own `sub`; a spend counts the attempt, so a flood is
+ * bounded even when every attempt is authorized.
  */
 
 /** The verify/authorize/store collaborators, injected for isolated unit tests. */
@@ -103,6 +108,12 @@ export interface ServingDeps {
   copy?: Omit<CopyRouteDeps, "writes">;
   /** Admission limits for the synchronous rename mutation; PATCH is not served without them. */
   rename?: { maxObjects: number; timeoutMs: number };
+  /**
+   * Per-subject sliding-window cap on agent-plane mutations (spec §gfs-controller
+   * Quotas; plan P4-S03). Absent = no cap, which is how the agent plane shipped
+   * before the limiter was wired in; tests inject a small limiter with a fake clock.
+   */
+  rateLimit?: RateLimiter;
   metrics?: GfsMetrics;
   /** Injectable clock for deterministic latency tests; defaults to Date.now. */
   now?: () => number;
@@ -315,6 +326,18 @@ export class GfsServingHandler {
       const requestId = needsMutationRequestId ? requireRequestId(req) : undefined;
       const ctx = await this.authContext(claims, req, requestId);
       copyAbort?.signal.throwIfAborted();
+
+      // Agent-plane flood fence (plan P4-S03): mutations spend the caller's
+      // per-subject budget AFTER the subject is known and BEFORE any executor
+      // runs, so a compromised agent is bounded by attempts rather than by
+      // successes. Reads stay uncapped — the limiter's documented scope is
+      // mint + write ops.
+      if (
+        this.deps.rateLimit &&
+        (resourceWrite || copyWrite || renameWrite || (uploadRoute && isWrite))
+      ) {
+        this.enforceRateLimit(ctx);
+      }
 
       if (capabilitiesMatch) {
         await this.serveCapabilities(res);
@@ -584,6 +607,29 @@ export class GfsServingHandler {
         "not_mounted",
         `subject resolution failed: ${err instanceof Error ? err.message : String(err)}`
       );
+    }
+  }
+
+  /**
+   * Spend one unit of the resolved principal's mutation budget (plan P4-S03).
+   * Keyed on the token's own `sub`, so a compromised agent cannot flood gfsc
+   * even when every attempt is otherwise authorized. A `rate_limited` denial
+   * carries Retry-After (the window length, an upper bound on the wait) and
+   * X-RateLimit-Limit, which the catch block turns into headers.
+   */
+  private enforceRateLimit(ctx: AuthzContext): void {
+    const limiter = this.deps.rateLimit;
+    if (!limiter) return;
+    try {
+      limiter.check(ctx.primarySubject);
+    } catch (err) {
+      if (err instanceof QuotaError && err.code === "rate_limited") {
+        throw new GfsError("rate_limited", err.message, undefined, {
+          retryAfterSeconds: Math.ceil(limiter.windowLengthMs / 1000),
+          rateLimitLimit: limiter.limitPerWindow,
+        });
+      }
+      throw err;
     }
   }
 

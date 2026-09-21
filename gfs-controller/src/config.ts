@@ -91,6 +91,12 @@ export interface GfsConfig {
   syncRenameMaxObjects: number
   /** End-to-end deadline for one synchronous rename request. */
   syncRenameTimeoutMs: number
+  /**
+   * Per-subject sliding-window cap on agent-plane mutations (mint + write ops),
+   * enforced by the serving handler (spec §gfs-controller Quotas; plan P4-S03).
+   * A tuning knob with a safe default; garbage values fail loud.
+   */
+  agentRateLimitPerMinute: number
   uploadV2: GfsUploadConfig
   devMode: boolean
 }
@@ -393,6 +399,7 @@ export function loadConfig(): GfsConfig {
     syncCopyTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_COPY_TIMEOUT_MS', 30000),
     syncRenameMaxObjects: syncCopyPositiveInteger('GFS_SYNC_RENAME_MAX_OBJECTS', 1000),
     syncRenameTimeoutMs: syncCopyPositiveInteger('GFS_SYNC_RENAME_TIMEOUT_MS', 30000),
+    agentRateLimitPerMinute: positiveInteger('GFS_AGENT_RATE_LIMIT_PER_MINUTE', 300, 1000000),
     uploadV2: uploadConfig(),
     devMode,
   }
