@@ -8,6 +8,7 @@ import { type Page, type TestInfo, expect, test } from '@playwright/test'
 import { AgentListPage, AgentModelPage, ControlUiShell } from '../pages/codex-subscription'
 import {
   type Scenario,
+  browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -106,7 +107,8 @@ export async function workflowJourney(page: Page, testInfo: TestInfo) {
     await advanced.getByRole('button', { name: 'Add', exact: true }).click()
     const update = page.waitForResponse(
       response =>
-        new URL(response.url()).pathname === `/api/v1/admin/hosts/${scenario.agentName}` &&
+        new URL(response.url()).pathname ===
+          browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}`) &&
         response.request().method() === 'PUT'
     )
     await advanced.getByRole('button', { name: 'Save', exact: true }).click()

@@ -13,6 +13,7 @@ import { type Page, expect, test } from '@playwright/test'
 import {
   type Scenario,
   type UpstreamEvidence,
+  browserApiPath,
   localUrl,
   readEvidence,
   readUpstreamEvidence,
@@ -47,7 +48,8 @@ if (process.env.PLAYWRIGHT_DESKTOP_BUILT !== 'true')
 async function saveConnector(page: Page, scenario: Scenario, remove: boolean) {
   const response = page.waitForResponse(
     response =>
-      new URL(response.url()).pathname === `/api/v1/admin/contexts/${scenario.contextName}` &&
+      new URL(response.url()).pathname ===
+        browserApiPath(`/api/v1/admin/contexts/${scenario.contextName}`) &&
       response.request().method() === 'PUT'
   )
   if (remove) {
@@ -448,7 +450,7 @@ for (const scenario of cases) {
         const persistedDetail = page.waitForResponse(
           response =>
             new URL(response.url()).pathname ===
-              `/api/v1/admin/hosts/${scenario.agentName}/detail` &&
+              browserApiPath(`/api/v1/admin/hosts/${scenario.agentName}/detail`) &&
             response.request().method() === 'GET'
         )
         await new AgentListPage(page).openNamed(scenario.agentName)

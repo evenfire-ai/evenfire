@@ -7,13 +7,22 @@
 import { type Page, type Route, expect } from '@playwright/test'
 import { beginConnectionCapture } from '../../../../scripts/e2e/approved-tools-connection-journal.mjs'
 import { ControlUiShell, SecretsLlmSubscriptionsPage } from '../pages/codex-subscription'
-import { type Scenario, required } from './approved-tools-scenarios'
+import {
+  CONTROL_UI_API_PREFIX,
+  type Scenario,
+  browserApiPath,
+  required,
+} from './approved-tools-scenarios'
 
 const verificationUrl = 'https://auth.openai.com/codex/device'
 const devicePath = (connectionKey: string, step: 'start' | 'poll') =>
-  `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/device/${step}`
+  browserApiPath(
+    `/api/v1/admin/llm/providers/codex-subscription/connections/${connectionKey}/device/${step}`
+  )
 const anyDevicePath = (step: 'start' | 'poll') =>
-  new RegExp(`^/api/v1/admin/llm/providers/codex-subscription/connections/[^/]+/device/${step}$`)
+  new RegExp(
+    `^${CONTROL_UI_API_PREFIX}/api/v1/admin/llm/providers/codex-subscription/connections/[^/]+/device/${step}$`
+  )
 
 export async function prepareSubscriptionVisible(page: Page, scenario: Scenario): Promise<string> {
   if (required('APPROVED_TOOLS_UPSTREAM_MODE') === 'real') {
