@@ -1,15 +1,17 @@
 /**
- * Pure presentation map for GFS grant/revoke/list server verdicts.
+ * Pure presentation map for GFS server verdicts, on both the grant plane
+ * (grant/revoke/list) and the read plane (resolve/download/list/affordances).
  *
- * The renderer receives control-api error codes embedded in Electron IPC error
- * messages (e.g. "Error invoking remote method 'gfs:grant': Error: 403
- * Forbidden: foreign_agent_forbidden"), so codes are matched as substrings of
- * the raw message. Unknown errors keep their raw message — fail loud, never
- * swallow a server verdict.
+ * The renderer receives error codes embedded in Electron IPC error messages
+ * (e.g. "Error invoking remote method 'gfs:grant': Error: 403 Forbidden:
+ * foreign_agent_forbidden"), so codes are matched as substrings of the raw
+ * message. Unknown errors keep their server verdict — fail loud, never swallow
+ * it — but lose the IPC wrapper, which names our own process boundary and
+ * means nothing to a user.
  */
 
 export interface GfsGrantErrorPresentation {
-  /** Matched control-api error code, or null when the message is passed through. */
+  /** Matched server error code, or null when the message is passed through. */
   code: string | null
   message: string
   /**
@@ -28,6 +30,19 @@ const GFS_GRANT_ERROR_MESSAGES: Record<string, string> = {
   manage_acl_required: 'Only people with manage access can view who has access here.',
 }
 
+/**
+ * Electron prefixes every IPC rejection with
+ * `Error invoking remote method '<channel>': <ErrorClass>: `. The channel name
+ * is an implementation detail of our own main/renderer split; the server
+ * verdict that follows it is the part a user can act on. This strips exactly
+ * the wrapper and leaves the verdict intact.
+ */
+const IPC_WRAPPER_PREFIX = /^Error invoking remote method '[^']*':\s*(?:[A-Za-z]*Error:\s*)?/
+
+export function stripIpcWrapper(message: string): string {
+  return message.replace(IPC_WRAPPER_PREFIX, '')
+}
+
 function rawMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error ?? '')
 }
@@ -41,15 +56,51 @@ function parseInvalidIndexes(message: string): number[] {
     .filter(index => Number.isInteger(index) && index >= 0)
 }
 
+/**
+ * Upper bound on a server-supplied retry window, in seconds.
+ *
+ * The value drives a real wall-clock gate: it disables the Retry button and
+ * suppresses focus revalidation. An unbounded value from the wire would wedge
+ * both for the controller's lifetime, recoverable only by remount — a durable
+ * self-denial of service out of a transient 429. Every limiter behind this
+ * endpoint meters per minute, so five minutes is already far past any window
+ * the server can legitimately be asking us to wait.
+ */
+const MAX_RETRY_AFTER_SECONDS = 300
+
+/**
+ * Lift a retry window out of an error message.
+ *
+ * The separator is matched explicitly (`=` from our own IPC suffix, `:` from a
+ * JSON body, with optional quote and spaces) rather than skipped with a
+ * permissive `[^\d]*`. A skipping pattern binds to the next number ANYWHERE in
+ * the message, so `{"retryAfterSeconds":null,"limit":100}` would yield 100 —
+ * a 100-second gate invented out of an unrelated field. It is also quadratic
+ * on long non-JSON bodies (an upstream proxy's HTML 429 page reaches this
+ * function verbatim), which freezes the renderer's main thread.
+ */
 export function parseRetryAfterSeconds(message: string): number | null {
-  const match = message.match(/retryAfterSeconds[^\d]*(\d+)/)
+  const match = message.match(/retryAfterSeconds["']?\s*[:=]\s*(\d{1,7})/)
   if (!match?.[1]) return null
   const seconds = Number.parseInt(match[1], 10)
-  return Number.isInteger(seconds) && seconds >= 0 ? seconds : null
+  if (!Number.isInteger(seconds) || seconds < 0) return null
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS)
 }
 
 export function isRateLimited(message: string): boolean {
   return /\b429\b/.test(message) || message.includes('rate_limited')
+}
+
+function describeRateLimited(raw: string, subject: string): GfsGrantErrorPresentation {
+  const retryAfterSeconds = parseRetryAfterSeconds(raw)
+  return {
+    code: 'rate_limited',
+    message:
+      retryAfterSeconds !== null
+        ? `Too many ${subject} — try again in ${retryAfterSeconds}s.`
+        : `Too many ${subject} — try again shortly.`,
+    severity: 'error',
+  }
 }
 
 /**
@@ -58,41 +109,25 @@ export function isRateLimited(message: string): boolean {
  * A read and a permission change fail under the same server budget but call for
  * different words: "too many permission changes" tells a user who was only
  * opening a file to stop doing something they never did. Only the rate limit is
- * translated here — every other read failure keeps its raw message, because the
- * grant-plane codes below describe an operation a read never performs.
+ * translated here — every other read failure keeps its server verdict, because
+ * the grant-plane codes below describe an operation a read never performs.
  */
 export function describeGfsReadError(error: unknown): GfsGrantErrorPresentation {
   const raw = rawMessage(error)
 
-  if (isRateLimited(raw)) {
-    const retryAfterSeconds = parseRetryAfterSeconds(raw)
-    return {
-      code: 'rate_limited',
-      message:
-        retryAfterSeconds !== null
-          ? `Too many file requests — try again in ${retryAfterSeconds}s.`
-          : 'Too many file requests — try again shortly.',
-      severity: 'error',
-    }
-  }
+  if (isRateLimited(raw)) return describeRateLimited(raw, 'file requests')
 
-  return { code: null, message: raw || 'The file request failed.', severity: 'error' }
+  return {
+    code: null,
+    message: stripIpcWrapper(raw) || 'The file request failed.',
+    severity: 'error',
+  }
 }
 
 export function describeGfsGrantError(error: unknown): GfsGrantErrorPresentation {
   const raw = rawMessage(error)
 
-  if (isRateLimited(raw)) {
-    const retryAfterSeconds = parseRetryAfterSeconds(raw)
-    return {
-      code: 'rate_limited',
-      message:
-        retryAfterSeconds !== null
-          ? `Too many permission changes — try again in ${retryAfterSeconds}s.`
-          : 'Too many permission changes — try again shortly.',
-      severity: 'error',
-    }
-  }
+  if (isRateLimited(raw)) return describeRateLimited(raw, 'permission changes')
 
   for (const [code, message] of Object.entries(GFS_GRANT_ERROR_MESSAGES)) {
     if (!raw.includes(code)) continue

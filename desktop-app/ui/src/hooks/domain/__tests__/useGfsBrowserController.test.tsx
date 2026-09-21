@@ -93,6 +93,10 @@ function Probe() {
       <div data-testid="discovery-failure-retry">
         {ctrl.discoveryFailure?.retryAfterSeconds ?? 'none'}
       </div>
+      <div data-testid="discovery-failure-retry-at">
+        {ctrl.discoveryFailure?.retryAvailableAt ?? 'none'}
+      </div>
+      <div data-testid="loading">{ctrl.loading ? 'loading' : 'idle'}</div>
       <div data-testid="loading-accessible">{ctrl.loadingAccessible ? 'loading' : 'idle'}</div>
       <div data-testid="row-affordances">{ctrl.rowAffordances?.held.join(',') ?? 'none'}</div>
       <div data-testid="held-permissions">{ctrl.affordances?.held.join(',') ?? 'none'}</div>
@@ -949,6 +953,12 @@ describe('useGfsBrowserController', () => {
     )
     expect(screen.getByTestId('accessible-error').textContent).toBe('none')
     expect(screen.getByTestId('accessible-count').textContent).toBe('0')
+    // Pin the classification, not only the copy it happens to produce. The page
+    // suppresses its retry card on `kind === 'unsupported'` and is tested
+    // against a hand-written controller, so without this assertion a 404 could
+    // start classifying as 'failed' and both suites would stay green while the
+    // user got a retry card with a raw 404 in it.
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('unsupported')
   })
 
   it('classifies a rate-limited discovery failure instead of calling the server unsupported', async () => {
@@ -1058,6 +1068,165 @@ describe('useGfsBrowserController', () => {
       await new Promise(resolve => globalThis.setTimeout(resolve, 0))
     })
     expect(listAccessible).toHaveBeenCalledTimes(2)
+
+    // That second attempt was refused with a BYTE-IDENTICAL message, which is
+    // the normal case: the server keeps saying the same thing while its window
+    // is open. Nothing derived from the message alone changes, so a verdict
+    // memoized on the message keeps its object identity and every effect keyed
+    // on it stays silent — leaving the pause at the FIRST failure's expired
+    // deadline and letting every later focus spend another request. Re-arming
+    // has to key off the error's timestamp.
+    expect(screen.getByTestId('discovery-failure-retry-at').textContent).toBe(
+      String(pausedAt + 8_000 + 7_000)
+    )
+
+    vi.setSystemTime(pausedAt + 9_000)
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+
+    // And the re-armed window opens in turn, so the assertion above is a
+    // suppression rather than a controller that stopped refetching for good.
+    vi.setSystemTime(pausedAt + 16_000)
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(3)
+  })
+
+  it('pauses focus revalidation for a rate limit that names no window', async () => {
+    // An upstream proxy or CDN answers 429 with its own body, which carries no
+    // retryAfterSeconds for us to parse. Treating an unknown window as "no wait
+    // needed" put focus revalidation straight back on an exhausted budget.
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          '<html><body>429 Too Many Requests</body></html>'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          resolve: vi.fn(),
+          listChildren: vi.fn(async () => ({ items: [], nextCursor: null })),
+          affordances: vi.fn(async () => ({
+            held: [],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() =>
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+    )
+    // The window really is unknown — this is the case under test, not a 429
+    // that happened to carry a hint.
+    expect(screen.getByTestId('discovery-failure-retry-at').textContent).toBe('none')
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const pausedAt = Date.now()
+
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(1)
+    expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+
+    // Past the default window, revalidation resumes.
+    vi.setSystemTime(pausedAt + 61_000)
+    await act(async () => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+    await act(async () => {
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    expect(listAccessible).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps reporting the children load while discovery is rate limited', async () => {
+    // `loading` is the children query's state. Gating it on a discovery error
+    // hid the spinner while a folder was genuinely loading, so the consumer
+    // that derives its loading state from this field alone flashed an empty
+    // folder at the user.
+    let releaseChildren: (page: { items: never[]; nextCursor: null }) => void = () => {}
+    const listChildren = vi.fn(
+      () =>
+        new Promise<{ items: never[]; nextCursor: null }>(resolve => {
+          releaseChildren = resolve
+        })
+    )
+    const listAccessible = vi.fn(async () => {
+      throw new Error(
+        "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+          'Too Many Requests retryAfterSeconds=7'
+      )
+    })
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible,
+          listChildren,
+          resolve: vi.fn(async () => ({
+            resourceId: 'root',
+            gfsUri: 'gfs://main/root',
+            name: 'Root',
+            kind: 'directory',
+          })),
+          affordances: vi.fn(async () => ({
+            held: ['read'],
+            canDelegate: false,
+            grantableBits: [],
+            canCreateShare: false,
+          })),
+        },
+      },
+    })
+
+    render(<Probe />, { wrapper: Harness })
+    await waitFor(() =>
+      expect(screen.getByTestId('discovery-failure-kind').textContent).toBe('rate-limited')
+    )
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'open' }).click()
+    })
+    // Witness: the children request is genuinely in flight, so "loading" below
+    // describes a pending load and not a tree that never started one.
+    await waitFor(() => expect(listChildren).toHaveBeenCalled())
+    expect(screen.getByTestId('loading').textContent).toBe('loading')
+
+    await act(async () => {
+      releaseChildren({ items: [], nextCursor: null })
+      await new Promise(resolve => globalThis.setTimeout(resolve, 0))
+    })
+    // Still loading once the children settle, but now for the other reason:
+    // the R4 authority gate is open because a 429 never advances the discovery
+    // query's `dataUpdatedAt`, and this controller withholds every cached GFS
+    // surface until the session is re-proved. That is deliberate and unchanged
+    // here — the point of this test is that the two concerns stay separate, so
+    // a settled discovery error can no longer silence an in-flight folder.
+    expect(screen.getByTestId('authority-pending').textContent).toBe('pending')
+    expect(screen.getByTestId('loading').textContent).toBe('loading')
   })
 
   it('reconciles the open folder after a move and feeds the returned version into follow-up actions', async () => {

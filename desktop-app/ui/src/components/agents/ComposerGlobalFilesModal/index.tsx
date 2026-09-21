@@ -3,6 +3,7 @@ import { Button, EmptyState, IconButton, StatusBanner } from '@components/Common
 import { GfsFileIcon } from '@components/GfsFileIcon'
 import { IconChevronRight, IconClose, IconContexts } from '@components/SidebarNav/icons'
 import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
+import { describeGfsReadError } from '@lib/gfsGrantErrors'
 import { formatSharedFileSize } from '@lib/sharedFiles'
 import type { ComposerGlobalFileReference } from '@/uiTypes'
 import type { ComposerGlobalFileSelection, ComposerGlobalFilesModalProps } from './types'
@@ -39,7 +40,12 @@ export function ComposerGlobalFilesModal({ onAdd, onClose }: ComposerGlobalFiles
   const selectedFiles = useMemo(() => Object.values(selected), [selected])
   const entries = ctrl.current ? ctrl.items : ctrl.accessibleResources
   const loading = ctrl.current ? ctrl.loading : ctrl.loadingAccessible
-  const error = ctrl.current ? ctrl.error : ctrl.accessibleError
+  // Present the verdict, never the transport. Until discovery failures were
+  // classified by signal, every rejection of the `gfs:listAccessible` channel
+  // became a friendly notice here; now only a 404 does, so a 429 would have
+  // put the raw "Error invoking remote method …" string in front of the user.
+  const rawError = ctrl.current ? ctrl.error : ctrl.accessibleError
+  const error = rawError ? describeGfsReadError(rawError).message : null
   const hasMore = ctrl.current ? ctrl.hasMore : ctrl.hasMoreAccessible
   const loadingMore = ctrl.current ? ctrl.isFetchingMore : ctrl.isFetchingMoreAccessible
   const loadMore = ctrl.current ? ctrl.loadMore : ctrl.loadMoreAccessible

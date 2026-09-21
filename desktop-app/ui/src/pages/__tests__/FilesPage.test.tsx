@@ -3384,7 +3384,12 @@ describe('FilesPage', () => {
       ...baseController(),
       authorityPending: true,
       accessibleError: rawMessage,
-      discoveryFailure: { kind: 'rate-limited', message: rawMessage, retryAfterSeconds: 7 },
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 7,
+        retryAvailableAt: Date.now() + 7_000,
+      },
       retryDiscovery,
     })
 
@@ -3431,5 +3436,67 @@ describe('FilesPage', () => {
     expect(screen.getByText(/Automatic GFS discovery is not available/)).toBeTruthy()
     expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
     expect(screen.queryByRole('button', { name: /retry file listing/i })).toBeNull()
+  })
+
+  it('shows a server-side discovery failure without the IPC plumbing around it', () => {
+    // `kind: 'failed'` covers 5xx, network and timeout — everything that is
+    // neither a 404 nor a rate limit. It reaches the same card, so the card's
+    // body has to be presented rather than passed through: the raw value is an
+    // Electron wrapper around the verdict, and the seam test in this PR asserts
+    // that wrapper must never reach a user.
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      accessibleError:
+        "Error invoking remote method 'gfs:listAccessible': Error: 503 Service Unavailable: upstream_unreachable",
+      discoveryFailure: {
+        kind: 'failed',
+        message:
+          "Error invoking remote method 'gfs:listAccessible': Error: 503 Service Unavailable: upstream_unreachable",
+        retryAfterSeconds: null,
+        retryAvailableAt: null,
+      },
+    })
+
+    renderFilesPage()
+
+    // Liveness witness: the card really rendered, so the absence assertions
+    // below describe a presented failure and not an unmounted branch.
+    expect(screen.getByText('Could not load your files')).toBeTruthy()
+    expect(screen.getByText(/503 Service Unavailable: upstream_unreachable/)).toBeTruthy()
+    expect(screen.queryByText(/Error invoking remote method/)).toBeNull()
+    // No window was named, so nothing pretends to know one.
+    expect(screen.queryByTestId('gfs-discovery-retry-seconds')).toBeNull()
+    const retry = screen.getByRole('button', { name: /retry file listing/i }) as HTMLButtonElement
+    expect(retry.disabled).toBe(false)
+  })
+
+  it('stops reporting the drive as busy once discovery has settled into a failure', () => {
+    // authorityPending stays true after a 429 on purpose — a rate limit does
+    // not re-prove the session — so aria-busy had to stop deriving from it
+    // alone, or a screen reader announces a loading region that is showing a
+    // settled error with a Retry button.
+    const rawMessage =
+      "Error invoking remote method 'gfs:listAccessible': Error: 429 Too Many Requests: " +
+      'Too Many Requests retryAfterSeconds=7'
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      authorityPending: true,
+      accessibleError: rawMessage,
+      discoveryFailure: {
+        kind: 'rate-limited',
+        message: rawMessage,
+        retryAfterSeconds: 7,
+        retryAvailableAt: Date.now() + 7_000,
+      },
+    })
+
+    renderFilesPage()
+
+    const drive = screen.getByLabelText('Global File System browser')
+    // Witness: this is the failure state, not a page that never rendered the
+    // drive region at all.
+    expect(screen.getByText('Too many file requests')).toBeTruthy()
+    expect(drive.getAttribute('aria-busy')).toBe('false')
   })
 })

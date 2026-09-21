@@ -15,8 +15,8 @@ const RID_RE = /^[0-9a-f]{32}$/
 const TRAILING_RID_RE = /-([0-9a-f]{32})$/
 
 export class GfsUriError extends Error {
-  constructor(message: string) {
-    super(message)
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
     this.name = 'GfsUriError'
   }
 }
@@ -779,29 +779,46 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
  * error CODE (`subjects_invalid`, `foreign_agent_forbidden`, `429`, …) — intact.
  *
  * The READ methods (`resolveUri`, `download`, `listChildren`, `listAccessible`,
- * `affordances`) route through this too. They share the per-actor `resource`
- * rate-limit budget in control-api, so a 429 here is the common case, not an
- * edge one: without the hint the renderer can tell the user it was rate limited
- * but not when to retry.
+ * `affordances`) route through this too, so a 429 here is the common case, not
+ * an edge one: without the hint the renderer can tell the user it was rate
+ * limited but not when to retry. Four of them are metered per actor in the
+ * `resource` class; `download`'s proxy leg has its own `proxy-read` budget and
+ * its resolve leg falls under `resource`.
+ *
+ * The retry window is read from the JSON body first and from the `Retry-After`
+ * response header second. Both are needed: our own services answer with
+ * `{ retryAfterSeconds }`, but an upstream proxy or CDN answers 429 with its
+ * own body and only the standard header, and that body parses to nothing.
  *
  * When there is nothing structured to surface, the ORIGINAL error propagates
  * unchanged (fail loud; never swallow the server's verdict).
  */
 function surfaceGfsGrantError(error: unknown): unknown {
-  const bodyText =
-    error &&
-    typeof error === 'object' &&
-    typeof (error as { bodyText?: unknown }).bodyText === 'string'
-      ? (error as { bodyText: string }).bodyText
-      : ''
-  if (!bodyText) return error
-  const fields = parseGfsGrantErrorFields(bodyText)
+  if (!error || typeof error !== 'object') return error
+  const transportError = error as { bodyText?: unknown; retryAfter?: unknown }
+  const bodyText = typeof transportError.bodyText === 'string' ? transportError.bodyText : ''
+  const fields = bodyText ? parseGfsGrantErrorFields(bodyText) : {}
+  const retryAfterSeconds =
+    fields.retryAfterSeconds ?? parseRetryAfterHeader(transportError.retryAfter)
   const parts: string[] = []
   if (fields.invalidIndexes) parts.push(`invalidIndexes=[${fields.invalidIndexes.join(',')}]`)
-  if (fields.retryAfterSeconds !== undefined) {
-    parts.push(`retryAfterSeconds=${fields.retryAfterSeconds}`)
-  }
+  if (retryAfterSeconds !== undefined) parts.push(`retryAfterSeconds=${retryAfterSeconds}`)
   if (parts.length === 0) return error
   const baseMessage = error instanceof Error ? error.message : String(error ?? '')
-  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`)
+  return new GfsUriError(`${baseMessage} ${parts.join(' ')}`, { cause: error })
+}
+
+/**
+ * Read a `Retry-After` header value as a delay in seconds.
+ *
+ * RFC 9110 also permits an HTTP-date, which we deliberately do not translate:
+ * a date depends on clock agreement between the server and this machine, and a
+ * skewed clock would produce a retry window that is wrong in either direction.
+ * An unparsed header yields no hint at all, which the renderer already handles
+ * — it says "try again shortly" and pauses automatic revalidation for the
+ * shortest window the limiters behind this endpoint can be enforcing.
+ */
+function parseRetryAfterHeader(retryAfter: unknown): number | undefined {
+  if (typeof retryAfter !== 'string' || !/^\d{1,7}$/.test(retryAfter.trim())) return undefined
+  return Number.parseInt(retryAfter.trim(), 10)
 }

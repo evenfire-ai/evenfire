@@ -692,7 +692,53 @@ describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
     })
     // Fail loud: an error with nothing structured to surface propagates verbatim,
     // it is never rewritten or swallowed.
-    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow('403 Forbidden: denied')
+    //
+    // The anchors are what make this a negative control. `toThrow('…')` is a
+    // SUBSTRING match, so a message rewritten to "403 Forbidden: denied
+    // retryAfterSeconds=0" satisfies it identically — the assertion could not
+    // express the "untouched" its name promises, and survived deleting the
+    // feature it guards.
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(/^403 Forbidden: denied$/)
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('takes the retry window from Retry-After when the 429 body is not ours', async () => {
+    // An upstream proxy or CDN refuses with its own body, which parses to
+    // nothing — the case where the renderer previously got a rate limit with
+    // no window at all and put focus revalidation straight back on the budget.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: Too Many Requests',
+          429,
+          '<html><body>429 Too Many Requests</body></html>',
+          '11'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=11/)
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores an HTTP-date Retry-After rather than translating it against a local clock', async () => {
+    // RFC 9110 permits a date here. Converting it would depend on this
+    // machine's clock agreeing with the server's, and a skewed clock produces
+    // a window that is wrong in either direction. No hint is the honest answer.
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError(
+          '429 Too Many Requests: Too Many Requests',
+          429,
+          'rate limited',
+          'Wed, 21 Oct 2026 07:28:00 GMT'
+        )
+      }) as GfsTransport['requestJson'],
+    })
+
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow(
+      /^429 Too Many Requests: Too Many Requests$/
+    )
     expect(t.requestJson).toHaveBeenCalledTimes(1)
   })
 })

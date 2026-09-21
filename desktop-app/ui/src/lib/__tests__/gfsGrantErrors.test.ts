@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { describeGfsGrantError, describeGfsReadError } from '../gfsGrantErrors'
+import {
+  describeGfsGrantError,
+  describeGfsReadError,
+  parseRetryAfterSeconds,
+} from '../gfsGrantErrors'
 
 /**
  * Pure presentation map for GFS grant-plane server verdicts. Codes arrive
@@ -155,5 +159,42 @@ describe('describeGfsReadError', () => {
       message: 'gfs download failed: 502',
       severity: 'error',
     })
+  })
+
+  it('keeps the server verdict but drops the IPC wrapper around it', () => {
+    // The wrapper names our own main/renderer channel. It is noise to a user
+    // and the verdict after it is the part they can act on, so exactly one of
+    // the two is removed.
+    const presented = describeGfsReadError(
+      new Error(
+        "Error invoking remote method 'gfs:listChildren': GfsUriError: 503 Service Unavailable: upstream_unreachable"
+      )
+    )
+
+    expect(presented.message).toBe('503 Service Unavailable: upstream_unreachable')
+  })
+
+  it('reads a retry window only from its own field', () => {
+    // A pattern that skips non-digits binds to the next number ANYWHERE in the
+    // message, so a null window next to an unrelated number yielded that
+    // number — inventing a 100-second gate out of a rate-limit ceiling.
+    expect(
+      parseRetryAfterSeconds('429 Too Many Requests: {"retryAfterSeconds":null,"limit":100}')
+    ).toBeNull()
+    // Witness: the same parser does find the field when it is genuinely there,
+    // in both shapes the wire uses.
+    expect(parseRetryAfterSeconds('429 Too Many Requests retryAfterSeconds=7')).toBe(7)
+    expect(
+      parseRetryAfterSeconds('429: {"error":"Too Many Requests","retryAfterSeconds": 3}')
+    ).toBe(3)
+  })
+
+  it('bounds a retry window the server could never legitimately be asking for', () => {
+    // The value disables the Retry button and suppresses focus revalidation.
+    // Unbounded, one hostile or corrupt response wedges both for the lifetime
+    // of the controller — a durable outage out of a transient 429.
+    expect(parseRetryAfterSeconds('429 retryAfterSeconds=999999999')).toBe(300)
+    // Witness: the clamp is a ceiling, not a constant.
+    expect(parseRetryAfterSeconds('429 retryAfterSeconds=45')).toBe(45)
   })
 })

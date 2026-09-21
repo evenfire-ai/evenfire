@@ -8,7 +8,7 @@ import {
   useQueryClient,
 } from '@tanstack/react-query'
 import { GFS_BREADCRUMB_MAX_DEPTH } from '@constants/gfsBrowser'
-import { parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
+import { isRateLimited, parseRetryAfterSeconds } from '@lib/gfsGrantErrors'
 import type { GfsGrantListItem, GfsShareListItem } from '@/gfs/delegation.types'
 import { desktopQueryKeys } from './queryKeys'
 
@@ -145,6 +145,23 @@ export interface GfsDiscoveryFailure {
   kind: GfsDiscoveryFailureKind
   message: string
   retryAfterSeconds: number | null
+  /**
+   * Absolute epoch (ms) at which the server's own window closes, or null when
+   * this failure named no window.
+   *
+   * An absolute deadline, not a duration, and derived from the query's
+   * `errorUpdatedAt` rather than from the message. Two consecutive 429s carry a
+   * byte-identical message — the server keeps refusing with the same words —
+   * so anything memoized on the message alone returns the SAME object, and
+   * every effect keyed on it stays silent for the second failure. The pause
+   * would then never re-arm after a retry, which is the hammering this
+   * controller exists to prevent. `errorUpdatedAt` advances on every settled
+   * error, identical message or not.
+   *
+   * A deadline also survives a remount and cannot drift: a consumer counting
+   * down derives the remainder from the clock instead of decrementing state.
+   */
+  retryAvailableAt: number | null
 }
 
 /**
@@ -160,9 +177,28 @@ export interface GfsDiscoveryFailure {
  */
 function classifyDiscoveryFailure(message: string): GfsDiscoveryFailureKind {
   if (/\b404 Not Found\b/.test(message)) return 'unsupported'
-  if (/\b429\b/.test(message)) return 'rate-limited'
+  // Share the predicate with the presentation layer rather than restating it.
+  // A third copy of "what counts as rate limited" is a copy that will rot, and
+  // the two must agree: the card renders copy chosen by `describeGfsReadError`
+  // for a failure this function classified.
+  if (isRateLimited(message)) return 'rate-limited'
   return 'failed'
 }
+
+/**
+ * Focus-refetch pause applied when the server rate limited us without naming a
+ * window.
+ *
+ * The manual Retry button stays enabled — spending the user's own click is
+ * their decision, and the card tells them to "try again shortly". What this
+ * suppresses is the automatic revalidation on every window focus, which would
+ * otherwise keep drawing on a budget the server is still refusing. The case is
+ * reachable: an upstream proxy or CDN answers 429 with its own body, which
+ * carries no `retryAfterSeconds` for us to parse.
+ *
+ * One minute is the window of the per-minute limiters behind this endpoint.
+ */
+const UNKNOWN_RATE_LIMIT_PAUSE_MS = 60_000
 
 const SESSION_AUTHORITY_ERROR_CODES = [
   'desktop_user_retired',
@@ -254,9 +290,14 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
   // it must not re-render. 0 means "not paused".
   const pausedUntilRef = useRef(0)
   // TanStack 5 accepts `(query) => boolean | 'always'` here. It must return
-  // 'always' | false, never a boolean: under desktopQueryDefaults' staleTime
-  // of Infinity, `true` means "refetch if stale", which never happens — a
-  // boolean predicate would silently disable focus refetch altogether.
+  // 'always' | false, never a boolean: `true` means "refetch if stale", and
+  // under desktopQueryDefaults' staleTime of Infinity a query that HOLDS DATA
+  // never is — so `true` would drop the focus revalidation this option exists
+  // for, which is picking up grants made from another surface. (It is not that
+  // staleness is impossible under Infinity: `isStaleByTime` short-circuits to
+  // true when `data === undefined` or the query was invalidated, both
+  // reachable here. `'always'` is unconditional, which is what we want when
+  // not paused.)
   const refetchOnFocusUnlessPaused = useCallback(
     (): 'always' | false => (Date.now() >= pausedUntilRef.current ? 'always' : false),
     []
@@ -637,22 +678,34 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
     [authorityPending, sharesQuery.data]
   )
   const accessibleErrorMessage = accessibleQuery.error ? toMessage(accessibleQuery.error) : null
-  const discoveryFailure = useMemo<GfsDiscoveryFailure | null>(
-    () =>
-      accessibleErrorMessage
-        ? {
-            kind: classifyDiscoveryFailure(accessibleErrorMessage),
-            message: accessibleErrorMessage,
-            retryAfterSeconds: parseRetryAfterSeconds(accessibleErrorMessage),
-          }
-        : null,
-    [accessibleErrorMessage]
-  )
+  // The timestamp is a dependency in its own right, not decoration. It is the
+  // only thing that distinguishes two consecutive failures carrying the same
+  // message, and without it the memo below never recomputes for the second one.
+  const accessibleErrorUpdatedAt = accessibleQuery.error ? accessibleQuery.errorUpdatedAt : 0
+  const discoveryFailure = useMemo<GfsDiscoveryFailure | null>(() => {
+    if (!accessibleErrorMessage) return null
+    const kind = classifyDiscoveryFailure(accessibleErrorMessage)
+    const retryAfterSeconds = parseRetryAfterSeconds(accessibleErrorMessage)
+    return {
+      kind,
+      message: accessibleErrorMessage,
+      retryAfterSeconds,
+      retryAvailableAt:
+        kind === 'rate-limited' && retryAfterSeconds !== null
+          ? accessibleErrorUpdatedAt + retryAfterSeconds * 1000
+          : null,
+    }
+  }, [accessibleErrorMessage, accessibleErrorUpdatedAt])
   useEffect(() => {
+    if (discoveryFailure?.kind !== 'rate-limited') {
+      pausedUntilRef.current = 0
+      return
+    }
+    // A rate limit with no parseable window is still a rate limit. Leaving the
+    // pause open here would let every window focus spend another request
+    // against a server that just refused one.
     pausedUntilRef.current =
-      discoveryFailure?.kind === 'rate-limited' && discoveryFailure.retryAfterSeconds !== null
-        ? Date.now() + discoveryFailure.retryAfterSeconds * 1000
-        : 0
+      discoveryFailure.retryAvailableAt ?? Date.now() + UNKNOWN_RATE_LIMIT_PAUSE_MS
   }, [discoveryFailure])
   // The page must not reach into the query object to retry. Clearing the pause
   // here is deliberate: an explicit retry is the user's decision, and the
@@ -885,14 +938,13 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         ? null
         : ((rowAffordancesQuery.data as GfsBrowserAffordances | undefined) ?? null),
     rowAffordancesError: rowAffordancesQuery.error ? toMessage(rowAffordancesQuery.error) : null,
+    loading: (authorityPending || childrenQuery.isFetching) && items.length === 0,
     // A settled discovery error is not a pending load. Without this the
     // spinner outlived the failure for every consumer that derives its
-    // loading state from here alone (ComposerGlobalFilesModal); FilesPage
-    // reads authorityPending directly and is fixed separately.
-    loading:
-      (authorityPending || childrenQuery.isFetching) &&
-      items.length === 0 &&
-      !accessibleQuery.isError,
+    // loading state from here alone (ComposerGlobalFilesModal). The term
+    // belongs on this field only: `loading` above reports the INDEPENDENT
+    // children query, and gating it on a discovery error hid the spinner while
+    // a folder was genuinely loading, flashing "this folder is empty".
     loadingAccessible:
       !accessibleQuery.isError &&
       ((authorityPending && canListAccessibleResources) ||
