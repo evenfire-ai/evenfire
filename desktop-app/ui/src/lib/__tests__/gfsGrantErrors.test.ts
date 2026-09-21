@@ -104,6 +104,30 @@ describe('describeGfsGrantError', () => {
     })
   })
 
+  it.each([
+    ['hyphen-delimited, as in a name', '500 Internal Server Error: upstream edge-429-pool refused'],
+    ['slash-delimited, as in a path', '404 Not Found: no handler for /docs/429/index.md'],
+  ])('does not treat a 429 embedded in text as a rate limit (%s)', (_label, raw) => {
+    // `httpClient` copies the RAW body into the message when the JSON carries
+    // no top-level `error`/`message`, so arbitrary server text reaches the
+    // classifier. A word-boundary match fired on `-429-` and `/429/`.
+    const presentation = describeGfsReadError(new Error(raw))
+
+    expect(presentation.code).toBeNull()
+    // Witness: the classifier is live and still recognises the status token in
+    // the very same message, so the null above is a rejected embedding and not
+    // a matcher that stopped working.
+    expect(describeGfsReadError(new Error(`${raw} 429`)).code).toBe('rate_limited')
+  })
+
+  it.each([
+    ['leading status', '429 Too Many Requests'],
+    ['colon-wrapped status', 'gfs download failed: 429: Too Many Requests'],
+    ['trailing status', 'gfs download failed: 429'],
+  ])('still recognises the status token the wire produces (%s)', (_label, raw) => {
+    expect(describeGfsReadError(new Error(raw)).code).toBe('rate_limited')
+  })
+
   it('passes unknown errors through verbatim — fail loud, never swallow', () => {
     expect(describeGfsGrantError(new Error('total surprise'))).toEqual({
       code: null,

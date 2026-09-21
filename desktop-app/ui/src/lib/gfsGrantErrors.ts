@@ -96,8 +96,23 @@ export function parseRetryAfterSeconds(message: string): number | null {
   return Math.min(seconds, MAX_RETRY_AFTER_SECONDS)
 }
 
+/**
+ * A 429 is recognised as a STATUS TOKEN, not as three digits anywhere.
+ *
+ * `\b` treats `-` and `/` as boundaries, so it matched `429` inside a path or
+ * a name — and `httpClient` copies the RAW response body into the message
+ * whenever the JSON carries no top-level `error`/`message` key, so such text
+ * genuinely reaches here. A non-429 failure whose body mentioned, say, an edge
+ * pool called `edge-429-pool` was presented as "Too many file requests" and
+ * armed a focus pause on a listing that was never rate limited.
+ *
+ * Every shape the wire actually produces delimits the status with whitespace
+ * or a colon — `429 Too Many Requests`, `gfs download failed: 429:` — so
+ * requiring that delimiter on both sides loses no real detection. Erring the
+ * other way is the costly one: a missed 429 is the original incident.
+ */
 export function isRateLimited(message: string): boolean {
-  return /\b429\b/.test(message) || message.includes('rate_limited')
+  return /(?:^|[\s:])429(?=[\s:]|$)/.test(message) || message.includes('rate_limited')
 }
 
 function describeRateLimited(raw: string, subject: string): GfsGrantErrorPresentation {
