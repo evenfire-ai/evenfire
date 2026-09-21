@@ -8,9 +8,11 @@
  *
  * The refresh machinery is NOT reimplemented: each candidate is fed to the
  * existing reactive `getAccessToken` with `refreshBufferMs = Bp` and
- * `requireBackground: true`, and the returned access token is DISCARDED — only
- * the side effect (persisted renewed token) and the outcome label matter
- * (mini-spec §6.2). The decision layer is the pure `proactiveRefreshPolicy`
+ * `requireBackground` set per grantKind (`true` for `user` grants — SEC-5;
+ * `false` for `shared` context identity, which is unattended by design), and the
+ * returned access token is DISCARDED — only the side effect (persisted renewed
+ * token) and the outcome label matter (mini-spec §6.2). The decision layer is
+ * the pure `proactiveRefreshPolicy`
  * module; this file is the thin orchestrator: enumerate → claim → refresh →
  * classify, plus the time-based DCR sweep.
  *
@@ -201,13 +203,22 @@ export async function runProactiveRefreshSweep(
         // reactive path already renewed it out of the window since the snapshot.
         const claimed = await claimRemoteGrantForRefresh(txDb, key, window)
         if (!claimed) return 'skipped' as const
-        // requireBackground:true — unattended use (SEC-5). The access token is
-        // discarded; only the persisted refresh + the kind matter. refreshBufferMs
-        // = Bp so `getAccessToken` treats an in-proactive-window token as stale
-        // and refreshes it. resolveDns/pinnedTransport left undefined ⇒ production
-        // resolve + node:https (the remote lane's own IP-pinned path).
+        // requireBackground is PER-grantKind, not fixed. SEC-5 governs `user`
+        // grants only (unattended reuse needs explicit background consent), so
+        // those keep `true` — redundant with the enumeration filter, kept as
+        // defense in depth. `shared` grants are context identity, unattended by
+        // design and created by `bootstrapSharedOAuthGrant` with `background`
+        // defaulting to false; forcing `true` here would make `getOAuthGrant`'s
+        // shared branch add `AND background = true`, return `no_grant`, and never
+        // refresh the context grant — the mini-spec's headline case. Mirrors the
+        // interactive shared broker (`routes/mcpOauth.ts`, requireBackground:false).
+        // The access token is discarded; only the persisted refresh + the kind
+        // matter. refreshBufferMs = Bp so `getAccessToken` treats an
+        // in-proactive-window token as stale and refreshes it.
+        // resolveDns/pinnedTransport left undefined ⇒ production resolve +
+        // node:https (the remote lane's own IP-pinned path).
         const result = await getAccessToken(
-          { ...key, requireBackground: true },
+          { ...key, requireBackground: key.grantKind === 'user' },
           {
             db: txDb,
             recipeReader: ownerDeclReader,

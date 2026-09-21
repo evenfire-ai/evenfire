@@ -69,6 +69,15 @@ const sharedKey = (server: string, ctx: string): OAuthGrantKey => ({
   oauthClientId: 'cid',
 })
 
+const userKey = (server: string, userId: string): OAuthGrantKey => ({
+  grantKind: 'user',
+  ownerKind: 'mcpserver',
+  recipeNamespace: 'mcp-server',
+  recipeName: server,
+  userId,
+  oauthClientId: 'cid',
+})
+
 const mockedEnumerate = vi.mocked(listRemoteGrantsInProactiveWindow)
 const mockedClaim = vi.mocked(claimRemoteGrantForRefresh)
 const mockedGetToken = vi.mocked(getAccessToken)
@@ -102,14 +111,33 @@ describe('runProactiveRefreshSweep — token candidates', () => {
   })
 
   it('claimed + ok → outcome ok, and the refresh runs on the transaction client', async () => {
-    mockedEnumerate.mockResolvedValue([sharedKey('srv-a', 'ctx-1')])
+    mockedEnumerate.mockResolvedValue([userKey('srv-a', 'u-1')])
     const summary = await runProactiveRefreshSweep(gateway, OPTS, deps)
     expect(summary.outcomes.ok).toBe(1)
-    // requireBackground:true (SEC-5) and refreshBufferMs = Bp, db = the tx client.
+    // refreshBufferMs = Bp, db = the tx client (per-grantKind requireBackground is
+    // asserted by the B1 test below).
     expect(mockedGetToken).toHaveBeenCalledWith(
-      expect.objectContaining({ grantKind: 'shared', requireBackground: true }),
+      expect.objectContaining({ grantKind: 'user' }),
       expect.objectContaining({ db: fakeTx, refreshBufferMs: OPTS.proactiveBufferMs })
     )
+  })
+
+  it('B1: requireBackground is per-grantKind — false for shared (context identity), true for user', async () => {
+    // B1 regression: passing requireBackground:true for shared keys makes
+    // getOAuthGrant's shared branch add `AND background = true` and return
+    // no_grant, so the headline context grant is never refreshed. This asserts
+    // the exact flag the cron hands the getAccessToken seam per key. Fails
+    // against the pre-fix head (which passed `true` for every key).
+    mockedEnumerate.mockResolvedValue([sharedKey('srv-s', 'ctx-1'), userKey('srv-u', 'u-1')])
+    await runProactiveRefreshSweep(gateway, OPTS, deps)
+
+    const flagFor = (grantKind: 'shared' | 'user') =>
+      mockedGetToken.mock.calls.find(
+        ([input]) => (input as OAuthGrantKey).grantKind === grantKind
+      )?.[0].requireBackground
+
+    expect(flagFor('shared')).toBe(false)
+    expect(flagFor('user')).toBe(true)
   })
 
   it('claim returns false (locked / renewed out of window) → skipped, no refresh', async () => {

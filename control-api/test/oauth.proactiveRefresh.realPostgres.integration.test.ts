@@ -14,15 +14,24 @@ import { Pool } from 'pg'
 import { config } from '../src/config.js'
 import type { DbClient } from '../src/db.js'
 import { initDb } from '../src/db.js'
+import type {
+  PinnedRawResponse,
+  PinnedTransport,
+  PinnedTransportInput,
+} from '../src/http/pinnedFetch.js'
+import type { RecipeWithOAuthClients } from '../src/oauth/callback.js'
 import { listExpiringDynamicClients, upsertDynamicClient } from '../src/oauth/dynamicClientStore.js'
 import { deriveOAuthEncryptionKey } from '../src/oauth/encryption.js'
+import { resolveServerOAuthSubject } from '../src/oauth/mcpServerOAuthSpec.js'
 import {
   type OAuthGrantKey,
   bootstrapSharedOAuthGrant,
   claimRemoteGrantForRefresh,
+  getOAuthGrant,
   listRemoteGrantsInProactiveWindow,
   upsertOAuthGrant,
 } from '../src/oauth/store.js'
+import { getAccessToken } from '../src/oauth/tokenHelper.js'
 
 const adminUrl = process.env.CONTROL_API_REAL_PG_ADMIN_URL
 const describeRealPostgres = adminUrl ? describe : describe.skip
@@ -123,6 +132,88 @@ describeRealPostgres('oauth proactive refresh — enumeration + claim (real Post
       )
     }
   }
+
+  // Remote owner decl produced by the REAL resolver (T1), so the refresh path
+  // reads the same public/remote routing the mint + callback do.
+  const REMOTE_TOKEN_ENDPOINT = 'https://as.example.com/token'
+  const REMOTE_VALIDATED_IP = '93.184.216.34'
+  function remoteOwnerDecl(): RecipeWithOAuthClients {
+    const resolved = resolveServerOAuthSubject({
+      spec: {
+        contextRef: 'ctx-1',
+        oauth: {
+          source: 'remote',
+          id: 'https://control.example.com/.well-known/evenfire-mcp-client',
+          clientMode: 'public',
+          authorizationEndpoint: 'https://as.example.com/authorize',
+          tokenEndpoint: REMOTE_TOKEN_ENDPOINT,
+          issuer: 'https://as.example.com',
+          resource: 'https://as.example.com',
+          grantScope: 'user',
+          scopes: ['read'],
+          bearerInBody: false,
+          supportsRefresh: true,
+        },
+      },
+    })
+    if (!resolved) throw new Error('fixture: remote resolve returned null')
+    return { spec: { oauthClients: [resolved.decl] } }
+  }
+  const constTransport =
+    (responseJson: string): PinnedTransport =>
+    async (_input: PinnedTransportInput): Promise<PinnedRawResponse> => ({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      bodyText: responseJson,
+    })
+  const refreshDeps = (transport: PinnedTransport) => ({
+    db,
+    recipeReader: { read: async () => remoteOwnerDecl() },
+    secretReader: { read: async () => ({}) },
+    fetchFn: (async () => {
+      throw new Error('remote refresh must not use fetchFn')
+    }) as unknown as typeof fetch,
+    encryptionKey: KEY,
+    resolveDns: async () => [REMOTE_VALIDATED_IP],
+    pinnedTransport: transport,
+    // Bp so an in-proactive-window token is treated as stale, exactly as the cron.
+    refreshBufferMs: WINDOW.proactiveBufferMs,
+  })
+
+  it('T4/B1: a background=false shared context grant is refreshed end-to-end (only with requireBackground:false)', async () => {
+    await seedShared('e2e-shared', 'ctx-1', 'remote', IN_WINDOW_SEC)
+    const key = sharedKey('e2e-shared', 'ctx-1')
+    const before = await getOAuthGrant(db, KEY, key)
+    expect(before?.background).toBe(false) // bootstrapSharedOAuthGrant defaults false
+
+    // B1 root cause: with requireBackground:true the shared grant is invisible to
+    // getOAuthGrant, so the refresh returns no_grant and the row is untouched.
+    const gatedOut = await getAccessToken(
+      { ...key, requireBackground: true },
+      refreshDeps(constTransport('{}'))
+    )
+    expect(gatedOut).toEqual({ kind: 'no_grant' })
+    const afterGated = await getOAuthGrant(db, KEY, key)
+    expect(afterGated?.accessToken).toBe(before?.accessToken) // unchanged
+
+    // The fix: requireBackground:false (what the cron now passes for shared) →
+    // refreshes and persists a new token with an advanced expiry (T4 observable).
+    const result = await getAccessToken(
+      { ...key, requireBackground: false },
+      refreshDeps(
+        constTransport(
+          JSON.stringify({ access_token: 'NEW-AT', refresh_token: 'NEW-RT', expires_in: 3600 })
+        )
+      )
+    )
+    expect(result.kind).toBe('ok')
+    const after = await getOAuthGrant(db, KEY, key)
+    expect(after?.accessToken).toBe('NEW-AT')
+    expect(after?.refreshToken).toBe('NEW-RT')
+    expect(after?.accessTokenExpiresAt?.getTime()).toBeGreaterThan(
+      before?.accessTokenExpiresAt?.getTime() ?? 0
+    )
+  })
 
   it('enumerates only remote mcpserver grants (shared + background user) inside the window', async () => {
     await seedShared('e-shared-in', 'ctx-in', 'remote', IN_WINDOW_SEC)
