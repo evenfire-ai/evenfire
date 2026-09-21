@@ -19,6 +19,7 @@ import * as dns from 'dns/promises'
 import * as http from 'http'
 import * as https from 'https'
 import * as net from 'net'
+import { Readable } from 'stream'
 
 /** Thrown when a target host is (or resolves to) a non-public address, or can't be verified. */
 export class SsrfBlockedError extends Error {
@@ -330,4 +331,123 @@ export function requestPinned(opts: {
     if (body) req.write(body)
     req.end()
   })
+}
+
+/** Extract a plain header record from any `HeadersInit` shape. */
+function headerRecord(headers: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!headers) return out
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      out[key] = value
+    })
+  } else if (Array.isArray(headers)) {
+    for (const [key, value] of headers) out[key] = value
+  } else {
+    for (const [key, value] of Object.entries(headers)) out[key] = String(value)
+  }
+  return out
+}
+
+/**
+ * Build a `fetch`-compatible function that connects to a caller-VALIDATED,
+ * DNS-pinned IP while keeping the original hostname in the Host header and TLS
+ * SNI/cert check — the streaming sibling of `requestPinned`, shaped for SDK
+ * transports that take a custom `fetch` (e.g. the MCP StreamableHTTP/SSE client).
+ *
+ * Why this and not `resolvePinnedPublicIp` alone: validating the host resolves to
+ * a public IP and then handing the raw hostname to a fetch that RE-RESOLVES it is
+ * a DNS-rebinding TOCTOU — a TTL≈0 record can answer public at validation and
+ * private/metadata at connect. This connects to the exact validated IP, so the
+ * socket can never be rebound. It deliberately does NOT follow redirects (Node's
+ * core client returns the 3xx as-is), so a redirect to an internal host is inert.
+ *
+ * `pinnedIp` MUST already be the public IP returned by `resolvePinnedPublicIp` —
+ * this primitive trusts it and does NOT re-validate (same contract as
+ * `requestPinned`; the caller owns the public-IP check). Only string/absent
+ * request bodies are supported (what the MCP SDK sends); any other body fails
+ * closed.
+ */
+export function pinnedFetch(
+  pinnedIp: string
+): (input: string | URL, init?: RequestInit) => Promise<Response> {
+  return (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input.toString())
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+      return Promise.reject(new SsrfBlockedError(`unsupported protocol ${url.protocol}`))
+    }
+    const body = init?.body
+    if (body != null && typeof body !== 'string') {
+      // The MCP transports only ever send string bodies; anything else would need
+      // stream piping we do not support — fail closed rather than send a wrong body.
+      return Promise.reject(new SsrfBlockedError('pinnedFetch only supports string request bodies'))
+    }
+
+    const isHttps = url.protocol === 'https:'
+    const client = isHttps ? https : http
+    const defaultPort = isHttps ? 443 : 80
+    const headers = headerRecord(init?.headers)
+    // Preserve the hostname for the peer's virtual-host routing; suppress
+    // compression since Node's core client does not auto-decode (the SDK reads
+    // the body as SSE text / JSON).
+    headers['host'] = url.host
+    headers['accept-encoding'] = 'identity'
+    // The body is a complete string (never streamed), so send it with an explicit
+    // Content-Length rather than the chunked Transfer-Encoding Node's client would
+    // otherwise use — strict WAFs/gateways reject chunked request bodies.
+    if (typeof body === 'string') {
+      headers['content-length'] = String(Buffer.byteLength(body))
+    }
+
+    return new Promise<Response>((resolve, reject) => {
+      const req = client.request(
+        {
+          method: (init?.method ?? 'GET').toUpperCase(),
+          hostname: pinnedIp,
+          port: url.port ? Number(url.port) : defaultPort,
+          path: `${url.pathname}${url.search}`,
+          headers,
+          // SNI + certificate identity are checked against the real hostname even
+          // though the socket connects to the pinned IP literal.
+          servername: url.hostname,
+        },
+        res => {
+          const encoding = res.headers['content-encoding']
+          if (encoding && encoding !== 'identity') {
+            res.destroy()
+            reject(new SsrfBlockedError(`unexpected content-encoding "${encoding}"`))
+            return
+          }
+          const responseHeaders = new Headers()
+          for (const [key, value] of Object.entries(res.headers)) {
+            if (value === undefined) continue
+            if (Array.isArray(value)) value.forEach(item => responseHeaders.append(key, item))
+            else responseHeaders.set(key, value)
+          }
+          const status = res.statusCode ?? 502
+          // Per the fetch spec these statuses carry a null body.
+          const nullBody = status === 204 || status === 205 || status === 304
+          if (nullBody) res.resume()
+          resolve(
+            new Response(nullBody ? null : (Readable.toWeb(res) as ReadableStream<Uint8Array>), {
+              status,
+              statusText: res.statusMessage,
+              headers: responseHeaders,
+            })
+          )
+        }
+      )
+      req.on('error', reject)
+      const signal = init?.signal
+      if (signal) {
+        const onAbort = (): void => {
+          req.destroy(new Error('request aborted'))
+        }
+        if (signal.aborted) onAbort()
+        else signal.addEventListener('abort', onAbort, { once: true })
+      }
+      if (typeof body === 'string') req.write(body)
+      req.end()
+    })
+  }
 }

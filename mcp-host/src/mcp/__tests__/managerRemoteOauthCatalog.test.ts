@@ -94,6 +94,9 @@ vi.mock('@modelcontextprotocol/sdk/client/sse.js', () => ({
 vi.mock('../../core/net/ssrf', () => ({
   SsrfBlockedError: class SsrfBlockedError extends Error {},
   resolvePinnedPublicIp: vi.fn(async () => '203.0.113.10'),
+  // client.ts pins remote connections with a fetch from pinnedFetch(ip); the SDK
+  // Client is mocked here so the returned fetch is never invoked.
+  pinnedFetch: vi.fn(() => vi.fn(async () => new Response('{}'))),
 }))
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
