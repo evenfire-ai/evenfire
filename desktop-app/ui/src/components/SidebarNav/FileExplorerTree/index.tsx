@@ -83,6 +83,14 @@ function FileExplorerNode({
     // session fetches nothing (the subtree also unmounts as accessibleResources
     // empties, but this keeps the guard robust to future refactors).
     enabled: isExpanded && accessActive,
+    // Folder contents change out-of-band: agents with host grants, other
+    // sessions, and operator writes never pass through this client. The sidebar
+    // is a persistent surface, so under the app's Infinity staleTime an expanded
+    // folder would otherwise serve its first page forever — removed files linger
+    // and new files never appear until a hard reload. Revalidate on revisit and
+    // window focus, matching the controller's own children query.
+    refetchOnMount: 'always',
+    refetchOnWindowFocus: 'always',
     initialPageParam: undefined as string | undefined,
     getNextPageParam: lastPage => lastPage.nextCursor ?? undefined,
   })

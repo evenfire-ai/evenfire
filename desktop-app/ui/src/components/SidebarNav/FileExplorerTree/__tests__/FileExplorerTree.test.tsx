@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
 import {
@@ -467,6 +468,63 @@ describe('FileExplorerTree — folder activation focuses an existing files tab',
       expect(screen.getByTestId('active-path').textContent).toBe('gfs://main/archive')
     )
     expect(screen.getByTestId('tab-count').textContent).toBe('3')
+  })
+})
+
+describe('FileExplorerTree — expanded folder revalidates its listing (R1-H5)', () => {
+  // The sidebar is a persistent surface. Folder contents change out-of-band
+  // (agents, other sessions, operator writes never pass through this client), so
+  // an expanded folder must revalidate on window focus — not serve its first
+  // page forever under the app's Infinity staleTime.
+  //
+  // This test runs under the REAL desktop cache policy (`desktopQueryDefaults`:
+  // Infinity staleTime, refetch flags off by default). The loose harness client
+  // the other tests use inherits TanStack's default refetchOnWindowFocus:true,
+  // which would refetch anyway and hide the bug — so it must NOT be used here.
+  it('re-fetches an expanded folder on window focus and renders the new children', async () => {
+    // The producer returns a DIFFERENT children page on the second fetch: the
+    // out-of-band change the sidebar must surface without a hard reload.
+    let call = 0
+    const listChildren = vi.fn(async () => {
+      call += 1
+      return call === 1
+        ? listChildrenPage([childView('old-1', 'old.md', 'file')])
+        : listChildrenPage([childView('new-1', 'new.md', 'file')])
+    })
+    installClerum({
+      listAccessible: vi.fn(async () =>
+        listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+      ),
+      listChildren,
+    })
+
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+      </QueryClientProvider>
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Expand Reports' }))
+    expect(await screen.findByRole('button', { name: 'old.md' })).toBeTruthy()
+
+    // Return focus to the window (force a false→true transition so the focus
+    // listener fires). Under Infinity staleTime, only refetchOnWindowFocus:
+    // 'always' triggers a refetch of the still-fresh listing.
+    act(() => {
+      focusManager.setFocused(false)
+      focusManager.setFocused(true)
+    })
+
+    try {
+      // Observable output (T4): the tree renders the NEW child and drops the stale
+      // one — not a refetch spy count.
+      expect(await screen.findByRole('button', { name: 'new.md' })).toBeTruthy()
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'old.md' })).toBeNull())
+    } finally {
+      // Restore event-driven focus detection so this global state does not leak.
+      focusManager.setFocused(undefined)
+    }
   })
 })
 
