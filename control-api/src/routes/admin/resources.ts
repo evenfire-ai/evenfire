@@ -14,6 +14,7 @@ import { validateMcpServerSpecPreflight } from '../../http/validateMcpServerSpec
 import { K8sGateway } from '../../k8s.js'
 import { cleanupDynamicClientForServer } from '../../oauth/dcrCleanup.js'
 import { deriveOAuthEncryptionKey } from '../../oauth/encryption.js'
+import { deleteOAuthGrantsForServer } from '../../oauth/store.js'
 import { rootLogger } from '../../observability/logger.js'
 import { stripHookRefFromHosts } from '../../services/hostGuardrailRefs.js'
 import {
@@ -1102,6 +1103,28 @@ export function createAdminResourcesRouter(gateway: K8sGateway): Router {
           log.error(
             { event: 'mcpserver_dynamic_client_cleanup_failed', name, namespace: ns, err },
             'dynamic client cleanup failed on uninstall (CR already deleted)'
+          )
+        }
+
+        // Server teardown (DEC-R2): wipe ALL of this server's oauth_grants rows —
+        // every user / context / client / flavor. Idempotent; never blocks the
+        // uninstall (the CR is already deleted). This is NOT the per-user
+        // revocation path — see deleteOAuthGrantsForServer.
+        try {
+          const purged = await deleteOAuthGrantsForServer(dcrDb, {
+            recipeNamespace: ns,
+            recipeName: name,
+          })
+          if (purged > 0) {
+            log.info(
+              { event: 'mcpserver_oauth_grants_purged', name, namespace: ns, count: purged },
+              'purged oauth grants on uninstall'
+            )
+          }
+        } catch (err) {
+          log.error(
+            { event: 'mcpserver_oauth_grants_purge_failed', name, namespace: ns, err },
+            'oauth grants purge failed on uninstall (CR already deleted)'
           )
         }
 
