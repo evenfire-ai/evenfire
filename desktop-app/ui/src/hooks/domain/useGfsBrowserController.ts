@@ -611,8 +611,21 @@ export function useGfsBrowserController(options: GfsBrowserControllerOptions = {
         !authorityPending &&
         accessState === 'active',
       // Permission changes made outside this page must not leave row actions
-      // stale when a folder is revisited.
-      refetchOnMount: 'always' as const,
+      // stale when a folder is revisited — but `'always'` paid for that with a
+      // refetch per visible child on EVERY mount, against data the project
+      // default keeps fresh forever (`staleTime: Infinity`). Re-entering a
+      // 45-child folder seconds later spent 40 requests to re-derive bits the
+      // cache already held, which was 47% of the affordances traffic in the
+      // incident behind #681.
+      //
+      // A 60s bound keeps the out-of-band case working and makes the re-entry
+      // free. The cost is that a row's permission bits may be up to 60s stale
+      // after a change made elsewhere; server-side enforcement is unchanged, so
+      // a stale row action still gets the 403 this page already handles. The
+      // menu-level affordances query above serves Infinity-cached bits today,
+      // so this is tighter than the status quo beside it, not looser.
+      refetchOnMount: true as const,
+      staleTime: 60_000,
     })),
   })
   const rowAffordancesByResourceId = useMemo(() => {

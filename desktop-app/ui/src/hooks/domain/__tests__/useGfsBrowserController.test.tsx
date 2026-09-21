@@ -467,6 +467,122 @@ describe('useGfsBrowserController', () => {
     expect(affordances).toHaveBeenCalledWith('readonly-file', 'main')
   })
 
+  /**
+   * Row affordances are one request per visible child. Under `'always'` every
+   * folder re-entry paid that cost again against data the production default
+   * keeps fresh forever — 40 redundant requests on a 45-child folder, 47% of
+   * the affordances traffic in the incident behind #681.
+   *
+   * The clock is moved with `toFake: ['Date']` only, so `waitFor` keeps running
+   * on real timers; a full fake-timer install would stall it.
+   */
+  it('serves cached row affordances on folder re-entry and refetches them past the freshness bound', async () => {
+    const parent = {
+      resourceId: 'folder-root',
+      rid: 'folder-root',
+      gfsUri: 'gfs://main/folder-root',
+      drive: 'main',
+      parentResourceId: null,
+      name: 'Workspace',
+      kind: 'directory' as const,
+      path: '/Workspace',
+      version: 1,
+      bytes: 0,
+      sources: ['grant'],
+      permissions: ['read'],
+      coversDescendants: true,
+    }
+    const children = ['child-a', 'child-b', 'child-c'].map((resourceId, index) => ({
+      resourceId,
+      rid: resourceId,
+      gfsUri: `gfs://main/${resourceId}`,
+      drive: 'main',
+      parentResourceId: 'folder-root',
+      name: `file-${index}.txt`,
+      kind: 'file' as const,
+      path: `/Workspace/file-${index}.txt`,
+      version: index + 2,
+      bytes: 10,
+    }))
+    const listChildren = vi.fn(async () => ({ items: children, nextCursor: null }))
+    // The open folder and its rows answer differently, so a row asserted below
+    // can only have been filled by that row's own query.
+    const affordances = vi.fn(async (resourceId: string) => ({
+      held: resourceId === 'folder-root' ? ['read'] : ['read', 'write'],
+      canDelegate: false,
+      grantableBits: [],
+      canCreateShare: false,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: {
+        gfs: {
+          listAccessible: vi.fn(async () => ({ items: [parent], nextCursor: null })),
+          listChildren,
+          affordances,
+        },
+      },
+    })
+
+    // Count only the ROW queries. The open folder has an affordances query of
+    // its own, and folding both into one total would hide which of the two
+    // this change is about.
+    const rowCalls = () =>
+      affordances.mock.calls.filter(([resourceId]) => resourceId.startsWith('child-')).length
+
+    // One client across all three mounts, with the REAL production defaults.
+    // A client per mount would make every count below meaningless.
+    const client = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    const wrapper = ({ children: node }: { children: ReactNode }) => (
+      <AuthContext.Provider value={authValue(userA)}>
+        <QueryClientProvider client={client}>{node}</QueryClientProvider>
+      </AuthContext.Provider>
+    )
+    const enterWorkspace = async () => {
+      await waitFor(() =>
+        expect(screen.getByRole('button', { name: 'open Workspace' })).toBeTruthy()
+      )
+      await act(async () => {
+        screen.getByRole('button', { name: 'open Workspace' }).click()
+      })
+    }
+
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const mountedAt = Date.now()
+
+    const first = render(<Probe />, { wrapper })
+    await enterWorkspace()
+    await waitFor(() => expect(rowCalls()).toBe(3))
+    expect(listChildren).toHaveBeenCalledTimes(1)
+    first.unmount()
+
+    vi.setSystemTime(mountedAt + 17_000)
+    const second = render(<Probe />, { wrapper })
+    await enterWorkspace()
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
+    await waitFor(() =>
+      // Witness, and the reason this is not a test that passes by rendering
+      // nothing: the rows are on screen with their cached bits. `listChildren`
+      // at 2 is the second witness — the remount happened and the children
+      // query's own `'always'` still fired.
+      children.forEach(child =>
+        expect(screen.getByTestId(`row-affordances-${child.resourceId}`).textContent).toBe(
+          'read,write'
+        )
+      )
+    )
+    expect(rowCalls()).toBe(3)
+    second.unmount()
+
+    // Past the 60s bound the bits are stale, so a permission change made
+    // outside this page is still picked up — the bound is a delay, not a
+    // suppression.
+    vi.setSystemTime(mountedAt + 70_000)
+    render(<Probe />, { wrapper })
+    await enterWorkspace()
+    await waitFor(() => expect(rowCalls()).toBe(6))
+  })
+
   it('loads accessible GFS resources and opens one without a pasted link', async () => {
     Object.defineProperty(window, 'clerum', {
       configurable: true,
