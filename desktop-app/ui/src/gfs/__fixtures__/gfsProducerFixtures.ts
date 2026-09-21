@@ -35,6 +35,7 @@
  * H8 (fail-closed tests) reuses these builders — do not inline gfs wire shapes
  * in a new tree/preview test.
  */
+import { createServer } from 'node:http'
 import {
   type GfsAccessibleResource,
   type GfsChildView,
@@ -42,6 +43,7 @@ import {
   type GfsTransport,
   type ResolvedGfsResource,
 } from '../../../../src/gfs/uriHandler.js'
+import { requestJson } from '../../../../src/httpClient.js'
 
 // listChildren/listAccessible bind cleanly to the renderer boundary types (the
 // `.d.ts` the tree consumes), so a drift between the producer's emitted page and
@@ -176,6 +178,54 @@ export async function openGfsResourcePayload(
     kind: resolved.kind,
     bytes: typeof resolved.bytes === 'number' ? resolved.bytes : null,
   })
+}
+
+/**
+ * The Error message `window.clerum.gfs.resolve` rejects with when a per-resource
+ * read is denied (the file was unshared) — derived, not hand-written (T1).
+ *
+ * Unlike the success builders above, a denial cannot go through `stubTransport`:
+ * that stub returns its body and lets `GfsClient.unwrap` throw a `GfsUriError`,
+ * but that envelope branch is UNREACHABLE for a resolve denial in production. The
+ * server returns an HTTP 403 (gfsc `envelope.ts` `toResponse` → `{ ok:false,
+ * error:{ code:'forbidden', … } }`, forwarded verbatim through control-api and
+ * external-rest-api since 403 ∈ its PROPAGATED set), and the desktop's REAL
+ * `httpClient.requestJson` — the exact transport `appService.ts` constructs
+ * `GfsClient` with — mints an `ApiError` from that non-2xx BEFORE `unwrap` ever
+ * runs. Only that `ApiError.message` survives the Electron IPC boundary to the
+ * renderer. So the faithful producer is the real client + real transport run
+ * against a temp 403 endpoint; the only hand-modeled part is the gfsc error body,
+ * the cross-service HTTP boundary this module already treats as the honest seam.
+ */
+export async function resolveDeniedMessage(
+  gfsUri = 'gfs://main/secret',
+  errorBody: { code: string; message: string } = {
+    code: 'forbidden',
+    message: 'not authorized to read this resource',
+  },
+  status = 403
+): Promise<string> {
+  const server = createServer((_req, res) => {
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ ok: false, error: errorBody }))
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+  try {
+    const address = server.address()
+    const port = typeof address === 'object' && address ? address.port : 0
+    const client = new GfsClient({
+      baseUrl: `http://127.0.0.1:${port}`,
+      requestJson,
+      fetchBytes: async () => new ArrayBuffer(0),
+    })
+    await client.resolveUri(gfsUri, SESSION_TOKEN)
+    throw new Error(`expected resolve to reject with a ${status} denial`)
+  } catch (error) {
+    if (!(error instanceof Error)) return String(error)
+    return error.message
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 }
 
 /** A `ResolvedGfsResource` for a downloadable file, for `downloadResult`. */
