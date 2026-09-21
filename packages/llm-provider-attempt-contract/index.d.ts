@@ -20,6 +20,7 @@ export declare const LIMITS: {
   readonly maxOutputTokens: 16384
   readonly maxDeadlineMs: 300000
   readonly maxIdLength: 128
+  readonly maxNestingDepth: 64
 }
 
 export type ContractResult<T> =
@@ -138,6 +139,15 @@ export declare function parseCodexCompletionRequestV1(
 export declare function hashCodexCompletionRequestV1(
   request: CodexCompletionRequestV1
 ): string
+/**
+ * Canonical client hash: JSON wire round-trip, parseCodexCompletionRequestV1,
+ * then hashCodexCompletionRequestV1 of the projection. Send `request` together
+ * with `requestHash`. Never throws; invalid input returns `{ ok: false }`.
+ */
+export declare function hashCanonicalCodexRequest(raw: unknown): ContractResult<{
+  request: CodexCompletionRequestV1
+  requestHash: string
+}>
 export declare function computeCodexPolicyHash(input: {
   model: string
   catalogRevision: number

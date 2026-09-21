@@ -8,6 +8,8 @@ import {
   getErrorCode,
   observeCreate,
   observeExistenceRead,
+  podDisruptionBudgetMatchesDesired,
+  preserveObjectAnnotations,
   replaceWithConflictRetry,
 } from '../utils'
 import { GFS_TEMPLATE_HASH_ANNOTATION } from './gfsFactory'
@@ -144,6 +146,8 @@ export class K8sGfsApi implements GfsK8sApi {
           description: `pod disruption budget "${name}" in ${namespace}`,
           logPrefix: LOG,
           body: pdb,
+          mergeExisting: preserveObjectAnnotations,
+          isUpToDate: podDisruptionBudgetMatchesDesired,
           read,
           replace: body =>
             this.policyApi.replaceNamespacedPodDisruptionBudget({ name, namespace, body }),

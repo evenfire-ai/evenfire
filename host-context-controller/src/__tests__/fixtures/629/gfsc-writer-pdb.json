@@ -1,0 +1,22 @@
+{
+  "apiVersion": "policy/v1",
+  "kind": "PodDisruptionBudget",
+  "metadata": {
+    "generation": 1,
+    "labels": {
+      "clerum.io/globalfilesystem": "gfs",
+      "clerum.io/managed-by": "host-context-controller"
+    },
+    "name": "gfsc-writer-pdb",
+    "namespace": "gfs"
+  },
+  "spec": {
+    "minAvailable": 1,
+    "selector": {
+      "matchLabels": {
+        "app": "gfs-controller",
+        "clerum.io/gfsc-role": "writer"
+      }
+    }
+  }
+}

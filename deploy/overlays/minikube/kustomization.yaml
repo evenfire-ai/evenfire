@@ -67,6 +67,8 @@ images:
     newTag: test
   - name: clerum/codex-llm-proxy
     newTag: test
+  - name: clerum/grok-llm-proxy
+    newTag: test
   - name: clerum/webhook-gateway
     newTag: test
   - name: clerum/stdio-bridge
@@ -110,4 +112,5 @@ patches:
   # ConfigMap overrides: replace base values with minikube-specific config
   - path: configmaps/control-api-config.yaml
   - path: configmaps/codex-llm-proxy-config.yaml
+  - path: configmaps/grok-llm-proxy-config.yaml
   - path: configmaps/channel-reader-config.yaml

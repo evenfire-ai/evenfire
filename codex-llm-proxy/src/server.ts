@@ -162,7 +162,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
       // Abort only when the client drops the response before we finish writing.
       abortWhenClientDisconnects(req, res, abort)
       try {
-        release = await streamGate.acquire()
+        release = await streamGate.acquire(abort.signal)
         res.status(200)
         res.setHeader('content-type', 'text/event-stream')
         res.setHeader('cache-control', 'no-cache')
@@ -185,9 +185,7 @@ export function createProxyApps(config: CodexLlmProxyConfig, deps: ProxyRuntimeD
           finalize: input => client.finalize(input),
           fetchFn,
           lookup,
-          onFrame: frame => {
-            res.write(`data: ${JSON.stringify(frame)}\n\n`)
-          },
+          onFrame: frame => writeSseChunk(res, `data: ${JSON.stringify(frame)}\n\n`, abort.signal),
         })
         res.write(
           `data: ${JSON.stringify({ type: 'done', outcome: result.outcome, ...(result.usage ? { usage: result.usage } : {}) })}\n\n`
@@ -335,6 +333,32 @@ function mapError(err: unknown): { status: number; code: string } {
     return { status: statusByCode[err.code] ?? 503, code: err.code }
   }
   return { status: 503, code: 'provider_unavailable' }
+}
+
+/**
+ * Write one SSE chunk and honor socket backpressure. Returns undefined when
+ * the chunk was accepted (hot path stays synchronous); otherwise a promise that
+ * settles on 'drain', or when the client closes / the stream aborts so a
+ * departed consumer never pins the stream slot.
+ */
+export function writeSseChunk(
+  res: Response,
+  chunk: string,
+  signal: AbortSignal
+): Promise<void> | undefined {
+  if (res.write(chunk)) return undefined
+  return new Promise<void>(resolve => {
+    const done = () => {
+      res.off('drain', done)
+      res.off('close', done)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    res.on('drain', done)
+    res.on('close', done)
+    signal.addEventListener('abort', done, { once: true })
+    if (signal.aborted || res.destroyed) done()
+  })
 }
 
 export function abortWhenClientDisconnects(

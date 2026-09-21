@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as k8s from '@kubernetes/client-node'
 import { HostReconciler } from '../src/hostReconciler'
+import { HostContextLogger } from '../src/logger'
 import { HostCRD } from '../src/types'
 import {
   asAppsApi,
@@ -467,15 +468,13 @@ describe('HostReconciler orphan NetworkPolicy authority-gated cleanup', () => {
         },
       ],
     })
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
 
     await reconciler.fullReconcile([])
 
     expect(getObj).not.toHaveBeenCalled()
     expect(mocks.networkingApi.deleteNamespacedNetworkPolicy).not.toHaveBeenCalled()
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('Deferring orphan cleanup: authority_unknown')
-    )
+    expect(warn).toHaveBeenCalledWith('Deferring orphan cleanup', { reason: 'authority_unknown' })
     warn.mockRestore()
   })
 })

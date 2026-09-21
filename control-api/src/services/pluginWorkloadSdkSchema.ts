@@ -13,7 +13,7 @@ export async function applyPluginWorkloadSdkSchema(db: DbClient): Promise<void> 
       capability_family TEXT NOT NULL CHECK (capability_family IN ('promptBridge','clientNotifications')),
       -- Explicit provider bound to a promptBridge grant (R1: credentials resolve
       -- per-provider, not per-model). NULLABLE: rows written before migration
-      -- 0050 carry NULL and remain legacy/unreviewed until an operator
+      -- 0055_plugin_workload_sdk_grant_provider carry NULL and remain legacy/unreviewed until an operator
       -- explicitly resaves an ordered target policy. clientNotifications
       -- grants leave it NULL.
       provider TEXT,
@@ -358,7 +358,8 @@ export async function addPluginWorkloadSdkAttemptLedgerColumns(db: DbClient): Pr
 }
 
 /**
- * Migration 0086 is intentionally a no-op for policy authority. A complete
+ * Migration 0086_plugin_workload_sdk_legacy_policy_repair is intentionally a
+ * no-op for policy authority. A complete
  * JSON shape is not provenance of an operator decision, so a legacy row must
  * never be reactivated automatically. The forward provenance migration below
  * fences rows on clusters that already ran the original unsafe implementation.

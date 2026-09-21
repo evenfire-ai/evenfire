@@ -20,6 +20,14 @@ export interface ChatMessage {
   role: MessageRole
   content: string
   contentParts?: MessageContentPart[] // only set when tool results have images
+  /**
+   * Issue #654 — set when the image parts were produced by a tool result, never
+   * by the user. A user who attaches an image to a model without affirmative
+   * image-input evidence gets a typed refusal; a screenshot the agent's own
+   * tool returned is withheld instead, so an unverified model can still finish
+   * a text task that happens to call a screenshot tool.
+   */
+  imageOrigin?: 'tool_result'
   tool_call_id?: string
   name?: string
   tool_calls?: ToolCall[] | null
@@ -401,6 +409,15 @@ export interface Conversation {
    * `undefined` ⇔ no selection (today's behaviour).
    */
   modelSelections?: Record<string, string>
+  /**
+   * #654 (migration 015) — durable revision of `modelSelections` for this
+   * session, mirrored from `sessions.model_selection_revision` and rehydrated on
+   * cold-load. It is the compare-and-swap token of the selection write: the
+   * writer sends the revision it read, and a write whose base is already stale
+   * is rejected instead of overwriting the row that got there first. `undefined`
+   * ⇔ the row has not been read yet; the durable default is 0.
+   */
+  modelSelectionRevision?: number
 }
 
 /**
@@ -492,7 +509,19 @@ export interface TurnToolCall {
   spillover_ref?: string
 }
 
+export interface TaskExecutionBudgetSnapshot {
+  elapsedActiveMs: number
+  iterationsUsed: number
+  durationMs: number
+  maxIterations: number
+}
+
 export interface PendingApproval {
+  task_budget?: TaskExecutionBudgetSnapshot
+  /** Set only by reconstruction of migration-marked legacy rows. */
+  legacy_budget?: boolean
+  /** Internal atomic replacement instruction; not persisted in the snapshot. */
+  replaces_request_id?: string
   request_id: string
   tool_name: string
   /** Producer-owned governed replay classification; never inferred by Control UI. */
@@ -533,7 +562,13 @@ export type LoopResult =
   | { type: 'response'; content: string; usage: TokenUsage; attachments?: Attachment[] }
   | { type: 'need_approval'; approval: PendingApproval }
   | { type: 'error'; error: Error }
-  | { type: 'exhaustion'; message: string; iterations: number; attachments?: Attachment[] }
+  | {
+      type: 'exhaustion'
+      reason?: 'iteration_limit' | 'task_budget'
+      message: string
+      iterations: number
+      attachments?: Attachment[]
+    }
   | { type: 'cancelled'; reason?: string }
 
 export type AgentEventType =

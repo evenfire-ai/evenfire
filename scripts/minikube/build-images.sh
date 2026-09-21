@@ -318,6 +318,7 @@ ALL_IMAGES=(
   "clerum/rpc-proxy:test"
   "clerum/webhook-proxy:test"
   "clerum/codex-llm-proxy:test"
+  "clerum/grok-llm-proxy:test"
   "clerum/webhook-gateway:test"
   "clerum/channel-reader:test"
   "clerum/workflow-approval-request-reader:test"
@@ -347,6 +348,7 @@ KNOWN_BUILD_NAMES=(
   rpc-proxy
   webhook-proxy
   codex-llm-proxy
+  grok-llm-proxy
   webhook-gateway
   channel-reader
   workflow-approval-request-reader
@@ -358,6 +360,10 @@ KNOWN_BUILD_NAMES=(
 
 # These isolated test images are opt-in only. Their acquisition must happen
 # before T2 reconciliation, never inside the final Playwright command.
+if [ "$ONLY_SVC" = image-capabilities-mcp-host ]; then
+  ALL_IMAGES+=("clerum/image-capabilities-mcp-host:test")
+  KNOWN_BUILD_NAMES+=(image-capabilities-mcp-host)
+fi
 if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
   ALL_IMAGES+=("clerum/codex-approved-tools-control-api-e2e:test")
   KNOWN_BUILD_NAMES+=(codex-approved-tools-control-api-e2e)
@@ -993,6 +999,10 @@ build_image() {
   fi
   log "Building ${tag}..."
   local docker_args=(-t "$tag") derived_base=""
+  if [ "$name" = image-capabilities-mcp-host ]; then
+    docker_args+=(--build-arg MCP_HOST_IMAGE=clerum/mcp-host:test)
+    derived_base="clerum/mcp-host:test"
+  fi
   if [ -n "$dockerfile" ]; then
     docker_args+=(-f "$dockerfile")
   fi
@@ -1214,6 +1224,17 @@ build_image "codex-llm-proxy" \
   "clerum/codex-llm-proxy:test" \
   "${PROJECT_DIR}/codex-llm-proxy/Dockerfile"
 
+build_image "grok-llm-proxy" \
+  "${PROJECT_DIR}" \
+  "clerum/grok-llm-proxy:test" \
+  "${PROJECT_DIR}/grok-llm-proxy/Dockerfile"
+
+if [ "$ONLY_SVC" = image-capabilities-mcp-host ]; then
+  build_image image-capabilities-mcp-host "${PROJECT_DIR}" \
+    clerum/image-capabilities-mcp-host:test \
+    "${PROJECT_DIR}/tests/e2e/fixtures/image-capabilities/Dockerfile"
+fi
+
 if [ "$ONLY_SVC" = codex-approved-tools-control-api-e2e ]; then
   build_image codex-approved-tools-control-api-e2e "${PROJECT_DIR}" \
     clerum/codex-approved-tools-control-api-e2e:test \
@@ -1337,7 +1358,8 @@ if [ "$SKIP_PUBLIC" = false ]; then
     "postgres:16-alpine"
     "redis:7-alpine"
     "nginx:1.30.1-alpine"
-    "minio/minio:latest"
+    # MinIO is not pulled here: nothing in this distribution consumes the
+    # image; the optional sibling evenfire-registry deployment pulls its own.
     "axllent/mailpit:latest"
     "mongodb/mongodb-community-server:7.0-ubi8"
     "mongodb/mongodb-mcp-server:latest"

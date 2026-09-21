@@ -36,7 +36,7 @@ export type WorkflowControlScope =
   | 'workflow:approval:decide'
   | 'plugin-workload-sdk'
 
-export type DerivedPlatformScope = 'llm:codex:execute'
+export type DerivedPlatformScope = 'llm:codex:execute' | 'llm:grok:execute'
 export type EffectiveWorkflowControlScope = WorkflowControlScope | DerivedPlatformScope
 
 async function postMcpHostTokenIssue(

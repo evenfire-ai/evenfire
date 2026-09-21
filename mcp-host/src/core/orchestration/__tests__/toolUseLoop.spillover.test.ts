@@ -187,7 +187,10 @@ describe('executeSingleTool — T1.5 spillover wiring', () => {
       } as never,
       0
     )
-    expect(target.execute).toHaveBeenCalledExactlyOnceWith({ field_0: 'selected' }, undefined)
+    expect(target.execute).toHaveBeenCalledExactlyOnceWith(
+      { field_0: 'selected' },
+      expect.objectContaining({ timeoutMs: expect.any(Number), signal: expect.any(AbortSignal) })
+    )
     expect(invoked.toolResults[0]).toMatchObject({
       tool_call_id: 'business-call',
       name: target.name(),

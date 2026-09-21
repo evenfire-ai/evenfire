@@ -20,6 +20,11 @@ import {
   assertCodexConnectionKey,
   isCodexUnassignedConnectionKey,
 } from '../../services/codexSubscriptionConnection.js'
+import { isGrokAssignmentAllowed } from '../../services/grokSubscriptionCatalog.js'
+import {
+  assertGrokConnectionKey,
+  isGrokUnassignedConnectionKey,
+} from '../../services/grokSubscriptionConnection.js'
 import { listEnabledModelsWithStaleForProvider } from '../../services/llmAllowedModels.js'
 import {
   MAX_ALLOWLIST_ENTRY_LENGTH,
@@ -44,6 +49,7 @@ import {
   RecipeCodexGrantIdentityError,
   publishRecipeGrantIdentity,
 } from '../../services/recipeCodexGrantIdentity.js'
+import { collectRecipeOauthBrokerProviders } from '../../services/subscriptionGrantIdentity.js'
 import { isPlainObject } from '../../utils/isPlainObject.js'
 import {
   type EmitHostSpecIncoherenceTolerated,
@@ -296,12 +302,20 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       // a previously stored Codex target can be edited without inventing a
       // grant. Spend still fail-closes at authorize until the operator picks
       // a live connection. Malformed keys stay rejected.
-      if (connectionRef && !isCodexUnassignedConnectionKey(connectionRef)) {
+      const unassigned =
+        provider === 'grok-subscription'
+          ? isGrokUnassignedConnectionKey(connectionRef)
+          : isCodexUnassignedConnectionKey(connectionRef)
+      if (connectionRef && !unassigned) {
         try {
-          assertCodexConnectionKey(connectionRef)
+          if (provider === 'grok-subscription') assertGrokConnectionKey(connectionRef)
+          else assertCodexConnectionKey(connectionRef)
         } catch {
           res.status(400).json({
-            error: `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
+            error:
+              provider === 'grok-subscription'
+                ? `promptTargets[${index}].connectionRef must name an existing Grok subscription connection`
+                : `promptTargets[${index}].connectionRef must name an existing Codex subscription connection`,
           })
           return null
         }
@@ -341,6 +355,13 @@ function parsePromptTargets(value: unknown, res: Response): PluginWorkloadSdkPro
       credentialSlot,
       ...(brokerBacked ? { connectionRef } : {}),
     })
+  }
+  const brokerProviders = new Set(
+    targets.filter(target => isBrokerBackedProvider(target.provider)).map(target => target.provider)
+  )
+  if (brokerProviders.size > 1) {
+    res.status(400).json({ error: 'oauth_broker_provider_conflict' })
+    return null
   }
   const brokerKeys = new Set(
     targets
@@ -388,28 +409,49 @@ async function publishPromptBridgeGrantIdentity(input: {
   recipeNamespace: string
   recipeName: string
   nextRef: string
+  provider?: string
+  /**
+   * Upsert rejects a broker target whose provider differs from the recipe's
+   * agent / step-agent broker. Delete skips the publish instead: the grant row
+   * is already gone and the agent owns the annotation.
+   */
+  onProviderConflict: 'reject' | 'skip'
 }): Promise<{ error?: { status: number; error: string } }> {
+  let recipeBrokers: string[]
+  try {
+    const recipe = (await input.gateway.getResource(
+      'workflowrecipes',
+      input.recipeName,
+      input.recipeNamespace
+    )) as { spec?: unknown } | null
+    recipeBrokers = collectRecipeOauthBrokerProviders(
+      isPlainObject(recipe?.spec) ? recipe.spec : {}
+    )
+  } catch (err) {
+    log.error(
+      { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
+      'failed to read WorkflowRecipe before publishing grant identity'
+    )
+    return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
+  }
+  // A broker SDK target is spendable only when the recipe's agent / step agents
+  // name that same broker: authorize attests live targets from agent/steps, and
+  // the promptBridge default target must match the bootstrap agent. A static-
+  // agent recipe (RP-009) therefore fails closed here instead of publishing an
+  // identity no SDK call can ever redeem. An unassigned target on such a recipe
+  // only clears the identity, so legacy grant re-saves keep working.
+  if (
+    input.provider &&
+    !recipeBrokers.includes(input.provider) &&
+    (recipeBrokers.length > 0 || input.nextRef !== '')
+  ) {
+    if (input.onProviderConflict === 'skip') return {}
+    return { error: { status: 400, error: 'oauth_broker_provider_conflict' } }
+  }
   let next = input.nextRef
   if (!next) {
-    let recipeAgent: string | undefined
-    try {
-      const recipe = (await input.gateway.getResource(
-        'workflowrecipes',
-        input.recipeName,
-        input.recipeNamespace
-      )) as { spec?: { agent?: { provider?: string } } }
-      recipeAgent =
-        typeof recipe.spec?.agent?.provider === 'string' ? recipe.spec.agent.provider : undefined
-    } catch (err) {
-      log.error(
-        { err, recipeNamespace: input.recipeNamespace, recipeName: input.recipeName },
-        'failed to read WorkflowRecipe before publishing Codex grant identity'
-      )
-      return { error: { status: 503, error: 'recipe_annotation_publish_failed' } }
-    }
-    if (recipeAgent === 'codex-subscription') {
-      return {}
-    }
+    // Do not unassign a recipe whose agent (or any step agent) owns the grant.
+    if (recipeBrokers.length > 0) return {}
     next = 'unassigned'
   }
   try {
@@ -418,6 +460,7 @@ async function publishPromptBridgeGrantIdentity(input: {
       namespace: input.recipeNamespace,
       name: input.recipeName,
       next,
+      ...(input.provider ? { provider: input.provider } : {}),
     })
   } catch (err) {
     if (err instanceof RecipeCodexGrantIdentityError) {
@@ -601,20 +644,25 @@ export function createAdminPluginWorkloadSdkRouter(
       // before (serialization only, no accept/reject change): a disabled model
       // reachable solely through `allowed_models` (no promptTarget) is a
       // PRE-EXISTING gap, out of R1-H3 scope.
-      const brokerConnectionRef =
-        promptTargets.find(
-          target =>
-            isBrokerBackedProvider(target.provider) &&
-            target.connectionRef &&
-            !isCodexUnassignedConnectionKey(target.connectionRef)
-        )?.connectionRef ?? ''
-      const hasBrokerTarget = promptTargets.some(target => isBrokerBackedProvider(target.provider))
+      const brokerTargets = promptTargets.filter(target => isBrokerBackedProvider(target.provider))
+      const brokerProviders = [...new Set(brokerTargets.map(target => target.provider))]
+      const brokerTarget = brokerTargets.find(
+        target =>
+          target.connectionRef &&
+          !(target.provider === 'grok-subscription'
+            ? isGrokUnassignedConnectionKey(target.connectionRef)
+            : isCodexUnassignedConnectionKey(target.connectionRef))
+      )
+      const brokerConnectionRef = brokerTarget?.connectionRef ?? ''
+      const hasBrokerTarget = brokerTargets.length > 0
       if (capabilityFamily === 'promptBridge' && deps.gateway && hasBrokerTarget) {
         const published = await publishPromptBridgeGrantIdentity({
           gateway: deps.gateway,
           recipeNamespace,
           recipeName,
           nextRef: brokerConnectionRef,
+          provider: brokerTarget?.provider ?? brokerProviders[0],
+          onProviderConflict: 'reject',
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })
@@ -645,13 +693,23 @@ export function createAdminPluginWorkloadSdkRouter(
             for (const target of promptTargets) {
               if (!isBrokerBackedProvider(target.provider)) continue
               const connectionRef = target.connectionRef ?? ''
-              if (!connectionRef || isCodexUnassignedConnectionKey(connectionRef)) {
+              const unassigned =
+                target.provider === 'grok-subscription'
+                  ? isGrokUnassignedConnectionKey(connectionRef)
+                  : isCodexUnassignedConnectionKey(connectionRef)
+              if (!connectionRef || unassigned) {
                 continue
               }
-              const allowed = await isCodexAssignmentAllowed(db, connectionRef, target.model)
+              const allowed =
+                target.provider === 'grok-subscription'
+                  ? await isGrokAssignmentAllowed(db, connectionRef, target.model)
+                  : await isCodexAssignmentAllowed(db, connectionRef, target.model)
               if (!allowed) {
                 throw new GrantModelGateError({
-                  error: 'codex_connection_not_allowed',
+                  error:
+                    target.provider === 'grok-subscription'
+                      ? 'grok_connection_not_allowed'
+                      : 'codex_connection_not_allowed',
                   connectionRef: target.connectionRef ?? '',
                   model: target.model,
                 })
@@ -870,20 +928,23 @@ export function createAdminPluginWorkloadSdkRouter(
       }
       if (deps.gateway) {
         const remaining = await listGrants({ recipeNamespace, recipeName })
-        const remainingRef =
-          remaining
-            .flatMap(grant => grant.promptTargets)
-            .find(
-              target =>
-                isBrokerBackedProvider(target.provider) &&
-                target.connectionRef &&
-                !isCodexUnassignedConnectionKey(target.connectionRef)
-            )?.connectionRef ?? ''
+        const remainingTarget = remaining
+          .flatMap(grant => grant.promptTargets)
+          .find(
+            target =>
+              isBrokerBackedProvider(target.provider) &&
+              target.connectionRef &&
+              !(target.provider === 'grok-subscription'
+                ? isGrokUnassignedConnectionKey(target.connectionRef)
+                : isCodexUnassignedConnectionKey(target.connectionRef))
+          )
         const published = await publishPromptBridgeGrantIdentity({
           gateway: deps.gateway,
           recipeNamespace,
           recipeName,
-          nextRef: remainingRef,
+          nextRef: remainingTarget?.connectionRef ?? '',
+          provider: remainingTarget?.provider,
+          onProviderConflict: 'skip',
         })
         if (published.error) {
           res.status(published.error.status).json({ error: published.error.error })

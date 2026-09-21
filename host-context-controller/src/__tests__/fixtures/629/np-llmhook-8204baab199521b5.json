@@ -1,0 +1,24 @@
+{
+  "apiVersion": "networking.k8s.io/v1",
+  "kind": "NetworkPolicy",
+  "metadata": {
+    "annotations": {
+      "clerum.io/llmhook-members": "tool-policy-hook"
+    },
+    "labels": {
+      "app": "llmhook-8204baab199521b5",
+      "clerum.io/hook-pod-key": "8204baab199521b5",
+      "clerum.io/managed-by": "host-context-controller"
+    },
+    "name": "llmhook-8204baab199521b5",
+    "namespace": "llm-hooks"
+  },
+  "spec": {
+    "podSelector": {
+      "matchLabels": {
+        "clerum.io/hook-pod-key": "8204baab199521b5"
+      }
+    },
+    "policyTypes": ["Ingress"]
+  }
+}

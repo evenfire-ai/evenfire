@@ -1,3 +1,4 @@
+import { PROVIDER_AUTH_MODE, isLlmProviderId } from '@clerum/llm-providers'
 import { CircuitBreaker } from '../domain/circuitBreaker'
 import {
   PluginWorkloadError,
@@ -6,6 +7,7 @@ import {
 } from '../domain/errors'
 import type { PromptBridgeTarget } from '../domain/types'
 import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
+import { readSdkOnlyGrokBinding } from '../sdkOnlyGrokBinding'
 
 /**
  * Anti-corruption layer (plan §3.4): encapsulates the HTTP call to
@@ -17,6 +19,10 @@ import { readSdkOnlyCodexBinding } from '../sdkOnlyCodexBinding'
  * (5xx, network), plus a 50%-over-30s circuit breaker that short-circuits
  * to provider_unavailable while open (resets after 60s without calls).
  */
+
+function isOauthBrokerProvider(provider: string): boolean {
+  return isLlmProviderId(provider) && PROVIDER_AUTH_MODE[provider] === 'oauth-broker'
+}
 
 export interface ControlApiClientOptions {
   baseUrl: string
@@ -103,8 +109,10 @@ export interface PluginWorkloadSdkBootstrapProof {
     | 'bootstrap_target_mismatch'
     | 'policy_not_ready'
     | 'codex_execution_binding_missing'
+    | 'execution_binding_missing'
   /** Control API attested the live Codex connection against the v3 binding. */
   codexBindingReady?: boolean
+  bindingReady?: boolean
   /**
    * Policy metadata is deliberately optional at identity bootstrap. A recipe
    * may be installed and publish an awaiting-policy SDK runtime before an
@@ -632,7 +640,12 @@ export class PluginWorkloadSdkControlApiClient {
         true
       )
     }
-    const binding = expectedProvider === 'codex-subscription' ? readSdkOnlyCodexBinding() : null
+    const grok = expectedProvider === 'grok-subscription'
+    const binding = grok
+      ? readSdkOnlyGrokBinding()
+      : isOauthBrokerProvider(expectedProvider)
+        ? readSdkOnlyCodexBinding()
+        : null
     const reservationOnlyReady = capabilities.reservationOnlyOauthBroker === true
     const contractReady =
       capabilities.contractVersion === 3 && capabilities.supportedContractVersions.includes(3)
@@ -653,8 +666,8 @@ export class PluginWorkloadSdkControlApiClient {
       (binding !== null &&
         capabilities.defaultCatalogRevision === binding.catalogRevision &&
         capabilities.defaultCredentialRevision === binding.credentialRevision)
-    const codexBindingReady =
-      expectedProvider !== 'codex-subscription' ||
+    const brokerBindingReady =
+      !isOauthBrokerProvider(expectedProvider) ||
       (reservationOnlyReady &&
         contractReady &&
         binding !== null &&
@@ -672,7 +685,7 @@ export class PluginWorkloadSdkControlApiClient {
       !!capabilities.defaultTargetRef &&
       capabilities.defaultProvider === expectedProvider &&
       capabilities.defaultModel === expectedModel &&
-      codexBindingReady
+      brokerBindingReady
     const policyReason = policyReady
       ? undefined
       : capabilities.policyState === 'missing'
@@ -683,19 +696,24 @@ export class PluginWorkloadSdkControlApiClient {
             ? 'policy_revoking'
             : capabilities.policyState === 'disabled'
               ? 'policy_disabled'
-              : expectedProvider === 'codex-subscription' && !codexBindingReady
-                ? 'codex_execution_binding_missing'
+              : isOauthBrokerProvider(expectedProvider) && !brokerBindingReady
+                ? grok
+                  ? 'execution_binding_missing'
+                  : 'codex_execution_binding_missing'
                 : capabilities.v2Ready
                   ? 'bootstrap_target_mismatch'
                   : 'policy_not_ready'
     return {
       ready: true,
-      contractVersion: expectedProvider === 'codex-subscription' ? 3 : 2,
+      contractVersion: isOauthBrokerProvider(expectedProvider) ? 3 : 2,
       provider: expectedProvider,
       model: expectedModel,
       policyReady,
       policyState: capabilities.policyState,
-      ...(expectedProvider === 'codex-subscription' ? { codexBindingReady } : {}),
+      ...(grok ? { bindingReady: brokerBindingReady } : {}),
+      ...(isOauthBrokerProvider(expectedProvider) && !grok
+        ? { codexBindingReady: brokerBindingReady }
+        : {}),
       ...(policyReason ? { policyReason } : {}),
       ...(capabilities.v2Ready &&
       capabilities.policyRevision >= 1 &&

@@ -1,5 +1,5 @@
 export const MAX_VISIBLE_SESSIONS = 6
-export const SESSION_PREVIEW_LIMIT = 9
+export const SESSION_PREVIEW_LIMIT = 5
 /**
  * Distance (px) from the bottom within which a reader still follows the chat.
  * Beyond it, appended content must not pull them away from older history.
@@ -14,4 +14,9 @@ export const AGENT_ERROR_CODE_LABELS: Record<string, string> = {
   LLM_MODEL_NOT_AVAILABLE: 'Model Not Available',
   LLM_CONTENT_FILTERED: 'Content Filtered',
   LLM_API_CALL_FAILED: 'Connection Error',
+  LLM_IMAGE_INPUT_UNSUPPORTED: 'Image Input Unsupported',
+  LLM_IMAGE_INPUT_UNKNOWN: 'Image Input Unverified',
+  LLM_INVALID_ATTACHMENT: 'Invalid Attachment',
+  LLM_MODEL_SELECTION_CONFLICT: 'Model Selection Changed',
+  LLM_MODEL_NOT_ALLOWED: 'Model Not Allowed',
 }

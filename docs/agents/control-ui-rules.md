@@ -83,9 +83,18 @@ leaning on either behaviour.
   opening a menu never navigates the row.
 - Render all per-record operations with `RowActionsMenu`; do not restore inline
   edit/delete icon clusters or the removed `RowActions` overflow heuristic.
-- Do not restore `cu-expandable-table`, expandable record rows, or inline detail
-  `<tr>` sections. Move record details to the canonical route; use a modal only
-  for a bounded action that must complete without leaving the list.
+- Do not restore `cu-expandable-table`, expandable record-detail rows, or inline
+  detail `<tr>` sections. Move record details to the canonical route; use a
+  modal only for a bounded action that must complete without leaving the list.
+- The `/llm-models` Catalog and Discovery Review are the current owner-approved
+  ordinary table row-expansion presentations. Both datasets repeat provider
+  identity across many models, so they render one provider/provider-family
+  summary row with expandable model child rows through the shared
+  domain-neutral grouped table primitive. Each summary uses four balanced
+  Provider, Models, Availability/Details, and Actions cells. The expanded model
+  header and rows use a nested child table because their schemas differ from
+  the provider summary. This exception does not apply to any other table
+  without a separately recorded owner decision.
 
 ## Routing
 

@@ -18,6 +18,7 @@ import {
   preserveDeploymentAnnotations,
 } from '../utils'
 import { RECORDED_APPSV1_DEPLOYMENT, asApiserverDeployment } from './asApiserverDeployment'
+import liveCodexCert from './fixtures/629/codex-cert.deployment.json'
 import {
   cloneAndMutateLeaf,
   collectLeafPaths,
@@ -412,5 +413,51 @@ describe('deploymentMatchesDesired', () => {
       'rev-abc'
     ) as k8s.V1Deployment
     expectSweepDetectsLiveOnlySpecLeaves(desired, asApiserverDeployment(desired))
+  })
+
+  it('T1: empty env value is equivalent to an omitted value', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [{ name: 'CLERUM_LLM_SECRET_REF' }]
+    const desiredEmpty = structuredClone(live)
+    desiredEmpty.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: '' },
+    ]
+    expect(live.spec?.template.spec?.containers[0].env?.[0]).not.toHaveProperty('value')
+    expect(deploymentMatchesDesired(desiredEmpty, live)).toBe(true)
+  })
+
+  it('T1: a real env value is not equivalent to an omitted value', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [{ name: 'CLERUM_LLM_SECRET_REF' }]
+    const desiredSet = structuredClone(live)
+    desiredSet.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: 'x' },
+    ]
+    expect(deploymentMatchesDesired(desiredSet, live)).toBe(false)
+  })
+
+  it('T1: empty env value is not equivalent to a valueFrom secret ref', () => {
+    const live = sparseDeployment()
+    live.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', valueFrom: { secretKeyRef: { name: 's', key: 'k' } } },
+    ]
+    const desiredEmpty = structuredClone(live)
+    desiredEmpty.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: '' },
+    ]
+    expect(deploymentMatchesDesired(desiredEmpty, live)).toBe(false)
+    expect(deploymentMatchesDesired(live, desiredEmpty)).toBe(false)
+  })
+
+  it('T1: 629 fixture env without value matches empty value', () => {
+    const live = liveCodexCert as k8s.V1Deployment
+    const liveEnv = live.spec?.template.spec?.containers[0].env?.[0]
+    expect(liveEnv?.name).toBe('CLERUM_LLM_SECRET_REF')
+    expect(liveEnv).not.toHaveProperty('value')
+    const desiredEmpty = structuredClone(live)
+    desiredEmpty.spec!.template.spec!.containers[0].env = [
+      { name: 'CLERUM_LLM_SECRET_REF', value: '' },
+    ]
+    expect(deploymentMatchesDesired(desiredEmpty, live)).toBe(true)
   })
 })

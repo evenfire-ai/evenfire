@@ -11,11 +11,11 @@ import { IconChevronRight } from '@/components/icons'
 import { Button, Field, TextAreaInput, TextInput } from '@/components/ui'
 import { cn } from '@/lib/cn'
 import {
+  GROK_SUBSCRIPTION_PROVIDER,
   type LlmCredentialField,
   type LlmCredentialGroup,
   type LlmProvider,
   OPENAI_SUBSCRIPTION_PROVIDER,
-  OPERATOR_PROVIDER_OPTIONS,
   allowedModelsForProvider,
   constrainModelOptions,
   describeLlmCompleteness,
@@ -27,6 +27,7 @@ import {
   isProviderAllowUnrestricted,
   mintFallbackSlot,
   normalizeProvider,
+  operatorProviderOptions,
   providerSupportsFallbackCredentialSlot,
   resolveDefaultModel,
   validateLlmSecretData,
@@ -103,6 +104,7 @@ export function LlmProviderConfig({
   secretKeys = [],
   fallbackProvidersInitiallyCollapsed = false,
   disabled = false,
+  grokEnabled = false,
 }: LlmProviderConfigProps) {
   const [fallbackProvidersOpen, setFallbackProvidersOpen] = useState(
     !fallbackProvidersInitiallyCollapsed
@@ -125,16 +127,25 @@ export function LlmProviderConfig({
     [catalog, allowedModels, provider]
   )
   const primaryModelOutOfAllowlist = Boolean(model) && !primaryModelOptions.includes(model)
-  const pickerOptions = OPERATOR_PROVIDER_OPTIONS
-  const primaryProviderOptions = useMemo(
-    () =>
-      pickerOptions.map(option => ({
-        ...option,
-        icon: <LlmProviderIcon provider={option.value} label={option.label} />,
-      })),
-    [pickerOptions]
-  )
   const providerPickerValue = isOpenAiFamily(provider) ? 'openai' : provider
+  const primaryProviderOptions = useMemo(() => {
+    const options = operatorProviderOptions({ grokEnabled }).map(option => ({
+      ...option,
+      icon: <LlmProviderIcon provider={option.value} label={option.label} />,
+    }))
+    // A saved provider the picker no longer offers (e.g. a Grok primary while
+    // the Grok capability is off) stays visible and selected, marked disabled,
+    // instead of rendering as an empty selection.
+    if (!options.some(option => option.value === providerPickerValue)) {
+      const label = `${getProviderLabel(providerPickerValue)} (disabled)`
+      options.push({
+        value: providerPickerValue as LlmProvider,
+        label,
+        icon: <LlmProviderIcon provider={providerPickerValue} label={label} />,
+      })
+    }
+    return options
+  }, [grokEnabled, providerPickerValue])
   const primaryModelSelectOptions = useMemo(() => {
     const options: SelectionDropdownOption[] = primaryModelOptions.map(option => ({
       value: option,
@@ -304,7 +315,9 @@ export function LlmProviderConfig({
           <p className="cu-field__error">
             {provider === OPENAI_SUBSCRIPTION_PROVIDER
               ? 'No enabled models for this subscription. Connect and sync the grant first.'
-              : 'No enabled models for this provider. Add one under LLM Models first.'}
+              : provider === GROK_SUBSCRIPTION_PROVIDER
+                ? 'No enabled models for this Grok subscription. Connect and sync the grant first.'
+                : 'No enabled models for this provider. Add one under LLM Models first.'}
           </p>
         ) : null}
 
@@ -367,6 +380,7 @@ export function LlmProviderConfig({
               secretKeys={secretKeys}
               defaultProvider={provider}
               disabled={disabled}
+              grokEnabled={grokEnabled}
             />
           </div>
         ) : null}

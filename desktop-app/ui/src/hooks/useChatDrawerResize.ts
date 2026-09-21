@@ -29,20 +29,27 @@ import type { RefObject } from 'react'
  *  starts to overflow. Also the minimum the resize drag can reach. */
 export const CHAT_DRAWER_MIN_WIDTH = 340
 /** Default session width. Matches the top of the LIVE CSS pre-mount fallback
- *  `--chat-drawer-width: clamp(340px, 32vw, 420px)` (styles.css) that sizes the
+ *  `--chat-drawer-width: clamp(340px, 32vw, 525px)` (styles.css) that sizes the
  *  drawer before this hook measures — keep the two in sync. That clamp is still
  *  in use (the pre-mount / closed-state width), not dead code to delete. */
-export const CHAT_DRAWER_DEFAULT_WIDTH = 420
+export const CHAT_DRAWER_DEFAULT_WIDTH = 525
 /** Generous absolute ceiling for the drag. */
-export const CHAT_DRAWER_MAX_ABSOLUTE = 820
+export const CHAT_DRAWER_MAX_ABSOLUTE = 1000
 /** Width step for arrow-key resize (WAI-ARIA window-splitter pattern). */
 const CHAT_DRAWER_KEY_STEP = 24
 /** Legible floor reserved for the app embed's column while docked. The drawer's
  *  dynamic max width is capped so at least this much embed remains; once the
  *  window is too narrow for both this floor AND the drawer's own minimum, the
  *  embed keeps shrinking and scrolls via its own `overflow-x` (never overlaps
- *  the drawer). Reuses the value of the removed overlay threshold. */
-const CHAT_DRAWER_EMBED_FLOOR = 460
+ *  the drawer). Reuses the value of the removed overlay threshold. This is the
+ *  floor for APP tabs (a native embed shares the panel); DOM tabs use the
+ *  smaller `CHAT_DRAWER_DOM_FLOOR` because a reflowing DOM page needs less
+ *  reserved width to stay legible beside the drawer (mini-spec 04a §A3). */
+export const CHAT_DRAWER_EMBED_FLOOR = 460
+/** Content floor for DOM tabs (files/settings/etc.): no native embed shares the
+ *  panel, so the reserved column can be tighter than the embed floor. Below this
+ *  the split is too cramped and the drawer auto-suppresses (mini-spec 04a §A3). */
+export const CHAT_DRAWER_DOM_FLOOR = 360
 /** Fixed term added beside `--chat-drawer-width` in the embed gutter, mirroring
  *  the CSS `--app-header-utilities-width` term `var(--space-2) + 36px`
  *  (space-2 = 10px). Kept in sync with styles.css by hand. */
@@ -51,14 +58,19 @@ const CHAT_DRAWER_GUTTER_EXTRA = 46
  *  (`--space-4` = 18px). */
 const CHAT_DRAWER_RIGHT_INSET = 18
 
-/** Minimum content-panel width at which the docked drawer and the app embed can
- *  still coexist: the drawer already pinned to its own minimum (340) PLUS the
- *  embed at its legible floor (460) PLUS the fixed gutter term (46) = 846. Below
+/** Minimum content-panel width at which the docked drawer and the given content
+ *  floor can still coexist: the drawer pinned to its own minimum (340) PLUS the
+ *  content floor (embed 460 / DOM 360) PLUS the fixed gutter term (46). Below
  *  this the two no longer fit side by side, so there is no split to show and the
- *  drawer auto-suppresses (the app takes the full width). Derived from its three
- *  inputs — never a bare literal — so it always tracks them if any one moves. */
-export const CHAT_DRAWER_MIN_PANEL_WIDTH =
-  CHAT_DRAWER_MIN_WIDTH + CHAT_DRAWER_GUTTER_EXTRA + CHAT_DRAWER_EMBED_FLOOR
+ *  drawer auto-suppresses (the content takes the full width). Derived from its
+ *  three inputs — never a bare literal — so it always tracks them if any moves. */
+export function minPanelWidth(contentFloor: number = CHAT_DRAWER_EMBED_FLOOR): number {
+  return CHAT_DRAWER_MIN_WIDTH + CHAT_DRAWER_GUTTER_EXTRA + contentFloor
+}
+
+/** Back-compat alias for the embed-floor minimum (846). App tabs use this via
+ *  `minPanelWidth(CHAT_DRAWER_EMBED_FLOOR)`; kept exported for existing tests. */
+export const CHAT_DRAWER_MIN_PANEL_WIDTH = minPanelWidth(CHAT_DRAWER_EMBED_FLOOR)
 
 /** Clamp a user-requested width to the panel-independent absolute bounds
  *  [MIN, MAX_ABSOLUTE], rounded to a whole pixel. This is what we persist as the
@@ -75,17 +87,20 @@ function readPanelWidth(ref: RefObject<HTMLElement | null>): number {
 }
 
 /** Clamp a requested width to [MIN, dynamicMax], rounded to a whole pixel. The
- *  dynamic max reserves `EMBED_FLOOR + GUTTER_EXTRA` for the docked embed so a
- *  narrowing window shrinks the drawer instead of collapsing the embed. */
-export function clampWidth(requested: number, panelWidth: number): number {
+ *  dynamic max reserves `contentFloor + GUTTER_EXTRA` for the docked content so a
+ *  narrowing window shrinks the drawer instead of collapsing the content. The
+ *  floor defaults to the embed floor (app tabs); DOM tabs pass the smaller
+ *  `CHAT_DRAWER_DOM_FLOOR` (mini-spec 04a §A3). */
+export function clampWidth(
+  requested: number,
+  panelWidth: number,
+  contentFloor: number = CHAT_DRAWER_EMBED_FLOOR
+): number {
   const dynamicMax =
     panelWidth > 0
       ? Math.max(
           CHAT_DRAWER_MIN_WIDTH,
-          Math.min(
-            CHAT_DRAWER_MAX_ABSOLUTE,
-            panelWidth - CHAT_DRAWER_EMBED_FLOOR - CHAT_DRAWER_GUTTER_EXTRA
-          )
+          Math.min(CHAT_DRAWER_MAX_ABSOLUTE, panelWidth - contentFloor - CHAT_DRAWER_GUTTER_EXTRA)
         )
       : CHAT_DRAWER_MAX_ABSOLUTE
   return Math.round(Math.max(CHAT_DRAWER_MIN_WIDTH, Math.min(dynamicMax, requested)))
@@ -111,7 +126,8 @@ export type ChatDrawerResize = {
 
 export function useChatDrawerResize(
   contentPanelRef: RefObject<HTMLElement | null>,
-  active: boolean
+  active: boolean,
+  contentFloor: number = CHAT_DRAWER_EMBED_FLOOR
 ): ChatDrawerResize {
   // `requestedWidth` is the user's INTENT (drag/keyboard target); the rendered
   // width is `clampWidth(requestedWidth, panelWidth)`. Separating them is what
@@ -122,8 +138,8 @@ export function useChatDrawerResize(
   const [requestedWidth, setRequestedWidth] = React.useState(CHAT_DRAWER_DEFAULT_WIDTH)
   const [panelWidth, setPanelWidth] = React.useState(0)
   const [isResizing, setIsResizing] = React.useState(false)
-  const width = clampWidth(requestedWidth, panelWidth)
-  const panelTooNarrow = panelWidth > 0 && panelWidth < CHAT_DRAWER_MIN_PANEL_WIDTH
+  const width = clampWidth(requestedWidth, panelWidth, contentFloor)
+  const panelTooNarrow = panelWidth > 0 && panelWidth < minPanelWidth(contentFloor)
   // Mirrors the rendered width so the pointer/keyboard handlers (stable
   // callbacks) can read the current applied value as the base for a relative
   // resize without re-subscribing on every width change.

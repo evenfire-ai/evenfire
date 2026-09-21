@@ -203,6 +203,51 @@ describe('LlmHook NetworkPolicy no-op gate', () => {
     expect(body.spec?.ingress).toEqual(desired.spec?.ingress)
   })
 
+  it('T6: hook with no referencing hosts skips replace when live omits empty ingress', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const desiredEmpty = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    expect(desiredEmpty.spec?.ingress).toEqual([])
+    const live = structuredClone(desiredEmpty)
+    delete live.spec!.ingress
+    live.metadata = { ...live.metadata, resourceVersion: '3' }
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+
+    await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.replaceNamespacedNetworkPolicy).not.toHaveBeenCalled()
+    expect(networkingApi.createNamespacedNetworkPolicy).not.toHaveBeenCalled()
+  })
+
+  it('T6: adding a referencing Host still replaces the live policy', async () => {
+    const hook = makeImageHook()
+    const podKey = computePodKey(hook)!
+    const desiredEmpty = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    const live = structuredClone(desiredEmpty)
+    delete live.spec!.ingress
+    live.metadata = { ...live.metadata, resourceVersion: '3' }
+    const host = makeHost(hook.name)
+    hosts.set(host.name, host)
+    const desiredWithHost = (reconciler as any).buildNetworkPolicy(
+      podKey,
+      [hook],
+      []
+    ) as k8s.V1NetworkPolicy
+    expect(desiredWithHost.spec?.ingress?.length).toBeGreaterThan(0)
+    networkingApi.readNamespacedNetworkPolicy.mockResolvedValue(live)
+    await (reconciler as any).ensureNetworkPolicy(podKey, [hook], [])
+    expect(networkingApi.readNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+    expect(networkingApi.replaceNamespacedNetworkPolicy).toHaveBeenCalledTimes(1)
+  })
+
   it('propagates GET 403 without creating or replacing a policy', async () => {
     const error = { code: 403 }
     networkingApi.readNamespacedNetworkPolicy.mockRejectedValue(error)
