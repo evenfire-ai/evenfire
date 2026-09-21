@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { HccAdministrativeOutcomeBindingResolver } from '../src/services/tracing/adminOperationBindingResolver.js'
+import { administrativeIntentLookupKey } from '../src/services/tracing/adminOperationService.js'
 
 const principal = {
   kind: 'hcc_internal_control',
@@ -29,7 +30,7 @@ const event = {
 
 const intentAttribution = {
   operatorSub: 'admin-1',
-  requestId: 'request-1',
+  requestId: 'request-1' as string | null,
   environment: 'test',
   tenantId: null,
   teamId: null,
@@ -42,8 +43,29 @@ const intentAttribution = {
   decisionActorSub: 'control-api',
 }
 
+const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+
+/**
+ * Built with the implementation's own key function rather than a literal. A
+ * hardcoded key that stopped matching would turn every `toBeNull()` row below
+ * into a test that passes for the wrong reason, since a missing intent also
+ * refuses the binding.
+ */
+function intentMap(attribution = intentAttribution, name = 'chatllm') {
+  return new Map([
+    [
+      administrativeIntentLookupKey({
+        operationId: OPERATION_ID,
+        targetRef: `mcp-host/${name}`,
+        namespace: 'mcp-host',
+      }),
+      attribution,
+    ],
+  ])
+}
+
 function host(
-  operationId = '11111111-1111-4111-8111-111111111111',
+  operationId = OPERATION_ID,
   generation = 7,
   intentGeneration = generation,
   uid = HOST_UID
@@ -67,12 +89,7 @@ function host(
 describe('HccAdministrativeOutcomeBindingResolver', () => {
   it('binds a terminal outcome only after live Host and durable intent validation', async () => {
     const listResource = vi.fn().mockResolvedValue([host()])
-    const intent = intentAttribution
-    const findHostIntents = vi
-      .fn()
-      .mockResolvedValue(
-        new Map([['11111111-1111-4111-8111-111111111111:mcp-host:mcp-host/chatllm', intent]])
-      )
+    const findHostIntents = vi.fn().mockResolvedValue(intentMap())
     const binding = await new HccAdministrativeOutcomeBindingResolver(
       { getResource: vi.fn(), listResource },
       { findHostIntent: vi.fn(), findHostIntents }
@@ -114,14 +131,7 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
         findHostIntents: vi
           .fn()
           .mockResolvedValue(
-            hasIntent
-              ? new Map([
-                  [
-                    '11111111-1111-4111-8111-111111111111:mcp-host:mcp-host/chatllm',
-                    { ...intentAttribution, requestId: null },
-                  ],
-                ])
-              : new Map()
+            hasIntent ? intentMap({ ...intentAttribution, requestId: null }) : new Map()
           ),
       }
     )
@@ -131,16 +141,7 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
   it('refuses a sourceStatusRef without the uid suffix (#694)', async () => {
     const resolver = new HccAdministrativeOutcomeBindingResolver(
       { getResource: vi.fn(), listResource: vi.fn().mockResolvedValue([host()]) },
-      {
-        findHostIntent: vi.fn(),
-        findHostIntents: vi
-          .fn()
-          .mockResolvedValue(
-            new Map([
-              ['11111111-1111-4111-8111-111111111111:mcp-host:mcp-host/chatllm', intentAttribution],
-            ])
-          ),
-      }
+      { findHostIntent: vi.fn(), findHostIntents: vi.fn().mockResolvedValue(intentMap()) }
     )
 
     // Batched with the current format so the null below cannot come from a
@@ -156,5 +157,54 @@ describe('HccAdministrativeOutcomeBindingResolver', () => {
 
     expect(legacy).toBeNull()
     expect(current).toMatchObject({ targetRef: 'mcp-host/chatllm', outcome: 'succeeded' })
+  })
+
+  /**
+   * The test above cannot tell the format contract from the uid comparison: a
+   * reference the regex rejected and one whose uid does not match the live
+   * object both end as null. These rows separate them. Each malformed spelling
+   * is paired with a live Host carrying that exact string as its uid, so the
+   * comparison would accept it — only `STATUS_REF` refuses, and relaxing the
+   * pattern makes the row bind.
+   */
+  it.each([
+    ['a uid that is not a uuid', 'not-a-uuid'],
+    ['an uppercase uid', HOST_UID.toUpperCase()],
+    ['a uid with trailing text', `${HOST_UID}-extra`],
+  ] as const)('refuses %s in the sourceStatusRef (#694)', async (_label, uid) => {
+    // `chatllm` carries the malformed spelling as its real uid, so the
+    // comparison would accept it; `chatllm-live` is the witness that binds
+    // through the same call.
+    const malformedHost = host(undefined, 7, 7, uid)
+    const liveHost = host()
+    liveHost.metadata.name = 'chatllm-live'
+    const resolver = new HccAdministrativeOutcomeBindingResolver(
+      {
+        getResource: vi.fn(),
+        listResource: vi.fn().mockResolvedValue([malformedHost, liveHost]),
+      },
+      {
+        findHostIntent: vi.fn(),
+        findHostIntents: vi
+          .fn()
+          .mockResolvedValue(new Map([...intentMap(), ...intentMap(undefined, 'chatllm-live')])),
+      }
+    )
+
+    const [malformed, witness] = await resolver.resolveMany(principal, [
+      {
+        ...event,
+        sourceEventId: 'outcome-malformed-uid',
+        sourceStatusRef: `host:mcp-host/chatllm:generation=7:uid=${uid}`,
+      },
+      {
+        ...event,
+        sourceEventId: 'outcome-live',
+        sourceStatusRef: `host:mcp-host/chatllm-live:generation=7:uid=${HOST_UID}`,
+      },
+    ])
+
+    expect(malformed).toBeNull()
+    expect(witness).toMatchObject({ targetRef: 'mcp-host/chatllm-live', outcome: 'succeeded' })
   })
 })

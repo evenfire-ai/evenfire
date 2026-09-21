@@ -645,11 +645,19 @@ export class HostReconciler {
         this.prepareHostMutationAdmission(action, host),
       reflectHostOutcome: (name, uid, apply) => this.reflectHostOutcome?.(name, uid, apply),
       onLifecycleStatusCommitted: (host, lifecycle) => {
+        // A uid-less snapshot never reaches a lifecycle status commit, so this
+        // branch is the compiler's requirement rather than an observed path.
+        // It shares the emitter guard instead of assuming that stays true.
+        const hostLookupReference = this.hostTelemetryReference(host, {
+          telemetryType: 'health_transition',
+          state: lifecycle.state,
+        })
+        if (hostLookupReference === undefined) return
         const occurredAt = this.now().toISOString()
         this.infrastructureTelemetryReporter?.enqueueHealthTransition({
           sourceEventId: `hcc-health-transition:${this.newTelemetryOccurrenceId()}`,
           occurredAt,
-          hostLookupReference: this.hostLookupReference(host),
+          hostLookupReference,
           payload: { transition: `lifecycle:${lifecycle.state}`, state: lifecycle.state },
         })
       },
@@ -1287,9 +1295,9 @@ export class HostReconciler {
   }
 
   /**
-   * Evidence is keyed by the Host uid, not by namespace/name: a Host deleted
-   * and recreated under the same name is a different object, and a name-keyed
-   * entry left behind would be reported as the new object's rotation (#696).
+   * The key carries the uid alongside namespace/name: a Host deleted and
+   * recreated under the same name is a different object, and an entry keyed by
+   * the name alone would be reported as the new object's rotation (#696).
    */
   private static gfsLifecycleEvidenceKey(
     host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>
@@ -1321,6 +1329,25 @@ export class HostReconciler {
     this.gfsTokenLifecycleEvidence.set(key, outcome)
   }
 
+  /**
+   * Drops one object's entry. A caller holding the snapshot it reconciled
+   * knows which uid it recorded under, so it must not reach for the prefix
+   * sweep below: that would also destroy a sibling uid's evidence at the same
+   * name, which is the cross-object confusion the uid in the key exists to
+   * prevent (#696).
+   */
+  private clearGfsLifecycleEvidenceForObject(
+    host: Pick<HostCRD, 'namespace' | 'name' | 'uid'>
+  ): void {
+    const key = HostReconciler.gfsLifecycleEvidenceKey(host)
+    if (key !== undefined) this.gfsTokenLifecycleEvidence.delete(key)
+  }
+
+  /**
+   * Drops every object's entry at a namespace/name. Only for callers handed a
+   * name with no snapshot behind it, which is `reconcileDelete`: it cannot know
+   * which uid the departing object had.
+   */
   private clearGfsLifecycleEvidence(namespace: string, name: string): void {
     const prefix = HostReconciler.gfsLifecycleEvidencePrefix(namespace, name)
     for (const key of this.gfsTokenLifecycleEvidence.keys()) {
@@ -2166,12 +2193,31 @@ export class HostReconciler {
     }
   }
 
-  private hostLookupReference(host: HostCRD): HostLookupReference {
+  /**
+   * Undefined when the snapshot carries no uid, which `HostCRD` documents as a
+   * legal state. Sending the reference anyway would earn a 400 the reporter
+   * treats as terminal, so the event would be dropped — and, unlike the
+   * administrative path, re-sent and dropped again on every pass, because this
+   * reporter keeps no `seen` set to fall silent. Every telemetry emitter goes
+   * through here so the drop is decided, and named, in one place (#693).
+   */
+  private hostTelemetryReference(
+    host: HostCRD,
+    context: Record<string, string>
+  ): HostLookupReference | undefined {
+    if (host.uid === undefined) {
+      log.warn('skipping host telemetry: Host snapshot has no uid', {
+        host: host.name,
+        namespace: host.namespace,
+        ...context,
+      })
+      return undefined
+    }
     return {
       name: host.name,
       namespace: host.namespace,
       ...(host.generation !== undefined ? { generation: host.generation } : {}),
-      ...(host.uid !== undefined ? { uid: host.uid } : {}),
+      uid: host.uid,
     }
   }
 
@@ -2181,6 +2227,8 @@ export class HostReconciler {
     reasonCode: string,
     payload: HccInfrastructureTelemetryPayload
   ): void {
+    const hostLookupReference = this.hostTelemetryReference(host, { telemetryType, reasonCode })
+    if (hostLookupReference === undefined) return
     const occurredAt = this.now().toISOString()
     const eventPayload = {
       resource_class: 'Host',
@@ -2191,7 +2239,7 @@ export class HostReconciler {
       this.infrastructureTelemetryReporter?.enqueue({
         occurredAt,
         telemetryType,
-        hostLookupReference: this.hostLookupReference(host),
+        hostLookupReference,
         payload: eventPayload,
       })
       return
@@ -2200,7 +2248,7 @@ export class HostReconciler {
       sourceEventId: `hcc-${telemetryType}:${this.newTelemetryOccurrenceId()}`,
       occurredAt,
       telemetryType,
-      hostLookupReference: this.hostLookupReference(host),
+      hostLookupReference,
       payload: eventPayload,
     })
   }
@@ -4486,10 +4534,12 @@ export class HostReconciler {
           // rethrow as a retire (reconcileDelete → 'superseded', watch callers
           // only log the error), so the rethrow is preserved.
           // This exit emits no outcome, so drop the GFS evidence this pass
-          // recorded: a leftover would be reported by the next pass over the
-          // same object. The stateless suspension path also calls reconcileCore
-          // without emitting an outcome and does not clear the entry (#696).
-          this.clearGfsLifecycleEvidence(admittedHost.namespace, admittedHost.name)
+          // recorded: a leftover would be reported by the next pass over this
+          // object. The clear is scoped to this snapshot's uid, so a sibling
+          // object at the same name keeps its own evidence. The stateless
+          // suspension path also calls reconcileCore without emitting an
+          // outcome and does not clear the entry (#696).
+          this.clearGfsLifecycleEvidenceForObject(admittedHost)
           this.observeReconcileLatency(source, 'superseded', dispatchedAt, admittedAt)
           throw error
         }

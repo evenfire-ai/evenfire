@@ -34,9 +34,15 @@ type HostResource = {
  * emitter is host-context-controller/src/administrativeOutcomeReporter.ts,
  * which builds this literal; the two live in different packages and cannot
  * import each other, so each side pins the same example string in its tests.
+ *
+ * The uid is matched in lowercase hex only, which is what the API server emits
+ * and what the reporter copies verbatim. An uppercase spelling of the same uid
+ * would parse and then fail the case-sensitive comparison below, so accepting
+ * it would only move the refusal later; keeping the format exact says what the
+ * one valid spelling is.
  */
 const STATUS_REF =
-  /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*):uid=([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$/
+  /^host:([a-z0-9]([-a-z0-9]*[a-z0-9])?)\/([a-z0-9]([-a-z0-9]*[a-z0-9])?):generation=([1-9][0-9]*):uid=([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 export class HccAdministrativeOutcomeBindingResolver implements AdministrativeOperationBindingResolver {

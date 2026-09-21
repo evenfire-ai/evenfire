@@ -413,6 +413,7 @@ describe('first vertical trusted binding resolvers', () => {
     // chain does not catch exceptions, so a throw here would abort a WRC batch
     // before wrcInfrastructureBindingResolver ever saw it.
     const hostLookup = { getResource: vi.fn() }
+    const resolver = new HccHealthTransitionBindingResolver(hostLookup)
     const principal = {
       kind: 'wrc_internal_control',
       sourceService: 'workflow-recipes',
@@ -421,15 +422,29 @@ describe('first vertical trusted binding resolvers', () => {
       resourceAuthority: 'wrc_managed',
       allowedTelemetryTypes: ['health_transition'],
     } as const
+    const hccPrincipal = {
+      kind: 'hcc_internal_control',
+      sourceService: 'host-context-controller',
+      serviceSub: 'hcc-provisioner',
+      credentialId: 'hcc-1',
+      resourceAuthority: 'hcc_managed',
+      allowedTelemetryTypes: ['health_transition'],
+    } as const
+    const event = {
+      sourceEventId: 'health-wrc',
+      occurredAt: NOW,
+      telemetryType: 'health_transition' as const,
+      hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+    }
 
-    await expect(
-      new HccHealthTransitionBindingResolver(hostLookup).resolve(principal, {
-        sourceEventId: 'health-wrc',
-        occurredAt: NOW,
-        telemetryType: 'health_transition',
-        hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
-      })
-    ).resolves.toBeNull()
+    await expect(resolver.resolve(principal, event)).resolves.toBeNull()
+    // Liveness: the same instance and the same uid-less reference, submitted
+    // under the HCC principal, do throw. The null above is the principal guard
+    // deciding, not a resolver that returns null for anything handed to it.
+    await expect(resolver.resolve(hccPrincipal, event)).rejects.toMatchObject({
+      code: 'invalid_tracing_input',
+      status: 400,
+    })
     expect(hostLookup.getResource).not.toHaveBeenCalled()
   })
 

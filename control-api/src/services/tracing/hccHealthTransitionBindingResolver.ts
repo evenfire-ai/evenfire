@@ -77,11 +77,12 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
       throw new HccHealthTransitionBindingUnavailableError()
     }
     if (reference.uid === undefined) {
-      // The uid became mandatory once HCC started sending it: a Host deleted
-      // and recreated under the same name restarts at generation 1, so without
-      // it an event observed on the old object can bind to its successor. This
-      // is a 400 rather than the 403 above because the caller can fix it, and
-      // HCC treats a 400 as terminal instead of retrying forever (#693).
+      // A Host deleted and recreated under the same name restarts at
+      // generation 1, so a reference without the uid does not name one object:
+      // an event observed on the old Host would bind to its successor. There
+      // is no spelling of this request that names the right object, which is
+      // why it is a 400 the caller must fix rather than the 403 above, which
+      // says the binding is not visible yet and invites a retry (#693).
       throw new InvalidTracingInputError(
         'hostLookupReference.uid is required for host-context-controller telemetry'
       )
@@ -103,6 +104,10 @@ export class HccHealthTransitionBindingResolver implements InfrastructureWorkloa
       host.kind !== 'Host' ||
       metadata?.name !== reference.name ||
       metadata.namespace !== reference.namespace ||
+      // The generation stays optional where the uid is required: it narrows
+      // which revision of an object was observed, and an event that omits it
+      // still names one object. The uid is what names the object at all, so
+      // its absence has no safe reading (#693).
       (reference.generation !== undefined && metadata.generation !== reference.generation) ||
       // A Host deleted and recreated under the same name restarts at generation 1;
       // only the uid tells the objects apart, so an event observed on the old

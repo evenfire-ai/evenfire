@@ -468,6 +468,36 @@ describe('HostReconciler', () => {
     expect(administrativeOutcomeReporter.enqueueHostOutcome).not.toHaveBeenCalled()
   })
 
+  it('skips Host telemetry when the Host snapshot has no uid (#693)', async () => {
+    const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warn.mockRestore())
+    const reporter = createTelemetryReporterMock()
+    const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+
+    // Liveness: this reconciler and this reporter do enqueue when the snapshot
+    // carries a uid, so the unchanged count below is the guard's doing and not
+    // a reporter that was never reached.
+    await reconciler.reconcile(makeHost({ generation: 7 }))
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
+
+    const host = makeHost({ generation: 8 })
+    delete (host as { uid?: string }).uid
+    await reconciler.reconcile(host)
+
+    // control-api answers a uid-less reference with a 400 this reporter treats
+    // as terminal, and the infrastructure reporter keeps no `seen` set to fall
+    // silent, so the event would be re-sent and re-dropped every pass (#693).
+    expect(warn).toHaveBeenCalledWith(
+      'skipping host telemetry: Host snapshot has no uid',
+      expect.objectContaining({
+        host: 'alpha-host',
+        namespace: 'mcp-host',
+        telemetryType: 'reconcile_outcome',
+      })
+    )
+    expect(reporter.enqueue).toHaveBeenCalledTimes(1)
+  })
+
   it('sends an administrative outcome once across repeated reconcile passes (#327)', async () => {
     const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
     const administrativeOutcomeReporter = new BoundedAdministrativeOutcomeReporter({
@@ -674,11 +704,29 @@ describe('HostReconciler', () => {
       const superseded = new Error('Host spec changed while the Deployment write was in flight')
       superseded.name = 'HostMutationSpecRevisionChangedError'
       appsApi.replaceNamespacedDeployment.mockRejectedValueOnce(superseded)
+      // A different object at the same name, whose evidence this pass has no
+      // business touching: the supersession knows which uid it reconciled.
+      const evidence = gfsEvidenceOf(reconciler)
+      const siblingKey = evidenceKeyOf({
+        namespace: 'mcp-host',
+        name: 'alpha-host',
+        uid: 'host-uid-sibling',
+      })!
+      evidence.set(siblingKey, 'minted')
 
       await expect(reconciler.reconcile(makeHost({ generation: 3 }))).rejects.toBe(superseded)
       // Liveness: the superseded pass minted, and emitted no outcome.
       expect(vi.mocked(mintHostGfsToken).mock.calls.length - mintsBefore).toBe(1)
       expect(reconcileOutcomes(reporter)).toHaveLength(0)
+      // The pass dropped its own entry and left the sibling's alone. Both
+      // halves matter: a clear scoped too narrowly would leak the transition
+      // into the next pass, and one scoped by name would destroy the sibling's.
+      expect(
+        evidence.has(
+          evidenceKeyOf({ namespace: 'mcp-host', name: 'alpha-host', uid: 'host-uid-1' })!
+        )
+      ).toBe(false)
+      expect(evidence.get(siblingKey)).toBe('minted')
 
       rbacApi.readNamespacedRole.mockRejectedValueOnce({ code: 500 })
       await expect(reconciler.reconcile(makeHost({ generation: 4 }))).rejects.toEqual({
@@ -732,9 +780,12 @@ describe('HostReconciler', () => {
         name: 'alpha-host',
         uid: 'host-uid-1',
       })!
+      // A prefix neighbour on purpose: the sweep matches `mcp-host/alpha-host/`
+      // and only the trailing separator keeps `alpha-host-2` out of it. A
+      // survivor with an unrelated name would leave that character untested.
       const survivorKey = evidenceKeyOf({
         namespace: 'mcp-host',
-        name: 'other-host',
+        name: 'alpha-host-2',
         uid: 'host-uid-9',
       })!
       evidence.set(deletedKey, 'rotated')
@@ -752,23 +803,26 @@ describe('HostReconciler', () => {
       const warn = vi.spyOn(HostContextLogger.prototype, 'warn').mockImplementation(() => undefined)
       onTestFinished(() => warn.mockRestore())
       const reporter = createTelemetryReporterMock()
-      const { reconciler } = createReconciler({ infrastructureTelemetryReporter: reporter })
+      const { reconciler, appsApi } = createReconciler({
+        infrastructureTelemetryReporter: reporter,
+      })
       const host = makeHost({ generation: 3 })
       delete (host as { uid?: string }).uid
 
       await reconciler.reconcile(host)
 
-      // Liveness: the pass ran to an outcome, so the GFS write did happen —
-      // the evidence is missing because it was refused, not because the path
-      // never executed.
-      const outcomes = reconcileOutcomes(reporter)
-      expect(outcomes).toHaveLength(1)
+      // Liveness: the pass did its reconcile work, so it reached the GFS
+      // token path — the evidence is missing because recording it was
+      // refused, not because the pass never executed. The outcome itself is
+      // no longer a witness: the same missing uid now also stops the
+      // telemetry from being emitted at all (#693).
+      expect(appsApi.replaceNamespacedDeployment).toHaveBeenCalled()
       expect(warn).toHaveBeenCalledWith(
         'skipping gfs token lifecycle evidence: Host snapshot has no uid',
         expect.objectContaining({ host: 'alpha-host', namespace: 'mcp-host' })
       )
       expect(gfsEvidenceOf(reconciler).size).toBe(0)
-      expect(outcomes[0]?.payload).not.toHaveProperty('transition')
+      expect(reconcileOutcomes(reporter)).toHaveLength(0)
     })
   })
 

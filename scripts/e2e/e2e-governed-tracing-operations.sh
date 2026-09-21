@@ -208,6 +208,11 @@ const fs = require('node:fs')
 const [target, namespace, name, generation, uid, startedAt, suffix, variant] =
   process.argv.slice(2)
 const reference = { namespace, name, generation: Number(generation), uid }
+// A misspelled variant would otherwise write the valid body and the caller
+// would assert a rejection against a request that deserves none.
+if (!['full', 'missing-uid', 'unknown-key'].includes(variant)) {
+  throw new Error(`unknown hostLookupReference variant: ${variant}`)
+}
 if (variant === 'missing-uid') delete reference.uid
 if (variant === 'unknown-key') reference.resourceVersion = '1'
 const body = {
@@ -282,7 +287,12 @@ log 'hostLookupReference with an unknown key was refused as invalid_tracing_inpu
 
 # The administrative route refuses an unparseable reference with 403
 # `tracing_binding_unavailable`, which HCC retries rather than dropping: that is
-# what makes the control-api-first rollout order safe (#694).
+# what makes the control-api-first rollout order safe (#694). The paired
+# positive — the same outcome with `:uid=` binding and storing — needs a durable
+# administrative intent that this lane does not create, so it lives in
+# control-api/test/routes.tracingSubmissionBoundary.test.ts against the real
+# router. Here the message assertion below is what separates a refused binding
+# from a refused credential.
 STATUS="$(
   post_json "$CONTROL_API_URL/api/v1/internal/tracing/administrative-events" \
     "$LEGACY_STATUS_REF_BODY"

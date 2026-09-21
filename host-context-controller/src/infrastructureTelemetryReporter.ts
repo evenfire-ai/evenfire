@@ -22,12 +22,19 @@ export type HccHealthTransitionProjection = {
  * `uid` pins the event to one Host object. A Host deleted and recreated with
  * the same name restarts at generation 1; without the uid its events would
  * reuse the previous object's identities (#691).
+ *
+ * It is required rather than optional because control-api answers a reference
+ * without one with a 400 this reporter classifies as terminal: the event would
+ * be dropped, and re-sent and re-dropped on every reconcile pass, since this
+ * reporter keeps no `seen` set to go quiet. A caller holding a Host snapshot
+ * that never captured a uid has to decide what to do with it, so the type
+ * makes the compiler ask instead of letting the reference ship without it.
  */
 export type HostLookupReference = {
   name: string
   namespace: string
   generation?: number
-  uid?: string
+  uid: string
 }
 
 export type HccInfrastructureTelemetryType =

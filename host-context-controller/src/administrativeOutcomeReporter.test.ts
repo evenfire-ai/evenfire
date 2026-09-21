@@ -45,7 +45,7 @@ describe('BoundedAdministrativeOutcomeReporter', () => {
       fetchFn,
     })
     reporter.enqueueHostOutcome({
-      sourceEventId: 'hcc-admin-outcome:op-1:7:succeeded',
+      sourceEventId: 'hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded',
       occurredAt: '2026-07-11T10:00:00.000Z',
       hostRef: HOST_REF,
       outcome: 'succeeded',
@@ -250,10 +250,10 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
     const fetchFn = vi.fn().mockResolvedValue({ ok: true }) as unknown as typeof fetch
     const reporter = reporterWith(fetchFn)
 
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
     await settle()
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:succeeded'))
     await settle()
 
     expect(fetchFn).toHaveBeenCalledOnce()
@@ -294,10 +294,10 @@ describe('BoundedAdministrativeOutcomeReporter — once per process (#327, #326)
       .mockResolvedValue({ ok: true }) as unknown as typeof fetch
     const reporter = reporterWith(fetchFn)
 
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:failed'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:failed'))
     await settle()
     expect(await counted('retry_exhausted')).toBe(1)
-    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome:op-1:7:failed'))
+    reporter.enqueueHostOutcome(outcome('hcc-admin-outcome-v2:op-1:7:host-uid-1:failed'))
     await settle()
 
     expect(fetchFn).toHaveBeenCalledTimes(4)

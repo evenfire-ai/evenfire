@@ -8,6 +8,8 @@ import { clerumErrorHandler } from '../src/http/errorHandler.js'
 import { createInternalAdministrativeEventsRouter } from '../src/routes/internal/administrativeEvents.js'
 import { createInternalAgentRunEventsRouter } from '../src/routes/internal/agentRunEvents.js'
 import { createInternalInfrastructureTelemetryEventsRouter } from '../src/routes/internal/infrastructureTelemetryEvents.js'
+import { HccAdministrativeOutcomeBindingResolver } from '../src/services/tracing/adminOperationBindingResolver.js'
+import { administrativeIntentLookupKey } from '../src/services/tracing/adminOperationService.js'
 import {
   TracingIdempotencyConflictError,
   UnsafeTracingInputError,
@@ -419,6 +421,11 @@ describe('internal tracing submission routers — rejection code on the wire', (
         resourceVersion: '1',
       },
     ],
+    // A uid that is present but cannot name an object. Each of these would
+    // otherwise reach the resolver and be compared against a real Host.
+    ['with an empty uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: '' }],
+    ['with a non-string uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: 42 }],
+    ['with a null uid', { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: null }],
   ] as const)(
     'refuses a Host reference %s as 400 invalid_tracing_input through the real route',
     async (_label, hostLookupReference) => {
@@ -448,6 +455,119 @@ describe('internal tracing submission routers — rejection code on the wire', (
       expect(appendManyInTransaction).toHaveBeenCalledOnce()
     }
   )
+
+  /**
+   * The rollout order depends on this exact answer: HCC treats a 403 as
+   * retryable and a 400 as terminal, so a pre-#694 sourceStatusRef reaching a
+   * control-api that already requires the uid has to come back 403 or the
+   * outcome is dropped for good. The row above stubs the service and only
+   * proves the handler forwards the error it is handed; this one has to reach
+   * the real resolver through the real route.
+   */
+  it('answers an administrative outcome with a pre-uid sourceStatusRef 403 through the real route', async () => {
+    const OPERATION_ID = '11111111-1111-4111-8111-111111111111'
+    const listResource = vi.fn().mockResolvedValue([
+      {
+        apiVersion: 'clerum.io/v1alpha1',
+        kind: 'Host',
+        metadata: {
+          name: 'chatllm',
+          namespace: 'mcp-host',
+          generation: 7,
+          uid: HOST_UID,
+          annotations: {
+            'clerum.io/administrative-intent-id': OPERATION_ID,
+            'clerum.io/administrative-intent-generation': '7',
+          },
+        },
+      },
+    ])
+    const findHostIntents = vi.fn().mockResolvedValue(
+      new Map([
+        [
+          administrativeIntentLookupKey({
+            operationId: OPERATION_ID,
+            targetRef: 'mcp-host/chatllm',
+            namespace: 'mcp-host',
+          }),
+          {
+            operatorSub: 'admin-1',
+            requestId: 'request-1',
+            environment: 'test',
+            tenantId: null,
+            teamId: null,
+            identityIssuer: 'control-api',
+            operatorUserId: '22222222-2222-4222-8222-222222222222',
+            resourceAud: 'control-ui',
+            effectiveScopes: [],
+            tokenExchangeId: null,
+            authorizationDecision: 'allow' as const,
+            decisionActorSub: 'control-api',
+          },
+        ],
+      ])
+    )
+    const appendManyInTransaction = vi.fn().mockResolvedValue([
+      {
+        kind: 'accepted' as const,
+        accepted: 1,
+        replayed: 0,
+        family: 'administrative' as const,
+        eventId: '33333333-3333-4333-8333-333333333333',
+        streamSequence: '7',
+        payloadSha256: 'b'.repeat(64),
+        ingestedAt: '2026-07-10T10:00:00.000Z',
+      },
+    ])
+    const db = { query: vi.fn() } as unknown as DbClient
+    const app = express()
+    app.use(
+      createInternalAdministrativeEventsRouter(
+        new RouteTracingSubmissionService({
+          transaction: (async (work: (client: DbClient) => Promise<unknown>) =>
+            work(db)) as unknown as TracingTransactionRunner,
+          administrativeOperationBindingResolver: new HccAdministrativeOutcomeBindingResolver(
+            { getResource: vi.fn(), listResource },
+            { findHostIntent: vi.fn(), findHostIntents }
+          ),
+          administrativeEventAppender: { appendManyInTransaction },
+        })
+      )
+    )
+    app.use(clerumErrorHandler)
+
+    const post = (sourceStatusRef: string) =>
+      request(app)
+        .post('/internal/tracing/administrative-events')
+        .set('Authorization', `Bearer ${signInternalControl('hcc')}`)
+        .send({
+          events: [
+            {
+              kind: 'linked_outcome',
+              sourceEventId: `outcome-${sourceStatusRef.length}`,
+              occurredAt: '2026-07-10T09:59:59.000Z',
+              reasonCode: 'boundary_test',
+              sourceStatusRef,
+              payload: { resource_class: 'Host', status: 'succeeded' },
+            },
+          ],
+        })
+
+    // Liveness: the current format binds and stores through this same app, so
+    // the refusal below is the legacy format and not a route that refuses all.
+    const accepted = await post(`host:mcp-host/chatllm:generation=7:uid=${HOST_UID}`)
+    expect(accepted.status).toBe(200)
+    expect(appendManyInTransaction).toHaveBeenCalledOnce()
+
+    const legacy = await post('host:mcp-host/chatllm:generation=7')
+
+    expect(legacy.status).toBe(403)
+    expect(legacy.body.correlationId).toEqual(expect.any(String))
+    // No machine-readable code: that is what keeps HCC retrying instead of
+    // classifying the failure as terminal and dropping the outcome.
+    expect(legacy.body).not.toHaveProperty('code')
+    expect(appendManyInTransaction).toHaveBeenCalledOnce()
+  })
 
   it('keeps a binding 403 without a code, so HCC keeps retrying it', async () => {
     const { app, service } = rejectingApp(

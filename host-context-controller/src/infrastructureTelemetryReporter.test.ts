@@ -10,17 +10,20 @@ import {
   infrastructureTelemetryRetriesTotal,
 } from './metrics'
 
+/** control-api refuses a reference without one, so every fixture carries it. */
+const HOST_UID = '6f1c2f3a-2f4b-4d3a-9b2e-7c0d1a5e8b44'
+
 const projection = {
   sourceEventId: 'hcc-health-transition:mcp-host:chatllm:7:active:1',
   occurredAt: '2026-07-11T12:00:00.000Z',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: { transition: 'lifecycle:active', state: 'active' },
 } as const
 
 const reconcileProjection = {
   occurredAt: '2026-07-11T12:00:01.000Z',
   telemetryType: 'reconcile_outcome',
-  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7 },
+  hostLookupReference: { name: 'chatllm', namespace: 'mcp-host', generation: 7, uid: HOST_UID },
   payload: {
     resource_class: 'Host',
     reason_code: 'ready',
