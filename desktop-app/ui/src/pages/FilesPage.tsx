@@ -215,6 +215,15 @@ function GfsInlineRename({
 /** Sub-second, so a throttled or delayed wake-up cannot leave a stale number on screen. */
 const COUNTDOWN_TICK_MS = 250
 
+/**
+ * How many uncached subfolders one listing may speculatively warm.
+ *
+ * The server meters reads per minute per actor, so the cap is a count, not a
+ * concurrency limit — sending the same ten requests four at a time spends
+ * exactly the same budget as sending them at once.
+ */
+const PREFETCH_FOLDER_LIMIT = 10
+
 function secondsUntil(deadline: number | null): number {
   if (deadline === null) return 0
   return Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
@@ -359,21 +368,35 @@ export function FilesPage({
     refreshAffordances,
   } = ctrl
 
-  // Warm the cache for every directory row visible in the current view
-  // so clicking into a folder is instant. Re-runs whenever the listing
-  // changes (folder navigation, refresh, …) and silently no-ops if a
-  // folder was already prefetched. TanStack Query's staleTime:Infinity
-  // (set in lib/queryClient.ts) keeps the cached data hot until the user
-  // actually navigates there.
+  // Warm the cache for directory rows in the current view so clicking into a
+  // folder is instant. TanStack Query's staleTime:Infinity (set in
+  // lib/queryClient.ts) keeps the cached data hot until the user navigates.
+  //
+  // Bounded on both axes, because this is an optimization spending a shared
+  // budget. Opening a folder with 38 subfolders sent 38 speculative listings
+  // in one burst — 38 of the 85 requests in wave 1 of the incident behind
+  // #681, for folders the user mostly never opened.
+  //
+  // The cached-key skip is not redundant with the cap, it is what makes the
+  // cap advance: the effect re-runs on every `items` change (loadMore pages
+  // included), so a bare `slice(0, 10)` would re-select the same first ten
+  // forever and never reach the rest.
   useEffect(() => {
     if (!sessionScope) return
-    const folders = items.filter(item => item.kind === 'directory')
+    const folders = items
+      .filter(item => item.kind === 'directory')
+      .map(folder => ({
+        folder,
+        key: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+      }))
+      .filter(({ key }) => queryClient.getQueryState(key)?.data === undefined)
+      .slice(0, PREFETCH_FOLDER_LIMIT)
     if (folders.length === 0) return
     void Promise.all(
-      folders.map(folder =>
+      folders.map(({ folder, key }) =>
         queryClient
           .fetchInfiniteQuery({
-            queryKey: desktopQueryKeys.gfsChildren(sessionScope, folder.resourceId, 'main'),
+            queryKey: key,
             queryFn: ({ pageParam }) =>
               window.clerum.gfs.listChildren(folder.resourceId, 'main', pageParam),
             initialPageParam: undefined as string | undefined,

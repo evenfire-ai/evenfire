@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { GFS_FILE_UPLOAD_PROTOCOL_MAX_BYTES } from '@constants/gfsFileUpload'
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
+import { desktopQueryKeys } from '@hooks/domain/queryKeys'
 import type { GfsCrumb } from '@hooks/domain/useGfsBrowserController'
 import type { Tone } from '@/uiTypes'
 import { FilesPage } from '../FilesPage'
@@ -3372,6 +3373,79 @@ describe('FilesPage', () => {
     await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(2))
     expect(listChildren).toHaveBeenCalledWith('folder-a', 'main', undefined)
     expect(listChildren).toHaveBeenCalledWith('folder-b', 'main', undefined)
+  })
+
+  it('prefetches only the first ten uncached subfolders, skipping those already in cache', async () => {
+    // The mock carries the real signature so `calls.map(call => call[0])`
+    // below is typed as the resource id, not as an empty tuple.
+    const listChildren = vi.fn(async (_resourceId: string) => ({
+      items: [],
+      nextCursor: null,
+    }))
+    Object.defineProperty(window, 'clerum', {
+      configurable: true,
+      value: { gfs: { list: () => ({ items: [] }), download: vi.fn(), listChildren } },
+    })
+    const scope = 'env-1:user-1:team-1'
+    const folders = Array.from({ length: 15 }, (_, index) => ({
+      resourceId: `folder-${String(index).padStart(2, '0')}`,
+      rid: `folder-${index}`,
+      gfsUri: `gfs://main/folder-${index}`,
+      drive: 'main',
+      parentResourceId: 'folder-1',
+      name: `Folder ${index}`,
+      kind: 'directory',
+      path: `/Product/Folder ${index}`,
+      version: 1,
+      bytes: 0,
+    }))
+    hookMock.useGfsBrowserController.mockReturnValue({
+      ...baseController(),
+      current: {
+        resourceId: 'folder-1',
+        gfsUri: 'gfs://main/folder-1',
+        name: 'Product',
+        kind: 'directory',
+        version: 1,
+      },
+      items: folders,
+    })
+
+    const cached = ['folder-02', 'folder-05', 'folder-09']
+    // Scattered, not leading: a cap applied before the skip would still get
+    // the first ten right if the cached ids were all at the front.
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    cached.forEach(resourceId =>
+      queryClient.setQueryData(desktopQueryKeys.gfsChildren(scope, resourceId, 'main'), {
+        pages: [{ items: [], nextCursor: null }],
+        pageParams: [undefined],
+      })
+    )
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FilesPage />
+      </QueryClientProvider>
+    )
+
+    // Positive, and the witness: the effect ran and sent exactly the cap.
+    // Under production defaults `fetchInfiniteQuery` would serve the cached
+    // pages without a request anyway; this harness runs at `staleTime: 0`, so
+    // the explicit cached-key check is the only thing keeping those three out.
+    await waitFor(() => expect(listChildren).toHaveBeenCalledTimes(10))
+    const requested = listChildren.mock.calls.map(call => call[0])
+    cached.forEach(resourceId => expect(requested).not.toContain(resourceId))
+    expect(requested).toEqual([
+      'folder-00',
+      'folder-01',
+      'folder-03',
+      'folder-04',
+      'folder-06',
+      'folder-07',
+      'folder-08',
+      'folder-10',
+      'folder-11',
+      'folder-12',
+    ])
   })
 
   it('renders a rate-limited discovery failure as a card with a retry countdown', async () => {
