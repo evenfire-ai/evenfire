@@ -1844,6 +1844,29 @@ h3 {
   font-size: var(--font-size-xs);
 }
 
+/* Revoked-access surface for the sidebar tree — the compact-chrome sibling of
+   the Files page's "File access is not authorized" empty state + Retry. */
+.da-file-explorer__revoked {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-1);
+}
+
+.da-file-explorer__revoked-title {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-tight);
+}
+
+.da-file-explorer__revoked-body {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-normal);
+}
+
 .da-file-explorer__tree,
 .da-file-explorer__group {
   display: grid;

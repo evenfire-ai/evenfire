@@ -345,7 +345,22 @@ export function FileExplorerTree({
 
   return (
     <div className="da-file-explorer">
-      {ctrl.accessibleNotice ? (
+      {ctrl.accessState === 'revoked' ? (
+        // Mirror the Files page's revoked surface, adapted to the sidebar's
+        // compact chrome. Without this branch a revoked drive falls through to
+        // "No shared files yet." — the fail-closed purge has already dropped the
+        // discovery error and roots, so an unauthorized drive would read empty.
+        <div className="da-file-explorer__revoked" role="alert">
+          <p className="da-file-explorer__revoked-title">File access is not authorized</p>
+          <p className="da-file-explorer__revoked-body">
+            Your current session cannot access these files. Sign in again or contact an
+            administrator.
+          </p>
+          <Button onClick={() => ctrl.retryAccess()} size="xs" variant="text">
+            Retry file access
+          </Button>
+        </div>
+      ) : ctrl.accessibleNotice ? (
         <p className="da-file-explorer__message muted">{ctrl.accessibleNotice}</p>
       ) : ctrl.accessibleError ? (
         <StatusBanner tone="error" text={ctrl.accessibleError} compact />

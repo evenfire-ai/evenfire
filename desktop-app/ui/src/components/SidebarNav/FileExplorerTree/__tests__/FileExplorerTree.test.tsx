@@ -3,6 +3,7 @@ import { useRef, useState } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { useGfsBrowserController } from '@hooks/domain/useGfsBrowserController'
 import { desktopQueryDefaults } from '@lib/queryClient'
 import { activeWorkspaceTab, openFilesTab } from '@lib/workspaceTabs'
 import type { WorkspaceTabsState } from '@lib/workspaceTabs.types'
@@ -589,5 +590,65 @@ describe('FileExplorerTree — unreadable rows refuse activation (R1-H1)', () =>
     expect(pushToast).toHaveBeenCalledWith('You do not have read access to Locked', 'error')
     expect(pushToast).toHaveBeenCalledTimes(2)
     expect(within(folderButton).getByText('No access')).toBeTruthy()
+  })
+})
+
+describe('FileExplorerTree — shared revoked access across controller mounts (R1-H2)', () => {
+  // The sidebar tree, FilesPage and FilePreviewPage each mount their OWN
+  // `useGfsBrowserController`. A session-authority 401 in any one of them must
+  // revoke ALL of them, and a retry in one must re-activate all — otherwise a
+  // 401 in the tree leaves FilesPage live against caches the session can no
+  // longer authorize, and FilesPage's Retry never re-enables the still-mounted
+  // tree. The revoked flag is shared through the query cache, so every mount on
+  // the SAME queryClient observes it. This second mount is an independent
+  // controller consumer, not the tree's own instance.
+  function AccessStateProbe() {
+    const ctrl = useGfsBrowserController()
+    return <div data-testid="probe-access">{ctrl.accessState}</div>
+  }
+
+  it('revokes a second mount from a tree 401 and re-activates both on retry (not the empty state)', async () => {
+    // Discovery succeeds; the 401 comes from the tree's own listChildren — an
+    // operation-surface authority failure that ONLY the tree's controller
+    // observes. Under per-mount state the probe would never see it.
+    const listAccessible = vi.fn(async () =>
+      listAccessiblePage([accessibleResource('reports', 'Reports', 'directory')])
+    )
+    let childrenCall = 0
+    const listChildren = vi.fn(async () => {
+      childrenCall += 1
+      if (childrenCall === 1) throw new Error('401 Unauthorized')
+      return listChildrenPage([childView('r-1', 'r.md', 'file')])
+    })
+    installClerum({ listAccessible, listChildren })
+
+    // ONE queryClient shared by both mounts is the sharing boundary. Run it
+    // under the REAL desktop cache policy so nothing but the shared flag carries
+    // the revoke across mounts.
+    const queryClient = new QueryClient({ defaultOptions: desktopQueryDefaults })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <FileExplorerTree onOpenFolder={vi.fn()} onOpenPreview={vi.fn()} pushToast={vi.fn()} />
+        <AccessStateProbe />
+      </QueryClientProvider>
+    )
+
+    await screen.findByRole('button', { name: 'Reports' })
+    expect(screen.getByTestId('probe-access').textContent).toBe('active')
+
+    // Expand the folder → the tree's listChildren 401s → the tree revokes.
+    fireEvent.click(screen.getByRole('button', { name: 'Expand Reports' }))
+
+    // (a) The tree shows the unauthorized + retry surface — NOT "No shared files
+    // yet." (b) The independent second mount reads revoked (shared flag).
+    expect(await screen.findByText('File access is not authorized')).toBeTruthy()
+    expect(screen.queryByText('No shared files yet.')).toBeNull()
+    await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('revoked'))
+
+    // (c) Retry from the tree re-activates BOTH mounts and re-enables the
+    // queries, so discovery reloads and the tree renders its root again.
+    fireEvent.click(screen.getByRole('button', { name: 'Retry file access' }))
+    await waitFor(() => expect(screen.getByTestId('probe-access').textContent).toBe('active'))
+    expect(await screen.findByRole('button', { name: 'Reports' })).toBeTruthy()
   })
 })
