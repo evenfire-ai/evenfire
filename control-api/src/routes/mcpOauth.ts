@@ -91,6 +91,15 @@ export function normalizeMcpServerOwnerDecl(
     if (!resolved) return null
     return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
   }
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): delegate to the SAME
+  // subject resolver (D4 — no drift with mint + callback) so the refresh reader
+  // gets the pinned `generic` routing + secretSource that `getAccessToken`
+  // branches on.
+  if (oauth.source === 'generic') {
+    const resolved = resolveServerOAuthSubject(server)
+    if (!resolved) return null
+    return { metadata: server.metadata, spec: { oauthClients: [resolved.decl] } }
+  }
   // Baked lane (unchanged; a public baked client is tolerated per E-19.2).
   if (typeof oauth.id !== 'string' || typeof oauth.provider !== 'string') return null
   const clientIdRef = oauth.clientIdRef

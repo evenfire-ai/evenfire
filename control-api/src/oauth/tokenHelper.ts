@@ -13,6 +13,7 @@ import {
 } from './callback.js'
 import {
   type ParsedTokenResponse,
+  buildAdapterFromConfig,
   buildRemoteRefreshRequest,
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
@@ -110,6 +111,14 @@ export async function getAccessToken(
     // NOT heuristically from token presence.
     if (!decl.remote.supportsRefresh) return { kind: 'no_grant' }
     return refreshRemoteGrant(grant.refreshToken, decl, input, deps)
+  }
+
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): same fail-closed
+  // no-refresh gate (D-8) and IP-pinned refresh POST (DEC-17) as the remote lane,
+  // but the request is composed from the CR knobs (`buildAdapterFromConfig`).
+  if (decl.generic) {
+    if (!decl.generic.supportsRefresh) return { kind: 'no_grant' }
+    return refreshGenericGrant(grant.refreshToken, decl, input, deps)
   }
 
   if (!isKnownOAuthProvider(decl.provider)) {
@@ -275,6 +284,84 @@ async function refreshRemoteGrant(
   const refreshed = await refreshOAuthGrantTokens(deps.db, deps.encryptionKey, {
     ...input,
     provider: 'remote',
+    accessToken: parsed.accessToken,
+    refreshToken: parsed.refreshToken ?? refreshToken,
+    accessTokenExpiresInSec: parsed.expiresIn,
+  })
+  if (!refreshed.updated) return { kind: 'no_grant' }
+
+  const expiresAt =
+    typeof parsed.expiresIn === 'number'
+      ? new Date(Date.now() + parsed.expiresIn * 1000)
+      : undefined
+  return { kind: 'ok', accessToken: parsed.accessToken, expiresAt }
+}
+
+/**
+ * Generic-lane refresh (`source:'generic'`, `supportsRefresh:true`, DEC-28). The
+ * refresh request is composed from the CR knobs (`buildAdapterFromConfig`),
+ * credentials come from `secretSource` (public/k8s-secret), and the POST is
+ * IP-pinned to the pinned `refreshEndpoint` (defaulting to `tokenEndpoint`,
+ * DEC-17). Persists via the SAME `refreshOAuthGrantTokens` UPDATE (never
+ * resurrects a concurrently-deleted grant). `refreshToken` is already narrowed
+ * non-null by the caller.
+ */
+async function refreshGenericGrant(
+  refreshToken: string,
+  decl: OAuthClientDecl,
+  input: GetAccessTokenInput,
+  deps: GetAccessTokenDeps
+): Promise<GetAccessTokenResult> {
+  const generic = decl.generic
+  if (!generic) return { kind: 'no_grant' }
+  const credResult = await resolveRemoteClientCredential(
+    decl,
+    input.recipeNamespace,
+    input.recipeName,
+    {
+      db: deps.db,
+      encryptionKey: deps.encryptionKey,
+      secretReader: deps.secretReader,
+    }
+  )
+  if (!credResult.ok) return { kind: 'secret_missing', secret: credResult.secret }
+
+  const adapter = buildAdapterFromConfig(generic)
+  let refreshRequest: ReturnType<typeof adapter.buildRefreshRequest>
+  try {
+    // The build can throw (tokenAuthMethod=basic without a secret); wrap it into a
+    // typed fail-closed result rather than an opaque 500 (symmetric with baked).
+    refreshRequest = adapter.buildRefreshRequest({
+      refreshToken,
+      clientId: credResult.cred.clientId,
+      clientSecret: credResult.cred.clientSecret,
+    })
+  } catch (err) {
+    return { kind: 'refresh_failed', detail: (err as Error).message }
+  }
+
+  const posted = await postRemoteTokenForm(
+    refreshRequest.url,
+    'spec.oauth.refreshEndpoint',
+    refreshRequest,
+    {
+      resolveDns: deps.resolveDns,
+      pinnedTransport: deps.pinnedTransport,
+      timeoutMs: deps.refreshTimeoutMs,
+    }
+  )
+  if (!posted.ok) return { kind: 'refresh_failed', status: posted.status, detail: posted.detail }
+
+  let parsed: ParsedTokenResponse
+  try {
+    parsed = adapter.parseTokenResponse(JSON.parse(posted.bodyText))
+  } catch (err) {
+    return { kind: 'refresh_failed', detail: (err as Error).message }
+  }
+
+  const refreshed = await refreshOAuthGrantTokens(deps.db, deps.encryptionKey, {
+    ...input,
+    provider: 'generic',
     accessToken: parsed.accessToken,
     refreshToken: parsed.refreshToken ?? refreshToken,
     accessTokenExpiresInSec: parsed.expiresIn,

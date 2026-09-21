@@ -10,6 +10,7 @@ import {
 } from './callback.js'
 import { computeCodeChallengeS256, deriveCodeVerifier } from './pkce.js'
 import {
+  buildAdapterFromConfig,
   buildRemoteAuthorizeUrl,
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
@@ -182,6 +183,26 @@ async function mintAuthorizeUrl(
       scopes: decl.scopes ?? [],
       codeChallenge,
       resource: decl.remote.resource,
+    })
+    return { kind: 'ok', authorizeUrl }
+  }
+
+  // Generic self-hosted lane (`source:'generic'`, DEC-28): the authorize URL is
+  // composed from the pinned `authorizationEndpoint` + wire knobs
+  // (`buildAdapterFromConfig`) with the PUBLIC client_id (`decl.id`). PKCE S256 is
+  // gated on `usePkce`; when off, no challenge is computed or emitted. No K8s
+  // Secret is read (the client_id rides `oauth.id`, not a Secret).
+  if (decl.generic) {
+    const state = signOAuthState(deps.stateSecret, stateInput)
+    const codeChallenge = decl.generic.usePkce
+      ? computeCodeChallengeS256(deriveCodeVerifier(deps.stateSecret, state))
+      : undefined
+    const authorizeUrl = buildAdapterFromConfig(decl.generic).buildAuthorizeUrl({
+      clientId: decl.id,
+      redirectUri: input.redirectUri,
+      state,
+      scopes: decl.scopes ?? [],
+      codeChallenge,
     })
     return { kind: 'ok', authorizeUrl }
   }

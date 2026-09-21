@@ -5,8 +5,10 @@ import type { DnsResolver } from '../http/validateMcpServerSpec.js'
 import { getDynamicClient } from './dynamicClientStore.js'
 import { deriveCodeVerifier } from './pkce.js'
 import {
+  type GenericAdapterConfig,
   type OAuthProvider,
   type ParsedTokenResponse,
+  buildAdapterFromConfig,
   buildRemoteTokenRequest,
   getOAuthProviderAdapter,
   isKnownOAuthProvider,
@@ -65,6 +67,20 @@ export interface RemoteClientRouting {
 }
 
 /**
+ * Generic self-hosted OAuth routing pinned on the CR (`source:'generic'`, DEC-28).
+ * Present only for a `source:'generic'` client; drives a KNOB-configured
+ * exchange/refresh/authorize via `buildAdapterFromConfig` instead of a baked
+ * provider adapter. Like the remote lane, the operator-supplied endpoints are
+ * attacker-influenced ⇒ every token/refresh POST is IP-pinned (DEC-17). Extends
+ * the pure wire knobs (`GenericAdapterConfig`, single source of truth in
+ * providers.ts) with the fail-closed `supportsRefresh` flag (D-8).
+ */
+export interface GenericClientRouting extends GenericAdapterConfig {
+  /** D-8: fail-closed — false ⇒ NEVER attempt a refresh. */
+  supportsRefresh: boolean
+}
+
+/**
  * End-to-end handler for the auth-code OAuth callback. Independent of Express
  * so we can unit-test it with stubs for K8s + DB + fetch. The route handler
  * (`routes/external/oauthCallback.ts`) is a thin parse-params + delegate.
@@ -104,8 +120,16 @@ export interface OAuthClientDecl {
    */
   remote?: RemoteClientRouting
   /**
-   * Where the remote client credentials live (DEC-18). Present only alongside
-   * `remote`; absent ⇒ the legacy K8s `clientIdRef`/`clientSecretRef` path.
+   * Generic self-hosted OAuth routing (`source:'generic'`, DEC-28). Present ⇒ the
+   * knob-configured lane: exchange/refresh/authorize use the pinned endpoints +
+   * `buildAdapterFromConfig` + `secretSource` instead of a baked provider adapter.
+   * Mutually exclusive with `remote`. Absent ⇒ baked/recipe (byte-identical).
+   */
+  generic?: GenericClientRouting
+  /**
+   * Where the remote/generic client credentials live (DEC-18). Present alongside
+   * `remote` or `generic`; absent ⇒ the legacy K8s `clientIdRef`/`clientSecretRef`
+   * path. For the generic lane it is `public` (no refs) or `k8s-secret` (both refs).
    */
   secretSource?: ServerOAuthSecretSource
 }
@@ -238,8 +262,11 @@ export interface CallbackDeps {
   pinnedTransport?: PinnedTransport
 }
 
-/** Provider label persisted / displayed. `'remote'` for the discovery-derived lane. */
-export type GrantProviderLabel = OAuthProvider | 'remote'
+/**
+ * Provider label persisted / displayed. `'remote'` for the discovery-derived lane,
+ * `'generic'` for the knob-configured self-hosted lane (DEC-28).
+ */
+export type GrantProviderLabel = OAuthProvider | 'remote' | 'generic'
 
 export type CallbackResult =
   | {
@@ -605,6 +632,13 @@ async function exchangeAuthCode(
     return exchangeRemoteAuthCode(decl, secretNamespace, serverName, input, deps)
   }
 
+  // Generic self-hosted lane (`source:'generic'`): knob-configured request over
+  // the same IP-pinned POST (DEC-17). Credentials per `secretSource` (public or
+  // k8s-secret). Baked path is below (unchanged).
+  if (decl.generic) {
+    return exchangeGenericAuthCode(decl, secretNamespace, serverName, input, deps)
+  }
+
   // Baked/recipe lane. clientIdRef is always present here (remote is the only
   // decl that omits it); guard fail-closed rather than dereference undefined.
   if (!decl.clientIdRef) {
@@ -747,6 +781,74 @@ async function exchangeRemoteAuthCode(
   }
 }
 
+/**
+ * Generic-lane auth-code exchange (`source:'generic'`, DEC-28). Operator-pinned
+ * token endpoint ⇒ IP-pinned POST (DEC-17). The request is composed from the CR
+ * knobs via `buildAdapterFromConfig`; credentials come from `secretSource`
+ * (public ⇒ no `client_secret`; k8s-secret ⇒ both read from the named Secret).
+ * PKCE is gated on the `usePkce` knob.
+ */
+async function exchangeGenericAuthCode(
+  decl: OAuthClientDecl,
+  secretNamespace: string,
+  serverName: string | undefined,
+  input: CallbackInput,
+  deps: CallbackDeps
+): Promise<ExchangeAuthCodeResult> {
+  // `decl.generic` presence is the branch guard in the caller.
+  const generic = decl.generic as GenericClientRouting
+  const credResult = await resolveRemoteClientCredential(decl, secretNamespace, serverName, deps)
+  if (!credResult.ok) return { kind: 'secret_missing', secret: credResult.secret }
+
+  const adapter = buildAdapterFromConfig(generic)
+  // PKCE gated on the knob: re-derive the verifier from the exact round-tripped
+  // state (the authorize URL derived its challenge from the same value).
+  const codeVerifier = generic.usePkce
+    ? deriveCodeVerifier(deps.stateSecret, input.state)
+    : undefined
+
+  let tokenRequest: ReturnType<typeof adapter.buildTokenRequest>
+  try {
+    // The build can throw (e.g. tokenAuthMethod=basic on a secret-less client) —
+    // turn that into a typed fail-closed result, never an opaque 500.
+    tokenRequest = adapter.buildTokenRequest({
+      code: input.code,
+      clientId: credResult.cred.clientId,
+      clientSecret: credResult.cred.clientSecret,
+      redirectUri: input.redirectUri,
+      codeVerifier,
+    })
+  } catch (err) {
+    return { kind: 'provider_response_invalid', detail: (err as Error).message }
+  }
+
+  const posted = await postRemoteTokenForm(
+    tokenRequest.url,
+    'spec.oauth.tokenEndpoint',
+    tokenRequest,
+    {
+      resolveDns: deps.resolveDns,
+      pinnedTransport: deps.pinnedTransport,
+      timeoutMs: deps.tokenRequestTimeoutMs,
+    }
+  )
+  if (!posted.ok) {
+    if (typeof posted.status === 'number') {
+      return { kind: 'provider_token_exchange_failed', status: posted.status, body: posted.detail }
+    }
+    return { kind: 'provider_response_invalid', detail: posted.detail }
+  }
+  try {
+    return {
+      kind: 'ok',
+      provider: 'generic',
+      parsed: adapter.parseTokenResponse(JSON.parse(posted.bodyText)),
+    }
+  } catch (err) {
+    return { kind: 'provider_response_invalid', detail: (err as Error).message }
+  }
+}
+
 /** Resolved remote client credentials for a token/refresh POST. */
 export interface RemoteClientCredential {
   clientId: string
@@ -818,10 +920,13 @@ export type RemotePostResult =
   | { ok: false; status?: number; detail: string }
 
 /**
- * POST a form-encoded token/refresh request to a discovery-derived endpoint
- * through the IP-pinned `pinnedFetch` (DEC-17). Adds `content-length` (the pinned
- * `node:https` transport needs an explicit length rather than chunked) on top of
- * the builder's `content-type: application/x-www-form-urlencoded`. Any pin-level
+ * POST a token/refresh request to a discovery-derived (remote) or operator-pinned
+ * (generic) endpoint through the IP-pinned `pinnedFetch` (DEC-17). Body-agnostic:
+ * the builder owns the `content-type` (`application/x-www-form-urlencoded` for the
+ * remote/baked and generic form path, `application/json` for a generic
+ * `tokenRequestFormat:'json'` server); this helper only adds `content-length` (the
+ * pinned `node:https` transport needs an explicit length rather than chunked) from
+ * `Buffer.byteLength` of the builder's body. Any pin-level
  * failure (kernel-rejected, transport, non-identity encoding) is a fail-closed
  * `ok:false` with a NAME-only detail — never secret material. Shared by exchange
  * + refresh (D4).

@@ -681,3 +681,199 @@ export function buildRemoteRefreshRequest(
 
 /** Remote token responses are standard OAuth2 — reuse the baked parser. */
 export const parseRemoteTokenResponse = parseStandardOAuth2
+
+// ─── Generic self-hosted OAuth composer (S3.2 / DEC-28) ─────────────────────
+//
+// The `source:'generic'` lane speaks OAuth to operator-pinned endpoints whose
+// wire shape is described by a fixed set of KNOBS rather than a baked adapter.
+// `buildAdapterFromConfig` is a PURE knob→wire composer: given the knobs it
+// returns a per-call `{ buildAuthorizeUrl, buildTokenRequest, buildRefreshRequest,
+// parseTokenResponse }`. It is NOT a decision module — each knob independently
+// selects ONE fixed behavior (no precedence/merge/ordering resolution) — and it is
+// deliberately NOT added to `OAuthProvider`/`ADAPTERS`/`KNOWN_OAUTH_PROVIDERS`:
+// the 8 baked adapters and the provider enum stay byte-frozen (T1 golden). It
+// reuses the existing `standardTokenRequest`/`standardRefreshRequest`/
+// `parseStandardOAuth2` + `appendResource` primitives, so the `form`+`body` combo
+// is byte-identical to the baked/remote form shape.
+
+/** The wire knobs a generic client is configured with (mirrors the CRD generic fields). */
+export interface GenericAdapterConfig {
+  authorizationEndpoint: string
+  tokenEndpoint: string
+  /** Optional; the refresh POST targets this, defaulting to `tokenEndpoint`. */
+  refreshEndpoint?: string
+  /** RFC 8707 resource indicator, echoed on authorize + token/refresh when present. */
+  resource?: string
+  /** Token/refresh POST body encoding. */
+  tokenRequestFormat: 'form' | 'json'
+  /** `client_secret` placement: form/JSON body vs HTTP Basic header. */
+  tokenAuthMethod: 'body' | 'basic'
+  /** Separator joining scopes on the authorize URL. */
+  scopeSeparator: 'space' | 'comma'
+  /** Whether to emit the `scope` param on the authorize URL at all. */
+  sendScope: boolean
+  /** PKCE S256 on authorize + `code_verifier` on exchange. */
+  usePkce: boolean
+  /** Emit `response_type=code` on the authorize URL. */
+  includeResponseType: boolean
+  /** Static extra query params appended to the authorize URL (reserved params win). */
+  extraAuthorizeParams?: Record<string, string>
+}
+
+/** Per-call generic adapter: same four capabilities a baked adapter exposes. */
+export interface GenericAdapter {
+  buildAuthorizeUrl(input: AuthorizeUrlInput): string
+  buildTokenRequest(input: TokenExchangeInput): TokenRequest
+  buildRefreshRequest(input: RefreshTokenInput): TokenRequest
+  parseTokenResponse(body: unknown): ParsedTokenResponse
+}
+
+function basicAuthHeader(clientId: string, clientSecret: string): string {
+  return `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`
+}
+
+/** Append `resource` as a JSON field (RFC 8707) without disturbing key order. */
+function withJsonResource(body: Record<string, string>, resource?: string): Record<string, string> {
+  if (!resource) return body
+  return { ...body, resource }
+}
+
+/**
+ * Compose a per-call generic OAuth adapter from its wire knobs. Pure: the same
+ * `(config, input)` always yields the same request/URL, and it never reads I/O.
+ */
+export function buildAdapterFromConfig(config: GenericAdapterConfig): GenericAdapter {
+  const scopeSep = config.scopeSeparator === 'comma' ? ',' : ' '
+  const useJson = config.tokenRequestFormat === 'json'
+  const useBasic = config.tokenAuthMethod === 'basic'
+
+  return {
+    buildAuthorizeUrl(input: AuthorizeUrlInput): string {
+      // Reserved OAuth params first; `extraAuthorizeParams` may only FILL GAPS,
+      // never clobber a reserved param (an operator's static extras must not be
+      // able to override `state`, `code_challenge`, `client_id`, …). One fixed
+      // rule, not a precedence table.
+      const params: Record<string, string> = {}
+      if (config.includeResponseType) params.response_type = 'code'
+      params.client_id = input.clientId
+      params.redirect_uri = input.redirectUri
+      params.state = input.state
+      if (config.usePkce && input.codeChallenge) {
+        params.code_challenge = input.codeChallenge
+        params.code_challenge_method = 'S256'
+      }
+      if (config.sendScope && input.scopes.length > 0) {
+        params.scope = input.scopes.join(scopeSep)
+      }
+      if (config.resource) params.resource = config.resource
+      for (const [k, v] of Object.entries(config.extraAuthorizeParams ?? {})) {
+        if (!(k in params)) params[k] = v
+      }
+      const sep = config.authorizationEndpoint.includes('?') ? '&' : '?'
+      return `${config.authorizationEndpoint}${sep}${urlEncode(params)}`
+    },
+
+    buildTokenRequest(input: TokenExchangeInput): TokenRequest {
+      // form + body → the standard OAuth2 shape verbatim (byte-identical to the
+      // baked/remote form adapters), then RFC 8707 resource.
+      if (!useJson && !useBasic) {
+        return appendResource(standardTokenRequest(config.tokenEndpoint, input), config.resource)
+      }
+      const extraHeaders: Record<string, string> = {}
+      if (useBasic) {
+        if (!input.clientSecret) {
+          // Basic client authentication needs a secret; a public generic client
+          // must use tokenAuthMethod=body. Fail closed (like the notion adapter).
+          throw new Error('generic OAuth tokenAuthMethod=basic requires a client secret')
+        }
+        extraHeaders.authorization = basicAuthHeader(input.clientId, input.clientSecret)
+      }
+      if (useJson) {
+        const body: Record<string, string> = { grant_type: 'authorization_code' }
+        // Basic auth carries the credentials in the header; omit them from the body.
+        if (!useBasic) {
+          body.client_id = input.clientId
+          if (input.clientSecret) body.client_secret = input.clientSecret
+        }
+        body.code = input.code
+        body.redirect_uri = input.redirectUri
+        if (input.codeVerifier) body.code_verifier = input.codeVerifier
+        return {
+          url: config.tokenEndpoint,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...extraHeaders,
+          },
+          body: JSON.stringify(withJsonResource(body, config.resource)),
+        }
+      }
+      // form + basic: form body without client creds (they ride the Basic header).
+      const params: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: input.code,
+        redirect_uri: input.redirectUri,
+      }
+      if (input.codeVerifier) params.code_verifier = input.codeVerifier
+      const request: TokenRequest = {
+        url: config.tokenEndpoint,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+          ...extraHeaders,
+        },
+        body: urlEncode(params),
+      }
+      return appendResource(request, config.resource)
+    },
+
+    buildRefreshRequest(input: RefreshTokenInput): TokenRequest {
+      const url = config.refreshEndpoint ?? config.tokenEndpoint
+      // form + body → standard refresh verbatim + resource.
+      if (!useJson && !useBasic) {
+        return appendResource(standardRefreshRequest(url, input), config.resource)
+      }
+      const extraHeaders: Record<string, string> = {}
+      if (useBasic) {
+        if (!input.clientSecret) {
+          throw new Error('generic OAuth tokenAuthMethod=basic requires a client secret')
+        }
+        extraHeaders.authorization = basicAuthHeader(input.clientId, input.clientSecret)
+      }
+      if (useJson) {
+        const body: Record<string, string> = { grant_type: 'refresh_token' }
+        if (!useBasic) {
+          body.client_id = input.clientId
+          if (input.clientSecret) body.client_secret = input.clientSecret
+        }
+        body.refresh_token = input.refreshToken
+        return {
+          url,
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json',
+            ...extraHeaders,
+          },
+          body: JSON.stringify(withJsonResource(body, config.resource)),
+        }
+      }
+      // form + basic refresh: creds in the Basic header, omit from the body.
+      const request: TokenRequest = {
+        url,
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          accept: 'application/json',
+          ...extraHeaders,
+        },
+        body: urlEncode({ grant_type: 'refresh_token', refresh_token: input.refreshToken }),
+      }
+      return appendResource(request, config.resource)
+    },
+
+    parseTokenResponse: parseStandardOAuth2,
+  }
+}
