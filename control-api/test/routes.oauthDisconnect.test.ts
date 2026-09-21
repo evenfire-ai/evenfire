@@ -5,11 +5,13 @@ import { config } from '../src/config.js'
 import { MockGateway } from './mockGateway.js'
 
 const mockPoolQuery = vi.fn()
+const rateLimiter = vi.hoisted(() => ({ checkAndIncrement: vi.fn() }))
 vi.mock('../src/db.js', () => ({
   pool: {
     query: (...args: unknown[]) => mockPoolQuery(...args),
   },
 }))
+vi.mock('../src/services/rateLimiterService.js', () => rateLimiter)
 
 const RPC_PROXY_TOKEN = 'dev-rpc-proxy-token'
 const URL = '/api/v1/internal/sandbox-ui/oauth/grant'
@@ -50,6 +52,15 @@ describe('DELETE /api/v1/internal/sandbox-ui/oauth/grant (spec §9.9 disconnect)
   beforeEach(() => {
     mockPoolQuery.mockReset()
     mockPoolQuery.mockResolvedValue({ rows: [], rowCount: 0 })
+    rateLimiter.checkAndIncrement.mockReset()
+    rateLimiter.checkAndIncrement.mockResolvedValue({
+      allowed: true,
+      backendAvailable: true,
+      count: 1,
+      remaining: 9,
+      resetMs: Date.now() + 60_000,
+      windowStartMs: Date.now(),
+    })
   })
 
   it('returns 401 when service-token auth is missing', async () => {

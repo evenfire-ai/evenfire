@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import { NextFunction, Request, Response, Router } from 'express'
 import {
   type ActionOperationId,
   canonicalActionTargetJson,
@@ -92,6 +92,92 @@ function hasExpectedV2OAuthContext(
 interface McpServerAuthResource extends McpServerOAuthSpecInput {
   spec?: McpServerOAuthSpecInput['spec'] & { auth?: { type?: unknown } }
 }
+
+type SandboxOAuthAdmission = {
+  recipeNs: string
+  recipeName: string
+  oauthClientId: string
+  userId: string
+}
+
+type SandboxOAuthAdmissionRequest = Request & {
+  sandboxOAuthAdmission?: SandboxOAuthAdmission
+}
+
+const SANDBOX_OAUTH_ADMISSION = {
+  tokenVend: {
+    operationId: 'sandbox.oauth.vend',
+  },
+  grantDisconnect: {
+    operationId: 'sandbox.oauth.disconnect',
+  },
+} as const satisfies Record<
+  string,
+  {
+    operationId: ActionOperationId
+  }
+>
+
+function validateSandboxOAuthAdmission(
+  operationId: ActionOperationId
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
+    if (
+      typeof recipeNs !== 'string' ||
+      typeof recipeName !== 'string' ||
+      typeof oauthClientId !== 'string' ||
+      typeof userId !== 'string' ||
+      userId.length === 0
+    ) {
+      res.status(400).json({ error: 'invalid_request' })
+      return
+    }
+    if (recipeNs !== config.sandboxNamespace) {
+      res.status(400).json({ error: 'invalid_recipe_namespace' })
+      return
+    }
+    if (
+      !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
+        operationId,
+        userId,
+        target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
+      })
+    ) {
+      res.status(400).json({ error: 'invalid_binding' })
+      return
+    }
+
+    ;(req as SandboxOAuthAdmissionRequest).sandboxOAuthAdmission = {
+      recipeNs,
+      recipeName,
+      oauthClientId,
+      userId,
+    }
+    next()
+  }
+}
+
+function sandboxOAuthAdmissionForRequest(req: Request): SandboxOAuthAdmission {
+  const admission = (req as SandboxOAuthAdmissionRequest).sandboxOAuthAdmission
+  if (!admission) {
+    throw new Error('validated Sandbox OAuth admission context is missing')
+  }
+  return admission
+}
+
+const sandboxOAuthTokenVendRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_token_vend',
+  maxPerMinute: 10,
+  getBucketKey: req => `sandbox-oauth-token-vend:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
+
+const sandboxOAuthGrantDisconnectRateLimit = rateLimitMiddleware({
+  bucketType: 'sandbox_oauth_grant_disconnect',
+  maxPerMinute: 10,
+  getBucketKey: req =>
+    `sandbox-oauth-grant-disconnect:${sandboxOAuthAdmissionForRequest(req).userId}`,
+})
 
 /**
  * Internal OAuth helper endpoints. rpc-proxy fronts these from the
@@ -563,29 +649,13 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.post(
     '/internal/sandbox-ui/oauth/token',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.tokenVend.operationId),
+    sandboxOAuthTokenVendRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
-        }
-        if (
-          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
-            operationId: 'sandbox.oauth.vend',
-            userId,
-            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
-          })
-        ) {
-          return res.status(400).json({ error: 'invalid_binding' })
-        }
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
 
         const result = await getAccessToken(
           {
@@ -636,30 +706,13 @@ export function createInternalOAuthRouter(gateway: K8sGateway): Router {
   router.delete(
     '/internal/sandbox-ui/oauth/grant',
     requireInternalService('rpc-proxy'),
+    validateSandboxOAuthAdmission(SANDBOX_OAUTH_ADMISSION.grantDisconnect.operationId),
+    sandboxOAuthGrantDisconnectRateLimit,
     async (req, res, next) => {
       try {
-        const { recipeNs, recipeName, oauthClientId, userId } = req.body ?? {}
-        if (
-          typeof recipeNs !== 'string' ||
-          typeof recipeName !== 'string' ||
-          typeof oauthClientId !== 'string' ||
-          typeof userId !== 'string'
-        ) {
-          return res.status(400).json({ error: 'invalid_request' })
-        }
-        if (recipeNs !== config.sandboxNamespace) {
-          return res.status(400).json({ error: 'invalid_recipe_namespace' })
-        }
-
-        if (
-          !hasExpectedV2OAuthContext(req.header('x-clerum-edge-action-context'), {
-            operationId: 'sandbox.oauth.disconnect',
-            userId,
-            target: { recipeNamespace: recipeNs, recipeName, oauthClientId },
-          })
-        ) {
-          return res.status(400).json({ error: 'invalid_binding' })
-        }
+        const { recipeNs, recipeName, oauthClientId, userId } = (
+          req as SandboxOAuthAdmissionRequest
+        ).sandboxOAuthAdmission!
 
         let recipe: RecipeWithOAuthClients | null
         try {
