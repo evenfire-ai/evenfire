@@ -856,7 +856,15 @@ export class AppService {
     fetchBytes: async (url, token) => {
       const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
       if (!res.ok) {
-        throw new ApiError(`gfs download failed: ${res.status}`, res.status, '')
+        // Keep the body and Retry-After: a 429 on the proxy read carries
+        // retryAfterSeconds, and surfaceGfsGrantError can only lift it out of
+        // bodyText. Discarding them left the renderer with no retry hint.
+        throw new ApiError(
+          `gfs download failed: ${res.status}`,
+          res.status,
+          await res.text(),
+          res.headers.get('retry-after')
+        )
       }
       return res.arrayBuffer()
     },

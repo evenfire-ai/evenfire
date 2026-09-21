@@ -41,7 +41,7 @@ function parseInvalidIndexes(message: string): number[] {
     .filter(index => Number.isInteger(index) && index >= 0)
 }
 
-function parseRetryAfterSeconds(message: string): number | null {
+export function parseRetryAfterSeconds(message: string): number | null {
   const match = message.match(/retryAfterSeconds[^\d]*(\d+)/)
   if (!match?.[1]) return null
   const seconds = Number.parseInt(match[1], 10)

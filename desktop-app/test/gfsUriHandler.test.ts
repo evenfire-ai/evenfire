@@ -639,3 +639,60 @@ describe('parseSubjectKey', () => {
     expect(() => parseSubjectKey('context:engineering')).toThrow(GfsUriError)
   })
 })
+
+/**
+ * A 429 on a GFS READ must carry the server's retryAfterSeconds hint across the
+ * Electron IPC boundary, which only preserves `Error.message` — `.bodyText` is
+ * dropped. Without this the renderer can detect the 429 but cannot tell the user
+ * when to retry, which is what left the Files page with no countdown during the
+ * 2026-09-18 rate-limit incident.
+ */
+const RATE_LIMIT_BODY = JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 7 })
+
+function rateLimitedTransport(): GfsTransport {
+  return transport({
+    requestJson: vi.fn(async () => {
+      throw new ApiError('429 Too Many Requests: Too Many Requests', 429, RATE_LIMIT_BODY, '7')
+    }) as GfsTransport['requestJson'],
+  })
+}
+
+describe('GfsClient read paths surface retryAfterSeconds across IPC', () => {
+  it('appends retryAfterSeconds to a rate-limited listAccessible rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.listAccessible('sess')).rejects.toThrow(/^429 Too Many Requests/)
+    await expect(client.listAccessible('sess')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('appends retryAfterSeconds to a rate-limited resolveUri rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.resolveUri(`gfs://main/${RID}`, 'tok')).rejects.toThrow(
+      /^429 Too Many Requests/
+    )
+    await expect(client.resolveUri(`gfs://main/${RID}`, 'tok')).rejects.toThrow(
+      /retryAfterSeconds=7/
+    )
+  })
+
+  it('appends retryAfterSeconds to a rate-limited listChildren rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.listChildren(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('appends retryAfterSeconds to a rate-limited affordances rejection', async () => {
+    const client = new GfsClient(rateLimitedTransport())
+    await expect(client.affordances(RID, 'tok')).rejects.toThrow(/retryAfterSeconds=7/)
+  })
+
+  it('leaves a non-rate-limited read rejection untouched', async () => {
+    const t = transport({
+      requestJson: vi.fn(async () => {
+        throw new ApiError('403 Forbidden: denied', 403, '{"error":"forbidden"}')
+      }) as GfsTransport['requestJson'],
+    })
+    // Fail loud: an error with nothing structured to surface propagates verbatim,
+    // it is never rewritten or swallowed.
+    await expect(new GfsClient(t).listAccessible('sess')).rejects.toThrow('403 Forbidden: denied')
+    expect(t.requestJson).toHaveBeenCalledTimes(1)
+  })
+})

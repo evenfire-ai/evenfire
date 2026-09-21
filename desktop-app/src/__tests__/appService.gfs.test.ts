@@ -992,3 +992,63 @@ describe('legacy GFS descriptor safety', () => {
     }
   })
 })
+
+describe('AppService GFS proxy read transport', () => {
+  it('carries retryAfterSeconds out of a rate-limited proxy download body', async () => {
+    // The uriHandler suite injects a fake fetchBytes, so the real transport
+    // literal on AppService is only reachable from here. Drive both legs of
+    // download(): resolve must succeed so the proxy leg is the one that 429s.
+    const service = new AppService() as unknown as {
+      sessionToken: string | null
+      downloadGfsUri: (uri: string) => Promise<{ bytes: ArrayBuffer }>
+    }
+    service.sessionToken = 'session-token'
+
+    const resolved = {
+      drive: 'main',
+      resourceId: RESOURCE_ID,
+      parentResourceId: null,
+      gfsUri: `gfs://main/${RESOURCE_ID}`,
+      name: 'report.md',
+      kind: 'file',
+      version: 3,
+    }
+    const originalFetch = globalThis.fetch
+    const fetchMock = vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/gfs/resolve')) {
+        return new Response(JSON.stringify({ ok: true, data: resolved }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      }
+      if (url.includes(`/gfs/proxy/${RESOURCE_ID}`)) {
+        return new Response(JSON.stringify({ error: 'Too Many Requests', retryAfterSeconds: 7 }), {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: { 'content-type': 'application/json', 'retry-after': '7' },
+        })
+      }
+      throw new Error(`unexpected request to ${url}`)
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+
+    try {
+      const error = await service.downloadGfsUri(`gfs://main/${RESOURCE_ID}`).then(
+        () => {
+          throw new Error('expected the rate-limited proxy download to reject')
+        },
+        (rejected: unknown) => rejected
+      )
+      const message = error instanceof Error ? error.message : String(error)
+      expect(message).toContain('gfs download failed: 429')
+      expect(message).toContain('retryAfterSeconds=7')
+      // Liveness witness: both legs ran, so the 429 came from the proxy read
+      // and not from a resolve that never happened.
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(String(fetchMock.mock.calls[1]?.[0])).toContain(`/gfs/proxy/${RESOURCE_ID}`)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})

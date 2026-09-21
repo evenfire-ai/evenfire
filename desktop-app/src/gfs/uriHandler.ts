@@ -417,12 +417,16 @@ export class GfsClient {
   /** Resolve a gfs:// URI to its current resource (validates the URI locally first). */
   async resolveUri(uri: string, token: string): Promise<ResolvedGfsResource> {
     parseGfsUri(uri) // fail fast on a malformed URI before a round-trip
-    const payload = await this.transport.requestJson<GfsEnvelope<ResolvedGfsResource>>(
-      'GET',
-      joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/resolve?uri=${encodeURIComponent(uri)}`),
-      { token }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<ResolvedGfsResource>>(
+        'GET',
+        joinUrl(this.transport.baseUrl, `/api/v1/me/gfs/resolve?uri=${encodeURIComponent(uri)}`),
+        { token }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /** Resolve then download the resource bytes through the brokered proxy. */
@@ -430,15 +434,21 @@ export class GfsClient {
     uri: string,
     token: string
   ): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }> {
+    // resolveUri runs first and already surfaces its own verdict, so a 429 on the
+    // resolve leg reaches the renderer with the resolve message, not this one.
     const resource = await this.resolveUri(uri, token)
-    const bytes = await this.transport.fetchBytes(
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
-      ),
-      token
-    )
-    return { resource, bytes }
+    try {
+      const bytes = await this.transport.fetchBytes(
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
+        ),
+        token
+      )
+      return { resource, bytes }
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -454,15 +464,19 @@ export class GfsClient {
     const q = new URLSearchParams()
     q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
     if (opts?.cursor) q.set('cursor', opts.cursor)
-    const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
-      'GET',
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
-      ),
-      { token }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsChildrenPage>>(
+        'GET',
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/children?${q.toString()}`
+        ),
+        { token }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   async listAccessible(
@@ -472,12 +486,16 @@ export class GfsClient {
     const q = new URLSearchParams()
     q.set('drive', opts?.drive ?? DEFAULT_DRIVE)
     if (opts?.cursor) q.set('cursor', opts.cursor)
-    const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
-      'GET',
-      joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
-      { ['token']: session }
-    )
-    return unwrap(payload)
+    try {
+      const payload = await this.transport.requestJson<GfsEnvelope<GfsAccessibleResourcesPage>>(
+        'GET',
+        joinUrl(this.transport.baseUrl, '/api/v1/me/gfs/resources?' + q.toString()),
+        { ['token']: session }
+      )
+      return unwrap(payload)
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -490,14 +508,18 @@ export class GfsClient {
     token: string,
     drive: string = DEFAULT_DRIVE
   ): Promise<GfsHeldAffordances> {
-    return this.transport.requestJson<GfsHeldAffordances>(
-      'GET',
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
-      ),
-      { token }
-    )
+    try {
+      return await this.transport.requestJson<GfsHeldAffordances>(
+        'GET',
+        joinUrl(
+          this.transport.baseUrl,
+          `/api/v1/me/gfs/resources/${encodeURIComponent(resourceId)}/affordances?drive=${encodeURIComponent(drive)}`
+        ),
+        { token }
+      )
+    } catch (error) {
+      throw surfaceGfsGrantError(error)
+    }
   }
 
   /**
@@ -744,8 +766,8 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
 }
 
 /**
- * Re-throw a grant/share/list failure with the server's structured verdict
- * fields embedded in the message.
+ * Re-throw any GFS failure — grant, share, or read — with the server's
+ * structured verdict fields embedded in the message.
  *
  * The transport (httpClient) throws an `ApiError` that stashes the raw response
  * body on `.bodyText`, but ONLY the `Error.message` survives the Electron IPC
@@ -755,6 +777,12 @@ function parseGfsGrantErrorFields(bodyText: string): GfsGrantErrorFields {
  * the message in the exact shape that module's regexes parse (`invalidIndexes=[…]`,
  * `retryAfterSeconds=…`), keeping the original message — and therefore the server
  * error CODE (`subjects_invalid`, `foreign_agent_forbidden`, `429`, …) — intact.
+ *
+ * The READ methods (`resolveUri`, `download`, `listChildren`, `listAccessible`,
+ * `affordances`) route through this too. They share the per-actor `resource`
+ * rate-limit budget in control-api, so a 429 here is the common case, not an
+ * edge one: without the hint the renderer can tell the user it was rate limited
+ * but not when to retry.
  *
  * When there is nothing structured to surface, the ORIGINAL error propagates
  * unchanged (fail loud; never swallow the server's verdict).
