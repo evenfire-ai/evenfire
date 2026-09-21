@@ -104,7 +104,7 @@ describe('routes/rpc /rpc/token', () => {
       'session-xyz',
       ['host:message:invoke'],
       ['pro-agent'],
-      '::ffff:127.0.0.1'
+      '127.0.0.1'
     )
   })
 })
