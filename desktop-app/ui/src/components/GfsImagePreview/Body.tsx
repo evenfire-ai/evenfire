@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { IconCopy } from '@components/SidebarNav/icons'
+import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { assertGfsImagePreviewSize } from '@lib/gfsImagePreview'
 import type { GfsImagePreviewBodyProps } from './types'
 
@@ -42,8 +43,14 @@ export function GfsImagePreviewBody({
 
     const loadPreview = async () => {
       try {
+        // The listed size is a skip HINT (fail fast without a round-trip); the
+        // download itself is independently bounded so a wrong listed size cannot
+        // materialize an oversized payload.
         assertGfsImagePreviewSize(byteLength)
-        const { bytes } = await window.clerum.gfs.download(gfsUri)
+        const { bytes } = await window.clerum.gfs.downloadPreview(
+          gfsUri,
+          GFS_IMAGE_PREVIEW_MAX_BYTES
+        )
         assertGfsImagePreviewSize(bytes.byteLength)
         if (!active) return
         const blob = new Blob([bytes], { type: mimeType })

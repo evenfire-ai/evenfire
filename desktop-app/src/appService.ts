@@ -16,6 +16,7 @@ import {
   saveDesktopRuntimeConfig,
   selectDesktopRuntimeConfigOption,
 } from './config.js'
+import { fetchBoundedBytes } from './gfs/boundedDownload.js'
 import { type DelegationAffordances, delegationAffordances } from './gfs/delegation.js'
 import {
   DesktopGfsUploadJob,
@@ -853,13 +854,7 @@ export class AppService {
       return config.externalRestApiBaseUrl
     },
     requestJson,
-    fetchBytes: async (url, token) => {
-      const res = await fetch(url, { headers: { authorization: `Bearer ${token}` } })
-      if (!res.ok) {
-        throw new ApiError(`gfs download failed: ${res.status}`, res.status, '')
-      }
-      return res.arrayBuffer()
-    },
+    fetchBytes: (url, token, opts) => fetchBoundedBytes(url, token, opts),
   })
   private readonly tokenStore = new TokenStore()
   private readonly rpcTokenManager = new RpcTokenManager(this.authClient)
@@ -1930,9 +1925,18 @@ export class AppService {
     return this.gfsClient.resolveUri(uri, this.requireSessionToken())
   }
 
-  /** Resolve then download a gfs:// resource's bytes through the brokered proxy. */
-  async downloadGfsUri(uri: string) {
-    return this.gfsClient.download(uri, this.requireSessionToken())
+  /**
+   * Resolve then download a gfs:// resource's bytes through the brokered proxy.
+   * `maxBytes` bounds the download for the preview path (rejected before an
+   * oversized payload materializes); omitting it (save-to-disk, plugin SDK)
+   * reads the full body.
+   */
+  async downloadGfsUri(uri: string, maxBytes?: number) {
+    return this.gfsClient.download(
+      uri,
+      this.requireSessionToken(),
+      maxBytes !== undefined ? { maxBytes } : undefined
+    )
   }
 
   /** List a gfs directory's children (deny-by-default: only what the user is granted). */

@@ -5,12 +5,12 @@ import { GFS_VIDEO_PREVIEW_MAX_BYTES } from '@constants/gfsVideoPreview'
 import { GfsVideoPreviewBody } from './Body'
 
 function stubDownload(bytes: ArrayBuffer) {
-  const download = vi.fn(async () => ({ bytes }))
+  const downloadPreview = vi.fn(async () => ({ bytes }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { download } },
+    value: { gfs: { downloadPreview } },
   })
-  return download
+  return downloadPreview
 }
 
 describe('GfsVideoPreviewBody', () => {
@@ -30,7 +30,7 @@ describe('GfsVideoPreviewBody', () => {
   it('downloads by gfsUri and renders an HTML5 video without a modal', async () => {
     const createObjectURL = vi.fn(() => 'blob:gfs-video-preview')
     Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
-    const download = stubDownload(new Uint8Array([1, 2, 3]).buffer)
+    const downloadPreview = stubDownload(new Uint8Array([1, 2, 3]).buffer)
 
     render(
       <GfsVideoPreviewBody
@@ -46,12 +46,12 @@ describe('GfsVideoPreviewBody', () => {
     expect(video.getAttribute('controls')).not.toBeNull()
     expect(video.getAttribute('src')).toBe('blob:gfs-video-preview')
     expect(createObjectURL).toHaveBeenCalledWith(expect.objectContaining({ type: 'video/mp4' }))
-    expect(download).toHaveBeenCalledWith('gfs://main/video-1')
+    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/video-1', GFS_VIDEO_PREVIEW_MAX_BYTES)
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
   it('rejects an oversized video from metadata before downloading', async () => {
-    const download = stubDownload(new Uint8Array([1]).buffer)
+    const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
     render(
       <GfsVideoPreviewBody
         byteLength={GFS_VIDEO_PREVIEW_MAX_BYTES + 1}
@@ -61,17 +61,17 @@ describe('GfsVideoPreviewBody', () => {
       />
     )
     expect(await screen.findByText(/Video previews are limited to 100 MB/)).toBeTruthy()
-    expect(download).not.toHaveBeenCalled()
+    expect(downloadPreview).not.toHaveBeenCalled()
   })
 
   it('fails closed on a download error and notifies onDownloadError', async () => {
     const onDownloadError = vi.fn()
-    const download = vi.fn(async () => {
+    const downloadPreview = vi.fn(async () => {
       throw new Error('403 Forbidden')
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download } },
+      value: { gfs: { downloadPreview } },
     })
     render(
       <GfsVideoPreviewBody

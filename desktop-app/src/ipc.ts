@@ -410,6 +410,20 @@ export function registerIpcHandlers(service: AppService): void {
     return service.downloadGfsUri(sanitizeString(payload?.uri))
   })
   ipcMain.handle(
+    'gfs:downloadPreview',
+    async (event, payload: { uri: string; maxBytes: number }) => {
+      assertTrustedSender(event)
+      // The preview path is bounded: a required ceiling caps the download so an
+      // oversized payload is rejected before it materializes (the save-to-disk
+      // 'gfs:download' path above stays intentionally uncapped).
+      const maxBytes = sanitizeOptionalPositiveInteger(payload?.maxBytes, 'maxBytes')
+      if (maxBytes === undefined) {
+        throw new Error('maxBytes is required for a preview download')
+      }
+      return service.downloadGfsUri(sanitizeString(payload?.uri), maxBytes)
+    }
+  )
+  ipcMain.handle(
     'gfs:listAccessible',
     async (event, payload: { drive?: string; cursor?: string }) => {
       assertTrustedSender(event)

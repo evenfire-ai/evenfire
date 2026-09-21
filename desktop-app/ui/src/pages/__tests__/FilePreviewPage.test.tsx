@@ -16,14 +16,14 @@ function controller(accessState: 'active' | 'revoked' = 'active') {
   }
 }
 
-// The producer (`window.clerum.gfs.download`) returns `{ bytes: ArrayBuffer }`.
+// The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`.
 function stubDownload(impl: () => Promise<{ bytes: ArrayBuffer }>) {
-  const download = vi.fn(impl)
+  const downloadPreview = vi.fn(impl)
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { download } },
+    value: { gfs: { downloadPreview } },
   })
-  return download
+  return downloadPreview
 }
 
 describe('FilePreviewPage', () => {
@@ -98,7 +98,7 @@ describe('FilePreviewPage', () => {
   // fail-closed error. Here the second fetch (after revocation) returns 403.
   it('re-fetches and fails closed when authority is revoked while the tab is mounted', async () => {
     let revoked = false
-    const download = stubDownload(async () => {
+    const downloadPreview = stubDownload(async () => {
       if (revoked) throw new Error('403 Forbidden')
       return { bytes: new Uint8Array([1, 2, 3]).buffer }
     })
@@ -119,7 +119,7 @@ describe('FilePreviewPage', () => {
 
     // First fetch succeeds and the image renders.
     expect(await screen.findByAltText('Preview of secret.png')).toBeTruthy()
-    expect(download).toHaveBeenCalledTimes(1)
+    expect(downloadPreview).toHaveBeenCalledTimes(1)
 
     // Access is revoked out-of-band → the authority controller reports revoked.
     revoked = true
@@ -131,6 +131,6 @@ describe('FilePreviewPage', () => {
     await waitFor(() => expect(screen.queryByAltText('Preview of secret.png')).toBeNull())
     expect(await screen.findByText('403 Forbidden')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'secret.png', level: 2 })).toBeTruthy()
-    expect(download).toHaveBeenCalledTimes(2)
+    expect(downloadPreview).toHaveBeenCalledTimes(2)
   })
 })

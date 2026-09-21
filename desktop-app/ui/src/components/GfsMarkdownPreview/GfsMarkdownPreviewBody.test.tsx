@@ -4,14 +4,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { GfsMarkdownPreviewBody } from './Body'
 
-// Mirror the producer shape: `window.clerum.gfs.download` → `{ bytes: ArrayBuffer }`.
+// Mirror the producer shape: `window.clerum.gfs.downloadPreview` → `{ bytes: ArrayBuffer }`.
 function stubDownload(text: string) {
-  const download = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
+  const downloadPreview = vi.fn(async () => ({ bytes: new TextEncoder().encode(text).buffer }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { download } },
+    value: { gfs: { downloadPreview } },
   })
-  return download
+  return downloadPreview
 }
 
 describe('GfsMarkdownPreviewBody', () => {
@@ -23,7 +23,7 @@ describe('GfsMarkdownPreviewBody', () => {
   it('renders markdown with safe vanilla rendering (no modal, no unsafe links or scripts)', async () => {
     const markdown =
       '# Project guide\n\nUse **safe rendering**.\n\n1. First\n2. Second\n\n[Unsafe](javascript:alert)\n\n<script>alert("no")</script>'
-    const download = stubDownload(markdown)
+    const downloadPreview = stubDownload(markdown)
 
     const { container } = render(
       <GfsMarkdownPreviewBody
@@ -38,7 +38,10 @@ describe('GfsMarkdownPreviewBody', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(2)
     expect(screen.getByText('Unsafe').closest('a')).toBeNull()
     expect(container.querySelector('script')).toBeNull()
-    expect(download).toHaveBeenCalledWith('gfs://main/markdown-1')
+    expect(downloadPreview).toHaveBeenCalledWith(
+      'gfs://main/markdown-1',
+      GFS_MARKDOWN_PREVIEW_MAX_BYTES
+    )
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
@@ -76,7 +79,7 @@ describe('GfsMarkdownPreviewBody', () => {
   })
 
   it('rejects an oversized markdown file from metadata before downloading', async () => {
-    const download = stubDownload('x')
+    const downloadPreview = stubDownload('x')
     render(
       <GfsMarkdownPreviewBody
         byteLength={GFS_MARKDOWN_PREVIEW_MAX_BYTES + 1}
@@ -85,17 +88,17 @@ describe('GfsMarkdownPreviewBody', () => {
       />
     )
     expect(await screen.findByText(/Markdown previews are limited to 2 MB/)).toBeTruthy()
-    expect(download).not.toHaveBeenCalled()
+    expect(downloadPreview).not.toHaveBeenCalled()
   })
 
   it('fails closed on a download error and notifies onDownloadError', async () => {
     const onDownloadError = vi.fn()
-    const download = vi.fn(async () => {
+    const downloadPreview = vi.fn(async () => {
       throw new Error('401 not authenticated')
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download } },
+      value: { gfs: { downloadPreview } },
     })
     render(
       <GfsMarkdownPreviewBody

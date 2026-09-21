@@ -89,8 +89,12 @@ export interface GfsTransport {
     url: string,
     options?: { token?: string; body?: unknown; timeoutMs?: number; signal?: AbortSignal }
   ): Promise<T>
-  /** Binary fetch for downloads (resolves to the raw bytes). */
-  fetchBytes(url: string, token: string): Promise<ArrayBuffer>
+  /**
+   * Binary fetch for downloads (resolves to the raw bytes). `opts.maxBytes`
+   * bounds the download so an oversized payload is rejected before it fully
+   * materializes; omitting it reads the whole body (the save-to-disk path).
+   */
+  fetchBytes(url: string, token: string, opts?: { maxBytes?: number }): Promise<ArrayBuffer>
 }
 
 /**
@@ -425,19 +429,26 @@ export class GfsClient {
     return unwrap(payload)
   }
 
-  /** Resolve then download the resource bytes through the brokered proxy. */
+  /**
+   * Resolve then download the resource bytes through the brokered proxy.
+   * `opts.maxBytes` bounds the download (preview path); omitting it reads the
+   * full body (save-to-disk). The unbounded call keeps the exact 2-arg
+   * `fetchBytes` signature so existing callers are byte-for-byte unchanged.
+   */
   async download(
     uri: string,
-    token: string
+    token: string,
+    opts?: { maxBytes?: number }
   ): Promise<{ resource: ResolvedGfsResource; bytes: ArrayBuffer }> {
     const resource = await this.resolveUri(uri, token)
-    const bytes = await this.transport.fetchBytes(
-      joinUrl(
-        this.transport.baseUrl,
-        `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
-      ),
-      token
+    const proxyUrl = joinUrl(
+      this.transport.baseUrl,
+      `/api/v1/me/gfs/proxy/${resource.resourceId}?drive=${encodeURIComponent(resource.drive)}`
     )
+    const bytes =
+      opts?.maxBytes !== undefined
+        ? await this.transport.fetchBytes(proxyUrl, token, { maxBytes: opts.maxBytes })
+        : await this.transport.fetchBytes(proxyUrl, token)
     return { resource, bytes }
   }
 

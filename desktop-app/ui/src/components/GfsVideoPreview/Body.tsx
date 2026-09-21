@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { StatusBanner } from '@components/Common'
+import { GFS_VIDEO_PREVIEW_MAX_BYTES } from '@constants/gfsVideoPreview'
 import { assertGfsVideoPreviewSize } from '@lib/gfsVideoPreview'
 import type { GfsVideoPreviewBodyProps } from './types'
 
@@ -36,8 +37,14 @@ export function GfsVideoPreviewBody({
 
     const loadPreview = async () => {
       try {
+        // The listed size is a skip HINT (fail fast without a round-trip); the
+        // download itself is independently bounded so a wrong listed size cannot
+        // materialize an oversized payload.
         assertGfsVideoPreviewSize(byteLength)
-        const { bytes } = await window.clerum.gfs.download(gfsUri)
+        const { bytes } = await window.clerum.gfs.downloadPreview(
+          gfsUri,
+          GFS_VIDEO_PREVIEW_MAX_BYTES
+        )
         assertGfsVideoPreviewSize(bytes.byteLength)
         if (!active) return
         objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }))

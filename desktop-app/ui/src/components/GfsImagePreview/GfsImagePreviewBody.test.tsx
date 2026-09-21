@@ -4,15 +4,15 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { GFS_IMAGE_PREVIEW_MAX_BYTES } from '@constants/gfsImagePreview'
 import { GfsImagePreviewBody } from './Body'
 
-// The producer (`window.clerum.gfs.download`) returns `{ bytes: ArrayBuffer }`
+// The producer (`window.clerum.gfs.downloadPreview`) returns `{ bytes: ArrayBuffer }`
 // (renderer.d.ts); the body reads only `.bytes`, so the mock mirrors that shape.
 function stubDownload(bytes: ArrayBuffer) {
-  const download = vi.fn(async () => ({ bytes }))
+  const downloadPreview = vi.fn(async () => ({ bytes }))
   Object.defineProperty(window, 'clerum', {
     configurable: true,
-    value: { gfs: { download } },
+    value: { gfs: { downloadPreview } },
   })
-  return download
+  return downloadPreview
 }
 
 describe('GfsImagePreviewBody', () => {
@@ -30,7 +30,7 @@ describe('GfsImagePreviewBody', () => {
   })
 
   it('downloads by gfsUri and renders the image without a modal', async () => {
-    const download = stubDownload(new Uint8Array([1, 2, 3]).buffer)
+    const downloadPreview = stubDownload(new Uint8Array([1, 2, 3]).buffer)
 
     render(
       <GfsImagePreviewBody
@@ -44,7 +44,9 @@ describe('GfsImagePreviewBody', () => {
     const img = await screen.findByAltText('Preview of diagram.PNG')
     expect(img.tagName).toBe('IMG')
     expect(img.getAttribute('src')).toBe('blob:gfs-image-preview')
-    expect(download).toHaveBeenCalledWith('gfs://main/image-1')
+    // The preview download carries its per-kind ceiling so the main process can
+    // bound the fetch (R1-H4 Part B).
+    expect(downloadPreview).toHaveBeenCalledWith('gfs://main/image-1', GFS_IMAGE_PREVIEW_MAX_BYTES)
     // No portal/backdrop/dialog chrome — this is the de-modalized body.
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(screen.queryByRole('presentation')).toBeNull()
@@ -65,7 +67,7 @@ describe('GfsImagePreviewBody', () => {
   })
 
   it('rejects an oversized image from metadata before downloading', async () => {
-    const download = stubDownload(new Uint8Array([1]).buffer)
+    const downloadPreview = stubDownload(new Uint8Array([1]).buffer)
     render(
       <GfsImagePreviewBody
         byteLength={GFS_IMAGE_PREVIEW_MAX_BYTES + 1}
@@ -75,17 +77,17 @@ describe('GfsImagePreviewBody', () => {
       />
     )
     expect(await screen.findByText(/Image previews are limited to 10 MB/)).toBeTruthy()
-    expect(download).not.toHaveBeenCalled()
+    expect(downloadPreview).not.toHaveBeenCalled()
   })
 
   it('fails closed on a download error: shows the reason and notifies onDownloadError', async () => {
     const onDownloadError = vi.fn()
-    const download = vi.fn(async () => {
+    const downloadPreview = vi.fn(async () => {
       throw new Error('403 Forbidden')
     })
     Object.defineProperty(window, 'clerum', {
       configurable: true,
-      value: { gfs: { download } },
+      value: { gfs: { downloadPreview } },
     })
 
     render(

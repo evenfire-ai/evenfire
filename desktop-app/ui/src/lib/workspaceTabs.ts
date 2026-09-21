@@ -7,6 +7,7 @@ import type {
   OpenFilesTabInput,
   OpenPreviewTabInput,
   OpenSettingsTabInput,
+  PreviewTabPayload,
   WorkspaceTab,
   WorkspaceTabsState,
 } from './workspaceTabs.types'
@@ -307,12 +308,35 @@ export function openPreviewTab(
   // sanitizer at this single store border; every render site inherits the cleaned
   // value. Empty-after-sanitize falls back to 'Preview' below.
   const title = input.title ? sanitizeAppTabTitle(input.title) : ''
+  const nextPreview: PreviewTabPayload = {
+    gfsUri: input.gfsUri,
+    fileKind: input.fileKind,
+    byteLength: input.byteLength,
+    ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
+  }
   if (existing) {
+    // Focus AND refresh the whole payload: unlike the other open* dedupe
+    // branches, a preview tab's payload carries non-key fields (fileKind /
+    // byteLength / mimeType) beyond its `gfsUri` key. If the resource at the URI
+    // changed (a rename that keeps the URI, a replaced body), a title-only patch
+    // would leave STALE metadata — and a stale small `byteLength` lets the body's
+    // size-guard wave an oversized new payload through. Keep the same-reference
+    // no-op when nothing actually changed so a `setState` still bails out.
+    const nextTitle = title || existing.title
+    const p = existing.preview
+    const unchanged =
+      existing.title === nextTitle &&
+      p !== undefined &&
+      p.gfsUri === nextPreview.gfsUri &&
+      p.fileKind === nextPreview.fileKind &&
+      p.byteLength === nextPreview.byteLength &&
+      p.mimeType === nextPreview.mimeType
     return {
-      tabs:
-        title && existing.title !== title
-          ? state.tabs.map(tab => (tab.id === existing.id ? { ...tab, title } : tab))
-          : state.tabs,
+      tabs: unchanged
+        ? state.tabs
+        : state.tabs.map(tab =>
+            tab.id === existing.id ? { ...tab, title: nextTitle, preview: nextPreview } : tab
+          ),
       activeTabId: existing.id,
     }
   }
@@ -320,12 +344,7 @@ export function openPreviewTab(
     id: input.id,
     kind: 'preview',
     title: title || 'Preview',
-    preview: {
-      gfsUri: input.gfsUri,
-      fileKind: input.fileKind,
-      byteLength: input.byteLength,
-      ...(input.mimeType !== undefined ? { mimeType: input.mimeType } : {}),
-    },
+    preview: nextPreview,
   }
   return { tabs: [...state.tabs, tab], activeTabId: input.id }
 }

@@ -2,6 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, StatusBanner } from '@components/Common'
 import { IconCopy } from '@components/SidebarNav/icons'
+import { GFS_MARKDOWN_PREVIEW_MAX_BYTES } from '@constants/gfsMarkdownPreview'
 import { assertGfsMarkdownPreviewSize } from '@lib/gfsMarkdownPreview'
 import { parseVanillaMarkdown } from '@lib/vanillaMarkdown'
 import type { MarkdownBlock, MarkdownInlineNode } from '@lib/vanillaMarkdown.types'
@@ -104,8 +105,14 @@ export function GfsMarkdownPreviewBody({
 
     const loadPreview = async () => {
       try {
+        // The listed size is a skip HINT (fail fast without a round-trip); the
+        // download itself is independently bounded so a wrong listed size cannot
+        // materialize an oversized payload.
         assertGfsMarkdownPreviewSize(byteLength)
-        const { bytes } = await window.clerum.gfs.download(gfsUri)
+        const { bytes } = await window.clerum.gfs.downloadPreview(
+          gfsUri,
+          GFS_MARKDOWN_PREVIEW_MAX_BYTES
+        )
         assertGfsMarkdownPreviewSize(bytes.byteLength)
         const markdown = new TextDecoder().decode(bytes)
         if (active) setSource(markdown)
